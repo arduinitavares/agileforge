@@ -15,6 +15,7 @@ import api as api_module
 from agile_sqlmodel import (
     CompiledSpecAuthority,
     Product,
+    SpecAuthorityAcceptance,
     SpecRegistry,
 )
 from services.agent_workbench.authority_decision import (
@@ -2379,6 +2380,23 @@ def test_phase_generate_canonical_row_outranks_valid_derived_caches(
     session.add(authority)
     session.commit()
     session.refresh(authority)
+    session.add(
+        SpecAuthorityAcceptance(
+            product_id=product.product_id,
+            spec_version_id=cast("int", spec.spec_version_id),
+            status="accepted",
+            policy="test",
+            decided_by="test",
+            compiler_version=authority.compiler_version,
+            prompt_hash=authority.prompt_hash,
+            spec_hash=spec.spec_hash,
+            pending_authority_id=authority.authority_id,
+            terminal_decision_key=(
+                f"{product.product_id}:{spec.spec_version_id}:{authority.authority_id}"
+            ),
+        )
+    )
+    session.commit()
     workflow.states[str(product.product_id)] = {
         "fsm_state": "BACKLOG_READY",
         "latest_spec_version_id": spec.spec_version_id,
@@ -2410,6 +2428,116 @@ def test_phase_generate_canonical_row_outranks_valid_derived_caches(
     assert error["code"] == "COMPILED_AUTHORITY_INVALID"
     assert error["details"]["load_status"] == "schema_invalid"
     assert error["details"]["authority_id"] == authority.authority_id
+
+
+def test_phase_generate_uses_exact_accepted_authority_when_newer_row_is_pending(
+    monkeypatch: pytest.MonkeyPatch,
+    session: "Session",
+) -> None:
+    """All phase generation routes inherit exact accepted-row selection."""
+    client, repo, workflow = _build_client(monkeypatch)
+    product = repo.create("Accepted Phase Project")
+    accepted_json = current_v3_compiled_authority_json(prompt_hash="a" * 64)
+    pending_json = current_v3_compiled_authority_json(prompt_hash="b" * 64)
+    product.spec_file_path = __file__
+    product.compiled_authority_json = pending_json
+    session.add(
+        Product(
+            product_id=product.product_id,
+            name=product.name,
+            compiled_authority_json=pending_json,
+        )
+    )
+    session.commit()
+    spec = SpecRegistry(
+        product_id=product.product_id,
+        spec_hash="accepted-phase-spec",
+        content="# Accepted phase spec",
+        status="approved",
+    )
+    session.add(spec)
+    session.commit()
+    session.refresh(spec)
+    accepted = CompiledSpecAuthority(
+        spec_version_id=cast("int", spec.spec_version_id),
+        compiler_version="3.0.0",
+        prompt_hash="a" * 64,
+        compiled_artifact_json=accepted_json,
+        scope_themes="[]",
+        invariants="[]",
+        eligible_feature_ids="[]",
+        rejected_features="[]",
+        spec_gaps="[]",
+    )
+    session.add(accepted)
+    session.commit()
+    session.refresh(accepted)
+    session.add(
+        SpecAuthorityAcceptance(
+            product_id=product.product_id,
+            spec_version_id=cast("int", spec.spec_version_id),
+            status="accepted",
+            policy="test",
+            decided_by="test",
+            compiler_version=accepted.compiler_version,
+            prompt_hash=accepted.prompt_hash,
+            spec_hash=spec.spec_hash,
+            pending_authority_id=accepted.authority_id,
+            terminal_decision_key=(
+                f"{product.product_id}:{spec.spec_version_id}:{accepted.authority_id}"
+            ),
+        )
+    )
+    session.commit()
+    pending = CompiledSpecAuthority(
+        spec_version_id=cast("int", spec.spec_version_id),
+        compiler_version="3.0.0",
+        prompt_hash="b" * 64,
+        compiled_artifact_json=pending_json,
+        scope_themes="[]",
+        invariants="[]",
+        eligible_feature_ids="[]",
+        rejected_features="[]",
+        spec_gaps="[]",
+    )
+    session.add(pending)
+    session.commit()
+    session.refresh(pending)
+    workflow.states[str(product.product_id)] = {
+        "fsm_state": "BACKLOG_READY",
+        "latest_spec_version_id": spec.spec_version_id,
+        "compiled_authority_cached": pending_json,
+    }
+    observed_authorities: list[object] = []
+
+    async def record_service_call(
+        *_args: object,
+        **_kwargs: object,
+    ) -> dict[str, object]:
+        observed_authorities.append(
+            workflow.states[str(product.product_id)]["compiled_authority_cached"]
+        )
+        return {}
+
+    monkeypatch.setattr(
+        api_module,
+        "generate_vision_draft_service",
+        record_service_call,
+    )
+
+    response = client.post(
+        f"/api/projects/{product.product_id}/vision/generate",
+        json={"user_input": "draft vision"},
+    )
+
+    assert response.status_code == HTTP_OK
+    assert accepted.authority_id != pending.authority_id
+    assert observed_authorities == [accepted_json]
+    assert product.compiled_authority_json == accepted_json
+    session.expire_all()
+    persisted = session.get(Product, product.product_id)
+    assert persisted is not None
+    assert persisted.compiled_authority_json == accepted_json
 
 
 def test_phase_generate_rejects_cross_project_spec_without_mutating_caches(

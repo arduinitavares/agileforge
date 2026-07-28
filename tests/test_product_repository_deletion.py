@@ -7,7 +7,30 @@ from sqlalchemy import event
 from sqlalchemy.engine import Connection, Engine
 from sqlmodel import Session, col, select
 
-from models.core import Product, UserStory, UserStoryDependency
+from models.agent_workbench import (
+    DiscoveryChallengeArtifact,
+    DiscoveryPrd,
+    DiscoverySpecAmendmentDraft,
+    GreenfieldDiscoveryChallengeArtifact,
+    GreenfieldDiscoveryContext,
+    GreenfieldDiscoveryPrd,
+    GreenfieldDiscoverySpecAmendmentDraft,
+)
+from models.authority_curation import (
+    AuthorityCurationAttempt,
+    AuthorityFeedbackAttempt,
+)
+from models.core import (
+    Product,
+    Sprint,
+    SprintStory,
+    Task,
+    Team,
+    UserStory,
+    UserStoryDependency,
+)
+from models.enums import TaskStatus, WorkflowEventType
+from models.events import TaskExecutionLog, WorkflowEvent
 from models.specs import (
     CompiledSpecAuthority,
     SpecAuthorityAcceptance,
@@ -213,6 +236,426 @@ def test_delete_project_neutralizes_external_story_self_reference(
             )
             is None
         )
+
+
+def test_delete_progressed_project_removes_task_execution_logs(
+    engine: Engine,
+) -> None:
+    """Delete execution history before its task and sprint parents."""
+    with Session(engine) as session:
+        assert (
+            session.connection().exec_driver_sql("PRAGMA foreign_keys").scalar_one()
+            == 1
+        )
+
+        product = Product(name="Progressed project")
+        team = Team(name="Delivery team")
+        session.add(product)
+        session.add(team)
+        session.flush()
+        assert product.product_id is not None
+        assert team.team_id is not None
+
+        story = UserStory(title="Progressed story", product_id=product.product_id)
+        sprint = Sprint(product_id=product.product_id, team_id=team.team_id)
+        session.add(story)
+        session.add(sprint)
+        session.flush()
+        assert story.story_id is not None
+        assert sprint.sprint_id is not None
+
+        task = Task(description="Progressed task", story_id=story.story_id)
+        session.add(task)
+        session.add(SprintStory(sprint_id=sprint.sprint_id, story_id=story.story_id))
+        session.flush()
+        assert task.task_id is not None
+
+        execution_log = TaskExecutionLog(
+            task_id=task.task_id,
+            sprint_id=sprint.sprint_id,
+            old_status=TaskStatus.TO_DO,
+            new_status=TaskStatus.IN_PROGRESS,
+        )
+        session.add(execution_log)
+        session.commit()
+        assert execution_log.log_id is not None
+
+        product_id = product.product_id
+        story_id = story.story_id
+        sprint_id = sprint.sprint_id
+        task_id = task.task_id
+        execution_log_id = execution_log.log_id
+
+        assert ProductRepository(session).delete_project(product_id) is True
+
+        assert session.get(Product, product_id) is None
+        assert session.get(UserStory, story_id) is None
+        assert session.get(Sprint, sprint_id) is None
+        assert session.get(Task, task_id) is None
+        assert session.get(TaskExecutionLog, execution_log_id) is None
+        assert session.get(Team, team.team_id) is not None
+
+
+def test_delete_project_removes_sprint_only_workflow_events(engine: Engine) -> None:
+    """Delete events linked through a target sprint even without a product ID."""
+    with Session(engine) as session:
+        assert (
+            session.connection().exec_driver_sql("PRAGMA foreign_keys").scalar_one()
+            == 1
+        )
+
+        deleted_product = Product(name="Event target project")
+        surviving_product = Product(name="Event survivor project")
+        team = Team(name="Event delivery team")
+        session.add(deleted_product)
+        session.add(surviving_product)
+        session.add(team)
+        session.flush()
+        assert deleted_product.product_id is not None
+        assert surviving_product.product_id is not None
+        assert team.team_id is not None
+
+        deleted_sprint = Sprint(
+            product_id=deleted_product.product_id,
+            team_id=team.team_id,
+        )
+        surviving_sprint = Sprint(
+            product_id=surviving_product.product_id,
+            team_id=team.team_id,
+        )
+        session.add(deleted_sprint)
+        session.add(surviving_sprint)
+        session.flush()
+        assert deleted_sprint.sprint_id is not None
+        assert surviving_sprint.sprint_id is not None
+
+        deleted_event = WorkflowEvent(
+            event_type=WorkflowEventType.SPRINT_STARTED,
+            product_id=None,
+            sprint_id=deleted_sprint.sprint_id,
+        )
+        surviving_event = WorkflowEvent(
+            event_type=WorkflowEventType.SPRINT_STARTED,
+            product_id=surviving_product.product_id,
+            sprint_id=surviving_sprint.sprint_id,
+        )
+        session.add(deleted_event)
+        session.add(surviving_event)
+        session.commit()
+        assert deleted_event.event_id is not None
+        assert surviving_event.event_id is not None
+
+        deleted_product_id = deleted_product.product_id
+        deleted_sprint_id = deleted_sprint.sprint_id
+        deleted_event_id = deleted_event.event_id
+        surviving_product_id = surviving_product.product_id
+        surviving_sprint_id = surviving_sprint.sprint_id
+        surviving_event_id = surviving_event.event_id
+
+        assert ProductRepository(session).delete_project(deleted_product_id) is True
+
+        assert session.get(Product, deleted_product_id) is None
+        assert session.get(Sprint, deleted_sprint_id) is None
+        assert session.get(WorkflowEvent, deleted_event_id) is None
+        assert session.get(Product, surviving_product_id) is not None
+        assert session.get(Sprint, surviving_sprint_id) is not None
+        assert session.get(WorkflowEvent, surviving_event_id) is not None
+
+
+def test_delete_project_removes_authority_curation_rows(engine: Engine) -> None:
+    """Delete curation attempts that directly reference the project."""
+    with Session(engine) as session:
+        assert (
+            session.connection().exec_driver_sql("PRAGMA foreign_keys").scalar_one()
+            == 1
+        )
+
+        product = Product(name="Curated project")
+        session.add(product)
+        session.flush()
+        assert product.product_id is not None
+
+        feedback = AuthorityFeedbackAttempt(
+            project_id=product.product_id,
+            feedback_attempt_id="feedback-delete",
+            source_authority_id=1,
+            source_authority_fingerprint="sha256:authority",
+            feedback_fingerprint="sha256:feedback",
+            feedback_json="{}",
+            request_hash="sha256:feedback-request",
+            idempotency_key="feedback-delete",
+        )
+        curation = AuthorityCurationAttempt(
+            project_id=product.product_id,
+            curation_attempt_id="curation-delete",
+            source_authority_id=1,
+            source_authority_fingerprint="sha256:authority",
+            spec_version_id=1,
+            feedback_attempt_id=feedback.feedback_attempt_id,
+            request_hash="sha256:curation-request",
+            idempotency_key="curation-delete",
+        )
+        session.add(feedback)
+        session.add(curation)
+        session.commit()
+        assert feedback.feedback_row_id is not None
+        assert curation.curation_row_id is not None
+
+        product_id = product.product_id
+        feedback_row_id = feedback.feedback_row_id
+        curation_row_id = curation.curation_row_id
+
+        assert ProductRepository(session).delete_project(product_id) is True
+
+        assert session.get(Product, product_id) is None
+        assert session.get(AuthorityFeedbackAttempt, feedback_row_id) is None
+        assert session.get(AuthorityCurationAttempt, curation_row_id) is None
+
+
+def test_delete_project_removes_discovery_rows(  # noqa: PLR0915
+    engine: Engine,
+) -> None:
+    """Delete project and linked-greenfield discovery artifact chains."""
+    with Session(engine) as session:
+        assert (
+            session.connection().exec_driver_sql("PRAGMA foreign_keys").scalar_one()
+            == 1
+        )
+
+        product = Product(name="Discovered project")
+        session.add(product)
+        session.flush()
+        assert product.product_id is not None
+
+        challenge = DiscoveryChallengeArtifact(
+            project_id=product.product_id,
+            producer="test",
+            readiness="ready_for_prd",
+            original_idea="Delete this project.",
+            content_json="{}",
+            artifact_fingerprint="challenge-fingerprint",
+            request_hash="challenge-request",
+            idempotency_key="challenge-delete",
+        )
+        session.add(challenge)
+        session.flush()
+        assert challenge.challenge_artifact_id is not None
+
+        prd = DiscoveryPrd(
+            project_id=product.product_id,
+            challenge_artifact_id=challenge.challenge_artifact_id,
+            producer="test",
+            status="accepted",
+            version="1",
+            title="Delete project PRD",
+            content_json="{}",
+            artifact_fingerprint="prd-fingerprint",
+            request_hash="prd-request",
+            idempotency_key="prd-delete",
+        )
+        session.add(prd)
+        session.flush()
+        assert prd.prd_id is not None
+
+        draft = DiscoverySpecAmendmentDraft(
+            project_id=product.product_id,
+            prd_id=prd.prd_id,
+            challenge_artifact_id=challenge.challenge_artifact_id,
+            status="accepted",
+            amendment_file="spec.md",
+            content_json="{}",
+            validation_json="{}",
+            artifact_fingerprint="draft-fingerprint",
+            request_hash="draft-request",
+            idempotency_key="draft-delete",
+        )
+        session.add(draft)
+
+        context = GreenfieldDiscoveryContext(
+            context_key="greenfield-delete",
+            project_id=product.product_id,
+            status="project_created",
+            request_hash="greenfield-context-request",
+            idempotency_key="greenfield-context-delete",
+        )
+        session.add(context)
+        session.flush()
+        assert context.greenfield_context_id is not None
+
+        greenfield_challenge = GreenfieldDiscoveryChallengeArtifact(
+            greenfield_context_id=context.greenfield_context_id,
+            producer="test",
+            readiness="ready_for_prd",
+            original_idea="Create then delete this project.",
+            content_json="{}",
+            artifact_fingerprint="greenfield-challenge-fingerprint",
+            request_hash="greenfield-challenge-request",
+            idempotency_key="greenfield-challenge-delete",
+        )
+        session.add(greenfield_challenge)
+        session.flush()
+        assert greenfield_challenge.challenge_artifact_id is not None
+
+        greenfield_prd = GreenfieldDiscoveryPrd(
+            greenfield_context_id=context.greenfield_context_id,
+            challenge_artifact_id=greenfield_challenge.challenge_artifact_id,
+            producer="test",
+            status="accepted",
+            version="1",
+            title="Greenfield delete project PRD",
+            content_json="{}",
+            artifact_fingerprint="greenfield-prd-fingerprint",
+            request_hash="greenfield-prd-request",
+            idempotency_key="greenfield-prd-delete",
+        )
+        session.add(greenfield_prd)
+        session.flush()
+        assert greenfield_prd.prd_id is not None
+
+        greenfield_draft = GreenfieldDiscoverySpecAmendmentDraft(
+            greenfield_context_id=context.greenfield_context_id,
+            prd_id=greenfield_prd.prd_id,
+            challenge_artifact_id=greenfield_challenge.challenge_artifact_id,
+            status="accepted",
+            amendment_file="greenfield-spec.md",
+            content_json="{}",
+            validation_json="{}",
+            artifact_fingerprint="greenfield-draft-fingerprint",
+            request_hash="greenfield-draft-request",
+            idempotency_key="greenfield-draft-delete",
+        )
+        session.add(greenfield_draft)
+        session.commit()
+        assert draft.spec_amendment_draft_id is not None
+        assert greenfield_draft.spec_amendment_draft_id is not None
+
+        product_id = product.product_id
+        challenge_id = challenge.challenge_artifact_id
+        prd_id = prd.prd_id
+        draft_id = draft.spec_amendment_draft_id
+        context_id = context.greenfield_context_id
+        greenfield_challenge_id = greenfield_challenge.challenge_artifact_id
+        greenfield_prd_id = greenfield_prd.prd_id
+        greenfield_draft_id = greenfield_draft.spec_amendment_draft_id
+
+        assert ProductRepository(session).delete_project(product_id) is True
+
+        assert session.get(Product, product_id) is None
+        assert session.get(DiscoveryChallengeArtifact, challenge_id) is None
+        assert session.get(DiscoveryPrd, prd_id) is None
+        assert session.get(DiscoverySpecAmendmentDraft, draft_id) is None
+        assert session.get(GreenfieldDiscoveryContext, context_id) is None
+        assert (
+            session.get(
+                GreenfieldDiscoveryChallengeArtifact,
+                greenfield_challenge_id,
+            )
+            is None
+        )
+        assert session.get(GreenfieldDiscoveryPrd, greenfield_prd_id) is None
+        assert (
+            session.get(
+                GreenfieldDiscoverySpecAmendmentDraft,
+                greenfield_draft_id,
+            )
+            is None
+        )
+
+
+def test_delete_project_nulls_surviving_discovery_prd_reference(
+    engine: Engine,
+) -> None:
+    """Preserve a PRD after deleting the cross-project PRD it superseded."""
+    with Session(engine) as session:
+        assert (
+            session.connection().exec_driver_sql("PRAGMA foreign_keys").scalar_one()
+            == 1
+        )
+
+        deleted_product = Product(name="Discovery target project")
+        surviving_product = Product(name="Discovery survivor project")
+        session.add(deleted_product)
+        session.add(surviving_product)
+        session.flush()
+        assert deleted_product.product_id is not None
+        assert surviving_product.product_id is not None
+
+        deleted_challenge = DiscoveryChallengeArtifact(
+            project_id=deleted_product.product_id,
+            producer="test",
+            readiness="ready_for_prd",
+            original_idea="Delete this discovery graph.",
+            content_json="{}",
+            artifact_fingerprint="deleted-challenge-fingerprint",
+            request_hash="deleted-challenge-request",
+            idempotency_key="deleted-challenge",
+        )
+        surviving_challenge = DiscoveryChallengeArtifact(
+            project_id=surviving_product.product_id,
+            producer="test",
+            readiness="ready_for_prd",
+            original_idea="Preserve this discovery graph.",
+            content_json="{}",
+            artifact_fingerprint="surviving-challenge-fingerprint",
+            request_hash="surviving-challenge-request",
+            idempotency_key="surviving-challenge",
+        )
+        session.add(deleted_challenge)
+        session.add(surviving_challenge)
+        session.flush()
+        assert deleted_challenge.challenge_artifact_id is not None
+        assert surviving_challenge.challenge_artifact_id is not None
+
+        deleted_prd = DiscoveryPrd(
+            project_id=deleted_product.product_id,
+            challenge_artifact_id=deleted_challenge.challenge_artifact_id,
+            producer="test",
+            status="accepted",
+            version="1",
+            title="Deleted PRD",
+            content_json="{}",
+            artifact_fingerprint="deleted-prd-fingerprint",
+            request_hash="deleted-prd-request",
+            idempotency_key="deleted-prd",
+        )
+        session.add(deleted_prd)
+        session.flush()
+        assert deleted_prd.prd_id is not None
+
+        surviving_prd = DiscoveryPrd(
+            project_id=surviving_product.product_id,
+            challenge_artifact_id=surviving_challenge.challenge_artifact_id,
+            producer="test",
+            status="accepted",
+            version="2",
+            title="Surviving PRD",
+            content_json="{}",
+            supersedes_prd_id=deleted_prd.prd_id,
+            artifact_fingerprint="surviving-prd-fingerprint",
+            request_hash="surviving-prd-request",
+            idempotency_key="surviving-prd",
+        )
+        session.add(surviving_prd)
+        session.commit()
+        assert surviving_prd.prd_id is not None
+
+        deleted_product_id = deleted_product.product_id
+        deleted_prd_id = deleted_prd.prd_id
+        surviving_product_id = surviving_product.product_id
+        surviving_challenge_id = surviving_challenge.challenge_artifact_id
+        surviving_prd_id = surviving_prd.prd_id
+
+        assert ProductRepository(session).delete_project(deleted_product_id) is True
+
+        assert session.get(Product, deleted_product_id) is None
+        assert session.get(DiscoveryPrd, deleted_prd_id) is None
+        assert session.get(Product, surviving_product_id) is not None
+        assert (
+            session.get(DiscoveryChallengeArtifact, surviving_challenge_id) is not None
+        )
+        stored_survivor = session.get(DiscoveryPrd, surviving_prd_id)
+        assert stored_survivor is not None
+        assert stored_survivor.supersedes_prd_id is None
 
 
 def test_delete_project_rolls_back_when_commit_fails(engine: Engine) -> None:

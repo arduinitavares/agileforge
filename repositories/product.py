@@ -1,8 +1,21 @@
 import logging
 
-from sqlalchemy import or_
+from sqlalchemy import delete, or_, update
 from sqlmodel import Session, col, select
 
+from models.agent_workbench import (
+    DiscoveryChallengeArtifact,
+    DiscoveryPrd,
+    DiscoverySpecAmendmentDraft,
+    GreenfieldDiscoveryChallengeArtifact,
+    GreenfieldDiscoveryContext,
+    GreenfieldDiscoveryPrd,
+    GreenfieldDiscoverySpecAmendmentDraft,
+)
+from models.authority_curation import (
+    AuthorityCurationAttempt,
+    AuthorityFeedbackAttempt,
+)
 from models.brownfield import (
     BrownfieldScanAttempt,
     BrownfieldSourceArtifact,
@@ -23,10 +36,135 @@ from models.core import (
     UserStoryDependency,
 )
 from models.db import get_engine
-from models.events import StoryCompletionLog, WorkflowEvent
+from models.events import StoryCompletionLog, TaskExecutionLog, WorkflowEvent
 from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance, SpecRegistry
 
 logger = logging.getLogger(__name__)
+
+
+def _delete_project_curation_rows(session: Session, product_id: int) -> None:
+    """Delete authority curation rows that directly reference a project."""
+    session.exec(
+        delete(AuthorityCurationAttempt).where(
+            col(AuthorityCurationAttempt.project_id) == product_id
+        )
+    )
+    session.exec(
+        delete(AuthorityFeedbackAttempt).where(
+            col(AuthorityFeedbackAttempt.project_id) == product_id
+        )
+    )
+
+
+def _delete_project_discovery_rows(session: Session, product_id: int) -> None:
+    """Delete discovery artifact chains that reference a project."""
+    prd_ids = list(
+        session.exec(
+            select(DiscoveryPrd.prd_id).where(DiscoveryPrd.project_id == product_id)
+        ).all()
+    )
+    session.exec(
+        delete(DiscoverySpecAmendmentDraft).where(
+            col(DiscoverySpecAmendmentDraft.project_id) == product_id
+        )
+    )
+    if prd_ids:
+        session.exec(
+            update(DiscoveryPrd)
+            .where(col(DiscoveryPrd.supersedes_prd_id).in_(prd_ids))
+            .values(supersedes_prd_id=None)
+        )
+    session.exec(delete(DiscoveryPrd).where(col(DiscoveryPrd.project_id) == product_id))
+    session.exec(
+        delete(DiscoveryChallengeArtifact).where(
+            col(DiscoveryChallengeArtifact.project_id) == product_id
+        )
+    )
+
+    greenfield_context_ids = list(
+        session.exec(
+            select(GreenfieldDiscoveryContext.greenfield_context_id).where(
+                GreenfieldDiscoveryContext.project_id == product_id
+            )
+        ).all()
+    )
+    if not greenfield_context_ids:
+        return
+
+    session.exec(
+        delete(GreenfieldDiscoverySpecAmendmentDraft).where(
+            col(GreenfieldDiscoverySpecAmendmentDraft.greenfield_context_id).in_(
+                greenfield_context_ids
+            )
+        )
+    )
+    session.exec(
+        delete(GreenfieldDiscoveryPrd).where(
+            col(GreenfieldDiscoveryPrd.greenfield_context_id).in_(
+                greenfield_context_ids
+            )
+        )
+    )
+    session.exec(
+        delete(GreenfieldDiscoveryChallengeArtifact).where(
+            col(GreenfieldDiscoveryChallengeArtifact.greenfield_context_id).in_(
+                greenfield_context_ids
+            )
+        )
+    )
+    session.exec(
+        delete(GreenfieldDiscoveryContext).where(
+            col(GreenfieldDiscoveryContext.greenfield_context_id).in_(
+                greenfield_context_ids
+            )
+        )
+    )
+
+
+def _delete_task_execution_logs(
+    session: Session,
+    *,
+    task_ids: list[int],
+    sprint_ids: list[int],
+) -> None:
+    """Delete execution logs before either referenced parent is deleted."""
+    if not task_ids and not sprint_ids:
+        return
+
+    statement = delete(TaskExecutionLog)
+    if task_ids and sprint_ids:
+        statement = statement.where(
+            or_(
+                col(TaskExecutionLog.task_id).in_(task_ids),
+                col(TaskExecutionLog.sprint_id).in_(sprint_ids),
+            )
+        )
+    elif task_ids:
+        statement = statement.where(col(TaskExecutionLog.task_id).in_(task_ids))
+    else:
+        statement = statement.where(col(TaskExecutionLog.sprint_id).in_(sprint_ids))
+
+    session.exec(statement)
+
+
+def _delete_project_workflow_events(
+    session: Session,
+    *,
+    product_id: int,
+    sprint_ids: list[int],
+) -> None:
+    """Delete events linked directly to the project or through its sprints."""
+    statement = delete(WorkflowEvent)
+    if sprint_ids:
+        statement = statement.where(
+            or_(
+                col(WorkflowEvent.product_id) == product_id,
+                col(WorkflowEvent.sprint_id).in_(sprint_ids),
+            )
+        )
+    else:
+        statement = statement.where(col(WorkflowEvent.product_id) == product_id)
+    session.exec(statement)
 
 
 class ProductRepository:
@@ -121,11 +259,17 @@ class ProductRepository:
             if not product:
                 return False
 
-            # Delete WorkflowEvent records
-            for event in session.exec(
-                select(WorkflowEvent).where(WorkflowEvent.product_id == product_id)
-            ).all():
-                session.delete(event)
+            sprints = session.exec(
+                select(Sprint).where(Sprint.product_id == product_id)
+            ).all()
+            sprint_ids = [
+                sprint.sprint_id for sprint in sprints if sprint.sprint_id is not None
+            ]
+            _delete_project_workflow_events(
+                session,
+                product_id=product_id,
+                sprint_ids=sprint_ids,
+            )
 
             # Delete SpecAuthorityAcceptance records
             for sa in session.exec(
@@ -162,29 +306,47 @@ class ProductRepository:
             ).all():
                 session.delete(source_artifact)
 
+            _delete_project_curation_rows(session, product_id)
+            _delete_project_discovery_rows(session, product_id)
+
             # Delete ProductPersonas
             for persona in session.exec(
                 select(ProductPersona).where(ProductPersona.product_id == product_id)
             ).all():
                 session.delete(persona)
 
-            # Handle Sprints (and mappings)
-            for sprint in session.exec(
-                select(Sprint).where(Sprint.product_id == product_id)
-            ).all():
-                for sm in session.exec(
-                    select(SprintStory).where(SprintStory.sprint_id == sprint.sprint_id)
-                ).all():
-                    session.delete(sm)
-                session.delete(sprint)
-
-            # Handle UserStories (and dependencies / tasks / logs)
             stories = session.exec(
                 select(UserStory).where(UserStory.product_id == product_id)
             ).all()
             story_ids = [
                 story.story_id for story in stories if story.story_id is not None
             ]
+            task_ids = (
+                list(
+                    session.exec(
+                        select(Task.task_id).where(col(Task.story_id).in_(story_ids))
+                    ).all()
+                )
+                if story_ids
+                else []
+            )
+
+            _delete_task_execution_logs(
+                session,
+                task_ids=task_ids,
+                sprint_ids=sprint_ids,
+            )
+
+            # Handle Sprints (and mappings)
+            for sprint in sprints:
+                session.exec(
+                    delete(SprintStory).where(
+                        col(SprintStory.sprint_id) == sprint.sprint_id
+                    )
+                )
+                session.delete(sprint)
+
+            # Handle UserStories (and dependencies / tasks / logs)
             if story_ids:
                 for dependency in session.exec(
                     select(UserStoryDependency).where(

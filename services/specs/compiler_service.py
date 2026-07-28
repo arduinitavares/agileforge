@@ -35,7 +35,6 @@ from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer imp
     normalize_compiler_output,
 )
 from services.agent_workbench.error_codes import ErrorCode
-from services.agent_workbench.fingerprints import canonical_hash
 from services.specs._engine_resolution import resolve_spec_engine
 from services.specs.authority_quality import apply_authority_quality_gate
 from services.specs.authority_selection import (
@@ -75,6 +74,7 @@ from utils.spec_schemas import (
     AuthorityQualityInvalidatedItem,
     AuthorityQualityMergedItem,
     AuthorityQualityReport,
+    AuthorityQualityReviewGroup,
     AuthorityQualitySummary,
     EligibleFeatureRule,
     Invariant,
@@ -1367,54 +1367,6 @@ def _extension_only_artifact(
     return focused
 
 
-def _json_field_for_authority_fingerprint(raw: str | None) -> object:
-    """Return a canonical JSON field value for authority fingerprints."""
-    if raw is None:
-        return None
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        return {"malformed_json": raw}
-
-
-def _pending_authority_fingerprint(
-    authority: CompiledSpecAuthority | None,
-) -> str | None:
-    """Return the same pending authority fingerprint used by projections."""
-    if authority is None:
-        return None
-    return canonical_hash(
-        {
-            "command": "agileforge authority status",
-            "pending_compiled": {
-                "authority_id": authority.authority_id,
-                "spec_version_id": authority.spec_version_id,
-                "compiler_version": authority.compiler_version,
-                "prompt_hash": authority.prompt_hash,
-                "compiled_at": authority.compiled_at,
-                "compiled_artifact_json": _json_field_for_authority_fingerprint(
-                    authority.compiled_artifact_json
-                ),
-                "scope_themes": _json_field_for_authority_fingerprint(
-                    authority.scope_themes
-                ),
-                "invariants": _json_field_for_authority_fingerprint(
-                    authority.invariants
-                ),
-                "eligible_feature_ids": _json_field_for_authority_fingerprint(
-                    authority.eligible_feature_ids
-                ),
-                "rejected_features": _json_field_for_authority_fingerprint(
-                    authority.rejected_features
-                ),
-                "spec_gaps": _json_field_for_authority_fingerprint(
-                    authority.spec_gaps
-                ),
-            },
-        }
-    )
-
-
 def _source_metadata_failure_detail_fields(
     failure: SpecAuthorityCompilationFailure,
     *,
@@ -1982,6 +1934,7 @@ def _merge_compilation_successes(
             "authority_quality": _merge_authority_quality_reports(
                 successes,
                 final_invariant_count=len(merged_invariants),
+                merged_assumptions=merged_assumptions,
                 merged_source_map=merged_source_map,
                 invalidated_items=invalidated_items,
             ),
@@ -2085,6 +2038,7 @@ def _merge_authority_quality_reports(
     successes: list[SpecAuthorityCompilationSuccess],
     *,
     final_invariant_count: int,
+    merged_assumptions: list[AuthorityAssumption],
     merged_source_map: list[SourceMapEntry],
     invalidated_items: list[AuthorityQualityInvalidatedItem],
 ) -> dict[str, object] | None:
@@ -2113,7 +2067,10 @@ def _merge_authority_quality_reports(
         )
         for kept_id, removed_ids in cross_success_merges.items()
     )
-    review_groups = [group for report in reports for group in report.review_groups]
+    review_groups = _remap_merged_assumption_review_groups(
+        successes,
+        merged_assumptions=merged_assumptions,
+    )
     all_invalidated_items = [
         item for report in reports for item in report.invalidated_items
     ]
@@ -2163,6 +2120,43 @@ def _merge_authority_quality_reports(
         ],
     )
     return report.model_dump(mode="json")
+
+
+def _remap_merged_assumption_review_groups(
+    successes: list[SpecAuthorityCompilationSuccess],
+    *,
+    merged_assumptions: list[AuthorityAssumption],
+) -> list[AuthorityQualityReviewGroup]:
+    """Map assumption group members to the final deduplicated assumption order."""
+    final_id_by_key = {
+        canonical_assumption_key(assumption): f"ASM-{index}"
+        for index, assumption in enumerate(merged_assumptions, start=1)
+    }
+    remapped_groups: list[AuthorityQualityReviewGroup] = []
+    for success in successes:
+        report = success.authority_quality
+        if report is None:
+            continue
+        local_to_final: dict[str, str] = {}
+        for index, assumption in enumerate(success.assumptions, start=1):
+            final_id = final_id_by_key.get(canonical_assumption_key(assumption))
+            if final_id is not None:
+                local_to_final[f"ASM-{index}"] = final_id
+        for group in report.review_groups:
+            if group.group_type != "noisy_assumptions":
+                remapped_groups.append(group)
+                continue
+            member_ids = _dedupe_strings(
+                [
+                    local_to_final[member_id]
+                    for member_id in group.member_ids
+                    if member_id in local_to_final
+                ]
+            )
+            if len(member_ids) <= 1:
+                continue
+            remapped_groups.append(group.model_copy(update={"member_ids": member_ids}))
+    return remapped_groups
 
 
 def _invoke_and_normalize_spec_authority(  # noqa: PLR0913
@@ -3503,6 +3497,10 @@ def _accepted_authority_identity_matches(
     acceptance: SpecAuthorityAcceptance,
 ) -> bool:
     """Return whether a compiled authority still matches its acceptance row."""
+    from services.agent_workbench.authority_projection import (  # noqa: PLC0415
+        pending_authority_fingerprint,
+    )
+
     if authority.compiler_version != acceptance.compiler_version:
         return False
     if authority.prompt_hash != acceptance.prompt_hash:
@@ -3514,7 +3512,7 @@ def _accepted_authority_identity_matches(
         return False
     if acceptance.authority_fingerprint is not None:
         return (
-            _pending_authority_fingerprint(authority)
+            pending_authority_fingerprint(authority)
             == acceptance.authority_fingerprint
         )
     return True

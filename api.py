@@ -20,6 +20,7 @@ from typing import (
     TYPE_CHECKING,
     Any,
     Literal,
+    Never,
     Protocol,
     cast,
     runtime_checkable,
@@ -215,8 +216,8 @@ from services.setup_service import (
     run_project_setup as run_project_setup_service,
 )
 from services.specs.authority_selection import (
-    accepted_compiled_authority,
-    latest_compiled_authority,
+    compiled_authority_for_acceptance,
+    latest_accepted_authority_decision,
 )
 from services.specs.compiler_service import (
     CompiledAuthorityReadFailure,
@@ -891,12 +892,12 @@ def _raise_if_authority_json_unusable(
         _raise_compiled_authority_read_failure(failure)
 
 
-def _raise_phase_spec_version_not_found(
+def _raise_spec_version_not_found(
     *,
     project_id: int,
     spec_version_id: int,
-) -> None:
-    """Raise a stable conflict when phase state names another project's spec."""
+) -> Never:
+    """Raise a stable conflict when execution names another project's spec."""
     raise HTTPException(
         status_code=409,
         detail={
@@ -921,6 +922,90 @@ def _raise_phase_spec_version_not_found(
     )
 
 
+def _raise_execution_authority_conflict(
+    *,
+    code: Literal["AUTHORITY_NOT_ACCEPTED", "AUTHORITY_ACCEPTANCE_MISMATCH"],
+    message: str,
+    details: dict[str, Any],
+    remediation: str,
+) -> Never:
+    """Raise a stable conflict when accepted execution authority is unresolved."""
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "status": "error",
+            "errors": [
+                {
+                    "code": code,
+                    "message": message,
+                    "details": details,
+                    "remediation": [remediation],
+                }
+            ],
+        },
+    )
+
+
+def _load_exact_accepted_authority(
+    session: Session,
+    *,
+    project_id: int,
+    spec_version_id: int,
+) -> CompiledSpecAuthority:
+    """Load the exact authority identity selected by an accepted decision."""
+    spec = session.get(SpecRegistry, spec_version_id)
+    if spec is None or spec.product_id != project_id:
+        _raise_spec_version_not_found(
+            project_id=project_id,
+            spec_version_id=spec_version_id,
+        )
+
+    acceptance = latest_accepted_authority_decision(
+        session,
+        product_id=project_id,
+        spec_version_id=spec_version_id,
+    )
+    if acceptance is None:
+        _raise_execution_authority_conflict(
+            code="AUTHORITY_NOT_ACCEPTED",
+            message=(
+                f"Spec version {spec_version_id} has no accepted authority "
+                f"for project {project_id}."
+            ),
+            details={
+                "project_id": project_id,
+                "spec_version_id": spec_version_id,
+            },
+            remediation=(
+                "Accept authority for the selected spec version before execution."
+            ),
+        )
+
+    authority = compiled_authority_for_acceptance(
+        session,
+        acceptance=acceptance,
+    )
+    if authority is None:
+        _raise_execution_authority_conflict(
+            code="AUTHORITY_ACCEPTANCE_MISMATCH",
+            message=(
+                "Accepted authority does not resolve to the compiled authority "
+                "named by its decision."
+            ),
+            details={
+                "project_id": project_id,
+                "spec_version_id": spec_version_id,
+                "accepted_decision_id": acceptance.id,
+                "accepted_authority_id": acceptance.pending_authority_id,
+            },
+            remediation=(
+                "Repair the accepted authority decision or accept a valid compiled "
+                "authority before execution."
+            ),
+        )
+    return authority
+
+
 async def _guard_phase_generation_authority(
     *,
     project_id: int,
@@ -936,20 +1021,12 @@ async def _guard_phase_generation_authority(
         canonical_found = False
         with Session(get_engine()) as session:
             spec = session.get(SpecRegistry, spec_version_id)
-            if spec is not None and spec.product_id != project_id:
-                _raise_phase_spec_version_not_found(
+            if spec is not None:
+                authority = _load_exact_accepted_authority(
+                    session,
                     project_id=project_id,
                     spec_version_id=spec_version_id,
                 )
-            authority = (
-                latest_compiled_authority(
-                    session,
-                    spec_version_id=spec_version_id,
-                )
-                if spec is not None
-                else None
-            )
-            if authority is not None:
                 canonical_found = True
                 load_result = load_compiled_artifact(authority)
                 canonical_failure = compiled_authority_read_failure(
@@ -1886,9 +1963,9 @@ def _load_pinned_authority(
 ) -> CompiledSpecAuthority | None:
     if accepted_spec_version_id is None:
         return None
-    return accepted_compiled_authority(
+    return _load_exact_accepted_authority(
         session,
-        product_id=project_id,
+        project_id=project_id,
         spec_version_id=accepted_spec_version_id,
     )
 

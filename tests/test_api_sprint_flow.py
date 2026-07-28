@@ -2723,11 +2723,11 @@ def test_task_packet_uses_latest_deterministic_accepted_decision(
     )
 
 
-def test_task_packet_does_not_fallback_when_pinned_spec_is_foreign_owned(
+def test_task_packet_rejects_pinned_spec_when_foreign_owned(
     session: Session,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A product/spec ownership mismatch exposes no authority fallback."""
+    """A product/spec ownership mismatch rejects the execution packet."""
     client, repo, _workflow = _build_client(monkeypatch)
     project_id, sprint_id, story_id, task_id = _seed_task_packet_context(
         session,
@@ -2747,17 +2747,20 @@ def test_task_packet_does_not_fallback_when_pinned_spec_is_foreign_owned(
         f"/api/projects/{project_id}/sprints/{sprint_id}/tasks/{task_id}/packet"
     )
 
-    assert response.status_code == HTTP_OK
-    binding = response.json()["data"]["constraints"]["spec_binding"]
-    assert binding["binding_status"] == "pinned"
-    assert binding["authority_artifact_status"] == "missing"
+    assert response.status_code == HTTP_CONFLICT
+    error = response.json()["detail"]["errors"][0]
+    assert error["code"] == "SPEC_VERSION_NOT_FOUND"
+    assert error["details"] == {
+        "project_id": project_id,
+        "spec_version_id": spec.spec_version_id,
+    }
 
 
-def test_task_packet_does_not_fallback_when_acceptance_targets_other_spec(
+def test_task_packet_rejects_acceptance_targeting_other_spec(
     session: Session,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An acceptance/authority spec mismatch exposes no alternate row."""
+    """An acceptance/authority spec mismatch rejects the execution packet."""
     client, repo, _workflow = _build_client(monkeypatch)
     project_id, sprint_id, story_id, task_id = _seed_task_packet_context(
         session,
@@ -2782,8 +2785,7 @@ def test_task_packet_does_not_fallback_when_acceptance_targets_other_spec(
     acceptance = session.exec(
         select(SpecAuthorityAcceptance).where(
             SpecAuthorityAcceptance.product_id == project_id,
-            SpecAuthorityAcceptance.spec_version_id
-            == story.accepted_spec_version_id,
+            SpecAuthorityAcceptance.spec_version_id == story.accepted_spec_version_id,
         )
     ).first()
     assert acceptance is not None
@@ -2795,13 +2797,80 @@ def test_task_packet_does_not_fallback_when_acceptance_targets_other_spec(
         f"/api/projects/{project_id}/sprints/{sprint_id}/tasks/{task_id}/packet"
     )
 
-    assert response.status_code == HTTP_OK
-    assert (
-        response.json()["data"]["constraints"]["spec_binding"][
-            "authority_artifact_status"
-        ]
-        == "missing"
+    assert response.status_code == HTTP_CONFLICT
+    error = response.json()["detail"]["errors"][0]
+    assert error["code"] == "AUTHORITY_ACCEPTANCE_MISMATCH"
+    assert error["details"]["project_id"] == project_id
+    assert error["details"]["spec_version_id"] == story.accepted_spec_version_id
+    assert error["details"]["accepted_authority_id"] == other_authority.authority_id
+
+
+def test_task_packet_rejects_pinned_spec_without_acceptance(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pinned spec without an accepted decision is not executable."""
+    client, repo, _workflow = _build_client(monkeypatch)
+    project_id, sprint_id, story_id, task_id = _seed_task_packet_context(
+        session,
+        repo,
+        pinned=True,
     )
+    story, _, _ = _packet_authority_rows(session, story_id=story_id)
+    acceptance = session.exec(
+        select(SpecAuthorityAcceptance).where(
+            SpecAuthorityAcceptance.product_id == project_id,
+            SpecAuthorityAcceptance.spec_version_id == story.accepted_spec_version_id,
+        )
+    ).one()
+    session.delete(acceptance)
+    session.commit()
+
+    response = client.get(
+        f"/api/projects/{project_id}/sprints/{sprint_id}/tasks/{task_id}/packet"
+    )
+
+    assert response.status_code == HTTP_CONFLICT
+    error = response.json()["detail"]["errors"][0]
+    assert error["code"] == "AUTHORITY_NOT_ACCEPTED"
+    assert error["details"] == {
+        "project_id": project_id,
+        "spec_version_id": story.accepted_spec_version_id,
+    }
+
+
+def test_task_packet_rejects_accepted_decision_without_authority_identity(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pinned decision with no exact authority identity is not executable."""
+    client, repo, _workflow = _build_client(monkeypatch)
+    project_id, sprint_id, story_id, task_id = _seed_task_packet_context(
+        session,
+        repo,
+        pinned=True,
+    )
+    story, _, _ = _packet_authority_rows(session, story_id=story_id)
+    acceptance = session.exec(
+        select(SpecAuthorityAcceptance).where(
+            SpecAuthorityAcceptance.product_id == project_id,
+            SpecAuthorityAcceptance.spec_version_id == story.accepted_spec_version_id,
+        )
+    ).one()
+    acceptance.pending_authority_id = None
+    session.add(acceptance)
+    session.commit()
+
+    response = client.get(
+        f"/api/projects/{project_id}/sprints/{sprint_id}/tasks/{task_id}/packet"
+    )
+
+    assert response.status_code == HTTP_CONFLICT
+    error = response.json()["detail"]["errors"][0]
+    assert error["code"] == "AUTHORITY_ACCEPTANCE_MISMATCH"
+    assert error["details"]["project_id"] == project_id
+    assert error["details"]["spec_version_id"] == story.accepted_spec_version_id
+    assert error["details"]["accepted_authority_id"] is None
 
 
 @pytest.mark.parametrize(

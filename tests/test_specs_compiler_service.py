@@ -21,6 +21,9 @@ from agile_sqlmodel import (
     SpecRegistry,
 )
 from db.migrations import ensure_schema_current
+from services.agent_workbench.authority_projection import (
+    pending_authority_fingerprint,
+)
 from services.specs.profile_content import (
     SpecContentNormalizationError,
     normalize_spec_content_for_registry,
@@ -2298,6 +2301,59 @@ def test_merge_compilation_successes_preserves_later_quality_reports() -> None:
     assert len(merged.authority_quality.merged_items) == 1
 
 
+def test_merge_compilation_successes_remaps_later_assumption_review_ids() -> None:
+    """Later quality groups identify assumptions in the final merged order."""
+    from services.specs import compiler_service  # noqa: PLC0415
+
+    leading = _scope_merge_success(
+        cast(
+            "dict[str, object]",
+            free_text_assumption("Deployment region remains undecided."),
+        )
+    )
+    later = SpecAuthorityCompilationSuccess.model_validate(
+        {
+            **leading.model_dump(mode="json"),
+            "assumptions": [
+                free_text_assumption(
+                    "Python runtime should be confirmed before implementation."
+                ),
+                free_text_assumption(
+                    "Python runtime should be confirmed before implementation step."
+                ),
+            ],
+        }
+    )
+    later = compiler_service.apply_authority_quality_gate(later)
+    assert later.authority_quality is not None
+    assert later.authority_quality.review_groups[0].member_ids == [
+        "ASM-1",
+        "ASM-2",
+    ]
+
+    merged = compiler_service._merge_compilation_successes(
+        [
+            compiler_service.ScopedCompilationSuccess(
+                scope=compiler_service.CompilationScope.FULL_SPEC,
+                success=leading,
+            ),
+            compiler_service.ScopedCompilationSuccess(
+                scope=compiler_service.CompilationScope.FOCUSED_ITEM,
+                success=later,
+            ),
+        ],
+        final_spec=None,
+    )
+
+    assert merged.authority_quality is not None
+    noisy_groups = [
+        group
+        for group in merged.authority_quality.review_groups
+        if group.group_type == "noisy_assumptions"
+    ]
+    assert [group.member_ids for group in noisy_groups] == [["ASM-2", "ASM-3"]]
+
+
 @pytest.mark.parametrize(
     ("claim", "assumption_kind"),
     [
@@ -2895,9 +2951,7 @@ def test_compile_spec_authority_scope_extension_reuses_base_authority(
             prompt_hash=base_authority.prompt_hash,
             spec_hash=base_spec.spec_hash,
             pending_authority_id=base_authority.authority_id,
-            authority_fingerprint=compiler_service._pending_authority_fingerprint(
-                base_authority
-            ),
+            authority_fingerprint=pending_authority_fingerprint(base_authority),
         )
     )
     session.commit()
