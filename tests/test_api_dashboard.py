@@ -2400,6 +2400,95 @@ def test_phase_generate_canonical_row_outranks_valid_derived_caches(
     assert error["details"]["authority_id"] == authority.authority_id
 
 
+def test_phase_generate_rejects_cross_project_spec_without_mutating_caches(
+    monkeypatch: pytest.MonkeyPatch,
+    session: "Session",
+) -> None:
+    """A stale foreign spec id must never copy authority across projects."""
+    client, repo, workflow = _build_client(monkeypatch)
+    product_a = repo.create("Project A")
+    product_b = repo.create("Project B")
+    cache_a = current_v3_compiled_authority_json(prompt_hash="a" * 64)
+    authority_b_json = current_v3_compiled_authority_json(prompt_hash="b" * 64)
+    product_a.spec_file_path = __file__
+    product_a.compiled_authority_json = cache_a
+    session.add_all(
+        [
+            Product(
+                product_id=product_a.product_id,
+                name=product_a.name,
+                compiled_authority_json=cache_a,
+            ),
+            Product(product_id=product_b.product_id, name=product_b.name),
+        ]
+    )
+    session.commit()
+    spec_b = SpecRegistry(
+        product_id=product_b.product_id,
+        spec_hash="project-b-spec",
+        content="# Project B spec",
+        status="approved",
+    )
+    session.add(spec_b)
+    session.commit()
+    session.refresh(spec_b)
+    session.add(
+        CompiledSpecAuthority(
+            spec_version_id=cast("int", spec_b.spec_version_id),
+            compiler_version="3.0.0",
+            prompt_hash="b" * 64,
+            compiled_artifact_json=authority_b_json,
+            scope_themes="[]",
+            invariants="[]",
+            eligible_feature_ids="[]",
+            rejected_features="[]",
+            spec_gaps="[]",
+        )
+    )
+    session.commit()
+    workflow.states[str(product_a.product_id)] = {
+        "fsm_state": "BACKLOG_READY",
+        "latest_spec_version_id": spec_b.spec_version_id,
+        "compiled_authority_cached": cache_a,
+    }
+    service_calls: list[str] = []
+
+    async def record_service_call(
+        *_args: object,
+        **_kwargs: object,
+    ) -> dict[str, object]:
+        service_calls.append("vision")
+        return {}
+
+    monkeypatch.setattr(
+        api_module,
+        "generate_vision_draft_service",
+        record_service_call,
+    )
+
+    response = client.post(
+        f"/api/projects/{product_a.product_id}/vision/generate",
+        json={"user_input": "draft vision"},
+    )
+
+    assert response.status_code == HTTP_CONFLICT
+    assert service_calls == []
+    error = response.json()["detail"]["errors"][0]
+    assert error["code"] == "SPEC_VERSION_NOT_FOUND"
+    assert error["details"] == {
+        "project_id": product_a.product_id,
+        "spec_version_id": spec_b.spec_version_id,
+    }
+    assert product_a.compiled_authority_json == cache_a
+    assert workflow.states[str(product_a.product_id)][
+        "compiled_authority_cached"
+    ] == cache_a
+    session.expire_all()
+    persisted_a = session.get(Product, product_a.product_id)
+    assert persisted_a is not None
+    assert persisted_a.compiled_authority_json == cache_a
+
+
 def test_retry_setup_nonexistent_or_invalid_spec_file(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

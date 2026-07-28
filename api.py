@@ -50,7 +50,7 @@ from models.enums import (
     WorkflowEventType,
 )
 from models.events import StoryCompletionLog, TaskExecutionLog, WorkflowEvent
-from models.specs import CompiledSpecAuthority
+from models.specs import CompiledSpecAuthority, SpecRegistry
 from orchestrator_agent.agent_tools.backlog_primer.tools import (
     save_backlog_tool,
 )
@@ -888,6 +888,36 @@ def _raise_if_authority_json_unusable(
         _raise_compiled_authority_read_failure(failure)
 
 
+def _raise_phase_spec_version_not_found(
+    *,
+    project_id: int,
+    spec_version_id: int,
+) -> None:
+    """Raise a stable conflict when phase state names another project's spec."""
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "status": "error",
+            "errors": [
+                {
+                    "code": "SPEC_VERSION_NOT_FOUND",
+                    "message": (
+                        f"Spec version {spec_version_id} was not found for project "
+                        f"{project_id}."
+                    ),
+                    "details": {
+                        "project_id": project_id,
+                        "spec_version_id": spec_version_id,
+                    },
+                    "remediation": [
+                        "Choose a spec version that belongs to this project."
+                    ],
+                }
+            ],
+        },
+    )
+
+
 async def _guard_phase_generation_authority(
     *,
     project_id: int,
@@ -902,9 +932,19 @@ async def _guard_phase_generation_authority(
         canonical_failure: CompiledAuthorityReadFailure | None = None
         canonical_found = False
         with Session(get_engine()) as session:
-            authority = latest_compiled_authority(
-                session,
-                spec_version_id=spec_version_id,
+            spec = session.get(SpecRegistry, spec_version_id)
+            if spec is not None and spec.product_id != project_id:
+                _raise_phase_spec_version_not_found(
+                    project_id=project_id,
+                    spec_version_id=spec_version_id,
+                )
+            authority = (
+                latest_compiled_authority(
+                    session,
+                    spec_version_id=spec_version_id,
+                )
+                if spec is not None
+                else None
             )
             if authority is not None:
                 canonical_found = True
