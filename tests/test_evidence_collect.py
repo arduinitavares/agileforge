@@ -1244,9 +1244,13 @@ def test_runner_returns_error_envelope_for_invalid_compiled_authority_json(
     assert result["ok"] is False
     error = _mapping(result["errors"][0])
     assert error["code"] == "COMPILED_AUTHORITY_INVALID"
-    assert error["details"]["load_status"] == "invalid_json"
-    assert error["details"]["authority_id"] == 1
-    assert "agileforge authority regenerate" in " ".join(error["remediation"])
+    details = _mapping(error["details"])
+    assert details["load_status"] == "invalid_json"
+    assert details["authority_id"] == 1
+    remediation = error["remediation"]
+    assert isinstance(remediation, list)
+    assert all(isinstance(item, str) for item in remediation)
+    assert "agileforge authority regenerate" in " ".join(cast("list[str]", remediation))
 
 
 def test_runner_returns_error_envelope_for_non_object_compiled_authority_json(
@@ -1285,8 +1289,9 @@ def test_runner_returns_error_envelope_for_non_object_compiled_authority_json(
     assert result["ok"] is False
     error = _mapping(result["errors"][0])
     assert error["code"] == "COMPILED_AUTHORITY_INVALID"
-    assert error["details"]["load_status"] == "schema_invalid"
-    assert error["details"]["authority_id"] == 1
+    details = _mapping(error["details"])
+    assert details["load_status"] == "schema_invalid"
+    assert details["authority_id"] == 1
 
 
 def test_runner_rejects_unsupported_compiled_authority_schema(

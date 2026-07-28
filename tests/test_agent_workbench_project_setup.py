@@ -49,6 +49,10 @@ from services.agent_workbench.project_setup_fingerprints import (
     setup_spec_hash,
 )
 from services.specs.profile_content import normalize_spec_content_for_registry
+from tests.authority_assumption_fixtures import current_v3_compiled_authority_json
+
+_TEST_COMPILER_VERSION = "3.0.0"
+_TEST_PROMPT_HASH = "a" * 64
 
 
 def _expected_authority_compile_action(
@@ -456,6 +460,39 @@ def _assert_create_lease_extended(
         return ledger.last_heartbeat_at, ledger.lease_expires_at
 
 
+def _persist_current_test_authority(
+    *,
+    engine: Engine,
+    spec_version_id: int,
+) -> int:
+    """Persist one model-valid current authority for compiler seam tests."""
+    with Session(engine) as session:
+        authority = session.exec(
+            select(CompiledSpecAuthority).where(
+                CompiledSpecAuthority.spec_version_id == spec_version_id
+            )
+        ).first()
+        if authority is None:
+            authority = CompiledSpecAuthority(
+                spec_version_id=spec_version_id,
+                compiler_version=_TEST_COMPILER_VERSION,
+                prompt_hash=_TEST_PROMPT_HASH,
+                compiled_artifact_json=current_v3_compiled_authority_json(
+                    prompt_hash=_TEST_PROMPT_HASH
+                ),
+                scope_themes="[]",
+                invariants="[]",
+                eligible_feature_ids="[]",
+                rejected_features="[]",
+                spec_gaps="[]",
+            )
+            session.add(authority)
+            session.commit()
+            session.refresh(authority)
+        assert authority.authority_id is not None
+        return authority.authority_id
+
+
 def _install_fast_compiler(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -481,28 +518,10 @@ def _install_fast_compiler(
                 "error_code": "MUTATION_IN_PROGRESS",
                 "boundary": "compiled_authority_persisted",
             }
-        with Session(engine) as session:
-            authority = session.exec(
-                select(CompiledSpecAuthority).where(
-                    CompiledSpecAuthority.spec_version_id == spec_version_id
-                )
-            ).first()
-            if authority is None:
-                authority = CompiledSpecAuthority(
-                    spec_version_id=spec_version_id,
-                    compiler_version="test-compiler",
-                    prompt_hash="sha256:test",
-                    compiled_artifact_json='{"ok":true}',
-                    scope_themes="[]",
-                    invariants="[]",
-                    eligible_feature_ids="[]",
-                    rejected_features="[]",
-                    spec_gaps="[]",
-                )
-                session.add(authority)
-                session.commit()
-                session.refresh(authority)
-            authority_id = authority.authority_id
+        authority_id = _persist_current_test_authority(
+            engine=engine,
+            spec_version_id=spec_version_id,
+        )
         if record_progress is not None:
             assert record_progress("compiled_authority_persisted")
             assert record_progress("product_authority_cache_persisted")
@@ -510,8 +529,8 @@ def _install_fast_compiler(
             "success": True,
             "authority_id": authority_id,
             "spec_version_id": spec_version_id,
-            "compiler_version": "test-compiler",
-            "prompt_hash": "sha256:test",
+            "compiler_version": _TEST_COMPILER_VERSION,
+            "prompt_hash": _TEST_PROMPT_HASH,
         }
 
     monkeypatch.setattr(
@@ -1588,22 +1607,10 @@ def test_authority_compile_pins_guarded_spec_version(
         if lease_guard is not None:
             assert lease_guard("compiled_authority_persisted")
         compiler_calls.append(spec_version_id)
-        with Session(engine) as session:
-            authority = CompiledSpecAuthority(
-                spec_version_id=spec_version_id,
-                compiler_version="test-compiler",
-                prompt_hash="sha256:test",
-                compiled_artifact_json='{"ok":true}',
-                scope_themes="[]",
-                invariants="[]",
-                eligible_feature_ids="[]",
-                rejected_features="[]",
-                spec_gaps="[]",
-            )
-            session.add(authority)
-            session.commit()
-            session.refresh(authority)
-            authority_id = authority.authority_id
+        authority_id = _persist_current_test_authority(
+            engine=engine,
+            spec_version_id=spec_version_id,
+        )
         if record_progress is not None:
             assert record_progress("compiled_authority_persisted")
             assert record_progress("product_authority_cache_persisted")
@@ -1611,8 +1618,8 @@ def test_authority_compile_pins_guarded_spec_version(
             "success": True,
             "authority_id": authority_id,
             "spec_version_id": spec_version_id,
-            "compiler_version": "test-compiler",
-            "prompt_hash": "sha256:test",
+            "compiler_version": _TEST_COMPILER_VERSION,
+            "prompt_hash": _TEST_PROMPT_HASH,
         }
 
     monkeypatch.setattr(
@@ -1709,22 +1716,10 @@ def test_authority_compile_marks_compiling_before_invocation(
                 "error_code": "MUTATION_IN_PROGRESS",
                 "boundary": "compiled_authority_persisted",
             }
-        with Session(engine) as session:
-            authority = CompiledSpecAuthority(
-                spec_version_id=spec_version_id,
-                compiler_version="test-compiler",
-                prompt_hash="sha256:test",
-                compiled_artifact_json='{"ok":true}',
-                scope_themes="[]",
-                invariants="[]",
-                eligible_feature_ids="[]",
-                rejected_features="[]",
-                spec_gaps="[]",
-            )
-            session.add(authority)
-            session.commit()
-            session.refresh(authority)
-            authority_id = authority.authority_id
+        authority_id = _persist_current_test_authority(
+            engine=engine,
+            spec_version_id=spec_version_id,
+        )
         if record_progress is not None:
             assert record_progress("compiled_authority_persisted")
             assert record_progress("product_authority_cache_persisted")
@@ -1732,8 +1727,8 @@ def test_authority_compile_marks_compiling_before_invocation(
             "success": True,
             "authority_id": authority_id,
             "spec_version_id": spec_version_id,
-            "compiler_version": "test-compiler",
-            "prompt_hash": "sha256:test",
+            "compiler_version": _TEST_COMPILER_VERSION,
+            "prompt_hash": _TEST_PROMPT_HASH,
         }
 
     monkeypatch.setattr(
@@ -1870,13 +1865,8 @@ def test_authority_compile_rejects_live_spec_hash_change_before_compiler(
         del engine, force_recompile, tool_context
         del lease_guard, record_progress
         compiler_calls.append(spec_version_id)
-        return {
-            "success": True,
-            "authority_id": 777,
-            "spec_version_id": spec_version_id,
-            "compiler_version": "unexpected-test-compiler",
-            "prompt_hash": "sha256:unexpected",
-        }
+        message = "stale spec hash must block compiler invocation"
+        raise AssertionError(message)
 
     monkeypatch.setattr(
         project_setup,
@@ -2031,11 +2021,8 @@ def test_authority_compile_initial_workflow_failure_marks_recovery_required(
     ) -> dict[str, Any]:
         del engine, force_recompile, tool_context, lease_guard, record_progress
         compiler_calls.append(spec_version_id)
-        return {
-            "success": True,
-            "authority_id": 999,
-            "spec_version_id": spec_version_id,
-        }
+        message = "initial workflow failure must block compiler invocation"
+        raise AssertionError(message)
 
     monkeypatch.setattr(
         project_setup,

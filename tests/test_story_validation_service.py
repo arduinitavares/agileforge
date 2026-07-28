@@ -181,7 +181,14 @@ def test_story_validation_blocks_malformed_v3_before_checks_or_evidence(
             [],
         ),
         run_llm_spec_validation=lambda *_args: (
-            calls.append("llm") or {"passed": True}
+            calls.append("llm")
+            or {
+                "passed": True,
+                "issues": [],
+                "suggestions": [],
+                "verdict": "Compliant",
+                "critical_gaps": [],
+            }
         ),
         persist_validation_evidence=lambda *_args: calls.append("persist"),
     )

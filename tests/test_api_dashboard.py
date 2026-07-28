@@ -44,6 +44,18 @@ AUTHORITY_REVIEW_FIXTURE = "agileforge.authority_review.v1:sha256:test"
 LEGACY_COMPILED_AUTHORITY_JSON = '{"invariants":[]}'
 
 
+def _http_exception_error(exc: HTTPException) -> dict[str, Any]:
+    """Return the first structured error after narrowing the detail envelope."""
+    detail = exc.detail
+    assert isinstance(detail, dict)
+    errors = detail.get("errors")
+    assert isinstance(errors, list)
+    assert errors
+    error = errors[0]
+    assert isinstance(error, dict)
+    return cast("dict[str, Any]", error)
+
+
 class _StateContext(Protocol):
     """Minimal tool context shape used by dashboard route shims."""
 
@@ -2614,7 +2626,7 @@ def test_build_story_compliance_boundaries_rejects_non_success_loader_result(
         )
 
     assert exc_info.value.status_code == HTTP_CONFLICT
-    error = exc_info.value.detail["errors"][0]
+    error = _http_exception_error(exc_info.value)
     assert error["code"] == "COMPILED_AUTHORITY_INVALID"
     assert error["details"]["load_status"] == "schema_invalid"
     assert error["details"]["authority_id"] == MALFORMED_AUTHORITY_ID
@@ -2652,7 +2664,7 @@ def test_build_task_hard_constraints_rejects_non_success_loader_result(
         )
 
     assert exc_info.value.status_code == HTTP_CONFLICT
-    error = exc_info.value.detail["errors"][0]
+    error = _http_exception_error(exc_info.value)
     assert error["code"] == "COMPILED_AUTHORITY_INVALID"
     assert error["details"]["load_status"] == "schema_invalid"
     assert error["details"]["authority_id"] == MALFORMED_AUTHORITY_ID
@@ -2743,7 +2755,7 @@ def test_load_packet_story_context_rejects_unreadable_authority(
         )
 
     assert exc_info.value.status_code == HTTP_CONFLICT
-    error = exc_info.value.detail["errors"][0]
+    error = _http_exception_error(exc_info.value)
     assert error["code"] == "COMPILED_AUTHORITY_INVALID"
     assert error["details"]["load_status"] == "missing"
     assert error["details"]["authority_id"] == MALFORMED_AUTHORITY_ID

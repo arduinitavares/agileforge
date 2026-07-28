@@ -33,8 +33,11 @@ from services.agent_workbench.project_setup import (
     ProjectSetupMutationRunner,
 )
 from services.agent_workbench.project_setup_fingerprints import setup_spec_hash
+from tests.authority_assumption_fixtures import current_v3_compiled_authority_json
 
 GREENFIELD_GATE_EXIT_CODE = 4
+_TEST_COMPILER_VERSION = "3.0.0"
+_TEST_PROMPT_HASH = "b" * 64
 
 
 class FakeWorkflowPort:
@@ -339,8 +342,7 @@ def _accepted_greenfield_draft_id(
 
 def _write_sitecustomize_compiler_patch(caller_dir: Path) -> None:
     """Install a deterministic compiler patch visible only to the subprocess."""
-    (caller_dir / "sitecustomize.py").write_text(
-        """
+    patch_source = """
 from sqlmodel import Session
 
 from models.specs import CompiledSpecAuthority
@@ -362,9 +364,9 @@ def compile_for_test(
     with Session(engine) as session:
         authority = CompiledSpecAuthority(
             spec_version_id=spec_version_id,
-            compiler_version="test-compiler",
-            prompt_hash="sha256:test",
-            compiled_artifact_json='{"ok":true}',
+            compiler_version="3.0.0",
+            prompt_hash="b" * 64,
+            compiled_artifact_json=__CURRENT_V3_ARTIFACT_JSON__,
             scope_themes="[]",
             invariants="[]",
             eligible_feature_ids="[]",
@@ -382,13 +384,19 @@ def compile_for_test(
         "success": True,
         "authority_id": authority_id,
         "spec_version_id": spec_version_id,
-        "compiler_version": "test-compiler",
-        "prompt_hash": "sha256:test",
+        "compiler_version": "3.0.0",
+        "prompt_hash": "b" * 64,
     }
 
 
 project_setup.compile_spec_authority_for_version_with_engine = compile_for_test
-""",
+"""
+    patch_source = patch_source.replace(
+        "__CURRENT_V3_ARTIFACT_JSON__",
+        repr(current_v3_compiled_authority_json(prompt_hash=_TEST_PROMPT_HASH)),
+    )
+    (caller_dir / "sitecustomize.py").write_text(
+        patch_source,
         encoding="utf-8",
     )
 
@@ -437,9 +445,11 @@ def _install_compiler(
         with Session(engine) as session:
             authority = CompiledSpecAuthority(
                 spec_version_id=spec_version_id,
-                compiler_version="test-compiler",
-                prompt_hash="sha256:test",
-                compiled_artifact_json='{"ok":true}',
+                compiler_version=_TEST_COMPILER_VERSION,
+                prompt_hash=_TEST_PROMPT_HASH,
+                compiled_artifact_json=current_v3_compiled_authority_json(
+                    prompt_hash=_TEST_PROMPT_HASH
+                ),
                 scope_themes="[]",
                 invariants="[]",
                 eligible_feature_ids="[]",
@@ -457,8 +467,8 @@ def _install_compiler(
             "success": True,
             "authority_id": authority_id,
             "spec_version_id": spec_version_id,
-            "compiler_version": "test-compiler",
-            "prompt_hash": "sha256:test",
+            "compiler_version": _TEST_COMPILER_VERSION,
+            "prompt_hash": _TEST_PROMPT_HASH,
         }
 
     monkeypatch.setattr(

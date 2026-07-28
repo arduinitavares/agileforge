@@ -17,10 +17,6 @@ from sqlmodel import Session, select
 from models.core import Product
 from models.specs import SpecAuthorityAcceptance, SpecRegistry
 from services.specs.authority_selection import compiled_authority_by_id
-from services.specs.compiler_service import (
-    compiled_authority_read_failure,
-    load_compiled_artifact,
-)
 from services.specs.profile_content import (
     SpecContentNormalizationError,
     normalize_spec_content_for_registry,
@@ -644,9 +640,13 @@ def compile_pending_authority_for_project(  # noqa: PLR0911, PLR0913
             error="Compiler did not return a matching persisted authority id.",
         )
 
-    load_result = load_compiled_artifact(authority)
+    from services.specs.compiler_service import (  # noqa: PLC0415
+        compiled_authority_read_failure,
+        load_compiled_artifact,
+    )
+
     read_failure = compiled_authority_read_failure(
-        load_result,
+        load_compiled_artifact(authority),
         project_id=product_id,
         spec_version_id=spec_version_id,
         authority_id=authority.authority_id,
