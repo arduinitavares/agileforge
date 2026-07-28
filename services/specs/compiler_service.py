@@ -133,10 +133,6 @@ COMPILED_AUTHORITY_SCHEMA_VERSION = "agileforge.compiled_authority.v3"
 _COMPILED_AUTHORITY_PAYLOAD_OBJECT_ERROR = (
     "Compiled authority payload must serialize to an object."
 )
-_UNREADABLE_COMPILED_AUTHORITY_REMEDIATION = (
-    "Recompile the latest approved spec authority to persist a supported "
-    "compiled artifact."
-)
 CompiledAuthorityLoadStatus = Literal[
     "success",
     "missing",
@@ -466,6 +462,16 @@ class CompiledArtifactLoadResult:
         return self.status == "schema_unsupported"
 
 
+@dataclass(frozen=True)
+class CompiledAuthorityReadFailure:
+    """Stable public failure for one selected stored authority row."""
+
+    error_code: str
+    message: str
+    details: dict[str, Any]
+    remediation: tuple[str, ...]
+
+
 def _spec_authority_compiler_agent(
     *,
     compiler_model: str | None = None,
@@ -532,6 +538,75 @@ def compiled_authority_schema_unsupported_remediation(
             "--idempotency-key <new-key>."
         )
     ]
+
+
+def compiled_authority_read_failure(
+    load_result: CompiledArtifactLoadResult,
+    *,
+    project_id: int,
+    spec_version_id: int,
+    authority_id: int | None,
+) -> CompiledAuthorityReadFailure | None:
+    """Describe a selected stored row unless it is a parsed v3 success."""
+    if load_result.ok and load_result.artifact is not None:
+        return None
+
+    unsupported = load_result.status == "schema_unsupported"
+    error_code = (
+        ErrorCode.COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED.value
+        if unsupported
+        else ErrorCode.COMPILED_AUTHORITY_INVALID.value
+    )
+    message = (
+        "Compiled authority artifact schema is unsupported."
+        if unsupported
+        else "Compiled authority artifact is invalid."
+    )
+    remediation = compiled_authority_schema_unsupported_remediation(
+        project_id=project_id,
+        spec_version_id=spec_version_id,
+    )
+    return CompiledAuthorityReadFailure(
+        error_code=error_code,
+        message=message,
+        details={
+            "project_id": project_id,
+            "spec_version_id": spec_version_id,
+            "authority_id": authority_id,
+            "load_status": load_result.status,
+            "observed_schema_version": load_result.observed_schema_version,
+            "required_schema_version": COMPILED_AUTHORITY_SCHEMA_VERSION,
+        },
+        remediation=tuple(remediation),
+    )
+
+
+def _compiled_authority_read_failure_envelope(
+    failure: CompiledAuthorityReadFailure,
+    *,
+    cached: bool | None = None,
+) -> dict[str, Any]:
+    """Return a legacy-service envelope without weakening failure details."""
+    envelope: dict[str, Any] = {
+        "success": False,
+        "error": failure.message,
+        "error_code": failure.error_code,
+        "details": failure.details,
+        "remediation": list(failure.remediation),
+    }
+    if cached is not None:
+        envelope["cached"] = cached
+    if (
+        failure.error_code
+        == ErrorCode.COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED.value
+    ):
+        envelope["observed_schema_version"] = failure.details[
+            "observed_schema_version"
+        ]
+        envelope["required_schema_version"] = failure.details[
+            "required_schema_version"
+        ]
+    return envelope
 
 
 def _resolve_tool_module() -> object | None:
@@ -3035,43 +3110,34 @@ def _cached_compilation_result(
 ) -> dict[str, Any] | None:
     """Return the cached-authority envelope when a reusable compiled artifact exists."""
     existing_authority = context.existing_authority
-    if existing_authority is None or not existing_authority.compiled_artifact_json:
+    if existing_authority is None:
         return None
 
     load_result = load_compiled_artifact(existing_authority)
-    if load_result.unsupported:
-        observed_schema_version = load_result.observed_schema_version
-        project_id = context.spec_version.product_id
-        spec_version_id = cast("int", context.spec_version.spec_version_id)
-        return {
-            "success": False,
-            "cached": False,
-            "error": "Compiled authority artifact schema is unsupported.",
-            "error_code": ErrorCode.COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED.value,
-            "details": compiled_authority_schema_unsupported_details(
-                project_id=project_id,
-                spec_version_id=spec_version_id,
-                observed_schema_version=observed_schema_version,
-            ),
-            "remediation": compiled_authority_schema_unsupported_remediation(
-                project_id=project_id,
-                spec_version_id=spec_version_id,
-            ),
-            "observed_schema_version": observed_schema_version,
-            "required_schema_version": COMPILED_AUTHORITY_SCHEMA_VERSION,
-        }
-    artifact = load_result.artifact
-    if load_result.ok and artifact is not None:
-        scope_themes_count = len(artifact.scope_themes)
-        invariants_count = len(artifact.invariants)
-    else:
-        scope_themes_count = len(json.loads(existing_authority.scope_themes or "[]"))
-        invariants_count = len(json.loads(existing_authority.invariants or "[]"))
+    project_id = context.spec_version.product_id
+    spec_version_id = cast("int", context.spec_version.spec_version_id)
+    read_failure = compiled_authority_read_failure(
+        load_result,
+        project_id=project_id,
+        spec_version_id=spec_version_id,
+        authority_id=existing_authority.authority_id,
+    )
+    if read_failure is not None:
+        return _compiled_authority_read_failure_envelope(
+            read_failure,
+            cached=False,
+        )
+    artifact = cast("SpecAuthorityCompilationSuccess", load_result.artifact)
+    scope_themes_count = len(artifact.scope_themes)
+    invariants_count = len(artifact.invariants)
 
     cache_error = _update_product_compiled_authority_cache(
         session,
         product=context.product,
-        compiled_artifact_json=existing_authority.compiled_artifact_json,
+        compiled_artifact_json=cast(
+            "str",
+            existing_authority.compiled_artifact_json,
+        ),
         lease_guard=lease_guard,
         record_progress=record_progress,
     )
@@ -4079,20 +4145,25 @@ def _load_compiled_authority_or_error(
 
 def _compiled_authority_metrics(
     authority: CompiledSpecAuthority,
-) -> tuple[int, int, int]:
+    *,
+    project_id: int,
+    spec_version_id: int,
+) -> tuple[int, int, int] | dict[str, Any]:
     """Return counts used by the update+compile success payload."""
     load_result = load_compiled_artifact(authority)
-    artifact = load_result.artifact
-    if load_result.ok and artifact is not None:
-        return (
-            len(artifact.scope_themes),
-            len(artifact.invariants),
-            len(json.loads(authority.eligible_feature_ids)),
-        )
+    read_failure = compiled_authority_read_failure(
+        load_result,
+        project_id=project_id,
+        spec_version_id=spec_version_id,
+        authority_id=authority.authority_id,
+    )
+    if read_failure is not None:
+        return _compiled_authority_read_failure_envelope(read_failure)
+    artifact = cast("SpecAuthorityCompilationSuccess", load_result.artifact)
     return (
-        len(json.loads(authority.scope_themes or "[]")),
-        len(json.loads(authority.invariants or "[]")),
-        len(json.loads(authority.eligible_feature_ids or "[]")),
+        len(artifact.scope_themes),
+        len(artifact.invariants),
+        len(json.loads(authority.eligible_feature_ids)),
     )
 
 
@@ -4158,9 +4229,14 @@ def update_spec_and_compile_authority(  # noqa: PLR0911
             return authority_result
         authority = authority_result
 
-    scope_themes_count, invariants_count, eligible_feature_ids_count = (
-        _compiled_authority_metrics(authority)
+    metrics = _compiled_authority_metrics(
+        authority,
+        project_id=parsed.product_id,
+        spec_version_id=spec_version_id,
     )
+    if isinstance(metrics, dict):
+        return metrics
+    scope_themes_count, invariants_count, eligible_feature_ids_count = metrics
 
     return {
         "success": True,
@@ -4262,20 +4338,14 @@ def check_spec_authority_status(  # noqa: PLR0911
             }
 
         latest_load_result = load_compiled_artifact(latest_authority)
-        if not latest_load_result.ok:
-            return {
-                "success": True,
-                "status": SpecAuthorityStatus.NOT_COMPILED.value,
-                "status_details": (
-                    f"Latest approved spec version {latest_approved_spec_version_id} "
-                    "has an unreadable compiled artifact "
-                    f"({latest_load_result.status})."
-                ),
-                "latest_approved_spec_version_id": latest_approved_spec_version_id,
-                "authority_id": latest_authority.authority_id,
-                "remediation": _UNREADABLE_COMPILED_AUTHORITY_REMEDIATION,
-                "message": "Status: NOT_COMPILED (compiled artifact unreadable)",
-            }
+        read_failure = compiled_authority_read_failure(
+            latest_load_result,
+            project_id=parsed.product_id,
+            spec_version_id=latest_authority.spec_version_id,
+            authority_id=latest_authority.authority_id,
+        )
+        if read_failure is not None:
+            return _compiled_authority_read_failure_envelope(read_failure)
 
         return {
             "success": True,
@@ -4327,6 +4397,7 @@ def get_compiled_authority_by_version(
         if not authority:
             return {
                 "success": False,
+                "error_code": ErrorCode.AUTHORITY_NOT_COMPILED.value,
                 "error": (
                     f"Spec version {parsed.spec_version_id} is not compiled. "
                     "Use compile_spec_authority to compile it."
@@ -4334,15 +4405,18 @@ def get_compiled_authority_by_version(
             }
 
         load_result = load_compiled_artifact(authority)
-        artifact = load_result.artifact
-        if load_result.ok and artifact is not None:
-            scope_themes = artifact.scope_themes
-            invariants = [_render_invariant_summary(inv) for inv in artifact.invariants]
-            spec_gaps = artifact.gaps
-        else:
-            scope_themes = json.loads(authority.scope_themes or "[]")
-            invariants = json.loads(authority.invariants or "[]")
-            spec_gaps = json.loads(authority.spec_gaps) if authority.spec_gaps else []
+        read_failure = compiled_authority_read_failure(
+            load_result,
+            project_id=parsed.product_id,
+            spec_version_id=parsed.spec_version_id,
+            authority_id=authority.authority_id,
+        )
+        if read_failure is not None:
+            return _compiled_authority_read_failure_envelope(read_failure)
+        artifact = cast("SpecAuthorityCompilationSuccess", load_result.artifact)
+        scope_themes = artifact.scope_themes
+        invariants = [_render_invariant_summary(inv) for inv in artifact.invariants]
+        spec_gaps = artifact.gaps
 
         eligible_feature_ids = json.loads(authority.eligible_feature_ids)
         rejected_features = (
@@ -4378,6 +4452,7 @@ __all__ = [
     "UpdateSpecAndCompileAuthorityInput",
     "check_spec_authority_status",
     "compile_spec_authority_for_version",
+    "compiled_authority_read_failure",
     "ensure_accepted_spec_authority",
     "get_compiled_authority_by_version",
     "load_compiled_artifact",

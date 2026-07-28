@@ -24,6 +24,7 @@ EXPECTED_ERROR_METADATA = {
     ErrorCode.SPEC_COMPILE_FAILED: (1, True),
     ErrorCode.AUTHORITY_NOT_ACCEPTED: (4, False),
     ErrorCode.AUTHORITY_NOT_COMPILED: (4, False),
+    ErrorCode.COMPILED_AUTHORITY_INVALID: (4, False),
     ErrorCode.COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED: (4, False),
     ErrorCode.AUTHORITY_ACCEPTANCE_MISMATCH: (4, False),
     ErrorCode.AUTHORITY_INVARIANTS_INVALID: (4, False),
@@ -198,6 +199,19 @@ def test_compiled_authority_schema_unsupported_error_is_registered() -> None:
     assert metadata.default_exit_code == expected_exit_code
     assert metadata.retryable is False
     assert metadata.description == "Compiled authority artifact schema is unsupported."
+
+
+def test_compiled_authority_invalid_error_is_registered() -> None:
+    """Expose stable metadata for malformed compiled-authority artifacts."""
+    expected_exit_code = 4
+    code = getattr(ErrorCode, "COMPILED_AUTHORITY_INVALID", None)
+
+    assert code is not None
+    metadata = error_metadata(code)
+    assert metadata.code == "COMPILED_AUTHORITY_INVALID"
+    assert metadata.default_exit_code == expected_exit_code
+    assert metadata.retryable is False
+    assert metadata.description == "Compiled authority artifact is invalid."
 
 
 def test_authority_compile_stale_guard_error_codes_are_registered() -> None:

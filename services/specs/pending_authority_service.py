@@ -17,6 +17,10 @@ from sqlmodel import Session, select
 from models.core import Product
 from models.specs import SpecAuthorityAcceptance, SpecRegistry
 from services.specs.authority_selection import compiled_authority_by_id
+from services.specs.compiler_service import (
+    compiled_authority_read_failure,
+    load_compiled_artifact,
+)
 from services.specs.profile_content import (
     SpecContentNormalizationError,
     normalize_spec_content_for_registry,
@@ -67,6 +71,8 @@ class PendingAuthorityResult:
     raw_output_preview: str | None = None
     has_full_artifact: bool | None = None
     blocking_gaps: list[str] | None = None
+    details: dict[str, object] | None = None
+    remediation: list[str] | None = None
 
 
 def _result(  # noqa: PLR0913
@@ -88,6 +94,8 @@ def _result(  # noqa: PLR0913
     raw_output_preview: str | None = None,
     has_full_artifact: bool | None = None,
     blocking_gaps: list[str] | None = None,
+    details: dict[str, object] | None = None,
+    remediation: list[str] | None = None,
 ) -> PendingAuthorityResult:
     """Build a pending authority result."""
     return PendingAuthorityResult(
@@ -108,6 +116,8 @@ def _result(  # noqa: PLR0913
         raw_output_preview=raw_output_preview,
         has_full_artifact=has_full_artifact,
         blocking_gaps=blocking_gaps,
+        details=details,
+        remediation=remediation,
     )
 
 
@@ -256,6 +266,21 @@ def _normalize_compiler_failure(
 ) -> PendingAuthorityResult:
     """Map compiler failures to the pending-authority result contract."""
     error_code = compile_result.get("error_code")
+    if error_code in {
+        "COMPILED_AUTHORITY_INVALID",
+        "COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED",
+    }:
+        return _result(
+            ok=False,
+            product_id=product_id,
+            spec_path=spec_path,
+            error_code=str(error_code),
+            spec_hash=spec_hash,
+            spec_version_id=spec_version_id,
+            error=str(compile_result.get("error", error_code)),
+            details=_optional_dict(compile_result.get("details")),
+            remediation=_optional_str_list(compile_result.get("remediation")),
+        )
     if error_code in {"MUTATION_IN_PROGRESS", "MUTATION_RECOVERY_REQUIRED"}:
         error = str(compile_result.get("error", error_code))
         boundary = compile_result.get("boundary")
@@ -619,6 +644,27 @@ def compile_pending_authority_for_project(  # noqa: PLR0911, PLR0913
             error="Compiler did not return a matching persisted authority id.",
         )
 
+    load_result = load_compiled_artifact(authority)
+    read_failure = compiled_authority_read_failure(
+        load_result,
+        project_id=product_id,
+        spec_version_id=spec_version_id,
+        authority_id=authority.authority_id,
+    )
+    if read_failure is not None:
+        return _result(
+            ok=False,
+            product_id=product_id,
+            spec_path=resolved_path,
+            error_code=read_failure.error_code,
+            spec_hash=spec_hash,
+            spec_version_id=spec_version_id,
+            authority_id=authority.authority_id,
+            error=read_failure.message,
+            details=read_failure.details,
+            remediation=list(read_failure.remediation),
+        )
+
     return _result(
         ok=True,
         product_id=product_id,
@@ -650,3 +696,10 @@ def _optional_str_list(value: object) -> list[str] | None:
     if not isinstance(value, list):
         return None
     return [str(item) for item in value]
+
+
+def _optional_dict(value: object) -> dict[str, object] | None:
+    """Return a shallow string-keyed details mapping when possible."""
+    if not isinstance(value, dict):
+        return None
+    return {str(key): item for key, item in value.items()}

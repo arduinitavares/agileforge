@@ -896,6 +896,104 @@ def test_load_compiled_artifact_returns_compiler_failure_result() -> None:
     assert result.validation_error is None
 
 
+@pytest.mark.parametrize(
+    ("artifact_json", "expected_status", "expected_code", "observed_schema"),
+    [
+        (None, "missing", "COMPILED_AUTHORITY_INVALID", None),
+        ("not-json", "invalid_json", "COMPILED_AUTHORITY_INVALID", None),
+        (
+            json.dumps(
+                {
+                    **v3_compiled_authority_payload(),
+                    "invariants": "not-a-list",
+                }
+            ),
+            "schema_invalid",
+            "COMPILED_AUTHORITY_INVALID",
+            "agileforge.compiled_authority.v3",
+        ),
+        (
+            json.dumps(
+                historical_v2_compiled_authority(prompt_hash="a" * 64)
+            ),
+            "schema_unsupported",
+            "COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED",
+            "agileforge.compiled_authority.v2",
+        ),
+        (
+            _stored_compiler_failure_json(),
+            "compiler_failure",
+            "COMPILED_AUTHORITY_INVALID",
+            "agileforge.compiled_authority.v3",
+        ),
+    ],
+)
+def test_compiled_authority_read_failure_describes_every_non_success_status(
+    artifact_json: str | None,
+    expected_status: str,
+    expected_code: str,
+    observed_schema: str | None,
+) -> None:
+    """Every stored-artifact load failure has one stable public descriptor."""
+    from services.specs.compiler_service import (  # noqa: PLC0415
+        compiled_authority_read_failure,
+        load_compiled_artifact,
+    )
+
+    load_result = load_compiled_artifact(
+        SimpleNamespace(compiled_artifact_json=artifact_json)
+    )
+    failure = compiled_authority_read_failure(
+        load_result,
+        project_id=17,
+        spec_version_id=23,
+        authority_id=41,
+    )
+
+    assert failure is not None
+    assert failure.error_code == expected_code
+    assert failure.details == {
+        "project_id": 17,
+        "spec_version_id": 23,
+        "authority_id": 41,
+        "load_status": expected_status,
+        "observed_schema_version": observed_schema,
+        "required_schema_version": "agileforge.compiled_authority.v3",
+    }
+    assert failure.remediation == (
+        "Run agileforge authority regenerate "
+        "--project-id 17 "
+        "--spec-version-id 23 "
+        "--idempotency-key <new-key>.",
+    )
+    assert "validation" not in failure.details
+    assert "validation_error" not in failure.details
+    with pytest.raises(FrozenInstanceError):
+        failure.error_code = "changed"  # ty: ignore[invalid-assignment]
+
+
+def test_compiled_authority_read_failure_is_none_only_for_success() -> None:
+    """A parsed v3 success is the only loader state without a failure."""
+    from services.specs.compiler_service import (  # noqa: PLC0415
+        compiled_authority_read_failure,
+        load_compiled_artifact,
+    )
+
+    load_result = load_compiled_artifact(
+        SimpleNamespace(compiled_artifact_json=_stored_compiled_success_json())
+    )
+
+    assert (
+        compiled_authority_read_failure(
+            load_result,
+            project_id=17,
+            spec_version_id=23,
+            authority_id=41,
+        )
+        is None
+    )
+
+
 def test_compiled_authority_schema_unsupported_helpers_include_regenerate_details() -> (
     None
 ):
@@ -3803,7 +3901,7 @@ def test_compile_spec_authority_for_version_rejects_unsupported_cached_authority
     spec_row = _create_spec_version(
         session, product_id=require_id(sample_product.product_id, "product_id")
     )
-    _create_compiled_authority(
+    authority = _create_compiled_authority(
         session,
         spec_version_id=require_id(spec_row.spec_version_id, "spec_version_id"),
         artifact_json=json.dumps(
@@ -3826,6 +3924,8 @@ def test_compile_spec_authority_for_version_rejects_unsupported_cached_authority
     assert result["details"] == {
         "project_id": project_id,
         "spec_version_id": spec_version_id,
+        "authority_id": require_id(authority.authority_id, "authority_id"),
+        "load_status": "schema_unsupported",
         "observed_schema_version": "agileforge.compiled_authority.v2",
         "required_schema_version": "agileforge.compiled_authority.v3",
     }
@@ -3838,6 +3938,72 @@ def test_compile_spec_authority_for_version_rejects_unsupported_cached_authority
     assert "compiled_authority_cached" not in tool_context.state
     session.refresh(sample_product)
     assert sample_product.compiled_authority_json is None
+
+
+@pytest.mark.parametrize(
+    ("artifact_json", "load_status"),
+    [
+        ("not-json", "invalid_json"),
+        (None, "missing"),
+    ],
+)
+def test_compile_spec_authority_for_version_rejects_invalid_cached_authority(  # noqa: PLR0913
+    engine: Engine,
+    session: Session,
+    sample_product: Product,
+    monkeypatch: pytest.MonkeyPatch,
+    artifact_json: str | None,
+    load_status: str,
+) -> None:
+    """Malformed cached rows fail closed without compiler or cache mutation."""
+    from services.specs import compiler_service  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        compiler_service,
+        "_invoke_spec_authority_compiler",
+        lambda **_: (_ for _ in ()).throw(AssertionError("compiler should not run")),
+    )
+    spec_row = _create_spec_version(
+        session,
+        product_id=require_id(sample_product.product_id, "product_id"),
+    )
+    authority = CompiledSpecAuthority(
+        spec_version_id=require_id(spec_row.spec_version_id, "spec_version_id"),
+        compiler_version="3.0.0",
+        prompt_hash="f" * 64,
+        compiled_at=datetime.now(UTC),
+        compiled_artifact_json=artifact_json,
+        scope_themes='["false-success"]',
+        invariants='["false-success"]',
+        eligible_feature_ids="[]",
+        rejected_features="[]",
+        spec_gaps="[]",
+    )
+    session.add(authority)
+    session.commit()
+    session.refresh(authority)
+    sample_product.compiled_authority_json = '{"preserved":true}'
+    session.add(sample_product)
+    session.commit()
+    tool_context = make_tool_context()
+
+    result = compiler_service.compile_spec_authority_for_version_with_engine(
+        engine=engine,
+        spec_version_id=require_id(spec_row.spec_version_id, "spec_version_id"),
+        force_recompile=False,
+        tool_context=tool_context,
+    )
+
+    assert result["success"] is False
+    assert result["cached"] is False
+    assert result["error_code"] == "COMPILED_AUTHORITY_INVALID"
+    assert result["details"]["load_status"] == load_status
+    assert result["details"]["authority_id"] == require_id(
+        authority.authority_id, "authority_id"
+    )
+    assert "compiled_authority_cached" not in tool_context.state
+    session.refresh(sample_product)
+    assert sample_product.compiled_authority_json == '{"preserved":true}'
 
 
 def test_compile_spec_authority_for_version_uses_content_ref_when_content_empty(
@@ -4383,21 +4549,65 @@ def test_check_spec_authority_status_does_not_report_historical_v2_artifact_curr
     )
 
     spec_version_id = require_id(spec_row.spec_version_id, "spec_version_id")
-    assert result == {
-        "success": True,
-        "status": SpecAuthorityStatus.NOT_COMPILED.value,
-        "status_details": (
-            f"Latest approved spec version {spec_version_id} has an unreadable "
-            "compiled artifact (schema_unsupported)."
-        ),
-        "latest_approved_spec_version_id": spec_version_id,
-        "authority_id": require_id(authority.authority_id, "authority_id"),
-        "remediation": (
-            "Recompile the latest approved spec authority to persist a supported "
-            "compiled artifact."
-        ),
-        "message": "Status: NOT_COMPILED (compiled artifact unreadable)",
+    authority_id = require_id(authority.authority_id, "authority_id")
+    project_id = require_id(sample_product.product_id, "product_id")
+    assert result["success"] is False
+    assert result["error_code"] == "COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED"
+    assert result["details"] == {
+        "project_id": project_id,
+        "spec_version_id": spec_version_id,
+        "authority_id": authority_id,
+        "load_status": "schema_unsupported",
+        "observed_schema_version": "agileforge.compiled_authority.v2",
+        "required_schema_version": "agileforge.compiled_authority.v3",
     }
+    assert result["remediation"] == [
+        "Run agileforge authority regenerate "
+        f"--project-id {project_id} "
+        f"--spec-version-id {spec_version_id} "
+        "--idempotency-key <new-key>."
+    ]
+
+
+def test_check_spec_authority_status_rejects_invalid_artifact(
+    session: Session,
+    sample_product: Product,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Malformed latest rows return the central invalid-artifact failure."""
+    from services.specs import compiler_service  # noqa: PLC0415
+
+    monkeypatch.setattr(compiler_service, "get_engine", session.get_bind)
+    spec_row = _create_spec_version(
+        session,
+        product_id=require_id(sample_product.product_id, "product_id"),
+    )
+    authority = CompiledSpecAuthority(
+        spec_version_id=require_id(spec_row.spec_version_id, "spec_version_id"),
+        compiler_version="3.0.0",
+        prompt_hash="f" * 64,
+        compiled_at=datetime.now(UTC),
+        compiled_artifact_json="not-json",
+        scope_themes='["false-success"]',
+        invariants='["false-success"]',
+        eligible_feature_ids="[]",
+        rejected_features="[]",
+        spec_gaps="[]",
+    )
+    session.add(authority)
+    session.commit()
+    session.refresh(authority)
+
+    result = compiler_service.check_spec_authority_status(
+        {"product_id": require_id(sample_product.product_id, "product_id")}
+    )
+
+    assert result["success"] is False
+    assert result["error_code"] == "COMPILED_AUTHORITY_INVALID"
+    assert result["details"]["load_status"] == "invalid_json"
+    assert result["details"]["authority_id"] == require_id(
+        authority.authority_id, "authority_id"
+    )
 
 
 def test_get_compiled_authority_by_version_returns_expected_envelope(
@@ -4448,10 +4658,10 @@ def test_get_compiled_authority_by_version_returns_expected_envelope(
     )
 
 
-def test_get_compiled_authority_by_version_falls_back_to_legacy_columns(
+def test_get_compiled_authority_by_version_rejects_invalid_artifact(
     session: Session, sample_product: Product, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Verify get compiled authority by version falls back to legacy columns."""
+    """Malformed stored JSON must not fall back to denormalized columns."""
     from services.specs import compiler_service  # noqa: PLC0415
 
     monkeypatch.setattr(
@@ -4487,12 +4697,14 @@ def test_get_compiled_authority_by_version_falls_back_to_legacy_columns(
         tool_context=None,
     )
 
-    assert result["success"] is True
-    assert result["scope_themes"] == ["Legacy Theme"]
-    assert result["invariants"] == ["FORBIDDEN_CAPABILITY:upload"]
-    assert result["eligible_feature_ids"] == [10, 11]
-    assert result["rejected_features"] == ["Feature X"]
-    assert result["spec_gaps"] == ["gap one"]
+    assert result["success"] is False
+    assert result["error_code"] == "COMPILED_AUTHORITY_INVALID"
+    assert result["details"]["load_status"] == "invalid_json"
+    assert result["details"]["authority_id"] == require_id(
+        authority.authority_id, "authority_id"
+    )
+    assert "scope_themes" not in result
+    assert "invariants" not in result
 
 
 def test_get_compiled_authority_by_version_returns_existing_error_messages(
@@ -4554,6 +4766,7 @@ def test_get_compiled_authority_by_version_returns_existing_error_messages(
     )
     assert not_compiled == {
         "success": False,
+        "error_code": "AUTHORITY_NOT_COMPILED",
         "error": (
             f"Spec version {spec_version_id} is not compiled. "
             "Use compile_spec_authority to compile it."
@@ -4782,6 +4995,60 @@ def test_update_spec_and_compile_authority_never_persists_acceptance(
     assert result["authority_status"] == "pending_acceptance"
     assert session.exec(select(SpecAuthorityAcceptance)).all() == []
 
+
+def test_update_spec_and_compile_authority_rejects_malformed_postcompile_row(
+    session: Session,
+    sample_product: Product,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Post-compile metrics require the exact persisted row to parse as v3."""
+    from services.specs import compiler_service  # noqa: PLC0415
+
+    monkeypatch.setattr(compiler_service, "get_engine", session.get_bind)
+
+    def fake_compile(
+        *,
+        spec_version_id: int,
+        **_: object,
+    ) -> dict[str, object]:
+        authority = CompiledSpecAuthority(
+            spec_version_id=spec_version_id,
+            compiler_version="3.0.0",
+            prompt_hash="a" * 64,
+            compiled_at=datetime.now(UTC),
+            compiled_artifact_json="not-json",
+            scope_themes='["false-success"]',
+            invariants='["false-success"]',
+            eligible_feature_ids="[]",
+            rejected_features="[]",
+            spec_gaps="[]",
+        )
+        session.add(authority)
+        session.commit()
+        session.refresh(authority)
+        return {
+            "success": True,
+            "cached": False,
+            "authority_id": require_id(authority.authority_id, "authority_id"),
+        }
+
+    monkeypatch.setattr(
+        compiler_service,
+        "compile_spec_authority_for_version",
+        fake_compile,
+    )
+
+    result = compiler_service.update_spec_and_compile_authority(
+        {
+            "product_id": require_id(sample_product.product_id, "product_id"),
+            "spec_content": _agileforge_spec_profile_json(),
+        }
+    )
+
+    assert result["success"] is False
+    assert result["error_code"] == "COMPILED_AUTHORITY_INVALID"
+    assert result["details"]["load_status"] == "invalid_json"
+    assert "num_scope_themes" not in result
 
 def test_update_spec_and_compile_authority_loads_content_ref(
     session: Session,

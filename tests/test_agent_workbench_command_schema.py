@@ -345,6 +345,8 @@ def test_project_setup_retry_is_registered_as_guarded_mutation() -> None:
         "expected_context_fingerprint",
     ]
     assert "recovery_mutation_event_id" in schema["input"]["optional"]
+    assert ErrorCode.COMPILED_AUTHORITY_INVALID.value in schema["errors"]
+    assert ErrorCode.COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED.value in schema["errors"]
     assert ErrorCode.MUTATION_FAILED.value in schema["errors"]
     assert ErrorCode.MUTATION_RESUME_CONFLICT.value in schema["errors"]
 
@@ -420,6 +422,8 @@ def test_authority_compile_is_registered_as_guarded_mutation() -> None:
     assert "dry_run" in schema["input"]["optional"]
     assert "dry_run_id" in schema["input"]["optional"]
     assert ErrorCode.SPEC_COMPILE_FAILED.value in schema["errors"]
+    assert "COMPILED_AUTHORITY_INVALID" in schema["errors"]
+    assert ErrorCode.COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED.value in schema["errors"]
     assert ErrorCode.WORKFLOW_SESSION_FAILED.value in schema["errors"]
     assert ErrorCode.STALE_STATE.value in schema["errors"]
     assert ErrorCode.MUTATION_IN_PROGRESS.value in schema["errors"]

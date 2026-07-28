@@ -19,6 +19,7 @@ from agile_sqlmodel import (
     SpecAuthorityAcceptance,
     SpecRegistry,
 )
+from tests.authority_assumption_fixtures import free_text_assumption
 from tests.typing_helpers import require_id
 
 EXPECTED_APPROVAL_NOTES = (
@@ -81,12 +82,25 @@ def _write_spec(tmp_path: Path, content: str | None = None) -> Path:
 def _persist_authority(
     session: Session, *, spec_version_id: int
 ) -> CompiledSpecAuthority:
+    artifact = {
+        "schema_version": "agileforge.compiled_authority.v3",
+        "scope_themes": ["Scope"],
+        "domain": None,
+        "invariants": [],
+        "eligible_feature_rules": [],
+        "rejected_features": [],
+        "gaps": [],
+        "assumptions": [free_text_assumption("Pending fixture.")],
+        "source_map": [],
+        "compiler_version": "3.0.0",
+        "prompt_hash": "f" * 64,
+    }
     authority = CompiledSpecAuthority(
         spec_version_id=spec_version_id,
         compiler_version="fake-compiler",
         prompt_hash="f" * 64,
         compiled_at=datetime.now(UTC),
-        compiled_artifact_json='{"ok": true}',
+        compiled_artifact_json=json.dumps(artifact),
         scope_themes='["Scope"]',
         invariants="[]",
         eligible_feature_ids="[]",
@@ -363,6 +377,91 @@ def test_compile_pending_authority_for_project_maps_compiler_failure(
     assert result.ok is False
     assert result.error_code == "SPEC_COMPILE_FAILED"
     assert result.spec_version_id is not None
+
+
+def test_compile_pending_authority_preserves_invalid_cached_artifact_failure(
+    session: Session,
+    engine: Engine,
+    tmp_path: Path,
+) -> None:
+    """Pending compilation fails closed on a malformed cached authority row."""
+    from services.specs import compiler_service  # noqa: PLC0415
+
+    service = _pending_service()
+    product = _create_product(session)
+    product_id = require_id(product.product_id, "product_id")
+    product.compiled_authority_json = '{"preserved":true}'
+    session.add(product)
+    spec_path = _write_spec(tmp_path)
+    normalized_content = spec_path.read_text(encoding="utf-8")
+    spec_hash = hashlib.sha256(normalized_content.encode("utf-8")).hexdigest()
+    spec = SpecRegistry(
+        product_id=product_id,
+        spec_hash=spec_hash,
+        content=normalized_content,
+        content_ref=str(spec_path.resolve()),
+        status="approved",
+        approved_at=datetime.now(UTC),
+        approved_by="human",
+    )
+    session.add(spec)
+    session.commit()
+    session.refresh(spec)
+    spec_version_id = require_id(spec.spec_version_id, "spec_version_id")
+    malformed = CompiledSpecAuthority(
+        spec_version_id=spec_version_id,
+        compiler_version="3.0.0",
+        prompt_hash="f" * 64,
+        compiled_at=datetime.now(UTC),
+        compiled_artifact_json="not-json",
+        scope_themes='["false-success"]',
+        invariants='["false-success"]',
+        eligible_feature_ids="[]",
+        rejected_features="[]",
+        spec_gaps="[]",
+    )
+    session.add(malformed)
+    session.commit()
+    session.refresh(malformed)
+    authority_id = require_id(malformed.authority_id, "authority_id")
+
+    result = service.compile_pending_authority_for_project(
+        session=session,
+        product_id=product_id,
+        spec_path=spec_path,
+        approved_by="cli-project-create",
+        compile_authority=lambda **kwargs: (
+            compiler_service.compile_spec_authority_for_version_with_engine(
+                engine=engine,
+                **kwargs,
+            )
+        ),
+        lease_guard=lambda _boundary: True,
+        record_progress=lambda _boundary: True,
+        expected_spec_version_id=spec_version_id,
+        expected_spec_hash=spec_hash,
+    )
+
+    assert result.ok is False
+    assert result.error_code == "COMPILED_AUTHORITY_INVALID"
+    assert result.details == {
+        "project_id": product_id,
+        "spec_version_id": spec_version_id,
+        "authority_id": authority_id,
+        "load_status": "invalid_json",
+        "observed_schema_version": None,
+        "required_schema_version": "agileforge.compiled_authority.v3",
+    }
+    assert result.remediation == [
+        "Run agileforge authority regenerate "
+        f"--project-id {product_id} "
+        f"--spec-version-id {spec_version_id} "
+        "--idempotency-key <new-key>."
+    ]
+    assert len(session.exec(select(CompiledSpecAuthority)).all()) == 1
+    assert session.exec(select(SpecAuthorityAcceptance)).all() == []
+    session.refresh(product)
+    assert product.compiled_authority_json == '{"preserved":true}'
 
 
 def test_compile_pending_authority_preserves_compiler_recovery_boundary(

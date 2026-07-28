@@ -3843,6 +3843,8 @@ def test_authority_compile_is_registered_command() -> None:
         "SCHEMA_NOT_READY",
         "PROJECT_NOT_FOUND",
         "SPEC_COMPILE_FAILED",
+        "COMPILED_AUTHORITY_INVALID",
+        "COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED",
         "WORKFLOW_SESSION_FAILED",
         "STALE_STATE",
         "STALE_SETUP_STATUS",
