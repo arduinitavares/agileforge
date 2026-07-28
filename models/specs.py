@@ -56,6 +56,8 @@ class SpecRegistry(SQLModel, table=True):
         sa_relationship=relationship(
             "CompiledSpecAuthority",
             back_populates="spec_version",
+            collection_class=list,
+            uselist=True,
         )
     )
 

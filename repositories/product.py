@@ -126,17 +126,13 @@ class ProductRepository:
                 session.delete(event)
 
             # Delete SpecAuthorityAcceptance records
-            session.exec(
-                select(SpecAuthorityAcceptance).where(
-                    SpecAuthorityAcceptance.product_id == product_id
-                )
-            ).all()
             for sa in session.exec(
                 select(SpecAuthorityAcceptance).where(
                     SpecAuthorityAcceptance.product_id == product_id
                 )
             ).all():
                 session.delete(sa)
+            session.flush()
 
             # Delete Brownfield curation artifacts
             for approval in session.exec(
@@ -164,39 +160,11 @@ class ProductRepository:
             ).all():
                 session.delete(source_artifact)
 
-            # Delete SpecRegistry (+ CompiledSpecAuthority is 1:1, but child records might need manual drop depending on FKs)
-            for spec_ver in session.exec(
-                select(SpecRegistry).where(SpecRegistry.product_id == product_id)
-            ).all():
-                comp = session.exec(
-                    select(CompiledSpecAuthority).where(
-                        CompiledSpecAuthority.spec_version_id
-                        == spec_ver.spec_version_id
-                    )
-                ).first()
-                if comp:
-                    session.delete(comp)
-                session.delete(spec_ver)
-
             # Delete ProductPersonas
             for persona in session.exec(
                 select(ProductPersona).where(ProductPersona.product_id == product_id)
             ).all():
                 session.delete(persona)
-
-            # Handle Themes -> Epics -> Features
-            for theme in session.exec(
-                select(Theme).where(Theme.product_id == product_id)
-            ).all():
-                for epic in session.exec(
-                    select(Epic).where(Epic.theme_id == theme.theme_id)
-                ).all():
-                    for feature in session.exec(
-                        select(Feature).where(Feature.epic_id == epic.epic_id)
-                    ).all():
-                        session.delete(feature)
-                    session.delete(epic)
-                session.delete(theme)
 
             # Handle Sprints (and mappings)
             for sprint in session.exec(
@@ -224,6 +192,37 @@ class ProductRepository:
                     session.delete(log)
                 session.delete(story)
 
+            # Stories may be pinned to spec versions.
+            session.flush()
+
+            # Delete every compiled authority row before its spec version.
+            for spec_ver in session.exec(
+                select(SpecRegistry).where(SpecRegistry.product_id == product_id)
+            ).all():
+                for compiled in session.exec(
+                    select(CompiledSpecAuthority).where(
+                        CompiledSpecAuthority.spec_version_id
+                        == spec_ver.spec_version_id
+                    )
+                ).all():
+                    session.delete(compiled)
+                session.delete(spec_ver)
+            session.flush()
+
+            # Handle Themes -> Epics -> Features
+            for theme in session.exec(
+                select(Theme).where(Theme.product_id == product_id)
+            ).all():
+                for epic in session.exec(
+                    select(Epic).where(Epic.theme_id == theme.theme_id)
+                ).all():
+                    for feature in session.exec(
+                        select(Feature).where(Feature.epic_id == epic.epic_id)
+                    ).all():
+                        session.delete(feature)
+                    session.delete(epic)
+                session.delete(theme)
+
             # Handle Teams Mappings
             for pt in session.exec(
                 select(ProductTeam).where(ProductTeam.product_id == product_id)
@@ -234,6 +233,10 @@ class ProductRepository:
             session.delete(product)
 
             session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        else:
             return True
         finally:
             if not self._session:
