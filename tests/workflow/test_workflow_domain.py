@@ -14,12 +14,22 @@ from sqlmodel import Session, col, select
 import workflow
 import workflow.domain as workflow_domain_module
 from models.core import Product
+from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance, SpecRegistry
 from models.workflow import (
     ChallengeArtifact,
     DiscoveryRun,
     InitialScopeRegistration,
     ProjectAbandonment,
     WorkflowTransitionReceipt,
+)
+from repositories.workflow import WorkflowFactRepository
+from services.specs.authority_selection import pending_authority_fingerprint
+from utils.spec_schemas import (
+    Invariant,
+    InvariantType,
+    RequiredFieldParams,
+    SpecAuthorityCompilationSuccess,
+    SpecAuthorityCompilerOutput,
 )
 from workflow import (
     AbandonProjectShell,
@@ -54,6 +64,28 @@ if TYPE_CHECKING:
 
 
 EVALUATED_AT = datetime(2026, 8, 2, 12, tzinfo=UTC)
+
+
+def authority_json() -> str:
+    """Build valid canonical authority content for persisted graph probes."""
+    return SpecAuthorityCompilerOutput(
+        root=SpecAuthorityCompilationSuccess(
+            scope_themes=["Workflow graph"],
+            invariants=[
+                Invariant(
+                    id="INV-0123456789abcdef",
+                    type=InvariantType.REQUIRED_FIELD,
+                    parameters=RequiredFieldParams(field_name="project_id"),
+                )
+            ],
+            eligible_feature_rules=[],
+            gaps=[],
+            assumptions=[],
+            source_map=[],
+            compiler_version="3.0.0",
+            prompt_hash="a" * 64,
+        )
+    ).model_dump_json()
 
 
 @dataclass
@@ -387,12 +419,100 @@ def test_abandon_project_shell_records_typed_fact(
         assert rows[0].abandoned_by == "operator@example.com"
 
 
+def test_historical_authority_acceptance_blocks_stale_authority_abandonment(
+    engine: Engine,
+) -> None:
+    """Keep activation permanent after an accepted authority becomes stale."""
+    domain = WorkflowDomain(
+        engine=engine,
+        graph=ROOT_GRAPH,
+        clock=FixedClock(now_value=EVALUATED_AT),
+    )
+    project_id = open_greenfield_shell(domain, name="Historical Acceptance")
+    with Session(engine) as session:
+        spec = SpecRegistry(
+            product_id=project_id,
+            spec_hash="sha256:historical-spec",
+            content="# Historical accepted specification",
+            status="superseded",
+        )
+        session.add(spec)
+        session.flush()
+        assert spec.spec_version_id is not None
+        authority = CompiledSpecAuthority(
+            spec_version_id=spec.spec_version_id,
+            compiler_version="3.0.0",
+            prompt_hash="a" * 64,
+            compiled_at=EVALUATED_AT,
+            compiled_artifact_json=authority_json(),
+            scope_themes="[]",
+            invariants="[]",
+            eligible_feature_ids="[]",
+        )
+        session.add(authority)
+        session.flush()
+        assert authority.authority_id is not None
+        authority_fingerprint = pending_authority_fingerprint(authority)
+        assert authority_fingerprint is not None
+        session.add(
+            SpecAuthorityAcceptance(
+                product_id=project_id,
+                spec_version_id=spec.spec_version_id,
+                status="accepted",
+                policy="test",
+                decided_by="reviewer",
+                decided_at=EVALUATED_AT,
+                compiler_version=authority.compiler_version,
+                prompt_hash=authority.prompt_hash,
+                spec_hash=spec.spec_hash,
+                pending_authority_id=authority.authority_id,
+                authority_fingerprint=authority_fingerprint,
+            )
+        )
+        session.commit()
+
+    with Session(engine) as session:
+        snapshot = WorkflowFactRepository(session).load(project_id)
+    assert tuple(item.status for item in snapshot.authorities) == ("stale",)
+    assert any(
+        item.artifact_type == "authority" and item.decision == "accepted"
+        for item in snapshot.review_decisions
+    )
+    position = domain.position(project_id)
+    decision = next(
+        item
+        for item in position.decisions
+        if item.node_id == AbandonProjectShell.node_id
+    )
+    assert decision.category is NodeCategory.BLOCKED
+    request = AbandonProjectShell(
+        project_id=project_id,
+        graph_version=position.graph_version,
+        fact_fingerprint=position.fact_fingerprint,
+        decision_fingerprint=decision.decision_fingerprint,
+        idempotency_key="historical-acceptance",
+        actor="operator@example.com",
+        reason="Must remain activated.",
+    )
+
+    result = domain.transition(request)
+
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.code is WorkflowErrorCode.TRANSITION_NOT_AVAILABLE
+    with Session(engine) as session:
+        assert session.exec(select(ProjectAbandonment)).all() == []
+
+
 def test_handler_exception_rolls_back_facts_and_receipt(
     domain: WorkflowDomain,
     engine: Engine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Keep claim, fact writes, and completion in one rollback boundary."""
+    transition_request = open_request(name="Rollback", idempotency_key="rollback")
+    failed_handler_calls = 0
+    real_handler = workflow_domain_module.execute_open_project_shell
 
     def exploding_handler(
         session: Session,
@@ -400,6 +520,8 @@ def test_handler_exception_rolls_back_facts_and_receipt(
         _graph: WorkflowGraph,
         evaluated_at: datetime,
     ) -> TransitionResult:
+        nonlocal failed_handler_calls
+        failed_handler_calls += 1
         project = Product(
             name=request.name,
             origin=request.origin,
@@ -428,9 +550,41 @@ def test_handler_exception_rolls_back_facts_and_receipt(
     )
 
     with pytest.raises(RuntimeError, match="handler failed after writes"):
-        domain.transition(open_request(name="Rollback", idempotency_key="rollback"))
+        domain.transition(transition_request)
 
     with Session(engine) as session:
         assert session.exec(select(Product)).all() == []
         assert session.exec(select(DiscoveryRun)).all() == []
         assert session.exec(select(WorkflowTransitionReceipt)).all() == []
+
+    successful_handler_calls = 0
+
+    def counted_handler(
+        session: Session,
+        request: OpenProjectShell,
+        graph: WorkflowGraph,
+        evaluated_at: datetime,
+    ) -> TransitionResult:
+        nonlocal successful_handler_calls
+        successful_handler_calls += 1
+        return real_handler(session, request, graph, evaluated_at)
+
+    monkeypatch.setattr(
+        workflow_domain_module,
+        "execute_open_project_shell",
+        counted_handler,
+    )
+    retry = domain.transition(transition_request)
+    replay = domain.transition(transition_request)
+
+    assert failed_handler_calls == 1
+    assert successful_handler_calls == 1
+    assert retry.ok is True
+    assert replay == retry.model_copy(update={"replayed": True})
+    with Session(engine) as session:
+        assert len(session.exec(select(Product)).all()) == 1
+        assert len(session.exec(select(DiscoveryRun)).all()) == 1
+        receipts = session.exec(select(WorkflowTransitionReceipt)).all()
+        assert len(receipts) == 1
+        assert receipts[0].result_json is not None
+        assert receipts[0].completed_at is not None

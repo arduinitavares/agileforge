@@ -30,7 +30,10 @@ def _abandon_shell_rule(
                 reason_code="PROJECT_ALREADY_ABANDONED",
             ),
         )
-    if any(authority.status == "accepted" for authority in snapshot.authorities):
+    if any(
+        decision.artifact_type == "authority" and decision.decision == "accepted"
+        for decision in snapshot.review_decisions
+    ):
         return (
             RuleEvaluation(
                 category=RuleCategory.BLOCKED,

@@ -30,6 +30,7 @@ if TYPE_CHECKING:
 
 
 EVALUATED_AT = datetime(2026, 8, 2, 14, tzinfo=UTC)
+_CONCURRENT_REQUEST_COUNT = 2
 
 
 @pytest.fixture
@@ -61,10 +62,22 @@ def test_two_concurrent_identical_requests_apply_once_and_replay_once(
         idempotency_key="concurrent-key",
         actor="operator",
     )
-    start = Barrier(2)
+    claim_start = Barrier(_CONCURRENT_REQUEST_COUNT, timeout=5)
     invocation_lock = Lock()
     invocation_count = 0
+    session_ids: set[int] = set()
+    connection_ids: set[int] = set()
     real_handler = workflow_domain_module.execute_open_project_shell
+
+    def synchronized_begin(session: Session) -> None:
+        connection = session.connection()
+        dbapi_connection = connection.connection.dbapi_connection
+        assert dbapi_connection is not None
+        with invocation_lock:
+            session_ids.add(id(session))
+            connection_ids.add(id(dbapi_connection))
+        claim_start.wait()
+        connection.exec_driver_sql("BEGIN IMMEDIATE")
 
     def counted_handler(
         session: Session,
@@ -82,20 +95,29 @@ def test_two_concurrent_identical_requests_apply_once_and_replay_once(
         "execute_open_project_shell",
         counted_handler,
     )
+    monkeypatch.setattr(domain, "_begin_write", synchronized_begin)
 
     def execute() -> TransitionResult:
-        start.wait()
         return domain.transition(request)
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        results = list(executor.map(lambda _index: execute(), range(2)))
+    with ThreadPoolExecutor(max_workers=_CONCURRENT_REQUEST_COUNT) as executor:
+        results = list(
+            executor.map(
+                lambda _index: execute(),
+                range(_CONCURRENT_REQUEST_COUNT),
+            )
+        )
 
+    assert len(session_ids) == _CONCURRENT_REQUEST_COUNT
+    assert len(connection_ids) == _CONCURRENT_REQUEST_COUNT
     assert invocation_count == 1
-    assert sorted(result.replayed for result in results) == [False, True]
+    assert sum(result.replayed for result in results) == 1
+    assert sum(not result.replayed for result in results) == 1
     assert all(result.ok for result in results)
     with Session(sqlite_file_engine) as session:
         assert len(session.exec(select(Product)).all()) == 1
         assert len(session.exec(select(DiscoveryRun)).all()) == 1
         receipts = session.exec(select(WorkflowTransitionReceipt)).all()
         assert len(receipts) == 1
+        assert receipts[0].result_json is not None
         assert receipts[0].completed_at == EVALUATED_AT.replace(tzinfo=None)

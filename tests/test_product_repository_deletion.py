@@ -56,6 +56,7 @@ def _seed_authority_project(
     session: Session,
     *,
     name: str,
+    decision_status: str = "accepted",
 ) -> _SeededAuthorityProject:
     product = Product(name=name)
     session.add(product)
@@ -99,7 +100,7 @@ def _seed_authority_project(
     acceptance = SpecAuthorityAcceptance(
         product_id=product_id,
         spec_version_id=spec_version_id,
-        status="accepted",
+        status=decision_status,
         policy="test",
         decided_by="test",
         compiler_version=current_v3.compiler_version,
@@ -149,10 +150,10 @@ def _seed_authority_project(
     )
 
 
-def test_delete_project_removes_authority_history_and_pinned_story(
+def test_delete_project_preserves_historically_accepted_authority(
     engine: Engine,
 ) -> None:
-    """Delete all retained authority rows after their dependent records."""
+    """Block hard deletion before mutating accepted authority history."""
     with Session(engine) as session:
         assert (
             session.connection().exec_driver_sql("PRAGMA foreign_keys").scalar_one()
@@ -166,12 +167,43 @@ def test_delete_project_removes_authority_history_and_pinned_story(
         assert stored_spec is not None
         assert len(stored_spec.compiled_authority) == len(seeded.authority_ids)
 
+        with pytest.raises(ProjectDeletionConflictError) as exc_info:
+            ProductRepository(session).delete_project(seeded.product_id)
+
+        assert exc_info.value.references == ("spec_authority_acceptance.status",)
+        session.rollback()
+
+    with Session(engine) as session:
+        assert session.get(Product, seeded.product_id) is not None
+        for story_id in seeded.story_ids:
+            assert session.get(UserStory, story_id) is not None
+        assert session.get(UserStoryDependency, seeded.dependency_id) is not None
+        assert session.get(SpecAuthorityAcceptance, seeded.acceptance_id) is not None
+        assert session.get(SpecRegistry, seeded.spec_version_id) is not None
+        remaining_authority_ids = set(
+            session.exec(
+                select(CompiledSpecAuthority.authority_id).where(
+                    col(CompiledSpecAuthority.authority_id).in_(seeded.authority_ids)
+                )
+            ).all()
+        )
+        assert remaining_authority_ids == seeded.authority_ids
+
+
+def test_delete_project_removes_rejected_authority_before_activation(
+    engine: Engine,
+) -> None:
+    """Keep hard deletion available when authority was never accepted."""
+    with Session(engine) as session:
+        seeded = _seed_authority_project(
+            session,
+            name="Rejected authority history",
+            decision_status="rejected",
+        )
+
         assert ProductRepository(session).delete_project(seeded.product_id) is True
 
         assert session.get(Product, seeded.product_id) is None
-        for story_id in seeded.story_ids:
-            assert session.get(UserStory, story_id) is None
-        assert session.get(UserStoryDependency, seeded.dependency_id) is None
         assert session.get(SpecAuthorityAcceptance, seeded.acceptance_id) is None
         assert session.get(SpecRegistry, seeded.spec_version_id) is None
         remaining_authority_ids = set(
@@ -366,16 +398,21 @@ def test_delete_project_removes_cross_project_sprint_story_links(
         )
 
 
-def test_delete_project_removes_foreign_product_acceptance_history(
+def test_delete_project_preserves_foreign_product_acceptance_history(
     engine: Engine,
 ) -> None:
-    """Delete acceptance history whose referenced spec is being deleted."""
+    """Block deletion before cascading an accepted decision on the target spec."""
     with Session(engine) as session:
-        seeded = _seed_authority_project(session, name="Acceptance target")
+        seeded = _seed_authority_project(
+            session,
+            name="Acceptance target",
+            decision_status="rejected",
+        )
         surviving_product = Product(name="Acceptance survivor")
         session.add(surviving_product)
         session.flush()
         assert surviving_product.product_id is not None
+        surviving_product_id = surviving_product.product_id
         target_spec = session.get(SpecRegistry, seeded.spec_version_id)
         assert target_spec is not None
         target_authority_id = next(iter(seeded.authority_ids))
@@ -396,12 +433,19 @@ def test_delete_project_removes_foreign_product_acceptance_history(
         session.add(foreign_acceptance)
         session.commit()
         assert foreign_acceptance.id is not None
+        foreign_acceptance_id = foreign_acceptance.id
 
-        assert ProductRepository(session).delete_project(seeded.product_id) is True
+        with pytest.raises(ProjectDeletionConflictError) as exc_info:
+            ProductRepository(session).delete_project(seeded.product_id)
 
-        assert session.get(Product, surviving_product.product_id) is not None
-        assert session.get(SpecAuthorityAcceptance, foreign_acceptance.id) is None
-        assert session.get(SpecRegistry, seeded.spec_version_id) is None
+        assert exc_info.value.references == ("spec_authority_acceptance.status",)
+        session.rollback()
+
+    with Session(engine) as session:
+        assert session.get(Product, seeded.product_id) is not None
+        assert session.get(Product, surviving_product_id) is not None
+        assert session.get(SpecAuthorityAcceptance, foreign_acceptance_id) is not None
+        assert session.get(SpecRegistry, seeded.spec_version_id) is not None
 
 
 def test_delete_project_removes_misowned_story_dependency(
@@ -877,7 +921,11 @@ def test_delete_project_nulls_surviving_discovery_prd_reference(
 def test_delete_project_nulls_surviving_story_spec_pin(engine: Engine) -> None:
     """Preserve another project's story after deleting its pinned spec."""
     with Session(engine) as session:
-        seeded = _seed_authority_project(session, name="Pinned spec target")
+        seeded = _seed_authority_project(
+            session,
+            name="Pinned spec target",
+            decision_status="rejected",
+        )
         surviving_product = Product(name="Pinned story survivor")
         session.add(surviving_product)
         session.flush()
@@ -1162,7 +1210,11 @@ def test_delete_project_inventories_all_cross_project_discovery_dependencies(
 def test_delete_project_rolls_back_when_commit_fails(engine: Engine) -> None:
     """Leave persisted project data intact when the transaction cannot commit."""
     with Session(engine) as session:
-        seeded = _seed_authority_project(session, name="Rollback project")
+        seeded = _seed_authority_project(
+            session,
+            name="Rollback project",
+            decision_status="rejected",
+        )
         dml_statements: list[str] = []
 
         def fail_commit(_session: Session) -> None:

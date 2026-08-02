@@ -209,6 +209,30 @@ def _ensure_project_discovery_deletable(session: Session, product_id: int) -> No
         )
 
 
+def _ensure_project_authority_deletable(session: Session, product_id: int) -> None:
+    """Reject deletion before removing any historically accepted authority."""
+    accepted_authority_id = session.exec(
+        select(SpecAuthorityAcceptance.id)
+        .join(
+            SpecRegistry,
+            col(SpecRegistry.spec_version_id)
+            == col(SpecAuthorityAcceptance.spec_version_id),
+        )
+        .where(
+            or_(
+                col(SpecAuthorityAcceptance.product_id) == product_id,
+                col(SpecRegistry.product_id) == product_id,
+            ),
+            col(SpecAuthorityAcceptance.status) == "accepted",
+        )
+    ).first()
+    if accepted_authority_id is not None:
+        raise ProjectDeletionConflictError(
+            product_id=product_id,
+            references=("spec_authority_acceptance.status",),
+        )
+
+
 def _neutralize_surviving_spec_pins(session: Session, product_id: int) -> None:
     """Clear nullable story pins to spec versions that will be deleted."""
     spec_version_ids = list(
@@ -496,6 +520,7 @@ class ProductRepository:
             if not product:
                 return False
 
+            _ensure_project_authority_deletable(session, product_id)
             _ensure_project_discovery_deletable(session, product_id)
 
             sprints = session.exec(

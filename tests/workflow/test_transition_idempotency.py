@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 from sqlalchemy import event
 from sqlmodel import Session, SQLModel, create_engine, select
 
+import workflow.domain as workflow_domain_module
 from models.core import Product
 from models.db import set_sqlite_pragma
 from models.workflow import DiscoveryRun, WorkflowTransitionReceipt
@@ -22,6 +23,9 @@ if TYPE_CHECKING:
 
     import pytest
     from sqlalchemy.engine import Connection, Engine
+
+    from workflow.contracts import TransitionResult
+    from workflow.graph import WorkflowGraph
 
 
 EVALUATED_AT = datetime(2026, 8, 2, 13, tzinfo=UTC)
@@ -79,18 +83,32 @@ def test_canonical_replay_returns_persisted_result_without_handler(
 
 def test_same_key_with_changed_canonical_request_conflicts_without_mutation(
     engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Reject reuse when any canonical request input changes."""
     domain = make_domain(engine)
     first = domain.transition(request())
+    assert first.ok is True
+    handler_calls = 0
+
+    def forbidden_handler(*_args: object, **_kwargs: object) -> object:
+        nonlocal handler_calls
+        handler_calls += 1
+        message = "changed canonical request invoked handler"
+        raise AssertionError(message)
+
+    monkeypatch.setattr(
+        "workflow.domain.execute_open_project_shell",
+        forbidden_handler,
+    )
 
     conflict = domain.transition(request(actor="different-operator"))
 
-    assert first.ok is True
     assert conflict.ok is False
     assert conflict.replayed is False
     assert conflict.error is not None
     assert conflict.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
+    assert handler_calls == 0
     with Session(engine) as session:
         assert len(session.exec(select(WorkflowTransitionReceipt)).all()) == 1
         assert len(session.exec(select(Product)).all()) == 1
@@ -153,6 +171,58 @@ def test_busy_timeout_exhaustion_maps_to_workflow_fact_conflict(
         assert elapsed < _MAX_BUSY_WAIT_SECONDS
         with Session(engine) as session:
             assert session.exec(select(Product)).all() == []
+            assert session.exec(select(WorkflowTransitionReceipt)).all() == []
+    finally:
+        engine.dispose()
+
+
+def test_commit_time_lock_exhaustion_maps_to_workflow_fact_conflict(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Map a lock raised by commit after one handler invocation."""
+    engine = create_engine(
+        f"sqlite:///{tmp_path / 'workflow-commit-lock.db'}",
+        connect_args={"check_same_thread": False},
+    )
+    event.listen(engine, "connect", set_sqlite_pragma)
+    SQLModel.metadata.create_all(engine)
+    domain = make_domain(engine)
+    real_handler = workflow_domain_module.execute_open_project_shell
+    handler_calls = 0
+
+    def counted_handler(
+        session: Session,
+        open_request: OpenProjectShell,
+        graph: WorkflowGraph,
+        evaluated_at: datetime,
+    ) -> TransitionResult:
+        nonlocal handler_calls
+        handler_calls += 1
+        return real_handler(session, open_request, graph, evaluated_at)
+
+    monkeypatch.setattr(
+        workflow_domain_module,
+        "execute_open_project_shell",
+        counted_handler,
+    )
+    try:
+        with engine.connect() as reader:
+            reader.exec_driver_sql("BEGIN")
+            reader.exec_driver_sql("SELECT product_id FROM products").all()
+            started = monotonic()
+            result = domain.transition(request(name="Commit Locked"))
+            elapsed = monotonic() - started
+            reader.rollback()
+
+        assert result.ok is False
+        assert result.error is not None
+        assert result.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
+        assert handler_calls == 1
+        assert elapsed < _MAX_BUSY_WAIT_SECONDS
+        with Session(engine) as session:
+            assert session.exec(select(Product)).all() == []
+            assert session.exec(select(DiscoveryRun)).all() == []
             assert session.exec(select(WorkflowTransitionReceipt)).all() == []
     finally:
         engine.dispose()

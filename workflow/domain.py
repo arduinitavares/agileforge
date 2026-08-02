@@ -84,6 +84,7 @@ class WorkflowDomain:
         with Session(self._engine) as session:
             try:
                 result = self._transition_in_session(session, request, evaluated_at)
+                session.commit()
             except OperationalError as error:
                 session.rollback()
                 if self._is_sqlite_lock_timeout(error):
@@ -95,7 +96,6 @@ class WorkflowDomain:
                 session.rollback()
                 raise
             else:
-                session.commit()
                 return result
 
     def _transition_in_session(
