@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Literal
 from pydantic import TypeAdapter, ValidationError
 from sqlmodel import Session, col, select
 
+from models.authority_curation import AuthorityFeedbackAttempt
 from models.core import (
     Product,
     Sprint,
@@ -38,6 +39,7 @@ from utils.spec_schemas import SpecAuthorityCompilationSuccess
 from workflow.contracts import JsonValue
 from workflow.facts import (
     AuthorityFact,
+    AuthorityFeedbackFact,
     ChallengeArtifactFact,
     DiscoveryRunAbandonmentFact,
     DiscoveryRunFact,
@@ -50,6 +52,7 @@ from workflow.facts import (
     RepositoryInventoryFact,
     ReviewDecisionFact,
     SpecDraftFact,
+    SpecVersionFact,
     SprintFact,
     StoryFact,
     TaskFact,
@@ -142,7 +145,10 @@ class WorkflowFactRepository:
         project = self._project(project_id)
         discovery_runs = self._discovery_runs(project_id)
         discovery_run_ids = frozenset(item.discovery_run_id for item in discovery_runs)
-        spec_versions = self._spec_versions(project_id)
+        spec_version_facts = self._spec_versions(project_id)
+        spec_versions = {
+            item.spec_version_id: item.spec_hash for item in spec_version_facts
+        }
         prd_versions = self._prd_versions(project_id, discovery_run_ids)
         spec_drafts = self._spec_drafts(
             project_id,
@@ -193,12 +199,17 @@ class WorkflowFactRepository:
                 {item.spec_draft_id: item.discovery_run_id for item in spec_drafts},
                 spec_versions,
             ),
+            spec_versions=spec_version_facts,
             repository_baselines=repository_baselines,
             repository_inventories=self._repository_inventories(
                 project_id,
                 {item.repository_baseline_id: item for item in repository_baselines},
             ),
             authorities=authority_load.facts,
+            authority_feedback=self._authority_feedback(
+                project_id,
+                {item.authority_id: item for item in authority_load.facts},
+            ),
             phase_artifacts=(),
             sprints=sprints,
             stories=stories,
@@ -487,19 +498,73 @@ class WorkflowFactRepository:
             )
         return tuple(facts)
 
-    def _spec_versions(self, project_id: int) -> dict[int, str]:
+    def _spec_versions(self, project_id: int) -> tuple[SpecVersionFact, ...]:
         rows = self._session.exec(
             select(SpecRegistry)
             .where(col(SpecRegistry.product_id) == project_id)
             .order_by(col(SpecRegistry.spec_version_id)),
             execution_options=self._query_options(),
         ).all()
-        return {
-            self._required_id(row.spec_version_id, "specification registry row"): (
-                row.spec_hash
+        facts: list[SpecVersionFact] = []
+        for row in rows:
+            if row.status not in {"approved", "superseded"}:
+                continue
+            status: Literal["approved", "superseded"] = (
+                "approved" if row.status == "approved" else "superseded"
             )
-            for row in rows
-        }
+            facts.append(
+                SpecVersionFact(
+                    spec_version_id=self._required_id(
+                        row.spec_version_id,
+                        "specification registry row",
+                    ),
+                    spec_hash=row.spec_hash,
+                    status=status,
+                    approved_at=row.approved_at,
+                )
+            )
+        return tuple(facts)
+
+    def _authority_feedback(
+        self,
+        project_id: int,
+        authorities: dict[int, AuthorityFact],
+    ) -> tuple[AuthorityFeedbackFact, ...]:
+        rows = self._session.exec(
+            select(AuthorityFeedbackAttempt)
+            .where(col(AuthorityFeedbackAttempt.project_id) == project_id)
+            .order_by(
+                col(AuthorityFeedbackAttempt.created_at),
+                col(AuthorityFeedbackAttempt.feedback_row_id),
+            ),
+            execution_options=self._query_options(),
+        ).all()
+        facts: list[AuthorityFeedbackFact] = []
+        for row in rows:
+            authority = authorities.get(row.source_authority_id)
+            if (
+                authority is None
+                or authority.authority_fingerprint
+                != row.source_authority_fingerprint
+            ):
+                message = (
+                    "Forced relationship corruption in authority feedback: "
+                    f"source authority {row.source_authority_id} does not match."
+                )
+                raise self._error(message)
+            facts.append(
+                AuthorityFeedbackFact(
+                    feedback_id=self._required_id(
+                        row.feedback_row_id,
+                        "authority feedback",
+                    ),
+                    source_authority_id=row.source_authority_id,
+                    source_authority_fingerprint=row.source_authority_fingerprint,
+                    feedback_fingerprint=row.feedback_fingerprint,
+                    recorded_at=row.created_at,
+                )
+            )
+        return tuple(facts)
 
     def _review_decisions(
         self,

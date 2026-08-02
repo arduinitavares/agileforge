@@ -17,6 +17,7 @@ from workflow.contracts import (
 )
 from workflow.facts import (
     AuthorityFact,
+    AuthorityFeedbackFact,
     ChallengeArtifactFact,
     DiscoveryRunAbandonmentFact,
     DiscoveryRunFact,
@@ -31,6 +32,7 @@ from workflow.facts import (
     RepositoryInventoryFact,
     ReviewDecisionFact,
     SpecDraftFact,
+    SpecVersionFact,
     SprintFact,
     StoryFact,
     TaskFact,
@@ -158,6 +160,17 @@ AUTHORITATIVE_SNAPSHOT_VARIANTS: tuple[tuple[str, object], ...] = (
         ),
     ),
     (
+        "spec_versions",
+        (
+            SpecVersionFact(
+                spec_version_id=9,
+                spec_hash="sha256:spec-version",
+                status="approved",
+                approved_at=EVALUATED_AT,
+            ),
+        ),
+    ),
+    (
         "repository_baselines",
         (
             RepositoryBaselineFact(
@@ -191,6 +204,18 @@ AUTHORITATIVE_SNAPSHOT_VARIANTS: tuple[tuple[str, object], ...] = (
                 authority_fingerprint="sha256:authority",
                 status="accepted",
                 decided_at=EVALUATED_AT,
+            ),
+        ),
+    ),
+    (
+        "authority_feedback",
+        (
+            AuthorityFeedbackFact(
+                feedback_id=11,
+                source_authority_id=10,
+                source_authority_fingerprint="sha256:authority",
+                feedback_fingerprint="sha256:feedback",
+                recorded_at=EVALUATED_AT,
             ),
         ),
     ),

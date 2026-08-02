@@ -40,6 +40,7 @@ class RuleEvaluation:
     fact_references: tuple[FactReference, ...] = ()
     blockers: tuple[Blocker, ...] = ()
     valid_until: datetime | None = None
+    recommendation_kind: RecommendationKind | None = None
 
 
 NodeRule = Callable[[WorkflowFactSnapshot, datetime], tuple[RuleEvaluation, ...]]
@@ -182,6 +183,9 @@ class WorkflowGraph:
             return None
 
         category = NodeCategory(evaluation.category.value)
+        recommendation_kind = (
+            evaluation.recommendation_kind or node.recommendation_kind
+        )
         payload: dict[str, object] = {
             "graph_version": self.graph_version,
             "fact_fingerprint": facts_hash,
@@ -189,7 +193,7 @@ class WorkflowGraph:
             "instance_key": evaluation.instance_key,
             "request_kind": node.request_kind,
             "category": category,
-            "recommendation_kind": node.recommendation_kind,
+            "recommendation_kind": recommendation_kind,
             "reason_code": evaluation.reason_code,
             "required_inputs": tuple(
                 item.model_dump(mode="json") for item in node.required_inputs
@@ -208,7 +212,7 @@ class WorkflowGraph:
             child_graph_id=node.child_graph_id,
             request_kind=node.request_kind,
             category=category,
-            recommendation_kind=node.recommendation_kind,
+            recommendation_kind=recommendation_kind,
             reason_code=evaluation.reason_code,
             required_inputs=node.required_inputs,
             fact_references=evaluation.fact_references,

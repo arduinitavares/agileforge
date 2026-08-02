@@ -75,7 +75,7 @@ from utils.spec_authority_ir import (
 )
 
 if TYPE_CHECKING:
-    from sqlalchemy.engine import Engine
+    from sqlalchemy.engine import Connection, Engine
 
     from models.specs import CompiledSpecAuthority, SpecRegistry
     from utils.spec_schemas import (
@@ -307,7 +307,7 @@ class AuthorityReviewService:
         self._engine = engine or model_db.get_engine()
         self._repo_root = Path(__file__).resolve().parents[2]
 
-    def review(  # noqa: PLR0911
+    def review(
         self,
         *,
         project_id: int,
@@ -333,31 +333,11 @@ class AuthorityReviewService:
             return _schema_error(AUTHORITY_REVIEW_COMMAND, readiness)
 
         with Session(self._engine) as session:
-            product = session.get(Product, project_id)
-            if product is None:
-                return _project_not_found_error(AUTHORITY_REVIEW_COMMAND, project_id)
-
-            selection = _load_authority_selection(session, project_id=project_id)
-            latest_spec = selection.latest_spec
-            authority = selection.pending_authority
-            if latest_spec is None or authority is None:
-                return _authority_not_pending_error(project_id)
-            load_result = load_stored_compiled_artifact(authority)
-            if load_result.unsupported:
-                return _unsupported_compiled_authority_error(
-                    project_id=project_id,
-                    spec_version_id=authority.spec_version_id,
-                    observed_schema_version=load_result.observed_schema_version,
-                )
-
-            snapshot = build_authority_review_snapshot(
+            snapshot = build_authority_review_snapshot_in_session(
+                session,
                 project_id=project_id,
-                product=product,
-                spec=latest_spec,
-                authority=authority,
                 include_spec=include_spec,
                 repo_root=self._repo_root,
-                engine=self._engine,
             )
             if not isinstance(snapshot, AuthorityReviewSnapshot):
                 return cast("JsonDict", snapshot)
@@ -536,6 +516,41 @@ def _normalize_sha256_hash(value: str) -> str:
     return f"sha256:{stripped.lower()}"
 
 
+def build_authority_review_snapshot_in_session(
+    session: Session,
+    *,
+    project_id: int,
+    include_spec: str = "auto",
+    repo_root: Path | None = None,
+) -> AuthorityReviewSnapshot | JsonDict:
+    """Build a review snapshot using only the caller-owned session."""
+    product = session.get(Product, project_id)
+    if product is None:
+        return _project_not_found_error(AUTHORITY_REVIEW_COMMAND, project_id)
+    selection = _load_authority_selection(session, project_id=project_id)
+    spec = selection.latest_spec
+    authority = selection.pending_authority
+    if spec is None or authority is None:
+        return _authority_not_pending_error(project_id)
+    load_result = load_stored_compiled_artifact(authority)
+    if load_result.unsupported:
+        return _unsupported_compiled_authority_error(
+            project_id=project_id,
+            spec_version_id=authority.spec_version_id,
+            observed_schema_version=load_result.observed_schema_version,
+        )
+    return build_authority_review_snapshot(
+        project_id=project_id,
+        product=product,
+        spec=spec,
+        authority=authority,
+        include_spec=include_spec,
+        repo_root=repo_root,
+        engine=session.get_bind(),
+        session=session,
+    )
+
+
 def build_authority_review_snapshot(  # noqa: PLR0913
     *,
     project_id: int,
@@ -544,28 +559,25 @@ def build_authority_review_snapshot(  # noqa: PLR0913
     authority: CompiledSpecAuthority | None = None,
     include_spec: str = "auto",
     repo_root: Path | None = None,
-    engine: Engine | None = None,
+    engine: Engine | Connection | None = None,
+    session: Session | None = None,
 ) -> AuthorityReviewSnapshot | JsonDict:
     """Build the canonical review snapshot without rendering a packet."""
     if product is None or spec is None or authority is None:
-        review_engine = engine or model_db.get_engine()
-        with Session(review_engine) as session:
-            product = session.get(Product, project_id)
-            if product is None:
-                return _project_not_found_error(AUTHORITY_REVIEW_COMMAND, project_id)
-            selection = _load_authority_selection(session, project_id=project_id)
-            spec = selection.latest_spec
-            authority = selection.pending_authority
-            if spec is None or authority is None:
-                return _authority_not_pending_error(project_id)
-            return build_authority_review_snapshot(
+        if session is not None:
+            return build_authority_review_snapshot_in_session(
+                session,
                 project_id=project_id,
-                product=product,
-                spec=spec,
-                authority=authority,
                 include_spec=include_spec,
                 repo_root=repo_root,
-                engine=review_engine,
+            )
+        review_engine = engine or model_db.get_engine()
+        with Session(review_engine) as owned_session:
+            return build_authority_review_snapshot_in_session(
+                owned_session,
+                project_id=project_id,
+                include_spec=include_spec,
+                repo_root=repo_root,
             )
 
     source = _load_source_from_latest_spec(
@@ -650,6 +662,7 @@ def build_authority_review_snapshot(  # noqa: PLR0913
     source_spec_hash = _normalize_sha256_hash(spec.spec_hash)
     scope_discovery = _scope_discovery_provenance(
         engine=engine or model_db.get_engine(),
+        session=session,
         project_id=project_id,
         amended_spec_hash=source_spec_hash,
     )
@@ -701,12 +714,21 @@ def build_authority_review_snapshot(  # noqa: PLR0913
 
 def _scope_discovery_provenance(
     *,
-    engine: Engine,
+    engine: Engine | Connection,
+    session: Session | None = None,
     project_id: int,
     amended_spec_hash: str,
 ) -> JsonDict | None:
     """Return Scope Discovery provenance for a pending discovered authority."""
-    with Session(engine) as session:
+    if session is None:
+        with Session(engine) as owned_session:
+            return _scope_discovery_provenance(
+                engine=engine,
+                session=owned_session,
+                project_id=project_id,
+                amended_spec_hash=amended_spec_hash,
+            )
+    else:
         draft = session.exec(
             select(DiscoverySpecAmendmentDraft)
             .where(

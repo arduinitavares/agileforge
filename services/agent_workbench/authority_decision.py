@@ -1137,6 +1137,71 @@ class AuthorityDecisionRunner:
             return result.rowcount == 1
 
 
+class AuthorityDecisionConflictError(RuntimeError):
+    """Raised when durable facts already contain a terminal authority decision."""
+
+
+def record_authority_decision_in_session(
+    session: Session,
+    *,
+    snapshot: AuthorityReviewSnapshot,
+    decision: Literal["accepted", "rejected"],
+    rationale: str,
+    actor: str,
+    policy: str,
+    review_fingerprint: str,
+    decided_at: datetime,
+) -> SpecAuthorityAcceptance:
+    """Append one exact terminal decision in the caller-owned transaction."""
+    authority_id = snapshot.pending_authority_id
+    authority_fingerprint = snapshot.authority_fingerprint
+    spec_version_id = snapshot.spec_version_id
+    if authority_id is None or authority_fingerprint is None or spec_version_id is None:
+        msg = "The authority review snapshot is missing durable identity."
+        raise ValueError(msg)
+    if review_fingerprint != snapshot.coverage_summary_fingerprint:
+        msg = "The authority review fingerprint changed."
+        raise AuthorityDecisionConflictError(msg)
+    key = terminal_decision_key(
+        project_id=snapshot.project_id,
+        spec_version_id=spec_version_id,
+        pending_authority_id=authority_id,
+    )
+    existing = session.exec(
+        select(SpecAuthorityAcceptance).where(
+            SpecAuthorityAcceptance.terminal_decision_key == key
+        )
+    ).first()
+    if existing is not None:
+        msg = "The exact authority already has a terminal decision."
+        raise AuthorityDecisionConflictError(msg)
+    row = SpecAuthorityAcceptance(
+        product_id=snapshot.project_id,
+        spec_version_id=spec_version_id,
+        status=decision,
+        policy=policy,
+        decided_by=actor,
+        decided_at=decided_at,
+        rationale=rationale,
+        compiler_version=snapshot.compiler_version,
+        prompt_hash=snapshot.prompt_hash,
+        spec_hash=_stored_spec_hash(snapshot.source_spec_hash),
+        pending_authority_id=authority_id,
+        authority_fingerprint=authority_fingerprint,
+        review_token=snapshot.review_token,
+        review_fingerprint=review_fingerprint,
+        disk_spec_hash=snapshot.disk_spec_hash,
+        resolved_spec_path=snapshot.resolved_spec_path,
+        actor_mode="workflow_domain",
+        review_completeness=snapshot.omission_assessment,
+        terminal_decision_key=key,
+        provenance_source="workflow_domain",
+    )
+    session.add(row)
+    session.flush()
+    return row
+
+
 def terminal_decision_key(
     *,
     project_id: int,

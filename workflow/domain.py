@@ -22,10 +22,13 @@ from workflow.contracts import (
 from workflow.fingerprints import canonical_hash, canonical_json
 from workflow.handlers import (
     execute_abandon_project_shell,
+    execute_compile_authority,
+    execute_decide_authority,
     execute_decide_brownfield_initial_spec,
     execute_decide_initial_spec_draft,
     execute_decide_prd,
     execute_open_project_shell,
+    execute_record_authority_feedback,
     execute_record_brownfield_spec_draft,
     execute_record_challenge_artifact,
     execute_record_initial_spec_draft,
@@ -33,13 +36,17 @@ from workflow.handlers import (
     execute_record_repository_baseline,
     execute_record_repository_inventory,
     execute_register_initial_scope,
+    execute_repair_authority,
 )
 from workflow.requests import (
     AbandonProjectShell,
+    CompileAuthority,
+    DecideAuthority,
     DecideBrownfieldInitialSpec,
     DecideInitialSpecDraft,
     DecidePrd,
     OpenProjectShell,
+    RecordAuthorityFeedback,
     RecordBrownfieldSpecDraft,
     RecordChallengeArtifact,
     RecordInitialSpecDraft,
@@ -47,6 +54,7 @@ from workflow.requests import (
     RecordRepositoryBaseline,
     RecordRepositoryInventory,
     RegisterInitialScope,
+    RepairAuthority,
     TransitionRequest,
 )
 
@@ -72,12 +80,19 @@ type _ExistingPositionedRequest = (
     | DecideInitialSpecDraft
     | RegisterInitialScope
 )
+type _AuthorityRequest = (
+    CompileAuthority | DecideAuthority | RecordAuthorityFeedback | RepairAuthority
+)
 type _PositionedTransitionRequest = (
     _ExistingPositionedRequest
     | RecordRepositoryBaseline
     | RecordRepositoryInventory
     | RecordBrownfieldSpecDraft
     | DecideBrownfieldInitialSpec
+    | CompileAuthority
+    | DecideAuthority
+    | RecordAuthorityFeedback
+    | RepairAuthority
 )
 
 
@@ -261,7 +276,20 @@ class WorkflowDomain:
         if isinstance(decision_or_failure, TransitionResult):
             return decision_or_failure
 
-        if isinstance(request, RecordRepositoryBaseline):
+        if isinstance(
+            request,
+            CompileAuthority
+            | DecideAuthority
+            | RecordAuthorityFeedback
+            | RepairAuthority,
+        ):
+            result = self._execute_authority_request(
+                session,
+                request,
+                decision_or_failure,
+                evaluated_at,
+            )
+        elif isinstance(request, RecordRepositoryBaseline):
             result = execute_record_repository_baseline(
                 session,
                 request,
@@ -302,6 +330,44 @@ class WorkflowDomain:
             evaluated_at,
         )
         return result.model_copy(update={"position": position})
+
+    @staticmethod
+    def _execute_authority_request(
+        session: Session,
+        request: _AuthorityRequest,
+        decision: NodeDecision,
+        evaluated_at: datetime,
+    ) -> TransitionResult:
+        """Dispatch the four closed authority transition variants."""
+        if isinstance(request, CompileAuthority):
+            return execute_compile_authority(
+                session,
+                request,
+                decision,
+                evaluated_at,
+            )
+        if isinstance(request, DecideAuthority):
+            return execute_decide_authority(
+                session,
+                request,
+                decision,
+                evaluated_at,
+            )
+        if isinstance(request, RecordAuthorityFeedback):
+            return execute_record_authority_feedback(
+                session,
+                request,
+                decision,
+                evaluated_at,
+            )
+        if isinstance(request, RepairAuthority):
+            return execute_repair_authority(
+                session,
+                request,
+                decision,
+                evaluated_at,
+            )
+        assert_never(request)
 
     @staticmethod
     def _execute_existing_positioned(
@@ -425,7 +491,10 @@ class WorkflowDomain:
                 "The requested node is invalid for the current Project facts.",
                 position=position,
             )
-        if decision.category is not NodeCategory.AVAILABLE:
+        human_review_waiting = isinstance(request, DecideAuthority) and (
+            decision.category is NodeCategory.WAITING
+        )
+        if decision.category is not NodeCategory.AVAILABLE and not human_review_waiting:
             return TransitionResult(
                 ok=False,
                 position=position,

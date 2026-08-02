@@ -111,6 +111,15 @@ class InitialScopeRegistrationFact(FrozenModel):
     spec_hash: str
 
 
+class SpecVersionFact(FrozenModel):
+    """Approved or superseded registered specification version."""
+
+    spec_version_id: int
+    spec_hash: str
+    status: Literal["approved", "superseded"]
+    approved_at: _DATETIME | None
+
+
 class RepositoryBaselineFact(FrozenModel):
     """Versioned repository identity captured for brownfield onboarding."""
 
@@ -140,6 +149,16 @@ class AuthorityFact(FrozenModel):
     authority_fingerprint: str
     status: Literal["pending_review", "accepted", "rejected", "stale"]
     decided_at: _DATETIME | None
+
+
+class AuthorityFeedbackFact(FrozenModel):
+    """Immutable feedback recorded against one compiled authority."""
+
+    feedback_id: int
+    source_authority_id: int
+    source_authority_fingerprint: str
+    feedback_fingerprint: str
+    recorded_at: _DATETIME
 
 
 class PhaseArtifactFact(FrozenModel):
@@ -215,9 +234,11 @@ class WorkflowFactSnapshot(FrozenModel):
     review_decisions: tuple[ReviewDecisionFact, ...] = ()
     spec_drafts: tuple[SpecDraftFact, ...] = ()
     initial_registrations: tuple[InitialScopeRegistrationFact, ...] = ()
+    spec_versions: tuple[SpecVersionFact, ...] = ()
     repository_baselines: tuple[RepositoryBaselineFact, ...] = ()
     repository_inventories: tuple[RepositoryInventoryFact, ...] = ()
     authorities: tuple[AuthorityFact, ...] = ()
+    authority_feedback: tuple[AuthorityFeedbackFact, ...] = ()
     phase_artifacts: tuple[PhaseArtifactFact, ...] = ()
     sprints: tuple[SprintFact, ...] = ()
     stories: tuple[StoryFact, ...] = ()

@@ -1,5 +1,11 @@
 """Guarded request contracts for workflow graph transitions."""
 
+from workflow.requests.authority import (
+    CompileAuthority,
+    DecideAuthority,
+    RecordAuthorityFeedback,
+    RepairAuthority,
+)
 from workflow.requests.onboarding import (
     DecideBrownfieldInitialSpec,
     DecideInitialSpecDraft,
@@ -27,14 +33,21 @@ type TransitionRequest = (
     | RecordInitialSpecDraft
     | DecideInitialSpecDraft
     | RegisterInitialScope
+    | CompileAuthority
+    | DecideAuthority
+    | RecordAuthorityFeedback
+    | RepairAuthority
 )
 
 __all__ = [
     "AbandonProjectShell",
+    "CompileAuthority",
+    "DecideAuthority",
     "DecideBrownfieldInitialSpec",
     "DecideInitialSpecDraft",
     "DecidePrd",
     "OpenProjectShell",
+    "RecordAuthorityFeedback",
     "RecordBrownfieldSpecDraft",
     "RecordChallengeArtifact",
     "RecordInitialSpecDraft",
@@ -42,5 +55,6 @@ __all__ = [
     "RecordRepositoryBaseline",
     "RecordRepositoryInventory",
     "RegisterInitialScope",
+    "RepairAuthority",
     "TransitionRequest",
 ]

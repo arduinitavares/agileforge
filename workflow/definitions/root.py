@@ -8,6 +8,7 @@ from workflow.contracts import (
     InputField,
     RecommendationKind,
 )
+from workflow.definitions.authority import AUTHORITY_NODES, VISION_BOUNDARY_NODE
 from workflow.definitions.onboarding import (
     BROWNFIELD_ONBOARDING_NODES,
     GREENFIELD_ONBOARDING_NODES,
@@ -90,8 +91,8 @@ ROOT_GRAPH: WorkflowGraph = WorkflowGraph(
                     _ABANDON_SHELL_NODE,
                 ),
             ),
-            ChildGraphSpec(child_graph_id="authority", nodes=()),
-            ChildGraphSpec(child_graph_id="vision", nodes=()),
+            ChildGraphSpec(child_graph_id="authority", nodes=AUTHORITY_NODES),
+            ChildGraphSpec(child_graph_id="vision", nodes=(VISION_BOUNDARY_NODE,)),
             ChildGraphSpec(child_graph_id="backlog", nodes=()),
             ChildGraphSpec(child_graph_id="planning", nodes=()),
             ChildGraphSpec(child_graph_id="execution", nodes=()),

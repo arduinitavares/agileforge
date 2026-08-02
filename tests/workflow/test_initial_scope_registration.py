@@ -268,7 +268,7 @@ def test_registration_uses_stored_content_after_source_mutation_and_deletion(
         assert registration.spec_version_id == spec_version_id
         assert registration.spec_hash == spec_hash
         assert session.exec(select(CompiledSpecAuthority)).all() == []
-    assert "authority.compile" not in result.position.available_nodes
+    assert "authority.compile" in result.position.available_nodes
     assert all(
         not node.startswith("backlog.") for node in result.position.available_nodes
     )

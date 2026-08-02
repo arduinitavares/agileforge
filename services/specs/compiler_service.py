@@ -2975,11 +2975,10 @@ def _update_product_compiled_authority_cache(
         return None
     boundary = "product_authority_cache_persisted"
     if lease_guard is not None and not lease_guard(boundary):
-        session.rollback()
         return _mutation_lease_lost_result()
     product.compiled_authority_json = compiled_artifact_json
     session.add(product)
-    session.commit()
+    session.flush()
     return _record_mutation_progress(record_progress, boundary)
 
 
@@ -3764,6 +3763,7 @@ def _persist_compiled_authority(  # noqa: PLR0913
     spec_version_id: int,
     force_recompile: bool,
     success: SpecAuthorityCompilationSuccess,
+    compiled_at: datetime,
     lease_guard: Callable[[str], bool] | None = None,
     record_progress: Callable[[str], bool] | None = None,
 ) -> _PersistedCompilation | dict[str, Any]:
@@ -3778,13 +3778,12 @@ def _persist_compiled_authority(  # noqa: PLR0913
 
     boundary = "compiled_authority_persisted"
     if lease_guard is not None and not lease_guard(boundary):
-        session.rollback()
         return _mutation_lease_lost_result()
     authority = CompiledSpecAuthority(
         spec_version_id=spec_version_id,
         compiler_version=compiler_version,
         prompt_hash=prompt_hash,
-        compiled_at=datetime.now(UTC),
+        compiled_at=compiled_at,
         compiled_artifact_json=compiled_artifact_json,
         scope_themes=json.dumps(scope_themes),
         invariants=json.dumps(invariants),
@@ -3793,8 +3792,7 @@ def _persist_compiled_authority(  # noqa: PLR0913
         spec_gaps=json.dumps(spec_gaps),
     )
     session.add(authority)
-    session.commit()
-    session.refresh(authority)
+    session.flush()
     recompiled = force_recompile
 
     progress_error = _record_mutation_progress(record_progress, boundary)
@@ -3831,6 +3829,7 @@ def _compile_spec_authority_for_version_in_session(  # noqa: PLR0913
     parsed: CompileSpecAuthorityForVersionInput,
     should_recompile: bool,
     tool_context: ToolContext | None,
+    compiled_at: datetime,
     compiler_model: str | None = None,
     lease_guard: Callable[[str], bool] | None = None,
     record_progress: Callable[[str], bool] | None = None,
@@ -3888,6 +3887,7 @@ def _compile_spec_authority_for_version_in_session(  # noqa: PLR0913
         spec_version_id=parsed.spec_version_id,
         force_recompile=should_recompile,
         success=compiled,
+        compiled_at=compiled_at,
         lease_guard=lease_guard,
         record_progress=record_progress,
     )
@@ -3923,6 +3923,30 @@ def _compile_spec_authority_for_version_in_session(  # noqa: PLR0913
     }
 
 
+def compile_spec_authority_for_version_in_session(
+    session: Session,
+    *,
+    spec_version_id: int,
+    compiled_at: datetime,
+    force_recompile: bool = False,
+    compiler_model: str | None = None,
+) -> dict[str, Any]:
+    """Compile using a caller-owned session without transaction side effects."""
+    parsed = _normalize_compile_version_input(
+        None,
+        spec_version_id=spec_version_id,
+        force_recompile=force_recompile,
+    )
+    return _compile_spec_authority_for_version_in_session(
+        session,
+        parsed=parsed,
+        should_recompile=force_recompile,
+        tool_context=None,
+        compiled_at=compiled_at,
+        compiler_model=compiler_model,
+    )
+
+
 def compile_spec_authority_for_version(
     params: dict[str, Any] | CompileSpecAuthorityForVersionInput | None = None,
     *,
@@ -3940,13 +3964,17 @@ def compile_spec_authority_for_version(
     should_recompile = bool(parsed.force_recompile)
 
     with Session(_resolve_engine()) as session:
-        return _compile_spec_authority_for_version_in_session(
+        result = _compile_spec_authority_for_version_in_session(
             session,
             parsed=parsed,
             should_recompile=should_recompile,
             tool_context=tool_context,
+            compiled_at=datetime.now(UTC),
             compiler_model=compiler_model,
         )
+        if result.get("success") is True:
+            session.commit()
+        return result
 
 
 def compile_spec_authority_for_version_with_engine(  # noqa: PLR0913
@@ -3967,15 +3995,19 @@ def compile_spec_authority_for_version_with_engine(  # noqa: PLR0913
         force_recompile=force_recompile,
     )
     with Session(engine) as session:
-        return _compile_spec_authority_for_version_in_session(
+        result = _compile_spec_authority_for_version_in_session(
             session,
             parsed=parsed,
             should_recompile=bool(parsed.force_recompile),
             tool_context=tool_context,
+            compiled_at=datetime.now(UTC),
             compiler_model=compiler_model,
             lease_guard=lease_guard,
             record_progress=record_progress,
         )
+        if result.get("success") is True:
+            session.commit()
+        return result
 
 
 def _resolve_compile_spec_authority_for_version() -> (
@@ -4412,6 +4444,7 @@ __all__ = [
     "UpdateSpecAndCompileAuthorityInput",
     "check_spec_authority_status",
     "compile_spec_authority_for_version",
+    "compile_spec_authority_for_version_in_session",
     "compiled_authority_read_failure",
     "ensure_accepted_spec_authority",
     "get_compiled_authority_by_version",

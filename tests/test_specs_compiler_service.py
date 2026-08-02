@@ -3582,7 +3582,7 @@ def test_compile_spec_authority_for_version_with_engine_runs_lease_guard_before_
     ("blocked_boundary", "expect_authority", "expect_product_cache"),
     [
         ("compiled_authority_persisted", False, False),
-        ("product_authority_cache_persisted", True, False),
+        ("product_authority_cache_persisted", False, False),
     ],
 )
 def test_compile_spec_authority_for_version_with_engine_lease_loss_blocks_write(  # noqa: PLR0913
@@ -3594,7 +3594,7 @@ def test_compile_spec_authority_for_version_with_engine_lease_loss_blocks_write(
     expect_authority: bool,
     expect_product_cache: bool,
 ) -> None:
-    """A lost lease should stop the guarded compiler write."""
+    """A lost lease should roll back every guarded compiler write atomically."""
     from services.specs import compiler_service  # noqa: PLC0415
 
     monkeypatch.setattr(
