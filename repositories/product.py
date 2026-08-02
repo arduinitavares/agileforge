@@ -1,6 +1,6 @@
 import logging
 
-from sqlalchemy import delete, or_, update
+from sqlalchemy import delete, inspect, or_, update
 from sqlmodel import Session, col, select
 
 from models.agent_workbench import (
@@ -35,7 +35,6 @@ from models.core import (
     UserStory,
     UserStoryDependency,
 )
-from models.db import get_engine
 from models.events import StoryCompletionLog, TaskExecutionLog, WorkflowEvent
 from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance, SpecRegistry
 
@@ -317,6 +316,39 @@ def _delete_project_curation_rows(session: Session, product_id: int) -> None:
     )
 
 
+def _delete_project_brownfield_rows(session: Session, product_id: int) -> None:
+    """Delete brownfield rows when the optional legacy tables exist."""
+    table_names = set(inspect(session.connection()).get_table_names())
+    if "brownfield_spec_approvals" in table_names:
+        for approval in session.exec(
+            select(BrownfieldSpecApproval).where(
+                BrownfieldSpecApproval.project_id == product_id
+            )
+        ).all():
+            session.delete(approval)
+    if "brownfield_spec_draft_attempts" in table_names:
+        for draft_attempt in session.exec(
+            select(BrownfieldSpecDraftAttempt).where(
+                BrownfieldSpecDraftAttempt.project_id == product_id
+            )
+        ).all():
+            session.delete(draft_attempt)
+    if "brownfield_scan_attempts" in table_names:
+        for scan_attempt in session.exec(
+            select(BrownfieldScanAttempt).where(
+                BrownfieldScanAttempt.project_id == product_id
+            )
+        ).all():
+            session.delete(scan_attempt)
+    if "brownfield_source_artifacts" in table_names:
+        for source_artifact in session.exec(
+            select(BrownfieldSourceArtifact).where(
+                BrownfieldSourceArtifact.project_id == product_id
+            )
+        ).all():
+            session.delete(source_artifact)
+
+
 def _delete_project_discovery_rows(session: Session, product_id: int) -> None:
     """Delete discovery artifact chains that reference a project."""
     prd_ids = list(
@@ -437,7 +469,11 @@ class ProductRepository:
         self._session = session
 
     def _get_session(self) -> Session:
-        return self._session if self._session else Session(get_engine())
+        if self._session is not None:
+            return self._session
+        from models.db import get_engine  # noqa: PLC0415
+
+        return Session(get_engine())
 
     def get_all(self) -> list[Product]:
         """Fetch all products."""
@@ -544,32 +580,7 @@ class ProductRepository:
                 session.delete(sa)
             session.flush()
 
-            # Delete Brownfield curation artifacts
-            for approval in session.exec(
-                select(BrownfieldSpecApproval).where(
-                    BrownfieldSpecApproval.project_id == product_id
-                )
-            ).all():
-                session.delete(approval)
-            for draft_attempt in session.exec(
-                select(BrownfieldSpecDraftAttempt).where(
-                    BrownfieldSpecDraftAttempt.project_id == product_id
-                )
-            ).all():
-                session.delete(draft_attempt)
-            for scan_attempt in session.exec(
-                select(BrownfieldScanAttempt).where(
-                    BrownfieldScanAttempt.project_id == product_id
-                )
-            ).all():
-                session.delete(scan_attempt)
-            for source_artifact in session.exec(
-                select(BrownfieldSourceArtifact).where(
-                    BrownfieldSourceArtifact.project_id == product_id
-                )
-            ).all():
-                session.delete(source_artifact)
-
+            _delete_project_brownfield_rows(session, product_id)
             _delete_project_curation_rows(session, product_id)
             _delete_project_discovery_rows(session, product_id)
 

@@ -17,6 +17,7 @@ from agile_sqlmodel import (
     CompiledSpecAuthority,
     Product,
     ProductTeam,
+    SpecAuthorityAcceptance,
     SpecRegistry,
     Sprint,
     SprintStory,
@@ -26,6 +27,7 @@ from agile_sqlmodel import (
     UserStory,
 )
 from models.core import Epic, Feature, Team, Theme
+from repositories.product import ProjectDeletionConflictError
 from scripts.delete_project import delete_project, resolve_db_path
 from tests.typing_helpers import require_id
 from utils.runtime_config import RuntimeConfigError, clear_runtime_config_cache
@@ -143,8 +145,8 @@ def test_delete_project_removes_sprints_and_story_logs(tmp_path: Path) -> None:
         assert session.exec(select(Theme)).first() is None
 
 
-def test_delete_project_removes_compiled_spec_authority(tmp_path: Path) -> None:
-    """Ensure delete_project clears compiled spec authority records."""
+def test_delete_project_allows_pre_acceptance_authority_shell(tmp_path: Path) -> None:
+    """Allow script deletion before any authority has been accepted."""
     db_path = tmp_path / "delete_project_spec.db"
     engine = _create_sqlite_engine(db_path)
 
@@ -179,8 +181,70 @@ def test_delete_project_removes_compiled_spec_authority(tmp_path: Path) -> None:
     delete_project(product_id, str(db_path))
 
     with Session(engine) as session:
+        assert session.get(Product, product_id) is None
         assert session.exec(select(CompiledSpecAuthority)).first() is None
         assert session.exec(select(SpecRegistry)).first() is None
+
+
+def test_delete_project_preserves_historically_accepted_authority(
+    tmp_path: Path,
+) -> None:
+    """Refuse script deletion before mutating accepted authority evidence."""
+    db_path = tmp_path / "delete_project_accepted_authority.db"
+    engine = _create_sqlite_engine(db_path)
+
+    with Session(engine) as session:
+        product = Product(name="Accepted Authority Product")
+        session.add(product)
+        session.flush()
+        product_id = require_id(product.product_id, "product_id")
+
+        spec = SpecRegistry(
+            product_id=product_id,
+            spec_hash="accepted-spec-hash",
+            content="# Accepted spec",
+            status="approved",
+        )
+        session.add(spec)
+        session.flush()
+        spec_version_id = require_id(spec.spec_version_id, "spec_version_id")
+
+        authority = CompiledSpecAuthority(
+            spec_version_id=spec_version_id,
+            compiler_version="3.0.0",
+            prompt_hash="accepted-prompt-hash",
+            scope_themes="[]",
+            invariants="[]",
+            eligible_feature_ids="[]",
+        )
+        session.add(authority)
+        session.flush()
+        authority_id = require_id(authority.authority_id, "authority_id")
+
+        acceptance = SpecAuthorityAcceptance(
+            product_id=product_id,
+            spec_version_id=spec_version_id,
+            status="accepted",
+            policy="test",
+            decided_by="reviewer",
+            compiler_version=authority.compiler_version,
+            prompt_hash=authority.prompt_hash,
+            spec_hash=spec.spec_hash,
+            pending_authority_id=authority_id,
+        )
+        session.add(acceptance)
+        session.commit()
+        acceptance_id = require_id(acceptance.id, "acceptance_id")
+
+    with pytest.raises(ProjectDeletionConflictError) as exc_info:
+        delete_project(product_id, str(db_path))
+
+    assert exc_info.value.references == ("spec_authority_acceptance.status",)
+    with Session(engine) as session:
+        assert session.get(Product, product_id) is not None
+        assert session.get(SpecRegistry, spec_version_id) is not None
+        assert session.get(CompiledSpecAuthority, authority_id) is not None
+        assert session.get(SpecAuthorityAcceptance, acceptance_id) is not None
 
 
 def test_delete_project_removes_brownfield_artifacts(tmp_path: Path) -> None:
