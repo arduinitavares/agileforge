@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from sqlalchemy.orm import relationship
+from sqlalchemy.schema import UniqueConstraint
 from sqlalchemy.types import Text
 from sqlmodel import Field, Relationship, SQLModel
 
@@ -17,6 +18,20 @@ class SpecRegistry(SQLModel, table=True):
     """Versioned technical specification registry with approval workflow."""
 
     __tablename__ = "spec_registry"  # type: ignore[assignment]
+    __table_args__ = (
+        UniqueConstraint(
+            "product_id",
+            "spec_version_id",
+            name="uq_spec_registry_product_id",
+        ),
+        UniqueConstraint(
+            "product_id",
+            "spec_version_id",
+            "spec_hash",
+            name="uq_spec_registry_product_id_hash",
+        ),
+    )
+
     spec_version_id: int | None = Field(default=None, primary_key=True)
     product_id: int = Field(foreign_key="products.product_id", index=True)
     spec_hash: str = Field(

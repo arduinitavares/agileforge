@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 import pytest  # noqa: TC002
 from fastapi.testclient import TestClient
+from sqlalchemy import text
 from sqlmodel import create_engine
 
 import api as api_module
@@ -63,6 +64,49 @@ def test_ensure_business_db_ready_creates_brownfield_tables(tmp_path: Path) -> N
         table_names = {row[0] for row in cursor.fetchall()}
 
     assert expected_tables <= table_names
+
+
+def test_ensure_business_db_ready_creates_workflow_tables(tmp_path: Path) -> None:
+    """Verify fresh bootstrap includes durable workflow tables."""
+    db_path = tmp_path / "business_bootstrap.db"
+    engine = create_engine(
+        f"sqlite:///{db_path}",
+        connect_args={"check_same_thread": False},
+    )
+
+    ensure_business_db_ready(engine_override=engine)
+
+    with sqlite3.connect(db_path) as conn:
+        table_names = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+
+    assert {
+        "discovery_runs",
+        "prd_versions",
+        "spec_drafts",
+        "workflow_node_attempts",
+        "workflow_transition_receipts",
+    } <= table_names
+
+
+def test_production_engine_creation_enables_sqlite_foreign_keys(
+    tmp_path: Path,
+) -> None:
+    """Verify the production engine hook enables SQLite FK enforcement."""
+    db_path = tmp_path / "foreign_keys.db"
+    engine = create_engine(
+        f"sqlite:///{db_path}",
+        connect_args={"check_same_thread": False},
+    )
+
+    with engine.connect() as connection:
+        enabled = connection.execute(text("PRAGMA foreign_keys")).scalar_one()
+
+    assert enabled == 1
 
 
 def test_api_startup_bootstraps_business_db(monkeypatch: pytest.MonkeyPatch) -> None:

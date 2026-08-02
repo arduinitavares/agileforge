@@ -43,8 +43,16 @@ class Product(SQLModel, table=True):
     """A top-level product container."""
 
     __tablename__ = "products"  # type: ignore[assignment]
+    __table_args__ = (
+        CheckConstraint(
+            "origin IN ('greenfield', 'brownfield')",
+            name="ck_product_origin",
+        ),
+    )
+
     product_id: int | None = Field(default=None, primary_key=True)
     name: str = Field(index=True, unique=True)
+    origin: str = Field(default="greenfield", index=True)
     description: str | None = Field(default=None, sa_type=Text)
     vision: str | None = Field(default=None, sa_type=Text)
     roadmap: str | None = Field(default=None, sa_type=Text)

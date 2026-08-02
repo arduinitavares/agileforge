@@ -13,6 +13,7 @@ __all__ = [
     "enums",
     "events",
     "specs",
+    "workflow",
 ]
 
 
