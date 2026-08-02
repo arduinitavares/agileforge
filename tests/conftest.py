@@ -41,6 +41,21 @@ model_config.clear_config_cache()
 clear_runtime_config_cache()
 
 
+@pytest.hookimpl(tryfirst=True)
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    """Require external socket access to be excluded from the default suite."""
+    invalid_nodeids = sorted(
+        item.nodeid
+        for item in items
+        if item.get_closest_marker("enable_socket") is not None
+        and item.get_closest_marker("integration") is None
+    )
+    if invalid_nodeids:
+        nodeids = ", ".join(invalid_nodeids)
+        message = f"enable_socket requires integration: {nodeids}"
+        raise pytest.UsageError(message)
+
+
 @pytest.fixture(scope="session")
 def test_db_url() -> str:
     """Return test database URL."""
