@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import pytest
 
@@ -13,8 +13,25 @@ from utils.model_config import (
     get_story_pipeline_mode,
 )
 
-if TYPE_CHECKING:
-    from pathlib import Path
+_RUNTIME_MODEL_KEYS: tuple[str, ...] = (
+    "spec_authority_compiler",
+    "product_vision",
+    "product_roadmap",
+    "product_user_story",
+    "story_draft",
+    "spec_validator",
+    "story_refiner",
+    "invest_validator",
+    "negation_checker",
+    "backlog_primer",
+    "roadmap_builder",
+    "user_story_writer",
+    "sprint_planner",
+    "as_built_assessor",
+)
+_TEST_MODEL_CONFIG_PATH: Path = (
+    Path(__file__).resolve().parents[1] / "config" / "models.test.yaml"
+)
 
 
 @pytest.fixture
@@ -53,6 +70,36 @@ def test_model_config_path_env_overrides(
     try:
         assert get_model_id("orchestrator") == "openrouter/openai/gpt-5-mini"
         assert get_story_pipeline_mode() == "single"
+    finally:
+        model_config.clear_config_cache()
+
+
+def test_default_model_config_uses_cheapest_gpt_5_6_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Production agent roles should default to GPT-5.6 Luna."""
+    monkeypatch.delenv("MODEL_CONFIG_PATH", raising=False)
+    model_config.clear_config_cache()
+
+    try:
+        assert {get_model_id(key) for key in _RUNTIME_MODEL_KEYS} == {
+            "openrouter/openai/gpt-5.6-luna"
+        }
+    finally:
+        model_config.clear_config_cache()
+
+
+def test_test_model_config_uses_pinned_free_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """All runtime agent roles should use the pinned free model under pytest."""
+    monkeypatch.setenv("MODEL_CONFIG_PATH", str(_TEST_MODEL_CONFIG_PATH))
+    model_config.clear_config_cache()
+
+    try:
+        assert {get_model_id(key) for key in _RUNTIME_MODEL_KEYS} == {
+            "openrouter/openai/gpt-oss-20b:free"
+        }
     finally:
         model_config.clear_config_cache()
 

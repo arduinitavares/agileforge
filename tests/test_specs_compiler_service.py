@@ -3291,6 +3291,10 @@ def test_source_metadata_failure_details_include_repair_guidance(
         for command in details["suggested_commands"]
     )
     assert all(
+        "--compiler-model openrouter/openai/gpt-5.6-luna" in command
+        for command in details["suggested_commands"]
+    )
+    assert all(
         "authority-compile-retry-20260614" not in command
         for command in details["suggested_commands"]
     )
