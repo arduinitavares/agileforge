@@ -358,7 +358,7 @@ def test_lease_decision_changes_exactly_at_expiry() -> None:
 
 
 def test_root_definition_has_named_children_in_lifecycle_order() -> None:
-    """Expose the approved empty product-lifecycle hierarchy."""
+    """Expose the approved hierarchy with only Task 6 abandonment executable."""
     assert tuple(child.child_graph_id for child in ROOT_GRAPH.root.children) == (
         "onboarding",
         "authority",
@@ -368,7 +368,11 @@ def test_root_definition_has_named_children_in_lifecycle_order() -> None:
         "execution",
         "scope_extension",
     )
-    assert all(not child.nodes for child in ROOT_GRAPH.root.children)
+    onboarding, *later_children = ROOT_GRAPH.root.children
+    assert tuple(node.node_id for node in onboarding.nodes) == (
+        "onboarding.abandon_shell",
+    )
+    assert all(not child.nodes for child in later_children)
 
 
 @pytest.mark.parametrize(
