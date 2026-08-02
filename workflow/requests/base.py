@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, model_validator
 class GuardedRequest(BaseModel):
     """Transition request guarded by a previously evaluated graph position."""
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="forbid", validate_default=True)
     _is_request_scaffold: ClassVar[bool] = True
 
     kind: str

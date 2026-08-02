@@ -3,10 +3,10 @@
 from collections.abc import Mapping, MutableMapping, MutableSequence
 from datetime import UTC, datetime
 from operator import setitem
-from typing import ClassVar, Literal, cast
+from typing import Annotated, ClassVar, Literal, cast
 
 import pytest
-from pydantic import ValidationError
+from pydantic import Field, ValidationError
 
 import workflow
 import workflow.requests as workflow_requests
@@ -42,9 +42,20 @@ class ExampleRequest(PositionedRequest):
     node_id: ClassVar[str] = "test.node"
 
 
-def _request_payload(**overrides: object) -> dict[str, object]:
+class MatchingKindDefaultRequest(GuardedRequest):
+    """Concrete request with a valid closed discriminator default."""
+
+    kind: Literal["declared"] = "declared"
+
+
+class MismatchedKindDefaultRequest(GuardedRequest):
+    """Concrete request with a default outside its closed discriminator."""
+
+    kind: Annotated[Literal["declared"], Field(default="other")]
+
+
+def _guarded_request_payload(**overrides: object) -> dict[str, object]:
     payload: dict[str, object] = {
-        "kind": "test",
         "project_id": 1,
         "graph_version": GRAPH_VERSION,
         "fact_fingerprint": "sha256:facts",
@@ -52,10 +63,18 @@ def _request_payload(**overrides: object) -> dict[str, object]:
         "idempotency_key": "key-1",
         "actor": "test",
         "correlation_id": None,
-        "instance_key": None,
-        "attempt_id": None,
-        "attempt_fingerprint": None,
     }
+    payload.update(overrides)
+    return payload
+
+
+def _request_payload(**overrides: object) -> dict[str, object]:
+    payload = _guarded_request_payload(
+        kind="test",
+        instance_key=None,
+        attempt_id=None,
+        attempt_fingerprint=None,
+    )
     payload.update(overrides)
     return payload
 
@@ -140,6 +159,27 @@ def test_guarded_request_subclass_requires_one_literal_kind() -> None:
 
         class GenericStringRequest(GuardedRequest):
             kind: str = "generic_action"
+
+
+def test_guarded_request_rejects_mismatched_kind_default() -> None:
+    """Validate a concrete request's discriminator when its default is used."""
+    with pytest.raises(ValidationError):
+        MismatchedKindDefaultRequest.model_validate(_guarded_request_payload())
+
+
+def test_guarded_request_accepts_matching_kind_default() -> None:
+    """Allow a concrete request's sole literal value as its default."""
+    request = MatchingKindDefaultRequest.model_validate(_guarded_request_payload())
+
+    assert request.kind == "declared"
+
+
+def test_guarded_request_rejects_caller_supplied_mismatched_kind() -> None:
+    """Reject caller input outside a concrete request's closed discriminator."""
+    with pytest.raises(ValidationError):
+        MatchingKindDefaultRequest.model_validate(
+            _guarded_request_payload(kind="other")
+        )
 
 
 def test_positioned_request_subclass_requires_stable_node_id() -> None:
