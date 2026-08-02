@@ -967,6 +967,12 @@ class SprintPlanArtifactDecision(SQLModel, table=True):
             "sprint_plan_artifact_id",
             name="uq_sprint_plan_decision",
         ),
+        UniqueConstraint(
+            "project_id",
+            "sprint_plan_artifact_id",
+            "sprint_plan_artifact_decision_id",
+            name="uq_sprint_plan_decision_lineage",
+        ),
         CheckConstraint(
             "decision IN ('accepted', 'rejected', 'feedback')",
             name="ck_sprint_plan_decision",
@@ -994,6 +1000,50 @@ class SprintPlanArtifactDecision(SQLModel, table=True):
     reviewer: str = Field(index=True)
     idempotency_key: str = Field(index=True)
     decided_at: datetime = Field(default_factory=utc_now, nullable=False)
+
+
+class SprintStart(SQLModel, table=True):
+    """Immutable StartSprint lineage for one accepted Sprint plan."""
+
+    __tablename__ = "sprint_starts"
+    __table_args__ = (
+        UniqueConstraint("sprint_id", name="uq_sprint_start"),
+        UniqueConstraint("audit_event_id", name="uq_sprint_start_audit_event"),
+        ForeignKeyConstraint(
+            [
+                "project_id",
+                "sprint_plan_artifact_id",
+                "sprint_plan_artifact_decision_id",
+            ],
+            [
+                "sprint_plan_artifact_decisions.project_id",
+                "sprint_plan_artifact_decisions.sprint_plan_artifact_id",
+                "sprint_plan_artifact_decisions.sprint_plan_artifact_decision_id",
+            ],
+            name="fk_sprint_start_accepted_plan",
+        ),
+    )
+
+    sprint_start_id: int | None = Field(default=None, primary_key=True)
+    project_id: int = Field(foreign_key="products.product_id", index=True)
+    sprint_id: int = Field(foreign_key="sprints.sprint_id", index=True)
+    sprint_plan_artifact_id: int = Field(index=True)
+    sprint_plan_artifact_decision_id: int = Field(index=True)
+    story_dependency_review_id: int = Field(
+        foreign_key="story_dependency_reviews.story_dependency_review_id",
+        index=True,
+    )
+    plan_fingerprint: str = Field(index=True)
+    candidate_set_fingerprint: str = Field(index=True)
+    selected_story_ids_json: str = Field(sa_type=Text)
+    task_content_fingerprint: str = Field(index=True)
+    dependency_source_fingerprint: str = Field(index=True)
+    dependency_fingerprint: str = Field(index=True)
+    dependency_rows_fingerprint: str = Field(index=True)
+    decision_fingerprint: str = Field(index=True)
+    audit_event_id: int = Field(foreign_key="workflow_events.event_id", index=True)
+    started_by: str = Field(index=True)
+    started_at: datetime = Field(nullable=False)
 
 
 class TaskCompletionEvidence(SQLModel, table=True):
@@ -1074,6 +1124,7 @@ class SprintClosure(SQLModel, table=True):
     project_id: int = Field(foreign_key="products.product_id", index=True)
     sprint_id: int = Field(foreign_key="sprints.sprint_id", index=True)
     review_fingerprint: str = Field(index=True)
+    close_fingerprint: str = Field(index=True)
     closed_by: str = Field(index=True)
     closed_at: datetime = Field(nullable=False)
 

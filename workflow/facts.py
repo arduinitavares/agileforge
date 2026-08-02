@@ -282,6 +282,28 @@ class SprintFact(FrozenModel):
     completed_at: _DATETIME | None
 
 
+class SprintStartFact(FrozenModel):
+    """Immutable accepted-plan and audit lineage for one Sprint start."""
+
+    start_id: int
+    sprint_id: int
+    sprint_plan_artifact_id: int
+    sprint_plan_artifact_decision_id: int
+    story_dependency_review_id: int
+    plan_fingerprint: str
+    candidate_set_fingerprint: str
+    selected_story_ids: tuple[int, ...]
+    task_content_fingerprint: str
+    dependency_source_fingerprint: str
+    dependency_fingerprint: str
+    dependency_rows_fingerprint: str
+    decision_fingerprint: str
+    audit_event_id: int
+    audit_event_fingerprint: str
+    started_by: str
+    started_at: _DATETIME
+
+
 class StoryFact(FrozenModel):
     """Story readiness state used for sprint evaluation."""
 
@@ -356,6 +378,7 @@ class SprintClosureFact(FrozenModel):
     closure_id: int
     sprint_id: int
     review_fingerprint: str
+    close_fingerprint: str
 
 
 class PostSprintTriageFact(FrozenModel):
@@ -408,6 +431,7 @@ class WorkflowFactSnapshot(FrozenModel):
     backlog_requirements: tuple[BacklogRequirementFact, ...] = ()
     planning_artifacts: tuple[PlanningArtifactFact, ...] = ()
     sprints: tuple[SprintFact, ...] = ()
+    sprint_starts: tuple[SprintStartFact, ...] = ()
     stories: tuple[StoryFact, ...] = ()
     story_dependencies: tuple[StoryDependencyFact, ...] = ()
     story_dependency_reviews: tuple[StoryDependencyReviewFact, ...] = ()

@@ -77,9 +77,19 @@ class RecordPostSprintTriage(PositionedRequest):
 
     kind: Literal["record_post_sprint_triage"] = "record_post_sprint_triage"
     node_id: ClassVar[str] = "execution.post_sprint_triage"
+    instance_key: str
     sprint_id: int
     impact: Literal["none", "backlog", "specification"]
     canonical_payload: JsonObject
+
+    @model_validator(mode="after")
+    def validate_sprint_instance(self) -> Self:
+        """Require the instance guard to bind the exact completed Sprint."""
+        expected = f"sprint:{self.sprint_id}"
+        if self.instance_key != expected:
+            message = f"instance_key must be exactly {expected!r}."
+            raise ValueError(message)
+        return self
 
 
 CompleteTask.model_rebuild(_types_namespace={"JsonObject": JsonObject})

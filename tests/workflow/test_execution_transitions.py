@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, TypedDict, get_args
 
 import pytest
 from pydantic import TypeAdapter, ValidationError
+from sqlalchemy import event
 from sqlmodel import Session, col, select
 
 import services.agent_workbench.post_sprint_triage as triage_service
@@ -22,9 +23,12 @@ from models.workflow import (
     PostSprintTriage,
     SprintClosure,
     SprintReview,
+    SprintStart,
     StoryClosure,
     TaskCompletionEvidence,
 )
+from repositories.workflow import WorkflowFactLoadError
+from tests.workflow.execution_fixtures import seed_started_execution
 from utils.task_metadata import TaskMetadata, serialize_task_metadata
 from workflow.clock import FixedClock
 from workflow.contracts import JsonObject, NodeDecision, WorkflowErrorCode
@@ -76,6 +80,10 @@ def _domain(engine: Engine) -> WorkflowDomain:
 
 
 def _seed_active_task(engine: Engine) -> tuple[int, int, int, int]:
+    return seed_started_execution(engine)
+
+
+def _seed_unlineaged_active_task(engine: Engine) -> tuple[int, int, int, int]:
     with Session(engine) as session:
         project = Product(name="Task 12", origin="greenfield")
         team = Team(name="Task 12 Team")
@@ -171,8 +179,51 @@ def _complete_task(
         outcome_summary="Implemented execution graph.",
         artifact_refs=("workflow/definitions/execution.py",),
         acceptance_result="fully_met",
-        checklist_result={"Focused tests pass": "passed"},
+        checklist_result={"Run focused tests": "passed"},
     )
+
+
+def _complete_execution_sprint(
+    engine: Engine,
+) -> tuple[WorkflowDomain, int, int, int, int, str]:
+    project_id, sprint_id, story_id, task_id = _seed_active_task(engine)
+    domain = _domain(engine)
+    assert domain.transition(_complete_task(domain, project_id, task_id)).ok is True
+    assert domain.transition(
+        CloseStory(
+            **_guards(domain, project_id, "execution.story.close", f"story:{story_id}"),
+            instance_key=f"story:{story_id}",
+            idempotency_key="close-story",
+            story_id=story_id,
+            resolution="Completed",
+            delivered="Execution graph delivered.",
+            evidence="Focused tests pass.",
+            known_gaps="None.",
+        )
+    ).ok is True
+    review_decision = _decision(domain, project_id, "execution.sprint.review")
+    review_fingerprint = next(
+        ref.fingerprint
+        for ref in review_decision.fact_references
+        if ref.fact_type == "sprint_review"
+    )
+    assert domain.transition(
+        ReviewSprint(
+            **_guards(domain, project_id, "execution.sprint.review"),
+            idempotency_key="review-sprint",
+            sprint_id=sprint_id,
+            review_fingerprint=review_fingerprint,
+        )
+    ).ok is True
+    assert domain.transition(
+        CloseSprint(
+            **_guards(domain, project_id, "execution.sprint.close"),
+            idempotency_key="close-sprint",
+            sprint_id=sprint_id,
+            review_fingerprint=review_fingerprint,
+        )
+    ).ok is True
+    return domain, project_id, sprint_id, story_id, task_id, review_fingerprint
 
 
 def test_execution_request_union_is_closed_and_fixed() -> None:
@@ -210,8 +261,8 @@ def test_execution_requests_use_positioned_guards_without_expected_state(
     assert "expected_state" not in request_type.model_fields
 
 
-def test_task_and_story_instance_guards_are_exact() -> None:
-    """Reject Task and Story requests with mismatched instance keys."""
+def test_task_story_and_triage_instance_guards_are_exact() -> None:
+    """Reject Task, Story, and Sprint requests with mismatched instance keys."""
     common: _RequestBase = {
         "project_id": 1,
         "graph_version": "graph",
@@ -238,11 +289,23 @@ def test_task_and_story_instance_guards_are_exact() -> None:
         evidence="Tests pass.",
         known_gaps="None.",
     )
+    triage = RecordPostSprintTriage(
+        **common,
+        instance_key="sprint:11",
+        sprint_id=11,
+        impact="none",
+        canonical_payload={"summary": "No impact."},
+    )
     assert task.decision_instance_key() == "task:7"
     assert story.decision_instance_key() == "story:9"
+    assert triage.decision_instance_key() == "sprint:11"
     with pytest.raises(ValidationError):
         task.model_copy(update={"instance_key": "task:8"}).model_validate(
             {**task.model_dump(), "instance_key": "task:8"}
+        )
+    with pytest.raises(ValidationError):
+        RecordPostSprintTriage.model_validate(
+            {**triage.model_dump(), "instance_key": "sprint:12"}
         )
 
 
@@ -251,6 +314,7 @@ def test_execution_service_mutations_use_only_caller_owned_session() -> None:
     functions = (
         task_service.complete_task_in_session,
         story_service.close_story_in_session,
+        sprint_service.start_sprint_in_session,
         sprint_service.review_sprint_in_session,
         sprint_service.close_sprint_in_session,
         triage_service.record_post_sprint_triage_in_session,
@@ -259,14 +323,81 @@ def test_execution_service_mutations_use_only_caller_owned_session() -> None:
         assert "session" in inspect.signature(function).parameters
         source = inspect.getsource(function)
         tree = ast.parse(source)
+        assert "get_engine" not in source
         assert "fsm_state" not in source
         assert "active_sprint_id" not in source
         assert "latest_completed_sprint_id" not in source
         for node in ast.walk(tree):
             if isinstance(node, ast.With):
                 assert "Session(" not in ast.unparse(node)
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
-                assert node.func.attr not in {"commit", "rollback", "close"}
+            if isinstance(node, ast.Call):
+                if isinstance(node.func, ast.Attribute):
+                    assert node.func.attr not in {"commit", "rollback", "close"}
+                if isinstance(node.func, ast.Name):
+                    assert node.func.id not in {"Session", "get_engine"}
+
+
+@pytest.mark.parametrize("field", ["candidate_set_fingerprint", "plan_fingerprint"])
+def test_active_sprint_start_lineage_tamper_is_loader_invalid(
+    engine: Engine,
+    field: str,
+) -> None:
+    """Reject stale accepted-plan values in durable StartSprint lineage."""
+    project_id, _sprint_id, _story_id, _task_id = _seed_active_task(engine)
+    with Session(engine) as session:
+        start = session.exec(select(SprintStart)).one()
+        setattr(start, field, "sha256:stale-lineage")
+        session.add(start)
+        session.commit()
+
+    with pytest.raises(WorkflowFactLoadError):
+        _domain(engine).position(project_id)
+
+
+def test_cross_project_sprint_start_lineage_is_loader_invalid(engine: Engine) -> None:
+    """Reject a StartSprint row whose Project differs from its Sprint."""
+    project_id, _sprint_id, _story_id, _task_id = _seed_active_task(engine)
+    with Session(engine) as session:
+        other = Product(name="Task 12 lineage owner", origin="greenfield")
+        session.add(other)
+        session.commit()
+        assert other.product_id is not None
+        other_project_id = other.product_id
+    with engine.connect() as connection:
+        connection.exec_driver_sql("PRAGMA foreign_keys=OFF")
+        connection.exec_driver_sql(
+            "UPDATE sprint_starts SET project_id = ?",
+            (other_project_id,),
+        )
+        connection.commit()
+        connection.exec_driver_sql("PRAGMA foreign_keys=ON")
+
+    with pytest.raises(WorkflowFactLoadError):
+        _domain(engine).position(project_id)
+
+
+def test_manually_activated_sprint_is_invalid_and_exposes_no_task(
+    engine: Engine,
+) -> None:
+    """Reject an active Sprint without accepted plan and StartSprint lineage."""
+    project_id, _sprint_id, _story_id, _task_id = _seed_unlineaged_active_task(
+        engine
+    )
+
+    position = _domain(engine).position(project_id)
+    decision = next(
+        item
+        for item in position.decisions
+        if item.node_id == "execution.task.complete"
+    )
+
+    assert decision.category.value == "invalid"
+    assert decision.reason_code == "WORKFLOW_FACT_CONFLICT"
+    assert not any(
+        item.node_id == "execution.task.complete"
+        and item.category.value == "available"
+        for item in position.decisions
+    )
 
 
 def test_complete_task_persists_status_audit_and_immutable_evidence(
@@ -384,7 +515,13 @@ def test_story_review_close_and_triage_persist_distinct_facts(engine: Engine) ->
     payload: JsonObject = {"summary": "No downstream change."}
     assert domain.transition(
         RecordPostSprintTriage(
-            **_guards(domain, project_id, "execution.post_sprint_triage"),
+            **_guards(
+                domain,
+                project_id,
+                "execution.post_sprint_triage",
+                f"sprint:{sprint_id}",
+            ),
+            instance_key=f"sprint:{sprint_id}",
             idempotency_key="triage-sprint",
             sprint_id=sprint_id,
             impact="none",
@@ -487,7 +624,13 @@ def test_triage_correction_is_append_only_and_fingerprint_guarded(
         )
     ).ok
     first = RecordPostSprintTriage(
-        **_guards(domain, project_id, "execution.post_sprint_triage"),
+        **_guards(
+            domain,
+            project_id,
+            "execution.post_sprint_triage",
+            f"sprint:{sprint_id}",
+        ),
+        instance_key=f"sprint:{sprint_id}",
         idempotency_key="triage-1",
         sprint_id=sprint_id,
         impact="backlog",
@@ -496,7 +639,13 @@ def test_triage_correction_is_append_only_and_fingerprint_guarded(
     assert domain.transition(first).ok
     duplicate = domain.transition(
         RecordPostSprintTriage(
-            **_guards(domain, project_id, "execution.post_sprint_triage"),
+            **_guards(
+                domain,
+                project_id,
+                "execution.post_sprint_triage",
+                f"sprint:{sprint_id}",
+            ),
+            instance_key=f"sprint:{sprint_id}",
             idempotency_key="triage-duplicate",
             sprint_id=sprint_id,
             impact="backlog",
@@ -506,7 +655,13 @@ def test_triage_correction_is_append_only_and_fingerprint_guarded(
     assert duplicate.ok is False
     correction = domain.transition(
         RecordPostSprintTriage(
-            **_guards(domain, project_id, "execution.post_sprint_triage"),
+            **_guards(
+                domain,
+                project_id,
+                "execution.post_sprint_triage",
+                f"sprint:{sprint_id}",
+            ),
+            instance_key=f"sprint:{sprint_id}",
             idempotency_key="triage-2",
             sprint_id=sprint_id,
             impact="specification",
@@ -524,3 +679,165 @@ def test_triage_correction_is_append_only_and_fingerprint_guarded(
         assert canonical_hash(rows[0].canonical_payload_json) != canonical_hash(
             rows[1].canonical_payload_json
         )
+
+
+def test_story_closure_evidence_tamper_is_loader_invalid(engine: Engine) -> None:
+    """Bind the immutable Story closure hash to delivery evidence and gaps."""
+    project_id, _sprint_id, story_id, task_id = _seed_active_task(engine)
+    domain = _domain(engine)
+    assert domain.transition(_complete_task(domain, project_id, task_id)).ok is True
+    assert domain.transition(
+        CloseStory(
+            **_guards(domain, project_id, "execution.story.close", f"story:{story_id}"),
+            instance_key=f"story:{story_id}",
+            idempotency_key="close-story",
+            story_id=story_id,
+            resolution="Completed",
+            delivered="Original delivery evidence.",
+            evidence="Original test evidence.",
+            known_gaps="None.",
+        )
+    ).ok is True
+    with Session(engine) as session:
+        closure = session.exec(select(StoryClosure)).one()
+        closure.delivered = "Tampered after close."
+        session.add(closure)
+        session.commit()
+
+    with pytest.raises(WorkflowFactLoadError):
+        domain.position(project_id)
+
+
+@pytest.mark.parametrize("fingerprint", ["review", "close"])
+def test_post_close_stale_terminal_fingerprint_is_invalid(
+    engine: Engine,
+    fingerprint: str,
+) -> None:
+    """Recompute persisted Sprint review and close hashes before triage."""
+    domain, project_id, sprint_id, _story_id, _task_id, _review = (
+        _complete_execution_sprint(engine)
+    )
+    with Session(engine) as session:
+        review = session.exec(select(SprintReview)).one()
+        closure = session.exec(select(SprintClosure)).one()
+        if fingerprint == "review":
+            review.review_fingerprint = "sha256:stale-terminal"
+            closure.review_fingerprint = "sha256:stale-terminal"
+            session.add(review)
+        else:
+            closure.close_fingerprint = "sha256:stale-terminal"
+        session.add(closure)
+        session.commit()
+
+    position = domain.position(project_id)
+    triage = next(
+        item
+        for item in position.decisions
+        if item.node_id == "execution.post_sprint_triage"
+        and item.instance_key == f"sprint:{sprint_id}"
+    )
+    assert triage.category.value == "invalid"
+    assert triage.reason_code == "WORKFLOW_FACT_CONFLICT"
+
+
+def test_cross_project_historical_triage_is_loader_invalid(engine: Engine) -> None:
+    """Do not hide a completed Sprint triage row under another Project."""
+    domain, project_id, sprint_id, _story_id, _task_id, _review = (
+        _complete_execution_sprint(engine)
+    )
+    assert domain.transition(
+        RecordPostSprintTriage(
+            **_guards(
+                domain,
+                project_id,
+                "execution.post_sprint_triage",
+                f"sprint:{sprint_id}",
+            ),
+            instance_key=f"sprint:{sprint_id}",
+            idempotency_key="triage-cross-project",
+            sprint_id=sprint_id,
+            impact="none",
+            canonical_payload={"summary": "No downstream change."},
+        )
+    ).ok is True
+    with Session(engine) as session:
+        other = Product(name="Task 12 triage owner", origin="greenfield")
+        session.add(other)
+        session.commit()
+        assert other.product_id is not None
+        other_project_id = other.product_id
+    with engine.connect() as connection:
+        connection.exec_driver_sql("PRAGMA foreign_keys=OFF")
+        connection.exec_driver_sql(
+            "UPDATE post_sprint_triage SET project_id = ?",
+            (other_project_id,),
+        )
+        connection.commit()
+        connection.exec_driver_sql("PRAGMA foreign_keys=ON")
+
+    with pytest.raises(WorkflowFactLoadError):
+        domain.position(project_id)
+
+
+def test_reversed_repository_triage_rows_preserve_position(
+    engine: Engine,
+) -> None:
+    """Keep decisions and fingerprints stable when SQL returns triage rows reversed."""
+    domain, project_id, sprint_id, _story_id, _task_id, _review = (
+        _complete_execution_sprint(engine)
+    )
+    first = RecordPostSprintTriage(
+        **_guards(
+            domain,
+            project_id,
+            "execution.post_sprint_triage",
+            f"sprint:{sprint_id}",
+        ),
+        instance_key=f"sprint:{sprint_id}",
+        idempotency_key="triage-first",
+        sprint_id=sprint_id,
+        impact="backlog",
+        canonical_payload={"requirements": ["REQ-1"]},
+    )
+    assert domain.transition(first).ok is True
+    correction = RecordPostSprintTriage(
+        **_guards(
+            domain,
+            project_id,
+            "execution.post_sprint_triage",
+            f"sprint:{sprint_id}",
+        ),
+        instance_key=f"sprint:{sprint_id}",
+        idempotency_key="triage-correction",
+        sprint_id=sprint_id,
+        impact="specification",
+        canonical_payload={"requirements": ["REQ-1"], "reason": "Spec gap"},
+    )
+    assert domain.transition(correction).ok is True
+    baseline = domain.position(project_id)
+    reversed_queries = 0
+
+    def reverse_triage_order(
+        _connection: object,
+        _cursor: object,
+        statement: str,
+        parameters: object,
+        _context: object,
+        _executemany: bool,
+    ) -> tuple[str, object]:
+        nonlocal reversed_queries
+        marker = " ORDER BY post_sprint_triage.triage_id"
+        if "FROM post_sprint_triage" in statement and marker in statement:
+            reversed_queries += 1
+            statement = statement.replace(marker, f"{marker} DESC")
+        return statement, parameters
+
+    event.listen(engine, "before_cursor_execute", reverse_triage_order, retval=True)
+    try:
+        reversed_position = domain.position(project_id)
+    finally:
+        event.remove(engine, "before_cursor_execute", reverse_triage_order)
+
+    assert reversed_queries > 0
+    assert reversed_position.fact_fingerprint == baseline.fact_fingerprint
+    assert reversed_position.decisions == baseline.decisions

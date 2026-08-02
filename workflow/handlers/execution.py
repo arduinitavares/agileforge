@@ -80,7 +80,7 @@ def _reference(
     return matches[0] if len(matches) == 1 else None
 
 
-def _active_sprint_id(session: Session, project_id: int) -> int | None:
+def _execution_sprint_id(session: Session, project_id: int) -> int | None:
     snapshot = WorkflowFactRepository(session).load(project_id)
     active = tuple(
         item.sprint_id for item in snapshot.sprints if item.status == "active"
@@ -94,7 +94,7 @@ def _execute_complete_task(
     decision: NodeDecision,
     evaluated_at: datetime,
 ) -> TransitionResult:
-    sprint_id = _active_sprint_id(session, request.project_id)
+    sprint_id = _execution_sprint_id(session, request.project_id)
     if sprint_id is None or _reference(decision, "task", request.task_id) is None:
         return _conflict("CompleteTask does not target the selected Task fact.")
     try:
@@ -133,7 +133,7 @@ def _execute_close_story(
     decision: NodeDecision,
     evaluated_at: datetime,
 ) -> TransitionResult:
-    sprint_id = _active_sprint_id(session, request.project_id)
+    sprint_id = _execution_sprint_id(session, request.project_id)
     completion_fingerprint = _reference(
         decision,
         "story_completion",
@@ -213,7 +213,12 @@ def _execute_close_sprint(
     evaluated_at: datetime,
 ) -> TransitionResult:
     expected = _reference(decision, "sprint_review", request.sprint_id)
-    if expected is None or request.review_fingerprint != expected:
+    close_fingerprint = _reference(decision, "sprint_close", request.sprint_id)
+    if (
+        expected is None
+        or close_fingerprint is None
+        or request.review_fingerprint != expected
+    ):
         return _conflict("CloseSprint does not target the persisted review fact.")
     try:
         row = close_sprint_in_session(
@@ -222,6 +227,7 @@ def _execute_close_sprint(
                 project_id=request.project_id,
                 sprint_id=request.sprint_id,
                 review_fingerprint=request.review_fingerprint,
+                close_fingerprint=close_fingerprint,
                 closed_by=request.actor,
                 closed_at=evaluated_at,
             ),
@@ -236,6 +242,7 @@ def _execute_close_sprint(
             "sprint_id": request.sprint_id,
             "sprint_closure_id": row.sprint_closure_id,
             "review_fingerprint": row.review_fingerprint,
+            "close_fingerprint": row.close_fingerprint,
         },
     )
 

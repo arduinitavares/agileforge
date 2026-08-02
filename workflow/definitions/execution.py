@@ -15,7 +15,13 @@ from workflow.contracts import (
     RecommendationKind,
 )
 from workflow.execution_integrity import (
+    ExecutionIntegrityError,
+    StoryClosurePayload,
+    TaskEvidencePayload,
+    execution_contract,
+    sprint_close_fingerprint,
     sprint_review_fingerprint,
+    story_completion_eligibility_fingerprint,
     story_completion_fingerprint,
     task_evidence_fingerprint,
     triage_payload_fingerprint,
@@ -35,7 +41,9 @@ if TYPE_CHECKING:
 
     from workflow.facts import (
         PostSprintTriageFact,
+        SprintClosureFact,
         SprintFact,
+        SprintReviewFact,
         StoryCompletionFact,
         StoryFact,
         TaskCompletionFact,
@@ -45,6 +53,9 @@ if TYPE_CHECKING:
 
 _TERMINAL_STORY_STATUSES = frozenset({"Done", "Accepted"})
 _TERMINAL_TASK_STATUSES = frozenset({"Done", "Cancelled"})
+_SPRINT_INTEGRITY_REASONS = frozenset(
+    {"SPRINT_STORY_COMPLETION_CONFLICT", "WORKFLOW_FACT_CONFLICT"}
+)
 
 
 def _after_abandonment(
@@ -83,11 +94,23 @@ def _blocked(
 
 def _active_sprint(
     snapshot: WorkflowFactSnapshot,
+    *,
+    require_completed_history: bool = True,
 ) -> SprintFact | RuleEvaluation | None:
     active = tuple(item for item in snapshot.sprints if item.status == "active")
     if len(active) > 1:
         return RuleEvaluation(RuleCategory.INVALID, "MULTIPLE_ACTIVE_SPRINTS")
-    return active[0] if active else None
+    if not active:
+        return None
+    try:
+        execution_contract(snapshot, active[0].sprint_id)
+    except ExecutionIntegrityError:
+        return RuleEvaluation(RuleCategory.INVALID, "WORKFLOW_FACT_CONFLICT")
+    if require_completed_history:
+        history_problem = _historical_execution_problem(snapshot)
+        if history_problem is not None:
+            return history_problem
+    return active[0]
 
 
 def _completed_sprint(
@@ -166,23 +189,49 @@ def _completion_by_task(
     for item in snapshot.task_completions:
         key = (item.sprint_id, item.task_id)
         task = tasks.get(key)
-        if task is None:
-            return None, "TASK_COMPLETION_ORPHANED"
-        if key in completions:
-            return None, "TASK_COMPLETION_CONFLICT"
-        if task.status != "Done":
-            return None, "TASK_COMPLETION_STATUS_CONFLICT"
-        expected = task_evidence_fingerprint(
+        problem = _task_completion_problem(
+            snapshot,
+            item,
             task,
-            outcome_summary=item.outcome_summary,
-            artifact_refs=item.artifact_refs,
-            acceptance_result=item.acceptance_result,
-            checklist_result=item.checklist_result,
+            duplicate=key in completions,
         )
-        if expected != item.evidence_fingerprint:
-            return None, "TASK_COMPLETION_EVIDENCE_STALE"
+        if problem is not None:
+            return None, problem
         completions[key] = item
     return completions, None
+
+
+def _task_completion_problem(
+    snapshot: WorkflowFactSnapshot,
+    completion: TaskCompletionFact,
+    task: TaskFact | None,
+    *,
+    duplicate: bool,
+) -> str | None:
+    if task is None:
+        return "TASK_COMPLETION_ORPHANED"
+    if duplicate:
+        return "TASK_COMPLETION_CONFLICT"
+    if task.status != "Done":
+        return "TASK_COMPLETION_STATUS_CONFLICT"
+    try:
+        expected = task_evidence_fingerprint(
+            snapshot,
+            task,
+            evidence=TaskEvidencePayload(
+                outcome_summary=completion.outcome_summary,
+                artifact_refs=completion.artifact_refs,
+                acceptance_result=completion.acceptance_result,
+                checklist_result=completion.checklist_result,
+            ),
+        )
+    except ExecutionIntegrityError:
+        return "WORKFLOW_FACT_CONFLICT"
+    return (
+        None
+        if expected == completion.evidence_fingerprint
+        else "TASK_COMPLETION_EVIDENCE_STALE"
+    )
 
 
 def _task_metadata(task: TaskFact) -> TaskMetadata | None:
@@ -235,6 +284,25 @@ def _dependency_blockers(
         for story_id in sorted(edges.get(task.story_id, set()))
         if stories[story_id].status not in _TERMINAL_STORY_STATUSES
     )
+
+
+def _dependency_fact_problem(
+    snapshot: WorkflowFactSnapshot,
+    sprint_id: int,
+    stories: dict[int, StoryFact],
+    edges: dict[int, set[int]],
+) -> RuleEvaluation | None:
+    for task in sorted(snapshot.tasks, key=lambda item: (item.sprint_id, item.task_id)):
+        if task.sprint_id != sprint_id:
+            continue
+        expected = not _dependency_blockers(task, stories, edges)
+        if task.dependencies_satisfied != expected:
+            return RuleEvaluation(
+                RuleCategory.INVALID,
+                "TASK_DEPENDENCY_FACT_CONFLICT",
+                instance_key=f"task:{task.task_id}",
+            )
+    return None
 
 
 def _task_candidate_rule(
@@ -342,6 +410,14 @@ def _task_rule(
                 dependency_error or "WORKFLOW_FACT_CONFLICT",
             ),
         )
+    dependency_fact_problem = _dependency_fact_problem(
+        snapshot,
+        active.sprint_id,
+        stories,
+        edges,
+    )
+    if dependency_fact_problem is not None:
+        return (dependency_fact_problem,)
     _completions, task_error = _task_integrity(snapshot, active.sprint_id)
     if task_error is not None:
         result = (task_error,)
@@ -424,16 +500,72 @@ def _story_rule(
     if isinstance(active, RuleEvaluation):
         return (active,)
     if active is None:
-        if any(item.status == "completed" for item in snapshot.sprints):
-            return (
-                RuleEvaluation(RuleCategory.SATISFIED, "SPRINT_EXECUTION_COMPLETE"),
-            )
+        return _story_without_active_sprint(snapshot)
+    return _active_story_rule(snapshot, active)
+
+
+def _story_without_active_sprint(
+    snapshot: WorkflowFactSnapshot,
+) -> tuple[RuleEvaluation, ...]:
+    if any(item.status == "completed" for item in snapshot.sprints):
         return (
-            _blocked(
-                "ACTIVE_SPRINT_REQUIRED",
-                "Story close requires an active Sprint.",
+            RuleEvaluation(RuleCategory.SATISFIED, "SPRINT_EXECUTION_COMPLETE"),
+        )
+    return (
+        _blocked(
+            "ACTIVE_SPRINT_REQUIRED",
+            "Story close requires an active Sprint.",
+        ),
+    )
+
+
+def _expected_story_completion(
+    snapshot: WorkflowFactSnapshot,
+    sprint_id: int,
+    story_id: int,
+    closures: list[StoryCompletionFact],
+) -> str:
+    if len(closures) != 1:
+        return story_completion_eligibility_fingerprint(
+            snapshot,
+            sprint_id=sprint_id,
+            story_id=story_id,
+        )
+    closure = closures[0]
+    return story_completion_fingerprint(
+        snapshot,
+        sprint_id=sprint_id,
+        story_id=story_id,
+        closure=StoryClosurePayload(
+            resolution=closure.resolution,
+            delivered=closure.delivered,
+            evidence=closure.evidence,
+            known_gaps=closure.known_gaps,
+        ),
+    )
+
+
+def _active_story_rule(
+    snapshot: WorkflowFactSnapshot,
+    active: SprintFact,
+) -> tuple[RuleEvaluation, ...]:
+    stories = _story_by_id(snapshot)
+    edges, dependency_error = _active_dependencies(snapshot)
+    if stories is None or edges is None:
+        return (
+            RuleEvaluation(
+                RuleCategory.INVALID,
+                dependency_error or "WORKFLOW_FACT_CONFLICT",
             ),
         )
+    dependency_fact_problem = _dependency_fact_problem(
+        snapshot,
+        active.sprint_id,
+        stories,
+        edges,
+    )
+    if dependency_fact_problem is not None:
+        return (dependency_fact_problem,)
     completions, task_error = _task_integrity(snapshot, active.sprint_id)
     if task_error is not None or completions is None:
         return (
@@ -457,11 +589,17 @@ def _story_rule(
             if item.sprint_id == active.sprint_id and item.story_id == story.story_id
         )
         closures = closure_by_story.get(story.story_id, [])
-        expected = story_completion_fingerprint(
-            story,
-            tasks,
-            tuple(completions.values()),
-        )
+        try:
+            expected = _expected_story_completion(
+                snapshot,
+                active.sprint_id,
+                story.story_id,
+                closures,
+            )
+        except ExecutionIntegrityError:
+            return (
+                RuleEvaluation(RuleCategory.INVALID, "WORKFLOW_FACT_CONFLICT"),
+            )
         evaluation = _story_evaluation(story, tasks, closures, expected)
         if evaluation is not None:
             evaluations.append(evaluation)
@@ -479,13 +617,96 @@ def _sprint_ready(
         return None, "SPRINT_STORIES_REQUIRED"
     if any(item.status not in _TERMINAL_STORY_STATUSES for item in attached):
         return None, "SPRINT_STORIES_NOT_TERMINAL"
-    closure_by_story: dict[int, list[object]] = {}
+    completion_problem = _terminal_completion_problem(
+        snapshot,
+        sprint_id,
+        attached,
+    )
+    if completion_problem is not None:
+        return None, completion_problem
+    try:
+        return sprint_review_fingerprint(snapshot, sprint_id), None
+    except ExecutionIntegrityError:
+        return None, "WORKFLOW_FACT_CONFLICT"
+
+
+def _terminal_completion_problem(
+    snapshot: WorkflowFactSnapshot,
+    sprint_id: int,
+    attached: tuple[StoryFact, ...],
+) -> str | None:
+    _completions, task_error = _task_integrity(snapshot, sprint_id)
+    if task_error is not None:
+        return "WORKFLOW_FACT_CONFLICT"
+    closure_by_story: dict[int, list[StoryCompletionFact]] = {}
     for item in snapshot.story_completions:
         if item.sprint_id == sprint_id:
             closure_by_story.setdefault(item.story_id, []).append(item)
-    if any(len(closure_by_story.get(item.story_id, [])) != 1 for item in attached):
-        return None, "SPRINT_STORY_COMPLETION_CONFLICT"
-    return sprint_review_fingerprint(snapshot, sprint_id), None
+    attached_ids = {item.story_id for item in attached}
+    if set(closure_by_story) != attached_ids or any(
+        len(closure_by_story[item.story_id]) != 1 for item in attached
+    ):
+        return "SPRINT_STORY_COMPLETION_CONFLICT"
+    for story in attached:
+        tasks = tuple(
+            item
+            for item in snapshot.tasks
+            if item.sprint_id == sprint_id and item.story_id == story.story_id
+        )
+        if not tasks or any(
+            item.status not in _TERMINAL_TASK_STATUSES for item in tasks
+        ):
+            return "WORKFLOW_FACT_CONFLICT"
+        closures = closure_by_story[story.story_id]
+        try:
+            expected = _expected_story_completion(
+                snapshot,
+                sprint_id,
+                story.story_id,
+                closures,
+            )
+        except ExecutionIntegrityError:
+            return "WORKFLOW_FACT_CONFLICT"
+        if closures[0].completion_fingerprint != expected:
+            return "WORKFLOW_FACT_CONFLICT"
+    return None
+
+
+def _terminal_sprint_facts(
+    snapshot: WorkflowFactSnapshot,
+    sprint_id: int,
+) -> tuple[SprintReviewFact | None, SprintClosureFact | None, str | None]:
+    expected_review, error = _sprint_ready(snapshot, sprint_id)
+    if error is not None or expected_review is None:
+        return None, None, error or "SPRINT_TERMINAL_FACT_CONFLICT"
+    reviews = tuple(
+        item for item in snapshot.sprint_reviews if item.sprint_id == sprint_id
+    )
+    closures = tuple(
+        item for item in snapshot.sprint_closures if item.sprint_id == sprint_id
+    )
+    if len(reviews) != 1 or len(closures) != 1:
+        return None, None, "SPRINT_TERMINAL_FACT_CONFLICT"
+    review = reviews[0]
+    closure = closures[0]
+    expected_close = sprint_close_fingerprint(
+        snapshot,
+        sprint_id,
+        expected_review,
+    )
+    if (
+        review.review_fingerprint != expected_review
+        or closure.review_fingerprint != expected_review
+        or closure.close_fingerprint != expected_close
+    ):
+        return None, None, "SPRINT_TERMINAL_FACT_CONFLICT"
+    return review, closure, None
+
+
+def _sprint_readiness_evaluation(reason: str, message: str) -> RuleEvaluation:
+    if reason in _SPRINT_INTEGRITY_REASONS:
+        return RuleEvaluation(RuleCategory.INVALID, reason)
+    return _blocked(reason, message)
 
 
 def _sprint_review_rule(
@@ -500,7 +721,7 @@ def _sprint_review_rule(
     expected, error = _sprint_ready(snapshot, active.sprint_id)
     if error is not None or expected is None:
         return (
-            _blocked(
+            _sprint_readiness_evaluation(
                 error or "SPRINT_NOT_REVIEWABLE",
                 "Sprint Stories are not ready for review.",
             ),
@@ -540,21 +761,11 @@ def _completed_sprint_close_rule(
                 "Sprint close requires an active Sprint.",
             ),
         )
-    reviews = tuple(
-        item
-        for item in snapshot.sprint_reviews
-        if item.sprint_id == completed.sprint_id
+    _review, _closure, error = _terminal_sprint_facts(
+        snapshot,
+        completed.sprint_id,
     )
-    closures = tuple(
-        item
-        for item in snapshot.sprint_closures
-        if item.sprint_id == completed.sprint_id
-    )
-    if (
-        len(reviews) != 1
-        or len(closures) != 1
-        or closures[0].review_fingerprint != reviews[0].review_fingerprint
-    ):
+    if error is not None:
         return (
             RuleEvaluation(RuleCategory.INVALID, "SPRINT_TERMINAL_FACT_CONFLICT"),
         )
@@ -573,7 +784,7 @@ def _sprint_close_rule(
     expected, error = _sprint_ready(snapshot, active.sprint_id)
     if error is not None or expected is None:
         result = (
-            _blocked(
+            _sprint_readiness_evaluation(
                 error or "SPRINT_NOT_CLOSABLE",
                 "Sprint Stories are not terminal.",
             ),
@@ -602,6 +813,11 @@ def _sprint_close_rule(
                 RuleEvaluation(RuleCategory.INVALID, "SPRINT_CLOSE_STATUS_CONFLICT"),
             )
         else:
+            close_fingerprint = sprint_close_fingerprint(
+                snapshot,
+                active.sprint_id,
+                expected,
+            )
             result = (
                 RuleEvaluation(
                     RuleCategory.AVAILABLE,
@@ -618,6 +834,11 @@ def _sprint_close_rule(
                             fact_type="sprint_review",
                             fact_id=str(active.sprint_id),
                             fingerprint=expected,
+                        ),
+                        FactReference(
+                            fact_type="sprint_close",
+                            fact_id=str(active.sprint_id),
+                            fingerprint=close_fingerprint,
                         ),
                     ),
                 ),
@@ -683,26 +904,67 @@ def _current_triage(
     return by_id[current_id], None
 
 
+def _historical_execution_problem(
+    snapshot: WorkflowFactSnapshot,
+) -> RuleEvaluation | None:
+    completed = tuple(
+        item for item in snapshot.sprints if item.status == "completed"
+    )
+    if any(item.completed_at is None for item in completed):
+        return RuleEvaluation(RuleCategory.INVALID, "SPRINT_COMPLETION_TIME_MISSING")
+    for sprint in sorted(
+        completed,
+        key=lambda item: (item.completed_at, item.sprint_id),
+    ):
+        _review, _closure, terminal_error = _terminal_sprint_facts(
+            snapshot,
+            sprint.sprint_id,
+        )
+        if terminal_error is not None:
+            return RuleEvaluation(
+                RuleCategory.INVALID,
+                "WORKFLOW_FACT_CONFLICT",
+                instance_key=f"sprint:{sprint.sprint_id}",
+            )
+        rows = tuple(
+            item
+            for item in snapshot.post_sprint_triage
+            if item.sprint_id == sprint.sprint_id
+        )
+        current, triage_error = _current_triage(rows)
+        if triage_error is not None:
+            return RuleEvaluation(
+                RuleCategory.INVALID,
+                triage_error,
+                instance_key=f"sprint:{sprint.sprint_id}",
+            )
+        if current is None:
+            return _blocked(
+                "POST_SPRINT_TRIAGE_REQUIRED",
+                "Earlier completed Sprint triage must be recorded first.",
+                instance_key=f"sprint:{sprint.sprint_id}",
+            )
+    return None
+
+
 def _completed_sprint_triage_rule(
     snapshot: WorkflowFactSnapshot,
     completed: SprintFact,
+    *,
+    correction: bool,
 ) -> tuple[RuleEvaluation, ...]:
-    reviews = tuple(
-        item
-        for item in snapshot.sprint_reviews
-        if item.sprint_id == completed.sprint_id
+    _review, closure, terminal_error = _terminal_sprint_facts(
+        snapshot,
+        completed.sprint_id,
     )
-    closures = tuple(
-        item
-        for item in snapshot.sprint_closures
-        if item.sprint_id == completed.sprint_id
-    )
-    if (
-        len(reviews) != 1
-        or len(closures) != 1
-        or closures[0].review_fingerprint != reviews[0].review_fingerprint
-    ):
-        return (RuleEvaluation(RuleCategory.INVALID, "SPRINT_TERMINAL_FACT_CONFLICT"),)
+    if terminal_error is not None or closure is None:
+        return (
+            RuleEvaluation(
+                RuleCategory.INVALID,
+                "WORKFLOW_FACT_CONFLICT",
+                instance_key=f"sprint:{completed.sprint_id}",
+            ),
+        )
     rows = tuple(
         item
         for item in snapshot.post_sprint_triage
@@ -710,24 +972,40 @@ def _completed_sprint_triage_rule(
     )
     current, error = _current_triage(rows)
     if error is not None:
-        return (RuleEvaluation(RuleCategory.INVALID, error),)
+        return (
+            RuleEvaluation(
+                RuleCategory.INVALID,
+                error,
+                instance_key=f"sprint:{completed.sprint_id}",
+            ),
+        )
     closure_reference = FactReference(
         fact_type="sprint_closure",
         fact_id=str(completed.sprint_id),
-        fingerprint=closures[0].review_fingerprint,
+        fingerprint=closure.close_fingerprint,
     )
     if current is None:
         return (
             RuleEvaluation(
                 RuleCategory.AVAILABLE,
                 "POST_SPRINT_TRIAGE_REQUIRED",
+                instance_key=f"sprint:{completed.sprint_id}",
                 fact_references=(closure_reference,),
+            ),
+        )
+    if not correction:
+        return (
+            RuleEvaluation(
+                RuleCategory.SATISFIED,
+                "POST_SPRINT_TRIAGE_RECORDED",
+                instance_key=f"sprint:{completed.sprint_id}",
             ),
         )
     return (
         RuleEvaluation(
             RuleCategory.AVAILABLE,
             "POST_SPRINT_TRIAGE_CORRECTION_AVAILABLE",
+            instance_key=f"sprint:{completed.sprint_id}",
             fact_references=(
                 closure_reference,
                 FactReference(
@@ -745,22 +1023,65 @@ def _triage_rule(
     snapshot: WorkflowFactSnapshot,
     _evaluated_at: datetime,
 ) -> tuple[RuleEvaluation, ...]:
-    active = _active_sprint(snapshot)
+    active = _active_sprint(snapshot, require_completed_history=False)
     if isinstance(active, RuleEvaluation):
-        return (active,)
-    if active is not None:
-        return (RuleEvaluation(RuleCategory.SATISFIED, "SPRINT_STILL_ACTIVE"),)
-    completed = _completed_sprint(snapshot)
-    if isinstance(completed, RuleEvaluation):
-        return (completed,)
-    if completed is None:
+        result = (active,)
+    else:
+        completed = tuple(
+            item for item in snapshot.sprints if item.status == "completed"
+        )
+        result = _triage_for_completed_history(snapshot, active, completed)
+    return result
+
+
+def _triage_for_completed_history(
+    snapshot: WorkflowFactSnapshot,
+    active: SprintFact | None,
+    completed: tuple[SprintFact, ...],
+) -> tuple[RuleEvaluation, ...]:
+    completed_with_time = tuple(
+        (item.completed_at, item)
+        for item in completed
+        if item.completed_at is not None
+    )
+    if len(completed_with_time) != len(completed):
+        return (
+            RuleEvaluation(RuleCategory.INVALID, "SPRINT_COMPLETION_TIME_MISSING"),
+        )
+    if not completed:
+        if active is not None:
+            return (RuleEvaluation(RuleCategory.SATISFIED, "SPRINT_STILL_ACTIVE"),)
         return (
             _blocked(
                 "COMPLETED_SPRINT_REQUIRED",
                 "Triage requires a completed Sprint.",
             ),
         )
-    return _completed_sprint_triage_rule(snapshot, completed)
+    ordered = tuple(
+        item
+        for _completed_at, item in sorted(
+            completed_with_time,
+            key=lambda entry: (entry[0], entry[1].sprint_id),
+        )
+    )
+    for sprint in ordered:
+        evaluation = _completed_sprint_triage_rule(
+            snapshot,
+            sprint,
+            correction=False,
+        )[0]
+        if (
+            evaluation.category is RuleCategory.INVALID
+            or evaluation.reason_code == "POST_SPRINT_TRIAGE_REQUIRED"
+        ):
+            return (evaluation,)
+    if active is not None:
+        return (RuleEvaluation(RuleCategory.SATISFIED, "SPRINT_STILL_ACTIVE"),)
+    return _completed_sprint_triage_rule(
+        snapshot,
+        ordered[-1],
+        correction=True,
+    )
 
 
 EXECUTION_NODES: tuple[NodeSpec, ...] = (
@@ -840,6 +1161,7 @@ def execution_graph() -> WorkflowGraph:
 __all__ = [
     "EXECUTION_NODES",
     "execution_graph",
+    "sprint_close_fingerprint",
     "sprint_review_fingerprint",
     "story_completion_fingerprint",
     "task_evidence_fingerprint",

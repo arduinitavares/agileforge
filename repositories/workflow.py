@@ -42,6 +42,7 @@ from models.workflow import (
     SprintPlanArtifact,
     SprintPlanArtifactDecision,
     SprintReview,
+    SprintStart,
     StoryArtifact,
     StoryArtifactDecision,
     StoryClosure,
@@ -60,6 +61,11 @@ from utils.spec_schemas import SpecAuthorityCompilationSuccess
 from utils.task_metadata import TaskMetadata, serialize_task_metadata
 from workflow.contracts import JsonValue
 from workflow.execution_integrity import (
+    ExecutionIntegrityError,
+    SprintStartAudit,
+    StoryClosurePayload,
+    TaskEvidencePayload,
+    sprint_start_audit_metadata,
     story_completion_fingerprint,
     task_evidence_fingerprint,
     triage_payload_fingerprint,
@@ -88,6 +94,7 @@ from workflow.facts import (
     SprintClosureFact,
     SprintFact,
     SprintReviewFact,
+    SprintStartFact,
     StoryCompletionFact,
     StoryDependencyFact,
     StoryDependencyReviewEdgeFact,
@@ -288,17 +295,56 @@ class WorkflowFactRepository:
             frozenset(item.sprint_id for item in sprints),
         )
         story_dependencies = self._story_dependencies(project_id)
+        story_dependency_reviews = self._story_dependency_reviews(
+            project_id,
+            stories,
+        )
         tasks = self._tasks(
             project_id,
             frozenset(item.sprint_id for item in sprints),
             stories,
         )
-        task_completions = self._task_completions(project_id, tasks)
+        sprint_starts = self._sprint_starts(
+            project_id,
+            sprints,
+            planning_load.facts,
+            story_dependency_reviews,
+        )
+        execution_snapshot = WorkflowFactSnapshot(
+            project=project,
+            review_decisions=planning_load.reviews,
+            planning_artifacts=planning_load.facts,
+            sprints=sprints,
+            sprint_starts=sprint_starts,
+            stories=stories,
+            story_dependencies=story_dependencies,
+            story_dependency_reviews=story_dependency_reviews,
+            tasks=tasks,
+        )
+        task_completions = self._task_completions(
+            project_id,
+            execution_snapshot,
+        )
+        execution_snapshot = execution_snapshot.model_copy(
+            update={"task_completions": task_completions}
+        )
         story_completions = self._story_completions(
             project_id,
-            stories,
-            tasks,
-            task_completions,
+            execution_snapshot,
+        )
+        execution_snapshot = execution_snapshot.model_copy(
+            update={"story_completions": story_completions}
+        )
+        sprint_reviews = self._sprint_reviews(
+            project_id,
+            sprints,
+        )
+        execution_snapshot = execution_snapshot.model_copy(
+            update={"sprint_reviews": sprint_reviews}
+        )
+        sprint_closures = self._sprint_closures(
+            project_id,
+            sprints,
         )
 
         return WorkflowFactSnapshot(
@@ -367,17 +413,15 @@ class WorkflowFactRepository:
             ),
             planning_artifacts=planning_load.facts,
             sprints=sprints,
+            sprint_starts=sprint_starts,
             stories=stories,
             story_dependencies=story_dependencies,
-            story_dependency_reviews=self._story_dependency_reviews(
-                project_id,
-                stories,
-            ),
+            story_dependency_reviews=story_dependency_reviews,
             tasks=tasks,
             task_completions=task_completions,
             story_completions=story_completions,
-            sprint_reviews=self._sprint_reviews(project_id, sprints),
-            sprint_closures=self._sprint_closures(project_id, sprints),
+            sprint_reviews=sprint_reviews,
+            sprint_closures=sprint_closures,
             post_sprint_triage=self._post_sprint_triage(project_id, sprints),
             node_attempts=self._node_attempts(project_id),
         )
@@ -2024,6 +2068,157 @@ class WorkflowFactRepository:
             )
         return tuple(facts)
 
+    def _sprint_starts(
+        self,
+        project_id: int,
+        sprints: tuple[SprintFact, ...],
+        planning_artifacts: tuple[PlanningArtifactFact, ...],
+        dependency_reviews: tuple[StoryDependencyReviewFact, ...],
+    ) -> tuple[SprintStartFact, ...]:
+        sprint_ids = frozenset(item.sprint_id for item in sprints)
+        linked_rows = (
+            self._session.exec(
+                select(SprintStart)
+                .where(col(SprintStart.sprint_id).in_(sprint_ids))
+                .order_by(col(SprintStart.sprint_start_id)),
+                execution_options=self._query_options(),
+            ).all()
+            if sprint_ids
+            else []
+        )
+        if any(row.project_id != project_id for row in linked_rows):
+            message = "Sprint start lineage crosses Project ownership."
+            raise self._error(message)
+        rows = self._session.exec(
+            select(SprintStart)
+            .where(col(SprintStart.project_id) == project_id)
+            .order_by(col(SprintStart.sprint_start_id)),
+            execution_options=self._query_options(),
+        ).all()
+        plans = {
+            item.artifact_id: item
+            for item in planning_artifacts
+            if item.artifact_type == "sprint_plan"
+        }
+        reviews = {item.review_id: item for item in dependency_reviews}
+        facts: list[SprintStartFact] = []
+        for row in rows:
+            self._require_member(row.sprint_id, sprint_ids, "Sprint start")
+            sprint = self._session.get(Sprint, row.sprint_id)
+            plan = plans.get(row.sprint_plan_artifact_id)
+            decision = self._session.get(
+                SprintPlanArtifactDecision,
+                row.sprint_plan_artifact_decision_id,
+            )
+            dependency_review = reviews.get(row.story_dependency_review_id)
+            dependency_review_row = self._session.get(
+                StoryDependencyReview,
+                row.story_dependency_review_id,
+            )
+            event = self._session.get(WorkflowEvent, row.audit_event_id)
+            try:
+                selected_story_ids = tuple(
+                    _INT_LIST.validate_json(row.selected_story_ids_json)
+                )
+            except ValidationError as exc:
+                message = "Sprint start selected Story IDs are invalid."
+                raise self._error(message) from exc
+            if (
+                selected_story_ids != tuple(sorted(set(selected_story_ids)))
+                or canonical_json(list(selected_story_ids))
+                != row.selected_story_ids_json
+            ):
+                message = "Sprint start selected Story IDs are not canonical."
+                raise self._error(message)
+            if (
+                sprint is None
+                or sprint.product_id != project_id
+                or sprint.status not in {SprintStatus.ACTIVE, SprintStatus.COMPLETED}
+                or sprint.started_at != row.started_at
+                or plan is None
+                or plan.status != "accepted"
+                or plan.sprint_id != row.sprint_id
+                or plan.artifact_fingerprint != row.plan_fingerprint
+                or plan.candidate_set_fingerprint
+                != row.candidate_set_fingerprint
+                or plan.story_ids != selected_story_ids
+                or plan.task_content_fingerprint != row.task_content_fingerprint
+                or decision is None
+                or decision.project_id != project_id
+                or decision.sprint_plan_artifact_id
+                != row.sprint_plan_artifact_id
+                or decision.plan_fingerprint != row.plan_fingerprint
+                or decision.decision != "accepted"
+                or dependency_review is None
+                or dependency_review_row is None
+                or dependency_review_row.project_id != project_id
+                or dependency_review.source_fingerprint
+                != row.dependency_source_fingerprint
+                or dependency_review.dependency_fingerprint
+                != row.dependency_fingerprint
+                or event is None
+                or event.event_type is not WorkflowEventType.SPRINT_STARTED
+                or event.product_id != project_id
+                or event.sprint_id != row.sprint_id
+                or event.timestamp != row.started_at
+                or event.session_id is not None
+                or event.duration_seconds != 0.0
+                or event.event_metadata is None
+            ):
+                message = "Sprint start accepted-plan or audit lineage changed."
+                raise self._error(message)
+            expected_metadata = sprint_start_audit_metadata(
+                SprintStartAudit(
+                    sprint_id=row.sprint_id,
+                    team_id=sprint.team_id,
+                    sprint_plan_artifact_id=row.sprint_plan_artifact_id,
+                    sprint_plan_artifact_decision_id=(
+                        row.sprint_plan_artifact_decision_id
+                    ),
+                    story_dependency_review_id=row.story_dependency_review_id,
+                    plan_fingerprint=row.plan_fingerprint,
+                    candidate_set_fingerprint=row.candidate_set_fingerprint,
+                    selected_story_ids=selected_story_ids,
+                    task_content_fingerprint=row.task_content_fingerprint,
+                    dependency_source_fingerprint=(
+                        row.dependency_source_fingerprint
+                    ),
+                    dependency_fingerprint=row.dependency_fingerprint,
+                    dependency_rows_fingerprint=row.dependency_rows_fingerprint,
+                    decision_fingerprint=row.decision_fingerprint,
+                    started_by=row.started_by,
+                )
+            )
+            if event.event_metadata != canonical_json(expected_metadata):
+                message = "Sprint start audit metadata changed."
+                raise self._error(message)
+            facts.append(
+                SprintStartFact(
+                    start_id=self._required_id(row.sprint_start_id, "Sprint start"),
+                    sprint_id=row.sprint_id,
+                    sprint_plan_artifact_id=row.sprint_plan_artifact_id,
+                    sprint_plan_artifact_decision_id=(
+                        row.sprint_plan_artifact_decision_id
+                    ),
+                    story_dependency_review_id=row.story_dependency_review_id,
+                    plan_fingerprint=row.plan_fingerprint,
+                    candidate_set_fingerprint=row.candidate_set_fingerprint,
+                    selected_story_ids=selected_story_ids,
+                    task_content_fingerprint=row.task_content_fingerprint,
+                    dependency_source_fingerprint=(
+                        row.dependency_source_fingerprint
+                    ),
+                    dependency_fingerprint=row.dependency_fingerprint,
+                    dependency_rows_fingerprint=row.dependency_rows_fingerprint,
+                    decision_fingerprint=row.decision_fingerprint,
+                    audit_event_id=row.audit_event_id,
+                    audit_event_fingerprint=canonical_hash(expected_metadata),
+                    started_by=row.started_by,
+                    started_at=row.started_at,
+                )
+            )
+        return tuple(facts)
+
     def _accepted_story_artifacts(
         self,
         planning_artifacts: tuple[PlanningArtifactFact, ...],
@@ -2390,7 +2585,7 @@ class WorkflowFactRepository:
     def _task_completions(
         self,
         project_id: int,
-        tasks: tuple[TaskFact, ...],
+        snapshot: WorkflowFactSnapshot,
     ) -> tuple[TaskCompletionFact, ...]:
         rows = self._session.exec(
             select(TaskCompletionEvidence)
@@ -2398,7 +2593,9 @@ class WorkflowFactRepository:
             .order_by(col(TaskCompletionEvidence.task_completion_evidence_id)),
             execution_options=self._query_options(),
         ).all()
-        tasks_by_key = {(item.sprint_id, item.task_id): item for item in tasks}
+        tasks_by_key = {
+            (item.sprint_id, item.task_id): item for item in snapshot.tasks
+        }
         facts: list[TaskCompletionFact] = []
         for row in rows:
             key = (row.sprint_id, row.task_id)
@@ -2439,13 +2636,20 @@ class WorkflowFactRepository:
                     "evidence_fingerprint": row.evidence_fingerprint,
                 }
             )
-            expected = task_evidence_fingerprint(
-                task,
-                outcome_summary=fact.outcome_summary,
-                artifact_refs=fact.artifact_refs,
-                acceptance_result=fact.acceptance_result,
-                checklist_result=fact.checklist_result,
-            )
+            try:
+                expected = task_evidence_fingerprint(
+                    snapshot,
+                    task,
+                    evidence=TaskEvidencePayload(
+                        outcome_summary=fact.outcome_summary,
+                        artifact_refs=fact.artifact_refs,
+                        acceptance_result=fact.acceptance_result,
+                        checklist_result=fact.checklist_result,
+                    ),
+                )
+            except ExecutionIntegrityError as exc:
+                message = "Task completion execution contract changed."
+                raise self._error(message) from exc
             if expected != fact.evidence_fingerprint:
                 message = "Task completion evidence fingerprint changed."
                 raise self._error(message)
@@ -2455,9 +2659,7 @@ class WorkflowFactRepository:
     def _story_completions(
         self,
         project_id: int,
-        stories: tuple[StoryFact, ...],
-        tasks: tuple[TaskFact, ...],
-        task_completions: tuple[TaskCompletionFact, ...],
+        snapshot: WorkflowFactSnapshot,
     ) -> tuple[StoryCompletionFact, ...]:
         rows = self._session.exec(
             select(StoryClosure)
@@ -2465,14 +2667,28 @@ class WorkflowFactRepository:
             .order_by(col(StoryClosure.story_closure_id)),
             execution_options=self._query_options(),
         ).all()
-        stories_by_id = {item.story_id: item for item in stories}
+        stories_by_id = {item.story_id: item for item in snapshot.stories}
         facts: list[StoryCompletionFact] = []
         for row in rows:
             story = stories_by_id.get(row.story_id)
             if story is None or row.sprint_id not in story.sprint_ids:
                 message = "Story closure targets a cross-Project Sprint Story."
                 raise self._error(message)
-            expected = story_completion_fingerprint(story, tasks, task_completions)
+            try:
+                expected = story_completion_fingerprint(
+                    snapshot,
+                    sprint_id=row.sprint_id,
+                    story_id=row.story_id,
+                    closure=StoryClosurePayload(
+                        resolution=row.resolution,
+                        delivered=row.delivered,
+                        evidence=row.evidence,
+                        known_gaps=row.known_gaps,
+                    ),
+                )
+            except ExecutionIntegrityError as exc:
+                message = "Story closure execution contract changed."
+                raise self._error(message) from exc
             if expected != row.completion_fingerprint:
                 message = "Story closure fingerprint changed."
                 raise self._error(message)
@@ -2499,6 +2715,19 @@ class WorkflowFactRepository:
         sprints: tuple[SprintFact, ...],
     ) -> tuple[SprintReviewFact, ...]:
         sprint_ids = frozenset(item.sprint_id for item in sprints)
+        linked_rows = (
+            self._session.exec(
+                select(SprintReview)
+                .where(col(SprintReview.sprint_id).in_(sprint_ids))
+                .order_by(col(SprintReview.sprint_review_id)),
+                execution_options=self._query_options(),
+            ).all()
+            if sprint_ids
+            else []
+        )
+        if any(row.project_id != project_id for row in linked_rows):
+            message = "Sprint review crosses Project ownership."
+            raise self._error(message)
         rows = self._session.exec(
             select(SprintReview)
             .where(col(SprintReview.project_id) == project_id)
@@ -2524,6 +2753,22 @@ class WorkflowFactRepository:
         sprints: tuple[SprintFact, ...],
     ) -> tuple[SprintClosureFact, ...]:
         sprint_ids = frozenset(item.sprint_id for item in sprints)
+        completed_ids = frozenset(
+            item.sprint_id for item in sprints if item.status == "completed"
+        )
+        linked_rows = (
+            self._session.exec(
+                select(SprintClosure)
+                .where(col(SprintClosure.sprint_id).in_(sprint_ids))
+                .order_by(col(SprintClosure.sprint_closure_id)),
+                execution_options=self._query_options(),
+            ).all()
+            if sprint_ids
+            else []
+        )
+        if any(row.project_id != project_id for row in linked_rows):
+            message = "Sprint closure crosses Project ownership."
+            raise self._error(message)
         rows = self._session.exec(
             select(SprintClosure)
             .where(col(SprintClosure.project_id) == project_id)
@@ -2535,10 +2780,11 @@ class WorkflowFactRepository:
                 closure_id=self._required_id(row.sprint_closure_id, "sprint closure"),
                 sprint_id=self._required_member_id(
                     row.sprint_id,
-                    sprint_ids,
+                    completed_ids,
                     "sprint closure",
                 ),
                 review_fingerprint=row.review_fingerprint,
+                close_fingerprint=row.close_fingerprint,
             )
             for row in rows
         )
@@ -2549,6 +2795,22 @@ class WorkflowFactRepository:
         sprints: tuple[SprintFact, ...],
     ) -> tuple[PostSprintTriageFact, ...]:
         sprint_ids = frozenset(item.sprint_id for item in sprints)
+        completed_ids = frozenset(
+            item.sprint_id for item in sprints if item.status == "completed"
+        )
+        linked_rows = (
+            self._session.exec(
+                select(PostSprintTriage)
+                .where(col(PostSprintTriage.sprint_id).in_(sprint_ids))
+                .order_by(col(PostSprintTriage.triage_id)),
+                execution_options=self._query_options(),
+            ).all()
+            if sprint_ids
+            else []
+        )
+        if any(row.project_id != project_id for row in linked_rows):
+            message = "Post-sprint triage crosses Project ownership."
+            raise self._error(message)
         rows = self._session.exec(
             select(PostSprintTriage)
             .where(col(PostSprintTriage.project_id) == project_id)
@@ -2556,18 +2818,21 @@ class WorkflowFactRepository:
             execution_options=self._query_options(),
         ).all()
         facts: list[PostSprintTriageFact] = []
-        row_ids = {
-            self._required_id(row.triage_id, "post-sprint triage") for row in rows
+        rows_by_id = {
+            self._required_id(row.triage_id, "post-sprint triage"): row
+            for row in rows
         }
         for row in rows:
             triage_id = self._required_id(row.triage_id, "post-sprint triage")
-            self._require_member(row.sprint_id, sprint_ids, "post-sprint triage")
-            if (
-                row.supersedes_triage_id is not None
-                and row.supersedes_triage_id not in row_ids
-            ):
-                message = "Post-sprint triage correction parent is missing."
-                raise self._error(message)
+            self._require_member(row.sprint_id, completed_ids, "post-sprint triage")
+            if row.supersedes_triage_id is not None:
+                parent = rows_by_id.get(row.supersedes_triage_id)
+                if parent is None:
+                    message = "Post-sprint triage correction parent is missing."
+                    raise self._error(message)
+                if parent.sprint_id != row.sprint_id:
+                    message = "Post-sprint triage correction crosses Sprints."
+                    raise self._error(message)
             try:
                 payload = _JSON_OBJECT.validate_json(row.canonical_payload_json)
             except ValidationError as exc:
@@ -2593,7 +2858,7 @@ class WorkflowFactRepository:
                     }
                 )
             )
-        return tuple(facts)
+        return tuple(sorted(facts, key=lambda item: item.triage_id))
 
     def _node_attempts(self, project_id: int) -> tuple[NodeAttemptFact, ...]:
         attempts = self._session.exec(

@@ -31,6 +31,7 @@ from models.workflow import (
     SprintPlanArtifact,
     SprintPlanArtifactDecision,
     SprintReview,
+    SprintStart,
 )
 from orchestrator_agent.agent_tools.sprint_planner_tool.schemes import (
     SprintPlannerOutput,
@@ -107,7 +108,12 @@ from utils.task_metadata import (
     parse_task_metadata,
     serialize_task_metadata,
 )
-from workflow.execution_integrity import sprint_review_fingerprint
+from workflow.execution_integrity import (
+    SprintStartAudit,
+    sprint_close_fingerprint,
+    sprint_review_fingerprint,
+    sprint_start_audit_metadata,
+)
 from workflow.fingerprints import canonical_json
 
 if TYPE_CHECKING:
@@ -535,46 +541,133 @@ def record_sprint_plan_decision_in_session(
     return row
 
 
+@dataclass(frozen=True)
+class SprintStartInput:
+    """Exact accepted planning and audit facts for one Sprint start."""
+
+    project_id: int
+    sprint_id: int
+    sprint_plan_artifact_id: int
+    sprint_plan_artifact_decision_id: int
+    story_dependency_review_id: int
+    plan_fingerprint: str
+    candidate_set_fingerprint: str
+    selected_story_ids: tuple[int, ...]
+    task_content_fingerprint: str
+    dependency_source_fingerprint: str
+    dependency_fingerprint: str
+    dependency_rows_fingerprint: str
+    decision_fingerprint: str
+    started_by: str
+    started_at: datetime
+
+
 def start_sprint_in_session(
     session: Session,
-    *,
-    project_id: int,
-    sprint_id: int,
-    started_at: datetime,
+    command: SprintStartInput,
 ) -> Sprint:
     """Start one planned Sprint without consulting routing state."""
-    sprint = session.get(Sprint, sprint_id)
-    if sprint is None or sprint.product_id != project_id:
+    sprint = session.get(Sprint, command.sprint_id)
+    plan = session.get(SprintPlanArtifact, command.sprint_plan_artifact_id)
+    plan_decision = session.get(
+        SprintPlanArtifactDecision,
+        command.sprint_plan_artifact_decision_id,
+    )
+    if sprint is None or sprint.product_id != command.project_id:
         message = "Sprint start does not target an exact Project Sprint."
+        raise ValueError(message)
+    if (
+        plan is None
+        or plan.project_id != command.project_id
+        or plan.sprint_id != command.sprint_id
+        or plan.plan_fingerprint != command.plan_fingerprint
+        or plan.candidate_set_fingerprint != command.candidate_set_fingerprint
+        or plan_decision is None
+        or plan_decision.project_id != command.project_id
+        or plan_decision.sprint_plan_artifact_id
+        != command.sprint_plan_artifact_id
+        or plan_decision.plan_fingerprint != command.plan_fingerprint
+        or plan_decision.decision != "accepted"
+    ):
+        message = "Sprint start does not match an exact accepted Sprint plan."
         raise ValueError(message)
     if sprint.status is not SprintStatus.PLANNED or sprint.started_at is not None:
         message = "Only an unstarted planned Sprint can start."
         raise ValueError(message)
     other_active = session.exec(
         select(Sprint).where(
-            Sprint.product_id == project_id,
+            Sprint.product_id == command.project_id,
             Sprint.status == SprintStatus.ACTIVE,
-            Sprint.sprint_id != sprint_id,
+            Sprint.sprint_id != command.sprint_id,
         )
     ).first()
     if other_active is not None:
         message = "Another Sprint is already active for this Project."
         raise ValueError(message)
+    existing = session.exec(
+        select(SprintStart).where(SprintStart.sprint_id == command.sprint_id)
+    ).one_or_none()
+    if existing is not None:
+        message = "Sprint start lineage is immutable."
+        raise ValueError(message)
+    metadata = sprint_start_audit_metadata(
+        SprintStartAudit(
+            sprint_id=command.sprint_id,
+            team_id=sprint.team_id,
+            sprint_plan_artifact_id=command.sprint_plan_artifact_id,
+            sprint_plan_artifact_decision_id=(
+                command.sprint_plan_artifact_decision_id
+            ),
+            story_dependency_review_id=command.story_dependency_review_id,
+            plan_fingerprint=command.plan_fingerprint,
+            candidate_set_fingerprint=command.candidate_set_fingerprint,
+            selected_story_ids=command.selected_story_ids,
+            task_content_fingerprint=command.task_content_fingerprint,
+            dependency_source_fingerprint=command.dependency_source_fingerprint,
+            dependency_fingerprint=command.dependency_fingerprint,
+            dependency_rows_fingerprint=command.dependency_rows_fingerprint,
+            decision_fingerprint=command.decision_fingerprint,
+            started_by=command.started_by,
+        )
+    )
+    event = WorkflowEvent(
+        event_type=WorkflowEventType.SPRINT_STARTED,
+        timestamp=command.started_at,
+        product_id=command.project_id,
+        sprint_id=command.sprint_id,
+        session_id=None,
+        event_metadata=canonical_json(metadata),
+        duration_seconds=0.0,
+    )
+    session.add(event)
+    session.flush()
+    if event.event_id is None:
+        message = "Sprint start audit event has no durable identity."
+        raise ValueError(message)
     sprint.status = SprintStatus.ACTIVE
-    sprint.started_at = started_at
-    sprint.updated_at = started_at
+    sprint.started_at = command.started_at
+    sprint.updated_at = command.started_at
     session.add(sprint)
     session.add(
-        WorkflowEvent(
-            event_type=WorkflowEventType.SPRINT_STARTED,
-            timestamp=started_at,
-            product_id=project_id,
-            sprint_id=sprint_id,
-            session_id=None,
-            event_metadata=canonical_json(
-                {"action": "sprint_started", "team_id": sprint.team_id}
+        SprintStart(
+            project_id=command.project_id,
+            sprint_id=command.sprint_id,
+            sprint_plan_artifact_id=command.sprint_plan_artifact_id,
+            sprint_plan_artifact_decision_id=(
+                command.sprint_plan_artifact_decision_id
             ),
-            duration_seconds=0.0,
+            story_dependency_review_id=command.story_dependency_review_id,
+            plan_fingerprint=command.plan_fingerprint,
+            candidate_set_fingerprint=command.candidate_set_fingerprint,
+            selected_story_ids_json=canonical_json(list(command.selected_story_ids)),
+            task_content_fingerprint=command.task_content_fingerprint,
+            dependency_source_fingerprint=command.dependency_source_fingerprint,
+            dependency_fingerprint=command.dependency_fingerprint,
+            dependency_rows_fingerprint=command.dependency_rows_fingerprint,
+            decision_fingerprint=command.decision_fingerprint,
+            audit_event_id=event.event_id,
+            started_by=command.started_by,
+            started_at=command.started_at,
         )
     )
     session.flush()
@@ -599,6 +692,7 @@ class SprintCloseInput:
     project_id: int
     sprint_id: int
     review_fingerprint: str
+    close_fingerprint: str
     closed_by: str
     closed_at: datetime
 
@@ -682,6 +776,14 @@ def close_sprint_in_session(
     ):
         message = "Sprint facts changed after review."
         raise ValueError(message)
+    expected_close = sprint_close_fingerprint(
+        snapshot,
+        command.sprint_id,
+        command.review_fingerprint,
+    )
+    if command.close_fingerprint != expected_close:
+        message = "Sprint close fingerprint is stale."
+        raise ValueError(message)
     existing = session.exec(
         select(SprintClosure).where(col(SprintClosure.sprint_id) == command.sprint_id)
     ).one_or_none()
@@ -696,6 +798,7 @@ def close_sprint_in_session(
         project_id=command.project_id,
         sprint_id=command.sprint_id,
         review_fingerprint=command.review_fingerprint,
+        close_fingerprint=command.close_fingerprint,
         closed_by=command.closed_by,
         closed_at=command.closed_at,
     )
@@ -711,6 +814,7 @@ def close_sprint_in_session(
                 {
                     "action": "sprint_closed",
                     "review_fingerprint": command.review_fingerprint,
+                    "close_fingerprint": command.close_fingerprint,
                 }
             ),
             duration_seconds=0.0,

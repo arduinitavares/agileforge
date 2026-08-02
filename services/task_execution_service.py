@@ -23,10 +23,14 @@ from models.core import Sprint, SprintStory, Task, UserStory
 from models.enums import TaskAcceptanceResult, TaskStatus
 from models.events import TaskExecutionLog
 from models.workflow import TaskCompletionEvidence
+from repositories.workflow import WorkflowFactRepository
 from utils.api_schemas import TaskExecutionLogEntry
 from utils.task_metadata import TaskMetadata
-from workflow.execution_integrity import task_evidence_fingerprint
-from workflow.facts import TaskFact
+from workflow.execution_integrity import (
+    ExecutionIntegrityError,
+    TaskEvidencePayload,
+    task_evidence_fingerprint,
+)
 from workflow.fingerprints import canonical_json
 
 
@@ -378,22 +382,33 @@ def complete_task_in_session(
     if existing is not None:
         message = "Task completion evidence is immutable."
         raise TaskExecutionServiceError(message, status_code=409)
-    task_fact = TaskFact(
-        task_id=command.task_id,
-        sprint_id=command.sprint_id,
-        story_id=task.story_id,
-        description=task.description,
-        metadata_json=task.metadata_json or "",
-        status=TaskStatus.DONE.value,
-        dependencies_satisfied=True,
+    snapshot = WorkflowFactRepository(session).load(command.project_id)
+    current_task = next(
+        (
+            item
+            for item in snapshot.tasks
+            if item.sprint_id == command.sprint_id
+            and item.task_id == command.task_id
+        ),
+        None,
     )
-    evidence_fingerprint = task_evidence_fingerprint(
-        task_fact,
-        outcome_summary=normalized_outcome,
-        artifact_refs=normalized_refs,
-        acceptance_result=command.acceptance_result,
-        checklist_result=command.checklist_result,
-    )
+    if current_task is None or not current_task.dependencies_satisfied:
+        message = "Task dependency facts do not permit completion."
+        raise TaskExecutionServiceError(message, status_code=409)
+    task_fact = current_task.model_copy(update={"status": TaskStatus.DONE.value})
+    try:
+        evidence_fingerprint = task_evidence_fingerprint(
+            snapshot,
+            task_fact,
+            evidence=TaskEvidencePayload(
+                outcome_summary=normalized_outcome,
+                artifact_refs=normalized_refs,
+                acceptance_result=command.acceptance_result,
+                checklist_result=command.checklist_result,
+            ),
+        )
+    except ExecutionIntegrityError as error:
+        raise TaskExecutionServiceError(str(error), status_code=409) from error
     old_status = task.status
     task.status = TaskStatus.DONE
     task.updated_at = command.completed_at

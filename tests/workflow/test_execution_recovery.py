@@ -6,20 +6,22 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, NoReturn
 
 import pytest
-from sqlmodel import Session, col, select
+from sqlmodel import Session, SQLModel, col, create_engine, select
 
 import workflow.handlers.execution as execution_handlers
-from models.core import Product, Sprint, SprintStory, Task, Team, UserStory
-from models.enums import SprintStatus, StoryStatus, TaskStatus
+from models.core import Task
+from models.enums import TaskStatus
 from models.events import TaskExecutionLog
 from models.workflow import TaskCompletionEvidence, WorkflowTransitionReceipt
-from utils.task_metadata import TaskMetadata, serialize_task_metadata
+from tests.workflow.execution_fixtures import seed_started_execution
 from workflow.clock import FixedClock
 from workflow.definitions.execution import execution_graph
 from workflow.domain import WorkflowDomain
 from workflow.requests import CompleteTask
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from sqlalchemy.engine import Engine
 
     from services.task_execution_service import TaskCompletionInput
@@ -33,49 +35,8 @@ class _InterruptedAfterFlushError(RuntimeError):
 
 
 def _seed(engine: Engine) -> tuple[int, int]:
-    with Session(engine) as session:
-        project = Product(name="Task 12 recovery", origin="greenfield")
-        team = Team(name="Task 12 recovery team")
-        session.add(project)
-        session.add(team)
-        session.flush()
-        assert project.product_id is not None
-        assert team.team_id is not None
-        sprint = Sprint(
-            product_id=project.product_id,
-            team_id=team.team_id,
-            status=SprintStatus.ACTIVE,
-            started_at=EVALUATED_AT,
-        )
-        story = UserStory(
-            product_id=project.product_id,
-            title="Recover transition",
-            status=StoryStatus.TO_DO,
-            is_refined=True,
-            story_points=1,
-            rank="1.1",
-        )
-        session.add(sprint)
-        session.add(story)
-        session.flush()
-        assert sprint.sprint_id is not None
-        assert story.story_id is not None
-        session.add(SprintStory(sprint_id=sprint.sprint_id, story_id=story.story_id))
-        task = Task(
-            story_id=story.story_id,
-            description="Flush then recover",
-            metadata_json=serialize_task_metadata(
-                TaskMetadata(
-                    task_kind="testing",
-                    checklist_items=["Recovery test passes"],
-                )
-            ),
-            status=TaskStatus.IN_PROGRESS,
-        )
-        session.add(task)
-        session.commit()
-        assert task.task_id is not None
-        return project.product_id, task.task_id
+    project_id, _sprint_id, _story_id, task_id = seed_started_execution(engine)
+    return project_id, task_id
 
 
 def _domain(engine: Engine) -> WorkflowDomain:
@@ -84,6 +45,15 @@ def _domain(engine: Engine) -> WorkflowDomain:
         graph=execution_graph(),
         clock=FixedClock(now_value=EVALUATED_AT),
     )
+
+
+def _file_engine(path: Path) -> Engine:
+    engine = create_engine(
+        f"sqlite:///{path.as_posix()}",
+        connect_args={"check_same_thread": False},
+    )
+    SQLModel.metadata.create_all(engine)
+    return engine
 
 
 def _request(domain: WorkflowDomain, project_id: int, task_id: int) -> CompleteTask:
@@ -105,9 +75,9 @@ def _request(domain: WorkflowDomain, project_id: int, task_id: int) -> CompleteT
         actor="operator@example.com",
         task_id=task_id,
         outcome_summary="Recovered completion.",
-        artifact_refs=(),
+        artifact_refs=("planning workflow handler",),
         acceptance_result="fully_met",
-        checklist_result={"Recovery test passes": "passed"},
+        checklist_result={"Run focused tests": "passed"},
     )
 
 
@@ -178,4 +148,59 @@ def test_interrupted_retry_succeeds_once_and_replays_once(
     with Session(engine) as session:
         assert len(session.exec(select(TaskCompletionEvidence)).all()) == 1
         assert len(session.exec(select(TaskExecutionLog)).all()) == 1
-        assert len(session.exec(select(WorkflowTransitionReceipt)).all()) == 1
+        receipts = session.exec(
+            select(WorkflowTransitionReceipt).where(
+                col(WorkflowTransitionReceipt.idempotency_key)
+                == "interrupted-completion"
+            )
+        ).all()
+        assert len(receipts) == 1
+
+
+def test_process_restart_recovers_identical_position_retry_and_replay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Recover exact position and one retry after all dependencies restart."""
+    first_engine = _file_engine(tmp_path / "execution-restart.db")
+    project_id, task_id = _seed(first_engine)
+    first_domain = _domain(first_engine)
+    before = first_domain.position(project_id)
+    request = _request(first_domain, project_id, task_id)
+    original = execution_handlers.complete_task_in_session
+
+    def interrupt(
+        _session: Session,
+        _command: TaskCompletionInput,
+    ) -> NoReturn:
+        raise _InterruptedAfterFlushError
+
+    monkeypatch.setattr(execution_handlers, "complete_task_in_session", interrupt)
+    with pytest.raises(_InterruptedAfterFlushError):
+        first_domain.transition(request)
+    first_engine.dispose()
+
+    restarted_engine = _file_engine(tmp_path / "execution-restart.db")
+    restarted_domain = _domain(restarted_engine)
+    recovered = restarted_domain.position(project_id)
+    assert recovered.fact_fingerprint == before.fact_fingerprint
+    assert recovered.decisions == before.decisions
+
+    monkeypatch.setattr(execution_handlers, "complete_task_in_session", original)
+    applied = restarted_domain.transition(request)
+    replay = restarted_domain.transition(request)
+    assert applied.ok is True
+    assert replay.ok is True
+    assert replay.replayed is True
+    assert replay.output == applied.output
+    with Session(restarted_engine) as session:
+        assert len(session.exec(select(TaskCompletionEvidence)).all()) == 1
+        assert len(session.exec(select(TaskExecutionLog)).all()) == 1
+        receipts = session.exec(
+            select(WorkflowTransitionReceipt).where(
+                col(WorkflowTransitionReceipt.idempotency_key)
+                == "interrupted-completion"
+            )
+        ).all()
+        assert len(receipts) == 1
+    restarted_engine.dispose()

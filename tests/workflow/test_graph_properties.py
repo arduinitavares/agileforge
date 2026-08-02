@@ -39,6 +39,7 @@ from workflow.facts import (
     SprintClosureFact,
     SprintFact,
     SprintReviewFact,
+    SprintStartFact,
     StoryCompletionFact,
     StoryDependencyFact,
     StoryDependencyReviewFact,
@@ -291,6 +292,30 @@ AUTHORITATIVE_SNAPSHOT_VARIANTS: tuple[tuple[str, object], ...] = (
         ),
     ),
     (
+        "sprint_starts",
+        (
+            SprintStartFact(
+                start_id=13,
+                sprint_id=12,
+                sprint_plan_artifact_id=14,
+                sprint_plan_artifact_decision_id=15,
+                story_dependency_review_id=16,
+                plan_fingerprint="sha256:sprint-plan",
+                candidate_set_fingerprint="sha256:candidates",
+                selected_story_ids=(13,),
+                task_content_fingerprint="sha256:tasks",
+                dependency_source_fingerprint="sha256:story-source",
+                dependency_fingerprint="sha256:dependencies",
+                dependency_rows_fingerprint="sha256:dependency-rows",
+                decision_fingerprint="sha256:start-decision",
+                audit_event_id=17,
+                audit_event_fingerprint="sha256:start-audit",
+                started_by="reviewer",
+                started_at=EVALUATED_AT,
+            ),
+        ),
+    ),
+    (
         "stories",
         (
             StoryFact(
@@ -391,6 +416,7 @@ AUTHORITATIVE_SNAPSHOT_VARIANTS: tuple[tuple[str, object], ...] = (
                 closure_id=20,
                 sprint_id=12,
                 review_fingerprint="sha256:sprint-review",
+                close_fingerprint="sha256:sprint-close",
             ),
         ),
     ),

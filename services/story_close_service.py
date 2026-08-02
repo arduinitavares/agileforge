@@ -15,7 +15,11 @@ from models.events import StoryCompletionLog
 from models.workflow import StoryClosure, TaskCompletionEvidence
 from repositories.workflow import WorkflowFactRepository
 from utils.api_schemas import StoryTaskProgressSummary
-from workflow.execution_integrity import story_completion_fingerprint
+from workflow.execution_integrity import (
+    StoryClosurePayload,
+    story_completion_eligibility_fingerprint,
+    story_completion_fingerprint,
+)
 from workflow.fingerprints import canonical_json
 
 if TYPE_CHECKING:
@@ -370,24 +374,12 @@ def close_story_in_session(
         raise StoryCloseServiceError(message, status_code=409)
     if story.status in {StoryStatus.DONE, StoryStatus.ACCEPTED}:
         raise StoryCloseServiceError.already_closed(story.status)
-    _tasks, done_ids = _terminal_story_tasks(session, command)
+    _tasks, _done_ids = _terminal_story_tasks(session, command)
     snapshot = WorkflowFactRepository(session).load(command.project_id)
-    story_fact = next(
-        item for item in snapshot.stories if item.story_id == command.story_id
-    )
-    expected = story_completion_fingerprint(
-        story_fact,
-        tuple(
-            item
-            for item in snapshot.tasks
-            if item.sprint_id == command.sprint_id
-            and item.story_id == command.story_id
-        ),
-        tuple(
-            item
-            for item in snapshot.task_completions
-            if item.sprint_id == command.sprint_id and item.task_id in done_ids
-        ),
+    expected = story_completion_eligibility_fingerprint(
+        snapshot,
+        sprint_id=command.sprint_id,
+        story_id=command.story_id,
     )
     if command.completion_fingerprint != expected:
         message = "Story completion fingerprint is stale."
@@ -406,6 +398,17 @@ def close_story_in_session(
     if existing is not None:
         message = "Story closure is immutable."
         raise StoryCloseServiceError(message, status_code=409)
+    persisted_fingerprint = story_completion_fingerprint(
+        snapshot,
+        sprint_id=command.sprint_id,
+        story_id=command.story_id,
+        closure=StoryClosurePayload(
+            resolution=command.resolution,
+            delivered=command.delivered,
+            evidence=command.evidence,
+            known_gaps=command.known_gaps,
+        ),
+    )
     old_status = story.status
     story.status = StoryStatus.DONE
     story.resolution = normalized_resolution
@@ -416,7 +419,7 @@ def close_story_in_session(
         project_id=command.project_id,
         sprint_id=command.sprint_id,
         story_id=command.story_id,
-        completion_fingerprint=command.completion_fingerprint,
+        completion_fingerprint=persisted_fingerprint,
         resolution=command.resolution,
         delivered=command.delivered,
         evidence=command.evidence,
