@@ -1,8 +1,25 @@
 """Transactional workflow transition handlers."""
 
+from workflow.handlers.onboarding import (
+    execute_decide_initial_spec_draft,
+    execute_decide_prd,
+    execute_record_challenge_artifact,
+    execute_record_initial_spec_draft,
+    execute_record_prd_version,
+    execute_register_initial_scope,
+)
 from workflow.handlers.project_shell import (
     execute_abandon_project_shell,
     execute_open_project_shell,
 )
 
-__all__ = ["execute_abandon_project_shell", "execute_open_project_shell"]
+__all__ = [
+    "execute_abandon_project_shell",
+    "execute_decide_initial_spec_draft",
+    "execute_decide_prd",
+    "execute_open_project_shell",
+    "execute_record_challenge_artifact",
+    "execute_record_initial_spec_draft",
+    "execute_record_prd_version",
+    "execute_register_initial_scope",
+]

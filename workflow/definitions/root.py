@@ -8,6 +8,7 @@ from workflow.contracts import (
     InputField,
     RecommendationKind,
 )
+from workflow.definitions.onboarding import GREENFIELD_ONBOARDING_NODES
 from workflow.facts import WorkflowFactSnapshot
 from workflow.graph import (
     ChildGraphSpec,
@@ -71,7 +72,10 @@ ROOT_GRAPH: WorkflowGraph = WorkflowGraph(
         child_graph_id="product_lifecycle",
         nodes=(),
         children=(
-            ChildGraphSpec(child_graph_id="onboarding", nodes=(_ABANDON_SHELL_NODE,)),
+            ChildGraphSpec(
+                child_graph_id="onboarding",
+                nodes=(*GREENFIELD_ONBOARDING_NODES, _ABANDON_SHELL_NODE),
+            ),
             ChildGraphSpec(child_graph_id="authority", nodes=()),
             ChildGraphSpec(child_graph_id="vision", nodes=()),
             ChildGraphSpec(child_graph_id="backlog", nodes=()),

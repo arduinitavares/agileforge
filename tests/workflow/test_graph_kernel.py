@@ -358,7 +358,7 @@ def test_lease_decision_changes_exactly_at_expiry() -> None:
 
 
 def test_root_definition_has_named_children_in_lifecycle_order() -> None:
-    """Expose the approved hierarchy with only Task 6 abandonment executable."""
+    """Expose the approved hierarchy and ordered Task 7 onboarding path."""
     assert tuple(child.child_graph_id for child in ROOT_GRAPH.root.children) == (
         "onboarding",
         "authority",
@@ -370,6 +370,12 @@ def test_root_definition_has_named_children_in_lifecycle_order() -> None:
     )
     onboarding, *later_children = ROOT_GRAPH.root.children
     assert tuple(node.node_id for node in onboarding.nodes) == (
+        "onboarding.greenfield.challenge",
+        "onboarding.greenfield.prd",
+        "onboarding.greenfield.prd_review",
+        "onboarding.greenfield.initial_spec",
+        "onboarding.greenfield.initial_spec_review",
+        "onboarding.initial_scope_registration",
         "onboarding.abandon_shell",
     )
     assert all(not child.nodes for child in later_children)

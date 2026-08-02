@@ -22,11 +22,23 @@ from workflow.contracts import (
 from workflow.fingerprints import canonical_hash, canonical_json
 from workflow.handlers import (
     execute_abandon_project_shell,
+    execute_decide_initial_spec_draft,
+    execute_decide_prd,
     execute_open_project_shell,
+    execute_record_challenge_artifact,
+    execute_record_initial_spec_draft,
+    execute_record_prd_version,
+    execute_register_initial_scope,
 )
 from workflow.requests import (
     AbandonProjectShell,
+    DecideInitialSpecDraft,
+    DecidePrd,
     OpenProjectShell,
+    RecordChallengeArtifact,
+    RecordInitialSpecDraft,
+    RecordPrdVersion,
+    RegisterInitialScope,
     TransitionRequest,
 )
 
@@ -42,6 +54,16 @@ if TYPE_CHECKING:
 
 _SQLITE_BUSY_TIMEOUT_MS = 1_000
 _SQLITE_LOCK_MESSAGES = ("database is locked", "database table is locked")
+
+type _PositionedTransitionRequest = (
+    AbandonProjectShell
+    | RecordChallengeArtifact
+    | RecordPrdVersion
+    | DecidePrd
+    | RecordInitialSpecDraft
+    | DecideInitialSpecDraft
+    | RegisterInitialScope
+)
 
 
 @dataclass(frozen=True)
@@ -198,14 +220,12 @@ class WorkflowDomain:
                 self._graph,
                 evaluated_at,
             )
-        if isinstance(request, AbandonProjectShell):
-            return self._execute_positioned(session, request, evaluated_at)
-        assert_never(request)
+        return self._execute_positioned(session, request, evaluated_at)
 
     def _execute_positioned(
         self,
         session: Session,
-        request: AbandonProjectShell,
+        request: _PositionedTransitionRequest,
         evaluated_at: datetime,
     ) -> TransitionResult:
         """Re-derive and guard a positioned request before handler dispatch."""
@@ -221,12 +241,57 @@ class WorkflowDomain:
         if isinstance(decision_or_failure, TransitionResult):
             return decision_or_failure
 
-        result = execute_abandon_project_shell(
-            session,
-            request,
-            decision_or_failure,
-            evaluated_at,
-        )
+        if isinstance(request, AbandonProjectShell):
+            result = execute_abandon_project_shell(
+                session,
+                request,
+                decision_or_failure,
+                evaluated_at,
+            )
+        elif isinstance(request, RecordChallengeArtifact):
+            result = execute_record_challenge_artifact(
+                session,
+                request,
+                decision_or_failure,
+                evaluated_at,
+            )
+        elif isinstance(request, RecordPrdVersion):
+            result = execute_record_prd_version(
+                session,
+                request,
+                decision_or_failure,
+                evaluated_at,
+            )
+        elif isinstance(request, DecidePrd):
+            result = execute_decide_prd(
+                session,
+                request,
+                decision_or_failure,
+                evaluated_at,
+            )
+        elif isinstance(request, RecordInitialSpecDraft):
+            result = execute_record_initial_spec_draft(
+                session,
+                request,
+                decision_or_failure,
+                evaluated_at,
+            )
+        elif isinstance(request, DecideInitialSpecDraft):
+            result = execute_decide_initial_spec_draft(
+                session,
+                request,
+                decision_or_failure,
+                evaluated_at,
+            )
+        elif isinstance(request, RegisterInitialScope):
+            result = execute_register_initial_scope(
+                session,
+                request,
+                decision_or_failure,
+                evaluated_at,
+            )
+        else:
+            assert_never(request)
         position = self._position_in_session(
             session,
             request.project_id,

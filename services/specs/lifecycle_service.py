@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import re
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -21,6 +23,7 @@ from services.specs.compiler_service import (
     _resolve_update_spec_and_compile_authority,
     update_spec_and_compile_authority,
 )
+from workflow.fingerprints import canonical_hash, canonical_json
 
 if TYPE_CHECKING:
     from google.adk.tools import ToolContext
@@ -51,8 +54,7 @@ class SaveProjectSpecificationInput(BaseModel):
     product_id: int = Field(description="ID of project to attach specification to")
     spec_source: str = Field(
         description=(
-            'Source type: "file" (load from file path) '
-            'or "text" (pasted content)'
+            'Source type: "file" (load from file path) or "text" (pasted content)'
         )
     )
     content: str = Field(
@@ -83,6 +85,18 @@ class ApproveSpecVersionInput(BaseModel):
         default=None,
         description="Review notes or justification",
     )
+
+
+@dataclass(frozen=True)
+class ApprovedCanonicalSpec:
+    """Inputs for an approved canonical spec inserted by a domain transaction."""
+
+    product_id: int
+    canonical_content_json: str
+    content_ref: str | None
+    approved_at: datetime
+    approved_by: str
+    approval_notes: str
 
 
 def _normalize_input_params(params: object) -> dict[str, Any]:
@@ -203,8 +217,7 @@ def _load_spec_text_from_file(path_str: str) -> tuple[str, float] | dict[str, An
         return {
             "success": False,
             "error": (
-                f"File too large ({file_size_kb:.1f}KB). "
-                f"Maximum: {_MAX_SPEC_SIZE_KB}KB"
+                f"File too large ({file_size_kb:.1f}KB). Maximum: {_MAX_SPEC_SIZE_KB}KB"
             ),
         }
 
@@ -273,6 +286,35 @@ def _resolve_spec_storage(
         return saved
     spec_path, file_size_kb = saved
     return parsed.content, spec_path, file_size_kb, True
+
+
+def register_approved_spec_from_canonical_json(
+    session: Session,
+    approved: ApprovedCanonicalSpec,
+) -> SpecRegistry:
+    """Insert an approved spec from canonical JSON in a caller-owned transaction."""
+    parsed_content = json.loads(approved.canonical_content_json)
+    if not isinstance(parsed_content, dict):
+        msg = "Stored initial specification content must be a JSON object."
+        raise TypeError(msg)
+    if canonical_json(parsed_content) != approved.canonical_content_json:
+        msg = "Stored initial specification content is not canonical JSON."
+        raise ValueError(msg)
+
+    spec = SpecRegistry(
+        product_id=approved.product_id,
+        spec_hash=canonical_hash(parsed_content),
+        content=approved.canonical_content_json,
+        content_ref=approved.content_ref,
+        status="approved",
+        created_at=approved.approved_at,
+        approved_at=approved.approved_at,
+        approved_by=approved.approved_by,
+        approval_notes=approved.approval_notes,
+    )
+    session.add(spec)
+    session.flush()
+    return spec
 
 
 def register_spec_version(
@@ -376,8 +418,7 @@ def link_spec_to_product(
         return {
             "success": False,
             "error": (
-                f"File too large ({file_size_kb:.1f}KB). "
-                f"Maximum: {_MAX_SPEC_SIZE_KB}KB"
+                f"File too large ({file_size_kb:.1f}KB). Maximum: {_MAX_SPEC_SIZE_KB}KB"
             ),
         }
 
@@ -625,6 +666,7 @@ def read_project_specification(
 
 __all__ = [
     "ApproveSpecVersionInput",
+    "ApprovedCanonicalSpec",
     "LinkSpecToProductInput",
     "ReadProjectSpecificationInput",
     "RegisterSpecVersionInput",
@@ -634,6 +676,7 @@ __all__ = [
     "hydrate_spec_state",
     "link_spec_to_product",
     "read_project_specification",
+    "register_approved_spec_from_canonical_json",
     "register_spec_version",
     "resolve_spec_content",
     "save_project_specification",

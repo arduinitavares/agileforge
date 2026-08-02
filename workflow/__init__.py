@@ -16,7 +16,13 @@ from workflow.facts import WorkflowFactSnapshot
 from workflow.fingerprints import decision_fingerprint, fact_fingerprint
 from workflow.requests import (
     AbandonProjectShell,
+    DecideInitialSpecDraft,
+    DecidePrd,
     OpenProjectShell,
+    RecordChallengeArtifact,
+    RecordInitialSpecDraft,
+    RecordPrdVersion,
+    RegisterInitialScope,
     TransitionRequest,
 )
 
@@ -28,8 +34,14 @@ _LAZY_EXPORTS: dict[str, str] = {"WorkflowDomain": "workflow.domain"}
 __all__ = [
     "GRAPH_VERSION",
     "AbandonProjectShell",
+    "DecideInitialSpecDraft",
+    "DecidePrd",
     "NodeDecision",
     "OpenProjectShell",
+    "RecordChallengeArtifact",
+    "RecordInitialSpecDraft",
+    "RecordPrdVersion",
+    "RegisterInitialScope",
     "TransitionRequest",
     "TransitionResult",
     "WorkflowDomain",
