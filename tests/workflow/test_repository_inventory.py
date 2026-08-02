@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 from typing import TYPE_CHECKING
 
@@ -23,6 +24,30 @@ _FIXTURE_FILE_COUNT = 2
 _MANY_FILE_COUNT = 1_200
 _COMPLETE_FILE_COUNT = _MANY_FILE_COUNT + _FIXTURE_FILE_COUNT
 _MODEL_FILE_COUNT = 500
+_POST_HASH_CAPTURE_NUMBER = 2
+_SECRET_PATHS = (
+    ".npmrc",
+    ".env.production",
+    ".aws/credentials",
+    ".azure/accessTokens.json",
+    ".config/gh/hosts.yml",
+    ".config/gcloud/application_default_credentials.json",
+    ".docker/config.json",
+    ".git-credentials",
+    ".kube/config",
+    ".ssh/custom-deploy-key",
+    "api_token.txt",
+    "apiToken.txt",
+    "config/service-account.json",
+    "credentials/client.json",
+    "db-password.txt",
+    "dbPassword.txt",
+    "oauth-credential.json",
+    "private-keys/deploy.txt",
+    "prod.env",
+    "refresh_token.txt",
+    "secrets/production.json",
+)
 
 
 @pytest.fixture
@@ -53,6 +78,12 @@ def git_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 def _paths(result: inventory_module.RepositoryInventoryResult) -> tuple[str, ...]:
     return tuple(item.path for item in result.files)
+
+
+def _index_state(root: Path) -> tuple[str, int]:
+    index_path = root / ".git" / "index"
+    digest = hashlib.sha256(index_path.read_bytes()).hexdigest()
+    return digest, index_path.stat().st_mtime_ns
 
 
 def test_git_inventory_honors_ignores_and_preserves_suppressed_entries(
@@ -108,6 +139,35 @@ def test_git_inventory_honors_ignores_and_preserves_suppressed_entries(
         for path in (".env", "oversized.txt", "linked.py")
     )
     assert "tracked.py" in result.selected_for_model
+
+
+def test_secret_path_policy_suppresses_common_credentials_without_reading(
+    git_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Represent common credential paths without hashing or selecting them."""
+    secret_files: set[Path] = set()
+    for relative_path in _SECRET_PATHS:
+        path = git_repo / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("credential material\n", encoding="utf-8")
+        secret_files.add(path)
+
+    original = inventory_module._hash_file
+
+    def reject_secret_read(path: Path) -> str:
+        assert path not in secret_files
+        return original(path)
+
+    monkeypatch.setattr(inventory_module, "_hash_file", reject_secret_read)
+
+    result = RepositoryInventoryService().inventory(git_repo)
+
+    by_path = {item.path: item for item in result.files}
+    for relative_path in _SECRET_PATHS:
+        assert by_path[relative_path].content_status == "secret"
+        assert by_path[relative_path].sha256 is None
+        assert relative_path not in result.selected_for_model
 
 
 def test_model_budget_does_not_truncate_complete_inventory(git_repo: Path) -> None:
@@ -174,6 +234,147 @@ def test_status_change_during_hashing_rejects_mixed_snapshot(
 
     with pytest.raises(RepositoryChangedDuringInventoryError):
         RepositoryInventoryService().inventory(git_repo)
+
+
+def test_already_dirty_same_size_change_rejects_mixed_snapshot(
+    git_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Detect content changes even when porcelain status and size stay fixed."""
+    tracked = git_repo / "tracked.py"
+    tracked.write_bytes(b"A" * 32)
+    original = inventory_module._hash_file
+    changed = False
+
+    def hash_then_mutate(path: Path) -> str:
+        nonlocal changed
+        digest = original(path)
+        if path == tracked and not changed:
+            changed = True
+            tracked.write_bytes(b"B" * 32)
+        return digest
+
+    monkeypatch.setattr(inventory_module, "_hash_file", hash_then_mutate)
+
+    with pytest.raises(RepositoryChangedDuringInventoryError):
+        RepositoryInventoryService().inventory(git_repo)
+
+
+def test_already_dirty_metadata_change_rejects_mixed_snapshot(
+    git_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bind relevant lstat metadata even when Git's dirty text is unchanged."""
+    tracked = git_repo / "tracked.py"
+    tracked.write_bytes(b"A" * 32)
+    original = inventory_module._hash_file
+    changed = False
+
+    def hash_then_chmod(path: Path) -> str:
+        nonlocal changed
+        digest = original(path)
+        if path == tracked and not changed:
+            changed = True
+            path.chmod(0o600)
+        return digest
+
+    monkeypatch.setattr(inventory_module, "_hash_file", hash_then_chmod)
+
+    with pytest.raises(RepositoryChangedDuringInventoryError):
+        RepositoryInventoryService().inventory(git_repo)
+
+
+def test_hash_revalidation_detects_change_after_metadata_snapshot(
+    git_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rehash safe content after the first post-hash metadata capture."""
+    tracked = git_repo / "tracked.py"
+    tracked.write_bytes(b"A" * 32)
+    original = inventory_module._candidates
+    captures = 0
+
+    def mutate_after_second_capture(
+        root: Path,
+        paths: tuple[str, ...],
+    ) -> tuple[inventory_module._InventoryCandidate, ...]:
+        nonlocal captures
+        candidates = original(root, paths)
+        captures += 1
+        if captures == _POST_HASH_CAPTURE_NUMBER:
+            tracked.write_bytes(b"B" * 32)
+        return candidates
+
+    monkeypatch.setattr(inventory_module, "_candidates", mutate_after_second_capture)
+
+    with pytest.raises(RepositoryChangedDuringInventoryError):
+        RepositoryInventoryService().inventory(git_repo)
+
+
+def test_inventory_fingerprint_binds_selection_and_repository_state(
+    tmp_path: Path,
+) -> None:
+    """Fingerprint model inputs and Git provenance, not only file metadata."""
+    root = tmp_path / "fingerprint"
+    root.mkdir()
+    (root / "app.py").write_text("print('app')\n", encoding="utf-8")
+    (root / "README.md").write_text("# App\n", encoding="utf-8")
+
+    one_selected = RepositoryInventoryService(
+        limits=InventoryLimits(max_model_files=1)
+    ).inventory(root)
+    two_selected = RepositoryInventoryService(
+        limits=InventoryLimits(max_model_files=2)
+    ).inventory(root)
+    assert one_selected.files == two_selected.files
+    assert one_selected.selected_for_model != two_selected.selected_for_model
+    assert one_selected.inventory_fingerprint != two_selected.inventory_fingerprint
+
+    with Repo.init(root) as repo:
+        with repo.config_writer() as config:
+            config.set_value("user", "name", "Inventory Test")
+            config.set_value("user", "email", "inventory@example.com")
+        repo.index.add(["README.md", "app.py"])
+        repo.index.commit("same files under Git")
+
+    git_result = RepositoryInventoryService(
+        limits=InventoryLimits(max_model_files=1)
+    ).inventory(root)
+    assert git_result.files == one_selected.files
+    assert git_result.selected_for_model == one_selected.selected_for_model
+    assert git_result.inventory_fingerprint != one_selected.inventory_fingerprint
+
+
+@pytest.mark.parametrize(
+    "limits",
+    [
+        pytest.param(None, id="success"),
+        pytest.param(InventoryLimits(max_files=1), id="limit-failure"),
+    ],
+)
+def test_git_inventory_preserves_index_bytes_and_mtime(
+    git_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    limits: InventoryLimits | None,
+) -> None:
+    """Disable optional locks for every successful and failed Git inspection."""
+    monkeypatch.delenv("GIT_OPTIONAL_LOCKS", raising=False)
+    tracked = git_repo / "tracked.py"
+    metadata = tracked.stat()
+    os.utime(
+        tracked,
+        ns=(metadata.st_atime_ns, metadata.st_mtime_ns + 2_000_000_000),
+    )
+    before = _index_state(git_repo)
+    service = RepositoryInventoryService(limits=limits)
+
+    if limits is None:
+        service.inventory(git_repo)
+    else:
+        with pytest.raises(RepositoryInventoryLimitError):
+            service.inventory(git_repo)
+
+    assert _index_state(git_repo) == before
 
 
 def test_git_resources_close_after_success_and_limit_failure(

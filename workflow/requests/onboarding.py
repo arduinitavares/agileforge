@@ -1,11 +1,27 @@
-"""Greenfield onboarding transition request contracts."""
+"""Greenfield and brownfield onboarding transition request contracts."""
 
-from typing import ClassVar, Literal, Self
+from typing import Annotated, ClassVar, Literal, Self
 
-from pydantic import Field, model_validator
+from pydantic import Field, PlainSerializer, PlainValidator, model_validator
 
 from workflow.contracts import FrozenModel, JsonObject
+from workflow.repository_inventory import encode_repository_path, repository_path_bytes
 from workflow.requests.base import PositionedRequest
+
+
+def _validate_repository_path(value: object) -> str:
+    if not isinstance(value, str) or not value:
+        msg = "Repository inventory paths must be non-empty strings."
+        raise ValueError(msg)
+    repository_path_bytes(value)
+    return value
+
+
+type RepositoryPath = Annotated[
+    str,
+    PlainValidator(_validate_repository_path),
+    PlainSerializer(encode_repository_path, return_type=str, when_used="json"),
+]
 
 
 class RecordChallengeArtifact(PositionedRequest):
@@ -64,7 +80,7 @@ class DecideInitialSpecDraft(PositionedRequest):
 class RepositoryInventoryEntry(FrozenModel):
     """Canonical inventory entry accepted by the brownfield transition."""
 
-    path: str = Field(min_length=1)
+    path: RepositoryPath
     size_bytes: int = Field(ge=0)
     sha256: str | None
     content_status: Literal["hashable", "secret", "oversized", "symlink"]
@@ -95,8 +111,9 @@ class RecordRepositoryInventory(PositionedRequest):
     kind: Literal["record_repository_inventory"] = "record_repository_inventory"
     node_id: ClassVar[str] = "onboarding.brownfield.inventory"
     repository_baseline_id: int
+    git_available: bool
     files: tuple[RepositoryInventoryEntry, ...]
-    selected_for_model: tuple[str, ...]
+    selected_for_model: tuple[RepositoryPath, ...]
     total_bytes: int = Field(ge=0)
     inventory_fingerprint: str = Field(min_length=1)
 

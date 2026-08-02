@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -12,6 +13,7 @@ from sqlmodel import Session, select
 from models.core import Product
 from models.specs import SpecRegistry
 from models.workflow import RepositoryBaseline, RepositoryInventory, SpecDraft
+from repositories.workflow import WorkflowFactLoadError, WorkflowFactRepository
 from workflow import (
     DecideBrownfieldInitialSpec,
     OpenProjectShell,
@@ -24,7 +26,14 @@ from workflow import (
 from workflow.clock import FixedClock
 from workflow.contracts import NodeCategory, NodeDecision, TransitionResult
 from workflow.definitions.root import ROOT_GRAPH
-from workflow.fingerprints import canonical_hash
+from workflow.fingerprints import canonical_hash, canonical_json
+from workflow.repository_inventory import (
+    canonical_inventory_payload,
+    encode_repository_path,
+    encode_repository_paths,
+    inventory_binding_fingerprint,
+)
+from workflow.requests.onboarding import RepositoryInventoryEntry
 
 if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
@@ -48,6 +57,8 @@ FILES = (
     },
 )
 TOTAL_BYTES = 20
+SELECTED_FOR_MODEL = ("README.md",)
+SURROGATE_PATH = "bad-\udcff.py"
 
 
 @pytest.fixture
@@ -120,7 +131,72 @@ def _baseline_fingerprint() -> str:
 
 
 def _inventory_fingerprint() -> str:
-    return canonical_hash({"files": list(FILES), "total_bytes": TOTAL_BYTES})
+    payload = canonical_inventory_payload(
+        git_available=True,
+        commit=COMMIT,
+        dirty=False,
+        files=(
+            (".env", 8, None, "secret"),
+            ("README.md", 12, "sha256:readme", "hashable"),
+        ),
+        total_bytes=TOTAL_BYTES,
+    )
+    return inventory_binding_fingerprint(payload, SELECTED_FOR_MODEL)
+
+
+def _record_baseline(
+    domain: WorkflowDomain,
+    project_id: int,
+    *,
+    key: str,
+) -> int:
+    result = domain.transition(
+        RecordRepositoryBaseline.model_validate(
+            {
+                **_guards(
+                    domain,
+                    project_id,
+                    RecordRepositoryBaseline.node_id,
+                    key,
+                ),
+                "repository_path": REPOSITORY_PATH,
+                "git_commit": COMMIT,
+                "dirty": False,
+                "baseline_fingerprint": _baseline_fingerprint(),
+            }
+        )
+    )
+    assert result.ok is True
+    return _required_output_id(result, "repository_baseline_id")
+
+
+def _record_inventory(
+    domain: WorkflowDomain,
+    project_id: int,
+    baseline_id: int,
+    *,
+    key: str,
+) -> int:
+    result = domain.transition(
+        RecordRepositoryInventory.model_validate(
+            {
+                **_guards(
+                    domain,
+                    project_id,
+                    RecordRepositoryInventory.node_id,
+                    key,
+                ),
+                "repository_baseline_id": baseline_id,
+                "git_available": True,
+                "files": FILES,
+                "selected_for_model": SELECTED_FOR_MODEL,
+                "total_bytes": TOTAL_BYTES,
+                "inventory_fingerprint": _inventory_fingerprint(),
+            }
+        )
+    )
+    assert result.ok is True
+    return _required_output_id(result, "repository_inventory_id")
 
 
 def _spec_content() -> dict[str, object]:
@@ -191,8 +267,9 @@ def test_brownfield_transitions_persist_evidence_then_share_registration(
                     "inventory-1",
                 ),
                 "repository_baseline_id": baseline_id,
+                "git_available": True,
                 "files": FILES,
-                "selected_for_model": ("README.md",),
+                "selected_for_model": SELECTED_FOR_MODEL,
                 "total_bytes": TOTAL_BYTES,
                 "inventory_fingerprint": _inventory_fingerprint(),
             }
@@ -331,8 +408,9 @@ def test_inventory_fingerprint_mismatch_does_not_persist(
                     "inventory-tampered",
                 ),
                 "repository_baseline_id": baseline_id,
+                "git_available": True,
                 "files": FILES,
-                "selected_for_model": ("README.md",),
+                "selected_for_model": SELECTED_FOR_MODEL,
                 "total_bytes": TOTAL_BYTES,
                 "inventory_fingerprint": "sha256:wrong",
             }
@@ -342,6 +420,167 @@ def test_inventory_fingerprint_mismatch_does_not_persist(
     assert result.ok is False
     with Session(engine) as session:
         assert session.exec(select(RepositoryInventory)).all() == []
+
+
+def test_repository_inventory_contract_serializes_surrogate_paths_reversibly() -> None:
+    """Preserve raw path bytes through validation and request fingerprinting."""
+    encoded_path = encode_repository_path(SURROGATE_PATH)
+    entry = RepositoryInventoryEntry.model_validate(
+        {
+            "path": SURROGATE_PATH,
+            "size_bytes": 4,
+            "sha256": "sha256:surrogate",
+            "content_status": "hashable",
+        }
+    )
+    payload = canonical_inventory_payload(
+        git_available=True,
+        commit=COMMIT,
+        dirty=False,
+        files=((SURROGATE_PATH, 4, "sha256:surrogate", "hashable"),),
+        total_bytes=4,
+    )
+    request = RecordRepositoryInventory.model_validate(
+        {
+            "project_id": 1,
+            "graph_version": "agileforge.workflow.v1",
+            "fact_fingerprint": "sha256:facts",
+            "decision_fingerprint": "sha256:decision",
+            "idempotency_key": "surrogate-contract",
+            "actor": ACTOR,
+            "repository_baseline_id": 2,
+            "git_available": True,
+            "files": (entry,),
+            "selected_for_model": (SURROGATE_PATH,),
+            "total_bytes": 4,
+            "inventory_fingerprint": inventory_binding_fingerprint(
+                payload,
+                (SURROGATE_PATH,),
+            ),
+        }
+    )
+
+    dumped = request.model_dump(mode="json")
+    dumped_files = dumped["files"]
+    assert isinstance(dumped_files, list)
+    assert dumped_files[0]["path"] == encoded_path
+    assert dumped["selected_for_model"] == [encoded_path]
+    assert canonical_hash(dumped).startswith("sha256:")
+    assert encode_repository_path(encoded_path) != encoded_path
+
+
+def test_surrogate_path_round_trips_through_handler_and_loader(
+    domain: WorkflowDomain,
+    engine: Engine,
+) -> None:
+    """Persist canonical ASCII path bytes and restore the original path string."""
+    project_id = _open_brownfield(domain)
+    baseline_id = _record_baseline(domain, project_id, key="surrogate-baseline")
+    files = (
+        {
+            "path": SURROGATE_PATH,
+            "size_bytes": 4,
+            "sha256": "sha256:surrogate",
+            "content_status": "hashable",
+        },
+    )
+    selected = (SURROGATE_PATH,)
+    payload = canonical_inventory_payload(
+        git_available=True,
+        commit=COMMIT,
+        dirty=False,
+        files=((SURROGATE_PATH, 4, "sha256:surrogate", "hashable"),),
+        total_bytes=4,
+    )
+    fingerprint = inventory_binding_fingerprint(payload, selected)
+    result = domain.transition(
+        RecordRepositoryInventory.model_validate(
+            {
+                **_guards(
+                    domain,
+                    project_id,
+                    RecordRepositoryInventory.node_id,
+                    "surrogate-inventory",
+                ),
+                "repository_baseline_id": baseline_id,
+                "git_available": True,
+                "files": files,
+                "selected_for_model": selected,
+                "total_bytes": 4,
+                "inventory_fingerprint": fingerprint,
+            }
+        )
+    )
+
+    assert result.ok is True
+    with Session(engine) as session:
+        row = session.exec(select(RepositoryInventory)).one()
+        assert row.canonical_inventory_json == canonical_json(payload)
+        assert row.selected_for_model_json == canonical_json(
+            encode_repository_paths(selected)
+        )
+        assert row.content_fingerprint == fingerprint
+        snapshot = WorkflowFactRepository(session).load(project_id)
+    assert snapshot.repository_inventories[0].selected_for_model == selected
+
+
+def test_load_rejects_selected_for_model_only_tampering(
+    domain: WorkflowDomain,
+    engine: Engine,
+) -> None:
+    """Bind the exact bounded selection to the persisted inventory fingerprint."""
+    project_id = _open_brownfield(domain)
+    baseline_id = _record_baseline(domain, project_id, key="selection-baseline")
+    _record_inventory(
+        domain,
+        project_id,
+        baseline_id,
+        key="selection-inventory",
+    )
+    with Session(engine) as session:
+        row = session.exec(select(RepositoryInventory)).one()
+        row.selected_for_model_json = canonical_json(())
+        session.add(row)
+        session.commit()
+
+    with (
+        Session(engine) as session,
+        pytest.raises(WorkflowFactLoadError, match="binding mismatch"),
+    ):
+        WorkflowFactRepository(session).load(project_id)
+
+
+def test_load_rejects_inventory_metadata_only_tampering(
+    domain: WorkflowDomain,
+    engine: Engine,
+) -> None:
+    """Reject a changed file digest even when summary columns are untouched."""
+    project_id = _open_brownfield(domain)
+    baseline_id = _record_baseline(domain, project_id, key="metadata-baseline")
+    _record_inventory(
+        domain,
+        project_id,
+        baseline_id,
+        key="metadata-inventory",
+    )
+    with Session(engine) as session:
+        row = session.exec(select(RepositoryInventory)).one()
+        payload = json.loads(row.canonical_inventory_json)
+        assert isinstance(payload, dict)
+        files = payload["files"]
+        assert isinstance(files, list)
+        readme = files[1]
+        assert isinstance(readme, dict)
+        readme["sha256"] = "sha256:tampered"
+        row.canonical_inventory_json = canonical_json(payload)
+        session.add(row)
+        session.commit()
+
+    with (
+        Session(engine) as session,
+        pytest.raises(WorkflowFactLoadError, match="binding mismatch"),
+    ):
+        WorkflowFactRepository(session).load(project_id)
 
 
 def test_brownfield_spec_attempt_binding_requires_complete_pair() -> None:

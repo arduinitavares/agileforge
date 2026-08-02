@@ -33,6 +33,13 @@ from workflow.fingerprints import (
     canonical_json,
     canonical_stored_json_hash,
 )
+from workflow.repository_inventory import (
+    InventoryFingerprintEntry,
+    canonical_inventory_payload,
+    encode_repository_paths,
+    inventory_binding_fingerprint,
+    repository_path_bytes,
+)
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -296,9 +303,8 @@ def execute_record_repository_inventory(
     if existing:
         return _conflict("A repository inventory already exists for this Project.")
 
-    files = [item.model_dump(mode="json") for item in request.files]
     paths = [item.path for item in request.files]
-    expected_paths = sorted(paths, key=lambda path: path.encode("utf-8"))
+    expected_paths = sorted(paths, key=repository_path_bytes)
     hashable_paths = {
         item.path for item in request.files if item.content_status == "hashable"
     }
@@ -308,10 +314,29 @@ def execute_record_repository_inventory(
         or sum(item.size_bytes for item in request.files) != request.total_bytes
         or len(request.selected_for_model) != len(set(request.selected_for_model))
         or any(path not in hashable_paths for path in request.selected_for_model)
+        or (not request.git_available and baseline.git_commit is not None)
     ):
         return _conflict("The repository inventory payload is not canonical.")
-    inventory_payload = {"files": files, "total_bytes": request.total_bytes}
-    expected_fingerprint = canonical_hash(inventory_payload)
+    fingerprint_entries: tuple[InventoryFingerprintEntry, ...] = tuple(
+        (
+            item.path,
+            item.size_bytes,
+            item.sha256,
+            item.content_status,
+        )
+        for item in request.files
+    )
+    inventory_payload = canonical_inventory_payload(
+        git_available=request.git_available,
+        commit=baseline.git_commit,
+        dirty=baseline.dirty,
+        files=fingerprint_entries,
+        total_bytes=request.total_bytes,
+    )
+    expected_fingerprint = inventory_binding_fingerprint(
+        inventory_payload,
+        request.selected_for_model,
+    )
     if request.inventory_fingerprint != expected_fingerprint:
         return _conflict(
             "The repository inventory fingerprint does not match its input."
@@ -321,7 +346,9 @@ def execute_record_repository_inventory(
         project_id=request.project_id,
         repository_baseline_id=request.repository_baseline_id,
         canonical_inventory_json=canonical_json(inventory_payload),
-        selected_for_model_json=canonical_json(request.selected_for_model),
+        selected_for_model_json=canonical_json(
+            encode_repository_paths(request.selected_for_model)
+        ),
         content_fingerprint=expected_fingerprint,
         version_number=1,
         file_count=len(request.files),

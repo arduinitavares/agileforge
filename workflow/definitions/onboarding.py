@@ -916,6 +916,7 @@ BROWNFIELD_ONBOARDING_NODES: tuple[NodeSpec, ...] = (
         recommendation_kind=RecommendationKind.REQUIRED,
         required_inputs=(
             InputField(name="repository_baseline_id", value_type="integer"),
+            InputField(name="git_available", value_type="boolean"),
             InputField(name="files", value_type="array"),
             InputField(name="selected_for_model", value_type="array"),
             InputField(name="total_bytes", value_type="integer"),

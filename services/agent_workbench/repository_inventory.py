@@ -6,6 +6,8 @@ import argparse
 import hashlib
 import json
 import os
+import re
+import stat
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
@@ -13,7 +15,12 @@ from typing import Literal
 
 from git import InvalidGitRepositoryError, Repo
 
-from workflow.fingerprints import canonical_hash
+from workflow.repository_inventory import (
+    InventoryFingerprintEntry,
+    canonical_inventory_payload,
+    inventory_binding_fingerprint,
+    repository_path_bytes,
+)
 
 _HASH_CHUNK_BYTES = 1024 * 1024
 _FALLBACK_IGNORED_DIRECTORIES: frozenset[str] = frozenset(
@@ -35,16 +42,56 @@ _FALLBACK_IGNORED_DIRECTORIES: frozenset[str] = frozenset(
     }
 )
 _FALLBACK_IGNORED_FILES: frozenset[str] = frozenset({".coverage", ".DS_Store"})
-_SECRET_BASENAMES: frozenset[str] = frozenset(
+_SECRET_EXACT_BASENAMES: frozenset[str] = frozenset(
     {
         ".env",
+        ".envrc",
         ".netrc",
+        ".npmrc",
+        ".pypirc",
         "credentials",
         "credentials.json",
         "id_dsa",
         "id_ed25519",
         "id_rsa",
+        "service-account.json",
         "secrets.json",
+    }
+)
+_SECRET_NAME_TOKENS: frozenset[str] = frozenset(
+    {
+        "credential",
+        "credentials",
+        "passwd",
+        "password",
+        "secret",
+        "secrets",
+        "token",
+        "tokens",
+    }
+)
+_SECRET_DIRECTORY_NAMES: frozenset[str] = frozenset(
+    {
+        "credential",
+        "credentials",
+        "private-key",
+        "private-keys",
+        "private_key",
+        "private_keys",
+        "secret",
+        "secrets",
+        ".ssh",
+    }
+)
+_ESTABLISHED_SECRET_PATHS: frozenset[str] = frozenset(
+    {
+        ".aws/credentials",
+        ".azure/accesstokens.json",
+        ".azure/azureprofile.json",
+        ".config/gh/hosts.yml",
+        ".config/gcloud/application_default_credentials.json",
+        ".docker/config.json",
+        ".kube/config",
     }
 )
 _SECRET_SUFFIXES: tuple[str, ...] = (
@@ -169,7 +216,7 @@ class RepositoryInventoryLimitError(RuntimeError):
 
 
 class RepositoryChangedDuringInventoryError(RuntimeError):
-    """Raised when HEAD or porcelain status changes during file hashing."""
+    """Raised when repository or filesystem state changes during hashing."""
 
 
 @dataclass(frozen=True)
@@ -180,11 +227,29 @@ class _RepositoryState:
 
 
 @dataclass(frozen=True)
+class _FilesystemSnapshot:
+    device: int
+    inode: int
+    mode: int
+    size_bytes: int
+    mtime_ns: int
+    ctime_ns: int
+
+
+@dataclass(frozen=True)
 class _InventoryCandidate:
     path: str
     absolute_path: Path
     size_bytes: int
     symlink: bool
+    snapshot: _FilesystemSnapshot
+
+
+@dataclass(frozen=True)
+class _GitInventorySnapshot:
+    state: _RepositoryState
+    paths: tuple[str, ...]
+    candidates: tuple[_InventoryCandidate, ...]
 
 
 class RepositoryInventoryService:
@@ -207,36 +272,88 @@ class RepositoryInventoryService:
             return self._fallback_inventory(resolved)
 
     def _git_inventory(self, root: Path, repo: Repo) -> RepositoryInventoryResult:
-        before = _repository_state(repo)
-        paths = _git_visible_paths(repo)
-        candidates = _candidates(root, paths)
-        self._enforce_hard_limits(candidates)
-        files = self._hash_candidates(candidates)
-        after = _repository_state(repo)
-        if before != after:
-            message = (
-                "Repository HEAD or porcelain status changed during inventory; "
-                "retry after the worktree is stable."
+        with repo.git.custom_environment(GIT_OPTIONAL_LOCKS="0"):
+            before = _git_snapshot(root, repo)
+            self._enforce_hard_limits(before.candidates)
+            files = self._hash_candidates(before.candidates)
+            self._verify_git_snapshot(
+                root=root,
+                repo=repo,
+                before=before,
+                files=files,
             )
-            raise RepositoryChangedDuringInventoryError(message)
         return self._result(
             root=root,
             git_available=True,
-            commit=before.commit,
-            dirty=before.dirty,
+            commit=before.state.commit,
+            dirty=before.state.dirty,
             files=files,
         )
 
     def _fallback_inventory(self, root: Path) -> RepositoryInventoryResult:
-        candidates = _candidates(root, _fallback_visible_paths(root))
+        paths = _fallback_visible_paths(root)
+        candidates = _candidates(root, paths)
         self._enforce_hard_limits(candidates)
+        files = self._hash_candidates(candidates)
+        self._verify_fallback_snapshot(
+            root=root,
+            paths=paths,
+            candidates=candidates,
+            files=files,
+        )
         return self._result(
             root=root,
             git_available=False,
             commit=None,
             dirty=False,
-            files=self._hash_candidates(candidates),
+            files=files,
         )
+
+    def _verify_git_snapshot(
+        self,
+        *,
+        root: Path,
+        repo: Repo,
+        before: _GitInventorySnapshot,
+        files: tuple[InventoryFile, ...],
+    ) -> None:
+        _require_unchanged_snapshot(before == _git_snapshot(root, repo))
+        self._revalidate_hashes(before.candidates, files)
+        _require_unchanged_snapshot(before == _git_snapshot(root, repo))
+
+    def _verify_fallback_snapshot(
+        self,
+        *,
+        root: Path,
+        paths: tuple[str, ...],
+        candidates: tuple[_InventoryCandidate, ...],
+        files: tuple[InventoryFile, ...],
+    ) -> None:
+        after_paths = _fallback_visible_paths(root)
+        after_candidates = _candidates(root, after_paths)
+        _require_unchanged_snapshot(
+            paths == after_paths and candidates == after_candidates
+        )
+        self._revalidate_hashes(candidates, files)
+        final_paths = _fallback_visible_paths(root)
+        final_candidates = _candidates(root, final_paths)
+        _require_unchanged_snapshot(
+            paths == final_paths and candidates == final_candidates
+        )
+
+    def _revalidate_hashes(
+        self,
+        candidates: tuple[_InventoryCandidate, ...],
+        files: tuple[InventoryFile, ...],
+    ) -> None:
+        candidates_by_path = {item.path: item for item in candidates}
+        for item in files:
+            if item.content_status != "hashable":
+                continue
+            candidate = candidates_by_path[item.path]
+            _require_unchanged_snapshot(
+                _hash_file(candidate.absolute_path) == item.sha256
+            )
 
     def _enforce_hard_limits(
         self,
@@ -295,12 +412,23 @@ class RepositoryInventoryService:
     ) -> RepositoryInventoryResult:
         total_bytes = sum(item.size_bytes for item in files)
         selected = _select_for_model(files, self._limits)
-        fingerprint = canonical_hash(
-            {
-                "files": [asdict(item) for item in files],
-                "total_bytes": total_bytes,
-            }
+        fingerprint_entries: tuple[InventoryFingerprintEntry, ...] = tuple(
+            (
+                item.path,
+                item.size_bytes,
+                item.sha256,
+                item.content_status,
+            )
+            for item in files
         )
+        payload = canonical_inventory_payload(
+            git_available=git_available,
+            commit=commit,
+            dirty=dirty,
+            files=fingerprint_entries,
+            total_bytes=total_bytes,
+        )
+        fingerprint = inventory_binding_fingerprint(payload, selected)
         return RepositoryInventoryResult(
             root=root,
             git_available=git_available,
@@ -326,6 +454,15 @@ def _repository_state(repo: Repo) -> _RepositoryState:
         commit=commit,
         status_fingerprint=status_fingerprint,
         dirty=bool(porcelain),
+    )
+
+
+def _git_snapshot(root: Path, repo: Repo) -> _GitInventorySnapshot:
+    paths = _git_visible_paths(repo)
+    return _GitInventorySnapshot(
+        state=_repository_state(repo),
+        paths=paths,
+        candidates=_candidates(root, paths),
     )
 
 
@@ -376,31 +513,63 @@ def _candidates(
             metadata = absolute_path.lstat()
         except FileNotFoundError:
             continue
-        symlink = absolute_path.is_symlink()
-        if not symlink and not absolute_path.is_file():
+        symlink = stat.S_ISLNK(metadata.st_mode)
+        if not symlink and not stat.S_ISREG(metadata.st_mode):
             continue
+        snapshot = _FilesystemSnapshot(
+            device=metadata.st_dev,
+            inode=metadata.st_ino,
+            mode=metadata.st_mode,
+            size_bytes=metadata.st_size,
+            mtime_ns=metadata.st_mtime_ns,
+            ctime_ns=metadata.st_ctime_ns,
+        )
         candidates.append(
             _InventoryCandidate(
                 path=relative_path,
                 absolute_path=absolute_path,
                 size_bytes=metadata.st_size,
                 symlink=symlink,
+                snapshot=snapshot,
             )
         )
     return tuple(sorted(candidates, key=lambda item: _path_bytes(item.path)))
 
 
 def _path_bytes(path: str) -> bytes:
-    return path.encode("utf-8", errors="surrogateescape")
+    return repository_path_bytes(path)
 
 
 def _is_secret_path(relative_path: str) -> bool:
-    name = PurePosixPath(relative_path).name.lower()
-    return (
-        name in _SECRET_BASENAMES
-        or name.startswith(".env.")
-        or name.endswith(_SECRET_SUFFIXES)
+    path = PurePosixPath(relative_path)
+    lower_path = path.as_posix().lower()
+    name = path.name.lower()
+    separated_stem = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "-", path.stem)
+    stem_tokens = frozenset(
+        token for token in re.split(r"[^a-z0-9]+", separated_stem.lower()) if token
     )
+    directory_names = frozenset(part.lower() for part in path.parts[:-1])
+    return (
+        name in _SECRET_EXACT_BASENAMES
+        or name.startswith(".env.")
+        or name.endswith(".env")
+        or name.endswith(_SECRET_SUFFIXES)
+        or bool(stem_tokens & _SECRET_NAME_TOKENS)
+        or {"private", "key"}.issubset(stem_tokens)
+        or {"service", "account"}.issubset(stem_tokens)
+        or bool(directory_names & _SECRET_DIRECTORY_NAMES)
+        or lower_path in _ESTABLISHED_SECRET_PATHS
+    )
+
+
+def _require_unchanged_snapshot(unchanged: bool) -> None:
+    if unchanged:
+        return
+    message = (
+        "Repository HEAD, porcelain status, path set, metadata, or hashable "
+        "content changed during inventory; retry after the worktree is stable."
+    )
+    raise RepositoryChangedDuringInventoryError(message)
 
 
 def _hash_file(path: Path) -> str:

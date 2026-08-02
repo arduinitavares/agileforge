@@ -56,6 +56,12 @@ from workflow.facts import (
     WorkflowFactSnapshot,
 )
 from workflow.fingerprints import canonical_hash, canonical_json
+from workflow.repository_inventory import (
+    decode_repository_path,
+    encode_repository_paths,
+    inventory_binding_fingerprint,
+    repository_path_bytes,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -190,7 +196,7 @@ class WorkflowFactRepository:
             repository_baselines=repository_baselines,
             repository_inventories=self._repository_inventories(
                 project_id,
-                frozenset(item.repository_baseline_id for item in repository_baselines),
+                {item.repository_baseline_id: item for item in repository_baselines},
             ),
             authorities=authority_load.facts,
             phase_artifacts=(),
@@ -632,7 +638,7 @@ class WorkflowFactRepository:
     def _repository_inventories(
         self,
         project_id: int,
-        repository_baseline_ids: frozenset[int],
+        repository_baselines: dict[int, RepositoryBaselineFact],
     ) -> tuple[RepositoryInventoryFact, ...]:
         rows = self._session.exec(
             select(RepositoryInventory)
@@ -642,7 +648,8 @@ class WorkflowFactRepository:
         ).all()
         facts: list[RepositoryInventoryFact] = []
         for row in rows:
-            if row.repository_baseline_id not in repository_baseline_ids:
+            baseline = repository_baselines.get(row.repository_baseline_id)
+            if baseline is None:
                 message = (
                     "Forced relationship corruption in repository inventory: "
                     f"inventory {row.repository_inventory_id} has no Project baseline."
@@ -650,8 +657,11 @@ class WorkflowFactRepository:
                 raise self._error(message)
             try:
                 payload = _JSON_OBJECT.validate_json(row.canonical_inventory_json)
-                selected = _STRING_LIST.validate_json(row.selected_for_model_json)
-            except ValidationError as exc:
+                encoded_selected = _STRING_LIST.validate_json(
+                    row.selected_for_model_json
+                )
+                selected = [decode_repository_path(path) for path in encoded_selected]
+            except (ValidationError, ValueError) as exc:
                 message = (
                     "Forced relationship corruption in repository inventory: "
                     f"inventory {row.repository_inventory_id} contains invalid JSON."
@@ -659,8 +669,10 @@ class WorkflowFactRepository:
                 raise self._error(message) from exc
             if (
                 canonical_json(payload) != row.canonical_inventory_json
-                or canonical_json(selected) != row.selected_for_model_json
-                or canonical_hash(payload) != row.content_fingerprint
+                or canonical_json(encode_repository_paths(selected))
+                != row.selected_for_model_json
+                or inventory_binding_fingerprint(payload, selected)
+                != row.content_fingerprint
             ):
                 message = (
                     "Forced relationship corruption in repository inventory: "
@@ -670,12 +682,32 @@ class WorkflowFactRepository:
                 raise self._error(message)
             files = payload.get("files")
             total_bytes = payload.get("total_bytes")
+            git_available = payload.get("git_available")
+            commit = payload.get("commit")
+            dirty = payload.get("dirty")
+            truncated = payload.get("truncated")
             hashable_paths, measured_bytes = self._validate_inventory_files(
                 files,
                 inventory_id=row.repository_inventory_id,
             )
             if (
-                not isinstance(files, list)
+                set(payload)
+                != {
+                    "commit",
+                    "dirty",
+                    "files",
+                    "git_available",
+                    "total_bytes",
+                    "truncated",
+                }
+                or not isinstance(git_available, bool)
+                or (commit is not None and not isinstance(commit, str))
+                or not isinstance(dirty, bool)
+                or truncated is not False
+                or commit != baseline.git_commit
+                or dirty != baseline.dirty
+                or (not git_available and commit is not None)
+                or not isinstance(files, list)
                 or isinstance(total_bytes, bool)
                 or not isinstance(total_bytes, int)
                 or len(files) != row.file_count
@@ -738,13 +770,17 @@ class WorkflowFactRepository:
                 or (digest is not None and not isinstance(digest, str))
             ):
                 raise self._inventory_entry_error(inventory_id)
-            encoded_path = path.encode("utf-8", errors="surrogateescape")
+            try:
+                decoded_path = decode_repository_path(path)
+            except ValueError as exc:
+                raise self._inventory_entry_error(inventory_id) from exc
+            encoded_path = repository_path_bytes(decoded_path)
             if previous_path is not None and encoded_path <= previous_path:
                 raise self._inventory_entry_error(inventory_id)
             previous_path = encoded_path
             measured_bytes += size_bytes
             if status == "hashable":
-                hashable_paths.add(path)
+                hashable_paths.add(decoded_path)
         return frozenset(hashable_paths), measured_bytes
 
     def _inventory_entry_error(self, inventory_id: int | None) -> WorkflowFactLoadError:
