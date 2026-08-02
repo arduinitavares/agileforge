@@ -169,73 +169,129 @@ def _planning_story_invariant_ids(story: UserStory) -> list[str]:
     return list(evidence.evaluated_invariant_ids or [])
 
 
-def record_sprint_plan_in_session(  # noqa: C901, PLR0912, PLR0913, PLR0915
-    session: Session,
-    *,
-    project_id: int,
-    team_name: str,
-    selected_story_ids: tuple[int, ...],
-    canonical_task_plan: JsonObject,
-    plan_fingerprint: str,
-    candidate_set_fingerprint: str,
-    supersedes_sprint_plan_artifact_id: int | None,
-    actor: str,
-    recorded_at: datetime,
-) -> SprintPlanArtifact:
-    """Persist exact Sprint, task, and immutable plan facts in one transaction."""
-    plan = SprintPlannerOutput.model_validate(canonical_task_plan)
-    if canonical_hash(canonical_task_plan) != plan_fingerprint:
+@dataclass(frozen=True)
+class RecordSprintPlanInput:
+    """Exact immutable values used to record one Sprint plan."""
+
+    project_id: int
+    team_name: str
+    selected_story_ids: tuple[int, ...]
+    canonical_task_plan: JsonObject
+    plan_fingerprint: str
+    candidate_set_fingerprint: str
+    supersedes_sprint_plan_artifact_id: int | None
+    actor: str
+    recorded_at: datetime
+
+
+@dataclass(frozen=True)
+class RecordSprintPlanDecisionInput:
+    """Exact append-only values used to decide one Sprint plan."""
+
+    artifact: SprintPlanArtifact
+    decision: str
+    rationale: str
+    reviewer: str
+    idempotency_key: str
+    decided_at: datetime
+
+
+def _validated_sprint_plan(inputs: RecordSprintPlanInput) -> SprintPlannerOutput:
+    plan = SprintPlannerOutput.model_validate(inputs.canonical_task_plan)
+    if canonical_hash(inputs.canonical_task_plan) != inputs.plan_fingerprint:
         message = "Sprint plan fingerprint does not match canonical content."
         raise ValueError(message)
     plan_story_ids = tuple(sorted(item.story_id for item in plan.selected_stories))
-    if plan_story_ids != selected_story_ids:
+    if plan_story_ids != inputs.selected_story_ids:
         message = "Sprint plan selected Story IDs do not match the request."
         raise ValueError(message)
-    artifacts = session.exec(
-        select(SprintPlanArtifact)
-        .where(SprintPlanArtifact.project_id == project_id)
-        .order_by(cast("Any", SprintPlanArtifact.version_number))
-    ).all()
+    return plan
+
+
+def _sprint_plan_artifact_history(
+    session: Session,
+    inputs: RecordSprintPlanInput,
+) -> tuple[SprintPlanArtifact, ...]:
+    artifacts = tuple(
+        session.exec(
+            select(SprintPlanArtifact)
+            .where(SprintPlanArtifact.project_id == inputs.project_id)
+            .order_by(col(SprintPlanArtifact.version_number))
+        ).all()
+    )
     expected_parent = artifacts[-1].sprint_plan_artifact_id if artifacts else None
-    if supersedes_sprint_plan_artifact_id != expected_parent:
+    if inputs.supersedes_sprint_plan_artifact_id != expected_parent:
         message = "Sprint plan supersession does not match the current artifact."
         raise ValueError(message)
+    return artifacts
+
+
+def _selected_sprint_stories(
+    session: Session,
+    inputs: RecordSprintPlanInput,
+) -> dict[int, UserStory]:
     stories = session.exec(
-        select(UserStory).where(cast("Any", UserStory.story_id).in_(selected_story_ids))
+        select(UserStory).where(
+            col(UserStory.story_id).in_(inputs.selected_story_ids)
+        )
     ).all()
     stories_by_id = {
         story.story_id: story for story in stories if story.story_id is not None
     }
-    if set(stories_by_id) != set(selected_story_ids) or any(
-        story.product_id != project_id or story.is_superseded or not story.is_refined
+    if set(stories_by_id) != set(inputs.selected_story_ids) or any(
+        story.product_id != inputs.project_id
+        or story.is_superseded
+        or not story.is_refined
         for story in stories_by_id.values()
     ):
         message = "Sprint plan does not target exact active Project stories."
         raise ValueError(message)
-    assert_dependency_graph_valid_for_sprint(session, project_id=project_id)
-    team = session.exec(select(Team).where(Team.name == team_name)).first()
+    assert_dependency_graph_valid_for_sprint(session, project_id=inputs.project_id)
+    return stories_by_id
+
+
+def _ensure_sprint_team(session: Session, inputs: RecordSprintPlanInput) -> int:
+    team = session.exec(select(Team).where(Team.name == inputs.team_name)).first()
     if team is None:
-        team = Team(name=team_name, created_at=recorded_at, updated_at=recorded_at)
+        team = Team(
+            name=inputs.team_name,
+            created_at=inputs.recorded_at,
+            updated_at=inputs.recorded_at,
+        )
         session.add(team)
         session.flush()
-    if team.team_id is None:
+    team_id = team.team_id
+    if team_id is None:
         message = "Sprint Team did not receive a durable identity."
         raise ValueError(message)
-    ignored_sprint_id: int | None = None
-    sprint: Sprint | None = None
-    if supersedes_sprint_plan_artifact_id is not None:
-        parent = session.get(SprintPlanArtifact, supersedes_sprint_plan_artifact_id)
-        if parent is None or parent.project_id != project_id:
-            message = "Superseded Sprint plan does not exist."
-            raise ValueError(message)
-        sprint = session.get(Sprint, parent.sprint_id)
-        ignored_sprint_id = parent.sprint_id
+    return team_id
+
+
+def _superseded_sprint(
+    session: Session,
+    inputs: RecordSprintPlanInput,
+) -> tuple[Sprint | None, int | None]:
+    parent_id = inputs.supersedes_sprint_plan_artifact_id
+    if parent_id is None:
+        return None, None
+    parent = session.get(SprintPlanArtifact, parent_id)
+    if parent is None or parent.project_id != inputs.project_id:
+        message = "Superseded Sprint plan does not exist."
+        raise ValueError(message)
+    return session.get(Sprint, parent.sprint_id), parent.sprint_id
+
+
+def _assert_no_open_story_conflicts(
+    session: Session,
+    selected_story_ids: tuple[int, ...],
+    ignored_sprint_id: int | None,
+) -> None:
     conflicts = session.exec(
         select(SprintStory.story_id)
         .join(Sprint, col(Sprint.sprint_id) == col(SprintStory.sprint_id))
         .where(
-            cast("Any", SprintStory.story_id).in_(selected_story_ids),
-            cast("Any", Sprint.status).in_([SprintStatus.PLANNED, SprintStatus.ACTIVE]),
+            col(SprintStory.story_id).in_(selected_story_ids),
+            col(Sprint.status).in_([SprintStatus.PLANNED, SprintStatus.ACTIVE]),
             *(
                 (Sprint.sprint_id != ignored_sprint_id,)
                 if ignored_sprint_id is not None
@@ -246,14 +302,23 @@ def record_sprint_plan_in_session(  # noqa: C901, PLR0912, PLR0913, PLR0915
     if conflicts:
         message = f"Stories already assigned to open Sprints: {sorted(set(conflicts))}."
         raise ValueError(message)
+
+
+def _ensure_planned_sprint(
+    session: Session,
+    inputs: RecordSprintPlanInput,
+    plan: SprintPlannerOutput,
+    team_id: int,
+    sprint: Sprint | None,
+) -> Sprint:
     if sprint is None:
         sprint = Sprint(
             goal=plan.sprint_goal,
             status=SprintStatus.PLANNED,
-            product_id=project_id,
-            team_id=team.team_id,
-            created_at=recorded_at,
-            updated_at=recorded_at,
+            product_id=inputs.project_id,
+            team_id=team_id,
+            created_at=inputs.recorded_at,
+            updated_at=inputs.recorded_at,
         )
         session.add(sprint)
         session.flush()
@@ -262,8 +327,8 @@ def record_sprint_plan_in_session(  # noqa: C901, PLR0912, PLR0913, PLR0915
             message = "Only a planned Sprint can receive a superseding plan."
             raise ValueError(message)
         sprint.goal = plan.sprint_goal
-        sprint.team_id = team.team_id
-        sprint.updated_at = recorded_at
+        sprint.team_id = team_id
+        sprint.updated_at = inputs.recorded_at
         session.add(sprint)
         for link in session.exec(
             select(SprintStory).where(SprintStory.sprint_id == sprint.sprint_id)
@@ -273,6 +338,13 @@ def record_sprint_plan_in_session(  # noqa: C901, PLR0912, PLR0913, PLR0915
     if sprint.sprint_id is None:
         message = "Sprint did not receive a durable identity."
         raise ValueError(message)
+    return sprint
+
+
+def _validate_sprint_task_plan(
+    plan: SprintPlannerOutput,
+    stories_by_id: dict[int, UserStory],
+) -> None:
     allowed_invariants = {
         story_id: _planning_story_invariant_ids(story)
         for story_id, story in stories_by_id.items()
@@ -305,10 +377,18 @@ def record_sprint_plan_in_session(  # noqa: C901, PLR0912, PLR0913, PLR0915
         raise ValueError(
             "Sprint task decomposition failed: " + "; ".join(decomposition_errors)
         )
+
+
+def _replace_sprint_story_tasks(
+    session: Session,
+    sprint_id: int,
+    plan: SprintPlannerOutput,
+    recorded_at: datetime,
+) -> None:
     for selected in plan.selected_stories:
         session.add(
             SprintStory(
-                sprint_id=sprint.sprint_id,
+                sprint_id=sprint_id,
                 story_id=selected.story_id,
                 added_at=recorded_at,
             )
@@ -329,32 +409,42 @@ def record_sprint_plan_in_session(  # noqa: C901, PLR0912, PLR0913, PLR0915
                     updated_at=recorded_at,
                 )
             )
+
+
+def _add_sprint_plan_artifact(
+    session: Session,
+    inputs: RecordSprintPlanInput,
+    sprint_id: int,
+    artifact_count: int,
+) -> SprintPlanArtifact:
     row = SprintPlanArtifact(
-        project_id=project_id,
-        sprint_id=sprint.sprint_id,
-        version_number=len(artifacts) + 1,
-        selected_story_ids_json=canonical_json(list(selected_story_ids)),
-        canonical_task_plan_json=canonical_json(canonical_task_plan),
-        plan_fingerprint=plan_fingerprint,
-        candidate_set_fingerprint=candidate_set_fingerprint,
-        supersedes_sprint_plan_artifact_id=supersedes_sprint_plan_artifact_id,
-        created_by=actor,
-        created_at=recorded_at,
+        project_id=inputs.project_id,
+        sprint_id=sprint_id,
+        version_number=artifact_count + 1,
+        selected_story_ids_json=canonical_json(list(inputs.selected_story_ids)),
+        canonical_task_plan_json=canonical_json(inputs.canonical_task_plan),
+        plan_fingerprint=inputs.plan_fingerprint,
+        candidate_set_fingerprint=inputs.candidate_set_fingerprint,
+        supersedes_sprint_plan_artifact_id=(
+            inputs.supersedes_sprint_plan_artifact_id
+        ),
+        created_by=inputs.actor,
+        created_at=inputs.recorded_at,
     )
     session.add(row)
     session.add(
         WorkflowEvent(
             event_type=WorkflowEventType.SPRINT_PLAN_SAVED,
-            timestamp=recorded_at,
-            product_id=project_id,
-            sprint_id=sprint.sprint_id,
+            timestamp=inputs.recorded_at,
+            product_id=inputs.project_id,
+            sprint_id=sprint_id,
             session_id=None,
             event_metadata=canonical_json(
                 {
                     "action": "sprint_plan_recorded",
-                    "candidate_set_fingerprint": candidate_set_fingerprint,
-                    "plan_fingerprint": plan_fingerprint,
-                    "selected_story_ids": list(selected_story_ids),
+                    "candidate_set_fingerprint": inputs.candidate_set_fingerprint,
+                    "plan_fingerprint": inputs.plan_fingerprint,
+                    "selected_story_ids": list(inputs.selected_story_ids),
                 }
             ),
             duration_seconds=0.0,
@@ -364,25 +454,60 @@ def record_sprint_plan_in_session(  # noqa: C901, PLR0912, PLR0913, PLR0915
     return row
 
 
-def record_sprint_plan_decision_in_session(  # noqa: PLR0913
+def record_sprint_plan_in_session(
     session: Session,
     *,
-    artifact: SprintPlanArtifact,
-    decision: str,
-    rationale: str,
-    reviewer: str,
-    idempotency_key: str,
-    decided_at: datetime,
+    inputs: RecordSprintPlanInput,
+) -> SprintPlanArtifact:
+    """Persist exact Sprint, task, and immutable plan facts in one transaction."""
+    plan = _validated_sprint_plan(inputs)
+    artifacts = _sprint_plan_artifact_history(session, inputs)
+    stories_by_id = _selected_sprint_stories(session, inputs)
+    team_id = _ensure_sprint_team(session, inputs)
+    sprint, ignored_sprint_id = _superseded_sprint(session, inputs)
+    _assert_no_open_story_conflicts(
+        session,
+        inputs.selected_story_ids,
+        ignored_sprint_id,
+    )
+    sprint = _ensure_planned_sprint(session, inputs, plan, team_id, sprint)
+    sprint_id = sprint.sprint_id
+    if sprint_id is None:
+        message = "Sprint did not receive a durable identity."
+        raise ValueError(message)
+    _validate_sprint_task_plan(plan, stories_by_id)
+    _replace_sprint_story_tasks(
+        session,
+        sprint_id,
+        plan,
+        inputs.recorded_at,
+    )
+    return _add_sprint_plan_artifact(
+        session,
+        inputs,
+        sprint_id,
+        len(artifacts),
+    )
+
+
+def record_sprint_plan_decision_in_session(
+    session: Session,
+    *,
+    inputs: RecordSprintPlanDecisionInput,
 ) -> SprintPlanArtifactDecision:
     """Append one terminal decision for an exact immutable Sprint plan."""
-    if decision not in {"accepted", "rejected", "feedback"}:
+    artifact = inputs.artifact
+    if inputs.decision not in {"accepted", "rejected", "feedback"}:
         message = "Sprint plan decision is invalid."
+        raise ValueError(message)
+    artifact_id = artifact.sprint_plan_artifact_id
+    if artifact_id is None:
+        message = "Sprint plan artifact has no durable identity."
         raise ValueError(message)
     existing = session.exec(
         select(SprintPlanArtifactDecision).where(
             SprintPlanArtifactDecision.project_id == artifact.project_id,
-            SprintPlanArtifactDecision.sprint_plan_artifact_id
-            == artifact.sprint_plan_artifact_id,
+            SprintPlanArtifactDecision.sprint_plan_artifact_id == artifact_id,
         )
     ).first()
     if existing is not None:
@@ -390,13 +515,13 @@ def record_sprint_plan_decision_in_session(  # noqa: PLR0913
         raise ValueError(message)
     row = SprintPlanArtifactDecision(
         project_id=artifact.project_id,
-        sprint_plan_artifact_id=cast("int", artifact.sprint_plan_artifact_id),
+        sprint_plan_artifact_id=artifact_id,
         plan_fingerprint=artifact.plan_fingerprint,
-        decision=decision,
-        rationale=rationale,
-        reviewer=reviewer,
-        idempotency_key=idempotency_key,
-        decided_at=decided_at,
+        decision=inputs.decision,
+        rationale=inputs.rationale,
+        reviewer=inputs.reviewer,
+        idempotency_key=inputs.idempotency_key,
+        decided_at=inputs.decided_at,
     )
     session.add(row)
     session.flush()

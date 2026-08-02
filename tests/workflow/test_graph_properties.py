@@ -316,6 +316,7 @@ AUTHORITATIVE_SNAPSHOT_VARIANTS: tuple[tuple[str, object], ...] = (
             StoryDependencyReviewFact(
                 review_id=15,
                 selected_story_ids=(12, 13),
+                reviewed_edges=(),
                 source_fingerprint="sha256:story-source",
                 dependency_fingerprint="sha256:dependencies",
             ),
@@ -328,6 +329,12 @@ AUTHORITATIVE_SNAPSHOT_VARIANTS: tuple[tuple[str, object], ...] = (
                 task_id=14,
                 sprint_id=12,
                 story_id=13,
+                description="Implement Story 13",
+                metadata_json=(
+                    '{"artifact_targets":[],"checklist_items":[],'
+                    '"relevant_invariant_ids":[],"task_kind":"other",'
+                    '"version":"task_metadata.v1","workstream_tags":[]}'
+                ),
                 status="ready",
                 dependencies_satisfied=True,
             ),

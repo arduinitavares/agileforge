@@ -488,7 +488,10 @@ def test_accepted_current_backlog_unlocks_roadmap_generation() -> None:
         _snapshot(artifacts=(vision, backlog), decisions=decisions),
         "planning.roadmap.generate",
     )
-    assert {item.fact_type for item in join.fact_references} == {"backlog"}
+    assert {item.fact_type for item in join.fact_references} == {
+        "authority",
+        "backlog",
+    }
 
 
 def test_contradictory_vision_terminal_decisions_fail_closed() -> None:

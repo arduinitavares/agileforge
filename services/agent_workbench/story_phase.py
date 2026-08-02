@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from itertools import pairwise
 from types import SimpleNamespace
@@ -12,7 +13,7 @@ from uuid import uuid4
 
 import anyio
 from sqlalchemy.exc import SQLAlchemyError
-from sqlmodel import Session, select
+from sqlmodel import Session, col, select
 
 from models.core import Sprint, SprintStory, Task, UserStory, UserStoryDependency
 from models.db import get_engine
@@ -22,6 +23,7 @@ from models.specs import SpecRegistry
 from models.workflow import StoryArtifact, StoryArtifactDecision
 from orchestrator_agent.agent_tools.story_linkage import normalize_requirement_key
 from orchestrator_agent.agent_tools.user_story_writer_tool.schemes import (
+    UserStoryItem,
     UserStoryWriterOutput,
 )
 from orchestrator_agent.agent_tools.user_story_writer_tool.tools import (
@@ -1968,126 +1970,181 @@ def _repair_story_readiness_rows(request: dict[str, Any]) -> dict[str, Any]:
     return {"repaired_count": len(repaired_ids), "story_ids": repaired_ids}
 
 
-def record_story_draft_in_session(  # noqa: C901, PLR0912, PLR0913, PLR0915
-    session: Session,
-    *,
-    project_id: int,
-    requirement_id: str,
-    requirement_text: str,
-    requirement_rank: int,
-    roadmap_artifact_id: int,
-    roadmap_artifact_fingerprint: str,
-    canonical_content: JsonObject,
-    content_fingerprint: str,
-    supersedes_story_artifact_id: int | None,
-    actor: str,
-    recorded_at: datetime,
-) -> StoryArtifact:
-    """Persist deterministic Story linkage and one immutable Story-set artifact."""
-    output = UserStoryWriterOutput.model_validate(canonical_content)
-    if output.parent_requirement != requirement_text:
+@dataclass(frozen=True)
+class RecordStoryDraftInput:
+    """Exact immutable values used to record one Story-set draft."""
+
+    project_id: int
+    requirement_id: str
+    requirement_text: str
+    requirement_rank: int
+    roadmap_artifact_id: int
+    roadmap_artifact_fingerprint: str
+    canonical_content: JsonObject
+    content_fingerprint: str
+    supersedes_story_artifact_id: int | None
+    actor: str
+    recorded_at: datetime
+
+
+@dataclass(frozen=True)
+class RecordStoryDecisionInput:
+    """Exact append-only values used to decide one Story-set draft."""
+
+    artifact: StoryArtifact
+    decision: str
+    rationale: str
+    reviewer: str
+    idempotency_key: str
+    decided_at: datetime
+
+
+@dataclass(frozen=True)
+class _StoryWriteContext:
+    """Shared immutable inputs for deterministic Story row writes."""
+
+    inputs: RecordStoryDraftInput
+    normalized_requirement: str
+    accepted_spec_version_id: int | None
+
+
+def _validated_story_output(inputs: RecordStoryDraftInput) -> UserStoryWriterOutput:
+    output = UserStoryWriterOutput.model_validate(inputs.canonical_content)
+    if output.parent_requirement != inputs.requirement_text:
         message = "Story content does not target the exact Backlog requirement."
         raise ValueError(message)
-    if canonical_hash(canonical_content) != content_fingerprint:
+    if canonical_hash(inputs.canonical_content) != inputs.content_fingerprint:
         message = "Story content fingerprint does not match canonical content."
         raise ValueError(message)
-    normalized_requirement = normalize_requirement_key(requirement_text)
-    if requirement_id != normalized_requirement:
+    normalized_requirement = normalize_requirement_key(inputs.requirement_text)
+    if inputs.requirement_id != normalized_requirement:
         message = "Story requirement identity is not canonical."
         raise ValueError(message)
-    artifacts = session.exec(
-        select(StoryArtifact)
-        .where(
-            StoryArtifact.project_id == project_id,
-            StoryArtifact.requirement_id == requirement_id,
-        )
-        .order_by(cast("Any", StoryArtifact.version_number))
-    ).all()
+    return output
+
+
+def _story_artifact_history(
+    session: Session,
+    inputs: RecordStoryDraftInput,
+) -> tuple[StoryArtifact, ...]:
+    artifacts = tuple(
+        session.exec(
+            select(StoryArtifact)
+            .where(
+                StoryArtifact.project_id == inputs.project_id,
+                StoryArtifact.requirement_id == inputs.requirement_id,
+            )
+            .order_by(col(StoryArtifact.version_number))
+        ).all()
+    )
     expected_parent = artifacts[-1].story_artifact_id if artifacts else None
-    if supersedes_story_artifact_id != expected_parent:
+    if inputs.supersedes_story_artifact_id != expected_parent:
         message = "Story supersession does not match the current artifact."
         raise ValueError(message)
-    existing = session.exec(
-        select(UserStory)
-        .where(
-            UserStory.product_id == project_id,
-            UserStory.source_requirement == normalized_requirement,
-            UserStory.is_superseded == False,  # noqa: E712
-        )
-        .order_by(cast("Any", UserStory.refinement_slot))
-    ).all()
-    existing_by_slot = {
-        item.refinement_slot: item
-        for item in existing
-        if item.refinement_slot is not None
-    }
+    return artifacts
+
+
+def _active_requirement_stories(
+    session: Session,
+    inputs: RecordStoryDraftInput,
+    normalized_requirement: str,
+) -> tuple[UserStory, ...]:
+    return tuple(
+        session.exec(
+            select(UserStory)
+            .where(
+                UserStory.product_id == inputs.project_id,
+                UserStory.source_requirement == normalized_requirement,
+                col(UserStory.is_superseded).is_(False),
+            )
+            .order_by(col(UserStory.refinement_slot))
+        ).all()
+    )
+
+
+def _accepted_spec_version_id(session: Session, project_id: int) -> int | None:
     spec = session.exec(
         select(SpecRegistry)
         .where(
             SpecRegistry.product_id == project_id,
             SpecRegistry.status == "approved",
         )
-        .order_by(cast("Any", SpecRegistry.spec_version_id).desc())
+        .order_by(col(SpecRegistry.spec_version_id).desc())
     ).first()
-    accepted_spec_version_id = None if spec is None else spec.spec_version_id
-    story_ids: list[int] = []
-    for slot, item in enumerate(output.user_stories, start=1):
-        story = existing_by_slot.get(slot)
-        acceptance_criteria = "\n".join(
-            criterion if criterion.startswith("- ") else f"- {criterion}"
-            for criterion in item.acceptance_criteria
+    return None if spec is None else spec.spec_version_id
+
+
+def _story_persona(statement: str) -> str | None:
+    if ", I want " not in statement:
+        return None
+    prefix = statement.split(", I want ", maxsplit=1)[0]
+    return prefix.removeprefix("As a ").removeprefix("As an ").strip()
+
+
+def _write_story_item(
+    session: Session,
+    context: _StoryWriteContext,
+    slot: int,
+    item: UserStoryItem,
+    story: UserStory | None,
+) -> int:
+    acceptance_criteria = "\n".join(
+        criterion if criterion.startswith("- ") else f"- {criterion}"
+        for criterion in item.acceptance_criteria
+    )
+    if story is not None:
+        linked = session.exec(
+            select(SprintStory).where(SprintStory.story_id == story.story_id)
+        ).first()
+        changed = (
+            story.title != item.story_title
+            or story.story_description != item.statement
+            or story.acceptance_criteria != acceptance_criteria
         )
-        persona = None
-        statement = item.statement.strip()
-        if ", I want " in statement:
-            persona = statement.split(", I want ", maxsplit=1)[0]
-            persona = persona.removeprefix("As a ").removeprefix("As an ").strip()
-        if story is not None:
-            linked = session.exec(
-                select(SprintStory).where(SprintStory.story_id == story.story_id)
-            ).first()
-            changed = (
-                story.title != item.story_title
-                or story.story_description != item.statement
-                or story.acceptance_criteria != acceptance_criteria
-            )
-            if linked is not None and changed:
-                message = "Story correction is unsafe after Sprint work exists."
-                raise ValueError(message)
-        else:
-            story = UserStory(
-                product_id=project_id,
-                title=item.story_title,
-                source_requirement=normalized_requirement,
-                refinement_slot=slot,
-                story_origin="refined",
-                created_at=recorded_at,
-            )
-        story.title = item.story_title
-        story.story_description = item.statement
-        story.acceptance_criteria = acceptance_criteria
-        story.persona = persona
-        story.status = StoryStatus.TO_DO
-        story.story_points = {"XS": 1, "S": 2, "M": 3, "L": 5, "XL": 8}[
-            item.estimated_effort
-        ]
-        story.rank = str((requirement_rank * 100) + slot)
-        story.source_requirement = normalized_requirement
-        story.refinement_slot = slot
-        story.story_origin = "refined"
-        story.is_refined = True
-        story.is_superseded = False
-        story.accepted_spec_version_id = accepted_spec_version_id
-        story.ac_updated_at = recorded_at
-        story.ac_update_reason = "user_story_refinement"
-        story.updated_at = recorded_at
-        session.add(story)
-        session.flush()
-        if story.story_id is None:
-            message = "Story row did not receive a durable identity."
+        if linked is not None and changed:
+            message = "Story correction is unsafe after Sprint work exists."
             raise ValueError(message)
-        story_ids.append(story.story_id)
-    retained_slots = set(range(1, len(output.user_stories) + 1))
+    else:
+        story = UserStory(
+            product_id=context.inputs.project_id,
+            title=item.story_title,
+            source_requirement=context.normalized_requirement,
+            refinement_slot=slot,
+            story_origin="refined",
+            created_at=context.inputs.recorded_at,
+        )
+    story.title = item.story_title
+    story.story_description = item.statement
+    story.acceptance_criteria = acceptance_criteria
+    story.persona = _story_persona(item.statement.strip())
+    story.status = StoryStatus.TO_DO
+    story.story_points = {"XS": 1, "S": 2, "M": 3, "L": 5, "XL": 8}[
+        item.estimated_effort
+    ]
+    story.rank = str((context.inputs.requirement_rank * 100) + slot)
+    story.source_requirement = context.normalized_requirement
+    story.refinement_slot = slot
+    story.story_origin = "refined"
+    story.is_refined = True
+    story.is_superseded = False
+    story.accepted_spec_version_id = context.accepted_spec_version_id
+    story.ac_updated_at = context.inputs.recorded_at
+    story.ac_update_reason = "user_story_refinement"
+    story.updated_at = context.inputs.recorded_at
+    session.add(story)
+    session.flush()
+    if story.story_id is None:
+        message = "Story row did not receive a durable identity."
+        raise ValueError(message)
+    return story.story_id
+
+
+def _supersede_removed_story_rows(
+    session: Session,
+    existing: tuple[UserStory, ...],
+    retained_slots: set[int],
+    recorded_at: datetime,
+) -> None:
     for story in existing:
         if story.refinement_slot in retained_slots:
             continue
@@ -2100,32 +2157,40 @@ def record_story_draft_in_session(  # noqa: C901, PLR0912, PLR0913, PLR0915
         story.is_superseded = True
         story.updated_at = recorded_at
         session.add(story)
+
+
+def _add_story_artifact(
+    session: Session,
+    inputs: RecordStoryDraftInput,
+    artifacts: tuple[StoryArtifact, ...],
+    story_ids: list[int],
+) -> StoryArtifact:
     row = StoryArtifact(
-        project_id=project_id,
-        requirement_id=requirement_id,
-        roadmap_artifact_id=roadmap_artifact_id,
-        roadmap_artifact_fingerprint=roadmap_artifact_fingerprint,
+        project_id=inputs.project_id,
+        requirement_id=inputs.requirement_id,
+        roadmap_artifact_id=inputs.roadmap_artifact_id,
+        roadmap_artifact_fingerprint=inputs.roadmap_artifact_fingerprint,
         version_number=len(artifacts) + 1,
-        canonical_content_json=canonical_json(canonical_content),
-        content_fingerprint=content_fingerprint,
+        canonical_content_json=canonical_json(inputs.canonical_content),
+        content_fingerprint=inputs.content_fingerprint,
         story_ids_json=canonical_json(sorted(story_ids)),
-        supersedes_story_artifact_id=supersedes_story_artifact_id,
-        created_by=actor,
-        created_at=recorded_at,
+        supersedes_story_artifact_id=inputs.supersedes_story_artifact_id,
+        created_by=inputs.actor,
+        created_at=inputs.recorded_at,
     )
     session.add(row)
     session.add(
         WorkflowEvent(
             event_type=WorkflowEventType.STORIES_SAVED,
-            timestamp=recorded_at,
-            product_id=project_id,
+            timestamp=inputs.recorded_at,
+            product_id=inputs.project_id,
             session_id=None,
             duration_seconds=0.0,
             event_metadata=canonical_json(
                 {
                     "action": "story_artifact_recorded",
-                    "content_fingerprint": content_fingerprint,
-                    "requirement_id": requirement_id,
+                    "content_fingerprint": inputs.content_fingerprint,
+                    "requirement_id": inputs.requirement_id,
                     "story_ids": sorted(story_ids),
                 }
             ),
@@ -2135,24 +2200,61 @@ def record_story_draft_in_session(  # noqa: C901, PLR0912, PLR0913, PLR0915
     return row
 
 
-def record_story_decision_in_session(  # noqa: PLR0913
+def record_story_draft_in_session(
     session: Session,
     *,
-    artifact: StoryArtifact,
-    decision: str,
-    rationale: str,
-    reviewer: str,
-    idempotency_key: str,
-    decided_at: datetime,
+    inputs: RecordStoryDraftInput,
+) -> StoryArtifact:
+    """Persist deterministic Story linkage and one immutable Story-set artifact."""
+    output = _validated_story_output(inputs)
+    artifacts = _story_artifact_history(session, inputs)
+    normalized_requirement = normalize_requirement_key(inputs.requirement_text)
+    existing = _active_requirement_stories(session, inputs, normalized_requirement)
+    existing_by_slot = {
+        item.refinement_slot: item
+        for item in existing
+        if item.refinement_slot is not None
+    }
+    context = _StoryWriteContext(
+        inputs=inputs,
+        normalized_requirement=normalized_requirement,
+        accepted_spec_version_id=_accepted_spec_version_id(
+            session,
+            inputs.project_id,
+        ),
+    )
+    story_ids = [
+        _write_story_item(session, context, slot, item, existing_by_slot.get(slot))
+        for slot, item in enumerate(output.user_stories, start=1)
+    ]
+    retained_slots = set(range(1, len(output.user_stories) + 1))
+    _supersede_removed_story_rows(
+        session,
+        existing,
+        retained_slots,
+        inputs.recorded_at,
+    )
+    return _add_story_artifact(session, inputs, artifacts, story_ids)
+
+
+def record_story_decision_in_session(
+    session: Session,
+    *,
+    inputs: RecordStoryDecisionInput,
 ) -> StoryArtifactDecision:
     """Append one terminal decision for exact immutable Story content."""
-    if decision not in {"accepted", "rejected", "feedback"}:
+    artifact = inputs.artifact
+    if inputs.decision not in {"accepted", "rejected", "feedback"}:
         message = "Story decision is invalid."
+        raise ValueError(message)
+    artifact_id = artifact.story_artifact_id
+    if artifact_id is None:
+        message = "Story artifact has no durable identity."
         raise ValueError(message)
     existing = session.exec(
         select(StoryArtifactDecision).where(
             StoryArtifactDecision.project_id == artifact.project_id,
-            StoryArtifactDecision.story_artifact_id == artifact.story_artifact_id,
+            StoryArtifactDecision.story_artifact_id == artifact_id,
         )
     ).first()
     if existing is not None:
@@ -2160,13 +2262,13 @@ def record_story_decision_in_session(  # noqa: PLR0913
         raise ValueError(message)
     row = StoryArtifactDecision(
         project_id=artifact.project_id,
-        story_artifact_id=cast("int", artifact.story_artifact_id),
+        story_artifact_id=artifact_id,
         artifact_fingerprint=artifact.content_fingerprint,
-        decision=decision,
-        rationale=rationale,
-        reviewer=reviewer,
-        idempotency_key=idempotency_key,
-        decided_at=decided_at,
+        decision=inputs.decision,
+        rationale=inputs.rationale,
+        reviewer=inputs.reviewer,
+        idempotency_key=inputs.idempotency_key,
+        decided_at=inputs.decided_at,
     )
     session.add(row)
     session.flush()
@@ -2184,7 +2286,7 @@ def repair_story_readiness_in_session(
     _assert_repair_readiness_safe_in_session(session, project_id=project_id)
     story_ids = tuple(item[0] for item in repairs)
     rows = session.exec(
-        select(UserStory).where(cast("Any", UserStory.story_id).in_(story_ids))
+        select(UserStory).where(col(UserStory.story_id).in_(story_ids))
     ).all()
     by_id = {item.story_id: item for item in rows if item.story_id is not None}
     if set(by_id) != set(story_ids):

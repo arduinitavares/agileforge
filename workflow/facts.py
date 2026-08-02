@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import datetime as _datetime
-from typing import Literal
+from typing import Annotated, Literal
+
+from pydantic import Field, model_validator
 
 from workflow.contracts import FrozenModel
 
@@ -211,10 +213,19 @@ class PlanningArtifactFact(FrozenModel):
     artifact_type: Literal["roadmap", "story", "sprint_plan"]
     artifact_id: int
     artifact_fingerprint: str
+    source_artifact_id: int | None = None
     source_fingerprint: str
+    authority_id: int | None = None
+    authority_fingerprint: str | None = None
+    backlog_artifact_id: int | None = None
+    backlog_artifact_fingerprint: str | None = None
+    roadmap_artifact_id: int | None = None
+    roadmap_artifact_fingerprint: str | None = None
     requirement_id: str | None = None
     story_ids: tuple[int, ...] = ()
+    sprint_id: int | None = None
     candidate_set_fingerprint: str | None = None
+    task_content_fingerprint: str | None = None
     supersedes_artifact_id: int | None = None
     status: Literal[
         "pending_review",
@@ -234,6 +245,23 @@ class StoryDependencyFact(FrozenModel):
     status: Literal["proposed", "active", "rejected"]
     source: Literal["story_writer", "dependency_repair", "manual_review"]
     confidence: Literal["explicit", "inferred", "reviewed"]
+    reason: str | None = None
+
+
+class StoryDependencyReviewEdgeFact(FrozenModel):
+    """One strictly typed canonical edge captured by dependency review."""
+
+    dependent_story_id: Annotated[int, Field(strict=True)]
+    prerequisite_story_id: Annotated[int, Field(strict=True)]
+    reason: Annotated[str, Field(strict=True, min_length=1)]
+
+    @model_validator(mode="after")
+    def reject_self_edge(self) -> StoryDependencyReviewEdgeFact:
+        """Reject a dependency from one Story to itself."""
+        if self.dependent_story_id == self.prerequisite_story_id:
+            message = "A Story dependency cannot reference itself."
+            raise ValueError(message)
+        return self
 
 
 class StoryDependencyReviewFact(FrozenModel):
@@ -241,6 +269,7 @@ class StoryDependencyReviewFact(FrozenModel):
 
     review_id: int
     selected_story_ids: tuple[int, ...]
+    reviewed_edges: tuple[StoryDependencyReviewEdgeFact, ...]
     source_fingerprint: str
     dependency_fingerprint: str
 
@@ -260,6 +289,13 @@ class StoryFact(FrozenModel):
     requirement_id: str | None = None
     content_fingerprint: str | None = None
     content_accepted: bool = False
+    story_artifact_id: int | None = None
+    authority_id: int | None = None
+    authority_fingerprint: str | None = None
+    backlog_artifact_id: int | None = None
+    backlog_artifact_fingerprint: str | None = None
+    roadmap_artifact_id: int | None = None
+    roadmap_artifact_fingerprint: str | None = None
     status: str
     story_points: int | None = None
     rank: str | None = None
@@ -273,6 +309,8 @@ class TaskFact(FrozenModel):
     task_id: int
     sprint_id: int
     story_id: int
+    description: str
+    metadata_json: str
     status: str
     dependencies_satisfied: bool
 

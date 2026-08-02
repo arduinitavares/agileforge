@@ -3,18 +3,20 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 import anyio
-from sqlmodel import Session, select
+from sqlmodel import Session, col, select
 
 from models.core import Product, UserStory
 from models.db import get_engine
 from models.enums import WorkflowEventType
 from models.events import WorkflowEvent
 from models.workflow import RoadmapArtifact, RoadmapArtifactDecision
+from orchestrator_agent.agent_tools.roadmap_builder.schemes import RoadmapBuilderOutput
 from orchestrator_agent.agent_tools.roadmap_builder.tools import save_roadmap_tool
 from repositories.product import ProductRepository
 from services.agent_workbench.error_codes import ErrorCode, workbench_error
@@ -242,70 +244,85 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
-def record_roadmap_draft_in_session(  # noqa: PLR0913
+@dataclass(frozen=True)
+class RecordRoadmapDraftInput:
+    """Exact immutable values used to record one Roadmap draft."""
+
+    project_id: int
+    backlog_artifact_id: int
+    backlog_artifact_fingerprint: str
+    canonical_content: JsonObject
+    content_fingerprint: str
+    supersedes_roadmap_artifact_id: int | None
+    actor: str
+    recorded_at: datetime
+
+
+@dataclass(frozen=True)
+class RecordRoadmapDecisionInput:
+    """Exact append-only values used to decide one Roadmap draft."""
+
+    artifact: RoadmapArtifact
+    decision: str
+    rationale: str
+    reviewer: str
+    idempotency_key: str
+    decided_at: datetime
+
+
+def record_roadmap_draft_in_session(
     session: Session,
     *,
-    project_id: int,
-    backlog_artifact_id: int,
-    backlog_artifact_fingerprint: str,
-    canonical_content: JsonObject,
-    content_fingerprint: str,
-    supersedes_roadmap_artifact_id: int | None,
-    actor: str,
-    recorded_at: datetime,
+    inputs: RecordRoadmapDraftInput,
 ) -> RoadmapArtifact:
     """Validate and add one immutable Roadmap artifact to the caller transaction."""
-    from orchestrator_agent.agent_tools.roadmap_builder.schemes import (  # noqa: PLC0415
-        RoadmapBuilderOutput,
-    )
-
-    RoadmapBuilderOutput.model_validate(canonical_content)
-    if canonical_hash(canonical_content) != content_fingerprint:
+    RoadmapBuilderOutput.model_validate(inputs.canonical_content)
+    if canonical_hash(inputs.canonical_content) != inputs.content_fingerprint:
         message = "Roadmap content fingerprint does not match canonical content."
         raise ValueError(message)
     existing = session.exec(
         select(RoadmapArtifact)
-        .where(RoadmapArtifact.project_id == project_id)
-        .order_by(cast("Any", RoadmapArtifact.version_number))
+        .where(RoadmapArtifact.project_id == inputs.project_id)
+        .order_by(col(RoadmapArtifact.version_number))
     ).all()
     expected_parent = existing[-1].roadmap_artifact_id if existing else None
-    if supersedes_roadmap_artifact_id != expected_parent:
+    if inputs.supersedes_roadmap_artifact_id != expected_parent:
         message = "Roadmap supersession does not match the current artifact."
         raise ValueError(message)
     row = RoadmapArtifact(
-        project_id=project_id,
-        backlog_artifact_id=backlog_artifact_id,
-        backlog_artifact_fingerprint=backlog_artifact_fingerprint,
+        project_id=inputs.project_id,
+        backlog_artifact_id=inputs.backlog_artifact_id,
+        backlog_artifact_fingerprint=inputs.backlog_artifact_fingerprint,
         version_number=len(existing) + 1,
-        canonical_content_json=canonical_json(canonical_content),
-        content_fingerprint=content_fingerprint,
-        supersedes_roadmap_artifact_id=supersedes_roadmap_artifact_id,
-        created_by=actor,
-        created_at=recorded_at,
+        canonical_content_json=canonical_json(inputs.canonical_content),
+        content_fingerprint=inputs.content_fingerprint,
+        supersedes_roadmap_artifact_id=inputs.supersedes_roadmap_artifact_id,
+        created_by=inputs.actor,
+        created_at=inputs.recorded_at,
     )
     session.add(row)
     session.flush()
     return row
 
 
-def record_roadmap_decision_in_session(  # noqa: PLR0913
+def record_roadmap_decision_in_session(
     session: Session,
     *,
-    artifact: RoadmapArtifact,
-    decision: str,
-    rationale: str,
-    reviewer: str,
-    idempotency_key: str,
-    decided_at: datetime,
+    inputs: RecordRoadmapDecisionInput,
 ) -> RoadmapArtifactDecision:
     """Append one exact Roadmap decision and update the accepted projection."""
-    if decision not in {"accepted", "rejected", "feedback"}:
+    artifact = inputs.artifact
+    if inputs.decision not in {"accepted", "rejected", "feedback"}:
         message = "Roadmap decision is invalid."
+        raise ValueError(message)
+    artifact_id = artifact.roadmap_artifact_id
+    if artifact_id is None:
+        message = "Roadmap artifact has no durable identity."
         raise ValueError(message)
     existing = session.exec(
         select(RoadmapArtifactDecision).where(
             RoadmapArtifactDecision.project_id == artifact.project_id,
-            RoadmapArtifactDecision.roadmap_artifact_id == artifact.roadmap_artifact_id,
+            RoadmapArtifactDecision.roadmap_artifact_id == artifact_id,
         )
     ).first()
     if existing is not None:
@@ -313,27 +330,27 @@ def record_roadmap_decision_in_session(  # noqa: PLR0913
         raise ValueError(message)
     row = RoadmapArtifactDecision(
         project_id=artifact.project_id,
-        roadmap_artifact_id=cast("int", artifact.roadmap_artifact_id),
+        roadmap_artifact_id=artifact_id,
         artifact_fingerprint=artifact.content_fingerprint,
-        decision=decision,
-        rationale=rationale,
-        reviewer=reviewer,
-        idempotency_key=idempotency_key,
-        decided_at=decided_at,
+        decision=inputs.decision,
+        rationale=inputs.rationale,
+        reviewer=inputs.reviewer,
+        idempotency_key=inputs.idempotency_key,
+        decided_at=inputs.decided_at,
     )
     session.add(row)
-    if decision == "accepted":
+    if inputs.decision == "accepted":
         product = session.get(Product, artifact.project_id)
         if product is None:
             message = "Roadmap Project does not exist."
             raise ValueError(message)
         product.roadmap = artifact.canonical_content_json
-        product.updated_at = decided_at
+        product.updated_at = inputs.decided_at
         session.add(product)
         session.add(
             WorkflowEvent(
                 event_type=WorkflowEventType.ROADMAP_SAVED,
-                timestamp=decided_at,
+                timestamp=inputs.decided_at,
                 product_id=artifact.project_id,
                 session_id=None,
                 duration_seconds=0.0,

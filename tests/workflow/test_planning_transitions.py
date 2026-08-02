@@ -1,13 +1,11 @@
 """Persisted planning transitions, transaction, and idempotency tests."""
 
-# ruff: noqa: D103
-
 from __future__ import annotations
 
 import ast
 import inspect
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, NoReturn, TypedDict, get_args
+from typing import TYPE_CHECKING, NoReturn, TypedDict, Unpack, get_args
 
 import pytest
 from pydantic import TypeAdapter, ValidationError
@@ -19,7 +17,15 @@ import services.agent_workbench.story_phase as story_phase_module
 import services.sprint_input as sprint_input_module
 import services.story_dependencies as story_dependencies_module
 import workflow.handlers.planning as planning_handlers
-from models.core import Product, Sprint, SprintStory, Task, Team, UserStory
+from models.core import (
+    Product,
+    Sprint,
+    SprintStory,
+    Task,
+    Team,
+    UserStory,
+    UserStoryDependency,
+)
 from models.enums import SprintStatus, WorkflowEventType
 from models.events import WorkflowEvent
 from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance, SpecRegistry
@@ -35,12 +41,14 @@ from models.workflow import (
     StoryDependencyReview,
     WorkflowTransitionReceipt,
 )
-from repositories.workflow import WorkflowFactRepository
+from repositories.workflow import WorkflowFactLoadError, WorkflowFactRepository
 from services.specs.authority_selection import pending_authority_fingerprint
 from utils.spec_schemas import SpecAuthorityCompilationSuccess
+from utils.task_metadata import TaskMetadata, serialize_task_metadata
 from workflow.clock import FixedClock
 from workflow.contracts import (
     JsonObject,
+    NodeCategory,
     NodeDecision,
     TransitionResult,
     WorkflowErrorCode,
@@ -76,6 +84,7 @@ EVALUATED_AT = datetime(2026, 8, 2, 12, tzinfo=UTC)
 EXPECTED_REQUEST_VARIANT_COUNT = 30
 EXPECTED_PLANNING_REQUEST_COUNT = 9
 REPAIRED_STORY_POINTS = 3
+EXPECTED_DEPENDENCY_STORY_COUNT = 3
 PLANNING_REQUESTS = (
     RecordRoadmapDraft,
     DecideRoadmap,
@@ -115,6 +124,25 @@ class _RequestGuards(TypedDict):
     instance_key: str | None
     actor: str
     correlation_id: str
+
+
+class _DependencyEdgePayload(TypedDict):
+    dependent_story_id: int
+    prerequisite_story_id: int
+    reason: str
+
+
+class _SprintDraftOptions(TypedDict):
+    team_name: str
+    idempotency_key: str
+
+
+def _copy_dependency_edge(item: _DependencyEdgePayload) -> _DependencyEdgePayload:
+    return {
+        "dependent_story_id": item["dependent_story_id"],
+        "prerequisite_story_id": item["prerequisite_story_id"],
+        "reason": item["reason"],
+    }
 
 
 class _ForcedPlanningError(RuntimeError):
@@ -240,6 +268,104 @@ def _seed_accepted_backlog(
         )
         session.commit()
         return project.product_id
+
+
+def _replace_authority_and_backlog(engine: Engine, project_id: int) -> None:
+    """Accept a replacement authority and Backlog, obsoleting prior lineage."""
+    authority_artifact = _authority_artifact()
+    with Session(engine) as session:
+        current_spec = session.exec(
+            select(SpecRegistry).where(
+                col(SpecRegistry.product_id) == project_id,
+                col(SpecRegistry.status) == "approved",
+            )
+        ).one()
+        current_spec.status = "superseded"
+        session.add(current_spec)
+        replacement_spec = SpecRegistry(
+            product_id=project_id,
+            spec_hash="sha256:task-11-replacement-spec",
+            content='{"scope":"task-11-replacement"}',
+            status="approved",
+            approved_at=EVALUATED_AT,
+            approved_by="operator@example.com",
+        )
+        session.add(replacement_spec)
+        session.flush()
+        assert replacement_spec.spec_version_id is not None
+        replacement_authority = CompiledSpecAuthority(
+            spec_version_id=replacement_spec.spec_version_id,
+            compiler_version=authority_artifact.compiler_version,
+            prompt_hash="c" * 64,
+            compiled_at=EVALUATED_AT,
+            compiled_artifact_json=authority_artifact.model_copy(
+                update={"prompt_hash": "c" * 64}
+            ).model_dump_json(),
+            scope_themes="[]",
+            invariants="[]",
+            eligible_feature_ids="[]",
+            rejected_features="[]",
+            spec_gaps="[]",
+        )
+        session.add(replacement_authority)
+        session.flush()
+        assert replacement_authority.authority_id is not None
+        authority_fingerprint = pending_authority_fingerprint(replacement_authority)
+        assert authority_fingerprint is not None
+        session.add(
+            SpecAuthorityAcceptance(
+                product_id=project_id,
+                spec_version_id=replacement_spec.spec_version_id,
+                status="accepted",
+                policy="manual",
+                decided_by="operator@example.com",
+                decided_at=EVALUATED_AT,
+                rationale="Accepted replacement authority.",
+                compiler_version=replacement_authority.compiler_version,
+                prompt_hash=replacement_authority.prompt_hash,
+                spec_hash=replacement_spec.spec_hash,
+                pending_authority_id=replacement_authority.authority_id,
+                authority_fingerprint=authority_fingerprint,
+                review_fingerprint="sha256:replacement-review",
+                terminal_decision_key="task-11-replacement-authority",
+            )
+        )
+        old_backlog = session.exec(
+            select(BacklogArtifact)
+            .where(col(BacklogArtifact.project_id) == project_id)
+            .order_by(col(BacklogArtifact.version_number).desc())
+        ).first()
+        assert old_backlog is not None
+        assert old_backlog.backlog_artifact_id is not None
+        replacement_content = _backlog_content("Plan replacement authority work")
+        replacement_fingerprint = canonical_hash(replacement_content)
+        replacement_backlog = BacklogArtifact(
+            project_id=project_id,
+            authority_id=replacement_authority.authority_id,
+            authority_fingerprint=authority_fingerprint,
+            version_number=old_backlog.version_number + 1,
+            canonical_content_json=canonical_json(replacement_content),
+            content_fingerprint=replacement_fingerprint,
+            supersedes_backlog_artifact_id=old_backlog.backlog_artifact_id,
+            created_by="operator@example.com",
+            created_at=EVALUATED_AT,
+        )
+        session.add(replacement_backlog)
+        session.flush()
+        assert replacement_backlog.backlog_artifact_id is not None
+        session.add(
+            BacklogArtifactDecision(
+                project_id=project_id,
+                backlog_artifact_id=replacement_backlog.backlog_artifact_id,
+                artifact_fingerprint=replacement_fingerprint,
+                decision="accepted",
+                rationale="Accepted replacement Backlog.",
+                reviewer="operator@example.com",
+                idempotency_key="seed-replacement-backlog",
+                decided_at=EVALUATED_AT,
+            )
+        )
+        session.commit()
 
 
 def _domain(engine: Engine) -> WorkflowDomain:
@@ -455,7 +581,177 @@ def _record_and_accept_story(
     return artifact_id, story_id
 
 
+def _record_sprint_plan_draft(
+    engine: Engine,
+    domain: WorkflowDomain,
+    project_id: int,
+    story_id: int,
+    **options: Unpack[_SprintDraftOptions],
+) -> tuple[int, int, str, JsonObject]:
+    """Record one persisted Sprint-plan draft and return exact bindings."""
+    team_name = options["team_name"]
+    idempotency_key = options["idempotency_key"]
+    _apply_current_dependencies(
+        engine,
+        domain,
+        project_id,
+        idempotency_key=f"{idempotency_key}-dependencies",
+    )
+    with Session(engine) as session:
+        session.add(Team(name=team_name))
+        session.commit()
+        snapshot = WorkflowFactRepository(session).load(project_id)
+    candidate_fingerprint = candidate_set_fingerprint(
+        snapshot.stories,
+        snapshot.story_dependencies,
+    )
+    plan = _sprint_plan(story_id)
+    position = domain.position(project_id)
+    recorded = domain.transition(
+        RecordSprintPlan(
+            **_guards(position, "planning.sprint.plan"),
+            idempotency_key=idempotency_key,
+            team_name=team_name,
+            selected_story_ids=(story_id,),
+            canonical_task_plan=plan,
+            plan_fingerprint=canonical_hash(plan),
+            candidate_set_fingerprint=candidate_fingerprint,
+        )
+    )
+    assert recorded.ok is True
+    return (
+        _output_int(recorded, "sprint_plan_artifact_id"),
+        _output_int(recorded, "sprint_id"),
+        candidate_fingerprint,
+        plan,
+    )
+
+
+def _apply_current_dependencies(
+    engine: Engine,
+    domain: WorkflowDomain,
+    project_id: int,
+    *,
+    idempotency_key: str,
+) -> None:
+    """Persist review of the current candidate dependency semantics."""
+    with Session(engine) as session:
+        snapshot = WorkflowFactRepository(session).load(project_id)
+    stories = tuple(item for item in snapshot.stories if item.sprint_candidate)
+    reviewed_edges = tuple(
+        ReviewedDependencyEdge(
+            dependent_story_id=edge.dependent_story_id,
+            prerequisite_story_id=edge.prerequisite_story_id,
+            reason=edge.reason or "Reviewed dependency.",
+        )
+        for edge in snapshot.story_dependencies
+        if edge.status == "active"
+    )
+    position = domain.position(project_id)
+    applied = domain.transition(
+        ApplyStoryDependencies(
+            **_guards(position, "planning.story_dependencies"),
+            idempotency_key=idempotency_key,
+            selected_story_ids=tuple(item.story_id for item in stories),
+            reviewed_edges=reviewed_edges,
+            source_fingerprint=story_dependency_source_fingerprint(stories),
+        )
+    )
+    assert applied.ok is True
+
+
+def _seed_dependency_review_rows(
+    engine: Engine,
+) -> tuple[int, int, tuple[int, ...], tuple[_DependencyEdgePayload, ...]]:
+    """Persist canonical reviewed dependency rows plus a foreign Story identity."""
+    project_id = _seed_accepted_backlog(engine)
+    with Session(engine) as session:
+        stories = [
+            UserStory(
+                product_id=project_id,
+                title=f"Story {index}",
+                source_requirement=f"requirement-{index}",
+                refinement_slot=1,
+                story_origin="refined",
+                is_refined=True,
+                story_points=3,
+                rank=f"1.{index}",
+            )
+            for index in range(1, 4)
+        ]
+        session.add_all(stories)
+        foreign_project = Product(
+            name="Foreign dependency Project",
+            origin="greenfield",
+        )
+        session.add(foreign_project)
+        session.flush()
+        assert foreign_project.product_id is not None
+        foreign_story = UserStory(
+            product_id=foreign_project.product_id,
+            title="Foreign Story",
+            source_requirement="foreign-requirement",
+            refinement_slot=1,
+            story_origin="refined",
+            is_refined=True,
+            story_points=3,
+            rank="1.1",
+        )
+        session.add(foreign_story)
+        session.flush()
+        story_ids = tuple(
+            sorted(story.story_id for story in stories if story.story_id is not None)
+        )
+        assert len(story_ids) == EXPECTED_DEPENDENCY_STORY_COUNT
+        assert foreign_story.story_id is not None
+        edges: tuple[_DependencyEdgePayload, ...] = (
+            {
+                "dependent_story_id": story_ids[1],
+                "prerequisite_story_id": story_ids[0],
+                "reason": "Second requires first.",
+            },
+            {
+                "dependent_story_id": story_ids[2],
+                "prerequisite_story_id": story_ids[1],
+                "reason": "Third requires second.",
+            },
+        )
+        session.add_all(
+            [
+                UserStoryDependency(
+                    product_id=project_id,
+                    dependent_story_id=edge["dependent_story_id"],
+                    prerequisite_story_id=edge["prerequisite_story_id"],
+                    status="active",
+                    source="manual_review",
+                    confidence="reviewed",
+                    reason=edge["reason"],
+                    created_at=EVALUATED_AT,
+                    updated_at=EVALUATED_AT,
+                )
+                for edge in edges
+            ]
+        )
+        session.commit()
+        snapshot = WorkflowFactRepository(session).load(project_id)
+        source_fingerprint = story_dependency_source_fingerprint(snapshot.stories)
+        session.add(
+            StoryDependencyReview(
+                project_id=project_id,
+                selected_story_ids_json=canonical_json(list(story_ids)),
+                reviewed_edges_json=canonical_json(list(edges)),
+                source_fingerprint=source_fingerprint,
+                dependency_fingerprint=canonical_hash(list(edges)),
+                reviewed_by="operator@example.com",
+                reviewed_at=EVALUATED_AT,
+            )
+        )
+        session.commit()
+        return project_id, foreign_story.story_id, story_ids, edges
+
+
 def test_closed_union_adds_exactly_nine_typed_planning_requests() -> None:
+    """Add exactly the nine approved planning request variants."""
     variants = get_args(TransitionRequest.__value__)
     assert len(variants) == EXPECTED_REQUEST_VARIANT_COUNT
     assert set(PLANNING_REQUESTS).issubset(set(variants))
@@ -466,11 +762,13 @@ def test_closed_union_adds_exactly_nine_typed_planning_requests() -> None:
 def test_planning_requests_inherit_positioned_guard_without_expected_state(
     request_type: type[PositionedRequest],
 ) -> None:
+    """Require common positioned guards and forbid expected_state."""
     assert issubclass(request_type, PositionedRequest)
     assert "expected_state" not in request_type.model_fields
 
 
 def test_story_request_instance_key_is_exact_requirement_id() -> None:
+    """Derive the exact requirement-scoped Story instance key."""
     payload = {
         "project_id": 1,
         "graph_version": "graph",
@@ -493,6 +791,7 @@ def test_story_request_instance_key_is_exact_requirement_id() -> None:
 
 
 def test_planning_service_mutations_use_only_caller_owned_session() -> None:
+    """Keep planning mutation transaction ownership in WorkflowDomain."""
     forbidden_calls = {"commit", "rollback", "close"}
     for module, function_names in CALLER_SESSION_FUNCTIONS.items():
         for function_name in function_names:
@@ -512,6 +811,7 @@ def test_planning_service_mutations_use_only_caller_owned_session() -> None:
 def test_roadmap_and_story_transitions_persist_immutable_reviewed_artifacts(
     engine: Engine,
 ) -> None:
+    """Persist immutable Roadmap and Story artifacts with append-only reviews."""
     project_id = _seed_accepted_backlog(engine)
     domain = _domain(engine)
     roadmap_id = _record_and_accept_roadmap(domain, project_id)
@@ -551,6 +851,7 @@ def test_roadmap_and_story_transitions_persist_immutable_reviewed_artifacts(
 def test_dependency_and_readiness_transitions_bind_exact_current_story_facts(
     engine: Engine,
 ) -> None:
+    """Bind dependency and readiness transitions to exact current Stories."""
     project_id = _seed_accepted_backlog(engine)
     domain = _domain(engine)
     _record_and_accept_roadmap(domain, project_id)
@@ -608,10 +909,17 @@ def test_dependency_and_readiness_transitions_bind_exact_current_story_facts(
 def test_sprint_plan_review_and_start_bind_exact_plan_and_candidate_set(
     engine: Engine,
 ) -> None:
+    """Bind Sprint plan review and start to exact plan and candidate facts."""
     project_id = _seed_accepted_backlog(engine)
     domain = _domain(engine)
     _record_and_accept_roadmap(domain, project_id)
     _story_artifact_id, story_id = _record_and_accept_story(domain, project_id)
+    _apply_current_dependencies(
+        engine,
+        domain,
+        project_id,
+        idempotency_key="plan-review-dependencies",
+    )
     with Session(engine) as session:
         team = Team(name="Task 11 Team")
         session.add(team)
@@ -692,10 +1000,17 @@ def test_sprint_plan_review_and_start_bind_exact_plan_and_candidate_set(
 
 
 def test_story_or_dependency_change_rejects_stale_plan_start(engine: Engine) -> None:
+    """Reject Sprint start after Story or dependency facts change."""
     project_id = _seed_accepted_backlog(engine)
     domain = _domain(engine)
     _record_and_accept_roadmap(domain, project_id)
     _story_artifact_id, story_id = _record_and_accept_story(domain, project_id)
+    _apply_current_dependencies(
+        engine,
+        domain,
+        project_id,
+        idempotency_key="stale-plan-dependencies",
+    )
     with Session(engine) as session:
         session.add(Team(name="Stale Plan Team"))
         session.commit()
@@ -754,9 +1069,376 @@ def test_story_or_dependency_change_rejects_stale_plan_start(engine: Engine) -> 
     assert result.error.code is WorkflowErrorCode.STALE_POSITION
 
 
+def test_stale_authority_roadmap_review_writes_no_terminal_decision(
+    engine: Engine,
+) -> None:
+    """Reject a persisted Roadmap review after authority and Backlog replacement."""
+    project_id = _seed_accepted_backlog(engine)
+    domain = _domain(engine)
+    position = domain.position(project_id)
+    backlog_reference = next(
+        item
+        for item in _decision(
+            position, "planning.roadmap.generate"
+        ).fact_references
+        if item.fact_type == "backlog"
+    )
+    content = _roadmap_content()
+    recorded = domain.transition(
+        RecordRoadmapDraft(
+            **_guards(position, "planning.roadmap.generate"),
+            idempotency_key="stale-authority-roadmap-draft",
+            backlog_artifact_id=int(backlog_reference.fact_id),
+            backlog_artifact_fingerprint=backlog_reference.fingerprint,
+            canonical_content=content,
+            content_fingerprint=canonical_hash(content),
+        )
+    )
+    assert recorded.ok is True
+    roadmap_id = _output_int(recorded, "roadmap_artifact_id")
+
+    _replace_authority_and_backlog(engine, project_id)
+    current = domain.position(project_id)
+    review = _decision(current, "planning.roadmap.review")
+    assert review.category is NodeCategory.INVALID
+    assert review.reason_code == "ROADMAP_REVIEW_SOURCE_STALE"
+    rejected = domain.transition(
+        DecideRoadmap(
+            **_guards(current, "planning.roadmap.review"),
+            idempotency_key="reject-stale-authority-roadmap-review",
+            roadmap_artifact_id=roadmap_id,
+            artifact_fingerprint=canonical_hash(content),
+            decision="accepted",
+            rationale="This stale review must not persist.",
+        )
+    )
+    assert rejected.ok is False
+    assert rejected.error is not None
+    assert rejected.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
+    with Session(engine) as session:
+        decisions = session.exec(
+            select(RoadmapArtifactDecision).where(
+                col(RoadmapArtifactDecision.roadmap_artifact_id) == roadmap_id
+            )
+        ).all()
+        assert decisions == []
+
+
+def test_stale_story_review_writes_no_terminal_decision(engine: Engine) -> None:
+    """Reject Story review after its exact source Roadmap is superseded."""
+    project_id = _seed_accepted_backlog(engine)
+    domain = _domain(engine)
+    roadmap_id = _record_and_accept_roadmap(domain, project_id)
+    position = domain.position(project_id)
+    generate = next(
+        item for item in position.decisions if item.node_id == "planning.story.generate"
+    )
+    assert generate.instance_key is not None
+    requirement_id = generate.instance_key.removeprefix("requirement:")
+    story_content = _story_content()
+    recorded_story = domain.transition(
+        RecordStoryDraft(
+            **_guards(position, "planning.story.generate", generate.instance_key),
+            idempotency_key="stale-story-draft",
+            requirement_id=requirement_id,
+            roadmap_artifact_id=roadmap_id,
+            roadmap_artifact_fingerprint=canonical_hash(_roadmap_content()),
+            canonical_content=story_content,
+            content_fingerprint=canonical_hash(story_content),
+        )
+    )
+    assert recorded_story.ok is True
+    story_artifact_id = _output_int(recorded_story, "story_artifact_id")
+
+    position = domain.position(project_id)
+    roadmap_generate = _decision(position, "planning.roadmap.generate")
+    backlog_reference = next(
+        item for item in roadmap_generate.fact_references if item.fact_type == "backlog"
+    )
+    replacement_content = _roadmap_content("Plan corrected work")
+    replacement = domain.transition(
+        RecordRoadmapDraft(
+            **_guards(position, "planning.roadmap.generate"),
+            idempotency_key="replacement-roadmap-draft",
+            backlog_artifact_id=int(backlog_reference.fact_id),
+            backlog_artifact_fingerprint=backlog_reference.fingerprint,
+            canonical_content=replacement_content,
+            content_fingerprint=canonical_hash(replacement_content),
+            supersedes_roadmap_artifact_id=roadmap_id,
+        )
+    )
+    assert replacement.ok is True
+    replacement_id = _output_int(replacement, "roadmap_artifact_id")
+    position = domain.position(project_id)
+    accepted = domain.transition(
+        DecideRoadmap(
+            **_guards(position, "planning.roadmap.review"),
+            idempotency_key="accept-replacement-roadmap",
+            roadmap_artifact_id=replacement_id,
+            artifact_fingerprint=canonical_hash(replacement_content),
+            decision="accepted",
+            rationale="Accept corrected Roadmap.",
+        )
+    )
+    assert accepted.ok is True
+
+    current = domain.position(project_id)
+    review = _decision(
+        current,
+        "planning.story.review",
+        f"requirement:{requirement_id}",
+    )
+    assert review.category is NodeCategory.INVALID
+    assert review.reason_code == "STORY_REVIEW_SOURCE_STALE"
+    rejected = domain.transition(
+        DecideStory(
+            **_guards(
+                current,
+                "planning.story.review",
+                f"requirement:{requirement_id}",
+            ),
+            idempotency_key="reject-stale-story-review",
+            requirement_id=requirement_id,
+            story_artifact_id=story_artifact_id,
+            artifact_fingerprint=canonical_hash(story_content),
+            decision="accepted",
+            rationale="This stale Story review must not persist.",
+        )
+    )
+    assert rejected.ok is False
+    with Session(engine) as session:
+        decisions = session.exec(
+            select(StoryArtifactDecision).where(
+                col(StoryArtifactDecision.story_artifact_id) == story_artifact_id
+            )
+        ).all()
+        assert decisions == []
+
+
+def test_stale_sprint_plan_review_writes_no_terminal_decision(engine: Engine) -> None:
+    """Reject Sprint-plan review after candidate readiness changes."""
+    project_id = _seed_accepted_backlog(engine)
+    domain = _domain(engine)
+    _record_and_accept_roadmap(domain, project_id)
+    _story_artifact_id, story_id = _record_and_accept_story(domain, project_id)
+    plan_id, _sprint_id, _candidate_fingerprint, plan = _record_sprint_plan_draft(
+        engine,
+        domain,
+        project_id,
+        story_id,
+        team_name="Stale Review Team",
+        idempotency_key="stale-review-plan-draft",
+    )
+    with Session(engine) as session:
+        story = session.get(UserStory, story_id)
+        assert story is not None
+        story.story_points = 5
+        session.add(story)
+        session.commit()
+
+    current = domain.position(project_id)
+    review = _decision(current, "planning.sprint.review")
+    assert review.category is NodeCategory.INVALID
+    assert review.reason_code == "SPRINT_PLAN_REVIEW_SOURCE_STALE"
+    rejected = domain.transition(
+        DecideSprintPlan(
+            **_guards(current, "planning.sprint.review"),
+            idempotency_key="reject-stale-sprint-review",
+            sprint_plan_artifact_id=plan_id,
+            plan_fingerprint=canonical_hash(plan),
+            decision="accepted",
+            rationale="This stale Sprint review must not persist.",
+        )
+    )
+    assert rejected.ok is False
+    with Session(engine) as session:
+        decisions = session.exec(
+            select(SprintPlanArtifactDecision).where(
+                col(SprintPlanArtifactDecision.sprint_plan_artifact_id) == plan_id
+            )
+        ).all()
+        assert decisions == []
+
+
+def test_task_description_and_metadata_tamper_blocks_sprint_start(
+    engine: Engine,
+) -> None:
+    """Bind reviewed Sprint start to exact persisted task semantics."""
+    project_id = _seed_accepted_backlog(engine)
+    domain = _domain(engine)
+    _record_and_accept_roadmap(domain, project_id)
+    _story_artifact_id, story_id = _record_and_accept_story(domain, project_id)
+    plan_id, sprint_id, candidate_fingerprint, plan = _record_sprint_plan_draft(
+        engine,
+        domain,
+        project_id,
+        story_id,
+        team_name="Task Tamper Team",
+        idempotency_key="task-tamper-plan-draft",
+    )
+    review_position = domain.position(project_id)
+    accepted = domain.transition(
+        DecideSprintPlan(
+            **_guards(review_position, "planning.sprint.review"),
+            idempotency_key="accept-task-tamper-plan",
+            sprint_plan_artifact_id=plan_id,
+            plan_fingerprint=canonical_hash(plan),
+            decision="accepted",
+            rationale="Review exact task content.",
+        )
+    )
+    assert accepted.ok is True
+    start_position = domain.position(project_id)
+    with Session(engine) as session:
+        before = WorkflowFactRepository(session).load(project_id)
+        task = session.exec(select(Task).where(col(Task.story_id) == story_id)).one()
+        task.description = "Tampered after plan review"
+        task.metadata_json = serialize_task_metadata(
+            TaskMetadata(
+                task_kind="testing",
+                artifact_targets=["unreviewed artifact"],
+                workstream_tags=["tampered"],
+            )
+        )
+        session.add(task)
+        session.commit()
+        after = WorkflowFactRepository(session).load(project_id)
+    assert before.model_dump(mode="json") != after.model_dump(mode="json")
+    current = domain.position(project_id)
+    start = _decision(current, "planning.sprint.start")
+    assert start.category is NodeCategory.INVALID
+    assert start.reason_code == "SPRINT_PLAN_TASK_CONTENT_STALE"
+
+    result = domain.transition(
+        StartSprint(
+            **_guards(start_position, "planning.sprint.start"),
+            idempotency_key="start-after-task-tamper",
+            sprint_plan_artifact_id=plan_id,
+            sprint_id=sprint_id,
+            plan_fingerprint=canonical_hash(plan),
+            candidate_set_fingerprint=candidate_fingerprint,
+        )
+    )
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.code is WorkflowErrorCode.STALE_POSITION
+    with Session(engine) as session:
+        sprint = session.get(Sprint, sprint_id)
+        assert sprint is not None
+        assert sprint.status is SprintStatus.PLANNED
+
+
+@pytest.mark.parametrize(
+    "metadata_json",
+    [
+        "{",
+        (
+            '{"artifact_targets": [], "checklist_items": [], '
+            '"relevant_invariant_ids": [], "task_kind": "other", '
+            '"version": "task_metadata.v1", "workstream_tags": []}'
+        ),
+    ],
+)
+def test_task_metadata_load_requires_valid_canonical_json(
+    engine: Engine,
+    metadata_json: str,
+) -> None:
+    """Fail fact loading for malformed or noncanonical persisted task metadata."""
+    project_id = _seed_accepted_backlog(engine)
+    domain = _domain(engine)
+    _record_and_accept_roadmap(domain, project_id)
+    _story_artifact_id, story_id = _record_and_accept_story(domain, project_id)
+    _record_sprint_plan_draft(
+        engine,
+        domain,
+        project_id,
+        story_id,
+        team_name=f"Metadata Validation {len(metadata_json)}",
+        idempotency_key=f"metadata-validation-{len(metadata_json)}",
+    )
+    with Session(engine) as session:
+        task = session.exec(select(Task).where(col(Task.story_id) == story_id)).one()
+        task.metadata_json = metadata_json
+        session.add(task)
+        session.commit()
+        with pytest.raises(WorkflowFactLoadError):
+            WorkflowFactRepository(session).load(project_id)
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "malformed_json",
+        "fingerprint_mismatch",
+        "duplicate_edge",
+        "reversed_order",
+        "unknown_endpoint",
+        "cross_project_endpoint",
+        "semantic_cycle",
+    ],
+)
+def test_dependency_review_load_rejects_persisted_corruption(
+    engine: Engine,
+    corruption: str,
+) -> None:
+    """Reject malformed, forged, noncanonical, foreign, and cyclic reviews."""
+    project_id, foreign_story_id, story_ids, canonical_edges = (
+        _seed_dependency_review_rows(engine)
+    )
+    with Session(engine) as session:
+        review = session.exec(
+            select(StoryDependencyReview).where(
+                col(StoryDependencyReview.project_id) == project_id
+            )
+        ).one()
+        edges = [_copy_dependency_edge(item) for item in canonical_edges]
+        if corruption == "malformed_json":
+            review.reviewed_edges_json = "{"
+        elif corruption == "fingerprint_mismatch":
+            review.dependency_fingerprint = "sha256:tampered"
+        elif corruption == "duplicate_edge":
+            edges.append(_copy_dependency_edge(edges[0]))
+            review.reviewed_edges_json = canonical_json(edges)
+            review.dependency_fingerprint = canonical_hash(edges)
+        elif corruption == "reversed_order":
+            edges.reverse()
+            review.reviewed_edges_json = canonical_json(edges)
+            review.dependency_fingerprint = canonical_hash(edges)
+        elif corruption == "unknown_endpoint":
+            edges[0]["dependent_story_id"] = max(story_ids) + 10_000
+            review.reviewed_edges_json = canonical_json(edges)
+            review.dependency_fingerprint = canonical_hash(edges)
+        elif corruption == "cross_project_endpoint":
+            edges[0]["dependent_story_id"] = foreign_story_id
+            selected = tuple(sorted((*story_ids, foreign_story_id)))
+            review.selected_story_ids_json = canonical_json(list(selected))
+            review.reviewed_edges_json = canonical_json(edges)
+            review.dependency_fingerprint = canonical_hash(edges)
+        else:
+            edges = [
+                {
+                    "dependent_story_id": story_ids[0],
+                    "prerequisite_story_id": story_ids[1],
+                    "reason": "First requires second.",
+                },
+                {
+                    "dependent_story_id": story_ids[1],
+                    "prerequisite_story_id": story_ids[0],
+                    "reason": "Second requires first.",
+                },
+            ]
+            review.reviewed_edges_json = canonical_json(edges)
+            review.dependency_fingerprint = canonical_hash(edges)
+        session.add(review)
+        session.commit()
+        with pytest.raises(WorkflowFactLoadError):
+            WorkflowFactRepository(session).load(project_id)
+
+
 def test_contradictory_terminal_planning_decision_fails_fact_conflict(
     engine: Engine,
 ) -> None:
+    """Reject contradictory terminal decisions as a workflow fact conflict."""
     project_id = _seed_accepted_backlog(engine)
     domain = _domain(engine)
     position = domain.position(project_id)
@@ -808,6 +1490,7 @@ def test_handler_failure_after_flush_rolls_back_business_audit_and_receipt(
     engine: Engine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Roll back business rows, audit, and receipt after a flushed failure."""
     project_id = _seed_accepted_backlog(engine)
     domain = _domain(engine)
     position = domain.position(project_id)
@@ -825,29 +1508,12 @@ def test_handler_failure_after_flush_rolls_back_business_audit_and_receipt(
     )
     original = planning_handlers.record_roadmap_draft_in_session
 
-    def fail_after_flush(  # noqa: PLR0913
+    def fail_after_flush(
         session: Session,
         *,
-        project_id: int,
-        backlog_artifact_id: int,
-        backlog_artifact_fingerprint: str,
-        canonical_content: JsonObject,
-        content_fingerprint: str,
-        supersedes_roadmap_artifact_id: int | None,
-        actor: str,
-        recorded_at: datetime,
+        inputs: roadmap_phase_module.RecordRoadmapDraftInput,
     ) -> NoReturn:
-        original(
-            session,
-            project_id=project_id,
-            backlog_artifact_id=backlog_artifact_id,
-            backlog_artifact_fingerprint=backlog_artifact_fingerprint,
-            canonical_content=canonical_content,
-            content_fingerprint=content_fingerprint,
-            supersedes_roadmap_artifact_id=supersedes_roadmap_artifact_id,
-            actor=actor,
-            recorded_at=recorded_at,
-        )
+        original(session, inputs=inputs)
         raise _ForcedPlanningError
 
     monkeypatch.setattr(
@@ -879,6 +1545,7 @@ def test_retry_and_replay_are_exact_after_rollback(
     engine: Engine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Preserve exact retry and replay behavior after rollback."""
     project_id = _seed_accepted_backlog(engine)
     domain = _domain(engine)
     position = domain.position(project_id)
@@ -918,6 +1585,7 @@ def test_retry_and_replay_are_exact_after_rollback(
 def test_apply_dependencies_rejects_cycle_without_persisting_edges(
     engine: Engine,
 ) -> None:
+    """Reject cyclic dependency review without persisting edges."""
     project_id = _seed_accepted_backlog(
         engine,
         requirements=("Plan immutable work", "Validate planning work"),
@@ -999,6 +1667,7 @@ def test_apply_dependencies_rejects_cycle_without_persisting_edges(
 
 
 def test_transition_adapter_rejects_unknown_request_shape() -> None:
+    """Reject unknown planning transition request shapes."""
     adapter = TypeAdapter(TransitionRequest)
     with pytest.raises(ValidationError):
         adapter.validate_python({"kind": "planning_escape_hatch", "action": {}})

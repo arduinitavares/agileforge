@@ -4,13 +4,18 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, cast
 
-from sqlmodel import Session, select
+from sqlmodel import Session, col, select
 
 from models.core import UserStory, UserStoryDependency
 from models.enums import WorkflowEventType
 from models.events import WorkflowEvent
 from models.workflow import StoryDependencyReview
-from workflow.fingerprints import canonical_hash, canonical_json
+from workflow.facts import StoryDependencyReviewEdgeFact
+from workflow.fingerprints import canonical_json
+from workflow.planning_integrity import (
+    dependency_edges_payload,
+    dependency_review_fingerprint,
+)
 
 
 @dataclass(frozen=True)
@@ -55,7 +60,7 @@ def load_story_dependency_graph(
     edge_rows = session.exec(
         select(UserStoryDependency)
         .where(UserStoryDependency.product_id == project_id)
-        .order_by(cast("Any", UserStoryDependency.dependent_story_id))
+        .order_by(col(UserStoryDependency.dependent_story_id))
     ).all()
     endpoint_ids = {
         story_id
@@ -209,20 +214,31 @@ def assert_dependency_graph_valid_for_sprint(
         raise StoryDependencyGraphError(blocking_issues)
 
 
-def apply_story_dependencies_in_session(  # noqa: PLR0913
+@dataclass(frozen=True)
+class ApplyStoryDependenciesInput:
+    """Exact caller-owned mutation inputs for dependency review."""
+
+    project_id: int
+    selected_story_ids: tuple[int, ...]
+    reviewed_edges: tuple[StoryDependencyReviewEdgeFact, ...]
+    source_fingerprint: str
+    reviewer: str
+    reviewed_at: datetime
+
+
+def apply_story_dependencies_in_session(
     session: Session,
     *,
-    project_id: int,
-    selected_story_ids: tuple[int, ...],
-    reviewed_edges: tuple[tuple[int, int, str], ...],
-    source_fingerprint: str,
-    reviewer: str,
-    reviewed_at: datetime,
+    inputs: ApplyStoryDependenciesInput,
 ) -> StoryDependencyReview:
     """Apply an exact acyclic reviewed edge set in the caller transaction."""
+    project_id = inputs.project_id
+    selected_story_ids = inputs.selected_story_ids
+    reviewed_edges = inputs.reviewed_edges
+    reviewed_at = inputs.reviewed_at
     selected = set(selected_story_ids)
     stories = session.exec(
-        select(UserStory).where(cast("Any", UserStory.story_id).in_(selected))
+        select(UserStory).where(col(UserStory.story_id).in_(selected))
     ).all()
     stories_by_id = {
         story.story_id: story for story in stories if story.story_id is not None
@@ -241,7 +257,10 @@ def apply_story_dependencies_in_session(  # noqa: PLR0913
                 )
             ]
         )
-    pairs = tuple((left, right) for left, right, _reason in reviewed_edges)
+    pairs = tuple(
+        (edge.dependent_story_id, edge.prerequisite_story_id)
+        for edge in reviewed_edges
+    )
     if any(left not in selected or right not in selected for left, right in pairs):
         message = "Dependency review edge leaves the selected Story set."
         raise StoryDependencyGraphError(
@@ -276,7 +295,10 @@ def apply_story_dependencies_in_session(  # noqa: PLR0913
         (row.dependent_story_id, row.prerequisite_story_id): row
         for row in existing_rows
     }
-    reviewed_by_pair = {(left, right): reason for left, right, reason in reviewed_edges}
+    reviewed_by_pair = {
+        (edge.dependent_story_id, edge.prerequisite_story_id): edge.reason
+        for edge in reviewed_edges
+    }
     for pair, row in existing_by_pair.items():
         row.status = "active" if pair in reviewed_by_pair else "rejected"
         row.source = "manual_review"
@@ -301,21 +323,14 @@ def apply_story_dependencies_in_session(  # noqa: PLR0913
                 updated_at=reviewed_at,
             )
         )
-    edge_payload = [
-        {
-            "dependent_story_id": left,
-            "prerequisite_story_id": right,
-            "reason": reason,
-        }
-        for left, right, reason in reviewed_edges
-    ]
+    edge_payload = dependency_edges_payload(reviewed_edges)
     review = StoryDependencyReview(
         project_id=project_id,
         selected_story_ids_json=canonical_json(list(selected_story_ids)),
         reviewed_edges_json=canonical_json(edge_payload),
-        source_fingerprint=source_fingerprint,
-        dependency_fingerprint=canonical_hash(edge_payload),
-        reviewed_by=reviewer,
+        source_fingerprint=inputs.source_fingerprint,
+        dependency_fingerprint=dependency_review_fingerprint(reviewed_edges),
+        reviewed_by=inputs.reviewer,
         reviewed_at=reviewed_at,
     )
     session.add(review)
@@ -331,7 +346,7 @@ def apply_story_dependencies_in_session(  # noqa: PLR0913
                     "action": "story_dependencies_reviewed",
                     "dependency_fingerprint": review.dependency_fingerprint,
                     "selected_story_ids": list(selected_story_ids),
-                    "source_fingerprint": source_fingerprint,
+                    "source_fingerprint": inputs.source_fingerprint,
                 }
             ),
         )

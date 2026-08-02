@@ -47,8 +47,12 @@ from models.workflow import (
     WorkflowNodeAttempt,
     WorkflowNodeAttemptOutcome,
 )
+from orchestrator_agent.agent_tools.sprint_planner_tool.schemes import (
+    SprintPlannerOutput,
+)
 from services.specs.authority_selection import pending_authority_fingerprint
 from utils.spec_schemas import SpecAuthorityCompilationSuccess
+from utils.task_metadata import TaskMetadata, serialize_task_metadata
 from workflow.contracts import JsonValue
 from workflow.facts import (
     AuthorityFact,
@@ -72,12 +76,20 @@ from workflow.facts import (
     SpecVersionFact,
     SprintFact,
     StoryDependencyFact,
+    StoryDependencyReviewEdgeFact,
     StoryDependencyReviewFact,
     StoryFact,
     TaskFact,
     WorkflowFactSnapshot,
 )
 from workflow.fingerprints import canonical_hash, canonical_json
+from workflow.planning_integrity import (
+    dependency_edges_are_canonical,
+    dependency_edges_have_cycle,
+    dependency_edges_payload,
+    dependency_review_fingerprint,
+    planned_task_content_fingerprint,
+)
 from workflow.reconciliation_audit import (
     BACKLOG_RECONCILIATION_ACTION,
     reconciliation_audit_event_fingerprint,
@@ -97,6 +109,7 @@ if TYPE_CHECKING:
 _JSON_OBJECT = TypeAdapter(dict[str, JsonValue])
 _STRING_LIST = TypeAdapter(list[str])
 _INT_LIST = TypeAdapter(list[int])
+_DEPENDENCY_EDGE_LIST = TypeAdapter(list[StoryDependencyReviewEdgeFact])
 type _AuthorityStatus = Literal["pending_review", "accepted", "rejected", "stale"]
 type _AttemptOutcome = Literal["success", "failure", "obsolete"]
 type _DiscoveryPurpose = Literal["initial", "extension"]
@@ -176,6 +189,39 @@ class _PlanningArtifactLoad:
     """Planning artifact facts and their validated append-only decisions."""
 
     facts: tuple[PlanningArtifactFact, ...]
+    reviews: tuple[ReviewDecisionFact, ...]
+
+
+@dataclass(frozen=True)
+class _PlanningRows:
+    """Canonical planning persistence rows for one Project."""
+
+    backlogs: tuple[BacklogArtifact, ...]
+    roadmaps: tuple[RoadmapArtifact, ...]
+    stories: tuple[StoryArtifact, ...]
+    sprint_plans: tuple[SprintPlanArtifact, ...]
+    roadmap_decisions: tuple[RoadmapArtifactDecision, ...]
+    story_decisions: tuple[StoryArtifactDecision, ...]
+    sprint_decisions: tuple[SprintPlanArtifactDecision, ...]
+
+
+@dataclass(frozen=True)
+class _PlanningIndexes:
+    """Planning artifact rows addressable by durable identity."""
+
+    backlogs: dict[int, BacklogArtifact]
+    roadmaps: dict[int, RoadmapArtifact]
+    stories: dict[int, StoryArtifact]
+    sprint_plans: dict[int, SprintPlanArtifact]
+
+
+@dataclass(frozen=True)
+class _PlanningDecisionLoad:
+    """Validated planning decisions and their review facts."""
+
+    roadmaps: dict[int, RoadmapArtifactDecision]
+    stories: dict[int, StoryArtifactDecision]
+    sprint_plans: dict[int, SprintPlanArtifactDecision]
     reviews: tuple[ReviewDecisionFact, ...]
 
 
@@ -295,7 +341,10 @@ class WorkflowFactRepository:
             sprints=sprints,
             stories=stories,
             story_dependencies=story_dependencies,
-            story_dependency_reviews=self._story_dependency_reviews(project_id),
+            story_dependency_reviews=self._story_dependency_reviews(
+                project_id,
+                stories,
+            ),
             tasks=self._tasks(
                 project_id,
                 frozenset(item.sprint_id for item in sprints),
@@ -1085,83 +1134,115 @@ class WorkflowFactRepository:
             raise WorkflowFactRepository._error(message)
         return content
 
-    def _planning_artifacts(self, project_id: int) -> _PlanningArtifactLoad:  # noqa: C901, PLR0912, PLR0915
-        """Load immutable planning artifacts and exact append-only decisions."""
-        roadmaps = self._session.exec(
-            select(RoadmapArtifact)
-            .where(col(RoadmapArtifact.project_id) == project_id)
-            .order_by(col(RoadmapArtifact.roadmap_artifact_id)),
-            execution_options=self._query_options(),
-        ).all()
-        stories = self._session.exec(
-            select(StoryArtifact)
-            .where(col(StoryArtifact.project_id) == project_id)
-            .order_by(col(StoryArtifact.story_artifact_id)),
-            execution_options=self._query_options(),
-        ).all()
-        sprint_plans = self._session.exec(
-            select(SprintPlanArtifact)
-            .where(col(SprintPlanArtifact.project_id) == project_id)
-            .order_by(col(SprintPlanArtifact.sprint_plan_artifact_id)),
-            execution_options=self._query_options(),
-        ).all()
-        backlog_rows = self._session.exec(
-            select(BacklogArtifact).where(
-                col(BacklogArtifact.project_id) == project_id
+    def _planning_rows(self, project_id: int) -> _PlanningRows:
+        return _PlanningRows(
+            backlogs=tuple(
+                self._session.exec(
+                    select(BacklogArtifact)
+                    .where(col(BacklogArtifact.project_id) == project_id)
+                    .order_by(col(BacklogArtifact.backlog_artifact_id)),
+                    execution_options=self._query_options(),
+                ).all()
             ),
-            execution_options=self._query_options(),
-        ).all()
-        backlog_by_id = {
-            self._required_id(row.backlog_artifact_id, "Backlog artifact"): row
-            for row in backlog_rows
-        }
-        roadmap_by_id = {
-            self._required_id(row.roadmap_artifact_id, "Roadmap artifact"): row
-            for row in roadmaps
-        }
-        story_by_id = {
-            self._required_id(row.story_artifact_id, "Story artifact"): row
-            for row in stories
-        }
-        sprint_plan_by_id = {
-            self._required_id(row.sprint_plan_artifact_id, "Sprint plan artifact"): row
-            for row in sprint_plans
-        }
+            roadmaps=tuple(
+                self._session.exec(
+                    select(RoadmapArtifact)
+                    .where(col(RoadmapArtifact.project_id) == project_id)
+                    .order_by(col(RoadmapArtifact.roadmap_artifact_id)),
+                    execution_options=self._query_options(),
+                ).all()
+            ),
+            stories=tuple(
+                self._session.exec(
+                    select(StoryArtifact)
+                    .where(col(StoryArtifact.project_id) == project_id)
+                    .order_by(col(StoryArtifact.story_artifact_id)),
+                    execution_options=self._query_options(),
+                ).all()
+            ),
+            sprint_plans=tuple(
+                self._session.exec(
+                    select(SprintPlanArtifact)
+                    .where(col(SprintPlanArtifact.project_id) == project_id)
+                    .order_by(col(SprintPlanArtifact.sprint_plan_artifact_id)),
+                    execution_options=self._query_options(),
+                ).all()
+            ),
+            roadmap_decisions=tuple(
+                self._session.exec(
+                    select(RoadmapArtifactDecision)
+                    .where(col(RoadmapArtifactDecision.project_id) == project_id)
+                    .order_by(
+                        col(RoadmapArtifactDecision.roadmap_artifact_decision_id)
+                    ),
+                    execution_options=self._query_options(),
+                ).all()
+            ),
+            story_decisions=tuple(
+                self._session.exec(
+                    select(StoryArtifactDecision)
+                    .where(col(StoryArtifactDecision.project_id) == project_id)
+                    .order_by(col(StoryArtifactDecision.story_artifact_decision_id)),
+                    execution_options=self._query_options(),
+                ).all()
+            ),
+            sprint_decisions=tuple(
+                self._session.exec(
+                    select(SprintPlanArtifactDecision)
+                    .where(col(SprintPlanArtifactDecision.project_id) == project_id)
+                    .order_by(
+                        col(
+                            SprintPlanArtifactDecision.sprint_plan_artifact_decision_id
+                        )
+                    ),
+                    execution_options=self._query_options(),
+                ).all()
+            ),
+        )
 
-        roadmap_decisions = self._session.exec(
-            select(RoadmapArtifactDecision)
-            .where(col(RoadmapArtifactDecision.project_id) == project_id)
-            .order_by(col(RoadmapArtifactDecision.roadmap_artifact_decision_id)),
-            execution_options=self._query_options(),
-        ).all()
-        story_decisions = self._session.exec(
-            select(StoryArtifactDecision)
-            .where(col(StoryArtifactDecision.project_id) == project_id)
-            .order_by(col(StoryArtifactDecision.story_artifact_decision_id)),
-            execution_options=self._query_options(),
-        ).all()
-        sprint_decisions = self._session.exec(
-            select(SprintPlanArtifactDecision)
-            .where(col(SprintPlanArtifactDecision.project_id) == project_id)
-            .order_by(col(SprintPlanArtifactDecision.sprint_plan_artifact_decision_id)),
-            execution_options=self._query_options(),
-        ).all()
+    def _planning_indexes(self, rows: _PlanningRows) -> _PlanningIndexes:
+        return _PlanningIndexes(
+            backlogs={
+                self._required_id(row.backlog_artifact_id, "Backlog artifact"): row
+                for row in rows.backlogs
+            },
+            roadmaps={
+                self._required_id(row.roadmap_artifact_id, "Roadmap artifact"): row
+                for row in rows.roadmaps
+            },
+            stories={
+                self._required_id(row.story_artifact_id, "Story artifact"): row
+                for row in rows.stories
+            },
+            sprint_plans={
+                self._required_id(
+                    row.sprint_plan_artifact_id,
+                    "Sprint plan artifact",
+                ): row
+                for row in rows.sprint_plans
+            },
+        )
 
-        review_facts: list[ReviewDecisionFact] = []
-        roadmap_decision_by_id: dict[int, RoadmapArtifactDecision] = {}
-        for row in roadmap_decisions:
-            artifact = roadmap_by_id.get(row.roadmap_artifact_id)
+    def _roadmap_planning_decisions(
+        self,
+        rows: _PlanningRows,
+        indexes: _PlanningIndexes,
+    ) -> tuple[dict[int, RoadmapArtifactDecision], tuple[ReviewDecisionFact, ...]]:
+        decisions: dict[int, RoadmapArtifactDecision] = {}
+        reviews: list[ReviewDecisionFact] = []
+        for row in rows.roadmap_decisions:
+            artifact = indexes.roadmaps.get(row.roadmap_artifact_id)
             if (
                 artifact is None
                 or artifact.content_fingerprint != row.artifact_fingerprint
             ):
                 message = "Roadmap decision does not match its artifact."
                 raise self._error(message)
-            if row.roadmap_artifact_id in roadmap_decision_by_id:
+            if row.roadmap_artifact_id in decisions:
                 message = "Roadmap artifact has contradictory decisions."
                 raise self._error(message)
-            roadmap_decision_by_id[row.roadmap_artifact_id] = row
-            review_facts.append(
+            decisions[row.roadmap_artifact_id] = row
+            reviews.append(
                 self._review_decision_fact(
                     _ReviewDecisionSource(
                         decision_id=self._required_id(
@@ -1176,20 +1257,28 @@ class WorkflowFactRepository:
                     )
                 )
             )
-        story_decision_by_id: dict[int, StoryArtifactDecision] = {}
-        for row in story_decisions:
-            artifact = story_by_id.get(row.story_artifact_id)
+        return decisions, tuple(reviews)
+
+    def _story_planning_decisions(
+        self,
+        rows: _PlanningRows,
+        indexes: _PlanningIndexes,
+    ) -> tuple[dict[int, StoryArtifactDecision], tuple[ReviewDecisionFact, ...]]:
+        decisions: dict[int, StoryArtifactDecision] = {}
+        reviews: list[ReviewDecisionFact] = []
+        for row in rows.story_decisions:
+            artifact = indexes.stories.get(row.story_artifact_id)
             if (
                 artifact is None
                 or artifact.content_fingerprint != row.artifact_fingerprint
             ):
                 message = "Story decision does not match its artifact."
                 raise self._error(message)
-            if row.story_artifact_id in story_decision_by_id:
+            if row.story_artifact_id in decisions:
                 message = "Story artifact has contradictory decisions."
                 raise self._error(message)
-            story_decision_by_id[row.story_artifact_id] = row
-            review_facts.append(
+            decisions[row.story_artifact_id] = row
+            reviews.append(
                 self._review_decision_fact(
                     _ReviewDecisionSource(
                         decision_id=self._required_id(
@@ -1204,17 +1293,25 @@ class WorkflowFactRepository:
                     )
                 )
             )
-        sprint_decision_by_id: dict[int, SprintPlanArtifactDecision] = {}
-        for row in sprint_decisions:
-            artifact = sprint_plan_by_id.get(row.sprint_plan_artifact_id)
+        return decisions, tuple(reviews)
+
+    def _sprint_planning_decisions(
+        self,
+        rows: _PlanningRows,
+        indexes: _PlanningIndexes,
+    ) -> tuple[dict[int, SprintPlanArtifactDecision], tuple[ReviewDecisionFact, ...]]:
+        decisions: dict[int, SprintPlanArtifactDecision] = {}
+        reviews: list[ReviewDecisionFact] = []
+        for row in rows.sprint_decisions:
+            artifact = indexes.sprint_plans.get(row.sprint_plan_artifact_id)
             if artifact is None or artifact.plan_fingerprint != row.plan_fingerprint:
                 message = "Sprint plan decision does not match its artifact."
                 raise self._error(message)
-            if row.sprint_plan_artifact_id in sprint_decision_by_id:
+            if row.sprint_plan_artifact_id in decisions:
                 message = "Sprint plan artifact has contradictory decisions."
                 raise self._error(message)
-            sprint_decision_by_id[row.sprint_plan_artifact_id] = row
-            review_facts.append(
+            decisions[row.sprint_plan_artifact_id] = row
+            reviews.append(
                 self._review_decision_fact(
                     _ReviewDecisionSource(
                         decision_id=self._required_id(
@@ -1229,133 +1326,24 @@ class WorkflowFactRepository:
                     )
                 )
             )
+        return decisions, tuple(reviews)
 
-        superseded_roadmaps = {
-            row.supersedes_roadmap_artifact_id
-            for row in roadmaps
-            if row.supersedes_roadmap_artifact_id is not None
-        }
-        superseded_stories = {
-            row.supersedes_story_artifact_id
-            for row in stories
-            if row.supersedes_story_artifact_id is not None
-        }
-        superseded_plans = {
-            row.supersedes_sprint_plan_artifact_id
-            for row in sprint_plans
-            if row.supersedes_sprint_plan_artifact_id is not None
-        }
-        facts: list[PlanningArtifactFact] = []
-        for artifact_id, row in roadmap_by_id.items():
-            self._canonical_object(
-                row.canonical_content_json,
-                row.content_fingerprint,
-                "Roadmap",
-            )
-            backlog = backlog_by_id.get(row.backlog_artifact_id)
-            if (
-                backlog is None
-                or backlog.content_fingerprint != row.backlog_artifact_fingerprint
-            ):
-                message = "Roadmap artifact source Backlog changed."
-                raise self._error(message)
-            decision = roadmap_decision_by_id.get(artifact_id)
-            facts.append(
-                PlanningArtifactFact(
-                    artifact_type="roadmap",
-                    artifact_id=artifact_id,
-                    artifact_fingerprint=row.content_fingerprint,
-                    source_fingerprint=row.backlog_artifact_fingerprint,
-                    supersedes_artifact_id=row.supersedes_roadmap_artifact_id,
-                    status=self._phase_status(
-                        None if decision is None else decision.decision,
-                        superseded=artifact_id in superseded_roadmaps,
-                    ),
-                )
-            )
-        for artifact_id, row in story_by_id.items():
-            self._canonical_object(
-                row.canonical_content_json,
-                row.content_fingerprint,
-                "Story",
-            )
-            roadmap = roadmap_by_id.get(row.roadmap_artifact_id)
-            if (
-                roadmap is None
-                or roadmap.content_fingerprint != row.roadmap_artifact_fingerprint
-            ):
-                message = "Story artifact source Roadmap changed."
-                raise self._error(message)
-            try:
-                story_ids = tuple(_INT_LIST.validate_json(row.story_ids_json))
-            except ValidationError as exc:
-                message = "Story artifact IDs are invalid."
-                raise self._error(message) from exc
-            if (
-                story_ids != tuple(sorted(set(story_ids)))
-                or canonical_json(list(story_ids)) != row.story_ids_json
-            ):
-                message = "Story artifact IDs are not canonical."
-                raise self._error(message)
-            decision = story_decision_by_id.get(artifact_id)
-            facts.append(
-                PlanningArtifactFact(
-                    artifact_type="story",
-                    artifact_id=artifact_id,
-                    artifact_fingerprint=row.content_fingerprint,
-                    source_fingerprint=row.roadmap_artifact_fingerprint,
-                    requirement_id=row.requirement_id,
-                    story_ids=story_ids,
-                    supersedes_artifact_id=row.supersedes_story_artifact_id,
-                    status=self._phase_status(
-                        None if decision is None else decision.decision,
-                        superseded=artifact_id in superseded_stories,
-                    ),
-                )
-            )
-        for artifact_id, row in sprint_plan_by_id.items():
-            self._canonical_object(
-                row.canonical_task_plan_json,
-                row.plan_fingerprint,
-                "Sprint plan",
-            )
-            try:
-                story_ids = tuple(_INT_LIST.validate_json(row.selected_story_ids_json))
-            except ValidationError as exc:
-                message = "Sprint plan selected Story IDs are invalid."
-                raise self._error(message) from exc
-            if (
-                story_ids != tuple(sorted(set(story_ids)))
-                or canonical_json(list(story_ids)) != row.selected_story_ids_json
-            ):
-                message = "Sprint plan selected Story IDs are not canonical."
-                raise self._error(message)
-            decision = sprint_decision_by_id.get(artifact_id)
-            facts.append(
-                PlanningArtifactFact(
-                    artifact_type="sprint_plan",
-                    artifact_id=artifact_id,
-                    artifact_fingerprint=row.plan_fingerprint,
-                    source_fingerprint=row.candidate_set_fingerprint,
-                    story_ids=story_ids,
-                    candidate_set_fingerprint=row.candidate_set_fingerprint,
-                    supersedes_artifact_id=row.supersedes_sprint_plan_artifact_id,
-                    status=self._phase_status(
-                        None if decision is None else decision.decision,
-                        superseded=artifact_id in superseded_plans,
-                    ),
-                )
-            )
-        return _PlanningArtifactLoad(
-            facts=tuple(
-                sorted(
-                    facts,
-                    key=lambda item: (item.artifact_type, item.artifact_id),
-                )
-            ),
+    def _planning_decisions(
+        self,
+        rows: _PlanningRows,
+        indexes: _PlanningIndexes,
+    ) -> _PlanningDecisionLoad:
+        roadmaps, roadmap_reviews = self._roadmap_planning_decisions(rows, indexes)
+        stories, story_reviews = self._story_planning_decisions(rows, indexes)
+        sprint_plans, sprint_reviews = self._sprint_planning_decisions(rows, indexes)
+        reviews = (*roadmap_reviews, *story_reviews, *sprint_reviews)
+        return _PlanningDecisionLoad(
+            roadmaps=roadmaps,
+            stories=stories,
+            sprint_plans=sprint_plans,
             reviews=tuple(
                 sorted(
-                    review_facts,
+                    reviews,
                     key=lambda item: (
                         item.artifact_type,
                         item.artifact_id,
@@ -1363,6 +1351,196 @@ class WorkflowFactRepository:
                     ),
                 )
             ),
+        )
+
+    def _roadmap_planning_facts(
+        self,
+        rows: _PlanningRows,
+        indexes: _PlanningIndexes,
+        decisions: _PlanningDecisionLoad,
+    ) -> tuple[PlanningArtifactFact, ...]:
+        superseded = {
+            row.supersedes_roadmap_artifact_id
+            for row in rows.roadmaps
+            if row.supersedes_roadmap_artifact_id is not None
+        }
+        facts: list[PlanningArtifactFact] = []
+        for artifact_id, row in indexes.roadmaps.items():
+            self._canonical_object(
+                row.canonical_content_json,
+                row.content_fingerprint,
+                "Roadmap",
+            )
+            backlog = indexes.backlogs.get(row.backlog_artifact_id)
+            if (
+                backlog is None
+                or backlog.content_fingerprint != row.backlog_artifact_fingerprint
+            ):
+                message = "Roadmap artifact source Backlog changed."
+                raise self._error(message)
+            decision = decisions.roadmaps.get(artifact_id)
+            facts.append(
+                PlanningArtifactFact(
+                    artifact_type="roadmap",
+                    artifact_id=artifact_id,
+                    artifact_fingerprint=row.content_fingerprint,
+                    source_artifact_id=row.backlog_artifact_id,
+                    source_fingerprint=row.backlog_artifact_fingerprint,
+                    authority_id=backlog.authority_id,
+                    authority_fingerprint=backlog.authority_fingerprint,
+                    backlog_artifact_id=row.backlog_artifact_id,
+                    backlog_artifact_fingerprint=row.backlog_artifact_fingerprint,
+                    roadmap_artifact_id=artifact_id,
+                    roadmap_artifact_fingerprint=row.content_fingerprint,
+                    supersedes_artifact_id=row.supersedes_roadmap_artifact_id,
+                    status=self._phase_status(
+                        None if decision is None else decision.decision,
+                        superseded=artifact_id in superseded,
+                    ),
+                )
+            )
+        return tuple(facts)
+
+    def _story_planning_facts(
+        self,
+        rows: _PlanningRows,
+        indexes: _PlanningIndexes,
+        decisions: _PlanningDecisionLoad,
+    ) -> tuple[PlanningArtifactFact, ...]:
+        superseded = {
+            row.supersedes_story_artifact_id
+            for row in rows.stories
+            if row.supersedes_story_artifact_id is not None
+        }
+        facts: list[PlanningArtifactFact] = []
+        for artifact_id, row in indexes.stories.items():
+            self._canonical_object(
+                row.canonical_content_json,
+                row.content_fingerprint,
+                "Story",
+            )
+            roadmap = indexes.roadmaps.get(row.roadmap_artifact_id)
+            if (
+                roadmap is None
+                or roadmap.content_fingerprint != row.roadmap_artifact_fingerprint
+            ):
+                message = "Story artifact source Roadmap changed."
+                raise self._error(message)
+            backlog = indexes.backlogs.get(roadmap.backlog_artifact_id)
+            if (
+                backlog is None
+                or backlog.content_fingerprint != roadmap.backlog_artifact_fingerprint
+            ):
+                message = "Story artifact source Backlog changed."
+                raise self._error(message)
+            story_ids = self._canonical_story_ids(
+                row.story_ids_json,
+                "Story artifact",
+            )
+            decision = decisions.stories.get(artifact_id)
+            facts.append(
+                PlanningArtifactFact(
+                    artifact_type="story",
+                    artifact_id=artifact_id,
+                    artifact_fingerprint=row.content_fingerprint,
+                    source_artifact_id=row.roadmap_artifact_id,
+                    source_fingerprint=row.roadmap_artifact_fingerprint,
+                    authority_id=backlog.authority_id,
+                    authority_fingerprint=backlog.authority_fingerprint,
+                    backlog_artifact_id=roadmap.backlog_artifact_id,
+                    backlog_artifact_fingerprint=roadmap.backlog_artifact_fingerprint,
+                    roadmap_artifact_id=row.roadmap_artifact_id,
+                    roadmap_artifact_fingerprint=row.roadmap_artifact_fingerprint,
+                    requirement_id=row.requirement_id,
+                    story_ids=story_ids,
+                    supersedes_artifact_id=row.supersedes_story_artifact_id,
+                    status=self._phase_status(
+                        None if decision is None else decision.decision,
+                        superseded=artifact_id in superseded,
+                    ),
+                )
+            )
+        return tuple(facts)
+
+    def _canonical_story_ids(self, raw_json: str, label: str) -> tuple[int, ...]:
+        try:
+            story_ids = tuple(_INT_LIST.validate_json(raw_json))
+        except ValidationError as exc:
+            message = f"{label} IDs are invalid."
+            raise self._error(message) from exc
+        if (
+            story_ids != tuple(sorted(set(story_ids)))
+            or canonical_json(list(story_ids)) != raw_json
+        ):
+            message = f"{label} IDs are not canonical."
+            raise self._error(message)
+        return story_ids
+
+    def _sprint_planning_facts(
+        self,
+        rows: _PlanningRows,
+        indexes: _PlanningIndexes,
+        decisions: _PlanningDecisionLoad,
+    ) -> tuple[PlanningArtifactFact, ...]:
+        superseded = {
+            row.supersedes_sprint_plan_artifact_id
+            for row in rows.sprint_plans
+            if row.supersedes_sprint_plan_artifact_id is not None
+        }
+        facts: list[PlanningArtifactFact] = []
+        for artifact_id, row in indexes.sprint_plans.items():
+            canonical_plan = self._canonical_object(
+                row.canonical_task_plan_json,
+                row.plan_fingerprint,
+                "Sprint plan",
+            )
+            try:
+                plan = SprintPlannerOutput.model_validate(canonical_plan)
+            except ValidationError as exc:
+                message = "Sprint plan task content is invalid."
+                raise self._error(message) from exc
+            story_ids = self._canonical_story_ids(
+                row.selected_story_ids_json,
+                "Sprint plan selected Story",
+            )
+            decision = decisions.sprint_plans.get(artifact_id)
+            facts.append(
+                PlanningArtifactFact(
+                    artifact_type="sprint_plan",
+                    artifact_id=artifact_id,
+                    artifact_fingerprint=row.plan_fingerprint,
+                    source_fingerprint=row.candidate_set_fingerprint,
+                    story_ids=story_ids,
+                    sprint_id=row.sprint_id,
+                    candidate_set_fingerprint=row.candidate_set_fingerprint,
+                    task_content_fingerprint=planned_task_content_fingerprint(plan),
+                    supersedes_artifact_id=row.supersedes_sprint_plan_artifact_id,
+                    status=self._phase_status(
+                        None if decision is None else decision.decision,
+                        superseded=artifact_id in superseded,
+                    ),
+                )
+            )
+        return tuple(facts)
+
+    def _planning_artifacts(self, project_id: int) -> _PlanningArtifactLoad:
+        """Load immutable planning artifacts and exact append-only decisions."""
+        rows = self._planning_rows(project_id)
+        indexes = self._planning_indexes(rows)
+        decisions = self._planning_decisions(rows, indexes)
+        facts = (
+            *self._roadmap_planning_facts(rows, indexes, decisions),
+            *self._story_planning_facts(rows, indexes, decisions),
+            *self._sprint_planning_facts(rows, indexes, decisions),
+        )
+        return _PlanningArtifactLoad(
+            facts=tuple(
+                sorted(
+                    facts,
+                    key=lambda item: (item.artifact_type, item.artifact_id),
+                )
+            ),
+            reviews=decisions.reviews,
         )
 
     def _review_decisions(
@@ -1818,31 +1996,11 @@ class WorkflowFactRepository:
             )
         return tuple(facts)
 
-    def _stories(
+    def _accepted_story_artifacts(
         self,
-        project_id: int,
-        spec_version_ids: frozenset[int],
         planning_artifacts: tuple[PlanningArtifactFact, ...],
-    ) -> tuple[StoryFact, ...]:
-        rows = self._session.exec(
-            select(UserStory)
-            .where(col(UserStory.product_id) == project_id)
-            .order_by(col(UserStory.rank), col(UserStory.story_id)),
-            execution_options=self._query_options(),
-        ).all()
-        dependencies = self._session.exec(
-            select(UserStoryDependency)
-            .where(col(UserStoryDependency.product_id) == project_id)
-            .order_by(
-                col(UserStoryDependency.dependent_story_id),
-                col(UserStoryDependency.prerequisite_story_id),
-                col(UserStoryDependency.dependency_id),
-            ),
-            execution_options=self._query_options(),
-        ).all()
-        stories_by_id = {self._required_id(row.story_id, "story"): row for row in rows}
-        story_ids = frozenset(stories_by_id)
-        accepted_content_by_story: dict[int, tuple[str, str]] = {}
+    ) -> dict[int, PlanningArtifactFact]:
+        accepted_content_by_story: dict[int, PlanningArtifactFact] = {}
         for artifact in planning_artifacts:
             if artifact.artifact_type != "story" or artifact.status != "accepted":
                 continue
@@ -1853,10 +2011,16 @@ class WorkflowFactRepository:
                 if story_id in accepted_content_by_story:
                     message = "Story row belongs to multiple accepted artifacts."
                     raise self._error(message)
-                accepted_content_by_story[story_id] = (
-                    artifact.requirement_id,
-                    artifact.artifact_fingerprint,
-                )
+                accepted_content_by_story[story_id] = artifact
+        return accepted_content_by_story
+
+    def _validate_story_relationships(
+        self,
+        rows: tuple[UserStory, ...],
+        dependencies: tuple[UserStoryDependency, ...],
+        story_ids: frozenset[int],
+        spec_version_ids: frozenset[int],
+    ) -> None:
         for row in rows:
             if row.accepted_spec_version_id is not None:
                 self._require_member(
@@ -1881,39 +2045,99 @@ class WorkflowFactRepository:
                 story_ids,
                 "story dependency",
             )
+
+    @staticmethod
+    def _story_fact(
+        row: UserStory,
+        story_id: int,
+        artifact: PlanningArtifactFact | None,
+        blockers: tuple[str, ...],
+    ) -> StoryFact:
+        return StoryFact(
+            story_id=story_id,
+            requirement_id=(
+                artifact.requirement_id
+                if artifact is not None
+                else row.source_requirement
+            ),
+            content_fingerprint=(
+                artifact.artifact_fingerprint if artifact is not None else None
+            ),
+            content_accepted=artifact is not None,
+            story_artifact_id=(artifact.artifact_id if artifact is not None else None),
+            authority_id=(artifact.authority_id if artifact is not None else None),
+            authority_fingerprint=(
+                artifact.authority_fingerprint if artifact is not None else None
+            ),
+            backlog_artifact_id=(
+                artifact.backlog_artifact_id if artifact is not None else None
+            ),
+            backlog_artifact_fingerprint=(
+                artifact.backlog_artifact_fingerprint
+                if artifact is not None
+                else None
+            ),
+            roadmap_artifact_id=(
+                artifact.roadmap_artifact_id if artifact is not None else None
+            ),
+            roadmap_artifact_fingerprint=(
+                artifact.roadmap_artifact_fingerprint
+                if artifact is not None
+                else None
+            ),
+            status=row.status.value,
+            story_points=row.story_points,
+            rank=row.rank,
+            sprint_candidate=not blockers,
+            readiness_blockers=blockers,
+        )
+
+    def _stories(
+        self,
+        project_id: int,
+        spec_version_ids: frozenset[int],
+        planning_artifacts: tuple[PlanningArtifactFact, ...],
+    ) -> tuple[StoryFact, ...]:
+        rows = tuple(
+            self._session.exec(
+                select(UserStory)
+                .where(col(UserStory.product_id) == project_id)
+                .order_by(col(UserStory.rank), col(UserStory.story_id)),
+                execution_options=self._query_options(),
+            ).all()
+        )
+        dependencies = tuple(
+            self._session.exec(
+                select(UserStoryDependency)
+                .where(col(UserStoryDependency.product_id) == project_id)
+                .order_by(
+                    col(UserStoryDependency.dependent_story_id),
+                    col(UserStoryDependency.prerequisite_story_id),
+                    col(UserStoryDependency.dependency_id),
+                ),
+                execution_options=self._query_options(),
+            ).all()
+        )
+        stories_by_id = {
+            self._required_id(row.story_id, "story"): row for row in rows
+        }
+        story_ids = frozenset(stories_by_id)
+        accepted_content_by_story = self._accepted_story_artifacts(planning_artifacts)
+        self._validate_story_relationships(
+            rows,
+            dependencies,
+            story_ids,
+            spec_version_ids,
+        )
         blockers = self._story_readiness_blockers(rows, dependencies, stories_by_id)
         return tuple(
-            StoryFact(
-                story_id=self._required_id(row.story_id, "story"),
-                requirement_id=(
-                    accepted_content_by_story[self._required_id(row.story_id, "story")][
-                        0
-                    ]
-                    if self._required_id(row.story_id, "story")
-                    in accepted_content_by_story
-                    else row.source_requirement
-                ),
-                content_fingerprint=(
-                    accepted_content_by_story[self._required_id(row.story_id, "story")][
-                        1
-                    ]
-                    if self._required_id(row.story_id, "story")
-                    in accepted_content_by_story
-                    else None
-                ),
-                content_accepted=(
-                    self._required_id(row.story_id, "story")
-                    in accepted_content_by_story
-                ),
-                status=row.status.value,
-                story_points=row.story_points,
-                rank=row.rank,
-                sprint_candidate=(
-                    not blockers[self._required_id(row.story_id, "story")]
-                ),
-                readiness_blockers=blockers[self._required_id(row.story_id, "story")],
+            self._story_fact(
+                row,
+                story_id,
+                accepted_content_by_story.get(story_id),
+                blockers[story_id],
             )
-            for row in rows
+            for story_id, row in stories_by_id.items()
         )
 
     def _story_dependencies(
@@ -1955,6 +2179,7 @@ class WorkflowFactRepository:
                         "status": row.status,
                         "source": row.source,
                         "confidence": row.confidence,
+                        "reason": row.reason,
                     }
                 )
             )
@@ -1963,6 +2188,7 @@ class WorkflowFactRepository:
     def _story_dependency_reviews(
         self,
         project_id: int,
+        stories: tuple[StoryFact, ...],
     ) -> tuple[StoryDependencyReviewFact, ...]:
         rows = self._session.exec(
             select(StoryDependencyReview)
@@ -1970,6 +2196,7 @@ class WorkflowFactRepository:
             .order_by(col(StoryDependencyReview.story_dependency_review_id)),
             execution_options=self._query_options(),
         ).all()
+        project_story_ids = frozenset(item.story_id for item in stories)
         facts: list[StoryDependencyReviewFact] = []
         for row in rows:
             try:
@@ -1977,8 +2204,47 @@ class WorkflowFactRepository:
             except ValidationError as exc:
                 message = "Story dependency review IDs are invalid."
                 raise self._error(message) from exc
-            if story_ids != tuple(sorted(set(story_ids))):
+            if (
+                story_ids != tuple(sorted(set(story_ids)))
+                or canonical_json(list(story_ids)) != row.selected_story_ids_json
+            ):
                 message = "Story dependency review IDs are not canonical."
+                raise self._error(message)
+            if not story_ids or any(
+                story_id not in project_story_ids for story_id in story_ids
+            ):
+                message = "Story dependency review contains unknown Project Stories."
+                raise self._error(message)
+            try:
+                reviewed_edges = tuple(
+                    _DEPENDENCY_EDGE_LIST.validate_json(row.reviewed_edges_json)
+                )
+            except ValidationError as exc:
+                message = "Story dependency review edges are invalid."
+                raise self._error(message) from exc
+            if (
+                not dependency_edges_are_canonical(reviewed_edges)
+                or canonical_json(dependency_edges_payload(reviewed_edges))
+                != row.reviewed_edges_json
+            ):
+                message = "Story dependency review edges are not canonical."
+                raise self._error(message)
+            selected = set(story_ids)
+            if any(
+                edge.dependent_story_id not in selected
+                or edge.prerequisite_story_id not in selected
+                for edge in reviewed_edges
+            ):
+                message = "Story dependency review edges leave the selected set."
+                raise self._error(message)
+            if dependency_edges_have_cycle(reviewed_edges):
+                message = "Story dependency review edges contain a semantic cycle."
+                raise self._error(message)
+            if (
+                dependency_review_fingerprint(reviewed_edges)
+                != row.dependency_fingerprint
+            ):
+                message = "Story dependency review fingerprint changed."
                 raise self._error(message)
             facts.append(
                 StoryDependencyReviewFact(
@@ -1987,6 +2253,7 @@ class WorkflowFactRepository:
                         "story dependency review",
                     ),
                     selected_story_ids=story_ids,
+                    reviewed_edges=reviewed_edges,
                     source_fingerprint=row.source_fingerprint,
                     dependency_fingerprint=row.dependency_fingerprint,
                 )
@@ -2031,6 +2298,21 @@ class WorkflowFactRepository:
         facts: list[TaskFact] = []
         for task, _story in rows:
             task_id = self._required_id(task.task_id, "task")
+            if not task.description.strip():
+                message = f"Task {task_id} has an empty description."
+                raise self._error(message)
+            if task.metadata_json is None:
+                message = f"Task {task_id} has no canonical metadata."
+                raise self._error(message)
+            try:
+                metadata = TaskMetadata.model_validate_json(task.metadata_json)
+            except ValidationError as exc:
+                message = f"Task {task_id} metadata is invalid."
+                raise self._error(message) from exc
+            canonical_metadata = serialize_task_metadata(metadata)
+            if canonical_metadata != task.metadata_json:
+                message = f"Task {task_id} metadata is not canonical."
+                raise self._error(message)
             task_sprint_ids = sprint_ids_by_story[task.story_id]
             if not task_sprint_ids:
                 message = (
@@ -2044,6 +2326,8 @@ class WorkflowFactRepository:
                     task_id=task_id,
                     sprint_id=sprint_id,
                     story_id=task.story_id,
+                    description=task.description,
+                    metadata_json=canonical_metadata,
                     status=task.status.value,
                     dependencies_satisfied=not story.readiness_blockers,
                 )

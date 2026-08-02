@@ -7,23 +7,10 @@ from typing import ClassVar, Literal, Self
 from pydantic import Field, model_validator
 
 from workflow.contracts import FrozenModel, JsonObject
+from workflow.facts import StoryDependencyReviewEdgeFact
 from workflow.requests.base import PositionedRequest
 
-
-class ReviewedDependencyEdge(FrozenModel):
-    """One operator-reviewed semantic Story dependency."""
-
-    dependent_story_id: int
-    prerequisite_story_id: int
-    reason: str = Field(min_length=1)
-
-    @model_validator(mode="after")
-    def reject_self_edge(self) -> Self:
-        """Reject a dependency from one Story to itself."""
-        if self.dependent_story_id == self.prerequisite_story_id:
-            message = "A Story dependency cannot reference itself."
-            raise ValueError(message)
-        return self
+ReviewedDependencyEdge = StoryDependencyReviewEdgeFact
 
 
 class StoryReadinessUpdate(FrozenModel):

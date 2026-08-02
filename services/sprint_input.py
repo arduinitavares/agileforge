@@ -5,7 +5,8 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Any, NotRequired, Protocol, TypedDict, Unpack, cast
+import typing
+from typing import Any, NotRequired, Protocol, TypedDict, Unpack, cast
 
 from orchestrator_agent.agent_tools.story_linkage import normalize_requirement_key
 from repositories.workflow import WorkflowFactRepository
@@ -19,7 +20,7 @@ from services.sprint_selection import (
     select_sprint_story_rows,
 )
 
-if TYPE_CHECKING:
+if typing.TYPE_CHECKING:
     from sqlmodel import Session
 
     from workflow.facts import StoryDependencyFact, StoryFact
