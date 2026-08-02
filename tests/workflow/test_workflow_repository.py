@@ -38,6 +38,7 @@ from utils.spec_schemas import (
     Invariant,
     InvariantType,
     RequiredFieldParams,
+    SpecAuthorityCompilationFailure,
     SpecAuthorityCompilationSuccess,
     SpecAuthorityCompilerOutput,
 )
@@ -109,6 +110,29 @@ def _required_authority_fingerprint(authority: CompiledSpecAuthority) -> str:
     fingerprint = pending_authority_fingerprint(authority)
     assert fingerprint is not None
     return fingerprint
+
+
+def _replace_first_authority_artifact(
+    session: Session,
+    compiled_artifact_json: str,
+) -> None:
+    """Replace canonical content while keeping its acceptance fingerprint current."""
+    authority = session.exec(
+        select(CompiledSpecAuthority).order_by(col(CompiledSpecAuthority.authority_id))
+    ).first()
+    assert authority is not None
+    authority.compiled_artifact_json = compiled_artifact_json
+    session.add(authority)
+    session.flush()
+    authority_id = _id(authority.authority_id)
+    acceptance = session.exec(
+        select(SpecAuthorityAcceptance).where(
+            col(SpecAuthorityAcceptance.pending_authority_id) == authority_id
+        )
+    ).one()
+    acceptance.authority_fingerprint = _required_authority_fingerprint(authority)
+    session.add(acceptance)
+    session.commit()
 
 
 @dataclass(frozen=True)
@@ -1314,6 +1338,62 @@ def test_load_rejects_authority_without_valid_canonical_artifact(
             WorkflowFactLoadError,
             match="canonical authority",
         ),
+    ):
+        WorkflowFactRepository(session).load(project_id)
+
+
+def test_load_rejects_schema_valid_authority_compilation_failure(
+    tmp_path: Path,
+) -> None:
+    """Accepted authority content must be a successful compilation payload."""
+    engine = sqlite_engine(tmp_path / "workflow.db")
+    project_id = seed_complete_project(engine)
+    failure_json = SpecAuthorityCompilerOutput(
+        root=SpecAuthorityCompilationFailure(
+            error="COMPILATION_FAILED",
+            reason="The source specification is incomplete.",
+            blocking_gaps=["Missing workflow invariant"],
+        )
+    ).model_dump_json()
+    with Session(engine) as session:
+        _replace_first_authority_artifact(session, failure_json)
+
+    with (
+        Session(engine) as session,
+        pytest.raises(WorkflowFactLoadError, match="canonical authority"),
+    ):
+        WorkflowFactRepository(session).load(project_id)
+
+
+@pytest.mark.parametrize(
+    ("metadata_field", "conflicting_value"),
+    [
+        pytest.param("compiler_version", "9.9.9", id="compiler-version"),
+        pytest.param("prompt_hash", "b" * 64, id="prompt-hash"),
+    ],
+)
+def test_load_rejects_authority_success_metadata_mismatch(
+    tmp_path: Path,
+    metadata_field: str,
+    conflicting_value: str,
+) -> None:
+    """Canonical success provenance must match the authoritative row."""
+    engine = sqlite_engine(tmp_path / "workflow.db")
+    project_id = seed_complete_project(engine)
+    artifact = SpecAuthorityCompilationSuccess.model_validate_json(_authority_json())
+    if metadata_field == "compiler_version":
+        artifact = artifact.model_copy(update={"compiler_version": conflicting_value})
+    else:
+        artifact = artifact.model_copy(update={"prompt_hash": conflicting_value})
+    artifact_json = SpecAuthorityCompilationSuccess.model_validate_json(
+        artifact.model_dump_json()
+    ).model_dump_json()
+    with Session(engine) as session:
+        _replace_first_authority_artifact(session, artifact_json)
+
+    with (
+        Session(engine) as session,
+        pytest.raises(WorkflowFactLoadError, match=metadata_field),
     ):
         WorkflowFactRepository(session).load(project_id)
 

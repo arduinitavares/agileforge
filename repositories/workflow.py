@@ -32,7 +32,7 @@ from models.workflow import (
     WorkflowNodeAttemptOutcome,
 )
 from services.specs.authority_selection import pending_authority_fingerprint
-from utils.spec_schemas import SpecAuthorityCompilerOutput
+from utils.spec_schemas import SpecAuthorityCompilationSuccess
 from workflow.contracts import JsonValue
 from workflow.facts import (
     AuthorityFact,
@@ -658,6 +658,8 @@ class WorkflowFactRepository:
             self._validate_authority_json(
                 authority.compiled_artifact_json,
                 authority_id,
+                authority.compiler_version,
+                authority.prompt_hash,
             )
             authority_fingerprint = pending_authority_fingerprint(authority)
             if authority_fingerprint is None:
@@ -1015,15 +1017,31 @@ class WorkflowFactRepository:
             raise WorkflowFactRepository._error(message) from exc
 
     @staticmethod
-    def _validate_authority_json(content: str | None, authority_id: int) -> None:
+    def _validate_authority_json(
+        content: str | None,
+        authority_id: int,
+        compiler_version: str,
+        prompt_hash: str,
+    ) -> None:
         if content is None:
             message = f"Stored canonical authority {authority_id} JSON is missing."
             raise WorkflowFactRepository._error(message)
         try:
-            SpecAuthorityCompilerOutput.model_validate_json(content)
+            artifact = SpecAuthorityCompilationSuccess.model_validate_json(content)
         except ValidationError as exc:
             message = f"Stored canonical authority {authority_id} JSON is invalid."
             raise WorkflowFactRepository._error(message) from exc
+        duplicated_provenance = (
+            ("compiler_version", artifact.compiler_version, compiler_version),
+            ("prompt_hash", artifact.prompt_hash, prompt_hash),
+        )
+        for field_name, artifact_value, authoritative_value in duplicated_provenance:
+            if artifact_value != authoritative_value:
+                message = (
+                    f"Stored canonical authority {authority_id} {field_name} "
+                    "does not match the authoritative compiled authority row."
+                )
+                raise WorkflowFactRepository._error(message)
 
     @staticmethod
     def _review_decision_fact(source: _ReviewDecisionSource) -> ReviewDecisionFact:
