@@ -60,7 +60,7 @@ from workflow.definitions.planning import (
 from workflow.execution_integrity import (
     ExecutionIntegrityError,
     current_dependency_review,
-    dependency_rows_fingerprint,
+    selected_story_dependency_snapshot,
 )
 from workflow.planning_integrity import current_task_content_fingerprint
 from workflow.requests.planning import (
@@ -695,14 +695,14 @@ def execute_start_sprint(
     snapshot = WorkflowFactRepository(session).load(request.project_id)
     current_plan = _current_sprint_plan(snapshot, request.sprint_plan_artifact_id)
     try:
-        dependency_review = current_dependency_review(snapshot)
+        candidate_dependency_review = current_dependency_review(snapshot)
     except ExecutionIntegrityError:
-        dependency_review = None
+        candidate_dependency_review = None
     if (
         artifact is None
         or accepted is None
         or current_plan is None
-        or dependency_review is None
+        or candidate_dependency_review is None
         or artifact.sprint_id != request.sprint_id
         or artifact.plan_fingerprint != request.plan_fingerprint
         or artifact.candidate_set_fingerprint != request.candidate_set_fingerprint
@@ -732,6 +732,13 @@ def execute_start_sprint(
         return _conflict("Accepted Sprint plan decision has no durable identity.")
     plan_fact, _candidate_fingerprint, task_fingerprint = current_plan
     try:
+        dependency_snapshot = selected_story_dependency_snapshot(
+            snapshot,
+            plan_fact.story_ids,
+        )
+    except ExecutionIntegrityError as error:
+        return _conflict(str(error))
+    try:
         sprint = start_sprint_in_session(
             session,
             SprintStartInput(
@@ -739,18 +746,11 @@ def execute_start_sprint(
                 sprint_id=request.sprint_id,
                 sprint_plan_artifact_id=request.sprint_plan_artifact_id,
                 sprint_plan_artifact_decision_id=accepted_id,
-                story_dependency_review_id=dependency_review.review_id,
                 plan_fingerprint=request.plan_fingerprint,
                 candidate_set_fingerprint=request.candidate_set_fingerprint,
                 selected_story_ids=plan_fact.story_ids,
                 task_content_fingerprint=task_fingerprint,
-                dependency_source_fingerprint=(
-                    dependency_review.source_fingerprint
-                ),
-                dependency_fingerprint=dependency_review.dependency_fingerprint,
-                dependency_rows_fingerprint=dependency_rows_fingerprint(
-                    snapshot.story_dependencies
-                ),
+                dependency_snapshot=dependency_snapshot,
                 decision_fingerprint=decision.decision_fingerprint,
                 started_by=request.actor,
                 started_at=evaluated_at,

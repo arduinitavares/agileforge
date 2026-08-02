@@ -32,6 +32,7 @@ from models.workflow import (
     SprintPlanArtifactDecision,
     SprintReview,
     SprintStart,
+    StoryDependencyReview,
 )
 from orchestrator_agent.agent_tools.sprint_planner_tool.schemes import (
     SprintPlannerOutput,
@@ -109,6 +110,7 @@ from utils.task_metadata import (
     serialize_task_metadata,
 )
 from workflow.execution_integrity import (
+    SelectedStoryDependencySnapshot,
     SprintStartAudit,
     sprint_close_fingerprint,
     sprint_review_fingerprint,
@@ -549,17 +551,59 @@ class SprintStartInput:
     sprint_id: int
     sprint_plan_artifact_id: int
     sprint_plan_artifact_decision_id: int
-    story_dependency_review_id: int
     plan_fingerprint: str
     candidate_set_fingerprint: str
     selected_story_ids: tuple[int, ...]
     task_content_fingerprint: str
-    dependency_source_fingerprint: str
-    dependency_fingerprint: str
-    dependency_rows_fingerprint: str
+    dependency_snapshot: SelectedStoryDependencySnapshot
     decision_fingerprint: str
     started_by: str
     started_at: datetime
+
+
+def _selected_dependency_review_id(
+    session: Session,
+    command: SprintStartInput,
+) -> int:
+    dependency = command.dependency_snapshot
+    if dependency.story_ids != command.selected_story_ids:
+        message = "Sprint dependency scope does not match selected Stories."
+        raise ValueError(message)
+    selected_json = canonical_json(list(dependency.story_ids))
+    edges_json = canonical_json(
+        [item.model_dump(mode="json") for item in dependency.reviewed_edges]
+    )
+    existing = session.exec(
+        select(StoryDependencyReview).where(
+            StoryDependencyReview.project_id == command.project_id,
+            StoryDependencyReview.source_fingerprint
+            == dependency.source_fingerprint,
+        )
+    ).one_or_none()
+    if existing is None:
+        existing = StoryDependencyReview(
+            project_id=command.project_id,
+            selected_story_ids_json=selected_json,
+            reviewed_edges_json=edges_json,
+            source_fingerprint=dependency.source_fingerprint,
+            dependency_fingerprint=dependency.dependency_fingerprint,
+            reviewed_by=command.started_by,
+            reviewed_at=command.started_at,
+        )
+        session.add(existing)
+        session.flush()
+    elif (
+        existing.selected_story_ids_json != selected_json
+        or existing.reviewed_edges_json != edges_json
+        or existing.dependency_fingerprint != dependency.dependency_fingerprint
+    ):
+        message = "Sprint dependency review conflicts with selected facts."
+        raise ValueError(message)
+    review_id = existing.story_dependency_review_id
+    if review_id is None:
+        message = "Sprint dependency review has no durable identity."
+        raise ValueError(message)
+    return review_id
 
 
 def start_sprint_in_session(
@@ -610,6 +654,8 @@ def start_sprint_in_session(
     if existing is not None:
         message = "Sprint start lineage is immutable."
         raise ValueError(message)
+    dependency_review_id = _selected_dependency_review_id(session, command)
+    dependency = command.dependency_snapshot
     metadata = sprint_start_audit_metadata(
         SprintStartAudit(
             sprint_id=command.sprint_id,
@@ -618,14 +664,14 @@ def start_sprint_in_session(
             sprint_plan_artifact_decision_id=(
                 command.sprint_plan_artifact_decision_id
             ),
-            story_dependency_review_id=command.story_dependency_review_id,
+            story_dependency_review_id=dependency_review_id,
             plan_fingerprint=command.plan_fingerprint,
             candidate_set_fingerprint=command.candidate_set_fingerprint,
             selected_story_ids=command.selected_story_ids,
             task_content_fingerprint=command.task_content_fingerprint,
-            dependency_source_fingerprint=command.dependency_source_fingerprint,
-            dependency_fingerprint=command.dependency_fingerprint,
-            dependency_rows_fingerprint=command.dependency_rows_fingerprint,
+            dependency_source_fingerprint=dependency.source_fingerprint,
+            dependency_fingerprint=dependency.dependency_fingerprint,
+            dependency_rows_fingerprint=dependency.rows_fingerprint,
             decision_fingerprint=command.decision_fingerprint,
             started_by=command.started_by,
         )
@@ -656,14 +702,14 @@ def start_sprint_in_session(
             sprint_plan_artifact_decision_id=(
                 command.sprint_plan_artifact_decision_id
             ),
-            story_dependency_review_id=command.story_dependency_review_id,
+            story_dependency_review_id=dependency_review_id,
             plan_fingerprint=command.plan_fingerprint,
             candidate_set_fingerprint=command.candidate_set_fingerprint,
             selected_story_ids_json=canonical_json(list(command.selected_story_ids)),
             task_content_fingerprint=command.task_content_fingerprint,
-            dependency_source_fingerprint=command.dependency_source_fingerprint,
-            dependency_fingerprint=command.dependency_fingerprint,
-            dependency_rows_fingerprint=command.dependency_rows_fingerprint,
+            dependency_source_fingerprint=dependency.source_fingerprint,
+            dependency_fingerprint=dependency.dependency_fingerprint,
+            dependency_rows_fingerprint=dependency.rows_fingerprint,
             decision_fingerprint=command.decision_fingerprint,
             audit_event_id=event.event_id,
             started_by=command.started_by,

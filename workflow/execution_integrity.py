@@ -22,6 +22,7 @@ if TYPE_CHECKING:
         ReviewDecisionFact,
         SprintStartFact,
         StoryDependencyFact,
+        StoryDependencyReviewEdgeFact,
         StoryDependencyReviewFact,
         StoryFact,
         TaskFact,
@@ -66,6 +67,19 @@ class SprintStartAudit:
     dependency_rows_fingerprint: str
     decision_fingerprint: str
     started_by: str
+
+
+@dataclass(frozen=True)
+class SelectedStoryDependencySnapshot:
+    """Canonical dependency facts incident to one exact selected Story set."""
+
+    story_ids: tuple[int, ...]
+    stories: tuple[StoryFact, ...]
+    dependencies: tuple[StoryDependencyFact, ...]
+    reviewed_edges: tuple[StoryDependencyReviewEdgeFact, ...]
+    source_fingerprint: str
+    dependency_fingerprint: str
+    rows_fingerprint: str
 
 
 @dataclass(frozen=True)
@@ -147,6 +161,70 @@ def dependency_rows_fingerprint(
                 ),
             )
         ]
+    )
+
+
+def selected_story_dependency_snapshot(
+    snapshot: WorkflowFactSnapshot,
+    selected_story_ids: tuple[int, ...],
+) -> SelectedStoryDependencySnapshot:
+    """Scope dependency identity, edges, and Story source to selected Stories."""
+    canonical_story_ids = tuple(sorted(set(selected_story_ids)))
+    if not canonical_story_ids or canonical_story_ids != selected_story_ids:
+        _fail("Selected Story dependency scope is not canonical.")
+    stories_by_id = {item.story_id: item for item in snapshot.stories}
+    if len(stories_by_id) != len(snapshot.stories):
+        _fail("Story facts contain duplicate identities.")
+    try:
+        stories = tuple(stories_by_id[story_id] for story_id in canonical_story_ids)
+    except KeyError as error:
+        _fail(
+            "Selected Story dependency scope references a missing Story.",
+            cause=error,
+        )
+    if any(
+        not item.content_accepted
+        or item.content_fingerprint is None
+        or item.story_artifact_id is None
+        for item in stories
+    ):
+        _fail("Selected dependency scope requires accepted Story content.")
+    selected = set(canonical_story_ids)
+    dependencies = tuple(
+        sorted(
+            (
+                item
+                for item in snapshot.story_dependencies
+                if item.dependent_story_id in selected
+                or item.prerequisite_story_id in selected
+            ),
+            key=lambda item: (
+                item.dependent_story_id,
+                item.prerequisite_story_id,
+                item.dependency_id,
+            ),
+        )
+    )
+    if len({item.dependency_id for item in dependencies}) != len(dependencies):
+        _fail("Selected dependency rows contain duplicate identities.")
+    try:
+        reviewed_edges = active_dependency_review_edges(dependencies)
+    except ValueError as error:
+        _fail("Selected dependency edges are not reviewable.", cause=error)
+    if any(
+        edge.dependent_story_id not in selected
+        or edge.prerequisite_story_id not in selected
+        for edge in reviewed_edges
+    ):
+        _fail("Selected Stories are not closed over active dependencies.")
+    return SelectedStoryDependencySnapshot(
+        story_ids=canonical_story_ids,
+        stories=stories,
+        dependencies=dependencies,
+        reviewed_edges=reviewed_edges,
+        source_fingerprint=accepted_story_source_fingerprint(stories),
+        dependency_fingerprint=dependency_review_fingerprint(reviewed_edges),
+        rows_fingerprint=dependency_rows_fingerprint(dependencies),
     )
 
 
@@ -356,66 +434,38 @@ def _contract_stories(
     )
     if tuple(item.story_id for item in attached) != selected_story_ids:
         _fail("Sprint Story membership changed after plan acceptance.")
-    review_story_ids = dependency_review.selected_story_ids
-    if (
-        not review_story_ids
-        or review_story_ids != tuple(sorted(set(review_story_ids)))
-        or not set(selected_story_ids).issubset(review_story_ids)
-    ):
+    if dependency_review.selected_story_ids != selected_story_ids:
         _fail("Sprint dependency review Story set is stale.")
-    stories_by_id = {item.story_id: item for item in snapshot.stories}
-    if len(stories_by_id) != len(snapshot.stories):
-        _fail("Story facts contain duplicate identities.")
-    try:
-        reviewed_stories = tuple(stories_by_id[item] for item in review_story_ids)
-    except KeyError as error:
-        _fail(
-            "Sprint dependency review references a missing Story.",
-            cause=error,
-        )
     if any(
         not item.content_accepted
         or item.content_fingerprint is None
         or item.story_artifact_id is None
-        for item in reviewed_stories
+        for item in attached
     ):
         _fail("Sprint execution requires accepted Story content.")
-    return reviewed_stories
+    return attached
 
 
 def _contract_dependencies(
     snapshot: WorkflowFactSnapshot,
     start: SprintStartFact,
     dependency_review: StoryDependencyReviewFact,
-    reviewed_stories: tuple[StoryFact, ...],
 ) -> tuple[StoryDependencyFact, ...]:
-    source_fingerprint = accepted_story_source_fingerprint(reviewed_stories)
-    try:
-        current_edges = active_dependency_review_edges(snapshot.story_dependencies)
-    except ValueError as error:
-        _fail("Current dependency edges are not reviewable.", cause=error)
-    current_dependency_fingerprint = dependency_review_fingerprint(current_edges)
+    selected = selected_story_dependency_snapshot(
+        snapshot,
+        start.selected_story_ids,
+    )
     if (
-        dependency_review.source_fingerprint != source_fingerprint
-        or dependency_review.reviewed_edges != current_edges
-        or dependency_review.dependency_fingerprint
-        != current_dependency_fingerprint
-        or start.dependency_source_fingerprint != source_fingerprint
-        or start.dependency_fingerprint != current_dependency_fingerprint
-        or start.dependency_rows_fingerprint
-        != dependency_rows_fingerprint(snapshot.story_dependencies)
+        dependency_review.selected_story_ids != selected.story_ids
+        or dependency_review.source_fingerprint != selected.source_fingerprint
+        or dependency_review.reviewed_edges != selected.reviewed_edges
+        or dependency_review.dependency_fingerprint != selected.dependency_fingerprint
+        or start.dependency_source_fingerprint != selected.source_fingerprint
+        or start.dependency_fingerprint != selected.dependency_fingerprint
+        or start.dependency_rows_fingerprint != selected.rows_fingerprint
     ):
         _fail("Sprint dependency review or dependency rows changed.")
-    return tuple(
-        sorted(
-            snapshot.story_dependencies,
-            key=lambda item: (
-                item.dependent_story_id,
-                item.prerequisite_story_id,
-                item.dependency_id,
-            ),
-        )
-    )
+    return selected.dependencies
 
 
 def _contract_tasks(
@@ -460,7 +510,6 @@ def execution_contract(
         snapshot,
         start,
         dependency_review,
-        stories,
     )
     tasks = _contract_tasks(snapshot, start)
     facts = _ExecutionContractFacts(
@@ -629,12 +678,6 @@ def sprint_close_fingerprint(
 ) -> str:
     """Bind Sprint closure to its current review and exact terminal Story set."""
     contract = execution_contract(snapshot, sprint_id)
-    attached = tuple(
-        sorted(
-            (item for item in snapshot.stories if sprint_id in item.sprint_ids),
-            key=lambda item: item.story_id,
-        )
-    )
     closures = tuple(
         sorted(
             (
@@ -650,7 +693,9 @@ def sprint_close_fingerprint(
             "execution_contract_fingerprint": contract.fingerprint,
             "sprint_id": sprint_id,
             "review_fingerprint": review_fingerprint,
-            "terminal_stories": [item.model_dump(mode="json") for item in attached],
+            "terminal_stories": [
+                item.model_dump(mode="json") for item in contract.stories
+            ],
             "story_completions": [
                 {
                     "completion_id": item.completion_id,
@@ -674,6 +719,7 @@ def triage_payload_fingerprint(
 __all__ = [
     "ExecutionContract",
     "ExecutionIntegrityError",
+    "SelectedStoryDependencySnapshot",
     "SprintStartAudit",
     "StoryClosurePayload",
     "TaskEvidencePayload",
@@ -682,6 +728,7 @@ __all__ = [
     "dependency_rows_fingerprint",
     "execution_contract",
     "execution_task_content_fingerprint",
+    "selected_story_dependency_snapshot",
     "sprint_close_fingerprint",
     "sprint_review_fingerprint",
     "sprint_start_audit_metadata",

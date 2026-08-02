@@ -419,14 +419,18 @@ def _output_first_int(result: TransitionResult, key: str) -> int:
     return first
 
 
-def _roadmap_content(requirement: str = "Plan immutable work") -> JsonObject:
+def _roadmap_content(
+    *requirements: str,
+) -> JsonObject:
+    if not requirements:
+        requirements = ("Plan immutable work",)
     return {
         "roadmap_releases": [
             {
                 "release_name": "Milestone 1",
                 "theme": "Planning",
                 "focus_area": "Technical Foundation",
-                "items": [requirement],
+                "items": list(requirements),
                 "reasoning": "Build durable planning facts first.",
             }
         ],
@@ -498,9 +502,14 @@ def _sprint_plan(story_id: int) -> JsonObject:
     }
 
 
-def _record_and_accept_roadmap(domain: WorkflowDomain, project_id: int) -> int:
+def _record_and_accept_roadmap(
+    domain: WorkflowDomain,
+    project_id: int,
+    *,
+    requirements: tuple[str, ...] = ("Plan immutable work",),
+) -> int:
     position = domain.position(project_id)
-    content = _roadmap_content()
+    content = _roadmap_content(*requirements)
     backlog_reference = _decision(
         position,
         "planning.roadmap.generate",
@@ -534,22 +543,30 @@ def _record_and_accept_roadmap(domain: WorkflowDomain, project_id: int) -> int:
 
 
 def _record_and_accept_story(
-    domain: WorkflowDomain, project_id: int
+    domain: WorkflowDomain,
+    project_id: int,
+    *,
+    requirement: str = "Plan immutable work",
+    idempotency_suffix: str = "",
 ) -> tuple[int, int]:
     position = domain.position(project_id)
+    requirement_id = " ".join(requirement.strip().lower().split())
+    instance_key = f"requirement:{requirement_id}"
     generate = next(
-        item for item in position.decisions if item.node_id == "planning.story.generate"
+        item
+        for item in position.decisions
+        if item.node_id == "planning.story.generate"
+        and item.instance_key == instance_key
     )
     assert generate.instance_key is not None
-    requirement_id = generate.instance_key.removeprefix("requirement:")
     roadmap_reference = next(
         item for item in generate.fact_references if item.fact_type == "roadmap"
     )
-    content = _story_content()
+    content = _story_content(requirement)
     recorded = domain.transition(
         RecordStoryDraft(
             **_guards(position, "planning.story.generate", generate.instance_key),
-            idempotency_key="record-story",
+            idempotency_key=f"record-story{idempotency_suffix}",
             requirement_id=requirement_id,
             roadmap_artifact_id=int(roadmap_reference.fact_id),
             roadmap_artifact_fingerprint=roadmap_reference.fingerprint,
@@ -569,7 +586,7 @@ def _record_and_accept_story(
                 "planning.story.review",
                 f"requirement:{requirement_id}",
             ),
-            idempotency_key="accept-story",
+            idempotency_key=f"accept-story{idempotency_suffix}",
             requirement_id=requirement_id,
             story_artifact_id=artifact_id,
             artifact_fingerprint=fingerprint,

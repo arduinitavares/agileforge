@@ -10,13 +10,21 @@ from typing import TYPE_CHECKING, TypedDict, get_args
 import pytest
 from pydantic import TypeAdapter, ValidationError
 from sqlalchemy import event
-from sqlmodel import Session, col, select
+from sqlmodel import Session, SQLModel, col, create_engine, select
 
 import services.agent_workbench.post_sprint_triage as triage_service
 import services.agent_workbench.sprint_phase as sprint_service
 import services.story_close_service as story_service
 import services.task_execution_service as task_service
-from models.core import Product, Sprint, SprintStory, Task, Team, UserStory
+from models.core import (
+    Product,
+    Sprint,
+    SprintStory,
+    Task,
+    Team,
+    UserStory,
+    UserStoryDependency,
+)
 from models.enums import SprintStatus, StoryStatus, TaskStatus
 from models.events import StoryCompletionLog, TaskExecutionLog
 from models.workflow import (
@@ -28,7 +36,10 @@ from models.workflow import (
     TaskCompletionEvidence,
 )
 from repositories.workflow import WorkflowFactLoadError
-from tests.workflow.execution_fixtures import seed_started_execution
+from tests.workflow.execution_fixtures import (
+    seed_started_execution,
+    seed_started_execution_with_unselected_story,
+)
 from utils.task_metadata import TaskMetadata, serialize_task_metadata
 from workflow.clock import FixedClock
 from workflow.contracts import JsonObject, NodeDecision, WorkflowErrorCode
@@ -46,6 +57,8 @@ from workflow.requests import (
 from workflow.requests.base import PositionedRequest
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from sqlalchemy.engine import Engine
 
 EVALUATED_AT = datetime(2026, 8, 2, 12, tzinfo=UTC)
@@ -77,6 +90,15 @@ def _domain(engine: Engine) -> WorkflowDomain:
         graph=execution_graph(),
         clock=FixedClock(now_value=EVALUATED_AT),
     )
+
+
+def _file_engine(path: Path) -> Engine:
+    engine = create_engine(
+        f"sqlite:///{path.as_posix()}",
+        connect_args={"check_same_thread": False},
+    )
+    SQLModel.metadata.create_all(engine)
+    return engine
 
 
 def _seed_active_task(engine: Engine) -> tuple[int, int, int, int]:
@@ -188,6 +210,25 @@ def _complete_execution_sprint(
 ) -> tuple[WorkflowDomain, int, int, int, int, str]:
     project_id, sprint_id, story_id, task_id = _seed_active_task(engine)
     domain = _domain(engine)
+    review_fingerprint = _close_execution_sprint(
+        domain,
+        project_id=project_id,
+        sprint_id=sprint_id,
+        story_id=story_id,
+        task_id=task_id,
+    )
+    return domain, project_id, sprint_id, story_id, task_id, review_fingerprint
+
+
+def _close_execution_sprint(
+    domain: WorkflowDomain,
+    *,
+    project_id: int,
+    sprint_id: int,
+    story_id: int,
+    task_id: int,
+) -> str:
+    """Complete one normalized single-Story Sprint through explicit close."""
     assert domain.transition(_complete_task(domain, project_id, task_id)).ok is True
     assert domain.transition(
         CloseStory(
@@ -223,7 +264,38 @@ def _complete_execution_sprint(
             review_fingerprint=review_fingerprint,
         )
     ).ok is True
-    return domain, project_id, sprint_id, story_id, task_id, review_fingerprint
+    return review_fingerprint
+
+
+def _complete_execution_sprint_with_unselected_story(
+    engine: Engine,
+) -> tuple[WorkflowDomain, int, int, int, int, int, int, str]:
+    (
+        project_id,
+        sprint_id,
+        story_id,
+        future_story_id,
+        task_id,
+        dependency_id,
+    ) = seed_started_execution_with_unselected_story(engine)
+    domain = _domain(engine)
+    review_fingerprint = _close_execution_sprint(
+        domain,
+        project_id=project_id,
+        sprint_id=sprint_id,
+        story_id=story_id,
+        task_id=task_id,
+    )
+    return (
+        domain,
+        project_id,
+        sprint_id,
+        story_id,
+        future_story_id,
+        task_id,
+        dependency_id,
+        review_fingerprint,
+    )
 
 
 def test_execution_request_union_is_closed_and_fixed() -> None:
@@ -740,6 +812,158 @@ def test_post_close_stale_terminal_fingerprint_is_invalid(
     assert triage.reason_code == "WORKFLOW_FACT_CONFLICT"
 
 
+def test_closed_sprint_ignores_unrelated_future_rejected_dependency(
+    engine: Engine,
+) -> None:
+    """Keep Sprint A triage stable when future-only rejected rows are added."""
+    domain, project_id, sprint_id, _story_id, _task_id, _review = (
+        _complete_execution_sprint(engine)
+    )
+    baseline = _decision(
+        domain,
+        project_id,
+        "execution.post_sprint_triage",
+        f"sprint:{sprint_id}",
+    )
+    with Session(engine) as session:
+        future_stories = [
+            UserStory(
+                product_id=project_id,
+                title=f"Future Story {index}",
+                status=StoryStatus.TO_DO,
+                is_refined=False,
+                rank=f"9.{index}",
+            )
+            for index in (1, 2)
+        ]
+        session.add_all(future_stories)
+        session.flush()
+        future_ids = tuple(item.story_id for item in future_stories)
+        assert all(item is not None for item in future_ids)
+        first_id, second_id = future_ids
+        assert first_id is not None
+        assert second_id is not None
+        session.add(
+            UserStoryDependency(
+                product_id=project_id,
+                dependent_story_id=first_id,
+                prerequisite_story_id=second_id,
+                status="rejected",
+                source="manual_review",
+                confidence="reviewed",
+                reason="Rejected future-only dependency.",
+            )
+        )
+        session.commit()
+
+    recovered = _decision(
+        domain,
+        project_id,
+        "execution.post_sprint_triage",
+        f"sprint:{sprint_id}",
+    )
+    assert recovered.category == baseline.category
+    assert recovered.reason_code == baseline.reason_code
+    assert recovered.fact_references == baseline.fact_references
+
+
+def test_closed_sprint_ignores_unselected_story_moved_to_later_sprint(
+    engine: Engine,
+) -> None:
+    """Keep Sprint A terminal hashes scoped to its attached Story set."""
+    (
+        domain,
+        project_id,
+        sprint_id,
+        _story_id,
+        future_story_id,
+        _task_id,
+        _dependency_id,
+        _review,
+    ) = _complete_execution_sprint_with_unselected_story(engine)
+    baseline = _decision(
+        domain,
+        project_id,
+        "execution.post_sprint_triage",
+        f"sprint:{sprint_id}",
+    )
+    with Session(engine) as session:
+        sprint_a = session.get(Sprint, sprint_id)
+        future_story = session.get(UserStory, future_story_id)
+        assert sprint_a is not None
+        assert future_story is not None
+        sprint_b = Sprint(
+            product_id=project_id,
+            team_id=sprint_a.team_id,
+            status=SprintStatus.PLANNED,
+        )
+        session.add(sprint_b)
+        session.flush()
+        assert sprint_b.sprint_id is not None
+        session.add(
+            SprintStory(
+                sprint_id=sprint_b.sprint_id,
+                story_id=future_story_id,
+            )
+        )
+        future_story.status = StoryStatus.DONE
+        session.add(future_story)
+        session.commit()
+
+    recovered = _decision(
+        domain,
+        project_id,
+        "execution.post_sprint_triage",
+        f"sprint:{sprint_id}",
+    )
+    assert recovered.category == baseline.category
+    assert recovered.reason_code == baseline.reason_code
+    assert recovered.fact_references == baseline.fact_references
+
+
+def test_closed_sprint_rejects_selected_scope_dependency_tamper(
+    engine: Engine,
+) -> None:
+    """Bind Sprint A completion facts to relevant dependency row semantics."""
+    (
+        domain,
+        project_id,
+        _sprint_id,
+        _story_id,
+        _future_story_id,
+        _task_id,
+        dependency_id,
+        _review,
+    ) = _complete_execution_sprint_with_unselected_story(engine)
+    with Session(engine) as session:
+        dependency = session.get(UserStoryDependency, dependency_id)
+        assert dependency is not None
+        dependency.reason = "Tampered selected-scope dependency semantics."
+        session.add(dependency)
+        session.commit()
+
+    with pytest.raises(WorkflowFactLoadError):
+        domain.position(project_id)
+
+
+def test_closed_sprint_rejects_attached_task_content_tamper(
+    engine: Engine,
+) -> None:
+    """Bind Sprint A review and closure to exact attached Task content."""
+    domain, project_id, _sprint_id, _story_id, task_id, _review = (
+        _complete_execution_sprint(engine)
+    )
+    with Session(engine) as session:
+        task = session.get(Task, task_id)
+        assert task is not None
+        task.description = "Tampered attached Task content."
+        session.add(task)
+        session.commit()
+
+    with pytest.raises(WorkflowFactLoadError):
+        domain.position(project_id)
+
+
 def test_cross_project_historical_triage_is_loader_invalid(engine: Engine) -> None:
     """Do not hide a completed Sprint triage row under another Project."""
     domain, project_id, sprint_id, _story_id, _task_id, _review = (
@@ -782,10 +1006,17 @@ def test_cross_project_historical_triage_is_loader_invalid(engine: Engine) -> No
 def test_reversed_repository_triage_rows_preserve_position(
     engine: Engine,
 ) -> None:
-    """Keep decisions and fingerprints stable when SQL returns triage rows reversed."""
-    domain, project_id, sprint_id, _story_id, _task_id, _review = (
-        _complete_execution_sprint(engine)
-    )
+    """Keep execution decisions stable under reversed normalized row order."""
+    (
+        domain,
+        project_id,
+        sprint_id,
+        _story_id,
+        _future_story_id,
+        _task_id,
+        _dependency_id,
+        _review,
+    ) = _complete_execution_sprint_with_unselected_story(engine)
     first = RecordPostSprintTriage(
         **_guards(
             domain,
@@ -815,7 +1046,57 @@ def test_reversed_repository_triage_rows_preserve_position(
     )
     assert domain.transition(correction).ok is True
     baseline = domain.position(project_id)
-    reversed_queries = 0
+    replacements = {
+        "stories": (
+            " ORDER BY user_stories.rank, user_stories.story_id",
+            " ORDER BY user_stories.rank DESC, user_stories.story_id DESC",
+        ),
+        "dependencies": (
+            " ORDER BY user_story_dependencies.dependent_story_id, "
+            "user_story_dependencies.prerequisite_story_id, "
+            "user_story_dependencies.dependency_id",
+            " ORDER BY user_story_dependencies.dependent_story_id DESC, "
+            "user_story_dependencies.prerequisite_story_id DESC, "
+            "user_story_dependencies.dependency_id DESC",
+        ),
+        "dependency_reviews": (
+            " ORDER BY story_dependency_reviews.story_dependency_review_id",
+            " ORDER BY story_dependency_reviews.story_dependency_review_id DESC",
+        ),
+        "story_memberships": (
+            " ORDER BY sprint_stories.story_id, sprint_stories.sprint_id",
+            " ORDER BY sprint_stories.story_id DESC, sprint_stories.sprint_id DESC",
+        ),
+        "task_memberships": (
+            " ORDER BY sprint_stories.sprint_id, sprint_stories.story_id",
+            " ORDER BY sprint_stories.sprint_id DESC, sprint_stories.story_id DESC",
+        ),
+        "tasks": (
+            " ORDER BY tasks.task_id",
+            " ORDER BY tasks.task_id DESC",
+        ),
+        "task_completions": (
+            " ORDER BY task_completion_evidence.task_completion_evidence_id",
+            " ORDER BY task_completion_evidence.task_completion_evidence_id DESC",
+        ),
+        "story_closures": (
+            " ORDER BY story_closures.story_closure_id",
+            " ORDER BY story_closures.story_closure_id DESC",
+        ),
+        "sprint_reviews": (
+            " ORDER BY sprint_reviews.sprint_review_id",
+            " ORDER BY sprint_reviews.sprint_review_id DESC",
+        ),
+        "sprint_closures": (
+            " ORDER BY sprint_closures.sprint_closure_id",
+            " ORDER BY sprint_closures.sprint_closure_id DESC",
+        ),
+        "triage": (
+            " ORDER BY post_sprint_triage.triage_id",
+            " ORDER BY post_sprint_triage.triage_id DESC",
+        ),
+    }
+    reversed_queries = dict.fromkeys(replacements, 0)
 
     def reverse_triage_order(
         _connection: object,
@@ -825,11 +1106,10 @@ def test_reversed_repository_triage_rows_preserve_position(
         _context: object,
         _executemany: bool,
     ) -> tuple[str, object]:
-        nonlocal reversed_queries
-        marker = " ORDER BY post_sprint_triage.triage_id"
-        if "FROM post_sprint_triage" in statement and marker in statement:
-            reversed_queries += 1
-            statement = statement.replace(marker, f"{marker} DESC")
+        for name, (ascending, descending) in replacements.items():
+            if ascending in statement:
+                reversed_queries[name] += 1
+                statement = statement.replace(ascending, descending)
         return statement, parameters
 
     event.listen(engine, "before_cursor_execute", reverse_triage_order, retval=True)
@@ -838,6 +1118,64 @@ def test_reversed_repository_triage_rows_preserve_position(
     finally:
         event.remove(engine, "before_cursor_execute", reverse_triage_order)
 
-    assert reversed_queries > 0
+    assert all(count > 0 for count in reversed_queries.values())
     assert reversed_position.fact_fingerprint == baseline.fact_fingerprint
     assert reversed_position.decisions == baseline.decisions
+
+
+def test_multi_sprint_restart_preserves_scoped_historical_position(
+    tmp_path: Path,
+) -> None:
+    """Recover Sprint A integrity after Sprint B membership and a full restart."""
+    first_engine = _file_engine(tmp_path / "execution-multi-sprint-restart.db")
+    (
+        first_domain,
+        project_id,
+        sprint_id,
+        _story_id,
+        future_story_id,
+        _task_id,
+        _dependency_id,
+        _review,
+    ) = _complete_execution_sprint_with_unselected_story(first_engine)
+    with Session(first_engine) as session:
+        sprint_a = session.get(Sprint, sprint_id)
+        future_story = session.get(UserStory, future_story_id)
+        assert sprint_a is not None
+        assert future_story is not None
+        sprint_b = Sprint(
+            product_id=project_id,
+            team_id=sprint_a.team_id,
+            status=SprintStatus.PLANNED,
+            created_at=EVALUATED_AT,
+            updated_at=EVALUATED_AT,
+        )
+        session.add(sprint_b)
+        session.flush()
+        assert sprint_b.sprint_id is not None
+        session.add(
+            SprintStory(
+                sprint_id=sprint_b.sprint_id,
+                story_id=future_story_id,
+                added_at=EVALUATED_AT,
+            )
+        )
+        future_story.status = StoryStatus.DONE
+        future_story.updated_at = EVALUATED_AT
+        session.add(future_story)
+        session.commit()
+    baseline = first_domain.position(project_id)
+    baseline_triage = next(
+        item
+        for item in baseline.decisions
+        if item.node_id == "execution.post_sprint_triage"
+        and item.instance_key == f"sprint:{sprint_id}"
+    )
+    assert baseline_triage.category.value == "available"
+    first_engine.dispose()
+
+    restarted_engine = _file_engine(tmp_path / "execution-multi-sprint-restart.db")
+    restarted = _domain(restarted_engine).position(project_id)
+    assert restarted.fact_fingerprint == baseline.fact_fingerprint
+    assert restarted.decisions == baseline.decisions
+    restarted_engine.dispose()
