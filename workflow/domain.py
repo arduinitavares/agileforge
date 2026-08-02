@@ -44,6 +44,7 @@ from workflow.handlers import (
     execute_record_vision_draft,
     execute_register_initial_scope,
     execute_repair_authority,
+    execute_scope_extension_request,
     validate_decide_authority_review,
     validate_decide_backlog_review,
     validate_decide_vision_review,
@@ -51,14 +52,17 @@ from workflow.handlers import (
 )
 from workflow.requests import (
     AbandonProjectShell,
+    AbandonScopeExtension,
     ApplyStoryDependencies,
     CloseSprint,
     CloseStory,
     CompileAuthority,
     CompleteTask,
+    DecideAmendmentSpecDraft,
     DecideAuthority,
     DecideBacklog,
     DecideBrownfieldInitialSpec,
+    DecideExtensionPrd,
     DecideInitialSpecDraft,
     DecidePrd,
     DecideRoadmap,
@@ -67,10 +71,14 @@ from workflow.requests import (
     DecideVision,
     OpenProjectShell,
     ReconcileBacklog,
+    ReconcileScopeExtension,
+    RecordAmendmentSpecDraft,
     RecordAuthorityFeedback,
     RecordBacklogDraft,
     RecordBrownfieldSpecDraft,
     RecordChallengeArtifact,
+    RecordExtensionChallenge,
+    RecordExtensionPrd,
     RecordInitialSpecDraft,
     RecordPostSprintTriage,
     RecordPrdVersion,
@@ -81,9 +89,11 @@ from workflow.requests import (
     RecordStoryDraft,
     RecordVisionDraft,
     RegisterInitialScope,
+    RegisterScopeExtension,
     RepairAuthority,
     RepairStoryReadiness,
     ReviewSprint,
+    StartScopeExtension,
     StartSprint,
     TransitionRequest,
 )
@@ -132,11 +142,18 @@ type _PlanningRequest = (
     | StartSprint
 )
 type _ExecutionRequest = (
-    CompleteTask
-    | CloseStory
-    | ReviewSprint
-    | CloseSprint
-    | RecordPostSprintTriage
+    CompleteTask | CloseStory | ReviewSprint | CloseSprint | RecordPostSprintTriage
+)
+type _ScopeExtensionRequest = (
+    StartScopeExtension
+    | RecordExtensionChallenge
+    | RecordExtensionPrd
+    | DecideExtensionPrd
+    | RecordAmendmentSpecDraft
+    | DecideAmendmentSpecDraft
+    | RegisterScopeExtension
+    | ReconcileScopeExtension
+    | AbandonScopeExtension
 )
 type _PositionedTransitionRequest = (
     _ExistingPositionedRequest
@@ -155,6 +172,7 @@ type _PositionedTransitionRequest = (
     | ReconcileBacklog
     | _PlanningRequest
     | _ExecutionRequest
+    | _ScopeExtensionRequest
 )
 
 
@@ -211,6 +229,8 @@ class WorkflowDomain:
                 if isinstance(
                     request,
                     RegisterInitialScope
+                    | RegisterScopeExtension
+                    | ReconcileScopeExtension
                     | CompleteTask
                     | CloseStory
                     | ReviewSprint
@@ -379,27 +399,53 @@ class WorkflowDomain:
         if isinstance(decision_or_failure, TransitionResult):
             return decision_or_failure
 
+        result = self._execute_execution_or_scope(
+            session,
+            request,
+            decision_or_failure,
+            evaluated_at,
+        )
+        if result is None:
+            result = self._execute_prior_positioned(
+                session,
+                request,
+                decision_or_failure,
+                evaluated_at,
+            )
+        position = self._position_in_session(
+            session,
+            request.project_id,
+            evaluated_at,
+        )
+        return result.model_copy(update={"position": position})
+
+    def _execute_prior_positioned(
+        self,
+        session: Session,
+        request: _PositionedTransitionRequest,
+        decision_or_failure: NodeDecision,
+        evaluated_at: datetime,
+    ) -> TransitionResult:
+        """Dispatch positioned request families implemented before Tasks 12-13."""
         if isinstance(
             request,
             CompleteTask
             | CloseStory
             | ReviewSprint
             | CloseSprint
-            | RecordPostSprintTriage,
+            | RecordPostSprintTriage
+            | StartScopeExtension
+            | RecordExtensionChallenge
+            | RecordExtensionPrd
+            | DecideExtensionPrd
+            | RecordAmendmentSpecDraft
+            | DecideAmendmentSpecDraft
+            | RegisterScopeExtension
+            | ReconcileScopeExtension
+            | AbandonScopeExtension,
         ):
-            result = execute_execution_request(
-                session,
-                request,
-                decision_or_failure,
-                evaluated_at,
-            )
-            position = self._position_in_session(
-                session,
-                request.project_id,
-                evaluated_at,
-            )
-            return result.model_copy(update={"position": position})
-
+            message = "A recent request reached the prior-family dispatcher."
+            raise TypeError(message)
         if isinstance(
             request,
             CompileAuthority
@@ -473,19 +519,67 @@ class WorkflowDomain:
                 decision_or_failure,
                 evaluated_at,
             )
-        else:
+        elif isinstance(
+            request,
+            AbandonProjectShell
+            | RecordChallengeArtifact
+            | RecordPrdVersion
+            | DecidePrd
+            | RecordInitialSpecDraft
+            | DecideInitialSpecDraft
+            | RegisterInitialScope,
+        ):
             result = self._execute_existing_positioned(
                 session,
                 request,
                 decision_or_failure,
                 evaluated_at,
             )
-        position = self._position_in_session(
-            session,
-            request.project_id,
-            evaluated_at,
-        )
-        return result.model_copy(update={"position": position})
+        else:
+            assert_never(request)
+        return result
+
+    @staticmethod
+    def _execute_execution_or_scope(
+        session: Session,
+        request: _PositionedTransitionRequest,
+        decision: NodeDecision,
+        evaluated_at: datetime,
+    ) -> TransitionResult | None:
+        """Execute recent execution and scope-extension request families."""
+        if isinstance(
+            request,
+            CompleteTask
+            | CloseStory
+            | ReviewSprint
+            | CloseSprint
+            | RecordPostSprintTriage,
+        ):
+            return execute_execution_request(
+                session,
+                request,
+                decision,
+                evaluated_at,
+            )
+        if isinstance(
+            request,
+            StartScopeExtension
+            | RecordExtensionChallenge
+            | RecordExtensionPrd
+            | DecideExtensionPrd
+            | RecordAmendmentSpecDraft
+            | DecideAmendmentSpecDraft
+            | RegisterScopeExtension
+            | ReconcileScopeExtension
+            | AbandonScopeExtension,
+        ):
+            return execute_scope_extension_request(
+                session,
+                request,
+                decision,
+                evaluated_at,
+            )
+        return None
 
     def _guarded_decision(
         self,
@@ -702,6 +796,8 @@ class WorkflowDomain:
             | DecideRoadmap
             | DecideStory
             | DecideSprintPlan
+            | DecideExtensionPrd
+            | DecideAmendmentSpecDraft
             | ReviewSprint,
         ) and (decision.category is NodeCategory.WAITING)
         if decision.category is not NodeCategory.AVAILABLE and not human_review_waiting:

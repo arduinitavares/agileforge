@@ -36,6 +36,8 @@ from models.workflow import (
     RepositoryInventory,
     RoadmapArtifact,
     RoadmapArtifactDecision,
+    ScopeExtensionReconciliation,
+    ScopeExtensionRegistration,
     SpecDraft,
     SpecDraftDecision,
     SprintClosure,
@@ -59,7 +61,7 @@ from orchestrator_agent.agent_tools.sprint_planner_tool.schemes import (
 from services.specs.authority_selection import pending_authority_fingerprint
 from utils.spec_schemas import SpecAuthorityCompilationSuccess
 from utils.task_metadata import TaskMetadata, serialize_task_metadata
-from workflow.contracts import JsonValue
+from workflow.contracts import FactReference, JsonValue
 from workflow.execution_integrity import (
     ExecutionIntegrityError,
     SprintStartAudit,
@@ -89,6 +91,8 @@ from workflow.facts import (
     RepositoryBaselineFact,
     RepositoryInventoryFact,
     ReviewDecisionFact,
+    ScopeExtensionReconciliationFact,
+    ScopeExtensionRegistrationFact,
     SpecDraftFact,
     SpecVersionFact,
     SprintClosureFact,
@@ -132,6 +136,7 @@ _JSON_OBJECT = TypeAdapter(dict[str, JsonValue])
 _STRING_LIST = TypeAdapter(list[str])
 _INT_LIST = TypeAdapter(list[int])
 _DEPENDENCY_EDGE_LIST = TypeAdapter(list[StoryDependencyReviewEdgeFact])
+_FACT_REFERENCE_LIST = TypeAdapter(list[FactReference])
 type _AuthorityStatus = Literal["pending_review", "accepted", "rejected", "stale"]
 type _AttemptOutcome = Literal["success", "failure", "obsolete"]
 type _DiscoveryPurpose = Literal["initial", "extension"]
@@ -268,12 +273,12 @@ class WorkflowFactRepository:
     def _load(self, project_id: int) -> WorkflowFactSnapshot:
         """Build one snapshot inside the read-only session query boundary."""
         project = self._project(project_id)
-        discovery_runs = self._discovery_runs(project_id)
-        discovery_run_ids = frozenset(item.discovery_run_id for item in discovery_runs)
         spec_version_facts = self._spec_versions(project_id)
         spec_versions = {
             item.spec_version_id: item.spec_hash for item in spec_version_facts
         }
+        discovery_runs = self._discovery_runs(project_id, spec_versions)
+        discovery_run_ids = frozenset(item.discovery_run_id for item in discovery_runs)
         prd_versions = self._prd_versions(project_id, discovery_run_ids)
         spec_drafts = self._spec_drafts(
             project_id,
@@ -390,6 +395,17 @@ class WorkflowFactRepository:
                 {item.spec_draft_id: item.discovery_run_id for item in spec_drafts},
                 spec_versions,
             ),
+            extension_registrations=self._extension_registrations(
+                project_id,
+                discovery_runs,
+                spec_drafts,
+                spec_versions,
+            ),
+            scope_extension_reconciliations=self._scope_extension_reconciliations(
+                project_id,
+                discovery_runs,
+                authority_load.facts,
+            ),
             spec_versions=spec_version_facts,
             repository_baselines=repository_baselines,
             repository_inventories=self._repository_inventories(
@@ -483,7 +499,11 @@ class WorkflowFactRepository:
             for row in rows
         )
 
-    def _discovery_runs(self, project_id: int) -> tuple[DiscoveryRunFact, ...]:
+    def _discovery_runs(
+        self,
+        project_id: int,
+        spec_versions: dict[int, str],
+    ) -> tuple[DiscoveryRunFact, ...]:
         rows = self._session.exec(
             select(DiscoveryRun)
             .where(col(DiscoveryRun.project_id) == project_id)
@@ -498,6 +518,20 @@ class WorkflowFactRepository:
                     f"{row.purpose!r}."
                 )
                 raise self._error(message)
+            if row.purpose == "initial":
+                if (
+                    row.base_spec_version_id is not None
+                    or row.base_spec_hash is not None
+                ):
+                    message = "Initial discovery run has an amendment base."
+                    raise self._error(message)
+            elif (
+                row.base_spec_version_id is None
+                or row.base_spec_hash is None
+                or spec_versions.get(row.base_spec_version_id) != row.base_spec_hash
+            ):
+                message = "Extension discovery run has a stale or missing base spec."
+                raise self._error(message)
             facts.append(
                 DiscoveryRunFact(
                     discovery_run_id=self._required_id(
@@ -509,6 +543,8 @@ class WorkflowFactRepository:
                     ordinal=row.ordinal,
                     created_at=row.created_at,
                     closed_at=row.closed_at,
+                    base_spec_version_id=row.base_spec_version_id,
+                    base_spec_hash=row.base_spec_hash,
                 )
             )
         return tuple(facts)
@@ -1263,9 +1299,7 @@ class WorkflowFactRepository:
                     select(SprintPlanArtifactDecision)
                     .where(col(SprintPlanArtifactDecision.project_id) == project_id)
                     .order_by(
-                        col(
-                            SprintPlanArtifactDecision.sprint_plan_artifact_decision_id
-                        )
+                        col(SprintPlanArtifactDecision.sprint_plan_artifact_decision_id)
                     ),
                     execution_options=self._query_options(),
                 ).all()
@@ -1950,6 +1984,122 @@ class WorkflowFactRepository:
             )
         return tuple(facts)
 
+    def _extension_registrations(
+        self,
+        project_id: int,
+        discovery_runs: tuple[DiscoveryRunFact, ...],
+        spec_drafts: tuple[SpecDraftFact, ...],
+        spec_versions: dict[int, str],
+    ) -> tuple[ScopeExtensionRegistrationFact, ...]:
+        rows = self._session.exec(
+            select(ScopeExtensionRegistration)
+            .where(col(ScopeExtensionRegistration.project_id) == project_id)
+            .order_by(col(ScopeExtensionRegistration.scope_extension_registration_id)),
+            execution_options=self._query_options(),
+        ).all()
+        runs = {item.discovery_run_id: item for item in discovery_runs}
+        drafts = {item.spec_draft_id: item for item in spec_drafts}
+        facts: list[ScopeExtensionRegistrationFact] = []
+        for row in rows:
+            run = runs.get(row.discovery_run_id)
+            draft = drafts.get(row.spec_draft_id)
+            if (
+                run is None
+                or run.purpose != "extension"
+                or draft is None
+                or draft.discovery_run_id != row.discovery_run_id
+                or draft.kind != "amendment"
+            ):
+                message = "Scope-extension registration relationship is invalid."
+                raise self._error(message)
+            self._require_fingerprint_reference(
+                row.spec_version_id,
+                row.spec_hash,
+                spec_versions,
+                "scope-extension registration",
+            )
+            facts.append(
+                ScopeExtensionRegistrationFact(
+                    registration_id=self._required_id(
+                        row.scope_extension_registration_id,
+                        "scope-extension registration",
+                    ),
+                    discovery_run_id=row.discovery_run_id,
+                    spec_draft_id=row.spec_draft_id,
+                    spec_version_id=row.spec_version_id,
+                    spec_hash=row.spec_hash,
+                )
+            )
+        return tuple(facts)
+
+    def _scope_extension_reconciliations(
+        self,
+        project_id: int,
+        discovery_runs: tuple[DiscoveryRunFact, ...],
+        authorities: tuple[AuthorityFact, ...],
+    ) -> tuple[ScopeExtensionReconciliationFact, ...]:
+        rows = self._session.exec(
+            select(ScopeExtensionReconciliation)
+            .where(col(ScopeExtensionReconciliation.project_id) == project_id)
+            .order_by(
+                col(ScopeExtensionReconciliation.scope_extension_reconciliation_id)
+            ),
+            execution_options=self._query_options(),
+        ).all()
+        runs = {item.discovery_run_id: item for item in discovery_runs}
+        authority_by_id = {item.authority_id: item for item in authorities}
+        facts: list[ScopeExtensionReconciliationFact] = []
+        for row in rows:
+            run = runs.get(row.discovery_run_id)
+            authority = authority_by_id.get(row.replacement_authority_id)
+            if (
+                run is None
+                or run.purpose != "extension"
+                or run.closed_at is None
+                or authority is None
+                or authority.authority_fingerprint
+                != row.replacement_authority_fingerprint
+            ):
+                message = "Scope-extension reconciliation relationship is invalid."
+                raise self._error(message)
+            try:
+                references = tuple(
+                    _FACT_REFERENCE_LIST.validate_json(row.artifact_references_json)
+                )
+            except ValidationError as error:
+                message = "Scope-extension reconciliation references are invalid."
+                raise self._error(message) from error
+            payload = [item.model_dump(mode="json") for item in references]
+            if (
+                row.artifact_references_json != canonical_json(payload)
+                or row.artifact_references_fingerprint != canonical_hash(payload)
+                or references
+                != tuple(
+                    sorted(
+                        set(references),
+                        key=lambda item: (item.fact_type, int(item.fact_id)),
+                    )
+                )
+            ):
+                message = "Scope-extension reconciliation references changed."
+                raise self._error(message)
+            facts.append(
+                ScopeExtensionReconciliationFact(
+                    reconciliation_id=self._required_id(
+                        row.scope_extension_reconciliation_id,
+                        "scope-extension reconciliation",
+                    ),
+                    discovery_run_id=row.discovery_run_id,
+                    replacement_authority_id=row.replacement_authority_id,
+                    replacement_authority_fingerprint=(
+                        row.replacement_authority_fingerprint
+                    ),
+                    artifact_references=references,
+                    reconciled_at=row.reconciled_at,
+                )
+            )
+        return tuple(facts)
+
     def _authorities(
         self,
         project_id: int,
@@ -2139,14 +2289,12 @@ class WorkflowFactRepository:
                 or plan.status != "accepted"
                 or plan.sprint_id != row.sprint_id
                 or plan.artifact_fingerprint != row.plan_fingerprint
-                or plan.candidate_set_fingerprint
-                != row.candidate_set_fingerprint
+                or plan.candidate_set_fingerprint != row.candidate_set_fingerprint
                 or plan.story_ids != selected_story_ids
                 or plan.task_content_fingerprint != row.task_content_fingerprint
                 or decision is None
                 or decision.project_id != project_id
-                or decision.sprint_plan_artifact_id
-                != row.sprint_plan_artifact_id
+                or decision.sprint_plan_artifact_id != row.sprint_plan_artifact_id
                 or decision.plan_fingerprint != row.plan_fingerprint
                 or decision.decision != "accepted"
                 or dependency_review is None
@@ -2180,9 +2328,7 @@ class WorkflowFactRepository:
                     candidate_set_fingerprint=row.candidate_set_fingerprint,
                     selected_story_ids=selected_story_ids,
                     task_content_fingerprint=row.task_content_fingerprint,
-                    dependency_source_fingerprint=(
-                        row.dependency_source_fingerprint
-                    ),
+                    dependency_source_fingerprint=(row.dependency_source_fingerprint),
                     dependency_fingerprint=row.dependency_fingerprint,
                     dependency_rows_fingerprint=row.dependency_rows_fingerprint,
                     decision_fingerprint=row.decision_fingerprint,
@@ -2205,9 +2351,7 @@ class WorkflowFactRepository:
                     candidate_set_fingerprint=row.candidate_set_fingerprint,
                     selected_story_ids=selected_story_ids,
                     task_content_fingerprint=row.task_content_fingerprint,
-                    dependency_source_fingerprint=(
-                        row.dependency_source_fingerprint
-                    ),
+                    dependency_source_fingerprint=(row.dependency_source_fingerprint),
                     dependency_fingerprint=row.dependency_fingerprint,
                     dependency_rows_fingerprint=row.dependency_rows_fingerprint,
                     decision_fingerprint=row.decision_fingerprint,
@@ -2297,17 +2441,13 @@ class WorkflowFactRepository:
                 artifact.backlog_artifact_id if artifact is not None else None
             ),
             backlog_artifact_fingerprint=(
-                artifact.backlog_artifact_fingerprint
-                if artifact is not None
-                else None
+                artifact.backlog_artifact_fingerprint if artifact is not None else None
             ),
             roadmap_artifact_id=(
                 artifact.roadmap_artifact_id if artifact is not None else None
             ),
             roadmap_artifact_fingerprint=(
-                artifact.roadmap_artifact_fingerprint
-                if artifact is not None
-                else None
+                artifact.roadmap_artifact_fingerprint if artifact is not None else None
             ),
             status=row.status.value,
             story_points=row.story_points,
@@ -2344,9 +2484,7 @@ class WorkflowFactRepository:
                 execution_options=self._query_options(),
             ).all()
         )
-        stories_by_id = {
-            self._required_id(row.story_id, "story"): row for row in rows
-        }
+        stories_by_id = {self._required_id(row.story_id, "story"): row for row in rows}
         story_ids = frozenset(stories_by_id)
         memberships = (
             self._session.exec(
@@ -2593,9 +2731,7 @@ class WorkflowFactRepository:
             .order_by(col(TaskCompletionEvidence.task_completion_evidence_id)),
             execution_options=self._query_options(),
         ).all()
-        tasks_by_key = {
-            (item.sprint_id, item.task_id): item for item in snapshot.tasks
-        }
+        tasks_by_key = {(item.sprint_id, item.task_id): item for item in snapshot.tasks}
         facts: list[TaskCompletionFact] = []
         for row in rows:
             key = (row.sprint_id, row.task_id)
@@ -2607,9 +2743,7 @@ class WorkflowFactRepository:
                 artifact_refs = tuple(
                     _STRING_LIST.validate_json(row.artifact_refs_json)
                 )
-                checklist_result = _JSON_OBJECT.validate_json(
-                    row.checklist_result_json
-                )
+                checklist_result = _JSON_OBJECT.validate_json(row.checklist_result_json)
             except ValidationError as exc:
                 message = "Task completion evidence JSON is invalid."
                 raise self._error(message) from exc
@@ -2819,8 +2953,7 @@ class WorkflowFactRepository:
         ).all()
         facts: list[PostSprintTriageFact] = []
         rows_by_id = {
-            self._required_id(row.triage_id, "post-sprint triage"): row
-            for row in rows
+            self._required_id(row.triage_id, "post-sprint triage"): row for row in rows
         }
         for row in rows:
             triage_id = self._required_id(row.triage_id, "post-sprint triage")

@@ -1,5 +1,6 @@
 """Root product-lifecycle workflow graph hierarchy."""
 
+from dataclasses import replace
 from datetime import datetime
 
 from workflow.contracts import (
@@ -17,6 +18,11 @@ from workflow.definitions.onboarding import (
     has_historical_accepted_authority,
 )
 from workflow.definitions.planning import PLANNING_NODES
+from workflow.definitions.scope_extension import (
+    SCOPE_EXTENSION_NODES,
+    scope_execution_is_complete,
+    scope_reconciliation_is_current,
+)
 from workflow.definitions.vision import VISION_NODES
 from workflow.facts import WorkflowFactSnapshot
 from workflow.graph import (
@@ -80,6 +86,45 @@ _ABANDON_SHELL_NODE = NodeSpec(
     evaluate_rule=_abandon_shell_rule,
 )
 
+
+def _scope_aware_lifecycle_node(node: NodeSpec) -> NodeSpec:
+    """Retire historical downstream routing only after exact reconciliation."""
+
+    def evaluate_rule(
+        snapshot: WorkflowFactSnapshot,
+        evaluated_at: datetime,
+    ) -> tuple[RuleEvaluation, ...]:
+        reconciled = scope_reconciliation_is_current(snapshot)
+        completed_historical_plan = node.node_id in {
+            "planning.sprint.plan",
+            "planning.sprint.start",
+        } and scope_execution_is_complete(snapshot)
+        if reconciled or completed_historical_plan:
+            return (
+                RuleEvaluation(
+                    category=RuleCategory.SATISFIED,
+                    reason_code=(
+                        "SCOPE_EXTENSION_RECONCILED"
+                        if reconciled
+                        else "CURRENT_SCOPE_EXECUTION_COMPLETE"
+                    ),
+                ),
+            )
+        return node.evaluate_rule(snapshot, evaluated_at)
+
+    return replace(node, evaluate_rule=evaluate_rule)
+
+
+_ROOT_VISION_NODES: tuple[NodeSpec, ...] = tuple(
+    _scope_aware_lifecycle_node(node) for node in VISION_NODES
+)
+_ROOT_BACKLOG_NODES: tuple[NodeSpec, ...] = tuple(
+    _scope_aware_lifecycle_node(node) for node in BACKLOG_NODES
+)
+_ROOT_PLANNING_NODES: tuple[NodeSpec, ...] = tuple(
+    _scope_aware_lifecycle_node(node) for node in PLANNING_NODES
+)
+
 ROOT_GRAPH: WorkflowGraph = WorkflowGraph(
     graph_version=GRAPH_VERSION,
     root=ChildGraphSpec(
@@ -96,14 +141,22 @@ ROOT_GRAPH: WorkflowGraph = WorkflowGraph(
                 ),
             ),
             ChildGraphSpec(child_graph_id="authority", nodes=AUTHORITY_NODES),
-            ChildGraphSpec(child_graph_id="vision", nodes=VISION_NODES),
-            ChildGraphSpec(child_graph_id="backlog", nodes=BACKLOG_NODES),
+            ChildGraphSpec(child_graph_id="vision", nodes=_ROOT_VISION_NODES),
+            ChildGraphSpec(child_graph_id="backlog", nodes=_ROOT_BACKLOG_NODES),
             ChildGraphSpec(
                 child_graph_id="planning",
-                nodes=PLANNING_NODES,
+                nodes=_ROOT_PLANNING_NODES,
             ),
             ChildGraphSpec(child_graph_id="execution", nodes=EXECUTION_NODES),
-            ChildGraphSpec(child_graph_id="scope_extension", nodes=()),
+            ChildGraphSpec(
+                child_graph_id="scope_extension",
+                nodes=SCOPE_EXTENSION_NODES,
+            ),
         ),
     ),
 )
+
+
+def project_graph() -> WorkflowGraph:
+    """Return the complete immutable Project workflow graph."""
+    return ROOT_GRAPH

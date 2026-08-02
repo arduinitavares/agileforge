@@ -40,6 +40,22 @@ class DiscoveryRun(SQLModel, table=True):
             "purpose IN ('initial', 'extension')",
             name="ck_discovery_purpose",
         ),
+        CheckConstraint(
+            "(purpose = 'initial' AND base_spec_version_id IS NULL "
+            "AND base_spec_hash IS NULL) OR "
+            "(purpose = 'extension' AND base_spec_version_id IS NOT NULL "
+            "AND base_spec_hash IS NOT NULL)",
+            name="ck_discovery_run_base_spec",
+        ),
+        ForeignKeyConstraint(
+            ["project_id", "base_spec_version_id", "base_spec_hash"],
+            [
+                "spec_registry.product_id",
+                "spec_registry.spec_version_id",
+                "spec_registry.spec_hash",
+            ],
+            name="fk_discovery_run_base_spec",
+        ),
         Index(
             "uq_initial_discovery_per_project",
             "project_id",
@@ -58,6 +74,8 @@ class DiscoveryRun(SQLModel, table=True):
     project_id: int = Field(foreign_key="products.product_id", index=True)
     purpose: str = Field(index=True)
     ordinal: int
+    base_spec_version_id: int | None = Field(default=None, index=True)
+    base_spec_hash: str | None = Field(default=None, index=True)
     created_at: datetime = Field(default_factory=utc_now, nullable=False)
     closed_at: datetime | None = Field(default=None)
 
@@ -431,6 +449,94 @@ class InitialScopeRegistration(SQLModel, table=True):
     spec_hash: str = Field(index=True)
     registered_by: str = Field(index=True)
     registered_at: datetime = Field(default_factory=utc_now, nullable=False)
+
+
+class ScopeExtensionRegistration(SQLModel, table=True):
+    """Bind one accepted amendment draft to its registered specification."""
+
+    __tablename__ = "scope_extension_registrations"
+    __table_args__ = (
+        UniqueConstraint(
+            "discovery_run_id",
+            name="uq_scope_extension_registration_run",
+        ),
+        UniqueConstraint(
+            "spec_draft_id",
+            name="uq_scope_extension_registration_draft",
+        ),
+        UniqueConstraint(
+            "spec_version_id",
+            name="uq_scope_extension_registration_spec",
+        ),
+        ForeignKeyConstraint(
+            ["project_id", "discovery_run_id"],
+            ["discovery_runs.project_id", "discovery_runs.discovery_run_id"],
+            name="fk_scope_extension_registration_run",
+        ),
+        ForeignKeyConstraint(
+            ["project_id", "discovery_run_id", "spec_draft_id"],
+            [
+                "spec_drafts.project_id",
+                "spec_drafts.discovery_run_id",
+                "spec_drafts.spec_draft_id",
+            ],
+            name="fk_scope_extension_registration_draft",
+        ),
+        ForeignKeyConstraint(
+            ["project_id", "spec_version_id", "spec_hash"],
+            [
+                "spec_registry.product_id",
+                "spec_registry.spec_version_id",
+                "spec_registry.spec_hash",
+            ],
+            name="fk_scope_extension_registration_spec",
+        ),
+    )
+
+    scope_extension_registration_id: int | None = Field(
+        default=None,
+        primary_key=True,
+    )
+    project_id: int = Field(index=True)
+    discovery_run_id: int = Field(index=True)
+    spec_draft_id: int = Field(index=True)
+    spec_version_id: int = Field(index=True)
+    spec_hash: str = Field(index=True)
+    registered_by: str = Field(index=True)
+    registered_at: datetime = Field(default_factory=utc_now, nullable=False)
+
+
+class ScopeExtensionReconciliation(SQLModel, table=True):
+    """Record downstream artifact relationships to replacement authority."""
+
+    __tablename__ = "scope_extension_reconciliations"
+    __table_args__ = (
+        UniqueConstraint(
+            "discovery_run_id",
+            name="uq_scope_extension_reconciliation_run",
+        ),
+        ForeignKeyConstraint(
+            ["project_id", "discovery_run_id"],
+            ["discovery_runs.project_id", "discovery_runs.discovery_run_id"],
+            name="fk_scope_extension_reconciliation_run",
+        ),
+    )
+
+    scope_extension_reconciliation_id: int | None = Field(
+        default=None,
+        primary_key=True,
+    )
+    project_id: int = Field(index=True)
+    discovery_run_id: int = Field(index=True)
+    replacement_authority_id: int = Field(
+        foreign_key="compiled_spec_authority.authority_id",
+        index=True,
+    )
+    replacement_authority_fingerprint: str = Field(index=True)
+    artifact_references_json: str = Field(sa_type=Text)
+    artifact_references_fingerprint: str = Field(index=True)
+    reconciled_by: str = Field(index=True)
+    reconciled_at: datetime = Field(default_factory=utc_now, nullable=False)
 
 
 class RepositoryBaseline(SQLModel, table=True):

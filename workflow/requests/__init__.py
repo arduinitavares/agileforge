@@ -44,6 +44,18 @@ from workflow.requests.product_definition import (
     RecordVisionDraft,
 )
 from workflow.requests.project_shell import AbandonProjectShell, OpenProjectShell
+from workflow.requests.scope_extension import (
+    AbandonScopeExtension,
+    DecideAmendmentSpecDraft,
+    DecideExtensionPrd,
+    ReconcileScopeExtension,
+    RecordAmendmentSpecDraft,
+    RecordExtensionChallenge,
+    RecordExtensionPrd,
+    RegisterScopeExtension,
+    ScopeExtensionArtifactReference,
+    StartScopeExtension,
+)
 
 type TransitionRequest = (
     OpenProjectShell
@@ -81,18 +93,30 @@ type TransitionRequest = (
     | ReviewSprint
     | CloseSprint
     | RecordPostSprintTriage
+    | StartScopeExtension
+    | RecordExtensionChallenge
+    | RecordExtensionPrd
+    | DecideExtensionPrd
+    | RecordAmendmentSpecDraft
+    | DecideAmendmentSpecDraft
+    | RegisterScopeExtension
+    | ReconcileScopeExtension
+    | AbandonScopeExtension
 )
 
 __all__ = [
     "AbandonProjectShell",
+    "AbandonScopeExtension",
     "ApplyStoryDependencies",
     "CloseSprint",
     "CloseStory",
     "CompileAuthority",
     "CompleteTask",
+    "DecideAmendmentSpecDraft",
     "DecideAuthority",
     "DecideBacklog",
     "DecideBrownfieldInitialSpec",
+    "DecideExtensionPrd",
     "DecideInitialSpecDraft",
     "DecidePrd",
     "DecideRoadmap",
@@ -101,10 +125,14 @@ __all__ = [
     "DecideVision",
     "OpenProjectShell",
     "ReconcileBacklog",
+    "ReconcileScopeExtension",
+    "RecordAmendmentSpecDraft",
     "RecordAuthorityFeedback",
     "RecordBacklogDraft",
     "RecordBrownfieldSpecDraft",
     "RecordChallengeArtifact",
+    "RecordExtensionChallenge",
+    "RecordExtensionPrd",
     "RecordInitialSpecDraft",
     "RecordPostSprintTriage",
     "RecordPrdVersion",
@@ -115,9 +143,12 @@ __all__ = [
     "RecordStoryDraft",
     "RecordVisionDraft",
     "RegisterInitialScope",
+    "RegisterScopeExtension",
     "RepairAuthority",
     "RepairStoryReadiness",
     "ReviewSprint",
+    "ScopeExtensionArtifactReference",
+    "StartScopeExtension",
     "StartSprint",
     "TransitionRequest",
 ]

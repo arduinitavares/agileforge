@@ -311,15 +311,7 @@ def seed_complete_project(engine: Engine, *, name: str = "Repository Test") -> i
             ordinal=1,
             created_at=recorded_at,
         )
-        extension_run = DiscoveryRun(
-            project_id=project_id,
-            purpose="extension",
-            ordinal=1,
-            created_at=recorded_at + timedelta(seconds=1),
-            closed_at=recorded_at + timedelta(minutes=1),
-        )
         session.add(initial_run)
-        session.add(extension_run)
         session.flush()
         initial_run_id = _id(initial_run.discovery_run_id)
 
@@ -375,6 +367,18 @@ def seed_complete_project(engine: Engine, *, name: str = "Repository Test") -> i
         prd_id = _id(prd.prd_version_id)
         draft_id = _id(draft.spec_draft_id)
         spec_id = _id(spec.spec_version_id)
+        session.add(
+            DiscoveryRun(
+                project_id=project_id,
+                purpose="extension",
+                ordinal=1,
+                base_spec_version_id=spec_id,
+                base_spec_hash=spec.spec_hash,
+                created_at=recorded_at + timedelta(seconds=1),
+                closed_at=recorded_at + timedelta(minutes=1),
+            )
+        )
+        session.flush()
 
         session.add(
             PrdDecision(
@@ -891,13 +895,22 @@ def test_load_maps_complete_canonical_snapshot_in_deterministic_order(
         DiscoveryRunFact,
     )
     assert tuple(
-        (item.purpose, item.ordinal, item.created_at, item.closed_at)
+        (
+            item.purpose,
+            item.ordinal,
+            item.base_spec_version_id,
+            item.base_spec_hash,
+            item.created_at,
+            item.closed_at,
+        )
         for item in snapshot.discovery_runs
     ) == (
-        ("initial", 1, persisted_at, None),
+        ("initial", 1, None, None, persisted_at, None),
         (
             "extension",
             1,
+            snapshot.spec_versions[0].spec_version_id,
+            snapshot.spec_versions[0].spec_hash,
             persisted_at + timedelta(seconds=1),
             persisted_at + timedelta(minutes=1),
         ),
@@ -1120,6 +1133,15 @@ def test_load_populates_abandonment_collections_in_deterministic_order(
         session.add(project)
         session.flush()
         project_id = _id(project.product_id)
+        base_spec = SpecRegistry(
+            product_id=project_id,
+            spec_hash="sha256:abandoned-base",
+            content="# Abandoned base",
+            status="approved",
+        )
+        session.add(base_spec)
+        session.flush()
+        base_spec_id = _id(base_spec.spec_version_id)
         initial = DiscoveryRun(
             project_id=project_id,
             purpose="initial",
@@ -1130,6 +1152,8 @@ def test_load_populates_abandonment_collections_in_deterministic_order(
             project_id=project_id,
             purpose="extension",
             ordinal=1,
+            base_spec_version_id=base_spec_id,
+            base_spec_hash=base_spec.spec_hash,
             created_at=recorded_at + timedelta(seconds=1),
         )
         session.add_all([initial, extension])

@@ -423,7 +423,18 @@ def test_root_definition_has_named_children_in_lifecycle_order() -> None:
         "execution.sprint.close",
         "execution.post_sprint_triage",
     )
-    assert not scope_extension.nodes
+    assert tuple(node.node_id for node in scope_extension.nodes) == (
+        "scope_extension.start",
+        "scope_extension.challenge",
+        "scope_extension.prd",
+        "scope_extension.prd_review",
+        "scope_extension.spec",
+        "scope_extension.spec_review",
+        "scope_extension.registration",
+        "scope_extension.authority",
+        "scope_extension.reconciliation",
+        "scope_extension.abandon",
+    )
 
 
 @pytest.mark.parametrize(

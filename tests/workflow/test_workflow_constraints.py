@@ -214,20 +214,27 @@ def test_two_initial_discovery_runs_are_rejected(
 def test_two_open_extension_runs_are_rejected(workflow_engine: Engine) -> None:
     """A Project cannot own two unresolved extension discovery runs."""
     with Session(workflow_engine) as session:
-        seeded = seed_project_with_initial_run(session, name="extension-cardinality")
+        registration = seed_initial_registration(
+            session,
+            name="extension-cardinality",
+        )
         session.add(
             DiscoveryRun(
-                project_id=seeded.project_id,
+                project_id=registration.project_id,
                 purpose="extension",
                 ordinal=2,
+                base_spec_version_id=registration.spec_version_id,
+                base_spec_hash=registration.spec_hash,
             )
         )
         session.commit()
         session.add(
             DiscoveryRun(
-                project_id=seeded.project_id,
+                project_id=registration.project_id,
                 purpose="extension",
                 ordinal=3,
+                base_spec_version_id=registration.spec_version_id,
+                base_spec_hash=registration.spec_hash,
             )
         )
 

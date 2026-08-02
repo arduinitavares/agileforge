@@ -7,7 +7,7 @@ from typing import Annotated, Literal
 
 from pydantic import Field, model_validator
 
-from workflow.contracts import FrozenModel, JsonObject
+from workflow.contracts import FactReference, FrozenModel, JsonObject
 
 _DATETIME = _datetime.datetime
 
@@ -40,6 +40,8 @@ class DiscoveryRunFact(FrozenModel):
     ordinal: int
     created_at: _DATETIME
     closed_at: _DATETIME | None
+    base_spec_version_id: int | None = None
+    base_spec_hash: str | None = None
 
 
 class DiscoveryRunAbandonmentFact(FrozenModel):
@@ -111,6 +113,27 @@ class InitialScopeRegistrationFact(FrozenModel):
     spec_draft_id: int
     spec_version_id: int
     spec_hash: str
+
+
+class ScopeExtensionRegistrationFact(FrozenModel):
+    """Registration of one accepted amendment draft."""
+
+    registration_id: int
+    discovery_run_id: int
+    spec_draft_id: int
+    spec_version_id: int
+    spec_hash: str
+
+
+class ScopeExtensionReconciliationFact(FrozenModel):
+    """Downstream facts reconciled to one replacement authority."""
+
+    reconciliation_id: int
+    discovery_run_id: int
+    replacement_authority_id: int
+    replacement_authority_fingerprint: str
+    artifact_references: tuple[FactReference, ...]
+    reconciled_at: _DATETIME
 
 
 class SpecVersionFact(FrozenModel):
@@ -421,6 +444,8 @@ class WorkflowFactSnapshot(FrozenModel):
     review_decisions: tuple[ReviewDecisionFact, ...] = ()
     spec_drafts: tuple[SpecDraftFact, ...] = ()
     initial_registrations: tuple[InitialScopeRegistrationFact, ...] = ()
+    extension_registrations: tuple[ScopeExtensionRegistrationFact, ...] = ()
+    scope_extension_reconciliations: tuple[ScopeExtensionReconciliationFact, ...] = ()
     spec_versions: tuple[SpecVersionFact, ...] = ()
     repository_baselines: tuple[RepositoryBaselineFact, ...] = ()
     repository_inventories: tuple[RepositoryInventoryFact, ...] = ()

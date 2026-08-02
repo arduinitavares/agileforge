@@ -34,6 +34,8 @@ from workflow.facts import (
     RepositoryBaselineFact,
     RepositoryInventoryFact,
     ReviewDecisionFact,
+    ScopeExtensionReconciliationFact,
+    ScopeExtensionRegistrationFact,
     SpecDraftFact,
     SpecVersionFact,
     SprintClosureFact,
@@ -166,6 +168,37 @@ AUTHORITATIVE_SNAPSHOT_VARIANTS: tuple[tuple[str, object], ...] = (
                 spec_draft_id=7,
                 spec_version_id=9,
                 spec_hash="sha256:spec-version",
+            ),
+        ),
+    ),
+    (
+        "extension_registrations",
+        (
+            ScopeExtensionRegistrationFact(
+                registration_id=80,
+                discovery_run_id=2,
+                spec_draft_id=7,
+                spec_version_id=9,
+                spec_hash="sha256:spec-version",
+            ),
+        ),
+    ),
+    (
+        "scope_extension_reconciliations",
+        (
+            ScopeExtensionReconciliationFact(
+                reconciliation_id=81,
+                discovery_run_id=2,
+                replacement_authority_id=12,
+                replacement_authority_fingerprint="sha256:authority",
+                artifact_references=(
+                    FactReference(
+                        fact_type="backlog",
+                        fact_id="13",
+                        fingerprint="sha256:backlog",
+                    ),
+                ),
+                reconciled_at=EVALUATED_AT,
             ),
         ),
     ),

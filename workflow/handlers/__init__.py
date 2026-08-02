@@ -37,6 +37,7 @@ from workflow.handlers.project_shell import (
     execute_abandon_project_shell,
     execute_open_project_shell,
 )
+from workflow.handlers.scope_extension import execute_scope_extension_request
 
 __all__ = [
     "execute_abandon_project_shell",
@@ -62,6 +63,7 @@ __all__ = [
     "execute_record_vision_draft",
     "execute_register_initial_scope",
     "execute_repair_authority",
+    "execute_scope_extension_request",
     "validate_decide_authority_review",
     "validate_decide_backlog_review",
     "validate_decide_vision_review",
