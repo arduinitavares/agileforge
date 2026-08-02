@@ -31,6 +31,7 @@ from models.workflow import (
     WorkflowNodeAttempt,
     WorkflowNodeAttemptOutcome,
 )
+from services.specs.authority_selection import pending_authority_fingerprint
 from utils.spec_schemas import SpecAuthorityCompilerOutput
 from workflow.contracts import JsonValue
 from workflow.facts import (
@@ -50,7 +51,6 @@ from workflow.facts import (
     TaskFact,
     WorkflowFactSnapshot,
 )
-from workflow.fingerprints import canonical_hash
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -88,6 +88,25 @@ class _ReviewDecisionSource:
     decided_at: datetime
 
 
+@dataclass(frozen=True)
+class _AuthorityAcceptanceSource:
+    """Validated authority decision tied to one exact compiled artifact."""
+
+    decision_id: int
+    authority_id: int
+    authority_fingerprint: str
+    status: str
+    decided_at: datetime
+
+
+@dataclass(frozen=True)
+class _AuthorityLoad:
+    """Authority facts and their validated review facts from one row set."""
+
+    facts: tuple[AuthorityFact, ...]
+    reviews: tuple[ReviewDecisionFact, ...]
+
+
 class WorkflowFactLoadError(RuntimeError):
     """Raised when stored rows cannot form one consistent Project snapshot."""
 
@@ -98,15 +117,29 @@ class WorkflowFactRepository:
     def __init__(self, session: Session) -> None:
         """Retain the session whose transaction lifecycle the caller owns."""
         self._session = session
+        self._identity_token: object = object()
 
     def load(self, project_id: int) -> WorkflowFactSnapshot:
         """Load every currently persisted workflow fact for one Project."""
+        self._identity_token = object()
+        with self._session.no_autoflush:
+            return self._load(project_id)
+
+    def _load(self, project_id: int) -> WorkflowFactSnapshot:
+        """Build one snapshot inside the read-only session query boundary."""
         project = self._project(project_id)
         discovery_runs = self._discovery_runs(project_id)
         discovery_run_ids = frozenset(item.discovery_run_id for item in discovery_runs)
-        prd_versions = self._prd_versions(project_id, discovery_run_ids)
-        spec_drafts = self._spec_drafts(project_id, discovery_run_ids)
         spec_versions = self._spec_versions(project_id)
+        prd_versions = self._prd_versions(project_id, discovery_run_ids)
+        spec_drafts = self._spec_drafts(
+            project_id,
+            discovery_run_ids,
+            spec_versions,
+        )
+        authority_load = self._authorities(project_id, spec_versions)
+        sprints = self._sprints(project_id)
+        stories = self._stories(project_id, frozenset(spec_versions))
 
         return WorkflowFactSnapshot(
             project=project,
@@ -124,30 +157,55 @@ class WorkflowFactRepository:
             review_decisions=self._review_decisions(
                 project_id,
                 discovery_run_ids,
-                frozenset(item.prd_version_id for item in prd_versions),
-                frozenset(item.spec_draft_id for item in spec_drafts),
+                {
+                    item.prd_version_id: (
+                        item.discovery_run_id,
+                        item.content_fingerprint,
+                    )
+                    for item in prd_versions
+                },
+                {
+                    item.spec_draft_id: (
+                        item.discovery_run_id,
+                        item.content_fingerprint,
+                    )
+                    for item in spec_drafts
+                },
+                authority_load.reviews,
             ),
             spec_drafts=spec_drafts,
             initial_registrations=self._initial_registrations(
                 project_id,
                 discovery_run_ids,
-                frozenset(item.spec_draft_id for item in spec_drafts),
+                {item.spec_draft_id: item.discovery_run_id for item in spec_drafts},
                 spec_versions,
             ),
-            authorities=self._authorities(project_id, spec_versions),
+            authorities=authority_load.facts,
             phase_artifacts=(),
-            sprints=self._sprints(project_id),
-            stories=self._stories(project_id),
-            tasks=self._tasks(project_id),
+            sprints=sprints,
+            stories=stories,
+            tasks=self._tasks(
+                project_id,
+                frozenset(item.sprint_id for item in sprints),
+                stories,
+            ),
             post_sprint_triage=(),
             node_attempts=self._node_attempts(project_id),
         )
+
+    def _query_options(self) -> dict[str, object]:
+        """Isolate canonical reads from pending caller identity-map state."""
+        return {
+            "autoflush": False,
+            "identity_token": self._identity_token,
+        }
 
     def _project(self, project_id: int) -> ProjectFact:
         row = self._session.exec(
             select(Product)
             .where(col(Product.product_id) == project_id)
-            .order_by(col(Product.product_id))
+            .order_by(col(Product.product_id)),
+            execution_options=self._query_options(),
         ).one_or_none()
         if row is None:
             message = f"Project {project_id} does not exist."
@@ -175,7 +233,8 @@ class WorkflowFactRepository:
             .order_by(
                 col(ProjectAbandonment.abandoned_at),
                 col(ProjectAbandonment.project_abandonment_id),
-            )
+            ),
+            execution_options=self._query_options(),
         ).all()
         return tuple(
             ProjectAbandonmentFact(
@@ -195,7 +254,8 @@ class WorkflowFactRepository:
         rows = self._session.exec(
             select(DiscoveryRun)
             .where(col(DiscoveryRun.project_id) == project_id)
-            .order_by(col(DiscoveryRun.ordinal), col(DiscoveryRun.discovery_run_id))
+            .order_by(col(DiscoveryRun.ordinal), col(DiscoveryRun.discovery_run_id)),
+            execution_options=self._query_options(),
         ).all()
         facts: list[DiscoveryRunFact] = []
         for row in rows:
@@ -231,7 +291,8 @@ class WorkflowFactRepository:
             .order_by(
                 col(DiscoveryRunAbandonment.abandoned_at),
                 col(DiscoveryRunAbandonment.discovery_run_abandonment_id),
-            )
+            ),
+            execution_options=self._query_options(),
         ).all()
         facts: list[DiscoveryRunAbandonmentFact] = []
         for row in rows:
@@ -267,7 +328,8 @@ class WorkflowFactRepository:
                 col(ChallengeArtifact.discovery_run_id),
                 col(ChallengeArtifact.version_number),
                 col(ChallengeArtifact.challenge_artifact_id),
-            )
+            ),
+            execution_options=self._query_options(),
         ).all()
         facts: list[ChallengeArtifactFact] = []
         for row in rows:
@@ -276,21 +338,32 @@ class WorkflowFactRepository:
                 discovery_run_ids,
                 "challenge artifact",
             )
+            artifact_id = self._required_id(
+                row.challenge_artifact_id,
+                "challenge artifact",
+            )
             self._validate_canonical_json(
                 row.canonical_content_json,
                 "challenge artifact",
-                self._required_id(row.challenge_artifact_id, "challenge artifact"),
+                artifact_id,
             )
             facts.append(
                 ChallengeArtifactFact(
-                    challenge_artifact_id=self._required_id(
-                        row.challenge_artifact_id,
-                        "challenge artifact",
-                    ),
+                    challenge_artifact_id=artifact_id,
                     discovery_run_id=row.discovery_run_id,
                     content_fingerprint=row.content_fingerprint,
                     supersedes_id=row.supersedes_challenge_artifact_id,
                 )
+            )
+        runs_by_artifact = {
+            item.challenge_artifact_id: item.discovery_run_id for item in facts
+        }
+        for item in facts:
+            self._require_same_run_reference(
+                item.supersedes_id,
+                item.discovery_run_id,
+                runs_by_artifact,
+                "challenge artifact supersession",
             )
         return tuple(facts)
 
@@ -306,23 +379,33 @@ class WorkflowFactRepository:
                 col(PrdVersion.discovery_run_id),
                 col(PrdVersion.version_number),
                 col(PrdVersion.prd_version_id),
-            )
+            ),
+            execution_options=self._query_options(),
         ).all()
         facts: list[PrdVersionFact] = []
         for row in rows:
             self._require_project_run(row.discovery_run_id, discovery_run_ids, "PRD")
+            prd_version_id = self._required_id(row.prd_version_id, "PRD")
             self._validate_canonical_json(
                 row.canonical_content_json,
                 "PRD",
-                self._required_id(row.prd_version_id, "PRD"),
+                prd_version_id,
             )
             facts.append(
                 PrdVersionFact(
-                    prd_version_id=self._required_id(row.prd_version_id, "PRD"),
+                    prd_version_id=prd_version_id,
                     discovery_run_id=row.discovery_run_id,
                     content_fingerprint=row.content_fingerprint,
                     supersedes_id=row.supersedes_prd_version_id,
                 )
+            )
+        runs_by_prd = {item.prd_version_id: item.discovery_run_id for item in facts}
+        for item in facts:
+            self._require_same_run_reference(
+                item.supersedes_id,
+                item.discovery_run_id,
+                runs_by_prd,
+                "PRD supersession",
             )
         return tuple(facts)
 
@@ -330,6 +413,7 @@ class WorkflowFactRepository:
         self,
         project_id: int,
         discovery_run_ids: frozenset[int],
+        spec_versions: dict[int, str],
     ) -> tuple[SpecDraftFact, ...]:
         rows = self._session.exec(
             select(SpecDraft)
@@ -338,7 +422,8 @@ class WorkflowFactRepository:
                 col(SpecDraft.discovery_run_id),
                 col(SpecDraft.version_number),
                 col(SpecDraft.spec_draft_id),
-            )
+            ),
+            execution_options=self._query_options(),
         ).all()
         facts: list[SpecDraftFact] = []
         for row in rows:
@@ -353,17 +438,19 @@ class WorkflowFactRepository:
                     f"{row.kind!r}."
                 )
                 raise self._error(message)
+            self._validate_spec_draft_base(row, spec_versions)
+            spec_draft_id = self._required_id(
+                row.spec_draft_id,
+                "specification draft",
+            )
             self._validate_canonical_json(
                 row.canonical_content_json,
                 "specification draft",
-                self._required_id(row.spec_draft_id, "specification draft"),
+                spec_draft_id,
             )
             facts.append(
                 SpecDraftFact(
-                    spec_draft_id=self._required_id(
-                        row.spec_draft_id,
-                        "specification draft",
-                    ),
+                    spec_draft_id=spec_draft_id,
                     discovery_run_id=row.discovery_run_id,
                     kind=self._spec_draft_kind(row.kind),
                     content_fingerprint=row.content_fingerprint,
@@ -372,31 +459,47 @@ class WorkflowFactRepository:
                     supersedes_id=row.supersedes_spec_draft_id,
                 )
             )
+        runs_by_draft = {item.spec_draft_id: item.discovery_run_id for item in facts}
+        for item in facts:
+            self._require_same_run_reference(
+                item.supersedes_id,
+                item.discovery_run_id,
+                runs_by_draft,
+                "specification draft supersession",
+            )
         return tuple(facts)
 
-    def _spec_versions(self, project_id: int) -> frozenset[int]:
+    def _spec_versions(self, project_id: int) -> dict[int, str]:
         rows = self._session.exec(
             select(SpecRegistry)
             .where(col(SpecRegistry.product_id) == project_id)
-            .order_by(col(SpecRegistry.spec_version_id))
+            .order_by(col(SpecRegistry.spec_version_id)),
+            execution_options=self._query_options(),
         ).all()
-        return frozenset(
-            self._required_id(row.spec_version_id, "specification registry row")
+        return {
+            self._required_id(row.spec_version_id, "specification registry row"): (
+                row.spec_hash
+            )
             for row in rows
-        )
+        }
 
     def _review_decisions(
         self,
         project_id: int,
         discovery_run_ids: frozenset[int],
-        prd_version_ids: frozenset[int],
-        spec_draft_ids: frozenset[int],
+        prd_versions: dict[int, tuple[int, str]],
+        spec_drafts: dict[int, tuple[int, str]],
+        authority_reviews: tuple[ReviewDecisionFact, ...],
     ) -> tuple[ReviewDecisionFact, ...]:
-        decisions: list[ReviewDecisionFact] = []
+        decisions: list[ReviewDecisionFact] = list(authority_reviews)
         prd_rows = self._session.exec(
             select(PrdDecision)
             .where(col(PrdDecision.project_id) == project_id)
-            .order_by(col(PrdDecision.decided_at), col(PrdDecision.prd_decision_id))
+            .order_by(
+                col(PrdDecision.decided_at),
+                col(PrdDecision.prd_decision_id),
+            ),
+            execution_options=self._query_options(),
         ).all()
         for row in prd_rows:
             self._require_project_run(
@@ -404,7 +507,13 @@ class WorkflowFactRepository:
                 discovery_run_ids,
                 "PRD decision",
             )
-            self._require_member(row.prd_version_id, prd_version_ids, "PRD decision")
+            self._require_artifact_parent(
+                row.prd_version_id,
+                row.discovery_run_id,
+                row.artifact_fingerprint,
+                prd_versions,
+                "PRD decision",
+            )
             decisions.append(
                 self._review_decision_fact(
                     _ReviewDecisionSource(
@@ -426,7 +535,8 @@ class WorkflowFactRepository:
             .order_by(
                 col(SpecDraftDecision.decided_at),
                 col(SpecDraftDecision.spec_draft_decision_id),
-            )
+            ),
+            execution_options=self._query_options(),
         ).all()
         for row in draft_rows:
             self._require_project_run(
@@ -434,9 +544,11 @@ class WorkflowFactRepository:
                 discovery_run_ids,
                 "specification draft decision",
             )
-            self._require_member(
+            self._require_artifact_parent(
                 row.spec_draft_id,
-                spec_draft_ids,
+                row.discovery_run_id,
+                row.artifact_fingerprint,
+                spec_drafts,
                 "specification draft decision",
             )
             decisions.append(
@@ -454,27 +566,6 @@ class WorkflowFactRepository:
                     )
                 )
             )
-        authority_rows = self._session.exec(
-            select(SpecAuthorityAcceptance)
-            .where(col(SpecAuthorityAcceptance.product_id) == project_id)
-            .order_by(
-                col(SpecAuthorityAcceptance.decided_at),
-                col(SpecAuthorityAcceptance.id),
-            )
-        ).all()
-        decisions.extend(
-            self._review_decision_fact(
-                _ReviewDecisionSource(
-                    decision_id=self._required_id(row.id, "authority acceptance"),
-                    artifact_type="authority",
-                    artifact_id=row.pending_authority_id or row.spec_version_id,
-                    artifact_fingerprint=row.authority_fingerprint or row.spec_hash,
-                    decision=row.status,
-                    decided_at=row.decided_at,
-                )
-            )
-            for row in authority_rows
-        )
         return tuple(
             sorted(
                 decisions,
@@ -491,13 +582,14 @@ class WorkflowFactRepository:
         self,
         project_id: int,
         discovery_run_ids: frozenset[int],
-        spec_draft_ids: frozenset[int],
-        spec_version_ids: frozenset[int],
+        spec_drafts: dict[int, int],
+        spec_versions: dict[int, str],
     ) -> tuple[InitialScopeRegistrationFact, ...]:
         rows = self._session.exec(
             select(InitialScopeRegistration)
             .where(col(InitialScopeRegistration.project_id) == project_id)
-            .order_by(col(InitialScopeRegistration.initial_scope_registration_id))
+            .order_by(col(InitialScopeRegistration.initial_scope_registration_id)),
+            execution_options=self._query_options(),
         ).all()
         facts: list[InitialScopeRegistrationFact] = []
         for row in rows:
@@ -506,14 +598,16 @@ class WorkflowFactRepository:
                 discovery_run_ids,
                 "initial-scope registration",
             )
-            self._require_member(
+            self._require_same_run_reference(
                 row.spec_draft_id,
-                spec_draft_ids,
+                row.discovery_run_id,
+                spec_drafts,
                 "initial-scope registration",
             )
-            self._require_member(
+            self._require_fingerprint_reference(
                 row.spec_version_id,
-                spec_version_ids,
+                row.spec_hash,
+                spec_versions,
                 "initial-scope registration",
             )
             facts.append(
@@ -533,8 +627,8 @@ class WorkflowFactRepository:
     def _authorities(
         self,
         project_id: int,
-        spec_version_ids: frozenset[int],
-    ) -> tuple[AuthorityFact, ...]:
+        spec_versions: dict[int, str],
+    ) -> _AuthorityLoad:
         rows = self._session.exec(
             select(CompiledSpecAuthority, SpecRegistry)
             .join(
@@ -543,50 +637,93 @@ class WorkflowFactRepository:
                 == col(SpecRegistry.spec_version_id),
             )
             .where(col(SpecRegistry.product_id) == project_id)
-            .order_by(col(CompiledSpecAuthority.authority_id))
+            .order_by(col(CompiledSpecAuthority.authority_id)),
+            execution_options=self._query_options(),
         ).all()
-        acceptances = self._session.exec(
-            select(SpecAuthorityAcceptance)
-            .where(col(SpecAuthorityAcceptance.product_id) == project_id)
-            .order_by(
-                col(SpecAuthorityAcceptance.decided_at),
-                col(SpecAuthorityAcceptance.id),
-            )
-        ).all()
-        facts: list[AuthorityFact] = []
+        authority_records: list[
+            tuple[int, CompiledSpecAuthority, SpecRegistry, str]
+        ] = []
+        authorities_by_id: dict[
+            int,
+            tuple[CompiledSpecAuthority, SpecRegistry, str],
+        ] = {}
         for authority, spec in rows:
             authority_id = self._required_id(authority.authority_id, "authority")
-            self._require_member(
+            self._require_fingerprint_reference(
                 authority.spec_version_id,
-                spec_version_ids,
-                "authority",
+                spec.spec_hash,
+                spec_versions,
+                "authority specification",
             )
             self._validate_authority_json(
                 authority.compiled_artifact_json,
                 authority_id,
             )
+            authority_fingerprint = pending_authority_fingerprint(authority)
+            if authority_fingerprint is None:
+                message = (
+                    "Forced relationship corruption in authority: "
+                    f"compiled authority {authority_id} has no fingerprint."
+                )
+                raise self._error(message)
+            record = (authority, spec, authority_fingerprint)
+            authorities_by_id[authority_id] = record
+            authority_records.append((authority_id, *record))
+
+        acceptance_rows = self._session.exec(
+            select(SpecAuthorityAcceptance)
+            .where(col(SpecAuthorityAcceptance.product_id) == project_id)
+            .order_by(
+                col(SpecAuthorityAcceptance.decided_at),
+                col(SpecAuthorityAcceptance.id),
+            ),
+            execution_options=self._query_options(),
+        ).all()
+        acceptances = tuple(
+            self._authority_acceptance_source(
+                row,
+                spec_versions,
+                authorities_by_id,
+            )
+            for row in acceptance_rows
+        )
+        facts: list[AuthorityFact] = []
+        for authority_id, authority, spec, authority_fingerprint in authority_records:
             acceptance = self._latest_acceptance(authority_id, acceptances)
-            status, decided_at, fingerprint = self._authority_state(
-                authority,
-                spec,
+            status, decided_at = self._authority_state(
+                spec.status,
                 acceptance,
             )
             facts.append(
                 AuthorityFact(
                     authority_id=authority_id,
                     spec_version_id=authority.spec_version_id,
-                    authority_fingerprint=fingerprint,
+                    authority_fingerprint=authority_fingerprint,
                     status=status,
                     decided_at=decided_at,
                 )
             )
-        return tuple(facts)
+        reviews = tuple(
+            self._review_decision_fact(
+                _ReviewDecisionSource(
+                    decision_id=item.decision_id,
+                    artifact_type="authority",
+                    artifact_id=item.authority_id,
+                    artifact_fingerprint=item.authority_fingerprint,
+                    decision=item.status,
+                    decided_at=item.decided_at,
+                )
+            )
+            for item in acceptances
+        )
+        return _AuthorityLoad(facts=tuple(facts), reviews=reviews)
 
     def _sprints(self, project_id: int) -> tuple[SprintFact, ...]:
         rows = self._session.exec(
             select(Sprint)
             .where(col(Sprint.product_id) == project_id)
-            .order_by(col(Sprint.completed_at), col(Sprint.sprint_id))
+            .order_by(col(Sprint.completed_at), col(Sprint.sprint_id)),
+            execution_options=self._query_options(),
         ).all()
         facts: list[SprintFact] = []
         for row in rows:
@@ -603,11 +740,16 @@ class WorkflowFactRepository:
             )
         return tuple(facts)
 
-    def _stories(self, project_id: int) -> tuple[StoryFact, ...]:
+    def _stories(
+        self,
+        project_id: int,
+        spec_version_ids: frozenset[int],
+    ) -> tuple[StoryFact, ...]:
         rows = self._session.exec(
             select(UserStory)
             .where(col(UserStory.product_id) == project_id)
-            .order_by(col(UserStory.rank), col(UserStory.story_id))
+            .order_by(col(UserStory.rank), col(UserStory.story_id)),
+            execution_options=self._query_options(),
         ).all()
         dependencies = self._session.exec(
             select(UserStoryDependency)
@@ -616,18 +758,33 @@ class WorkflowFactRepository:
                 col(UserStoryDependency.dependent_story_id),
                 col(UserStoryDependency.prerequisite_story_id),
                 col(UserStoryDependency.dependency_id),
-            )
+            ),
+            execution_options=self._query_options(),
         ).all()
         stories_by_id = {self._required_id(row.story_id, "story"): row for row in rows}
+        story_ids = frozenset(stories_by_id)
+        for row in rows:
+            if row.accepted_spec_version_id is not None:
+                self._require_member(
+                    row.accepted_spec_version_id,
+                    spec_version_ids,
+                    "story accepted specification",
+                )
+            if row.superseded_by_story_id is not None:
+                self._require_member(
+                    row.superseded_by_story_id,
+                    story_ids,
+                    "story supersession",
+                )
         for dependency in dependencies:
             self._require_member(
                 dependency.dependent_story_id,
-                frozenset(stories_by_id),
+                story_ids,
                 "story dependency",
             )
             self._require_member(
                 dependency.prerequisite_story_id,
-                frozenset(stories_by_id),
+                story_ids,
                 "story dependency",
             )
         blockers = self._story_readiness_blockers(rows, dependencies, stories_by_id)
@@ -641,41 +798,63 @@ class WorkflowFactRepository:
             for row in rows
         )
 
-    def _tasks(self, project_id: int) -> tuple[TaskFact, ...]:
+    def _tasks(
+        self,
+        project_id: int,
+        sprint_ids: frozenset[int],
+        stories: tuple[StoryFact, ...],
+    ) -> tuple[TaskFact, ...]:
         rows = self._session.exec(
-            select(Task, SprintStory, UserStory)
+            select(Task, UserStory)
             .join(UserStory, col(Task.story_id) == col(UserStory.story_id))
-            .join(SprintStory, col(UserStory.story_id) == col(SprintStory.story_id))
             .where(col(UserStory.product_id) == project_id)
-            .order_by(col(SprintStory.sprint_id), col(Task.task_id))
+            .order_by(col(Task.task_id)),
+            execution_options=self._query_options(),
         ).all()
-        dependencies = self._session.exec(
-            select(UserStoryDependency)
-            .where(col(UserStoryDependency.product_id) == project_id)
-            .order_by(
-                col(UserStoryDependency.dependent_story_id),
-                col(UserStoryDependency.prerequisite_story_id),
-                col(UserStoryDependency.dependency_id),
-            )
-        ).all()
-        stories_by_id = {
-            self._required_id(story.story_id, "story"): story for _, _, story in rows
+        stories_by_id = {item.story_id: item for item in stories}
+        story_ids = frozenset(stories_by_id)
+        memberships = (
+            self._session.exec(
+                select(SprintStory)
+                .where(col(SprintStory.story_id).in_(story_ids))
+                .order_by(col(SprintStory.sprint_id), col(SprintStory.story_id)),
+                execution_options=self._query_options(),
+            ).all()
+            if story_ids
+            else []
+        )
+        sprint_ids_by_story: dict[int, list[int]] = {
+            story_id: [] for story_id in story_ids
         }
-        blockers = self._story_readiness_blockers(
-            stories_by_id.values(),
-            dependencies,
-            stories_by_id,
-        )
-        return tuple(
-            TaskFact(
-                task_id=self._required_id(task.task_id, "task"),
-                sprint_id=sprint_story.sprint_id,
-                story_id=task.story_id,
-                status=task.status.value,
-                dependencies_satisfied=not blockers[task.story_id],
+        for membership in memberships:
+            self._require_member(
+                membership.sprint_id,
+                sprint_ids,
+                "task sprint relationship",
             )
-            for task, sprint_story, _ in rows
-        )
+            sprint_ids_by_story[membership.story_id].append(membership.sprint_id)
+        facts: list[TaskFact] = []
+        for task, _story in rows:
+            task_id = self._required_id(task.task_id, "task")
+            task_sprint_ids = sprint_ids_by_story[task.story_id]
+            if not task_sprint_ids:
+                message = (
+                    "Forced relationship corruption in task sprint relationship: "
+                    f"task {task_id} has no sprint membership."
+                )
+                raise self._error(message)
+            story = stories_by_id[task.story_id]
+            facts.extend(
+                TaskFact(
+                    task_id=task_id,
+                    sprint_id=sprint_id,
+                    story_id=task.story_id,
+                    status=task.status.value,
+                    dependencies_satisfied=not story.readiness_blockers,
+                )
+                for sprint_id in task_sprint_ids
+            )
+        return tuple(sorted(facts, key=lambda item: (item.sprint_id, item.task_id)))
 
     def _node_attempts(self, project_id: int) -> tuple[NodeAttemptFact, ...]:
         attempts = self._session.exec(
@@ -684,7 +863,8 @@ class WorkflowFactRepository:
             .order_by(
                 col(WorkflowNodeAttempt.started_at),
                 col(WorkflowNodeAttempt.workflow_node_attempt_id),
-            )
+            ),
+            execution_options=self._query_options(),
         ).all()
         outcomes = self._session.exec(
             select(WorkflowNodeAttemptOutcome)
@@ -692,7 +872,8 @@ class WorkflowFactRepository:
             .order_by(
                 col(WorkflowNodeAttemptOutcome.workflow_node_attempt_id),
                 col(WorkflowNodeAttemptOutcome.workflow_node_attempt_outcome_id),
-            )
+            ),
+            execution_options=self._query_options(),
         ).all()
         attempt_ids = frozenset(
             self._required_id(row.workflow_node_attempt_id, "workflow node attempt")
@@ -758,6 +939,74 @@ class WorkflowFactRepository:
             raise WorkflowFactRepository._error(message)
 
     @staticmethod
+    def _require_same_run_reference(
+        value: int | None,
+        discovery_run_id: int,
+        runs_by_id: dict[int, int],
+        label: str,
+    ) -> None:
+        if value is None:
+            return
+        referenced_run_id = runs_by_id.get(value)
+        if referenced_run_id != discovery_run_id:
+            message = (
+                f"Forced relationship corruption in {label}: reference {value} "
+                f"does not belong to discovery run {discovery_run_id}."
+            )
+            raise WorkflowFactRepository._error(message)
+
+    @staticmethod
+    def _require_fingerprint_reference(
+        value: int,
+        fingerprint: str,
+        fingerprints_by_id: dict[int, str],
+        label: str,
+    ) -> None:
+        if fingerprints_by_id.get(value) != fingerprint:
+            message = (
+                f"Forced relationship corruption in {label}: reference {value} "
+                "does not match its persisted fingerprint."
+            )
+            raise WorkflowFactRepository._error(message)
+
+    @staticmethod
+    def _require_artifact_parent(
+        value: int,
+        discovery_run_id: int,
+        fingerprint: str,
+        artifacts_by_id: dict[int, tuple[int, str]],
+        label: str,
+    ) -> None:
+        if artifacts_by_id.get(value) != (discovery_run_id, fingerprint):
+            message = (
+                f"Forced relationship corruption in {label}: artifact {value} "
+                "does not match its discovery run and fingerprint."
+            )
+            raise WorkflowFactRepository._error(message)
+
+    @staticmethod
+    def _validate_spec_draft_base(
+        row: SpecDraft,
+        spec_versions: dict[int, str],
+    ) -> None:
+        if row.kind == "initial":
+            if row.base_spec_version_id is None and row.base_spec_hash is None:
+                return
+        elif row.base_spec_version_id is not None and row.base_spec_hash is not None:
+            WorkflowFactRepository._require_fingerprint_reference(
+                row.base_spec_version_id,
+                row.base_spec_hash,
+                spec_versions,
+                "specification draft base",
+            )
+            return
+        message = (
+            "Forced relationship corruption in specification draft base: "
+            f"draft {row.spec_draft_id} has an invalid base relationship."
+        )
+        raise WorkflowFactRepository._error(message)
+
+    @staticmethod
     def _validate_canonical_json(content: str, label: str, identifier: int) -> None:
         try:
             _JSON_OBJECT.validate_json(content)
@@ -768,7 +1017,8 @@ class WorkflowFactRepository:
     @staticmethod
     def _validate_authority_json(content: str | None, authority_id: int) -> None:
         if content is None:
-            return
+            message = f"Stored canonical authority {authority_id} JSON is missing."
+            raise WorkflowFactRepository._error(message)
         try:
             SpecAuthorityCompilerOutput.model_validate_json(content)
         except ValidationError as exc:
@@ -787,34 +1037,85 @@ class WorkflowFactRepository:
         )
 
     @staticmethod
+    def _authority_acceptance_source(
+        row: SpecAuthorityAcceptance,
+        spec_versions: dict[int, str],
+        authorities_by_id: dict[
+            int,
+            tuple[CompiledSpecAuthority, SpecRegistry, str],
+        ],
+    ) -> _AuthorityAcceptanceSource:
+        decision_id = WorkflowFactRepository._required_id(
+            row.id,
+            "authority acceptance",
+        )
+        WorkflowFactRepository._require_fingerprint_reference(
+            row.spec_version_id,
+            row.spec_hash,
+            spec_versions,
+            "authority acceptance specification",
+        )
+        authority_id = row.pending_authority_id
+        if authority_id is None:
+            message = (
+                "Forced relationship corruption in authority acceptance: "
+                f"decision {decision_id} has no compiled authority."
+            )
+            raise WorkflowFactRepository._error(message)
+        authority_record = authorities_by_id.get(authority_id)
+        if authority_record is None:
+            message = (
+                "Forced relationship corruption in authority acceptance: "
+                f"authority {authority_id} is not owned by this Project."
+            )
+            raise WorkflowFactRepository._error(message)
+        authority, spec, expected_fingerprint = authority_record
+        if (
+            authority.spec_version_id != row.spec_version_id
+            or spec.spec_version_id != row.spec_version_id
+            or authority.compiler_version != row.compiler_version
+            or authority.prompt_hash != row.prompt_hash
+        ):
+            message = (
+                "Forced relationship corruption in authority acceptance: "
+                f"decision {decision_id} does not match authority {authority_id}."
+            )
+            raise WorkflowFactRepository._error(message)
+        if row.authority_fingerprint != expected_fingerprint:
+            message = (
+                "Forced relationship corruption in authority acceptance: "
+                f"decision {decision_id} has the wrong authority fingerprint."
+            )
+            raise WorkflowFactRepository._error(message)
+        WorkflowFactRepository._authority_status(row.status)
+        return _AuthorityAcceptanceSource(
+            decision_id=decision_id,
+            authority_id=authority_id,
+            authority_fingerprint=expected_fingerprint,
+            status=row.status,
+            decided_at=row.decided_at,
+        )
+
+    @staticmethod
     def _latest_acceptance(
         authority_id: int,
-        acceptances: Iterable[SpecAuthorityAcceptance],
-    ) -> SpecAuthorityAcceptance | None:
-        matching = (
-            item for item in acceptances if item.pending_authority_id == authority_id
-        )
+        acceptances: Iterable[_AuthorityAcceptanceSource],
+    ) -> _AuthorityAcceptanceSource | None:
+        matching = (item for item in acceptances if item.authority_id == authority_id)
         return next(reversed(tuple(matching)), None)
 
     @staticmethod
     def _authority_state(
-        authority: CompiledSpecAuthority,
-        spec: SpecRegistry,
-        acceptance: SpecAuthorityAcceptance | None,
-    ) -> tuple[_AuthorityStatus, datetime | None, str]:
-        if spec.status == "superseded":
-            return "stale", None, canonical_hash(authority.compiled_artifact_json)
+        spec_status: str,
+        acceptance: _AuthorityAcceptanceSource | None,
+    ) -> tuple[_AuthorityStatus, datetime | None]:
+        if spec_status == "superseded":
+            return "stale", None
         if acceptance is None:
-            return (
-                "pending_review",
-                None,
-                canonical_hash(authority.compiled_artifact_json),
-            )
+            return "pending_review", None
         return (
             WorkflowFactRepository._authority_status(acceptance.status),
             acceptance.decided_at,
-            acceptance.authority_fingerprint
-            or canonical_hash(authority.compiled_artifact_json),
         )
 
     @staticmethod

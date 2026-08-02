@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING
+from unittest.mock import patch
 
 from sqlmodel import Session, col, select
 
@@ -12,7 +14,25 @@ from tests.workflow.test_workflow_repository import seed_complete_project, sqlit
 from workflow.fingerprints import fact_fingerprint
 
 if TYPE_CHECKING:
-    from pathlib import Path
+    from sqlalchemy.engine import Engine
+
+    from workflow.facts import WorkflowFactSnapshot
+
+
+def _load_without_provenance_reads(
+    engine: Engine,
+    project_id: int,
+) -> WorkflowFactSnapshot:
+    """Load while making common provenance file reads fail immediately."""
+    blocked = AssertionError("Workflow fact loading read a provenance file.")
+    with (
+        patch("builtins.open", side_effect=blocked),
+        patch.object(Path, "open", side_effect=blocked),
+        patch.object(Path, "read_text", side_effect=blocked),
+        patch.object(Path, "read_bytes", side_effect=blocked),
+        Session(engine) as session,
+    ):
+        return WorkflowFactRepository(session).load(project_id)
 
 
 def test_snapshot_is_reproducible_after_repository_restart(tmp_path: Path) -> None:
@@ -51,16 +71,13 @@ def test_snapshot_uses_database_content_after_provenance_files_change(
         session.add(artifact)
         session.commit()
 
-    with Session(engine) as session:
-        first = WorkflowFactRepository(session).load(project_id)
+    first = _load_without_provenance_reads(engine, project_id)
 
     provenance_path.write_text("changed evidence", encoding="utf-8")
-    with Session(engine) as session:
-        second = WorkflowFactRepository(session).load(project_id)
+    second = _load_without_provenance_reads(engine, project_id)
 
     provenance_path.unlink()
-    with Session(engine) as session:
-        third = WorkflowFactRepository(session).load(project_id)
+    third = _load_without_provenance_reads(engine, project_id)
 
     assert second == first
     assert fact_fingerprint(second) == fact_fingerprint(first)
