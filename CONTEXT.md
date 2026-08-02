@@ -5,6 +5,27 @@ backlog, roadmap, stories, and sprints aligned through explicit review gates.
 
 ## Language
 
+**Project**:
+The single AgileForge aggregate that owns one product's discovery, authority,
+planning, and execution history. One discovery targets at most one Project.
+_Avoid_: repository, product row, workflow session
+
+**Workflow Fact**:
+A typed durable record whose current value can affect which workflow actions are
+available, waiting, blocked, or invalid.
+_Avoid_: session flag, cached FSM state, execution trace
+
+**Workflow Position**:
+The set of available, waiting, blocked, and invalid graph nodes derived from the
+current Workflow Facts. It is recalculated and is never stored as independent
+authority.
+_Avoid_: current FSM state, persisted graph cursor, session position
+
+**Project Shell**:
+A durable project identity that may own discovery or brownfield evidence before
+accepted authority exists. A project shell cannot create Executable Work.
+_Avoid_: accepted project, pre-project context, workflow state
+
 **Project Scope Extension**:
 A guarded workflow for adding new accepted product scope to an existing project
 after the current executable scope is exhausted.
@@ -36,9 +57,19 @@ and accepted before AgileForge generates new execution work from it.
 _Avoid_: new project spec, direct backlog input
 
 **Spec Amendment Draft**:
-A generated draft translation of an accepted PRD into the specification shape
-that AgileForge can validate and compile.
-_Avoid_: accepted spec amendment, PRD
+A generated draft translation of an accepted scope-extension PRD into a proposed
+change to an existing accepted specification.
+_Avoid_: initial spec draft, accepted spec amendment, PRD
+
+**Initial Spec Draft**:
+A generated draft translation of an accepted initial PRD into the first
+specification proposed for a Project Shell.
+_Avoid_: spec amendment draft, accepted specification, PRD
+
+**Initial Scope Registration**:
+The one-time binding of a reviewed Initial Spec Draft to a Project's first
+registered specification. Executable Work still requires Accepted Authority.
+_Avoid_: project creation, authority acceptance, spec amendment
 
 **Accepted Spec Amendment**:
 A human-reviewed spec amendment that AgileForge may pass through authority
@@ -52,7 +83,7 @@ _Avoid_: authority acceptance, PRD acceptance
 
 **PRD**:
 A product requirements document that captures clarified product intent before it
-is promoted into a spec amendment.
+is promoted into an initial specification or spec amendment.
 _Avoid_: issue list, implementation ticket batch, authority source
 
 **PRD Producer**:
@@ -62,7 +93,7 @@ _Avoid_: generic PRD generator, manual issue synthesis
 
 **Accepted PRD**:
 A PRD that a human has approved as product intent and that AgileForge may use to
-draft a spec amendment.
+draft an initial specification or spec amendment.
 _Avoid_: draft PRD, accepted authority
 
 **PRD Version**:
