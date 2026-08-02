@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from workflow.contracts import (
@@ -61,6 +61,13 @@ def _evaluation(
 
 def _invalid() -> tuple[RuleEvaluation, ...]:
     return _evaluation(RuleCategory.INVALID, "WORKFLOW_FACT_CONFLICT")
+
+
+def _for_instance(
+    evaluations: tuple[RuleEvaluation, ...],
+    instance_key: str,
+) -> tuple[RuleEvaluation, ...]:
+    return (replace(evaluations[0], instance_key=instance_key),)
 
 
 def _reference(fact_type: str, fact_id: int, fingerprint: str) -> FactReference:
@@ -137,33 +144,45 @@ def _authority_state(snapshot: WorkflowFactSnapshot) -> _AuthorityState:
 def _compile_attempt_result(
     snapshot: WorkflowFactSnapshot,
     evaluated_at: datetime,
+    *,
+    instance_key: str,
 ) -> tuple[RuleEvaluation, ...] | None:
     attempts = tuple(
         attempt
         for attempt in snapshot.node_attempts
-        if attempt.node_id == "authority.compile" and attempt.instance_key is None
+        if attempt.node_id == "authority.compile"
+        and attempt.instance_key == instance_key
     )
     if not attempts:
         return None
     latest = max(attempts, key=lambda item: item.attempt_id)
     if latest.outcome == "success":
-        return _invalid()
+        return _for_instance(_invalid(), instance_key)
     if latest.outcome == "failure":
-        return _evaluation(
-            RuleCategory.AVAILABLE,
-            "AUTHORITY_COMPILE_FAILED",
-            recommendation_kind=RecommendationKind.RECOVERY,
+        return _for_instance(
+            _evaluation(
+                RuleCategory.AVAILABLE,
+                "AUTHORITY_COMPILE_FAILED",
+                recommendation_kind=RecommendationKind.RECOVERY,
+            ),
+            instance_key,
         )
     if latest.outcome == "obsolete" or evaluated_at >= latest.lease_expires_at:
-        return _evaluation(
-            RuleCategory.AVAILABLE,
-            "AUTHORITY_COMPILE_RECOVERY_REQUIRED",
-            recommendation_kind=RecommendationKind.RECOVERY,
+        return _for_instance(
+            _evaluation(
+                RuleCategory.AVAILABLE,
+                "AUTHORITY_COMPILE_RECOVERY_REQUIRED",
+                recommendation_kind=RecommendationKind.RECOVERY,
+            ),
+            instance_key,
         )
-    return _evaluation(
-        RuleCategory.WAITING,
-        "AUTHORITY_COMPILE_ACTIVE",
-        valid_until=latest.lease_expires_at,
+    return _for_instance(
+        _evaluation(
+            RuleCategory.WAITING,
+            "AUTHORITY_COMPILE_ACTIVE",
+            valid_until=latest.lease_expires_at,
+        ),
+        instance_key,
     )
 
 
@@ -181,22 +200,36 @@ def _compile_rule(
     spec_reference = (
         _reference("spec_version", state.spec.spec_version_id, state.spec.spec_hash),
     )
+    instance_key = f"spec:{state.spec.spec_version_id}:{state.spec.spec_hash}"
     if state.candidate is not None:
-        return _evaluation(RuleCategory.SATISFIED, "AUTHORITY_COMPILED")
-    attempt_result = _compile_attempt_result(snapshot, evaluated_at)
+        return _for_instance(
+            _evaluation(RuleCategory.SATISFIED, "AUTHORITY_COMPILED"),
+            instance_key,
+        )
+    attempt_result = _compile_attempt_result(
+        snapshot,
+        evaluated_at,
+        instance_key=instance_key,
+    )
     if attempt_result is not None:
         evaluation = attempt_result[0]
-        return _evaluation(
-            evaluation.category,
-            evaluation.reason_code,
-            fact_references=spec_reference,
-            valid_until=evaluation.valid_until,
-            recommendation_kind=evaluation.recommendation_kind,
+        return _for_instance(
+            _evaluation(
+                evaluation.category,
+                evaluation.reason_code,
+                fact_references=spec_reference,
+                valid_until=evaluation.valid_until,
+                recommendation_kind=evaluation.recommendation_kind,
+            ),
+            instance_key,
         )
-    return _evaluation(
-        RuleCategory.AVAILABLE,
-        "AUTHORITY_COMPILE_REQUIRED",
-        fact_references=spec_reference,
+    return _for_instance(
+        _evaluation(
+            RuleCategory.AVAILABLE,
+            "AUTHORITY_COMPILE_REQUIRED",
+            fact_references=spec_reference,
+        ),
+        instance_key,
     )
 
 

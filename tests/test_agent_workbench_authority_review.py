@@ -363,6 +363,7 @@ def test_review_returns_pending_authority_packet_with_guard_tokens(
     )
     assert guard_tokens == {
         "review_token": guard_tokens["review_token"],
+        "review_fingerprint": guard_tokens["review_fingerprint"],
         "pending_authority_id": authority_id,
         "expected_authority_fingerprint": data["pending_authority"][
             "authority_fingerprint"

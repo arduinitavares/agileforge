@@ -22,6 +22,7 @@ SPEC_ID = 101
 SPEC_HASH = "sha256:current-spec"
 AUTHORITY_ID = 201
 AUTHORITY_FINGERPRINT = "sha256:current-authority"
+COMPILE_INSTANCE_KEY = f"spec:{SPEC_ID}:{SPEC_HASH}"
 
 
 def _snapshot(
@@ -86,7 +87,7 @@ def _attempt(*, outcome: str | None, lease_delta: timedelta) -> NodeAttemptFact:
         {
             "attempt_id": 401,
             "node_id": "authority.compile",
-            "instance_key": None,
+            "instance_key": COMPILE_INSTANCE_KEY,
             "graph_version": "agileforge.workflow.v1",
             "input_fingerprint": "sha256:input",
             "fact_fingerprint": "sha256:facts",
@@ -111,6 +112,7 @@ def test_registered_current_spec_exposes_compile() -> None:
 
     assert position.available_nodes == ("authority.compile",)
     compile_decision = _decision_for(_snapshot(), "authority.compile")
+    assert compile_decision.instance_key == COMPILE_INSTANCE_KEY
     assert compile_decision.fact_references[0].fact_id == str(SPEC_ID)
     assert compile_decision.fact_references[0].fingerprint == SPEC_HASH
 

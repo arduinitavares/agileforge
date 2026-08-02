@@ -25,6 +25,7 @@ from models.specs import SpecAuthorityAcceptance
 from services.agent_workbench.authority_regenerate import AUTHORITY_REGENERATE_COMMAND
 from services.agent_workbench.authority_review import (
     AuthorityReviewSnapshot,
+    authority_review_fingerprint,
     build_authority_review_snapshot,
 )
 from services.agent_workbench.envelope import error_envelope
@@ -201,6 +202,7 @@ class ReviewedAuthoritySnapshot:
     content_included: bool
     omission_assessment: str
     coverage_summary_fingerprint: str
+    review_fingerprint: str
     review_token: str | None
     spec_version_id: int
     review_findings: list[JsonDict]
@@ -773,7 +775,7 @@ class AuthorityDecisionRunner:
                 pending_authority_id=snapshot.pending_authority_id,
                 authority_fingerprint=snapshot.authority_fingerprint,
                 review_token=snapshot.review_token,
-                review_fingerprint=snapshot.coverage_summary_fingerprint,
+                review_fingerprint=snapshot.review_fingerprint,
                 disk_spec_hash=snapshot.disk_spec_hash,
                 resolved_spec_path=snapshot.resolved_spec_path,
                 actor_mode=request.actor_mode,
@@ -876,7 +878,7 @@ class AuthorityDecisionRunner:
                 pending_authority_id=snapshot.pending_authority_id,
                 authority_fingerprint=snapshot.authority_fingerprint,
                 review_token="injected-conflict",  # noqa: S106  # nosec B106
-                review_fingerprint=snapshot.coverage_summary_fingerprint,
+                review_fingerprint=snapshot.review_fingerprint,
                 disk_spec_hash=snapshot.disk_spec_hash,
                 resolved_spec_path=snapshot.resolved_spec_path,
                 actor_mode="test",
@@ -1159,7 +1161,7 @@ def record_authority_decision_in_session(
     if authority_id is None or authority_fingerprint is None or spec_version_id is None:
         msg = "The authority review snapshot is missing durable identity."
         raise ValueError(msg)
-    if review_fingerprint != snapshot.coverage_summary_fingerprint:
+    if review_fingerprint != authority_review_fingerprint(snapshot):
         msg = "The authority review fingerprint changed."
         raise AuthorityDecisionConflictError(msg)
     key = terminal_decision_key(
@@ -1299,6 +1301,7 @@ def _snapshot_from_review(
         content_included=snapshot.content_included,
         omission_assessment=snapshot.omission_assessment,
         coverage_summary_fingerprint=snapshot.coverage_summary_fingerprint,
+        review_fingerprint=snapshot.review_fingerprint,
         review_token=snapshot.review_token,
         spec_version_id=_required_int(snapshot.spec_version_id),
         review_findings=list(snapshot.review_findings),

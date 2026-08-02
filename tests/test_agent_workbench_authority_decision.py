@@ -537,7 +537,7 @@ def test_accept_with_review_token_promotes_authority_and_advances_to_vision(
     assert decision.pending_authority_id == authority_id
     assert decision.authority_fingerprint == snapshot.authority_fingerprint
     assert decision.review_token == snapshot.review_token
-    assert decision.review_fingerprint == snapshot.coverage_summary_fingerprint
+    assert decision.review_fingerprint == snapshot.review_fingerprint
     assert decision.disk_spec_hash == snapshot.disk_spec_hash
     assert decision.resolved_spec_path == snapshot.resolved_spec_path
     assert decision.actor_mode == "cli-agent"
@@ -999,13 +999,17 @@ def test_accept_ignores_removed_candidate_findings(
         "source_unit_ids": [],
         "override_allowed": True,
     }
+    reviewed_snapshot = replace(snapshot, review_findings=[candidate_finding])
     monkeypatch.setattr(
         "services.agent_workbench.authority_decision.build_authority_review_snapshot",
-        lambda **_kwargs: replace(snapshot, review_findings=[candidate_finding]),
+        lambda **_kwargs: reviewed_snapshot,
     )
 
     result = _runner(session, _workflow_for(project_id)).accept(
-        _accept_request(project_id=project_id, review_token=snapshot.review_token)
+        _accept_request(
+            project_id=project_id,
+            review_token=reviewed_snapshot.review_token,
+        )
     )
 
     assert result["ok"] is True
@@ -1049,13 +1053,17 @@ def test_accept_ignores_candidate_and_coverage_findings_defensively(
             "override_allowed": False,
         },
     ]
+    reviewed_snapshot = replace(snapshot, review_findings=findings)
     monkeypatch.setattr(
         "services.agent_workbench.authority_decision.build_authority_review_snapshot",
-        lambda **_kwargs: replace(snapshot, review_findings=findings),
+        lambda **_kwargs: reviewed_snapshot,
     )
 
     result = _runner(session, _workflow_for(project_id)).accept(
-        _accept_request(project_id=project_id, review_token=snapshot.review_token)
+        _accept_request(
+            project_id=project_id,
+            review_token=reviewed_snapshot.review_token,
+        )
     )
 
     assert result["ok"] is True
@@ -1088,13 +1096,17 @@ def test_accept_blocks_invalid_source_ref_finding(
         "source_unit_ids": [],
         "override_allowed": False,
     }
+    reviewed_snapshot = replace(snapshot, review_findings=[invalid_source_ref])
     monkeypatch.setattr(
         "services.agent_workbench.authority_decision.build_authority_review_snapshot",
-        lambda **_kwargs: replace(snapshot, review_findings=[invalid_source_ref]),
+        lambda **_kwargs: reviewed_snapshot,
     )
 
     result = _runner(session, _workflow_for(project_id)).accept(
-        _accept_request(project_id=project_id, review_token=snapshot.review_token)
+        _accept_request(
+            project_id=project_id,
+            review_token=reviewed_snapshot.review_token,
+        )
     )
 
     assert result["ok"] is False
@@ -1124,15 +1136,16 @@ def test_fatal_non_candidate_finding_blocks_accept(
         "source_unit_ids": ["S1"],
         "override_allowed": False,
     }
+    reviewed_snapshot = replace(snapshot, review_findings=[fatal_finding])
     monkeypatch.setattr(
         "services.agent_workbench.authority_decision.build_authority_review_snapshot",
-        lambda **_kwargs: replace(snapshot, review_findings=[fatal_finding]),
+        lambda **_kwargs: reviewed_snapshot,
     )
 
     result = _runner(session, _workflow_for(project_id)).accept(
         _accept_request(
             project_id=project_id,
-            review_token=snapshot.review_token,
+            review_token=reviewed_snapshot.review_token,
         )
     )
 
@@ -1408,12 +1421,16 @@ def test_same_idempotency_key_after_fatal_review_finding_replays_error(
         "source_unit_ids": ["S1"],
         "override_allowed": False,
     }
+    reviewed_snapshot = replace(snapshot, review_findings=[fatal_finding])
     monkeypatch.setattr(
         "services.agent_workbench.authority_decision.build_authority_review_snapshot",
-        lambda **_kwargs: replace(snapshot, review_findings=[fatal_finding]),
+        lambda **_kwargs: reviewed_snapshot,
     )
     runner = _runner(session, _workflow_for(project_id))
-    request = _accept_request(project_id=project_id, review_token=snapshot.review_token)
+    request = _accept_request(
+        project_id=project_id,
+        review_token=reviewed_snapshot.review_token,
+    )
 
     first = runner.accept(request)
     second = runner.accept(request)

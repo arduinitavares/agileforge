@@ -166,36 +166,72 @@ class AuthorityReviewSnapshot:
         """Return the canonical payload used for review-token hashing."""
         return {
             "schema": self.schema,
-            "project_id": self.project_id,
-            "pending_authority_id": self.pending_authority_id,
-            "authority_fingerprint": self.authority_fingerprint,
-            "source_spec_hash": self.source_spec_hash,
-            "disk_spec_hash": self.disk_spec_hash,
-            "resolved_spec_path": self.resolved_spec_path,
-            "compiler_version": self.compiler_version,
-            "prompt_hash": self.prompt_hash,
-            "fsm_state": self.fsm_state,
-            "setup_status": self.setup_status,
-            "content_included": self.content_included,
-            "omission_assessment": self.omission_assessment,
-            "coverage_summary_fingerprint": self.coverage_summary_fingerprint,
+            "project": {
+                "project_id": self.project_id,
+                "project_name": self.project_name,
+            },
+            "specification": {
+                "spec_version_id": self.spec_version_id,
+                "pending_spec_version_id": self.pending_spec_version_id,
+                "source_spec_hash": self.source_spec_hash,
+                "disk_spec_hash": self.disk_spec_hash,
+                "resolved_spec_path": self.resolved_spec_path,
+                "content_ref": self.content_ref,
+                "disk_status": self.disk_status,
+                "size_bytes": self.size_bytes,
+                "content_included": self.content_included,
+                "content_truncated": self.content_truncated,
+                "source_content": self.source_content,
+                "source_content_sha256": self.source_content_sha256,
+                "structured_spec_snapshot": self.structured_spec_snapshot,
+                "excerpt": self.excerpt,
+            },
+            "pending_authority": {
+                "pending_authority_id": self.pending_authority_id,
+                "authority_fingerprint": self.authority_fingerprint,
+                "compiler_version": self.compiler_version,
+                "prompt_hash": self.prompt_hash,
+                "compiled_at": self.compiled_at,
+                "artifact": self.artifact,
+                "authority_mappings": self.authority_mappings,
+            },
+            "review": {
+                "review_source_limit_bytes": self.review_source_limit_bytes,
+                "omission_assessment": self.omission_assessment,
+                "coverage_summary_fingerprint": self.coverage_summary_fingerprint,
+                "source_outline": self.source_outline,
+                "coverage_summary": self.coverage_summary,
+                "coverage_diagnostics": self.coverage_diagnostics,
+                "source_units": self.source_units,
+                "review_findings": self.review_findings,
+                "ir_provenance": self.ir_provenance,
+                "ir_packet_limits": self.ir_packet_limits,
+                "ir_coverage_summary": self.ir_coverage_summary,
+            },
             "scope_discovery_fingerprint": (
                 self.scope_discovery.get("scope_discovery_fingerprint")
                 if self.scope_discovery is not None
                 else None
             ),
+            "scope_discovery": self.scope_discovery,
         }
 
     @property
+    def review_fingerprint(self) -> str:
+        """Return the complete deterministic review fingerprint."""
+        return authority_review_fingerprint(self)
+
+    @property
     def review_token(self) -> str:
-        """Return the deterministic review token."""
-        return f"{REVIEW_TOKEN_SCHEMA}:{canonical_json_hash(self.payload)}"
+        """Return the schema-qualified complete review fingerprint."""
+        return f"{REVIEW_TOKEN_SCHEMA}:{self.review_fingerprint}"
 
     @property
     def guard_tokens(self) -> JsonDict:
         """Return decision guard tokens derived from the canonical snapshot."""
         return {
             "review_token": self.review_token,
+            "review_fingerprint": self.review_fingerprint,
             "pending_authority_id": self.pending_authority_id,
             "expected_authority_fingerprint": self.authority_fingerprint,
             "expected_source_spec_hash": self.source_spec_hash,
@@ -243,6 +279,11 @@ def canonical_json_hash(payload: Mapping[str, Any]) -> str:
         default=str,
     ).encode("utf-8")
     return sha256_prefixed(encoded)
+
+
+def authority_review_fingerprint(snapshot: AuthorityReviewSnapshot) -> str:
+    """Hash every input represented in one canonical authority review packet."""
+    return canonical_json_hash(snapshot.payload)
 
 
 def coverage_summary_fingerprint(payload: Mapping[str, Any]) -> str:

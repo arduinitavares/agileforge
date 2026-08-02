@@ -5,6 +5,7 @@ from workflow.handlers.authority import (
     execute_decide_authority,
     execute_record_authority_feedback,
     execute_repair_authority,
+    validate_decide_authority_review,
 )
 from workflow.handlers.onboarding import (
     execute_decide_brownfield_initial_spec,
@@ -40,4 +41,5 @@ __all__ = [
     "execute_record_repository_inventory",
     "execute_register_initial_scope",
     "execute_repair_authority",
+    "validate_decide_authority_review",
 ]

@@ -124,6 +124,45 @@ def _matches_reference(
     )
 
 
+def _review_for_decision(
+    session: Session,
+    request: DecideAuthority,
+) -> AuthorityReviewSnapshot | TransitionResult:
+    """Rebuild and bind every persisted input for one authority decision."""
+    authority = _authority(
+        session,
+        project_id=request.project_id,
+        authority_id=request.pending_authority_id,
+    )
+    actual_fingerprint = (
+        pending_authority_fingerprint(authority) if authority is not None else None
+    )
+    if authority is None or actual_fingerprint != request.authority_fingerprint:
+        return _conflict("DecideAuthority does not target the pending authority.")
+    review = build_authority_review_snapshot_in_session(
+        session,
+        project_id=request.project_id,
+    )
+    if not isinstance(review, AuthorityReviewSnapshot):
+        return _conflict("The pending authority review packet is unavailable.")
+    if (
+        review.pending_authority_id != request.pending_authority_id
+        or review.authority_fingerprint != request.authority_fingerprint
+        or review.review_fingerprint != request.review_fingerprint
+    ):
+        return _conflict("The authority review facts changed.")
+    return review
+
+
+def validate_decide_authority_review(
+    session: Session,
+    request: DecideAuthority,
+) -> TransitionResult | None:
+    """Return a pre-receipt conflict when the reviewed packet changed."""
+    review = _review_for_decision(session, request)
+    return review if isinstance(review, TransitionResult) else None
+
+
 def execute_compile_authority(
     session: Session,
     request: CompileAuthority,
@@ -178,37 +217,16 @@ def execute_decide_authority(
     evaluated_at: datetime,
 ) -> TransitionResult:
     """Append a terminal decision bound to the exact review packet."""
-    authority = _authority(
-        session,
-        project_id=request.project_id,
-        authority_id=request.pending_authority_id,
-    )
-    actual_fingerprint = (
-        pending_authority_fingerprint(authority) if authority is not None else None
-    )
-    if (
-        authority is None
-        or actual_fingerprint != request.authority_fingerprint
-        or not _matches_reference(
-            decision,
-            fact_type="authority",
-            fact_id=request.pending_authority_id,
-            fingerprint=request.authority_fingerprint,
-        )
+    review = _review_for_decision(session, request)
+    if isinstance(review, TransitionResult):
+        return review
+    if not _matches_reference(
+        decision,
+        fact_type="authority",
+        fact_id=request.pending_authority_id,
+        fingerprint=request.authority_fingerprint,
     ):
         return _conflict("DecideAuthority does not target the pending authority.")
-    review = build_authority_review_snapshot_in_session(
-        session,
-        project_id=request.project_id,
-    )
-    if not isinstance(review, AuthorityReviewSnapshot):
-        return _conflict("The pending authority review packet is unavailable.")
-    if (
-        review.pending_authority_id != request.pending_authority_id
-        or review.authority_fingerprint != request.authority_fingerprint
-        or review.coverage_summary_fingerprint != request.review_fingerprint
-    ):
-        return _conflict("The authority review facts changed.")
     try:
         row = record_authority_decision_in_session(
             session,

@@ -37,6 +37,7 @@ from workflow.handlers import (
     execute_record_repository_inventory,
     execute_register_initial_scope,
     execute_repair_authority,
+    validate_decide_authority_review,
 )
 from workflow.requests import (
     AbandonProjectShell,
@@ -163,6 +164,16 @@ class WorkflowDomain:
     ) -> TransitionResult:
         """Own receipt claim, handler facts, and completion in one transaction."""
         self._begin_write(session)
+        if isinstance(request, DecideAuthority):
+            existing = self._existing_receipt_claim(session, request)
+            if existing is not None:
+                if existing.immediate_result is None:
+                    msg = "An existing receipt claim did not produce a result."
+                    raise RuntimeError(msg)
+                return existing.immediate_result
+            review_failure = validate_decide_authority_review(session, request)
+            if review_failure is not None:
+                return review_failure
         claim = self._claim_receipt(session, request, evaluated_at)
         if claim.immediate_result is not None:
             return claim.immediate_result
@@ -202,33 +213,12 @@ class WorkflowDomain:
         evaluated_at: datetime,
     ) -> _ReceiptClaim:
         """Claim a canonical request key or return its persisted result."""
+        existing = self._existing_receipt_claim(session, request)
+        if existing is not None:
+            return existing
         request_payload = request.model_dump(mode="json")
         request_json = canonical_json(request_payload)
         request_hash = canonical_hash(request_payload)
-        receipt = session.exec(
-            select(WorkflowTransitionReceipt).where(
-                col(WorkflowTransitionReceipt.request_kind) == request.kind,
-                col(WorkflowTransitionReceipt.idempotency_key)
-                == request.idempotency_key,
-            )
-        ).one_or_none()
-        if receipt is not None:
-            if receipt.request_fingerprint != request_hash:
-                return _ReceiptClaim(
-                    immediate_result=self._fact_conflict(
-                        "The idempotency key was already used for different input."
-                    )
-                )
-            if receipt.result_json is None or receipt.completed_at is None:
-                return _ReceiptClaim(
-                    immediate_result=self._fact_conflict(
-                        "The idempotency receipt is incomplete."
-                    )
-                )
-            persisted = TransitionResult.model_validate_json(receipt.result_json)
-            return _ReceiptClaim(
-                immediate_result=persisted.model_copy(update={"replayed": True})
-            )
 
         receipt = WorkflowTransitionReceipt(
             request_kind=request.kind,
@@ -240,6 +230,39 @@ class WorkflowDomain:
         session.add(receipt)
         session.flush()
         return _ReceiptClaim(receipt=receipt)
+
+    @staticmethod
+    def _existing_receipt_claim(
+        session: Session,
+        request: TransitionRequest,
+    ) -> _ReceiptClaim | None:
+        """Return the immutable result for an existing idempotency key."""
+        request_hash = canonical_hash(request.model_dump(mode="json"))
+        receipt = session.exec(
+            select(WorkflowTransitionReceipt).where(
+                col(WorkflowTransitionReceipt.request_kind) == request.kind,
+                col(WorkflowTransitionReceipt.idempotency_key)
+                == request.idempotency_key,
+            )
+        ).one_or_none()
+        if receipt is None:
+            return None
+        if receipt.request_fingerprint != request_hash:
+            return _ReceiptClaim(
+                immediate_result=WorkflowDomain._fact_conflict(
+                    "The idempotency key was already used for different input."
+                )
+            )
+        if receipt.result_json is None or receipt.completed_at is None:
+            return _ReceiptClaim(
+                immediate_result=WorkflowDomain._fact_conflict(
+                    "The idempotency receipt is incomplete."
+                )
+            )
+        persisted = TransitionResult.model_validate_json(receipt.result_json)
+        return _ReceiptClaim(
+            immediate_result=persisted.model_copy(update={"replayed": True})
+        )
 
     def _execute_request(
         self,
