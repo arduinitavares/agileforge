@@ -27,6 +27,8 @@ from workflow.facts import (
     PrdVersionFact,
     ProjectAbandonmentFact,
     ProjectFact,
+    RepositoryBaselineFact,
+    RepositoryInventoryFact,
     ReviewDecisionFact,
     SpecDraftFact,
     SprintFact,
@@ -152,6 +154,31 @@ AUTHORITATIVE_SNAPSHOT_VARIANTS: tuple[tuple[str, object], ...] = (
                 spec_draft_id=7,
                 spec_version_id=9,
                 spec_hash="sha256:spec-version",
+            ),
+        ),
+    ),
+    (
+        "repository_baselines",
+        (
+            RepositoryBaselineFact(
+                repository_baseline_id=10,
+                repository_path="/evidence/repository",
+                git_commit="a" * 40,
+                dirty=False,
+                content_fingerprint="sha256:baseline",
+            ),
+        ),
+    ),
+    (
+        "repository_inventories",
+        (
+            RepositoryInventoryFact(
+                repository_inventory_id=11,
+                repository_baseline_id=10,
+                content_fingerprint="sha256:inventory",
+                file_count=2,
+                total_bytes=20,
+                selected_for_model=("README.md",),
             ),
         ),
     ),

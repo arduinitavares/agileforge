@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
+from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
@@ -31,6 +31,7 @@ from services.agent_workbench.mutation_ledger import (
     MutationStatus,
     RecoveryAction,
 )
+from services.agent_workbench.repository_inventory import RepositoryInventoryService
 from services.specs.pending_authority_service import (
     ensure_pending_spec_version_for_project,
 )
@@ -56,31 +57,13 @@ BROWNFIELD_DRAFT_NOT_FOUND = ErrorCode.BROWNFIELD_DRAFT_NOT_FOUND.value
 BROWNFIELD_DRAFT_STALE = ErrorCode.BROWNFIELD_DRAFT_STALE.value
 BROWNFIELD_DRAFT_INCOMPLETE = ErrorCode.BROWNFIELD_DRAFT_INCOMPLETE.value
 BROWNFIELD_SOURCE_SUPERSEDED = ErrorCode.BROWNFIELD_SOURCE_SUPERSEDED.value
-BROWNFIELD_APPROVAL_CHAIN_MISMATCH = (
-    ErrorCode.BROWNFIELD_APPROVAL_CHAIN_MISMATCH.value
-)
+BROWNFIELD_APPROVAL_CHAIN_MISMATCH = ErrorCode.BROWNFIELD_APPROVAL_CHAIN_MISMATCH.value
 BROWNFIELD_CURATED_SPEC_ALREADY_REGISTERED = (
     ErrorCode.BROWNFIELD_CURATED_SPEC_ALREADY_REGISTERED.value
 )
 BROWNFIELD_APPROVAL_STALE_GUARD = ErrorCode.BROWNFIELD_APPROVAL_STALE_GUARD.value
 BROWNFIELD_SPEC_IMPLEMENTATION_HEAVY = "BROWNFIELD_SPEC_IMPLEMENTATION_HEAVY"
 NO_SOURCE_FINGERPRINT = "sha256:no-source"
-MAX_SCAN_FILE_BYTES = 200_000
-MAX_SCAN_MANIFEST_FILES = 1_000
-GIT_OBJECT_ID_LENGTHS = {40, 64}
-GIT_INDEX_SIGNATURE = b"DIRC"
-GIT_INDEX_HEADER_BYTES = 12
-GIT_INDEX_VERSION_OFFSET = 4
-GIT_INDEX_ENTRY_COUNT_OFFSET = 8
-GIT_INDEX_ENTRY_FIXED_BYTES = 62
-GIT_INDEX_ENTRY_MTIME_SECONDS_OFFSET = 8
-GIT_INDEX_ENTRY_MTIME_NANOSECONDS_OFFSET = 12
-GIT_INDEX_ENTRY_DEVICE_OFFSET = 16
-GIT_INDEX_ENTRY_FILE_SIZE_OFFSET = 36
-GIT_INDEX_ENTRY_FILE_SIZE_END_OFFSET = 40
-GIT_INDEX_ENTRY_PADDING_BYTES = 8
-GIT_INDEX_SUPPORTED_VERSIONS = {2, 3}
-NANOSECONDS_PER_SECOND = 1_000_000_000
 SOURCE_ARTIFACT_CREATED_AT: Any = BrownfieldSourceArtifact.created_at
 SCAN_ATTEMPT_CREATED_AT: Any = BrownfieldScanAttempt.created_at
 DRAFT_ATTEMPT_CREATED_AT: Any = BrownfieldSpecDraftAttempt.created_at
@@ -203,255 +186,6 @@ def _file_sha256(file_path: Path) -> str:
 def _preview_text(file_path: Path, limit: int = 1000) -> str:
     """Return a bounded UTF-8 preview for a raw source artifact."""
     return file_path.read_text(encoding="utf-8", errors="replace")[:limit]
-
-
-def _repo_metadata(repo_path: Path) -> dict[str, Any]:
-    """Return best-effort git metadata without requiring a git repository."""
-    git_dir = _git_dir_for_repo(repo_path)
-    if git_dir is None:
-        return {"repo_commit": None, "repo_dirty": False}
-    return {
-        "repo_commit": _read_head_commit(git_dir),
-        "repo_dirty": _git_index_has_modified_tracked_files(repo_path, git_dir),
-    }
-
-
-def _git_dir_for_repo(repo_path: Path) -> Path | None:
-    """Resolve the git metadata directory for a normal repo or linked worktree."""
-    git_path = repo_path / ".git"
-    if git_path.is_dir():
-        return git_path
-    if not git_path.is_file():
-        return None
-    try:
-        marker = git_path.read_text(encoding="utf-8", errors="replace").strip()
-    except OSError:
-        return None
-    prefix = "gitdir:"
-    if not marker.lower().startswith(prefix):
-        return None
-    raw_git_dir = marker[len(prefix) :].strip()
-    if not raw_git_dir:
-        return None
-    git_dir = Path(raw_git_dir)
-    if not git_dir.is_absolute():
-        git_dir = (repo_path / git_dir).resolve()
-    return git_dir if git_dir.is_dir() else None
-
-
-def _read_head_commit(git_dir: Path) -> str | None:
-    """Read the current HEAD object id from loose or packed refs."""
-    try:
-        head = (git_dir / "HEAD").read_text(encoding="utf-8").strip()
-    except OSError:
-        return None
-    if head.startswith("ref:"):
-        return _read_git_ref(git_dir, head.removeprefix("ref:").strip())
-    return head if _is_git_object_id(head) else None
-
-
-def _read_git_ref(git_dir: Path, ref_name: str) -> str | None:
-    """Read a git ref from loose refs first, then packed-refs."""
-    ref_path = _safe_git_ref_path(git_dir, ref_name)
-    if ref_path is None:
-        return None
-    try:
-        ref_value = ref_path.read_text(encoding="utf-8").strip()
-    except OSError:
-        ref_value = ""
-    if _is_git_object_id(ref_value):
-        return ref_value
-    return _read_packed_git_ref(git_dir, ref_name)
-
-
-def _safe_git_ref_path(git_dir: Path, ref_name: str) -> Path | None:
-    """Return a safe path for a relative git ref name."""
-    ref_parts = Path(ref_name).parts
-    if not ref_parts or ref_name.startswith("/") or ".." in ref_parts:
-        return None
-    return git_dir.joinpath(*ref_parts)
-
-
-def _read_packed_git_ref(git_dir: Path, ref_name: str) -> str | None:
-    """Read a packed ref value if the current ref has been packed."""
-    try:
-        packed_refs = (git_dir / "packed-refs").read_text(encoding="utf-8")
-    except OSError:
-        return None
-    for line in packed_refs.splitlines():
-        if not line or line.startswith(("#", "^")):
-            continue
-        object_id, _, packed_ref_name = line.partition(" ")
-        if packed_ref_name == ref_name and _is_git_object_id(object_id):
-            return object_id
-    return None
-
-
-def _is_git_object_id(value: str) -> bool:
-    """Return whether a string looks like a git object id."""
-    return len(value) in GIT_OBJECT_ID_LENGTHS and all(
-        character in "0123456789abcdefABCDEF" for character in value
-    )
-
-
-def _git_index_has_modified_tracked_files(repo_path: Path, git_dir: Path) -> bool:
-    """Return whether tracked files differ from the git index stat metadata."""
-    entries = _read_git_index_entries(git_dir / "index")
-    if entries is None:
-        return False
-    for relative_path, indexed_mtime_ns, indexed_size in entries:
-        file_path = repo_path / relative_path
-        try:
-            file_stat = file_path.lstat()
-        except OSError:
-            return True
-        if file_stat.st_size != indexed_size:
-            return True
-        if file_stat.st_mtime_ns != indexed_mtime_ns:
-            return True
-    return False
-
-
-def _read_git_index_entries(index_path: Path) -> list[tuple[str, int, int]] | None:
-    """Read path, mtime, and size entries from a v2/v3 git index."""
-    try:
-        index = index_path.read_bytes()
-    except OSError:
-        return None
-    if (
-        len(index) < GIT_INDEX_HEADER_BYTES
-        or index[:GIT_INDEX_VERSION_OFFSET] != GIT_INDEX_SIGNATURE
-    ):
-        return None
-    version = int.from_bytes(
-        index[GIT_INDEX_VERSION_OFFSET:GIT_INDEX_ENTRY_COUNT_OFFSET],
-        byteorder="big",
-    )
-    if version not in GIT_INDEX_SUPPORTED_VERSIONS:
-        return None
-    entry_count = int.from_bytes(
-        index[GIT_INDEX_ENTRY_COUNT_OFFSET:GIT_INDEX_HEADER_BYTES],
-        byteorder="big",
-    )
-    offset = GIT_INDEX_HEADER_BYTES
-    entries: list[tuple[str, int, int]] = []
-    for _ in range(entry_count):
-        entry_start = offset
-        fixed_header_end = offset + GIT_INDEX_ENTRY_FIXED_BYTES
-        if fixed_header_end > len(index):
-            return None
-        mtime_s = int.from_bytes(
-            index[
-                offset + GIT_INDEX_ENTRY_MTIME_SECONDS_OFFSET : offset
-                + GIT_INDEX_ENTRY_MTIME_NANOSECONDS_OFFSET
-            ],
-            byteorder="big",
-        )
-        mtime_ns = int.from_bytes(
-            index[
-                offset
-                + GIT_INDEX_ENTRY_MTIME_NANOSECONDS_OFFSET : offset
-                + GIT_INDEX_ENTRY_DEVICE_OFFSET
-            ],
-            byteorder="big",
-        )
-        file_size = int.from_bytes(
-            index[
-                offset + GIT_INDEX_ENTRY_FILE_SIZE_OFFSET : offset
-                + GIT_INDEX_ENTRY_FILE_SIZE_END_OFFSET
-            ],
-            byteorder="big",
-        )
-        path_start = fixed_header_end
-        path_end = index.find(b"\0", path_start)
-        if path_end == -1:
-            return None
-        relative_path = index[path_start:path_end].decode(
-            "utf-8", errors="surrogateescape"
-        )
-        entries.append(
-            (relative_path, (mtime_s * NANOSECONDS_PER_SECOND) + mtime_ns, file_size)
-        )
-        offset = path_end + 1
-        while (offset - entry_start) % GIT_INDEX_ENTRY_PADDING_BYTES != 0:
-            offset += 1
-    return entries
-
-
-def _is_secret_or_env_file(relative_path: str) -> bool:
-    """Return whether a relative path should be skipped as secret-looking."""
-    parts = relative_path.split("/")
-    if any(part == ".git" for part in parts):
-        return True
-    name = parts[-1].lower()
-    if name == ".env" or name.startswith(".env."):
-        return True
-    secret_tokens = (
-        "secret",
-        "secrets",
-        "password",
-        "passwd",
-        "token",
-        "credential",
-        "credentials",
-    )
-    secret_suffixes = (".pem", ".key", ".p12", ".pfx")
-    return any(token in name for token in secret_tokens) or name.endswith(
-        secret_suffixes
-    )
-
-
-def _file_manifest(
-    repo_path: Path,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Return a bounded deterministic manifest and skip warnings."""
-    manifest: list[dict[str, Any]] = []
-    warnings: list[dict[str, Any]] = []
-    for root, dirnames, filenames in os.walk(repo_path):
-        dirnames[:] = sorted(dirname for dirname in dirnames if dirname != ".git")
-        for filename in sorted(filenames):
-            file_path = Path(root) / filename
-            if file_path.is_symlink() or not file_path.is_file():
-                continue
-            relative = file_path.relative_to(repo_path).as_posix()
-            skipped = _scan_file_skip_reason(relative, file_path)
-            if skipped is not None:
-                warnings.append(skipped)
-                continue
-            file_size = file_path.stat().st_size
-            manifest.append(
-                {
-                    "path": relative,
-                    "sha256": _file_sha256(file_path),
-                    "size_bytes": file_size,
-                }
-            )
-            if len(manifest) >= MAX_SCAN_MANIFEST_FILES:
-                warnings.append(
-                    {
-                        "reason": "manifest_file_limit_reached",
-                        "limit": MAX_SCAN_MANIFEST_FILES,
-                    }
-                )
-                return manifest, warnings
-    return manifest, warnings
-
-
-def _scan_file_skip_reason(
-    relative: str,
-    file_path: Path,
-) -> dict[str, Any] | None:
-    """Return a manifest skip reason for files outside scan bounds."""
-    if _is_secret_or_env_file(relative):
-        return {"path": relative, "reason": "secret_or_env_file"}
-    file_size = file_path.stat().st_size
-    if file_size > MAX_SCAN_FILE_BYTES:
-        return {
-            "path": relative,
-            "reason": "file_too_large",
-            "size_bytes": file_size,
-        }
-    return None
 
 
 def _typed_item(line: str, index: int) -> dict[str, Any] | None:
@@ -646,9 +380,7 @@ def brownfield_progress(*, engine: Engine, project_id: int) -> dict[str, Any]:
         "scan": "current" if scan is not None else "missing",
         "draft": "ready" if draft is not None else "missing",
         "approval": "required" if draft is not None else "blocked",
-        "recommended_draft_attempt_id": draft.attempt_id
-        if draft is not None
-        else None,
+        "recommended_draft_attempt_id": draft.attempt_id if draft is not None else None,
     }
 
 
@@ -779,7 +511,7 @@ class BrownfieldCurationRunner:
         correlation_id: str | None = None,
         changed_by: str = "cli-agent",
     ) -> dict[str, Any]:
-        """Record a bounded repository scan for brownfield curation."""
+        """Record a complete repository inventory for brownfield curation."""
         if not self._project_exists(project_id):
             return _error(
                 ErrorCode.PROJECT_NOT_FOUND,
@@ -812,16 +544,17 @@ class BrownfieldCurationRunner:
                 )
             source_fingerprint = source.artifact_fingerprint
 
-        metadata = _repo_metadata(resolved_repo)
-        manifest, skip_warnings = _file_manifest(resolved_repo)
-        manifest_hash = canonical_hash({"files": manifest})
+        inventory = RepositoryInventoryService().inventory(resolved_repo)
+        manifest = [asdict(item) for item in inventory.files]
+        selected_for_model = list(inventory.selected_for_model)
+        manifest_hash = inventory.inventory_fingerprint
         request_hash = canonical_hash(
             {
                 "command": BROWNFIELD_SCAN_COMMAND,
                 "project_id": project_id,
                 "repo_path": str(resolved_repo),
-                "repo_commit": metadata["repo_commit"],
-                "repo_dirty": metadata["repo_dirty"],
+                "repo_commit": inventory.commit,
+                "repo_dirty": inventory.dirty,
                 "manifest_hash": manifest_hash,
                 "source_attempt_id": source_attempt_id,
                 "source_fingerprint": source_fingerprint,
@@ -857,12 +590,12 @@ class BrownfieldCurationRunner:
                 "project_id": project_id,
                 "attempt_id": attempt_id,
                 "source_fingerprint": source_fingerprint,
-                "repo": metadata,
+                "repo_commit": inventory.commit,
+                "repo_dirty": inventory.dirty,
                 "manifest_hash": manifest_hash,
                 "tool_version": BROWNFIELD_COMMAND_VERSION,
             }
         )
-        facts = [{"kind": "file", "path": item["path"]} for item in manifest[:200]]
         data = {
             "project_id": project_id,
             "attempt_id": attempt_id,
@@ -870,11 +603,11 @@ class BrownfieldCurationRunner:
             "source_attempt_id": source_attempt_id,
             "source_fingerprint": source_fingerprint,
             "repo_path": str(resolved_repo),
-            "repo_commit": metadata["repo_commit"],
-            "repo_dirty": metadata["repo_dirty"],
+            "repo_commit": inventory.commit,
+            "repo_dirty": inventory.dirty,
             "manifest_hash": manifest_hash,
             "manifest": manifest,
-            "implementation_facts": facts,
+            "selected_for_model": selected_for_model,
             "status": "complete",
             "mutation_event_id": mutation_event_id,
         }
@@ -887,12 +620,12 @@ class BrownfieldCurationRunner:
                     source_attempt_id=source_attempt_id,
                     source_fingerprint=source_fingerprint,
                     repo_path=str(resolved_repo),
-                    repo_commit=metadata["repo_commit"],
-                    repo_dirty=bool(metadata["repo_dirty"]),
+                    repo_commit=inventory.commit,
+                    repo_dirty=inventory.dirty,
                     file_manifest_json=_json_dump(manifest),
-                    implementation_facts_json=_json_dump(facts),
+                    implementation_facts_json=_json_dump(selected_for_model),
                     request_hash=request_hash,
-                    warning_metadata_json=_json_dump(skip_warnings),
+                    warning_metadata_json="[]",
                     tool_version=BROWNFIELD_COMMAND_VERSION,
                 )
             )

@@ -9,6 +9,7 @@ from workflow.contracts import (
     RecommendationKind,
 )
 from workflow.definitions.onboarding import (
+    BROWNFIELD_ONBOARDING_NODES,
     GREENFIELD_ONBOARDING_NODES,
     has_historical_accepted_authority,
 )
@@ -82,7 +83,12 @@ ROOT_GRAPH: WorkflowGraph = WorkflowGraph(
         children=(
             ChildGraphSpec(
                 child_graph_id="onboarding",
-                nodes=(*GREENFIELD_ONBOARDING_NODES, _ABANDON_SHELL_NODE),
+                nodes=(
+                    *GREENFIELD_ONBOARDING_NODES[:-1],
+                    *BROWNFIELD_ONBOARDING_NODES,
+                    GREENFIELD_ONBOARDING_NODES[-1],
+                    _ABANDON_SHELL_NODE,
+                ),
             ),
             ChildGraphSpec(child_graph_id="authority", nodes=()),
             ChildGraphSpec(child_graph_id="vision", nodes=()),

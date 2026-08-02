@@ -1,4 +1,4 @@
-"""Transactional handlers for greenfield onboarding transitions."""
+"""Transactional handlers for greenfield and brownfield onboarding."""
 
 from __future__ import annotations
 
@@ -13,6 +13,8 @@ from models.workflow import (
     InitialScopeRegistration,
     PrdDecision,
     PrdVersion,
+    RepositoryBaseline,
+    RepositoryInventory,
     SpecDraft,
     SpecDraftDecision,
 )
@@ -36,11 +38,15 @@ if TYPE_CHECKING:
     from datetime import datetime
 
     from workflow.requests import (
+        DecideBrownfieldInitialSpec,
         DecideInitialSpecDraft,
         DecidePrd,
+        RecordBrownfieldSpecDraft,
         RecordChallengeArtifact,
         RecordInitialSpecDraft,
         RecordPrdVersion,
+        RecordRepositoryBaseline,
+        RecordRepositoryInventory,
         RegisterInitialScope,
     )
 
@@ -215,6 +221,222 @@ def _spec_replacement_error(
     if requested_parent_id != active_id:
         return "The replacement must supersede the exact reviewed draft."
     return None
+
+
+def execute_record_repository_baseline(
+    session: Session,
+    request: RecordRepositoryBaseline,
+    decision: NodeDecision,
+    evaluated_at: datetime,
+) -> TransitionResult:
+    """Store one canonical repository baseline without changing Project identity."""
+    expected_fingerprint = canonical_hash(
+        {
+            "repository_path": request.repository_path,
+            "git_commit": request.git_commit,
+            "dirty": request.dirty,
+        }
+    )
+    if request.baseline_fingerprint != expected_fingerprint:
+        return _conflict(
+            "The repository baseline fingerprint does not match its input."
+        )
+    rows = session.exec(
+        select(RepositoryBaseline).where(
+            col(RepositoryBaseline.project_id) == request.project_id
+        )
+    ).all()
+    if rows:
+        return _conflict("A repository baseline already exists for this Project.")
+    baseline = RepositoryBaseline(
+        project_id=request.project_id,
+        repository_path=request.repository_path,
+        git_commit=request.git_commit,
+        dirty=request.dirty,
+        content_fingerprint=expected_fingerprint,
+        version_number=1,
+        recorded_at=evaluated_at,
+    )
+    session.add(baseline)
+    session.flush()
+    baseline_id = _required_id(
+        baseline.repository_baseline_id,
+        "repository baseline",
+    )
+    return _success(
+        decision,
+        {
+            "repository_baseline_id": baseline_id,
+            "content_fingerprint": baseline.content_fingerprint,
+        },
+    )
+
+
+def execute_record_repository_inventory(
+    session: Session,
+    request: RecordRepositoryInventory,
+    decision: NodeDecision,
+    evaluated_at: datetime,
+) -> TransitionResult:
+    """Store complete inventory independently from bounded model selection."""
+    baseline = session.exec(
+        select(RepositoryBaseline).where(
+            col(RepositoryBaseline.project_id) == request.project_id,
+            col(RepositoryBaseline.repository_baseline_id)
+            == request.repository_baseline_id,
+        )
+    ).one_or_none()
+    if baseline is None:
+        return _conflict("The inventory does not target this Project's baseline.")
+    existing = session.exec(
+        select(RepositoryInventory).where(
+            col(RepositoryInventory.project_id) == request.project_id
+        )
+    ).all()
+    if existing:
+        return _conflict("A repository inventory already exists for this Project.")
+
+    files = [item.model_dump(mode="json") for item in request.files]
+    paths = [item.path for item in request.files]
+    expected_paths = sorted(paths, key=lambda path: path.encode("utf-8"))
+    hashable_paths = {
+        item.path for item in request.files if item.content_status == "hashable"
+    }
+    if (
+        paths != expected_paths
+        or len(paths) != len(set(paths))
+        or sum(item.size_bytes for item in request.files) != request.total_bytes
+        or len(request.selected_for_model) != len(set(request.selected_for_model))
+        or any(path not in hashable_paths for path in request.selected_for_model)
+    ):
+        return _conflict("The repository inventory payload is not canonical.")
+    inventory_payload = {"files": files, "total_bytes": request.total_bytes}
+    expected_fingerprint = canonical_hash(inventory_payload)
+    if request.inventory_fingerprint != expected_fingerprint:
+        return _conflict(
+            "The repository inventory fingerprint does not match its input."
+        )
+
+    inventory = RepositoryInventory(
+        project_id=request.project_id,
+        repository_baseline_id=request.repository_baseline_id,
+        canonical_inventory_json=canonical_json(inventory_payload),
+        selected_for_model_json=canonical_json(request.selected_for_model),
+        content_fingerprint=expected_fingerprint,
+        version_number=1,
+        file_count=len(request.files),
+        total_bytes=request.total_bytes,
+        recorded_at=evaluated_at,
+    )
+    session.add(inventory)
+    session.flush()
+    inventory_id = _required_id(
+        inventory.repository_inventory_id,
+        "repository inventory",
+    )
+    return _success(
+        decision,
+        {
+            "repository_inventory_id": inventory_id,
+            "content_fingerprint": inventory.content_fingerprint,
+        },
+    )
+
+
+def execute_record_brownfield_spec_draft(
+    session: Session,
+    request: RecordBrownfieldSpecDraft,
+    decision: NodeDecision,
+    evaluated_at: datetime,
+) -> TransitionResult:
+    """Append an initial spec draft derived from one Project inventory."""
+    inventory = session.exec(
+        select(RepositoryInventory).where(
+            col(RepositoryInventory.project_id) == request.project_id,
+            col(RepositoryInventory.repository_inventory_id)
+            == request.repository_inventory_id,
+        )
+    ).one_or_none()
+    if inventory is None:
+        return _conflict("The draft does not target this Project's inventory.")
+    run = _initial_run(session, request.project_id)
+    if run is None:
+        return _conflict("The Project does not have exactly one open initial run.")
+    run_id = _required_id(run.discovery_run_id, "initial discovery run")
+    rows = _spec_rows(session, request.project_id, run_id)
+    replacement_error = _spec_replacement_error(
+        session,
+        request.project_id,
+        rows,
+        request.supersedes_spec_draft_id,
+    )
+    if replacement_error is not None:
+        return _conflict(replacement_error)
+    draft = SpecDraft(
+        project_id=request.project_id,
+        discovery_run_id=run_id,
+        kind="initial",
+        version_number=max((row.version_number for row in rows), default=0) + 1,
+        canonical_content_json=canonical_json(request.canonical_content),
+        content_fingerprint=canonical_hash(request.canonical_content),
+        base_spec_version_id=None,
+        base_spec_hash=None,
+        supersedes_spec_draft_id=request.supersedes_spec_draft_id,
+        provenance_path=request.provenance_path,
+        created_at=evaluated_at,
+    )
+    session.add(draft)
+    session.flush()
+    draft_id = _required_id(draft.spec_draft_id, "specification draft")
+    return _success(
+        decision,
+        {
+            "spec_draft_id": draft_id,
+            "content_fingerprint": draft.content_fingerprint,
+        },
+    )
+
+
+def execute_decide_brownfield_initial_spec(
+    session: Session,
+    request: DecideBrownfieldInitialSpec,
+    decision: NodeDecision,
+    evaluated_at: datetime,
+) -> TransitionResult:
+    """Append a terminal decision bound to the exact brownfield draft."""
+    run = _initial_run(session, request.project_id)
+    if run is None:
+        return _conflict("The Project does not have exactly one open initial run.")
+    run_id = _required_id(run.discovery_run_id, "initial discovery run")
+    active = _active_spec(_spec_rows(session, request.project_id, run_id))
+    if active is None:
+        return _conflict("The persisted initial-draft chain is ambiguous.")
+    active_id = _required_id(active.spec_draft_id, "specification draft")
+    if (
+        request.spec_draft_id != active_id
+        or request.artifact_fingerprint != active.content_fingerprint
+    ):
+        return _conflict("The decision does not target the exact active draft.")
+    if _spec_decision(session, request.project_id, active_id) is not None:
+        return _conflict("The exact initial draft already has a terminal decision.")
+    review = SpecDraftDecision(
+        project_id=request.project_id,
+        discovery_run_id=run_id,
+        spec_draft_id=active_id,
+        artifact_fingerprint=active.content_fingerprint,
+        decision=request.decision,
+        reviewer=request.actor,
+        notes=request.notes,
+        idempotency_key=request.idempotency_key,
+        decided_at=evaluated_at,
+    )
+    session.add(review)
+    session.flush()
+    review_id = _required_id(
+        review.spec_draft_decision_id,
+        "specification draft decision",
+    )
+    return _success(decision, {"spec_draft_decision_id": review_id})
 
 
 def execute_record_challenge_artifact(
@@ -552,10 +774,14 @@ def execute_register_initial_scope(
 
 
 __all__ = [
+    "execute_decide_brownfield_initial_spec",
     "execute_decide_initial_spec_draft",
     "execute_decide_prd",
+    "execute_record_brownfield_spec_draft",
     "execute_record_challenge_artifact",
     "execute_record_initial_spec_draft",
     "execute_record_prd_version",
+    "execute_record_repository_baseline",
+    "execute_record_repository_inventory",
     "execute_register_initial_scope",
 ]

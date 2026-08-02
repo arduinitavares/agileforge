@@ -1,4 +1,4 @@
-"""Pure greenfield onboarding graph rules."""
+"""Pure greenfield and brownfield onboarding graph rules."""
 
 from __future__ import annotations
 
@@ -24,7 +24,10 @@ if TYPE_CHECKING:
 
     from workflow.facts import (
         ChallengeArtifactFact,
+        InitialScopeRegistrationFact,
         PrdVersionFact,
+        RepositoryBaselineFact,
+        RepositoryInventoryFact,
         ReviewDecisionFact,
         SpecDraftFact,
         WorkflowFactSnapshot,
@@ -82,6 +85,20 @@ def _run_context(
 ) -> tuple[int | None, tuple[RuleEvaluation, ...] | None]:
     if snapshot.project.origin != "greenfield":
         return None, _evaluation(RuleCategory.SATISFIED, "NOT_GREENFIELD")
+    return _initial_run_context(snapshot)
+
+
+def _brownfield_run_context(
+    snapshot: WorkflowFactSnapshot,
+) -> tuple[int | None, tuple[RuleEvaluation, ...] | None]:
+    if snapshot.project.origin != "brownfield":
+        return None, _evaluation(RuleCategory.SATISFIED, "NOT_BROWNFIELD")
+    return _initial_run_context(snapshot)
+
+
+def _initial_run_context(
+    snapshot: WorkflowFactSnapshot,
+) -> tuple[int | None, tuple[RuleEvaluation, ...] | None]:
     if len(snapshot.project_abandonments) > 1 or (
         snapshot.project_abandonments and has_historical_accepted_authority(snapshot)
     ):
@@ -565,6 +582,178 @@ def _accepted_spec(
     return selection.active, False
 
 
+def _brownfield_evidence(
+    snapshot: WorkflowFactSnapshot,
+) -> tuple[RepositoryBaselineFact | None, RepositoryInventoryFact | None, bool]:
+    baselines = snapshot.repository_baselines
+    inventories = snapshot.repository_inventories
+    if len(baselines) > 1 or len(inventories) > 1:
+        return None, None, True
+    baseline = baselines[0] if baselines else None
+    inventory = inventories[0] if inventories else None
+    conflict = inventory is not None and (
+        baseline is None
+        or inventory.repository_baseline_id != baseline.repository_baseline_id
+    )
+    return baseline, inventory, conflict
+
+
+def _brownfield_baseline_rule(
+    snapshot: WorkflowFactSnapshot,
+    _evaluated_at: datetime,
+) -> tuple[RuleEvaluation, ...]:
+    _run_id, terminal = _brownfield_run_context(snapshot)
+    if terminal is not None:
+        return terminal
+    baseline, inventory, conflict = _brownfield_evidence(snapshot)
+    downstream_exists = (
+        inventory is not None
+        or bool(snapshot.spec_drafts)
+        or bool(snapshot.initial_registrations)
+    )
+    if conflict or (baseline is None and downstream_exists):
+        return _invalid()
+    if baseline is None:
+        return _evaluation(RuleCategory.AVAILABLE, "REPOSITORY_BASELINE_REQUIRED")
+    return _evaluation(RuleCategory.SATISFIED, "REPOSITORY_BASELINE_RECORDED")
+
+
+def _brownfield_inventory_rule(
+    snapshot: WorkflowFactSnapshot,
+    _evaluated_at: datetime,
+) -> tuple[RuleEvaluation, ...]:
+    _run_id, terminal = _brownfield_run_context(snapshot)
+    if terminal is not None:
+        return terminal
+    baseline, inventory, conflict = _brownfield_evidence(snapshot)
+    if conflict or (baseline is None and inventory is not None):
+        return _invalid()
+    if baseline is None:
+        return _evaluation(RuleCategory.WAITING, "WAITING_FOR_REPOSITORY_BASELINE")
+    if inventory is None and (snapshot.spec_drafts or snapshot.initial_registrations):
+        return _invalid()
+    if inventory is None:
+        return _evaluation(
+            RuleCategory.AVAILABLE,
+            "REPOSITORY_INVENTORY_REQUIRED",
+            fact_references=(
+                _reference(
+                    "repository_baseline",
+                    baseline.repository_baseline_id,
+                    baseline.content_fingerprint,
+                ),
+            ),
+        )
+    return _evaluation(RuleCategory.SATISFIED, "REPOSITORY_INVENTORY_RECORDED")
+
+
+def _brownfield_curation_rule(
+    snapshot: WorkflowFactSnapshot,
+    _evaluated_at: datetime,
+) -> tuple[RuleEvaluation, ...]:
+    run_id, terminal = _brownfield_run_context(snapshot)
+    result = terminal or _invalid()
+    if terminal is None:
+        run_id = _required_run_id(run_id)
+        _baseline, inventory, conflict = _brownfield_evidence(snapshot)
+        selection = _active_spec(snapshot, run_id)
+        if conflict or selection.conflict:
+            result = _invalid()
+        elif inventory is None:
+            result = (
+                _invalid()
+                if selection.active is not None
+                else _evaluation(
+                    RuleCategory.WAITING,
+                    "WAITING_FOR_REPOSITORY_INVENTORY",
+                )
+            )
+        elif selection.active is None:
+            result = _evaluation(
+                RuleCategory.AVAILABLE,
+                "BROWNFIELD_SPEC_DRAFT_REQUIRED",
+                fact_references=(
+                    _reference(
+                        "repository_inventory",
+                        inventory.repository_inventory_id,
+                        inventory.content_fingerprint,
+                    ),
+                ),
+            )
+        else:
+            decision, decision_conflict = _decision_for(
+                snapshot,
+                artifact_type="spec_draft",
+                artifact_id=selection.active.spec_draft_id,
+                artifact_fingerprint=selection.active.content_fingerprint,
+            )
+            if decision_conflict:
+                result = _invalid()
+            elif decision is not None and decision.decision != "accepted":
+                result = _evaluation(
+                    RuleCategory.AVAILABLE,
+                    "BROWNFIELD_SPEC_REPLACEMENT_REQUIRED",
+                    fact_references=(
+                        _reference(
+                            "spec_draft",
+                            selection.active.spec_draft_id,
+                            selection.active.content_fingerprint,
+                        ),
+                    ),
+                )
+            else:
+                result = _evaluation(
+                    RuleCategory.SATISFIED,
+                    "BROWNFIELD_SPEC_DRAFT_RECORDED",
+                )
+    return result
+
+
+def _brownfield_initial_spec_review_rule(
+    snapshot: WorkflowFactSnapshot,
+    _evaluated_at: datetime,
+) -> tuple[RuleEvaluation, ...]:
+    run_id, terminal = _brownfield_run_context(snapshot)
+    result = terminal or _invalid()
+    if terminal is None:
+        run_id = _required_run_id(run_id)
+        _baseline, inventory, evidence_conflict = _brownfield_evidence(snapshot)
+        selection = _active_spec(snapshot, run_id)
+        if evidence_conflict or selection.conflict:
+            result = _invalid()
+        elif selection.active is None:
+            result = _evaluation(RuleCategory.WAITING, "WAITING_FOR_BROWNFIELD_SPEC")
+        elif inventory is None:
+            result = _invalid()
+        else:
+            decision, decision_conflict = _decision_for(
+                snapshot,
+                artifact_type="spec_draft",
+                artifact_id=selection.active.spec_draft_id,
+                artifact_fingerprint=selection.active.content_fingerprint,
+            )
+            if decision_conflict:
+                result = _invalid()
+            elif decision is not None:
+                result = _evaluation(
+                    RuleCategory.SATISFIED,
+                    "BROWNFIELD_SPEC_REVIEWED",
+                )
+            else:
+                result = _evaluation(
+                    RuleCategory.AVAILABLE,
+                    "BROWNFIELD_SPEC_REVIEW_REQUIRED",
+                    fact_references=(
+                        _reference(
+                            "spec_draft",
+                            selection.active.spec_draft_id,
+                            selection.active.content_fingerprint,
+                        ),
+                    ),
+                )
+    return result
+
+
 def _registration_waiting_for_prd(
     *,
     downstream_exists: bool,
@@ -595,48 +784,180 @@ def _registration_rule(
     snapshot: WorkflowFactSnapshot,
     _evaluated_at: datetime,
 ) -> tuple[RuleEvaluation, ...]:
-    run_id, terminal = _run_context(snapshot)
-    result = terminal or _invalid()
-    if terminal is None:
-        run_id = _required_run_id(run_id)
-        accepted_prd, prd_conflict = _accepted_prd(snapshot, run_id)
-        accepted_spec, spec_conflict = _accepted_spec(snapshot, run_id)
-        registrations = tuple(
-            registration
-            for registration in snapshot.initial_registrations
-            if registration.discovery_run_id == run_id
+    run_id, terminal = _initial_run_context(snapshot)
+    if terminal is not None:
+        return terminal
+    run_id = _required_run_id(run_id)
+    accepted_spec, spec_conflict = _accepted_spec(snapshot, run_id)
+    registrations = tuple(
+        registration
+        for registration in snapshot.initial_registrations
+        if registration.discovery_run_id == run_id
+    )
+    if len(registrations) > 1:
+        return _invalid()
+    if snapshot.project.origin == "greenfield":
+        return _greenfield_registration_result(
+            snapshot,
+            run_id=run_id,
+            accepted_spec=accepted_spec,
+            spec_conflict=spec_conflict,
+            registrations=registrations,
         )
-        if len(registrations) > 1:
-            result = _invalid()
-        elif accepted_prd is None:
-            result = _registration_waiting_for_prd(
-                downstream_exists=accepted_spec is not None or bool(registrations),
-                conflict=prd_conflict,
-            )
-        elif accepted_spec is None:
-            result = _registration_waiting_for_spec(
-                registration_exists=bool(registrations),
-                conflict=spec_conflict,
-            )
-        elif registrations:
-            result = (
-                _evaluation(RuleCategory.SATISFIED, "INITIAL_SCOPE_REGISTERED")
-                if registrations[0].spec_draft_id == accepted_spec.spec_draft_id
-                else _invalid()
-            )
-        else:
-            result = _evaluation(
-                RuleCategory.AVAILABLE,
-                "INITIAL_SCOPE_REGISTRATION_REQUIRED",
-                fact_references=(
-                    _reference(
-                        "spec_draft",
-                        accepted_spec.spec_draft_id,
-                        accepted_spec.content_fingerprint,
-                    ),
-                ),
-            )
-    return result
+    return _brownfield_registration_result(
+        snapshot,
+        accepted_spec=accepted_spec,
+        spec_conflict=spec_conflict,
+        registrations=registrations,
+    )
+
+
+def _greenfield_registration_result(
+    snapshot: WorkflowFactSnapshot,
+    *,
+    run_id: int,
+    accepted_spec: SpecDraftFact | None,
+    spec_conflict: bool,
+    registrations: tuple[InitialScopeRegistrationFact, ...],
+) -> tuple[RuleEvaluation, ...]:
+    accepted_prd, prd_conflict = _accepted_prd(snapshot, run_id)
+    if accepted_prd is None:
+        return _registration_waiting_for_prd(
+            downstream_exists=accepted_spec is not None or bool(registrations),
+            conflict=prd_conflict,
+        )
+    if accepted_spec is None:
+        return _registration_waiting_for_spec(
+            registration_exists=bool(registrations),
+            conflict=spec_conflict,
+        )
+    return _registration_for_accepted_spec(accepted_spec, registrations)
+
+
+def _brownfield_registration_result(
+    snapshot: WorkflowFactSnapshot,
+    *,
+    accepted_spec: SpecDraftFact | None,
+    spec_conflict: bool,
+    registrations: tuple[InitialScopeRegistrationFact, ...],
+) -> tuple[RuleEvaluation, ...]:
+    baseline, inventory, evidence_conflict = _brownfield_evidence(snapshot)
+    evidence_missing = baseline is None or inventory is None
+    if evidence_conflict or (
+        evidence_missing and (accepted_spec is not None or bool(registrations))
+    ):
+        return _invalid()
+    if evidence_missing:
+        return _evaluation(RuleCategory.WAITING, "WAITING_FOR_REPOSITORY_INVENTORY")
+    if accepted_spec is None:
+        return _registration_waiting_for_spec(
+            registration_exists=bool(registrations),
+            conflict=spec_conflict,
+        )
+    return _registration_for_accepted_spec(accepted_spec, registrations)
+
+
+def _registration_for_accepted_spec(
+    accepted_spec: SpecDraftFact,
+    registrations: tuple[InitialScopeRegistrationFact, ...],
+) -> tuple[RuleEvaluation, ...]:
+    if registrations:
+        return (
+            _evaluation(RuleCategory.SATISFIED, "INITIAL_SCOPE_REGISTERED")
+            if registrations[0].spec_draft_id == accepted_spec.spec_draft_id
+            else _invalid()
+        )
+    return _registration_available(accepted_spec)
+
+
+def _registration_available(
+    accepted_spec: SpecDraftFact,
+) -> tuple[RuleEvaluation, ...]:
+    return _evaluation(
+        RuleCategory.AVAILABLE,
+        "INITIAL_SCOPE_REGISTRATION_REQUIRED",
+        fact_references=(
+            _reference(
+                "spec_draft",
+                accepted_spec.spec_draft_id,
+                accepted_spec.content_fingerprint,
+            ),
+        ),
+    )
+
+
+_INITIAL_SCOPE_REGISTRATION_NODE = NodeSpec(
+    node_id="onboarding.initial_scope_registration",
+    child_graph_id="onboarding",
+    request_kind="register_initial_scope",
+    recommendation_kind=RecommendationKind.REQUIRED,
+    required_inputs=(InputField(name="spec_draft_id", value_type="integer"),),
+    evaluate_rule=_registration_rule,
+)
+
+BROWNFIELD_ONBOARDING_NODES: tuple[NodeSpec, ...] = (
+    NodeSpec(
+        node_id="onboarding.brownfield.baseline",
+        child_graph_id="onboarding",
+        request_kind="record_repository_baseline",
+        recommendation_kind=RecommendationKind.REQUIRED,
+        required_inputs=(
+            InputField(name="repository_path", value_type="string"),
+            InputField(name="git_commit", value_type="string", required=False),
+            InputField(name="dirty", value_type="boolean"),
+            InputField(name="baseline_fingerprint", value_type="string"),
+        ),
+        evaluate_rule=_brownfield_baseline_rule,
+    ),
+    NodeSpec(
+        node_id="onboarding.brownfield.inventory",
+        child_graph_id="onboarding",
+        request_kind="record_repository_inventory",
+        recommendation_kind=RecommendationKind.REQUIRED,
+        required_inputs=(
+            InputField(name="repository_baseline_id", value_type="integer"),
+            InputField(name="files", value_type="array"),
+            InputField(name="selected_for_model", value_type="array"),
+            InputField(name="total_bytes", value_type="integer"),
+            InputField(name="inventory_fingerprint", value_type="string"),
+        ),
+        evaluate_rule=_brownfield_inventory_rule,
+    ),
+    NodeSpec(
+        node_id="onboarding.brownfield.curation",
+        child_graph_id="onboarding",
+        request_kind="record_brownfield_spec_draft",
+        recommendation_kind=RecommendationKind.REQUIRED,
+        required_inputs=(
+            InputField(name="repository_inventory_id", value_type="integer"),
+            InputField(name="canonical_content", value_type="object"),
+            InputField(
+                name="supersedes_spec_draft_id",
+                value_type="integer",
+                required=False,
+            ),
+            InputField(
+                name="provenance_path",
+                value_type="string",
+                required=False,
+            ),
+        ),
+        evaluate_rule=_brownfield_curation_rule,
+    ),
+    NodeSpec(
+        node_id="onboarding.brownfield.initial_spec_review",
+        child_graph_id="onboarding",
+        request_kind="decide_brownfield_initial_spec",
+        recommendation_kind=RecommendationKind.REQUIRED,
+        required_inputs=(
+            InputField(name="spec_draft_id", value_type="integer"),
+            InputField(name="artifact_fingerprint", value_type="string"),
+            InputField(name="decision", value_type="string"),
+            InputField(name="notes", value_type="string"),
+        ),
+        evaluate_rule=_brownfield_initial_spec_review_rule,
+    ),
+)
 
 
 GREENFIELD_ONBOARDING_NODES: tuple[NodeSpec, ...] = (
@@ -723,14 +1044,7 @@ GREENFIELD_ONBOARDING_NODES: tuple[NodeSpec, ...] = (
         ),
         evaluate_rule=_initial_spec_review_rule,
     ),
-    NodeSpec(
-        node_id="onboarding.initial_scope_registration",
-        child_graph_id="onboarding",
-        request_kind="register_initial_scope",
-        recommendation_kind=RecommendationKind.REQUIRED,
-        required_inputs=(InputField(name="spec_draft_id", value_type="integer"),),
-        evaluate_rule=_registration_rule,
-    ),
+    _INITIAL_SCOPE_REGISTRATION_NODE,
 )
 
 
@@ -751,8 +1065,30 @@ def greenfield_graph() -> WorkflowGraph:
     )
 
 
+def brownfield_graph() -> WorkflowGraph:
+    """Return the isolated pure brownfield onboarding graph."""
+    return WorkflowGraph(
+        graph_version=GRAPH_VERSION,
+        root=ChildGraphSpec(
+            child_graph_id="product_lifecycle",
+            nodes=(),
+            children=(
+                ChildGraphSpec(
+                    child_graph_id="onboarding",
+                    nodes=(
+                        *BROWNFIELD_ONBOARDING_NODES,
+                        _INITIAL_SCOPE_REGISTRATION_NODE,
+                    ),
+                ),
+            ),
+        ),
+    )
+
+
 __all__ = [
+    "BROWNFIELD_ONBOARDING_NODES",
     "GREENFIELD_ONBOARDING_NODES",
+    "brownfield_graph",
     "greenfield_graph",
     "has_historical_accepted_authority",
 ]

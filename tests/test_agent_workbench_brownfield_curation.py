@@ -27,6 +27,8 @@ if TYPE_CHECKING:
     import pytest
     from sqlalchemy.engine import Engine
 
+_COMPLETE_SCAN_FILE_COUNT = 1_001
+
 
 def _project(engine: Engine, name: str = "Brownfield App") -> int:
     with Session(engine) as session:
@@ -402,9 +404,9 @@ def test_scan_records_repo_snapshot_with_source_chain(
         scan_rows = session.exec(select(BrownfieldScanAttempt)).all()
         assert len(scan_rows) == 1
         assert scan_rows[0].repo_path == str(repo.resolve())
-        assert scan_rows[0].source_fingerprint == imported["data"][
-            "artifact_fingerprint"
-        ]
+        assert (
+            scan_rows[0].source_fingerprint == imported["data"]["artifact_fingerprint"]
+        )
         assert session.exec(select(SpecRegistry)).all() == []
 
 
@@ -471,7 +473,7 @@ def test_scan_rejects_missing_repo_path(
     assert result["errors"][0]["code"] == "BROWNFIELD_REPO_PATH_NOT_FOUND"
 
 
-def test_scan_manifest_skips_git_env_secret_and_large_files(
+def test_scan_persists_complete_manifest_and_separate_model_selection(
     engine: Engine,
     tmp_path: Path,
 ) -> None:
@@ -499,11 +501,59 @@ def test_scan_manifest_skips_git_env_secret_and_large_files(
     manifest = json.loads(row.file_manifest_json)
     assert manifest == [
         {
+            "content_status": "secret",
+            "path": ".env",
+            "sha256": None,
+            "size_bytes": len("SECRET_KEY=value\n"),
+        },
+        {
+            "content_status": "hashable",
             "path": "app.py",
-            "sha256": result["data"]["manifest"][0]["sha256"],
+            "sha256": result["data"]["manifest"][1]["sha256"],
             "size_bytes": len("print('safe')\n"),
-        }
+        },
+        {
+            "content_status": "hashable",
+            "path": "large.txt",
+            "sha256": result["data"]["manifest"][2]["sha256"],
+            "size_bytes": 250_000,
+        },
+        {
+            "content_status": "secret",
+            "path": "service.secret",
+            "sha256": None,
+            "size_bytes": len("token=value\n"),
+        },
     ]
+    assert json.loads(row.implementation_facts_json) == ["app.py", "large.txt"]
+    assert result["data"]["selected_for_model"] == ["app.py", "large.txt"]
+    assert result["warnings"] == []
+
+
+def test_scan_does_not_stop_at_one_thousand_files(
+    engine: Engine,
+    tmp_path: Path,
+) -> None:
+    project_id = _project(engine)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    for index in range(_COMPLETE_SCAN_FILE_COUNT):
+        (repo / f"file-{index:04d}.txt").write_text("x", encoding="utf-8")
+    runner = BrownfieldCurationRunner(engine=engine)
+
+    result = runner.scan(
+        project_id=project_id,
+        repo_path=str(repo),
+        idempotency_key="scan-complete-001",
+        changed_by="agent",
+    )
+
+    assert result["ok"] is True
+    assert len(result["data"]["manifest"]) == _COMPLETE_SCAN_FILE_COUNT
+    assert result["warnings"] == []
+    with Session(engine) as session:
+        row = session.exec(select(BrownfieldScanAttempt)).one()
+    assert len(json.loads(row.file_manifest_json)) == _COMPLETE_SCAN_FILE_COUNT
 
 
 def test_spec_draft_from_typed_source_creates_reusable_candidate(

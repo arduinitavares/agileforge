@@ -111,6 +111,27 @@ class InitialScopeRegistrationFact(FrozenModel):
     spec_hash: str
 
 
+class RepositoryBaselineFact(FrozenModel):
+    """Versioned repository identity captured for brownfield onboarding."""
+
+    repository_baseline_id: int
+    repository_path: str
+    git_commit: str | None
+    dirty: bool
+    content_fingerprint: str
+
+
+class RepositoryInventoryFact(FrozenModel):
+    """Complete repository inventory and separate bounded model selection."""
+
+    repository_inventory_id: int
+    repository_baseline_id: int
+    content_fingerprint: str
+    file_count: int
+    total_bytes: int
+    selected_for_model: tuple[str, ...]
+
+
 class AuthorityFact(FrozenModel):
     """Compiled authority associated with a specification version."""
 
@@ -194,6 +215,8 @@ class WorkflowFactSnapshot(FrozenModel):
     review_decisions: tuple[ReviewDecisionFact, ...] = ()
     spec_drafts: tuple[SpecDraftFact, ...] = ()
     initial_registrations: tuple[InitialScopeRegistrationFact, ...] = ()
+    repository_baselines: tuple[RepositoryBaselineFact, ...] = ()
+    repository_inventories: tuple[RepositoryInventoryFact, ...] = ()
     authorities: tuple[AuthorityFact, ...] = ()
     phase_artifacts: tuple[PhaseArtifactFact, ...] = ()
     sprints: tuple[SprintFact, ...] = ()

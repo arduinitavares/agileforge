@@ -22,22 +22,30 @@ from workflow.contracts import (
 from workflow.fingerprints import canonical_hash, canonical_json
 from workflow.handlers import (
     execute_abandon_project_shell,
+    execute_decide_brownfield_initial_spec,
     execute_decide_initial_spec_draft,
     execute_decide_prd,
     execute_open_project_shell,
+    execute_record_brownfield_spec_draft,
     execute_record_challenge_artifact,
     execute_record_initial_spec_draft,
     execute_record_prd_version,
+    execute_record_repository_baseline,
+    execute_record_repository_inventory,
     execute_register_initial_scope,
 )
 from workflow.requests import (
     AbandonProjectShell,
+    DecideBrownfieldInitialSpec,
     DecideInitialSpecDraft,
     DecidePrd,
     OpenProjectShell,
+    RecordBrownfieldSpecDraft,
     RecordChallengeArtifact,
     RecordInitialSpecDraft,
     RecordPrdVersion,
+    RecordRepositoryBaseline,
+    RecordRepositoryInventory,
     RegisterInitialScope,
     TransitionRequest,
 )
@@ -55,7 +63,7 @@ if TYPE_CHECKING:
 _SQLITE_BUSY_TIMEOUT_MS = 1_000
 _SQLITE_LOCK_MESSAGES = ("database is locked", "database table is locked")
 
-type _PositionedTransitionRequest = (
+type _ExistingPositionedRequest = (
     AbandonProjectShell
     | RecordChallengeArtifact
     | RecordPrdVersion
@@ -63,6 +71,13 @@ type _PositionedTransitionRequest = (
     | RecordInitialSpecDraft
     | DecideInitialSpecDraft
     | RegisterInitialScope
+)
+type _PositionedTransitionRequest = (
+    _ExistingPositionedRequest
+    | RecordRepositoryBaseline
+    | RecordRepositoryInventory
+    | RecordBrownfieldSpecDraft
+    | DecideBrownfieldInitialSpec
 )
 
 
@@ -246,63 +261,108 @@ class WorkflowDomain:
         if isinstance(decision_or_failure, TransitionResult):
             return decision_or_failure
 
-        if isinstance(request, AbandonProjectShell):
-            result = execute_abandon_project_shell(
+        if isinstance(request, RecordRepositoryBaseline):
+            result = execute_record_repository_baseline(
                 session,
                 request,
                 decision_or_failure,
                 evaluated_at,
             )
-        elif isinstance(request, RecordChallengeArtifact):
-            result = execute_record_challenge_artifact(
+        elif isinstance(request, RecordRepositoryInventory):
+            result = execute_record_repository_inventory(
                 session,
                 request,
                 decision_or_failure,
                 evaluated_at,
             )
-        elif isinstance(request, RecordPrdVersion):
-            result = execute_record_prd_version(
+        elif isinstance(request, RecordBrownfieldSpecDraft):
+            result = execute_record_brownfield_spec_draft(
                 session,
                 request,
                 decision_or_failure,
                 evaluated_at,
             )
-        elif isinstance(request, DecidePrd):
-            result = execute_decide_prd(
-                session,
-                request,
-                decision_or_failure,
-                evaluated_at,
-            )
-        elif isinstance(request, RecordInitialSpecDraft):
-            result = execute_record_initial_spec_draft(
-                session,
-                request,
-                decision_or_failure,
-                evaluated_at,
-            )
-        elif isinstance(request, DecideInitialSpecDraft):
-            result = execute_decide_initial_spec_draft(
-                session,
-                request,
-                decision_or_failure,
-                evaluated_at,
-            )
-        elif isinstance(request, RegisterInitialScope):
-            result = execute_register_initial_scope(
+        elif isinstance(request, DecideBrownfieldInitialSpec):
+            result = execute_decide_brownfield_initial_spec(
                 session,
                 request,
                 decision_or_failure,
                 evaluated_at,
             )
         else:
-            assert_never(request)
+            result = self._execute_existing_positioned(
+                session,
+                request,
+                decision_or_failure,
+                evaluated_at,
+            )
         position = self._position_in_session(
             session,
             request.project_id,
             evaluated_at,
         )
         return result.model_copy(update={"position": position})
+
+    @staticmethod
+    def _execute_existing_positioned(
+        session: Session,
+        request: _ExistingPositionedRequest,
+        decision: NodeDecision,
+        evaluated_at: datetime,
+    ) -> TransitionResult:
+        """Dispatch established shell and greenfield requests."""
+        if isinstance(request, AbandonProjectShell):
+            result = execute_abandon_project_shell(
+                session,
+                request,
+                decision,
+                evaluated_at,
+            )
+        elif isinstance(request, RecordChallengeArtifact):
+            result = execute_record_challenge_artifact(
+                session,
+                request,
+                decision,
+                evaluated_at,
+            )
+        elif isinstance(request, RecordPrdVersion):
+            result = execute_record_prd_version(
+                session,
+                request,
+                decision,
+                evaluated_at,
+            )
+        elif isinstance(request, DecidePrd):
+            result = execute_decide_prd(
+                session,
+                request,
+                decision,
+                evaluated_at,
+            )
+        elif isinstance(request, RecordInitialSpecDraft):
+            result = execute_record_initial_spec_draft(
+                session,
+                request,
+                decision,
+                evaluated_at,
+            )
+        elif isinstance(request, DecideInitialSpecDraft):
+            result = execute_decide_initial_spec_draft(
+                session,
+                request,
+                decision,
+                evaluated_at,
+            )
+        elif isinstance(request, RegisterInitialScope):
+            result = execute_register_initial_scope(
+                session,
+                request,
+                decision,
+                evaluated_at,
+            )
+        else:
+            assert_never(request)
+        return result
 
     def _position_in_session(
         self,

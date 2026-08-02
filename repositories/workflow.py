@@ -26,6 +26,8 @@ from models.workflow import (
     PrdDecision,
     PrdVersion,
     ProjectAbandonment,
+    RepositoryBaseline,
+    RepositoryInventory,
     SpecDraft,
     SpecDraftDecision,
     WorkflowNodeAttempt,
@@ -44,6 +46,8 @@ from workflow.facts import (
     PrdVersionFact,
     ProjectAbandonmentFact,
     ProjectFact,
+    RepositoryBaselineFact,
+    RepositoryInventoryFact,
     ReviewDecisionFact,
     SpecDraftFact,
     SprintFact,
@@ -51,12 +55,14 @@ from workflow.facts import (
     TaskFact,
     WorkflowFactSnapshot,
 )
+from workflow.fingerprints import canonical_hash, canonical_json
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
     from datetime import datetime
 
 _JSON_OBJECT = TypeAdapter(dict[str, JsonValue])
+_STRING_LIST = TypeAdapter(list[str])
 type _AuthorityStatus = Literal["pending_review", "accepted", "rejected", "stale"]
 type _AttemptOutcome = Literal["success", "failure", "obsolete"]
 type _DiscoveryPurpose = Literal["initial", "extension"]
@@ -138,6 +144,7 @@ class WorkflowFactRepository:
             spec_versions,
         )
         authority_load = self._authorities(project_id, spec_versions)
+        repository_baselines = self._repository_baselines(project_id)
         sprints = self._sprints(project_id)
         stories = self._stories(project_id, frozenset(spec_versions))
 
@@ -179,6 +186,11 @@ class WorkflowFactRepository:
                 discovery_run_ids,
                 {item.spec_draft_id: item.discovery_run_id for item in spec_drafts},
                 spec_versions,
+            ),
+            repository_baselines=repository_baselines,
+            repository_inventories=self._repository_inventories(
+                project_id,
+                frozenset(item.repository_baseline_id for item in repository_baselines),
             ),
             authorities=authority_load.facts,
             phase_artifacts=(),
@@ -577,6 +589,170 @@ class WorkflowFactRepository:
                 ),
             )
         )
+
+    def _repository_baselines(
+        self,
+        project_id: int,
+    ) -> tuple[RepositoryBaselineFact, ...]:
+        rows = self._session.exec(
+            select(RepositoryBaseline)
+            .where(col(RepositoryBaseline.project_id) == project_id)
+            .order_by(col(RepositoryBaseline.repository_baseline_id)),
+            execution_options=self._query_options(),
+        ).all()
+        facts: list[RepositoryBaselineFact] = []
+        for row in rows:
+            expected_fingerprint = canonical_hash(
+                {
+                    "repository_path": row.repository_path,
+                    "git_commit": row.git_commit,
+                    "dirty": row.dirty,
+                }
+            )
+            if row.content_fingerprint != expected_fingerprint:
+                message = (
+                    "Forced relationship corruption in repository baseline: "
+                    f"baseline {row.repository_baseline_id} fingerprint mismatch."
+                )
+                raise self._error(message)
+            facts.append(
+                RepositoryBaselineFact(
+                    repository_baseline_id=self._required_id(
+                        row.repository_baseline_id,
+                        "repository baseline",
+                    ),
+                    repository_path=row.repository_path,
+                    git_commit=row.git_commit,
+                    dirty=row.dirty,
+                    content_fingerprint=row.content_fingerprint,
+                )
+            )
+        return tuple(facts)
+
+    def _repository_inventories(
+        self,
+        project_id: int,
+        repository_baseline_ids: frozenset[int],
+    ) -> tuple[RepositoryInventoryFact, ...]:
+        rows = self._session.exec(
+            select(RepositoryInventory)
+            .where(col(RepositoryInventory.project_id) == project_id)
+            .order_by(col(RepositoryInventory.repository_inventory_id)),
+            execution_options=self._query_options(),
+        ).all()
+        facts: list[RepositoryInventoryFact] = []
+        for row in rows:
+            if row.repository_baseline_id not in repository_baseline_ids:
+                message = (
+                    "Forced relationship corruption in repository inventory: "
+                    f"inventory {row.repository_inventory_id} has no Project baseline."
+                )
+                raise self._error(message)
+            try:
+                payload = _JSON_OBJECT.validate_json(row.canonical_inventory_json)
+                selected = _STRING_LIST.validate_json(row.selected_for_model_json)
+            except ValidationError as exc:
+                message = (
+                    "Forced relationship corruption in repository inventory: "
+                    f"inventory {row.repository_inventory_id} contains invalid JSON."
+                )
+                raise self._error(message) from exc
+            if (
+                canonical_json(payload) != row.canonical_inventory_json
+                or canonical_json(selected) != row.selected_for_model_json
+                or canonical_hash(payload) != row.content_fingerprint
+            ):
+                message = (
+                    "Forced relationship corruption in repository inventory: "
+                    f"inventory {row.repository_inventory_id} has a canonical "
+                    "binding mismatch."
+                )
+                raise self._error(message)
+            files = payload.get("files")
+            total_bytes = payload.get("total_bytes")
+            hashable_paths, measured_bytes = self._validate_inventory_files(
+                files,
+                inventory_id=row.repository_inventory_id,
+            )
+            if (
+                not isinstance(files, list)
+                or isinstance(total_bytes, bool)
+                or not isinstance(total_bytes, int)
+                or len(files) != row.file_count
+                or total_bytes != row.total_bytes
+                or measured_bytes != row.total_bytes
+                or any(path not in hashable_paths for path in selected)
+                or len(selected) != len(set(selected))
+            ):
+                message = (
+                    "Forced relationship corruption in repository inventory: "
+                    f"inventory {row.repository_inventory_id} summary mismatch."
+                )
+                raise self._error(message)
+            facts.append(
+                RepositoryInventoryFact(
+                    repository_inventory_id=self._required_id(
+                        row.repository_inventory_id,
+                        "repository inventory",
+                    ),
+                    repository_baseline_id=row.repository_baseline_id,
+                    content_fingerprint=row.content_fingerprint,
+                    file_count=row.file_count,
+                    total_bytes=row.total_bytes,
+                    selected_for_model=tuple(selected),
+                )
+            )
+        return tuple(facts)
+
+    def _validate_inventory_files(
+        self,
+        files: JsonValue | None,
+        *,
+        inventory_id: int | None,
+    ) -> tuple[frozenset[str], int]:
+        if not isinstance(files, list):
+            message = (
+                "Forced relationship corruption in repository inventory: "
+                f"inventory {inventory_id} has no file list."
+            )
+            raise self._error(message)
+        hashable_paths: set[str] = set()
+        previous_path: bytes | None = None
+        measured_bytes = 0
+        for item in files:
+            if not isinstance(item, dict):
+                raise self._inventory_entry_error(inventory_id)
+            path = item.get("path")
+            size_bytes = item.get("size_bytes")
+            digest = item.get("sha256")
+            status = item.get("content_status")
+            if (
+                set(item) != {"content_status", "path", "sha256", "size_bytes"}
+                or not isinstance(path, str)
+                or not path
+                or isinstance(size_bytes, bool)
+                or not isinstance(size_bytes, int)
+                or size_bytes < 0
+                or status not in {"hashable", "secret", "oversized", "symlink"}
+                or (status == "hashable") != isinstance(digest, str)
+                or (digest is not None and not isinstance(digest, str))
+            ):
+                raise self._inventory_entry_error(inventory_id)
+            encoded_path = path.encode("utf-8", errors="surrogateescape")
+            if previous_path is not None and encoded_path <= previous_path:
+                raise self._inventory_entry_error(inventory_id)
+            previous_path = encoded_path
+            measured_bytes += size_bytes
+            if status == "hashable":
+                hashable_paths.add(path)
+        return frozenset(hashable_paths), measured_bytes
+
+    def _inventory_entry_error(self, inventory_id: int | None) -> WorkflowFactLoadError:
+        message = (
+            "Forced relationship corruption in repository inventory: "
+            f"inventory {inventory_id} contains an invalid entry."
+        )
+        return self._error(message)
 
     def _initial_registrations(
         self,
