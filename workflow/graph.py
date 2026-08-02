@@ -123,7 +123,10 @@ class WorkflowGraph:
 
             for evaluation in sorted(
                 evaluations,
-                key=lambda item: item.instance_key or "",
+                key=lambda item: (
+                    item.instance_key is not None,
+                    item.instance_key or "",
+                ),
             ):
                 decision = self._decision(node, evaluation, facts_hash)
                 if decision is not None:

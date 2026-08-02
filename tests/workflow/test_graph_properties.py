@@ -15,7 +15,26 @@ from workflow.contracts import (
     InputField,
     RecommendationKind,
 )
-from workflow.facts import ProjectFact, WorkflowFactSnapshot
+from workflow.facts import (
+    AuthorityFact,
+    ChallengeArtifactFact,
+    DiscoveryRunAbandonmentFact,
+    DiscoveryRunFact,
+    InitialScopeRegistrationFact,
+    NodeAttemptFact,
+    PhaseArtifactFact,
+    PostSprintTriageFact,
+    PrdVersionFact,
+    ProjectAbandonmentFact,
+    ProjectFact,
+    ReviewDecisionFact,
+    SpecDraftFact,
+    SprintFact,
+    StoryFact,
+    TaskFact,
+    WorkflowFactSnapshot,
+)
+from workflow.fingerprints import fact_fingerprint
 from workflow.graph import (
     ChildGraphSpec,
     NodeSpec,
@@ -26,6 +45,202 @@ from workflow.graph import (
 
 CLOCK: FixedClock = FixedClock(datetime(2026, 8, 2, 12, tzinfo=UTC))
 EVALUATED_AT: datetime = CLOCK.now()
+
+AUTHORITATIVE_SNAPSHOT_VARIANTS: tuple[tuple[str, object], ...] = (
+    (
+        "project",
+        ProjectFact(
+            project_id=24,
+            name="Changed Project",
+            origin="brownfield",
+            created_at=EVALUATED_AT - timedelta(hours=2),
+        ),
+    ),
+    (
+        "project_abandonments",
+        (
+            ProjectAbandonmentFact(
+                project_abandonment_id=1,
+                project_id=23,
+                reason="Superseded",
+                abandoned_by="reviewer",
+                abandoned_at=EVALUATED_AT,
+            ),
+        ),
+    ),
+    (
+        "discovery_runs",
+        (
+            DiscoveryRunFact(
+                discovery_run_id=2,
+                project_id=23,
+                purpose="initial",
+                ordinal=1,
+                created_at=EVALUATED_AT - timedelta(minutes=30),
+                closed_at=None,
+            ),
+        ),
+    ),
+    (
+        "discovery_run_abandonments",
+        (
+            DiscoveryRunAbandonmentFact(
+                discovery_run_abandonment_id=3,
+                project_id=23,
+                discovery_run_id=2,
+                reason="Restarted",
+                abandoned_by="reviewer",
+                abandoned_at=EVALUATED_AT,
+            ),
+        ),
+    ),
+    (
+        "challenge_artifacts",
+        (
+            ChallengeArtifactFact(
+                challenge_artifact_id=4,
+                discovery_run_id=2,
+                content_fingerprint="sha256:challenge",
+                supersedes_id=None,
+            ),
+        ),
+    ),
+    (
+        "prd_versions",
+        (
+            PrdVersionFact(
+                prd_version_id=5,
+                discovery_run_id=2,
+                content_fingerprint="sha256:prd",
+                supersedes_id=None,
+            ),
+        ),
+    ),
+    (
+        "review_decisions",
+        (
+            ReviewDecisionFact(
+                decision_id=6,
+                artifact_type="prd",
+                artifact_id=5,
+                artifact_fingerprint="sha256:prd",
+                decision="accepted",
+                decided_at=EVALUATED_AT,
+            ),
+        ),
+    ),
+    (
+        "spec_drafts",
+        (
+            SpecDraftFact(
+                spec_draft_id=7,
+                discovery_run_id=2,
+                kind="initial",
+                content_fingerprint="sha256:spec-draft",
+                base_spec_version_id=None,
+                base_spec_hash=None,
+                supersedes_id=None,
+            ),
+        ),
+    ),
+    (
+        "initial_registrations",
+        (
+            InitialScopeRegistrationFact(
+                registration_id=8,
+                discovery_run_id=2,
+                spec_draft_id=7,
+                spec_version_id=9,
+                spec_hash="sha256:spec-version",
+            ),
+        ),
+    ),
+    (
+        "authorities",
+        (
+            AuthorityFact(
+                authority_id=10,
+                spec_version_id=9,
+                authority_fingerprint="sha256:authority",
+                status="accepted",
+                decided_at=EVALUATED_AT,
+            ),
+        ),
+    ),
+    (
+        "phase_artifacts",
+        (
+            PhaseArtifactFact(
+                artifact_type="vision",
+                artifact_id="vision:11",
+                artifact_fingerprint="sha256:vision",
+                status="accepted",
+            ),
+        ),
+    ),
+    (
+        "sprints",
+        (
+            SprintFact(
+                sprint_id=12,
+                status="active",
+                completed_at=None,
+            ),
+        ),
+    ),
+    (
+        "stories",
+        (
+            StoryFact(
+                story_id=13,
+                status="ready",
+                sprint_candidate=True,
+                readiness_blockers=(),
+            ),
+        ),
+    ),
+    (
+        "tasks",
+        (
+            TaskFact(
+                task_id=14,
+                sprint_id=12,
+                story_id=13,
+                status="ready",
+                dependencies_satisfied=True,
+            ),
+        ),
+    ),
+    (
+        "post_sprint_triage",
+        (
+            PostSprintTriageFact(
+                sprint_id=12,
+                impact="none",
+                payload_fingerprint="sha256:triage",
+            ),
+        ),
+    ),
+    (
+        "node_attempts",
+        (
+            NodeAttemptFact(
+                attempt_id=15,
+                node_id="properties.stable",
+                instance_key=None,
+                graph_version=GRAPH_VERSION,
+                input_fingerprint="sha256:input",
+                fact_fingerprint="sha256:attempt-facts",
+                business_fact_fingerprint="sha256:business-facts",
+                decision_fingerprint="sha256:prior-decision",
+                attempt_fingerprint="sha256:attempt",
+                model_id="fixed-model",
+                lease_expires_at=EVALUATED_AT + timedelta(minutes=5),
+                outcome=None,
+            ),
+        ),
+    ),
+)
 
 
 def _snapshot(*, name: str = "Properties") -> WorkflowFactSnapshot:
@@ -120,6 +335,55 @@ def test_repeated_instances_are_sorted_by_stable_instance_key() -> None:
     assert position.waiting_nodes == ("properties.story",)
 
 
+def test_instance_order_is_stable_for_none_empty_and_string_keys() -> None:
+    """Use a total order when accepted instance-key values would otherwise collide."""
+    evaluations = (
+        RuleEvaluation(
+            category=RuleCategory.AVAILABLE,
+            reason_code="NO_KEY",
+            instance_key=None,
+        ),
+        RuleEvaluation(
+            category=RuleCategory.AVAILABLE,
+            reason_code="EMPTY_KEY",
+            instance_key="",
+        ),
+        RuleEvaluation(
+            category=RuleCategory.AVAILABLE,
+            reason_code="STRING_KEY",
+            instance_key="story:1",
+        ),
+    )
+    forward = _graph(_node("properties.story", evaluations)).evaluate(
+        _snapshot(),
+        EVALUATED_AT,
+    )
+    reverse = _graph(_node("properties.story", tuple(reversed(evaluations)))).evaluate(
+        _snapshot(),
+        EVALUATED_AT,
+    )
+
+    expected = (
+        (None, "NO_KEY"),
+        ("", "EMPTY_KEY"),
+        ("story:1", "STRING_KEY"),
+    )
+    assert (
+        tuple(
+            (decision.instance_key, decision.reason_code)
+            for decision in forward.decisions
+        )
+        == expected
+    )
+    assert (
+        tuple(
+            (decision.instance_key, decision.reason_code)
+            for decision in reverse.decisions
+        )
+        == expected
+    )
+
+
 @pytest.mark.parametrize("duplicate_key", [None, "story:7"])
 def test_duplicate_instance_keys_are_rejected(duplicate_key: str | None) -> None:
     """Reject two decisions that claim the same node instance identity."""
@@ -203,8 +467,50 @@ def test_time_insensitive_decision_fingerprint_ignores_evaluation_time() -> None
     second = graph.evaluate(snapshot, EVALUATED_AT + timedelta(hours=1))
 
     assert first.evaluated_at != second.evaluated_at
+    assert first.fact_fingerprint == second.fact_fingerprint
     assert first.decisions[0].decision_fingerprint == (
         second.decisions[0].decision_fingerprint
+    )
+
+
+def test_snapshot_variants_cover_every_authoritative_field() -> None:
+    """Keep the sensitivity matrix aligned with the complete snapshot contract."""
+    assert {name for name, _value in AUTHORITATIVE_SNAPSHOT_VARIANTS} == set(
+        WorkflowFactSnapshot.model_fields
+    )
+
+
+@pytest.mark.parametrize(
+    ("field_name", "authoritative_value"),
+    AUTHORITATIVE_SNAPSHOT_VARIANTS,
+    ids=tuple(name for name, _value in AUTHORITATIVE_SNAPSHOT_VARIANTS),
+)
+def test_authoritative_snapshot_fields_change_fact_and_decision_fingerprints(
+    field_name: str,
+    authoritative_value: object,
+) -> None:
+    """Fingerprint every authoritative top-level snapshot semantic input."""
+    baseline = _snapshot()
+    variant = baseline.model_copy(update={field_name: authoritative_value})
+    graph = _graph(
+        _node(
+            "properties.fingerprint",
+            (
+                RuleEvaluation(
+                    category=RuleCategory.AVAILABLE,
+                    reason_code="READY",
+                ),
+            ),
+        )
+    )
+
+    baseline_position = graph.evaluate(baseline, EVALUATED_AT)
+    variant_position = graph.evaluate(variant, EVALUATED_AT)
+
+    assert fact_fingerprint(variant) != fact_fingerprint(baseline), field_name
+    assert variant_position.fact_fingerprint != baseline_position.fact_fingerprint
+    assert variant_position.decisions[0].decision_fingerprint != (
+        baseline_position.decisions[0].decision_fingerprint
     )
 
 
