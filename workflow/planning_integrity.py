@@ -44,29 +44,33 @@ def dependency_review_fingerprint(
     return canonical_hash(dependency_edges_payload(edges))
 
 
+def _dependency_edge_key(edge: StoryDependencyReviewEdgeFact) -> tuple[int, int]:
+    return edge.dependent_story_id, edge.prerequisite_story_id
+
+
 def canonical_dependency_edges(
     edges: Iterable[StoryDependencyReviewEdgeFact],
 ) -> tuple[StoryDependencyReviewEdgeFact, ...]:
     """Return edges in stable endpoint order."""
-    return tuple(
-        sorted(
-            edges,
-            key=lambda edge: (
-                edge.dependent_story_id,
-                edge.prerequisite_story_id,
-            ),
-        )
-    )
+    return tuple(sorted(edges, key=_dependency_edge_key))
+
+
+def dependency_edges_have_duplicate_endpoints(
+    edges: Iterable[StoryDependencyReviewEdgeFact],
+) -> bool:
+    """Return whether directed endpoints occur more than once."""
+    pairs = tuple(_dependency_edge_key(edge) for edge in edges)
+    return len(pairs) != len(set(pairs))
 
 
 def dependency_edges_are_canonical(
     edges: tuple[StoryDependencyReviewEdgeFact, ...],
 ) -> bool:
     """Require stable order and unique directed endpoints."""
-    pairs = tuple(
-        (edge.dependent_story_id, edge.prerequisite_story_id) for edge in edges
+    return (
+        not dependency_edges_have_duplicate_endpoints(edges)
+        and edges == canonical_dependency_edges(edges)
     )
-    return pairs == tuple(sorted(set(pairs)))
 
 
 def dependency_edges_have_cycle(
@@ -170,6 +174,7 @@ __all__ = [
     "current_task_content_fingerprint",
     "dependency_edges_are_canonical",
     "dependency_edges_have_cycle",
+    "dependency_edges_have_duplicate_endpoints",
     "dependency_edges_payload",
     "dependency_review_fingerprint",
     "planned_task_content_fingerprint",

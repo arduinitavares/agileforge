@@ -13,6 +13,8 @@ from models.workflow import StoryDependencyReview
 from workflow.facts import StoryDependencyReviewEdgeFact
 from workflow.fingerprints import canonical_json
 from workflow.planning_integrity import (
+    canonical_dependency_edges,
+    dependency_edges_have_duplicate_endpoints,
     dependency_edges_payload,
     dependency_review_fingerprint,
 )
@@ -234,9 +236,20 @@ def apply_story_dependencies_in_session(
     """Apply an exact acyclic reviewed edge set in the caller transaction."""
     project_id = inputs.project_id
     selected_story_ids = inputs.selected_story_ids
-    reviewed_edges = inputs.reviewed_edges
+    reviewed_edges = canonical_dependency_edges(inputs.reviewed_edges)
     reviewed_at = inputs.reviewed_at
     selected = set(selected_story_ids)
+    if dependency_edges_have_duplicate_endpoints(reviewed_edges):
+        message = "Dependency review contains duplicate directed endpoints."
+        raise StoryDependencyGraphError(
+            [
+                DependencyGraphIssue(
+                    code="STORY_DEPENDENCY_DUPLICATE_EDGE",
+                    message=message,
+                    story_ids=sorted(selected),
+                )
+            ]
+        )
     stories = session.exec(
         select(UserStory).where(col(UserStory.story_id).in_(selected))
     ).all()

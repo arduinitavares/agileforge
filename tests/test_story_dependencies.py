@@ -1,18 +1,35 @@
 """Tests for story dependency persistence."""
 
+from datetime import UTC, datetime
+
 import pytest
 from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
-from sqlmodel import Session, create_engine
+from sqlmodel import Session, create_engine, select
 
 from db.migrations import migrate_user_story_dependencies
 from models.core import Product, UserStory, UserStoryDependency
+from models.events import WorkflowEvent
+from models.workflow import StoryDependencyReview
+from repositories.workflow import WorkflowFactRepository
 from services.story_dependencies import (
+    ApplyStoryDependenciesInput,
+    StoryDependencyGraphError,
+    apply_story_dependencies_in_session,
     dependency_inspect_payload,
     detect_dependency_cycles,
     load_story_dependency_graph,
 )
+from workflow.facts import StoryDependencyReviewEdgeFact
+from workflow.fingerprints import canonical_json
+from workflow.planning_integrity import (
+    canonical_dependency_edges,
+    dependency_edges_payload,
+    dependency_review_fingerprint,
+)
+
+REVIEWED_AT = datetime(2026, 8, 2, 12, tzinfo=UTC)
 
 
 def _story_pair(session: Session) -> tuple[int, int, int]:
@@ -74,6 +91,165 @@ def _make_story(
     session.refresh(story)
     assert story.story_id is not None
     return story.story_id
+
+
+def _chain_edges(
+    *,
+    dependent_story_id: int,
+    prerequisite_story_id: int,
+    final_story_id: int,
+) -> tuple[StoryDependencyReviewEdgeFact, ...]:
+    return canonical_dependency_edges(
+        (
+            StoryDependencyReviewEdgeFact(
+                dependent_story_id=dependent_story_id,
+                prerequisite_story_id=prerequisite_story_id,
+                reason="Recommendation needs captured market data.",
+            ),
+            StoryDependencyReviewEdgeFact(
+                dependent_story_id=final_story_id,
+                prerequisite_story_id=dependent_story_id,
+                reason="Delivery needs the generated recommendation.",
+            ),
+        )
+    )
+
+
+def _apply_dependency_review(
+    session: Session,
+    *,
+    project_id: int,
+    selected_story_ids: tuple[int, ...],
+    reviewed_edges: tuple[StoryDependencyReviewEdgeFact, ...],
+) -> StoryDependencyReview:
+    return apply_story_dependencies_in_session(
+        session,
+        inputs=ApplyStoryDependenciesInput(
+            project_id=project_id,
+            selected_story_ids=selected_story_ids,
+            reviewed_edges=reviewed_edges,
+            source_fingerprint="sha256:dependency-source",
+            reviewer="dependency-reviewer",
+            reviewed_at=REVIEWED_AT,
+        ),
+    )
+
+
+def test_caller_session_writer_canonicalizes_reversed_edge_order(
+    session: Session,
+) -> None:
+    """Persist one canonical dependency review regardless of caller edge order."""
+    project_id, dependent_story_id, prerequisite_story_id = _story_pair(session)
+    final_story_id = _make_story(
+        session,
+        product_id=project_id,
+        title="Deliver recommendation",
+        slot=3,
+    )
+    selected_story_ids = tuple(
+        sorted((prerequisite_story_id, dependent_story_id, final_story_id))
+    )
+    canonical_edges = _chain_edges(
+        dependent_story_id=dependent_story_id,
+        prerequisite_story_id=prerequisite_story_id,
+        final_story_id=final_story_id,
+    )
+    expected_json = canonical_json(dependency_edges_payload(canonical_edges))
+    expected_fingerprint = dependency_review_fingerprint(canonical_edges)
+
+    first = _apply_dependency_review(
+        session,
+        project_id=project_id,
+        selected_story_ids=selected_story_ids,
+        reviewed_edges=canonical_edges,
+    )
+    first_json = first.reviewed_edges_json
+    first_fingerprint = first.dependency_fingerprint
+    session.rollback()
+
+    reversed_review = _apply_dependency_review(
+        session,
+        project_id=project_id,
+        selected_story_ids=selected_story_ids,
+        reviewed_edges=tuple(reversed(canonical_edges)),
+    )
+    session.commit()
+
+    assert first_json == expected_json
+    assert reversed_review.reviewed_edges_json == expected_json
+    assert first_fingerprint == expected_fingerprint
+    assert reversed_review.dependency_fingerprint == expected_fingerprint
+
+
+def test_reversed_dependency_review_round_trips_repository(
+    engine: Engine,
+    session: Session,
+) -> None:
+    """Reload a reversed caller edge set with its canonical fingerprint intact."""
+    project_id, dependent_story_id, prerequisite_story_id = _story_pair(session)
+    final_story_id = _make_story(
+        session,
+        product_id=project_id,
+        title="Deliver recommendation",
+        slot=3,
+    )
+    selected_story_ids = tuple(
+        sorted((prerequisite_story_id, dependent_story_id, final_story_id))
+    )
+    canonical_edges = _chain_edges(
+        dependent_story_id=dependent_story_id,
+        prerequisite_story_id=prerequisite_story_id,
+        final_story_id=final_story_id,
+    )
+    review = _apply_dependency_review(
+        session,
+        project_id=project_id,
+        selected_story_ids=selected_story_ids,
+        reviewed_edges=tuple(reversed(canonical_edges)),
+    )
+    session.commit()
+
+    with Session(engine) as reload_session:
+        snapshot = WorkflowFactRepository(reload_session).load(project_id)
+
+    assert review.reviewed_edges_json == canonical_json(
+        dependency_edges_payload(canonical_edges)
+    )
+    assert review.dependency_fingerprint == dependency_review_fingerprint(
+        canonical_edges
+    )
+    assert len(snapshot.story_dependency_reviews) == 1
+    assert snapshot.story_dependency_reviews[0].reviewed_edges == canonical_edges
+    assert (
+        snapshot.story_dependency_reviews[0].dependency_fingerprint
+        == review.dependency_fingerprint
+    )
+
+
+def test_caller_session_writer_rejects_duplicate_edges_before_write(
+    session: Session,
+) -> None:
+    """Reject duplicate reviewed endpoints before flushing any durable row."""
+    project_id, dependent_story_id, prerequisite_story_id = _story_pair(session)
+    edge = StoryDependencyReviewEdgeFact(
+        dependent_story_id=dependent_story_id,
+        prerequisite_story_id=prerequisite_story_id,
+        reason="Recommendation needs captured market data.",
+    )
+
+    with pytest.raises(StoryDependencyGraphError):
+        _apply_dependency_review(
+            session,
+            project_id=project_id,
+            selected_story_ids=tuple(
+                sorted((prerequisite_story_id, dependent_story_id))
+            ),
+            reviewed_edges=(edge, edge),
+        )
+
+    assert session.exec(select(UserStoryDependency)).all() == []
+    assert session.exec(select(StoryDependencyReview)).all() == []
+    assert session.exec(select(WorkflowEvent)).all() == []
 
 
 def test_dependency_table_accepts_proposed_edge(session: Session) -> None:
