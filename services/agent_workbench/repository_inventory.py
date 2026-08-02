@@ -9,6 +9,7 @@ import os
 import re
 import stat
 import sys
+from contextlib import ExitStack
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
 from typing import Literal
@@ -22,7 +23,26 @@ from workflow.repository_inventory import (
     repository_path_bytes,
 )
 
+
+def _required_open_flag(name: str) -> int:
+    value = getattr(os, name, None)
+    if isinstance(value, int):
+        return value
+    message = f"Secure repository inventory requires os.{name}."
+    raise RuntimeError(message)
+
+
 _HASH_CHUNK_BYTES = 1024 * 1024
+_CLOSE_ON_EXEC = getattr(os, "O_CLOEXEC", 0)
+_DIRECTORY = _required_open_flag("O_DIRECTORY")
+_NO_FOLLOW = _required_open_flag("O_NOFOLLOW")
+_NONBLOCK = _required_open_flag("O_NONBLOCK")
+_DIRECTORY_OPEN_FLAGS = (
+    os.O_RDONLY | _DIRECTORY | _NO_FOLLOW | _CLOSE_ON_EXEC
+)
+_HASHABLE_FILE_OPEN_FLAGS = (
+    os.O_RDONLY | _NO_FOLLOW | _NONBLOCK | _CLOSE_ON_EXEC
+)
 _FALLBACK_IGNORED_DIRECTORIES: frozenset[str] = frozenset(
     {
         ".git",
@@ -46,19 +66,22 @@ _SECRET_EXACT_BASENAMES: frozenset[str] = frozenset(
     {
         ".env",
         ".envrc",
+        ".git-credentials",
         ".netrc",
         ".npmrc",
         ".pypirc",
         "credentials",
         "credentials.json",
         "id_dsa",
+        "id_ecdsa",
         "id_ed25519",
         "id_rsa",
         "service-account.json",
+        "service_account.json",
         "secrets.json",
     }
 )
-_SECRET_NAME_TOKENS: frozenset[str] = frozenset(
+_SECRET_TERMINAL_TOKENS: frozenset[str] = frozenset(
     {
         "credential",
         "credentials",
@@ -70,7 +93,14 @@ _SECRET_NAME_TOKENS: frozenset[str] = frozenset(
         "tokens",
     }
 )
-_SECRET_DIRECTORY_NAMES: frozenset[str] = frozenset(
+_SECRET_TERMINAL_TOKEN_PAIRS: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("api", "key"),
+        ("private", "key"),
+        ("service", "account"),
+    }
+)
+_SECRET_ROOT_DIRECTORIES: frozenset[str] = frozenset(
     {
         "credential",
         "credentials",
@@ -80,8 +110,16 @@ _SECRET_DIRECTORY_NAMES: frozenset[str] = frozenset(
         "private_keys",
         "secret",
         "secrets",
-        ".ssh",
     }
+)
+_NON_SECRET_SSH_BASENAMES: frozenset[str] = frozenset(
+    {"authorized_keys", "config", "known_hosts", "known_hosts.old"}
+)
+_SECRET_TEMPLATE_SUFFIXES: tuple[str, ...] = (
+    ".dist",
+    ".example",
+    ".sample",
+    ".template",
 )
 _ESTABLISHED_SECRET_PATHS: frozenset[str] = frozenset(
     {
@@ -265,19 +303,40 @@ class RepositoryInventoryService:
         if not resolved.is_dir():
             message = f"Repository inventory root is not a directory: {resolved}"
             raise NotADirectoryError(message)
-        try:
-            with Repo(resolved) as repo:
-                return self._git_inventory(resolved, repo)
-        except InvalidGitRepositoryError:
-            return self._fallback_inventory(resolved)
+        with ExitStack() as descriptors:
+            try:
+                root_metadata = resolved.lstat()
+                root_descriptor = os.open(resolved, _DIRECTORY_OPEN_FLAGS)
+                descriptors.callback(os.close, root_descriptor)
+                opened_root_metadata = os.fstat(root_descriptor)
+            except OSError as error:
+                raise _repository_changed_error() from error
+            root_snapshot = _filesystem_snapshot(root_metadata)
+            _require_unchanged_snapshot(
+                stat.S_ISDIR(root_metadata.st_mode)
+                and root_snapshot == _filesystem_snapshot(opened_root_metadata)
+            )
+            try:
+                with Repo(resolved) as repo:
+                    result = self._git_inventory(resolved, root_descriptor, repo)
+            except InvalidGitRepositoryError:
+                result = self._fallback_inventory(resolved, root_descriptor)
+            _verify_root_snapshot(resolved, root_descriptor, root_snapshot)
+            return result
 
-    def _git_inventory(self, root: Path, repo: Repo) -> RepositoryInventoryResult:
+    def _git_inventory(
+        self,
+        root: Path,
+        root_descriptor: int,
+        repo: Repo,
+    ) -> RepositoryInventoryResult:
         with repo.git.custom_environment(GIT_OPTIONAL_LOCKS="0"):
             before = _git_snapshot(root, repo)
             self._enforce_hard_limits(before.candidates)
-            files = self._hash_candidates(before.candidates)
+            files = self._hash_candidates(root_descriptor, before.candidates)
             self._verify_git_snapshot(
                 root=root,
+                root_descriptor=root_descriptor,
                 repo=repo,
                 before=before,
                 files=files,
@@ -290,13 +349,18 @@ class RepositoryInventoryService:
             files=files,
         )
 
-    def _fallback_inventory(self, root: Path) -> RepositoryInventoryResult:
+    def _fallback_inventory(
+        self,
+        root: Path,
+        root_descriptor: int,
+    ) -> RepositoryInventoryResult:
         paths = _fallback_visible_paths(root)
         candidates = _candidates(root, paths)
         self._enforce_hard_limits(candidates)
-        files = self._hash_candidates(candidates)
+        files = self._hash_candidates(root_descriptor, candidates)
         self._verify_fallback_snapshot(
             root=root,
+            root_descriptor=root_descriptor,
             paths=paths,
             candidates=candidates,
             files=files,
@@ -313,18 +377,20 @@ class RepositoryInventoryService:
         self,
         *,
         root: Path,
+        root_descriptor: int,
         repo: Repo,
         before: _GitInventorySnapshot,
         files: tuple[InventoryFile, ...],
     ) -> None:
         _require_unchanged_snapshot(before == _git_snapshot(root, repo))
-        self._revalidate_hashes(before.candidates, files)
+        self._revalidate_hashes(root_descriptor, before.candidates, files)
         _require_unchanged_snapshot(before == _git_snapshot(root, repo))
 
     def _verify_fallback_snapshot(
         self,
         *,
         root: Path,
+        root_descriptor: int,
         paths: tuple[str, ...],
         candidates: tuple[_InventoryCandidate, ...],
         files: tuple[InventoryFile, ...],
@@ -334,7 +400,7 @@ class RepositoryInventoryService:
         _require_unchanged_snapshot(
             paths == after_paths and candidates == after_candidates
         )
-        self._revalidate_hashes(candidates, files)
+        self._revalidate_hashes(root_descriptor, candidates, files)
         final_paths = _fallback_visible_paths(root)
         final_candidates = _candidates(root, final_paths)
         _require_unchanged_snapshot(
@@ -343,6 +409,7 @@ class RepositoryInventoryService:
 
     def _revalidate_hashes(
         self,
+        root_descriptor: int,
         candidates: tuple[_InventoryCandidate, ...],
         files: tuple[InventoryFile, ...],
     ) -> None:
@@ -352,7 +419,7 @@ class RepositoryInventoryService:
                 continue
             candidate = candidates_by_path[item.path]
             _require_unchanged_snapshot(
-                _hash_file(candidate.absolute_path) == item.sha256
+                _hash_file(root_descriptor, candidate) == item.sha256
             )
 
     def _enforce_hard_limits(
@@ -373,6 +440,7 @@ class RepositoryInventoryService:
 
     def _hash_candidates(
         self,
+        root_descriptor: int,
         candidates: tuple[_InventoryCandidate, ...],
     ) -> tuple[InventoryFile, ...]:
         files: list[InventoryFile] = []
@@ -392,7 +460,7 @@ class RepositoryInventoryService:
                     path=candidate.path,
                     size_bytes=candidate.size_bytes,
                     sha256=(
-                        _hash_file(candidate.absolute_path)
+                        _hash_file(root_descriptor, candidate)
                         if status == "hashable"
                         else None
                     ),
@@ -516,14 +584,7 @@ def _candidates(
         symlink = stat.S_ISLNK(metadata.st_mode)
         if not symlink and not stat.S_ISREG(metadata.st_mode):
             continue
-        snapshot = _FilesystemSnapshot(
-            device=metadata.st_dev,
-            inode=metadata.st_ino,
-            mode=metadata.st_mode,
-            size_bytes=metadata.st_size,
-            mtime_ns=metadata.st_mtime_ns,
-            ctime_ns=metadata.st_ctime_ns,
-        )
+        snapshot = _filesystem_snapshot(metadata)
         candidates.append(
             _InventoryCandidate(
                 path=relative_path,
@@ -541,23 +602,34 @@ def _path_bytes(path: str) -> bytes:
 
 
 def _is_secret_path(relative_path: str) -> bool:
+    """Match secret artifacts by basename, known location, or terminal name."""
     path = PurePosixPath(relative_path)
     lower_path = path.as_posix().lower()
     name = path.name.lower()
+    if name.endswith(_SECRET_TEMPLATE_SUFFIXES):
+        return False
     separated_stem = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "-", path.stem)
-    stem_tokens = frozenset(
+    stem_tokens = tuple(
         token for token in re.split(r"[^a-z0-9]+", separated_stem.lower()) if token
     )
-    directory_names = frozenset(part.lower() for part in path.parts[:-1])
+    root_directory = path.parts[0].lower() if len(path.parts) > 1 else None
+    terminal_pair = tuple(stem_tokens[-2:])
+    real_environment_file = (
+        name == ".env" or name.startswith(".env.") or name.endswith(".env")
+    )
+    ssh_secret = (
+        root_directory == ".ssh"
+        and name not in _NON_SECRET_SSH_BASENAMES
+        and not name.endswith(".pub")
+    )
     return (
         name in _SECRET_EXACT_BASENAMES
-        or name.startswith(".env.")
-        or name.endswith(".env")
+        or real_environment_file
         or name.endswith(_SECRET_SUFFIXES)
-        or bool(stem_tokens & _SECRET_NAME_TOKENS)
-        or {"private", "key"}.issubset(stem_tokens)
-        or {"service", "account"}.issubset(stem_tokens)
-        or bool(directory_names & _SECRET_DIRECTORY_NAMES)
+        or (bool(stem_tokens) and stem_tokens[-1] in _SECRET_TERMINAL_TOKENS)
+        or terminal_pair in _SECRET_TERMINAL_TOKEN_PAIRS
+        or root_directory in _SECRET_ROOT_DIRECTORIES
+        or ssh_secret
         or lower_path in _ESTABLISHED_SECRET_PATHS
     )
 
@@ -565,18 +637,113 @@ def _is_secret_path(relative_path: str) -> bool:
 def _require_unchanged_snapshot(unchanged: bool) -> None:
     if unchanged:
         return
+    raise _repository_changed_error()
+
+
+def _repository_changed_error() -> RepositoryChangedDuringInventoryError:
     message = (
         "Repository HEAD, porcelain status, path set, metadata, or hashable "
         "content changed during inventory; retry after the worktree is stable."
     )
-    raise RepositoryChangedDuringInventoryError(message)
+    return RepositoryChangedDuringInventoryError(message)
 
 
-def _hash_file(path: Path) -> str:
+def _filesystem_snapshot(metadata: os.stat_result) -> _FilesystemSnapshot:
+    return _FilesystemSnapshot(
+        device=metadata.st_dev,
+        inode=metadata.st_ino,
+        mode=metadata.st_mode,
+        size_bytes=metadata.st_size,
+        mtime_ns=metadata.st_mtime_ns,
+        ctime_ns=metadata.st_ctime_ns,
+    )
+
+
+def _verify_root_snapshot(
+    root: Path,
+    root_descriptor: int,
+    expected: _FilesystemSnapshot,
+) -> None:
+    try:
+        descriptor_metadata = os.fstat(root_descriptor)
+        path_metadata = root.lstat()
+    except OSError as error:
+        raise _repository_changed_error() from error
+    _require_unchanged_snapshot(
+        expected == _filesystem_snapshot(descriptor_metadata)
+        and expected == _filesystem_snapshot(path_metadata)
+    )
+
+
+def _hash_file(root_descriptor: int, candidate: _InventoryCandidate) -> str:
+    """Hash through a no-follow descriptor walk rooted at the verified repository."""
+    relative_path = PurePosixPath(candidate.path)
+    parts = relative_path.parts
+    _require_unchanged_snapshot(
+        bool(parts)
+        and not relative_path.is_absolute()
+        and all(part not in {"", ".", ".."} for part in parts)
+    )
+    try:
+        with ExitStack() as descriptors:
+            parent_descriptor = root_descriptor
+            for component in parts[:-1]:
+                component_descriptor = os.open(
+                    component,
+                    _DIRECTORY_OPEN_FLAGS,
+                    dir_fd=parent_descriptor,
+                )
+                descriptors.callback(os.close, component_descriptor)
+                _require_unchanged_snapshot(
+                    stat.S_ISDIR(os.fstat(component_descriptor).st_mode)
+                )
+                parent_descriptor = component_descriptor
+
+            pre_open_metadata = os.stat(
+                parts[-1],
+                dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
+            _require_unchanged_snapshot(
+                stat.S_ISREG(pre_open_metadata.st_mode)
+                and _filesystem_snapshot(pre_open_metadata) == candidate.snapshot
+            )
+            file_descriptor = os.open(
+                parts[-1],
+                _HASHABLE_FILE_OPEN_FLAGS,
+                dir_fd=parent_descriptor,
+            )
+            descriptors.callback(os.close, file_descriptor)
+            opened_metadata = os.fstat(file_descriptor)
+            _require_unchanged_snapshot(
+                stat.S_ISREG(opened_metadata.st_mode)
+                and _filesystem_snapshot(opened_metadata) == candidate.snapshot
+            )
+            digest = _hash_descriptor(file_descriptor)
+            final_descriptor_metadata = os.fstat(file_descriptor)
+            final_path_metadata = os.stat(
+                parts[-1],
+                dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
+            _require_unchanged_snapshot(
+                _filesystem_snapshot(final_descriptor_metadata) == candidate.snapshot
+                and _filesystem_snapshot(final_path_metadata) == candidate.snapshot
+            )
+            return digest
+    except RepositoryChangedDuringInventoryError:
+        raise
+    except OSError as error:
+        raise _repository_changed_error() from error
+
+
+def _hash_descriptor(descriptor: int) -> str:
     digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(_HASH_CHUNK_BYTES), b""):
-            digest.update(chunk)
+    while True:
+        chunk = os.read(descriptor, _HASH_CHUNK_BYTES)
+        if not chunk:
+            break
+        digest.update(chunk)
     return f"sha256:{digest.hexdigest()}"
 
 
