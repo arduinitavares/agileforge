@@ -9,12 +9,10 @@ from workflow.contracts import (
 )
 from workflow.facts import WorkflowFactSnapshot
 from workflow.fingerprints import decision_fingerprint, fact_fingerprint
-from workflow.requests import PositionedRequest
 
 __all__ = [
     "GRAPH_VERSION",
     "NodeDecision",
-    "PositionedRequest",
     "TransitionResult",
     "WorkflowError",
     "WorkflowFactSnapshot",

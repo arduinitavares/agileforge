@@ -5,8 +5,14 @@ from datetime import UTC, datetime
 from services.agent_workbench.fingerprints import (
     canonical_hash as legacy_canonical_hash,
 )
+from workflow.contracts import TransitionResult
 from workflow.facts import ProjectFact, WorkflowFactSnapshot
-from workflow.fingerprints import canonical_hash, decision_fingerprint, fact_fingerprint
+from workflow.fingerprints import (
+    canonical_hash,
+    canonical_json,
+    decision_fingerprint,
+    fact_fingerprint,
+)
 
 
 def test_fact_fingerprint_is_stable_for_equivalent_snapshots() -> None:
@@ -35,3 +41,17 @@ def test_decision_fingerprint_is_order_stable() -> None:
 def test_legacy_fingerprint_module_reexports_domain_implementation() -> None:
     """Keep existing callers on the exact moved canonical-hash implementation."""
     assert legacy_canonical_hash is canonical_hash
+
+
+def test_frozen_transition_output_preserves_canonical_fingerprints() -> None:
+    """Keep immutable output byte-compatible with ordinary canonical JSON."""
+    output = {
+        "attempt_id": 7,
+        "metadata": {"ready": True, "labels": ["authority", None]},
+    }
+    result = TransitionResult(ok=True, output=output)
+    dumped_output = result.model_dump(mode="json")["output"]
+
+    assert canonical_json(result.output) == canonical_json(output)
+    assert canonical_hash(result.output) == canonical_hash(output)
+    assert canonical_hash(dumped_output) == canonical_hash(output)
