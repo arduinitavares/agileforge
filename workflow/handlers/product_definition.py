@@ -7,7 +7,13 @@ from typing import TYPE_CHECKING
 from sqlmodel import Session, col, func, select
 
 from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance, SpecRegistry
-from models.workflow import BacklogArtifact, VisionArtifact
+from models.workflow import (
+    BacklogArtifact,
+    BacklogArtifactDecision,
+    VisionArtifact,
+    VisionArtifactDecision,
+    WorkflowTransitionReceipt,
+)
 from services.agent_workbench.backlog_phase import (
     record_backlog_decision_in_session,
     record_backlog_draft_in_session,
@@ -27,13 +33,12 @@ from workflow.contracts import (
     WorkflowError,
     WorkflowErrorCode,
 )
+from workflow.requests.product_definition import DecideBacklog, DecideVision
 
 if TYPE_CHECKING:
     from datetime import datetime
 
     from workflow.requests.product_definition import (
-        DecideBacklog,
-        DecideVision,
         ReconcileBacklog,
         RecordBacklogDraft,
         RecordVisionDraft,
@@ -126,6 +131,94 @@ def _next_artifact_id(session: Session) -> int:
         select(func.max(BacklogArtifact.backlog_artifact_id))
     ).one()
     return max(latest_vision or 0, latest_backlog or 0) + 1
+
+
+def _vision_review_guards_match(first: DecideVision, second: DecideVision) -> bool:
+    return (
+        first.project_id == second.project_id
+        and first.graph_version == second.graph_version
+        and first.fact_fingerprint == second.fact_fingerprint
+        and first.decision_fingerprint == second.decision_fingerprint
+        and first.instance_key == second.instance_key
+        and first.attempt_id == second.attempt_id
+        and first.attempt_fingerprint == second.attempt_fingerprint
+        and first.vision_artifact_id == second.vision_artifact_id
+        and first.artifact_fingerprint == second.artifact_fingerprint
+    )
+
+
+def _backlog_review_guards_match(first: DecideBacklog, second: DecideBacklog) -> bool:
+    return (
+        first.project_id == second.project_id
+        and first.graph_version == second.graph_version
+        and first.fact_fingerprint == second.fact_fingerprint
+        and first.decision_fingerprint == second.decision_fingerprint
+        and first.instance_key == second.instance_key
+        and first.attempt_id == second.attempt_id
+        and first.attempt_fingerprint == second.attempt_fingerprint
+        and first.backlog_artifact_id == second.backlog_artifact_id
+        and first.artifact_fingerprint == second.artifact_fingerprint
+    )
+
+
+def validate_decide_vision_review(
+    session: Session,
+    request: DecideVision,
+) -> TransitionResult | None:
+    """Fail closed when exact Vision review guards already reached a decision."""
+    existing = session.exec(
+        select(VisionArtifactDecision).where(
+            col(VisionArtifactDecision.project_id) == request.project_id,
+            col(VisionArtifactDecision.vision_artifact_id)
+            == request.vision_artifact_id,
+        )
+    ).one_or_none()
+    if existing is None:
+        return None
+    receipts = session.exec(
+        select(WorkflowTransitionReceipt).where(
+            col(WorkflowTransitionReceipt.request_kind) == request.kind
+        )
+    ).all()
+    if any(
+        _vision_review_guards_match(
+            DecideVision.model_validate_json(receipt.request_json),
+            request,
+        )
+        for receipt in receipts
+    ):
+        return _conflict("Vision artifact already has a terminal review decision.")
+    return None
+
+
+def validate_decide_backlog_review(
+    session: Session,
+    request: DecideBacklog,
+) -> TransitionResult | None:
+    """Fail closed when exact Backlog review guards already reached a decision."""
+    existing = session.exec(
+        select(BacklogArtifactDecision).where(
+            col(BacklogArtifactDecision.project_id) == request.project_id,
+            col(BacklogArtifactDecision.backlog_artifact_id)
+            == request.backlog_artifact_id,
+        )
+    ).one_or_none()
+    if existing is None:
+        return None
+    receipts = session.exec(
+        select(WorkflowTransitionReceipt).where(
+            col(WorkflowTransitionReceipt.request_kind) == request.kind
+        )
+    ).all()
+    if any(
+        _backlog_review_guards_match(
+            DecideBacklog.model_validate_json(receipt.request_json),
+            request,
+        )
+        for receipt in receipts
+    ):
+        return _conflict("Backlog artifact already has a terminal review decision.")
+    return None
 
 
 def execute_record_vision_draft(
@@ -393,4 +486,6 @@ __all__ = [
     "execute_reconcile_backlog",
     "execute_record_backlog_draft",
     "execute_record_vision_draft",
+    "validate_decide_backlog_review",
+    "validate_decide_vision_review",
 ]

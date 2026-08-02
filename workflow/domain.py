@@ -43,6 +43,8 @@ from workflow.handlers import (
     execute_register_initial_scope,
     execute_repair_authority,
     validate_decide_authority_review,
+    validate_decide_backlog_review,
+    validate_decide_vision_review,
 )
 from workflow.requests import (
     AbandonProjectShell,
@@ -186,14 +188,19 @@ class WorkflowDomain:
     ) -> TransitionResult:
         """Own receipt claim, handler facts, and completion in one transaction."""
         self._begin_write(session)
-        if isinstance(request, DecideAuthority):
+        if isinstance(request, DecideAuthority | DecideVision | DecideBacklog):
             existing = self._existing_receipt_claim(session, request)
             if existing is not None:
                 if existing.immediate_result is None:
                     msg = "An existing receipt claim did not produce a result."
                     raise RuntimeError(msg)
                 return existing.immediate_result
-            review_failure = validate_decide_authority_review(session, request)
+            if isinstance(request, DecideAuthority):
+                review_failure = validate_decide_authority_review(session, request)
+            elif isinstance(request, DecideVision):
+                review_failure = validate_decide_vision_review(session, request)
+            else:
+                review_failure = validate_decide_backlog_review(session, request)
             if review_failure is not None:
                 return review_failure
         claim = self._claim_receipt(session, request, evaluated_at)

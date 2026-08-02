@@ -45,25 +45,14 @@ def _backlog_generate_rule(  # noqa: C901, PLR0911
             "ACCEPTED_AUTHORITY_REQUIRED",
             "Backlog generation requires accepted current authority.",
         )
-    vision_state = phase_artifact_state(
-        snapshot,
-        artifact_type="vision",
-        authority=authority,
-    )
     backlog_state = phase_artifact_state(
         snapshot,
         artifact_type="backlog",
         authority=authority,
     )
-    if vision_state.conflict or backlog_state.conflict:
+    if backlog_state.conflict:
         return (RuleEvaluation(RuleCategory.INVALID, "WORKFLOW_FACT_CONFLICT"),)
-    vision = accepted_current_artifact(vision_state, authority)
-    if vision is None:
-        return _blocked(
-            "ACCEPTED_CURRENT_VISION_REQUIRED",
-            "Backlog generation requires accepted Vision for current authority.",
-        )
-    references = (authority_reference(authority), artifact_reference(vision))
+    references = (authority_reference(authority),)
     affected_ids = stale_accepted_artifact_ids(snapshot, authority)
     if backlog_state.stale_accepted_ids and not _matching_reconciliation(
         snapshot,

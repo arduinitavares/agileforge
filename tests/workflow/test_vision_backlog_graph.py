@@ -21,6 +21,7 @@ from workflow.facts import (
     SpecVersionFact,
     WorkflowFactSnapshot,
 )
+from workflow.fingerprints import fact_fingerprint
 
 EVALUATED_AT = datetime(2026, 8, 2, 12, tzinfo=UTC)
 PROJECT_ID = 10
@@ -184,14 +185,18 @@ def test_no_accepted_current_authority_blocks_all_generation() -> None:
     assert "backlog.generate" not in position.available_nodes
 
 
-def test_accepted_authority_exposes_vision_without_session_sequence() -> None:
-    """Expose Vision directly from durable accepted authority."""
+def test_accepted_authority_exposes_parallel_product_definition_branches() -> None:
+    """Expose both generators directly from durable accepted authority."""
     position = _position(_snapshot())
 
-    assert position.available_nodes == ("vision.generate",)
-    decision = _decision_for(_snapshot(), "vision.generate")
-    assert decision.fact_references[0].fact_id == str(AUTHORITY_ID)
-    assert decision.fact_references[0].fingerprint == AUTHORITY_FINGERPRINT
+    assert position.available_nodes == ("vision.generate", "backlog.generate")
+    for node_id in position.available_nodes:
+        decision = _decision_for(_snapshot(), node_id)
+        assert len(decision.fact_references) == 1
+        authority = decision.fact_references[0]
+        assert authority.fact_type == "authority"
+        assert authority.fact_id == str(AUTHORITY_ID)
+        assert authority.fingerprint == AUTHORITY_FINGERPRINT
 
 
 def test_active_generation_attempt_waits_from_durable_lease() -> None:
@@ -216,6 +221,23 @@ def test_vision_draft_waits_for_review() -> None:
 
     assert position.waiting_nodes == ("vision.review",)
     assert "vision.generate" not in position.available_nodes
+    assert "backlog.generate" in position.available_nodes
+
+
+def test_backlog_draft_waits_for_review_without_blocking_vision() -> None:
+    """Let Backlog progress independently while Vision remains unstarted."""
+    backlog = _artifact(
+        "backlog",
+        artifact_id=BACKLOG_ID,
+        fingerprint=BACKLOG_FINGERPRINT,
+        status="pending_review",
+    )
+
+    position = _position(_snapshot(artifacts=(backlog,)))
+
+    assert "backlog.review" in position.waiting_nodes
+    assert "backlog.generate" not in position.available_nodes
+    assert "vision.generate" in position.available_nodes
 
 
 def test_rejected_vision_routes_to_superseding_generation() -> None:
@@ -472,8 +494,8 @@ def test_accepted_current_vision_and_backlog_form_explicit_planning_join() -> No
     }
 
 
-def test_contradictory_artifact_terminal_decisions_fail_closed() -> None:
-    """Fail closed when one artifact has contradictory terminal decisions."""
+def test_contradictory_vision_terminal_decisions_fail_closed() -> None:
+    """Expose invalid Vision nodes for contradictory terminal decisions."""
     vision = _artifact(
         "vision",
         artifact_id=VISION_ID,
@@ -496,8 +518,73 @@ def test_contradictory_artifact_terminal_decisions_fail_closed() -> None:
     )
     position = _position(_snapshot(artifacts=(vision,), decisions=(accepted, rejected)))
 
-    assert position.invalid_nodes
+    assert {"vision.generate", "vision.review"} <= set(position.invalid_nodes)
     assert all(
         decision.reason_code == "WORKFLOW_FACT_CONFLICT"
         for decision in position.decisions
+        if decision.node_id in {"vision.generate", "vision.review"}
     )
+
+
+def test_contradictory_backlog_terminal_decisions_fail_closed() -> None:
+    """Expose invalid Backlog nodes for contradictory terminal decisions."""
+    backlog = _artifact(
+        "backlog",
+        artifact_id=BACKLOG_ID,
+        fingerprint=BACKLOG_FINGERPRINT,
+        status="accepted",
+    )
+    accepted = _artifact_decision(
+        "backlog",
+        artifact_id=BACKLOG_ID,
+        fingerprint=BACKLOG_FINGERPRINT,
+        decision="accepted",
+        decision_id=701,
+    )
+    rejected = _artifact_decision(
+        "backlog",
+        artifact_id=BACKLOG_ID,
+        fingerprint=BACKLOG_FINGERPRINT,
+        decision="rejected",
+        decision_id=702,
+    )
+
+    position = _position(
+        _snapshot(artifacts=(backlog,), decisions=(accepted, rejected))
+    )
+
+    assert {"backlog.generate", "backlog.review"} <= set(position.invalid_nodes)
+    assert all(
+        decision.reason_code == "WORKFLOW_FACT_CONFLICT"
+        for decision in position.decisions
+        if decision.node_id in {"backlog.generate", "backlog.review"}
+    )
+
+
+def test_reconciliation_actor_and_audit_binding_are_authoritative_facts() -> None:
+    """Fingerprint the actor and exact canonical audit event binding."""
+    reconciliation = BacklogReconciliationFact(
+        reconciliation_id=801,
+        replacement_authority_id=AUTHORITY_ID,
+        replacement_authority_fingerprint=AUTHORITY_FINGERPRINT,
+        affected_artifact_ids=(VISION_ID, BACKLOG_ID),
+        affected_artifacts_fingerprint="sha256:affected-artifacts",
+        reconciled_by="operator@example.com",
+        audit_event_id=901,
+        audit_event_action="backlog_authority_reconciled",
+        audit_event_fingerprint="sha256:audit-event",
+        reconciled_at=EVALUATED_AT,
+    )
+    changed_actor = reconciliation.model_copy(
+        update={"reconciled_by": "tampered@example.com"}
+    )
+    changed_audit = reconciliation.model_copy(
+        update={"audit_event_fingerprint": "sha256:tampered-audit"}
+    )
+
+    baseline = _snapshot(reconciliations=(reconciliation,))
+    actor_tampered = _snapshot(reconciliations=(changed_actor,))
+    audit_tampered = _snapshot(reconciliations=(changed_audit,))
+
+    assert fact_fingerprint(actor_tampered) != fact_fingerprint(baseline)
+    assert fact_fingerprint(audit_tampered) != fact_fingerprint(baseline)

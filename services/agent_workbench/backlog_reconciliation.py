@@ -16,6 +16,10 @@ from models.workflow import (
     VisionArtifact,
 )
 from workflow.fingerprints import canonical_hash, canonical_json
+from workflow.reconciliation_audit import (
+    reconciliation_audit_event_fingerprint,
+    reconciliation_audit_metadata,
+)
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -212,27 +216,42 @@ def reconcile_stale_backlog_in_session(  # noqa: PLR0913
         affected_artifact_ids_json=canonical_json(list(affected_artifact_ids)),
         affected_artifacts_fingerprint=fingerprint,
         reconciled_by=reconciled_by,
+        audit_event_fingerprint="",
         reconciled_at=reconciled_at,
     )
     session.add(row)
-    session.add(
-        WorkflowEvent(
-            event_type=WorkflowEventType.BACKLOG_SAVED,
-            product_id=project_id,
-            timestamp=reconciled_at,
-            event_metadata=canonical_json(
-                {
-                    "action": "backlog_authority_reconciled",
-                    "replacement_authority_id": replacement_authority_id,
-                    "replacement_authority_fingerprint": (
-                        replacement_authority_fingerprint
-                    ),
-                    "affected_artifact_ids": affected_artifact_ids,
-                    "affected_artifacts_fingerprint": fingerprint,
-                }
-            ),
-        )
+    session.flush()
+    if row.backlog_authority_reconciliation_id is None:
+        message = "Backlog reconciliation did not receive a durable identity."
+        raise BacklogReconciliationError(message)
+    metadata = reconciliation_audit_metadata(
+        reconciliation_id=row.backlog_authority_reconciliation_id,
+        reconciled_by=reconciled_by,
+        replacement_authority_id=replacement_authority_id,
+        replacement_authority_fingerprint=replacement_authority_fingerprint,
+        affected_artifact_ids=affected_artifact_ids,
+        affected_artifacts_fingerprint=fingerprint,
     )
+    event = WorkflowEvent(
+        event_type=WorkflowEventType.BACKLOG_SAVED,
+        product_id=project_id,
+        timestamp=reconciled_at,
+        event_metadata=canonical_json(metadata),
+    )
+    session.add(event)
+    session.flush()
+    if event.event_id is None:
+        message = "Backlog reconciliation audit did not receive a durable identity."
+        raise BacklogReconciliationError(message)
+    row.audit_event_id = event.event_id
+    row.audit_event_fingerprint = reconciliation_audit_event_fingerprint(
+        event_id=event.event_id,
+        event_type=event.event_type.value,
+        project_id=project_id,
+        timestamp=event.timestamp,
+        metadata=metadata,
+    )
+    session.add(row)
     session.flush()
     return row
 

@@ -188,6 +188,10 @@ class BacklogReconciliationFact(FrozenModel):
     replacement_authority_fingerprint: str
     affected_artifact_ids: tuple[int, ...]
     affected_artifacts_fingerprint: str
+    reconciled_by: str
+    audit_event_id: int
+    audit_event_action: Literal["backlog_authority_reconciled"]
+    audit_event_fingerprint: str
     reconciled_at: _DATETIME
 
 

@@ -17,7 +17,8 @@ from models.core import (
     UserStory,
     UserStoryDependency,
 )
-from models.enums import SprintStatus, StoryStatus
+from models.enums import SprintStatus, StoryStatus, WorkflowEventType
+from models.events import WorkflowEvent
 from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance, SpecRegistry
 from models.workflow import (
     BacklogArtifact,
@@ -66,6 +67,11 @@ from workflow.facts import (
     WorkflowFactSnapshot,
 )
 from workflow.fingerprints import canonical_hash, canonical_json
+from workflow.reconciliation_audit import (
+    BACKLOG_RECONCILIATION_ACTION,
+    reconciliation_audit_event_fingerprint,
+    reconciliation_audit_metadata,
+)
 from workflow.repository_inventory import (
     decode_repository_path,
     encode_repository_paths,
@@ -799,6 +805,17 @@ class WorkflowFactRepository:
             for item in artifacts
             if isinstance(item.artifact_id, int)
         }
+        audit_events = self._session.exec(
+            select(WorkflowEvent)
+            .where(col(WorkflowEvent.product_id) == project_id)
+            .where(col(WorkflowEvent.event_type) == WorkflowEventType.BACKLOG_SAVED)
+            .order_by(col(WorkflowEvent.event_id)),
+            execution_options=self._query_options(),
+        ).all()
+        audit_events_by_id = {
+            self._required_id(event.event_id, "Workflow event"): event
+            for event in audit_events
+        }
         facts: list[BacklogReconciliationFact] = []
         for row in rows:
             authority = authorities.get(row.replacement_authority_id)
@@ -837,18 +854,53 @@ class WorkflowFactRepository:
             if row.affected_artifacts_fingerprint != expected_fingerprint:
                 message = "Backlog reconciliation fingerprint changed."
                 raise self._error(message)
+            reconciliation_id = self._required_id(
+                row.backlog_authority_reconciliation_id,
+                "Backlog authority reconciliation",
+            )
+            if row.audit_event_id is None:
+                message = "Backlog reconciliation audit event is missing."
+                raise self._error(message)
+            event = audit_events_by_id.get(row.audit_event_id)
+            if event is None or event.timestamp != row.reconciled_at:
+                message = "Backlog reconciliation audit event does not match."
+                raise self._error(message)
+            metadata = reconciliation_audit_metadata(
+                reconciliation_id=reconciliation_id,
+                reconciled_by=row.reconciled_by,
+                replacement_authority_id=row.replacement_authority_id,
+                replacement_authority_fingerprint=(
+                    row.replacement_authority_fingerprint
+                ),
+                affected_artifact_ids=affected_ids,
+                affected_artifacts_fingerprint=expected_fingerprint,
+            )
+            if event.event_metadata != canonical_json(metadata):
+                message = "Backlog reconciliation audit content changed."
+                raise self._error(message)
+            expected_audit_fingerprint = reconciliation_audit_event_fingerprint(
+                event_id=row.audit_event_id,
+                event_type=event.event_type.value,
+                project_id=project_id,
+                timestamp=event.timestamp,
+                metadata=metadata,
+            )
+            if row.audit_event_fingerprint != expected_audit_fingerprint:
+                message = "Backlog reconciliation audit fingerprint changed."
+                raise self._error(message)
             facts.append(
                 BacklogReconciliationFact(
-                    reconciliation_id=self._required_id(
-                        row.backlog_authority_reconciliation_id,
-                        "Backlog authority reconciliation",
-                    ),
+                    reconciliation_id=reconciliation_id,
                     replacement_authority_id=row.replacement_authority_id,
                     replacement_authority_fingerprint=(
                         row.replacement_authority_fingerprint
                     ),
                     affected_artifact_ids=affected_ids,
                     affected_artifacts_fingerprint=expected_fingerprint,
+                    reconciled_by=row.reconciled_by,
+                    audit_event_id=row.audit_event_id,
+                    audit_event_action=BACKLOG_RECONCILIATION_ACTION,
+                    audit_event_fingerprint=expected_audit_fingerprint,
                     reconciled_at=row.reconciled_at,
                 )
             )

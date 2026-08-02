@@ -684,6 +684,10 @@ class BacklogAuthorityReconciliation(SQLModel, table=True):
             "replacement_authority_fingerprint",
             name="uq_backlog_authority_reconciliation",
         ),
+        UniqueConstraint(
+            "audit_event_id",
+            name="uq_backlog_authority_reconciliation_audit_event",
+        ),
     )
 
     backlog_authority_reconciliation_id: int | None = Field(
@@ -699,6 +703,12 @@ class BacklogAuthorityReconciliation(SQLModel, table=True):
     affected_artifact_ids_json: str = Field(sa_type=Text)
     affected_artifacts_fingerprint: str = Field(index=True)
     reconciled_by: str = Field(index=True)
+    audit_event_id: int | None = Field(
+        default=None,
+        foreign_key="workflow_events.event_id",
+        index=True,
+    )
+    audit_event_fingerprint: str
     reconciled_at: datetime = Field(default_factory=utc_now, nullable=False)
 
 

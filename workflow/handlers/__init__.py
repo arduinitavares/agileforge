@@ -25,6 +25,8 @@ from workflow.handlers.product_definition import (
     execute_reconcile_backlog,
     execute_record_backlog_draft,
     execute_record_vision_draft,
+    validate_decide_backlog_review,
+    validate_decide_vision_review,
 )
 from workflow.handlers.project_shell import (
     execute_abandon_project_shell,
@@ -54,4 +56,6 @@ __all__ = [
     "execute_register_initial_scope",
     "execute_repair_authority",
     "validate_decide_authority_review",
+    "validate_decide_backlog_review",
+    "validate_decide_vision_review",
 ]
