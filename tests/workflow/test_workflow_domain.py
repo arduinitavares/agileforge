@@ -46,6 +46,7 @@ from workflow.contracts import (
     WorkflowErrorCode,
     WorkflowPosition,
 )
+from workflow.definitions.onboarding import GREENFIELD_ONBOARDING_NODES
 from workflow.definitions.root import ROOT_GRAPH
 from workflow.graph import (
     ChildGraphSpec,
@@ -136,6 +137,51 @@ def open_greenfield_shell(domain: WorkflowDomain, *, name: str = "Task 6") -> in
     result = domain.transition(open_request(name=name, idempotency_key=f"open-{name}"))
     assert result.ok is True
     return require_project_id(result)
+
+
+def seed_historical_authority_acceptance(engine: Engine, project_id: int) -> None:
+    """Persist one accepted authority whose spec is now superseded."""
+    with Session(engine) as session:
+        spec = SpecRegistry(
+            product_id=project_id,
+            spec_hash="sha256:historical-spec",
+            content="# Historical accepted specification",
+            status="superseded",
+        )
+        session.add(spec)
+        session.flush()
+        assert spec.spec_version_id is not None
+        authority = CompiledSpecAuthority(
+            spec_version_id=spec.spec_version_id,
+            compiler_version="3.0.0",
+            prompt_hash="a" * 64,
+            compiled_at=EVALUATED_AT,
+            compiled_artifact_json=authority_json(),
+            scope_themes="[]",
+            invariants="[]",
+            eligible_feature_ids="[]",
+        )
+        session.add(authority)
+        session.flush()
+        assert authority.authority_id is not None
+        authority_fingerprint = pending_authority_fingerprint(authority)
+        assert authority_fingerprint is not None
+        session.add(
+            SpecAuthorityAcceptance(
+                product_id=project_id,
+                spec_version_id=spec.spec_version_id,
+                status="accepted",
+                policy="test",
+                decided_by="reviewer",
+                decided_at=EVALUATED_AT,
+                compiler_version=authority.compiler_version,
+                prompt_hash=authority.prompt_hash,
+                spec_hash=spec.spec_hash,
+                pending_authority_id=authority.authority_id,
+                authority_fingerprint=authority_fingerprint,
+            )
+        )
+        session.commit()
 
 
 def available_abandon_decision(position: WorkflowPosition) -> tuple[str, str | None]:
@@ -411,6 +457,9 @@ def test_abandon_project_shell_records_typed_fact(
     assert result.ok is True
     assert result.applied_node_id == AbandonProjectShell.node_id
     assert result.position == domain.position(project_id)
+    assert result.position is not None
+    assert result.position.invalid_nodes == ()
+    assert result.position.terminal is True
     with Session(engine) as session:
         rows = session.exec(select(ProjectAbandonment)).all()
         assert len(rows) == 1
@@ -429,47 +478,7 @@ def test_historical_authority_acceptance_blocks_stale_authority_abandonment(
         clock=FixedClock(now_value=EVALUATED_AT),
     )
     project_id = open_greenfield_shell(domain, name="Historical Acceptance")
-    with Session(engine) as session:
-        spec = SpecRegistry(
-            product_id=project_id,
-            spec_hash="sha256:historical-spec",
-            content="# Historical accepted specification",
-            status="superseded",
-        )
-        session.add(spec)
-        session.flush()
-        assert spec.spec_version_id is not None
-        authority = CompiledSpecAuthority(
-            spec_version_id=spec.spec_version_id,
-            compiler_version="3.0.0",
-            prompt_hash="a" * 64,
-            compiled_at=EVALUATED_AT,
-            compiled_artifact_json=authority_json(),
-            scope_themes="[]",
-            invariants="[]",
-            eligible_feature_ids="[]",
-        )
-        session.add(authority)
-        session.flush()
-        assert authority.authority_id is not None
-        authority_fingerprint = pending_authority_fingerprint(authority)
-        assert authority_fingerprint is not None
-        session.add(
-            SpecAuthorityAcceptance(
-                product_id=project_id,
-                spec_version_id=spec.spec_version_id,
-                status="accepted",
-                policy="test",
-                decided_by="reviewer",
-                decided_at=EVALUATED_AT,
-                compiler_version=authority.compiler_version,
-                prompt_hash=authority.prompt_hash,
-                spec_hash=spec.spec_hash,
-                pending_authority_id=authority.authority_id,
-                authority_fingerprint=authority_fingerprint,
-            )
-        )
-        session.commit()
+    seed_historical_authority_acceptance(engine, project_id)
 
     with Session(engine) as session:
         snapshot = WorkflowFactRepository(session).load(project_id)
@@ -502,6 +511,65 @@ def test_historical_authority_acceptance_blocks_stale_authority_abandonment(
     assert result.error.code is WorkflowErrorCode.TRANSITION_NOT_AVAILABLE
     with Session(engine) as session:
         assert session.exec(select(ProjectAbandonment)).all() == []
+
+
+def test_persisted_abandonment_with_historical_acceptance_is_fact_conflict(
+    domain: WorkflowDomain,
+    engine: Engine,
+) -> None:
+    """Project corrupt terminal/downstream facts as invalid and reject mutation."""
+    project_id = open_greenfield_shell(domain, name="Abandoned Acceptance Conflict")
+    seed_historical_authority_acceptance(engine, project_id)
+    with Session(engine) as session:
+        session.add(
+            ProjectAbandonment(
+                project_id=project_id,
+                reason="Legacy abandoned shell",
+                abandoned_by="legacy-migration",
+                abandoned_at=EVALUATED_AT,
+            )
+        )
+        session.commit()
+
+    position = domain.position(project_id)
+    expected_invalid = (
+        *(node.node_id for node in GREENFIELD_ONBOARDING_NODES),
+        AbandonProjectShell.node_id,
+    )
+    assert position.available_nodes == ()
+    assert position.invalid_nodes == expected_invalid
+    assert position.terminal is False
+    decision = next(
+        item
+        for item in position.decisions
+        if item.node_id == AbandonProjectShell.node_id
+    )
+    request = AbandonProjectShell(
+        project_id=project_id,
+        graph_version=position.graph_version,
+        fact_fingerprint=position.fact_fingerprint,
+        decision_fingerprint=decision.decision_fingerprint,
+        idempotency_key="abandoned-accepted-conflict",
+        actor="operator@example.com",
+        correlation_id="task-7-review",
+        instance_key=decision.instance_key,
+        reason="Must fail closed.",
+    )
+
+    result = domain.transition(request)
+
+    assert decision.category is NodeCategory.INVALID
+    assert decision.reason_code == "WORKFLOW_FACT_CONFLICT"
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
+    with Session(engine) as session:
+        abandonments = session.exec(
+            select(ProjectAbandonment).where(
+                col(ProjectAbandonment.project_id) == project_id
+            )
+        ).all()
+        assert len(abandonments) == 1
 
 
 def test_handler_exception_rolls_back_facts_and_receipt(

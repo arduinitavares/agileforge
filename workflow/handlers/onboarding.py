@@ -26,7 +26,11 @@ from workflow.contracts import (
     WorkflowError,
     WorkflowErrorCode,
 )
-from workflow.fingerprints import canonical_hash, canonical_json
+from workflow.fingerprints import (
+    canonical_hash,
+    canonical_json,
+    canonical_stored_json_hash,
+)
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -480,9 +484,25 @@ def execute_register_initial_scope(
         or active.base_spec_hash is not None
         or review is None
         or review.decision != "accepted"
-        or review.artifact_fingerprint != active.content_fingerprint
     ):
         return _conflict("Registration requires the exact accepted initial draft.")
+    try:
+        stored_fingerprint = canonical_stored_json_hash(active.canonical_content_json)
+    except (TypeError, ValueError):
+        stored_fingerprint = None
+    if (
+        stored_fingerprint is None
+        or stored_fingerprint != active.content_fingerprint
+        or stored_fingerprint != review.artifact_fingerprint
+    ):
+        message = (
+            "The accepted initial draft contains malformed stored JSON."
+            if stored_fingerprint is None
+            else (
+                "The accepted initial draft content does not match its terminal review."
+            )
+        )
+        return _conflict(message)
     existing_registrations = session.exec(
         select(InitialScopeRegistration).where(
             col(InitialScopeRegistration.project_id) == request.project_id

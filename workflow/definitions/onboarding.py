@@ -69,12 +69,22 @@ def _required_run_id(value: int | None) -> int:
     return value
 
 
+def has_historical_accepted_authority(snapshot: WorkflowFactSnapshot) -> bool:
+    """Return whether any append-only authority decision records acceptance."""
+    return any(
+        decision.artifact_type == "authority" and decision.decision == "accepted"
+        for decision in snapshot.review_decisions
+    )
+
+
 def _run_context(
     snapshot: WorkflowFactSnapshot,
 ) -> tuple[int | None, tuple[RuleEvaluation, ...] | None]:
     if snapshot.project.origin != "greenfield":
         return None, _evaluation(RuleCategory.SATISFIED, "NOT_GREENFIELD")
-    if len(snapshot.project_abandonments) > 1:
+    if len(snapshot.project_abandonments) > 1 or (
+        snapshot.project_abandonments and has_historical_accepted_authority(snapshot)
+    ):
         return None, _invalid()
     if snapshot.project_abandonments:
         return None, _evaluation(RuleCategory.SATISFIED, "PROJECT_ABANDONED")
@@ -741,4 +751,8 @@ def greenfield_graph() -> WorkflowGraph:
     )
 
 
-__all__ = ["GREENFIELD_ONBOARDING_NODES", "greenfield_graph"]
+__all__ = [
+    "GREENFIELD_ONBOARDING_NODES",
+    "greenfield_graph",
+    "has_historical_accepted_authority",
+]

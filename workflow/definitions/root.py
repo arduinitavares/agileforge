@@ -8,7 +8,10 @@ from workflow.contracts import (
     InputField,
     RecommendationKind,
 )
-from workflow.definitions.onboarding import GREENFIELD_ONBOARDING_NODES
+from workflow.definitions.onboarding import (
+    GREENFIELD_ONBOARDING_NODES,
+    has_historical_accepted_authority,
+)
 from workflow.facts import WorkflowFactSnapshot
 from workflow.graph import (
     ChildGraphSpec,
@@ -24,6 +27,14 @@ def _abandon_shell_rule(
     _evaluated_at: datetime,
 ) -> tuple[RuleEvaluation, ...]:
     """Offer typed shell abandonment only before accepted authority."""
+    accepted_authority_exists = has_historical_accepted_authority(snapshot)
+    if snapshot.project_abandonments and accepted_authority_exists:
+        return (
+            RuleEvaluation(
+                category=RuleCategory.INVALID,
+                reason_code="WORKFLOW_FACT_CONFLICT",
+            ),
+        )
     if snapshot.project_abandonments:
         return (
             RuleEvaluation(
@@ -31,10 +42,7 @@ def _abandon_shell_rule(
                 reason_code="PROJECT_ALREADY_ABANDONED",
             ),
         )
-    if any(
-        decision.artifact_type == "authority" and decision.decision == "accepted"
-        for decision in snapshot.review_decisions
-    ):
+    if accepted_authority_exists:
         return (
             RuleEvaluation(
                 category=RuleCategory.BLOCKED,

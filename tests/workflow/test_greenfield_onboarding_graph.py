@@ -9,7 +9,11 @@ from typing import TYPE_CHECKING, Literal
 import pytest
 
 from workflow.contracts import NodeCategory
-from workflow.definitions.onboarding import greenfield_graph
+from workflow.definitions.onboarding import (
+    GREENFIELD_ONBOARDING_NODES,
+    greenfield_graph,
+)
+from workflow.definitions.root import ROOT_GRAPH
 from workflow.facts import (
     ChallengeArtifactFact,
     DiscoveryRunFact,
@@ -112,7 +116,7 @@ def _spec_draft(
 def _decision(
     *,
     decision_id: int,
-    artifact_type: Literal["prd", "spec_draft"],
+    artifact_type: Literal["prd", "spec_draft", "authority"],
     artifact_id: int,
     fingerprint: str,
     decision: Literal["accepted", "rejected", "feedback"],
@@ -196,6 +200,13 @@ SPEC_REJECTED = _decision(
     artifact_id=SPEC_DRAFT_ID,
     fingerprint=SPEC_DRAFT_FINGERPRINT,
     decision="feedback",
+)
+AUTHORITY_ACCEPTED = _decision(
+    decision_id=5,
+    artifact_type="authority",
+    artifact_id=501,
+    fingerprint="sha256:accepted-authority",
+    decision="accepted",
 )
 
 
@@ -408,6 +419,34 @@ def test_abandoned_shell_remains_terminal_with_historical_artifact_facts() -> No
     assert position.available_nodes == ()
     assert position.invalid_nodes == ()
     assert position.terminal is True
+
+
+def test_abandonment_with_historical_accepted_authority_is_fact_conflict() -> None:
+    """Fail closed when terminal shell and downstream activation facts coexist."""
+    snapshot = _snapshot(
+        decisions=(AUTHORITY_ACCEPTED,),
+        states={"abandoned"},
+    )
+    greenfield_node_ids = tuple(node.node_id for node in GREENFIELD_ONBOARDING_NODES)
+
+    onboarding_position = greenfield_graph().evaluate(snapshot, EVALUATED_AT)
+    root_position = ROOT_GRAPH.evaluate(snapshot, EVALUATED_AT)
+
+    assert onboarding_position.available_nodes == ()
+    assert onboarding_position.invalid_nodes == greenfield_node_ids
+    assert onboarding_position.terminal is False
+    assert root_position.available_nodes == ()
+    assert root_position.invalid_nodes == (
+        *greenfield_node_ids,
+        "onboarding.abandon_shell",
+    )
+    assert root_position.terminal is False
+    assert all(
+        decision.category is NodeCategory.INVALID
+        and decision.reason_code == "WORKFLOW_FACT_CONFLICT"
+        for decision in root_position.decisions
+        if decision.node_id in root_position.invalid_nodes
+    )
 
 
 def test_node_decisions_expose_exact_request_kinds_and_artifact_references() -> None:

@@ -10,7 +10,7 @@ from sqlalchemy.exc import OperationalError
 from sqlmodel import Session, col, select
 
 from models.workflow import WorkflowTransitionReceipt
-from repositories.workflow import WorkflowFactRepository
+from repositories.workflow import WorkflowFactLoadError, WorkflowFactRepository
 from workflow.contracts import (
     NodeCategory,
     NodeDecision,
@@ -113,6 +113,11 @@ class WorkflowDomain:
                     return self._fact_conflict(
                         "Another workflow transition holds the Project fact lock."
                     )
+                raise
+            except WorkflowFactLoadError as error:
+                session.rollback()
+                if isinstance(request, RegisterInitialScope):
+                    return self._fact_conflict(str(error))
                 raise
             except Exception:
                 session.rollback()

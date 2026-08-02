@@ -56,6 +56,22 @@ def canonical_hash(value: object) -> str:
     return f"sha256:{digest}"
 
 
+def canonical_stored_json_hash(canonical_content_json: str) -> str:
+    """Validate stored canonical object JSON and return its exact fingerprint."""
+    try:
+        parsed: object = json.loads(canonical_content_json)
+    except json.JSONDecodeError as exc:
+        msg = "Stored canonical content is malformed JSON."
+        raise ValueError(msg) from exc
+    if not isinstance(parsed, dict):
+        msg = "Stored canonical content must be a JSON object."
+        raise TypeError(msg)
+    if canonical_json(parsed) != canonical_content_json:
+        msg = "Stored canonical content is not canonical JSON."
+        raise ValueError(msg)
+    return canonical_hash(parsed)
+
+
 def fact_fingerprint(snapshot: WorkflowFactSnapshot) -> str:
     """Return the graph-versioned fingerprint for an immutable fact snapshot."""
     payload = {

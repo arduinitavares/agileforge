@@ -28,7 +28,12 @@ from services.specs.lifecycle_service import (
 )
 from workflow import RegisterInitialScope, WorkflowDomain
 from workflow.clock import FixedClock
-from workflow.contracts import NodeCategory, TransitionResult, WorkflowPosition
+from workflow.contracts import (
+    NodeCategory,
+    TransitionResult,
+    WorkflowErrorCode,
+    WorkflowPosition,
+)
 from workflow.definitions.root import ROOT_GRAPH
 from workflow.fingerprints import canonical_hash, canonical_json
 
@@ -267,6 +272,63 @@ def test_registration_uses_stored_content_after_source_mutation_and_deletion(
     assert all(
         not node.startswith("backlog.") for node in result.position.available_nodes
     )
+
+
+@pytest.mark.parametrize(
+    "tampered_content_json",
+    [
+        pytest.param(
+            canonical_json({"scope": ["post-review tamper"]}),
+            id="reviewed-fingerprint-mismatch",
+        ),
+        pytest.param('{"scope":', id="malformed-json"),
+    ],
+)
+def test_registration_rejects_post_review_stored_content_tampering_without_writes(
+    domain: WorkflowDomain,
+    engine: Engine,
+    tampered_content_json: str,
+) -> None:
+    """Re-bind stored draft bytes to the exact terminal review at mutation time."""
+    reviewed_content = {"scope": ["reviewed and accepted"]}
+    reviewed_fingerprint = canonical_hash(reviewed_content)
+    accepted = _seed_accepted_initial_draft(
+        engine,
+        name=f"Registration Tamper {tampered_content_json}",
+        canonical_content=reviewed_content,
+        provenance_path=None,
+    )
+    request = _registration_request(
+        domain.position(accepted.project_id),
+        accepted.spec_draft_id,
+        key=f"register-tamper-{canonical_hash(tampered_content_json)}",
+    )
+    with Session(engine) as session:
+        draft = session.get(SpecDraft, accepted.spec_draft_id)
+        assert draft is not None
+        assert draft.content_fingerprint == reviewed_fingerprint
+        draft.canonical_content_json = tampered_content_json
+        session.add(draft)
+        session.commit()
+
+    result = domain.transition(request)
+
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
+    with Session(engine) as session:
+        assert session.exec(select(SpecRegistry)).all() == []
+        assert session.exec(select(InitialScopeRegistration)).all() == []
+        draft = session.get(SpecDraft, accepted.spec_draft_id)
+        assert draft is not None
+        assert draft.canonical_content_json == tampered_content_json
+        assert draft.content_fingerprint == reviewed_fingerprint
+        review = session.exec(
+            select(SpecDraftDecision).where(
+                col(SpecDraftDecision.spec_draft_id) == accepted.spec_draft_id
+            )
+        ).one()
+        assert review.artifact_fingerprint == reviewed_fingerprint
 
 
 def test_registration_replay_cannot_create_duplicate_spec_or_binding(

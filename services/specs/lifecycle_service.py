@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import re
 from dataclasses import dataclass
@@ -23,7 +22,7 @@ from services.specs.compiler_service import (
     _resolve_update_spec_and_compile_authority,
     update_spec_and_compile_authority,
 )
-from workflow.fingerprints import canonical_hash, canonical_json
+from workflow.fingerprints import canonical_stored_json_hash
 
 if TYPE_CHECKING:
     from google.adk.tools import ToolContext
@@ -293,17 +292,9 @@ def register_approved_spec_from_canonical_json(
     approved: ApprovedCanonicalSpec,
 ) -> SpecRegistry:
     """Insert an approved spec from canonical JSON in a caller-owned transaction."""
-    parsed_content = json.loads(approved.canonical_content_json)
-    if not isinstance(parsed_content, dict):
-        msg = "Stored initial specification content must be a JSON object."
-        raise TypeError(msg)
-    if canonical_json(parsed_content) != approved.canonical_content_json:
-        msg = "Stored initial specification content is not canonical JSON."
-        raise ValueError(msg)
-
     spec = SpecRegistry(
         product_id=approved.product_id,
-        spec_hash=canonical_hash(parsed_content),
+        spec_hash=canonical_stored_json_hash(approved.canonical_content_json),
         content=approved.canonical_content_json,
         content_ref=approved.content_ref,
         status="approved",
