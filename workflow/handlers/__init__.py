@@ -19,6 +19,10 @@ from workflow.handlers.onboarding import (
     execute_record_repository_inventory,
     execute_register_initial_scope,
 )
+from workflow.handlers.planning import (
+    execute_planning_request,
+    validate_planning_review,
+)
 from workflow.handlers.product_definition import (
     execute_decide_backlog,
     execute_decide_vision,
@@ -43,6 +47,7 @@ __all__ = [
     "execute_decide_prd",
     "execute_decide_vision",
     "execute_open_project_shell",
+    "execute_planning_request",
     "execute_reconcile_backlog",
     "execute_record_authority_feedback",
     "execute_record_backlog_draft",
@@ -58,4 +63,5 @@ __all__ = [
     "validate_decide_authority_review",
     "validate_decide_backlog_review",
     "validate_decide_vision_review",
+    "validate_planning_review",
 ]

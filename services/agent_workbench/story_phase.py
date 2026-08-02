@@ -18,7 +18,12 @@ from models.core import Sprint, SprintStory, Task, UserStory, UserStoryDependenc
 from models.db import get_engine
 from models.enums import StoryStatus, TaskStatus, WorkflowEventType
 from models.events import WorkflowEvent
+from models.specs import SpecRegistry
+from models.workflow import StoryArtifact, StoryArtifactDecision
 from orchestrator_agent.agent_tools.story_linkage import normalize_requirement_key
+from orchestrator_agent.agent_tools.user_story_writer_tool.schemes import (
+    UserStoryWriterOutput,
+)
 from orchestrator_agent.agent_tools.user_story_writer_tool.tools import (
     evaluate_dependency_candidates,
     save_stories_tool,
@@ -68,6 +73,7 @@ from services.story_runtime import (
 )
 from services.workflow import WorkflowService
 from tools.orchestrator_tools import select_project
+from workflow.fingerprints import canonical_json
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -75,6 +81,7 @@ if TYPE_CHECKING:
     from google.adk.tools import ToolContext
 
     from models.core import Product
+    from workflow.contracts import JsonObject
 else:
     ToolContext = Any
 
@@ -1959,6 +1966,245 @@ def _repair_story_readiness_rows(request: dict[str, Any]) -> dict[str, Any]:
                 repaired_ids.append(story.story_id)
         session.commit()
     return {"repaired_count": len(repaired_ids), "story_ids": repaired_ids}
+
+
+def record_story_draft_in_session(  # noqa: C901, PLR0912, PLR0913, PLR0915
+    session: Session,
+    *,
+    project_id: int,
+    requirement_id: str,
+    requirement_text: str,
+    requirement_rank: int,
+    roadmap_artifact_id: int,
+    roadmap_artifact_fingerprint: str,
+    canonical_content: JsonObject,
+    content_fingerprint: str,
+    supersedes_story_artifact_id: int | None,
+    actor: str,
+    recorded_at: datetime,
+) -> StoryArtifact:
+    """Persist deterministic Story linkage and one immutable Story-set artifact."""
+    output = UserStoryWriterOutput.model_validate(canonical_content)
+    if output.parent_requirement != requirement_text:
+        message = "Story content does not target the exact Backlog requirement."
+        raise ValueError(message)
+    if canonical_hash(canonical_content) != content_fingerprint:
+        message = "Story content fingerprint does not match canonical content."
+        raise ValueError(message)
+    normalized_requirement = normalize_requirement_key(requirement_text)
+    if requirement_id != normalized_requirement:
+        message = "Story requirement identity is not canonical."
+        raise ValueError(message)
+    artifacts = session.exec(
+        select(StoryArtifact)
+        .where(
+            StoryArtifact.project_id == project_id,
+            StoryArtifact.requirement_id == requirement_id,
+        )
+        .order_by(cast("Any", StoryArtifact.version_number))
+    ).all()
+    expected_parent = artifacts[-1].story_artifact_id if artifacts else None
+    if supersedes_story_artifact_id != expected_parent:
+        message = "Story supersession does not match the current artifact."
+        raise ValueError(message)
+    existing = session.exec(
+        select(UserStory)
+        .where(
+            UserStory.product_id == project_id,
+            UserStory.source_requirement == normalized_requirement,
+            UserStory.is_superseded == False,  # noqa: E712
+        )
+        .order_by(cast("Any", UserStory.refinement_slot))
+    ).all()
+    existing_by_slot = {
+        item.refinement_slot: item
+        for item in existing
+        if item.refinement_slot is not None
+    }
+    spec = session.exec(
+        select(SpecRegistry)
+        .where(
+            SpecRegistry.product_id == project_id,
+            SpecRegistry.status == "approved",
+        )
+        .order_by(cast("Any", SpecRegistry.spec_version_id).desc())
+    ).first()
+    accepted_spec_version_id = None if spec is None else spec.spec_version_id
+    story_ids: list[int] = []
+    for slot, item in enumerate(output.user_stories, start=1):
+        story = existing_by_slot.get(slot)
+        acceptance_criteria = "\n".join(
+            criterion if criterion.startswith("- ") else f"- {criterion}"
+            for criterion in item.acceptance_criteria
+        )
+        persona = None
+        statement = item.statement.strip()
+        if ", I want " in statement:
+            persona = statement.split(", I want ", maxsplit=1)[0]
+            persona = persona.removeprefix("As a ").removeprefix("As an ").strip()
+        if story is not None:
+            linked = session.exec(
+                select(SprintStory).where(SprintStory.story_id == story.story_id)
+            ).first()
+            changed = (
+                story.title != item.story_title
+                or story.story_description != item.statement
+                or story.acceptance_criteria != acceptance_criteria
+            )
+            if linked is not None and changed:
+                message = "Story correction is unsafe after Sprint work exists."
+                raise ValueError(message)
+        else:
+            story = UserStory(
+                product_id=project_id,
+                title=item.story_title,
+                source_requirement=normalized_requirement,
+                refinement_slot=slot,
+                story_origin="refined",
+                created_at=recorded_at,
+            )
+        story.title = item.story_title
+        story.story_description = item.statement
+        story.acceptance_criteria = acceptance_criteria
+        story.persona = persona
+        story.status = StoryStatus.TO_DO
+        story.story_points = {"XS": 1, "S": 2, "M": 3, "L": 5, "XL": 8}[
+            item.estimated_effort
+        ]
+        story.rank = str((requirement_rank * 100) + slot)
+        story.source_requirement = normalized_requirement
+        story.refinement_slot = slot
+        story.story_origin = "refined"
+        story.is_refined = True
+        story.is_superseded = False
+        story.accepted_spec_version_id = accepted_spec_version_id
+        story.ac_updated_at = recorded_at
+        story.ac_update_reason = "user_story_refinement"
+        story.updated_at = recorded_at
+        session.add(story)
+        session.flush()
+        if story.story_id is None:
+            message = "Story row did not receive a durable identity."
+            raise ValueError(message)
+        story_ids.append(story.story_id)
+    retained_slots = set(range(1, len(output.user_stories) + 1))
+    for story in existing:
+        if story.refinement_slot in retained_slots:
+            continue
+        linked = session.exec(
+            select(SprintStory).where(SprintStory.story_id == story.story_id)
+        ).first()
+        if linked is not None:
+            message = "Story replacement is unsafe after Sprint work exists."
+            raise ValueError(message)
+        story.is_superseded = True
+        story.updated_at = recorded_at
+        session.add(story)
+    row = StoryArtifact(
+        project_id=project_id,
+        requirement_id=requirement_id,
+        roadmap_artifact_id=roadmap_artifact_id,
+        roadmap_artifact_fingerprint=roadmap_artifact_fingerprint,
+        version_number=len(artifacts) + 1,
+        canonical_content_json=canonical_json(canonical_content),
+        content_fingerprint=content_fingerprint,
+        story_ids_json=canonical_json(sorted(story_ids)),
+        supersedes_story_artifact_id=supersedes_story_artifact_id,
+        created_by=actor,
+        created_at=recorded_at,
+    )
+    session.add(row)
+    session.add(
+        WorkflowEvent(
+            event_type=WorkflowEventType.STORIES_SAVED,
+            timestamp=recorded_at,
+            product_id=project_id,
+            session_id=None,
+            duration_seconds=0.0,
+            event_metadata=canonical_json(
+                {
+                    "action": "story_artifact_recorded",
+                    "content_fingerprint": content_fingerprint,
+                    "requirement_id": requirement_id,
+                    "story_ids": sorted(story_ids),
+                }
+            ),
+        )
+    )
+    session.flush()
+    return row
+
+
+def record_story_decision_in_session(  # noqa: PLR0913
+    session: Session,
+    *,
+    artifact: StoryArtifact,
+    decision: str,
+    rationale: str,
+    reviewer: str,
+    idempotency_key: str,
+    decided_at: datetime,
+) -> StoryArtifactDecision:
+    """Append one terminal decision for exact immutable Story content."""
+    if decision not in {"accepted", "rejected", "feedback"}:
+        message = "Story decision is invalid."
+        raise ValueError(message)
+    existing = session.exec(
+        select(StoryArtifactDecision).where(
+            StoryArtifactDecision.project_id == artifact.project_id,
+            StoryArtifactDecision.story_artifact_id == artifact.story_artifact_id,
+        )
+    ).first()
+    if existing is not None:
+        message = "Story artifact already has a terminal decision."
+        raise ValueError(message)
+    row = StoryArtifactDecision(
+        project_id=artifact.project_id,
+        story_artifact_id=cast("int", artifact.story_artifact_id),
+        artifact_fingerprint=artifact.content_fingerprint,
+        decision=decision,
+        rationale=rationale,
+        reviewer=reviewer,
+        idempotency_key=idempotency_key,
+        decided_at=decided_at,
+    )
+    session.add(row)
+    session.flush()
+    return row
+
+
+def repair_story_readiness_in_session(
+    session: Session,
+    *,
+    project_id: int,
+    repairs: tuple[tuple[int, int, str], ...],
+    repaired_at: datetime,
+) -> tuple[int, ...]:
+    """Repair exact Story points and rank under the caller-owned transaction."""
+    _assert_repair_readiness_safe_in_session(session, project_id=project_id)
+    story_ids = tuple(item[0] for item in repairs)
+    rows = session.exec(
+        select(UserStory).where(cast("Any", UserStory.story_id).in_(story_ids))
+    ).all()
+    by_id = {item.story_id: item for item in rows if item.story_id is not None}
+    if set(by_id) != set(story_ids):
+        message = "Story readiness repair does not target exact Project stories."
+        raise ValueError(message)
+    for story_id, story_points, rank in repairs:
+        story = by_id[story_id]
+        if (
+            story.product_id != project_id
+            or story.is_superseded
+            or not story.is_refined
+        ):
+            message = "Story readiness repair targets an inactive Story."
+            raise ValueError(message)
+        story.story_points = story_points
+        story.rank = rank
+        story.updated_at = repaired_at
+        session.add(story)
+    session.flush()
+    return tuple(sorted(story_ids))
 
 
 def _assert_repair_readiness_safe(*, project_id: int) -> None:

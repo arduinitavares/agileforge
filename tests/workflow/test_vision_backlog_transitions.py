@@ -57,7 +57,7 @@ if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
 
 EVALUATED_AT = datetime(2026, 8, 2, 12, tzinfo=UTC)
-EXPECTED_REQUEST_VARIANT_COUNT = 21
+EXPECTED_REQUEST_VARIANT_COUNT = 30
 EXPECTED_VISION_VERSION_COUNT = 2
 CALLER_SESSION_FUNCTIONS: dict[ModuleType, frozenset[str]] = {
     vision_phase_module: frozenset(
@@ -470,7 +470,7 @@ def _select_story_in_sprint(
 
 
 def test_closed_request_union_adds_exactly_five_product_definition_variants() -> None:
-    """Keep the closed request union limited to the five Task 10 variants."""
+    """Keep the five Task 10 variants in the expanded closed request union."""
     variants = set(get_args(TransitionRequest.__value__))
     added = {
         RecordVisionDraft,

@@ -453,8 +453,8 @@ def test_authority_replacement_stales_prior_artifacts_and_requires_reconciliatio
     }
 
 
-def test_accepted_current_vision_and_backlog_form_explicit_planning_join() -> None:
-    """Unlock the planning boundary only at the explicit product join."""
+def test_accepted_current_backlog_unlocks_roadmap_generation() -> None:
+    """Bind Roadmap generation to the accepted current Backlog."""
     vision = _artifact(
         "vision",
         artifact_id=VISION_ID,
@@ -488,10 +488,7 @@ def test_accepted_current_vision_and_backlog_form_explicit_planning_join() -> No
         _snapshot(artifacts=(vision, backlog), decisions=decisions),
         "planning.roadmap.generate",
     )
-    assert {item.fact_type for item in join.fact_references} == {
-        "vision",
-        "backlog",
-    }
+    assert {item.fact_type for item in join.fact_references} == {"backlog"}
 
 
 def test_contradictory_vision_terminal_decisions_fail_closed() -> None:

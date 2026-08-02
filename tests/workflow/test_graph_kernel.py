@@ -401,6 +401,14 @@ def test_root_definition_has_named_children_in_lifecycle_order() -> None:
     )
     assert tuple(node.node_id for node in planning.nodes) == (
         "planning.roadmap.generate",
+        "planning.roadmap.review",
+        "planning.story.generate",
+        "planning.story.review",
+        "planning.story_dependencies",
+        "planning.story_readiness",
+        "planning.sprint.plan",
+        "planning.sprint.review",
+        "planning.sprint.start",
     )
     assert all(not child.nodes for child in later_children)
 

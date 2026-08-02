@@ -195,6 +195,56 @@ class BacklogReconciliationFact(FrozenModel):
     reconciled_at: _DATETIME
 
 
+class BacklogRequirementFact(FrozenModel):
+    """One stable requirement from the accepted current Backlog artifact."""
+
+    requirement_id: str
+    backlog_artifact_id: int
+    backlog_artifact_fingerprint: str
+    requirement: str
+    rank: int
+
+
+class PlanningArtifactFact(FrozenModel):
+    """Immutable Roadmap, Story-set, or Sprint-plan artifact state."""
+
+    artifact_type: Literal["roadmap", "story", "sprint_plan"]
+    artifact_id: int
+    artifact_fingerprint: str
+    source_fingerprint: str
+    requirement_id: str | None = None
+    story_ids: tuple[int, ...] = ()
+    candidate_set_fingerprint: str | None = None
+    supersedes_artifact_id: int | None = None
+    status: Literal[
+        "pending_review",
+        "accepted",
+        "rejected",
+        "feedback",
+        "superseded",
+    ]
+
+
+class StoryDependencyFact(FrozenModel):
+    """One semantic Story dependency edge used by planning joins."""
+
+    dependency_id: int
+    dependent_story_id: int
+    prerequisite_story_id: int
+    status: Literal["proposed", "active", "rejected"]
+    source: Literal["story_writer", "dependency_repair", "manual_review"]
+    confidence: Literal["explicit", "inferred", "reviewed"]
+
+
+class StoryDependencyReviewFact(FrozenModel):
+    """Reviewed dependency-set binding for an exact Story source."""
+
+    review_id: int
+    selected_story_ids: tuple[int, ...]
+    source_fingerprint: str
+    dependency_fingerprint: str
+
+
 class SprintFact(FrozenModel):
     """Sprint lifecycle state."""
 
@@ -207,7 +257,12 @@ class StoryFact(FrozenModel):
     """Story readiness state used for sprint evaluation."""
 
     story_id: int
+    requirement_id: str | None = None
+    content_fingerprint: str | None = None
+    content_accepted: bool = False
     status: str
+    story_points: int | None = None
+    rank: str | None = None
     sprint_candidate: bool
     readiness_blockers: tuple[str, ...]
 
@@ -266,8 +321,12 @@ class WorkflowFactSnapshot(FrozenModel):
     authority_feedback: tuple[AuthorityFeedbackFact, ...] = ()
     phase_artifacts: tuple[PhaseArtifactFact, ...] = ()
     backlog_reconciliations: tuple[BacklogReconciliationFact, ...] = ()
+    backlog_requirements: tuple[BacklogRequirementFact, ...] = ()
+    planning_artifacts: tuple[PlanningArtifactFact, ...] = ()
     sprints: tuple[SprintFact, ...] = ()
     stories: tuple[StoryFact, ...] = ()
+    story_dependencies: tuple[StoryDependencyFact, ...] = ()
+    story_dependency_reviews: tuple[StoryDependencyReviewFact, ...] = ()
     tasks: tuple[TaskFact, ...] = ()
     post_sprint_triage: tuple[PostSprintTriageFact, ...] = ()
     node_attempts: tuple[NodeAttemptFact, ...] = ()

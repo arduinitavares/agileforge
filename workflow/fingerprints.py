@@ -74,9 +74,13 @@ def canonical_stored_json_hash(canonical_content_json: str) -> str:
 
 def fact_fingerprint(snapshot: WorkflowFactSnapshot) -> str:
     """Return the graph-versioned fingerprint for an immutable fact snapshot."""
+    facts = snapshot.model_dump(mode="json")
+    for name, collection in facts.items():
+        if name != "project" and isinstance(collection, tuple | list):
+            facts[name] = sorted(collection, key=canonical_json)
     payload = {
         "graph_version": GRAPH_VERSION,
-        "facts": snapshot.model_dump(mode="json"),
+        "facts": facts,
     }
     return canonical_hash(payload)
 

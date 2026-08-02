@@ -30,6 +30,7 @@ from workflow.handlers import (
     execute_decide_prd,
     execute_decide_vision,
     execute_open_project_shell,
+    execute_planning_request,
     execute_reconcile_backlog,
     execute_record_authority_feedback,
     execute_record_backlog_draft,
@@ -45,15 +46,20 @@ from workflow.handlers import (
     validate_decide_authority_review,
     validate_decide_backlog_review,
     validate_decide_vision_review,
+    validate_planning_review,
 )
 from workflow.requests import (
     AbandonProjectShell,
+    ApplyStoryDependencies,
     CompileAuthority,
     DecideAuthority,
     DecideBacklog,
     DecideBrownfieldInitialSpec,
     DecideInitialSpecDraft,
     DecidePrd,
+    DecideRoadmap,
+    DecideSprintPlan,
+    DecideStory,
     DecideVision,
     OpenProjectShell,
     ReconcileBacklog,
@@ -65,9 +71,14 @@ from workflow.requests import (
     RecordPrdVersion,
     RecordRepositoryBaseline,
     RecordRepositoryInventory,
+    RecordRoadmapDraft,
+    RecordSprintPlan,
+    RecordStoryDraft,
     RecordVisionDraft,
     RegisterInitialScope,
     RepairAuthority,
+    RepairStoryReadiness,
+    StartSprint,
     TransitionRequest,
 )
 
@@ -103,6 +114,17 @@ type _ProductDefinitionRequest = (
     | DecideBacklog
     | ReconcileBacklog
 )
+type _PlanningRequest = (
+    RecordRoadmapDraft
+    | DecideRoadmap
+    | RecordStoryDraft
+    | DecideStory
+    | ApplyStoryDependencies
+    | RepairStoryReadiness
+    | RecordSprintPlan
+    | DecideSprintPlan
+    | StartSprint
+)
 type _PositionedTransitionRequest = (
     _ExistingPositionedRequest
     | RecordRepositoryBaseline
@@ -118,6 +140,7 @@ type _PositionedTransitionRequest = (
     | RecordBacklogDraft
     | DecideBacklog
     | ReconcileBacklog
+    | _PlanningRequest
 )
 
 
@@ -188,7 +211,15 @@ class WorkflowDomain:
     ) -> TransitionResult:
         """Own receipt claim, handler facts, and completion in one transaction."""
         self._begin_write(session)
-        if isinstance(request, DecideAuthority | DecideVision | DecideBacklog):
+        if isinstance(
+            request,
+            DecideAuthority
+            | DecideVision
+            | DecideBacklog
+            | DecideRoadmap
+            | DecideStory
+            | DecideSprintPlan,
+        ):
             existing = self._existing_receipt_claim(session, request)
             if existing is not None:
                 if existing.immediate_result is None:
@@ -199,8 +230,10 @@ class WorkflowDomain:
                 review_failure = validate_decide_authority_review(session, request)
             elif isinstance(request, DecideVision):
                 review_failure = validate_decide_vision_review(session, request)
-            else:
+            elif isinstance(request, DecideBacklog):
                 review_failure = validate_decide_backlog_review(session, request)
+            else:
+                review_failure = validate_planning_review(session, request)
             if review_failure is not None:
                 return review_failure
         claim = self._claim_receipt(session, request, evaluated_at)
@@ -350,6 +383,24 @@ class WorkflowDomain:
             | ReconcileBacklog,
         ):
             result = self._execute_product_definition_request(
+                session,
+                request,
+                decision_or_failure,
+                evaluated_at,
+            )
+        elif isinstance(
+            request,
+            RecordRoadmapDraft
+            | DecideRoadmap
+            | RecordStoryDraft
+            | DecideStory
+            | ApplyStoryDependencies
+            | RepairStoryReadiness
+            | RecordSprintPlan
+            | DecideSprintPlan
+            | StartSprint,
+        ):
+            result = execute_planning_request(
                 session,
                 request,
                 decision_or_failure,
@@ -589,7 +640,12 @@ class WorkflowDomain:
             )
         human_review_waiting = isinstance(
             request,
-            DecideAuthority | DecideVision | DecideBacklog,
+            DecideAuthority
+            | DecideVision
+            | DecideBacklog
+            | DecideRoadmap
+            | DecideStory
+            | DecideSprintPlan,
         ) and (decision.category is NodeCategory.WAITING)
         if decision.category is not NodeCategory.AVAILABLE and not human_review_waiting:
             return TransitionResult(

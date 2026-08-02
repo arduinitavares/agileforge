@@ -13,9 +13,9 @@ from uuid import uuid4
 
 import anyio
 from sqlalchemy.orm import selectinload
-from sqlmodel import Session, select
+from sqlmodel import Session, col, select
 
-from models.core import Sprint, SprintStory, Task, UserStory
+from models.core import Sprint, SprintStory, Task, Team, UserStory
 from models.db import get_engine
 from models.enums import (
     SprintStatus,
@@ -26,6 +26,12 @@ from models.enums import (
     WorkflowEventType,
 )
 from models.events import StoryCompletionLog, TaskExecutionLog, WorkflowEvent
+from models.workflow import SprintPlanArtifact, SprintPlanArtifactDecision
+from orchestrator_agent.agent_tools.sprint_planner_tool.schemes import (
+    SprintPlannerOutput,
+    validate_task_decomposition_quality,
+    validate_task_invariant_bindings,
+)
 from orchestrator_agent.agent_tools.sprint_planner_tool.tools import (
     save_sprint_plan_tool,
 )
@@ -71,7 +77,10 @@ from services.story_close_service import (
 from services.story_close_service import (
     get_story_close_readiness as get_story_close_readiness_service,
 )
-from services.story_dependencies import load_story_dependency_graph
+from services.story_dependencies import (
+    assert_dependency_graph_valid_for_sprint,
+    load_story_dependency_graph,
+)
 from services.task_execution_service import (
     TaskExecutionServiceError,
     get_task_execution_history,
@@ -86,7 +95,13 @@ from utils.api_schemas import (
     StoryCloseWriteRequest,
     TaskExecutionWriteRequest,
 )
-from utils.task_metadata import parse_task_metadata
+from utils.spec_schemas import ValidationEvidence
+from utils.task_metadata import (
+    metadata_from_structured_task,
+    parse_task_metadata,
+    serialize_task_metadata,
+)
+from workflow.fingerprints import canonical_json
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -95,6 +110,7 @@ if TYPE_CHECKING:
     from sqlmodel.sql._expression_select_cls import SelectOfScalar
 
     from models.core import Product
+    from workflow.contracts import JsonObject
 else:
     ToolContext = Any
 
@@ -141,6 +157,296 @@ _DEPENDENCY_RISK_STOPWORDS = frozenset(
         "validation",
     }
 )
+
+
+def _planning_story_invariant_ids(story: UserStory) -> list[str]:
+    if not story.validation_evidence:
+        return []
+    try:
+        evidence = ValidationEvidence.model_validate_json(story.validation_evidence)
+    except (ValueError, TypeError):
+        return []
+    return list(evidence.evaluated_invariant_ids or [])
+
+
+def record_sprint_plan_in_session(  # noqa: C901, PLR0912, PLR0913, PLR0915
+    session: Session,
+    *,
+    project_id: int,
+    team_name: str,
+    selected_story_ids: tuple[int, ...],
+    canonical_task_plan: JsonObject,
+    plan_fingerprint: str,
+    candidate_set_fingerprint: str,
+    supersedes_sprint_plan_artifact_id: int | None,
+    actor: str,
+    recorded_at: datetime,
+) -> SprintPlanArtifact:
+    """Persist exact Sprint, task, and immutable plan facts in one transaction."""
+    plan = SprintPlannerOutput.model_validate(canonical_task_plan)
+    if canonical_hash(canonical_task_plan) != plan_fingerprint:
+        message = "Sprint plan fingerprint does not match canonical content."
+        raise ValueError(message)
+    plan_story_ids = tuple(sorted(item.story_id for item in plan.selected_stories))
+    if plan_story_ids != selected_story_ids:
+        message = "Sprint plan selected Story IDs do not match the request."
+        raise ValueError(message)
+    artifacts = session.exec(
+        select(SprintPlanArtifact)
+        .where(SprintPlanArtifact.project_id == project_id)
+        .order_by(cast("Any", SprintPlanArtifact.version_number))
+    ).all()
+    expected_parent = artifacts[-1].sprint_plan_artifact_id if artifacts else None
+    if supersedes_sprint_plan_artifact_id != expected_parent:
+        message = "Sprint plan supersession does not match the current artifact."
+        raise ValueError(message)
+    stories = session.exec(
+        select(UserStory).where(cast("Any", UserStory.story_id).in_(selected_story_ids))
+    ).all()
+    stories_by_id = {
+        story.story_id: story for story in stories if story.story_id is not None
+    }
+    if set(stories_by_id) != set(selected_story_ids) or any(
+        story.product_id != project_id or story.is_superseded or not story.is_refined
+        for story in stories_by_id.values()
+    ):
+        message = "Sprint plan does not target exact active Project stories."
+        raise ValueError(message)
+    assert_dependency_graph_valid_for_sprint(session, project_id=project_id)
+    team = session.exec(select(Team).where(Team.name == team_name)).first()
+    if team is None:
+        team = Team(name=team_name, created_at=recorded_at, updated_at=recorded_at)
+        session.add(team)
+        session.flush()
+    if team.team_id is None:
+        message = "Sprint Team did not receive a durable identity."
+        raise ValueError(message)
+    ignored_sprint_id: int | None = None
+    sprint: Sprint | None = None
+    if supersedes_sprint_plan_artifact_id is not None:
+        parent = session.get(SprintPlanArtifact, supersedes_sprint_plan_artifact_id)
+        if parent is None or parent.project_id != project_id:
+            message = "Superseded Sprint plan does not exist."
+            raise ValueError(message)
+        sprint = session.get(Sprint, parent.sprint_id)
+        ignored_sprint_id = parent.sprint_id
+    conflicts = session.exec(
+        select(SprintStory.story_id)
+        .join(Sprint, col(Sprint.sprint_id) == col(SprintStory.sprint_id))
+        .where(
+            cast("Any", SprintStory.story_id).in_(selected_story_ids),
+            cast("Any", Sprint.status).in_([SprintStatus.PLANNED, SprintStatus.ACTIVE]),
+            *(
+                (Sprint.sprint_id != ignored_sprint_id,)
+                if ignored_sprint_id is not None
+                else ()
+            ),
+        )
+    ).all()
+    if conflicts:
+        message = f"Stories already assigned to open Sprints: {sorted(set(conflicts))}."
+        raise ValueError(message)
+    if sprint is None:
+        sprint = Sprint(
+            goal=plan.sprint_goal,
+            status=SprintStatus.PLANNED,
+            product_id=project_id,
+            team_id=team.team_id,
+            created_at=recorded_at,
+            updated_at=recorded_at,
+        )
+        session.add(sprint)
+        session.flush()
+    else:
+        if sprint.status is not SprintStatus.PLANNED:
+            message = "Only a planned Sprint can receive a superseding plan."
+            raise ValueError(message)
+        sprint.goal = plan.sprint_goal
+        sprint.team_id = team.team_id
+        sprint.updated_at = recorded_at
+        session.add(sprint)
+        for link in session.exec(
+            select(SprintStory).where(SprintStory.sprint_id == sprint.sprint_id)
+        ).all():
+            session.delete(link)
+        session.flush()
+    if sprint.sprint_id is None:
+        message = "Sprint did not receive a durable identity."
+        raise ValueError(message)
+    allowed_invariants = {
+        story_id: _planning_story_invariant_ids(story)
+        for story_id, story in stories_by_id.items()
+    }
+    binding_errors = validate_task_invariant_bindings(
+        plan,
+        allowed_invariant_ids_by_story=allowed_invariants,
+    )
+    if binding_errors:
+        raise ValueError(
+            "Sprint plan invariant binding failed: " + "; ".join(binding_errors)
+        )
+    acceptance_items: dict[int, list[str]] = {
+        story_id: [
+            line.lstrip("-* \t").strip()
+            for line in (story.acceptance_criteria or "").splitlines()
+            if line.lstrip("-* \t").strip()
+        ]
+        for story_id, story in stories_by_id.items()
+    }
+    decomposition_errors = validate_task_decomposition_quality(
+        plan,
+        include_task_decomposition=True,
+        has_acceptance_criteria_by_story={
+            story_id: bool(items) for story_id, items in acceptance_items.items()
+        },
+        acceptance_criteria_items_by_story=acceptance_items,
+    )
+    if decomposition_errors:
+        raise ValueError(
+            "Sprint task decomposition failed: " + "; ".join(decomposition_errors)
+        )
+    for selected in plan.selected_stories:
+        session.add(
+            SprintStory(
+                sprint_id=sprint.sprint_id,
+                story_id=selected.story_id,
+                added_at=recorded_at,
+            )
+        )
+        for task in session.exec(
+            select(Task).where(Task.story_id == selected.story_id)
+        ).all():
+            session.delete(task)
+        for task_spec in selected.tasks:
+            session.add(
+                Task(
+                    story_id=selected.story_id,
+                    description=task_spec.description,
+                    metadata_json=serialize_task_metadata(
+                        metadata_from_structured_task(task_spec)
+                    ),
+                    created_at=recorded_at,
+                    updated_at=recorded_at,
+                )
+            )
+    row = SprintPlanArtifact(
+        project_id=project_id,
+        sprint_id=sprint.sprint_id,
+        version_number=len(artifacts) + 1,
+        selected_story_ids_json=canonical_json(list(selected_story_ids)),
+        canonical_task_plan_json=canonical_json(canonical_task_plan),
+        plan_fingerprint=plan_fingerprint,
+        candidate_set_fingerprint=candidate_set_fingerprint,
+        supersedes_sprint_plan_artifact_id=supersedes_sprint_plan_artifact_id,
+        created_by=actor,
+        created_at=recorded_at,
+    )
+    session.add(row)
+    session.add(
+        WorkflowEvent(
+            event_type=WorkflowEventType.SPRINT_PLAN_SAVED,
+            timestamp=recorded_at,
+            product_id=project_id,
+            sprint_id=sprint.sprint_id,
+            session_id=None,
+            event_metadata=canonical_json(
+                {
+                    "action": "sprint_plan_recorded",
+                    "candidate_set_fingerprint": candidate_set_fingerprint,
+                    "plan_fingerprint": plan_fingerprint,
+                    "selected_story_ids": list(selected_story_ids),
+                }
+            ),
+            duration_seconds=0.0,
+        )
+    )
+    session.flush()
+    return row
+
+
+def record_sprint_plan_decision_in_session(  # noqa: PLR0913
+    session: Session,
+    *,
+    artifact: SprintPlanArtifact,
+    decision: str,
+    rationale: str,
+    reviewer: str,
+    idempotency_key: str,
+    decided_at: datetime,
+) -> SprintPlanArtifactDecision:
+    """Append one terminal decision for an exact immutable Sprint plan."""
+    if decision not in {"accepted", "rejected", "feedback"}:
+        message = "Sprint plan decision is invalid."
+        raise ValueError(message)
+    existing = session.exec(
+        select(SprintPlanArtifactDecision).where(
+            SprintPlanArtifactDecision.project_id == artifact.project_id,
+            SprintPlanArtifactDecision.sprint_plan_artifact_id
+            == artifact.sprint_plan_artifact_id,
+        )
+    ).first()
+    if existing is not None:
+        message = "Sprint plan already has a terminal decision."
+        raise ValueError(message)
+    row = SprintPlanArtifactDecision(
+        project_id=artifact.project_id,
+        sprint_plan_artifact_id=cast("int", artifact.sprint_plan_artifact_id),
+        plan_fingerprint=artifact.plan_fingerprint,
+        decision=decision,
+        rationale=rationale,
+        reviewer=reviewer,
+        idempotency_key=idempotency_key,
+        decided_at=decided_at,
+    )
+    session.add(row)
+    session.flush()
+    return row
+
+
+def start_sprint_in_session(
+    session: Session,
+    *,
+    project_id: int,
+    sprint_id: int,
+    started_at: datetime,
+) -> Sprint:
+    """Start one planned Sprint without consulting routing state."""
+    sprint = session.get(Sprint, sprint_id)
+    if sprint is None or sprint.product_id != project_id:
+        message = "Sprint start does not target an exact Project Sprint."
+        raise ValueError(message)
+    if sprint.status is not SprintStatus.PLANNED or sprint.started_at is not None:
+        message = "Only an unstarted planned Sprint can start."
+        raise ValueError(message)
+    other_active = session.exec(
+        select(Sprint).where(
+            Sprint.product_id == project_id,
+            Sprint.status == SprintStatus.ACTIVE,
+            Sprint.sprint_id != sprint_id,
+        )
+    ).first()
+    if other_active is not None:
+        message = "Another Sprint is already active for this Project."
+        raise ValueError(message)
+    sprint.status = SprintStatus.ACTIVE
+    sprint.started_at = started_at
+    sprint.updated_at = started_at
+    session.add(sprint)
+    session.add(
+        WorkflowEvent(
+            event_type=WorkflowEventType.SPRINT_STARTED,
+            timestamp=started_at,
+            product_id=project_id,
+            sprint_id=sprint_id,
+            session_id=None,
+            event_metadata=canonical_json(
+                {"action": "sprint_started", "team_id": sprint.team_id}
+            ),
+            duration_seconds=0.0,
+        )
+    )
+    session.flush()
+    return sprint
 
 
 @dataclass(frozen=True)
@@ -1261,8 +1567,8 @@ class SprintPhaseRunner:
 
         try:
             state = await self._ensure_session(str(project_id))
-            allow_completed_sprint_generation = (
-                _allow_completed_sprint_generation(state)
+            allow_completed_sprint_generation = _allow_completed_sprint_generation(
+                state
             )
 
             async def load_state() -> dict[str, Any]:
@@ -1670,9 +1976,7 @@ def _allow_completed_sprint_generation(state: dict[str, Any]) -> bool:
     current_triage = current_triage_for_latest_sprint(state)
     if current_triage is None or current_triage.get("impact") != "none":
         impact = (
-            current_triage.get("impact")
-            if isinstance(current_triage, dict)
-            else None
+            current_triage.get("impact") if isinstance(current_triage, dict) else None
         )
         message = (
             "Sprint generation from SPRINT_COMPLETE requires current "
@@ -1895,15 +2199,9 @@ def _post_sprint_triage_ledger_request_hash(  # noqa: PLR0913
             "sprint_id": _int_or_none(sprint_id) if sprint_id is not None else None,
             "expected_state": _triage_ledger_text(expected_state),
             "impact": _triage_ledger_text(impact).lower(),
-            "affected_requirements": _triage_ledger_text_list(
-                affected_requirements
-            ),
-            "affected_task_ids": _triage_ledger_positive_int_list(
-                affected_task_ids
-            ),
-            "affected_story_ids": _triage_ledger_positive_int_list(
-                affected_story_ids
-            ),
+            "affected_requirements": _triage_ledger_text_list(affected_requirements),
+            "affected_task_ids": _triage_ledger_positive_int_list(affected_task_ids),
+            "affected_story_ids": _triage_ledger_positive_int_list(affected_story_ids),
             "affected_backlog_item_ids": _triage_ledger_text_list(
                 affected_backlog_item_ids
             ),
@@ -2053,9 +2351,7 @@ def _post_sprint_triage_history(
     if sprint_id is None:
         return entries
     return [
-        entry
-        for entry in entries
-        if _int_or_none(entry.get("sprint_id")) == sprint_id
+        entry for entry in entries if _int_or_none(entry.get("sprint_id")) == sprint_id
     ]
 
 
@@ -2287,9 +2583,7 @@ def _serialize_sprint_metrics_row(
         if story.status in (StoryStatus.DONE, StoryStatus.ACCEPTED)
     ]
     duration_values = [
-        event.duration_seconds
-        for event in events
-        if event.duration_seconds is not None
+        event.duration_seconds for event in events if event.duration_seconds is not None
     ]
     turn_count_values = [
         event.turn_count for event in events if event.turn_count is not None
@@ -4032,9 +4326,7 @@ def _sprint_runtime_error(*, project_id: int, data: dict[str, Any]) -> dict[str,
                 "Inspect the recorded failure artifact when failure_artifact_id "
                 "is present."
             ),
-            (
-                f"Retry {safe_retry_command} from the current workflow next route."
-            ),
+            (f"Retry {safe_retry_command} from the current workflow next route."),
         ]
         if code == ErrorCode.SPRINT_GENERATION_MODEL_RESPONSE_INVALID
         else [

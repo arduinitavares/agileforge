@@ -9,12 +9,13 @@ from workflow.contracts import (
     RecommendationKind,
 )
 from workflow.definitions.authority import AUTHORITY_NODES
-from workflow.definitions.backlog import BACKLOG_NODES, PLANNING_BOUNDARY_NODE
+from workflow.definitions.backlog import BACKLOG_NODES
 from workflow.definitions.onboarding import (
     BROWNFIELD_ONBOARDING_NODES,
     GREENFIELD_ONBOARDING_NODES,
     has_historical_accepted_authority,
 )
+from workflow.definitions.planning import PLANNING_NODES
 from workflow.definitions.vision import VISION_NODES
 from workflow.facts import WorkflowFactSnapshot
 from workflow.graph import (
@@ -98,7 +99,7 @@ ROOT_GRAPH: WorkflowGraph = WorkflowGraph(
             ChildGraphSpec(child_graph_id="backlog", nodes=BACKLOG_NODES),
             ChildGraphSpec(
                 child_graph_id="planning",
-                nodes=(PLANNING_BOUNDARY_NODE,),
+                nodes=PLANNING_NODES,
             ),
             ChildGraphSpec(child_graph_id="execution", nodes=()),
             ChildGraphSpec(child_graph_id="scope_extension", nodes=()),

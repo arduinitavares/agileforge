@@ -319,18 +319,7 @@ BACKLOG_NODES: tuple[NodeSpec, ...] = (
     ),
 )
 
-PLANNING_BOUNDARY_NODE = NodeSpec(
-    node_id="planning.roadmap.generate",
-    child_graph_id="planning",
-    request_kind="record_roadmap_draft",
-    recommendation_kind=RecommendationKind.REQUIRED,
-    required_inputs=(),
-    evaluate_rule=_planning_boundary_rule,
-)
-
-
 __all__ = [
     "BACKLOG_NODES",
-    "PLANNING_BOUNDARY_NODE",
     "stale_accepted_artifact_ids",
 ]

@@ -712,6 +712,290 @@ class BacklogAuthorityReconciliation(SQLModel, table=True):
     reconciled_at: datetime = Field(default_factory=utc_now, nullable=False)
 
 
+class RoadmapArtifact(SQLModel, table=True):
+    """Immutable Roadmap artifact bound to one accepted Backlog artifact."""
+
+    __tablename__ = "roadmap_artifacts"
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id", "roadmap_artifact_id", name="uq_roadmap_project"
+        ),
+        UniqueConstraint(
+            "project_id",
+            "roadmap_artifact_id",
+            "content_fingerprint",
+            name="uq_roadmap_review_parent",
+        ),
+        UniqueConstraint("project_id", "version_number", name="uq_roadmap_version"),
+        UniqueConstraint(
+            "project_id",
+            "content_fingerprint",
+            name="uq_roadmap_fingerprint",
+        ),
+        ForeignKeyConstraint(
+            ["project_id", "backlog_artifact_id", "backlog_artifact_fingerprint"],
+            [
+                "backlog_artifacts.project_id",
+                "backlog_artifacts.backlog_artifact_id",
+                "backlog_artifacts.content_fingerprint",
+            ],
+            name="fk_roadmap_backlog",
+        ),
+        ForeignKeyConstraint(
+            ["project_id", "supersedes_roadmap_artifact_id"],
+            ["roadmap_artifacts.project_id", "roadmap_artifacts.roadmap_artifact_id"],
+            name="fk_roadmap_supersedes",
+        ),
+    )
+
+    roadmap_artifact_id: int | None = Field(default=None, primary_key=True)
+    project_id: int = Field(foreign_key="products.product_id", index=True)
+    backlog_artifact_id: int = Field(index=True)
+    backlog_artifact_fingerprint: str = Field(index=True)
+    version_number: int
+    canonical_content_json: str = Field(sa_type=Text)
+    content_fingerprint: str = Field(index=True)
+    supersedes_roadmap_artifact_id: int | None = Field(default=None, index=True)
+    created_by: str = Field(index=True)
+    created_at: datetime = Field(default_factory=utc_now, nullable=False)
+
+
+class RoadmapArtifactDecision(SQLModel, table=True):
+    """Append-only terminal review for one immutable Roadmap artifact."""
+
+    __tablename__ = "roadmap_artifact_decisions"
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id", "roadmap_artifact_id", name="uq_roadmap_decision"
+        ),
+        CheckConstraint(
+            "decision IN ('accepted', 'rejected', 'feedback')",
+            name="ck_roadmap_decision",
+        ),
+        ForeignKeyConstraint(
+            ["project_id", "roadmap_artifact_id", "artifact_fingerprint"],
+            [
+                "roadmap_artifacts.project_id",
+                "roadmap_artifacts.roadmap_artifact_id",
+                "roadmap_artifacts.content_fingerprint",
+            ],
+            name="fk_roadmap_decision_parent",
+        ),
+    )
+
+    roadmap_artifact_decision_id: int | None = Field(default=None, primary_key=True)
+    project_id: int = Field(index=True)
+    roadmap_artifact_id: int = Field(index=True)
+    artifact_fingerprint: str = Field(index=True)
+    decision: str = Field(index=True)
+    rationale: str = Field(sa_type=Text)
+    reviewer: str = Field(index=True)
+    idempotency_key: str = Field(index=True)
+    decided_at: datetime = Field(default_factory=utc_now, nullable=False)
+
+
+class StoryArtifact(SQLModel, table=True):
+    """Immutable Story-set artifact for one accepted Backlog requirement."""
+
+    __tablename__ = "story_artifacts"
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id", "story_artifact_id", name="uq_story_artifact_project"
+        ),
+        UniqueConstraint(
+            "project_id",
+            "story_artifact_id",
+            "content_fingerprint",
+            name="uq_story_artifact_review_parent",
+        ),
+        UniqueConstraint(
+            "project_id",
+            "requirement_id",
+            "version_number",
+            name="uq_story_artifact_version",
+        ),
+        UniqueConstraint(
+            "project_id",
+            "requirement_id",
+            "content_fingerprint",
+            name="uq_story_artifact_fingerprint",
+        ),
+        ForeignKeyConstraint(
+            ["project_id", "roadmap_artifact_id", "roadmap_artifact_fingerprint"],
+            [
+                "roadmap_artifacts.project_id",
+                "roadmap_artifacts.roadmap_artifact_id",
+                "roadmap_artifacts.content_fingerprint",
+            ],
+            name="fk_story_artifact_roadmap",
+        ),
+        ForeignKeyConstraint(
+            ["project_id", "supersedes_story_artifact_id"],
+            ["story_artifacts.project_id", "story_artifacts.story_artifact_id"],
+            name="fk_story_artifact_supersedes",
+        ),
+    )
+
+    story_artifact_id: int | None = Field(default=None, primary_key=True)
+    project_id: int = Field(foreign_key="products.product_id", index=True)
+    requirement_id: str = Field(index=True)
+    roadmap_artifact_id: int = Field(index=True)
+    roadmap_artifact_fingerprint: str = Field(index=True)
+    version_number: int
+    canonical_content_json: str = Field(sa_type=Text)
+    content_fingerprint: str = Field(index=True)
+    story_ids_json: str = Field(sa_type=Text)
+    supersedes_story_artifact_id: int | None = Field(default=None, index=True)
+    created_by: str = Field(index=True)
+    created_at: datetime = Field(default_factory=utc_now, nullable=False)
+
+
+class StoryArtifactDecision(SQLModel, table=True):
+    """Append-only terminal review for one immutable Story artifact."""
+
+    __tablename__ = "story_artifact_decisions"
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id",
+            "story_artifact_id",
+            name="uq_story_artifact_decision",
+        ),
+        CheckConstraint(
+            "decision IN ('accepted', 'rejected', 'feedback')",
+            name="ck_story_artifact_decision",
+        ),
+        ForeignKeyConstraint(
+            ["project_id", "story_artifact_id", "artifact_fingerprint"],
+            [
+                "story_artifacts.project_id",
+                "story_artifacts.story_artifact_id",
+                "story_artifacts.content_fingerprint",
+            ],
+            name="fk_story_artifact_decision_parent",
+        ),
+    )
+
+    story_artifact_decision_id: int | None = Field(default=None, primary_key=True)
+    project_id: int = Field(index=True)
+    story_artifact_id: int = Field(index=True)
+    artifact_fingerprint: str = Field(index=True)
+    decision: str = Field(index=True)
+    rationale: str = Field(sa_type=Text)
+    reviewer: str = Field(index=True)
+    idempotency_key: str = Field(index=True)
+    decided_at: datetime = Field(default_factory=utc_now, nullable=False)
+
+
+class StoryDependencyReview(SQLModel, table=True):
+    """Append-only audit of one reviewed Story dependency set."""
+
+    __tablename__ = "story_dependency_reviews"
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id",
+            "source_fingerprint",
+            name="uq_story_dependency_review_source",
+        ),
+    )
+
+    story_dependency_review_id: int | None = Field(default=None, primary_key=True)
+    project_id: int = Field(foreign_key="products.product_id", index=True)
+    selected_story_ids_json: str = Field(sa_type=Text)
+    reviewed_edges_json: str = Field(sa_type=Text)
+    source_fingerprint: str = Field(index=True)
+    dependency_fingerprint: str = Field(index=True)
+    reviewed_by: str = Field(index=True)
+    reviewed_at: datetime = Field(default_factory=utc_now, nullable=False)
+
+
+class SprintPlanArtifact(SQLModel, table=True):
+    """Immutable canonical Sprint plan bound to one candidate-set fingerprint."""
+
+    __tablename__ = "sprint_plan_artifacts"
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id",
+            "sprint_plan_artifact_id",
+            name="uq_sprint_plan_project",
+        ),
+        UniqueConstraint(
+            "project_id",
+            "sprint_plan_artifact_id",
+            "plan_fingerprint",
+            name="uq_sprint_plan_review_parent",
+        ),
+        UniqueConstraint(
+            "project_id",
+            "version_number",
+            name="uq_sprint_plan_version",
+        ),
+        UniqueConstraint(
+            "project_id",
+            "plan_fingerprint",
+            name="uq_sprint_plan_fingerprint",
+        ),
+        ForeignKeyConstraint(
+            ["project_id", "supersedes_sprint_plan_artifact_id"],
+            [
+                "sprint_plan_artifacts.project_id",
+                "sprint_plan_artifacts.sprint_plan_artifact_id",
+            ],
+            name="fk_sprint_plan_supersedes",
+        ),
+    )
+
+    sprint_plan_artifact_id: int | None = Field(default=None, primary_key=True)
+    project_id: int = Field(foreign_key="products.product_id", index=True)
+    sprint_id: int = Field(foreign_key="sprints.sprint_id", index=True)
+    version_number: int
+    selected_story_ids_json: str = Field(sa_type=Text)
+    canonical_task_plan_json: str = Field(sa_type=Text)
+    plan_fingerprint: str = Field(index=True)
+    candidate_set_fingerprint: str = Field(index=True)
+    supersedes_sprint_plan_artifact_id: int | None = Field(default=None, index=True)
+    created_by: str = Field(index=True)
+    created_at: datetime = Field(default_factory=utc_now, nullable=False)
+
+
+class SprintPlanArtifactDecision(SQLModel, table=True):
+    """Append-only terminal review for one immutable Sprint plan."""
+
+    __tablename__ = "sprint_plan_artifact_decisions"
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id",
+            "sprint_plan_artifact_id",
+            name="uq_sprint_plan_decision",
+        ),
+        CheckConstraint(
+            "decision IN ('accepted', 'rejected', 'feedback')",
+            name="ck_sprint_plan_decision",
+        ),
+        ForeignKeyConstraint(
+            ["project_id", "sprint_plan_artifact_id", "plan_fingerprint"],
+            [
+                "sprint_plan_artifacts.project_id",
+                "sprint_plan_artifacts.sprint_plan_artifact_id",
+                "sprint_plan_artifacts.plan_fingerprint",
+            ],
+            name="fk_sprint_plan_decision_parent",
+        ),
+    )
+
+    sprint_plan_artifact_decision_id: int | None = Field(
+        default=None,
+        primary_key=True,
+    )
+    project_id: int = Field(index=True)
+    sprint_plan_artifact_id: int = Field(index=True)
+    plan_fingerprint: str = Field(index=True)
+    decision: str = Field(index=True)
+    rationale: str = Field(sa_type=Text)
+    reviewer: str = Field(index=True)
+    idempotency_key: str = Field(index=True)
+    decided_at: datetime = Field(default_factory=utc_now, nullable=False)
+
+
 class WorkflowNodeAttempt(SQLModel, table=True):
     """Durable lease and input identity for one agentic node execution."""
 

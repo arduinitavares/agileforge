@@ -19,12 +19,14 @@ from workflow.facts import (
     AuthorityFact,
     AuthorityFeedbackFact,
     BacklogReconciliationFact,
+    BacklogRequirementFact,
     ChallengeArtifactFact,
     DiscoveryRunAbandonmentFact,
     DiscoveryRunFact,
     InitialScopeRegistrationFact,
     NodeAttemptFact,
     PhaseArtifactFact,
+    PlanningArtifactFact,
     PostSprintTriageFact,
     PrdVersionFact,
     ProjectAbandonmentFact,
@@ -35,6 +37,8 @@ from workflow.facts import (
     SpecDraftFact,
     SpecVersionFact,
     SprintFact,
+    StoryDependencyFact,
+    StoryDependencyReviewFact,
     StoryFact,
     TaskFact,
     WorkflowFactSnapshot,
@@ -249,6 +253,30 @@ AUTHORITATIVE_SNAPSHOT_VARIANTS: tuple[tuple[str, object], ...] = (
         ),
     ),
     (
+        "backlog_requirements",
+        (
+            BacklogRequirementFact(
+                requirement_id="requirement-a",
+                backlog_artifact_id=12,
+                backlog_artifact_fingerprint="sha256:backlog",
+                requirement="Persist planning facts",
+                rank=1,
+            ),
+        ),
+    ),
+    (
+        "planning_artifacts",
+        (
+            PlanningArtifactFact(
+                artifact_type="roadmap",
+                artifact_id=13,
+                artifact_fingerprint="sha256:roadmap",
+                source_fingerprint="sha256:backlog",
+                status="accepted",
+            ),
+        ),
+    ),
+    (
         "sprints",
         (
             SprintFact(
@@ -266,6 +294,30 @@ AUTHORITATIVE_SNAPSHOT_VARIANTS: tuple[tuple[str, object], ...] = (
                 status="ready",
                 sprint_candidate=True,
                 readiness_blockers=(),
+            ),
+        ),
+    ),
+    (
+        "story_dependencies",
+        (
+            StoryDependencyFact(
+                dependency_id=14,
+                dependent_story_id=13,
+                prerequisite_story_id=12,
+                status="active",
+                source="manual_review",
+                confidence="reviewed",
+            ),
+        ),
+    ),
+    (
+        "story_dependency_reviews",
+        (
+            StoryDependencyReviewFact(
+                review_id=15,
+                selected_story_ids=(12, 13),
+                source_fingerprint="sha256:story-source",
+                dependency_fingerprint="sha256:dependencies",
             ),
         ),
     ),

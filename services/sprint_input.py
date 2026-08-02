@@ -5,9 +5,10 @@
 from __future__ import annotations
 
 import json
-from typing import Any, NotRequired, Protocol, TypedDict, Unpack, cast
+from typing import TYPE_CHECKING, Any, NotRequired, Protocol, TypedDict, Unpack, cast
 
 from orchestrator_agent.agent_tools.story_linkage import normalize_requirement_key
+from repositories.workflow import WorkflowFactRepository
 from services.agent_workbench.fingerprints import canonical_hash
 from services.orchestrator_query_service import fetch_sprint_candidates
 from services.sprint_selection import (
@@ -17,6 +18,11 @@ from services.sprint_selection import (
     derive_parent_group,
     select_sprint_story_rows,
 )
+
+if TYPE_CHECKING:
+    from sqlmodel import Session
+
+    from workflow.facts import StoryDependencyFact, StoryFact
 
 DEFAULT_PRIORITY: int = 999
 GOVERNANCE_SPEC_UPDATE_WARNING_CODE: str = "SPRINT_GOVERNANCE_SPEC_UPDATE"
@@ -62,6 +68,17 @@ STANDARD_SPRINT_CANDIDATE_BLOCKING_CODES: set[str] = {
     "SPRINT_CANDIDATES_UNSIZED",
     "SPRINT_CANDIDATES_DEFAULT_PRIORITY",
 }
+
+
+def candidate_set_in_session(
+    session: Session,
+    *,
+    project_id: int,
+) -> tuple[tuple[StoryFact, ...], tuple[StoryDependencyFact, ...]]:
+    """Load exact candidate Story and dependency facts in the caller transaction."""
+    snapshot = WorkflowFactRepository(session).load(project_id)
+    stories = tuple(item for item in snapshot.stories if item.sprint_candidate)
+    return stories, snapshot.story_dependencies
 
 
 class _SprintCandidateFetcher(Protocol):
@@ -319,9 +336,7 @@ def _excluded_dependency_selection_failure(
             "remaining Sprint candidates."
         ),
         "selection_details": {
-            "blocked_story_ids": [
-                item["story_id"] for item in blocked_dependencies
-            ],
+            "blocked_story_ids": [item["story_id"] for item in blocked_dependencies],
             "excluded_dependency_story_ids": sorted(excluded_dependency_story_ids),
             "blocked_dependencies": blocked_dependencies,
         },
@@ -667,8 +682,7 @@ def _story_completion_scope_candidate_message(
     if non_refined_count:
         requirement_word = "requirement" if non_refined_count == 1 else "requirements"
         message = (
-            f"{message} Excluded: {non_refined_count} non-refined "
-            f"{requirement_word}."
+            f"{message} Excluded: {non_refined_count} non-refined {requirement_word}."
         )
     return message
 
@@ -705,10 +719,9 @@ def apply_story_completion_scope_to_candidate_result(
         if not isinstance(story, dict):
             continue
         source_requirement = as_text(story.get("source_requirement")).strip()
-        if (
-            normalize_requirement_key(source_requirement) in requirement_keys
-            and _matches_extension_scope(story, scope_payload)
-        ):
+        if normalize_requirement_key(
+            source_requirement
+        ) in requirement_keys and _matches_extension_scope(story, scope_payload):
             filtered.append(story)
         else:
             excluded_count += 1

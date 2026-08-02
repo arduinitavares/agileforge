@@ -1,11 +1,16 @@
 """Story dependency graph loading and diagnostics."""
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, cast
 
 from sqlmodel import Session, select
 
 from models.core import UserStory, UserStoryDependency
+from models.enums import WorkflowEventType
+from models.events import WorkflowEvent
+from models.workflow import StoryDependencyReview
+from workflow.fingerprints import canonical_hash, canonical_json
 
 
 @dataclass(frozen=True)
@@ -202,6 +207,138 @@ def assert_dependency_graph_valid_for_sprint(
     ]
     if blocking_issues:
         raise StoryDependencyGraphError(blocking_issues)
+
+
+def apply_story_dependencies_in_session(  # noqa: PLR0913
+    session: Session,
+    *,
+    project_id: int,
+    selected_story_ids: tuple[int, ...],
+    reviewed_edges: tuple[tuple[int, int, str], ...],
+    source_fingerprint: str,
+    reviewer: str,
+    reviewed_at: datetime,
+) -> StoryDependencyReview:
+    """Apply an exact acyclic reviewed edge set in the caller transaction."""
+    selected = set(selected_story_ids)
+    stories = session.exec(
+        select(UserStory).where(cast("Any", UserStory.story_id).in_(selected))
+    ).all()
+    stories_by_id = {
+        story.story_id: story for story in stories if story.story_id is not None
+    }
+    if set(stories_by_id) != selected or any(
+        story.product_id != project_id or story.is_superseded or not story.is_refined
+        for story in stories_by_id.values()
+    ):
+        message = "Dependency review does not target exact active Project stories."
+        raise StoryDependencyGraphError(
+            [
+                DependencyGraphIssue(
+                    code="STORY_DEPENDENCY_STORY_SET_INVALID",
+                    message=message,
+                    story_ids=sorted(selected),
+                )
+            ]
+        )
+    pairs = tuple((left, right) for left, right, _reason in reviewed_edges)
+    if any(left not in selected or right not in selected for left, right in pairs):
+        message = "Dependency review edge leaves the selected Story set."
+        raise StoryDependencyGraphError(
+            [
+                DependencyGraphIssue(
+                    code="STORY_DEPENDENCY_CROSS_SELECTION",
+                    message=message,
+                    story_ids=sorted(selected),
+                )
+            ]
+        )
+    graph: dict[int, set[int]] = {}
+    for dependent_story_id, prerequisite_story_id in pairs:
+        graph.setdefault(dependent_story_id, set()).add(prerequisite_story_id)
+    cycles = detect_dependency_cycles(graph)
+    if cycles:
+        raise StoryDependencyGraphError(
+            [
+                DependencyGraphIssue(
+                    code="STORY_DEPENDENCY_CYCLE",
+                    message="Reviewed Story dependency graph contains a cycle.",
+                    story_ids=cycle,
+                    edge_status="active",
+                )
+                for cycle in cycles
+            ]
+        )
+    existing_rows = session.exec(
+        select(UserStoryDependency).where(UserStoryDependency.product_id == project_id)
+    ).all()
+    existing_by_pair = {
+        (row.dependent_story_id, row.prerequisite_story_id): row
+        for row in existing_rows
+    }
+    reviewed_by_pair = {(left, right): reason for left, right, reason in reviewed_edges}
+    for pair, row in existing_by_pair.items():
+        row.status = "active" if pair in reviewed_by_pair else "rejected"
+        row.source = "manual_review"
+        row.confidence = "reviewed"
+        row.reason = reviewed_by_pair.get(pair, "Rejected by dependency review.")
+        row.updated_at = reviewed_at
+        session.add(row)
+    for pair, reason in reviewed_by_pair.items():
+        if pair in existing_by_pair:
+            continue
+        dependent_story_id, prerequisite_story_id = pair
+        session.add(
+            UserStoryDependency(
+                product_id=project_id,
+                dependent_story_id=dependent_story_id,
+                prerequisite_story_id=prerequisite_story_id,
+                status="active",
+                source="manual_review",
+                confidence="reviewed",
+                reason=reason,
+                created_at=reviewed_at,
+                updated_at=reviewed_at,
+            )
+        )
+    edge_payload = [
+        {
+            "dependent_story_id": left,
+            "prerequisite_story_id": right,
+            "reason": reason,
+        }
+        for left, right, reason in reviewed_edges
+    ]
+    review = StoryDependencyReview(
+        project_id=project_id,
+        selected_story_ids_json=canonical_json(list(selected_story_ids)),
+        reviewed_edges_json=canonical_json(edge_payload),
+        source_fingerprint=source_fingerprint,
+        dependency_fingerprint=canonical_hash(edge_payload),
+        reviewed_by=reviewer,
+        reviewed_at=reviewed_at,
+    )
+    session.add(review)
+    session.add(
+        WorkflowEvent(
+            event_type=WorkflowEventType.STORY_DEPENDENCIES_APPLIED,
+            timestamp=reviewed_at,
+            product_id=project_id,
+            session_id=None,
+            duration_seconds=0.0,
+            event_metadata=canonical_json(
+                {
+                    "action": "story_dependencies_reviewed",
+                    "dependency_fingerprint": review.dependency_fingerprint,
+                    "selected_story_ids": list(selected_story_ids),
+                    "source_fingerprint": source_fingerprint,
+                }
+            ),
+        )
+    )
+    session.flush()
+    assert_dependency_graph_valid_for_sprint(session, project_id=project_id)
+    return review
 
 
 def _load_stories_by_id(
