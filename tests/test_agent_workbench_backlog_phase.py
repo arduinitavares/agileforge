@@ -515,14 +515,9 @@ def test_backlog_generate_repairs_stale_scope_extension_accept_state(
 
     assert result["ok"] is True
     assert captured["state"]["fsm_state"] == "BACKLOG_INTERVIEW"
-    assert (
-        captured["state"]["accepted_spec_version_id"] == amended_spec_version_id
-    )
+    assert captured["state"]["accepted_spec_version_id"] == amended_spec_version_id
     assert captured["state"]["latest_spec_version_id"] == amended_spec_version_id
-    assert (
-        workflow_service.state["accepted_spec_version_id"]
-        == amended_spec_version_id
-    )
+    assert workflow_service.state["accepted_spec_version_id"] == amended_spec_version_id
     assert workflow_service.state["latest_spec_version_id"] == amended_spec_version_id
 
 
@@ -858,9 +853,12 @@ def test_backlog_refine_import_returns_success_for_valid_files(
     assert workflow.state["backlog_attempts"][0]["attempt_kind"] == (
         "imported_preview_source"
     )
-    assert workflow.state["backlog_attempts"][0]["output_artifact"]["backlog_items"][0][
-        "item_id"
-    ] == "item-001"
+    assert (
+        workflow.state["backlog_attempts"][0]["output_artifact"]["backlog_items"][0][
+            "item_id"
+        ]
+        == "item-001"
+    )
     assert workflow.state["backlog_attempts"][1]["trigger"] == "refine_import"
     assert workflow.state["backlog_attempts"][1]["attempt_kind"] == "import_refinement"
     assert (
@@ -1097,15 +1095,18 @@ def test_backlog_approve_marks_recorded_refinement_attempt_saveable(
     active_draft = workflow.state["product_backlog_assessment"]
     assert approve_result["ok"] is True
     assert refined_attempt["refinement_saveable"] is True
-    assert refined_attempt["refinement_approval"]["approval_id"] == (
-        approve_result["data"]["approval_id"]
+    assert (
+        refined_attempt["refinement_approval"]["approval_id"]
+        == (approve_result["data"]["approval_id"])
     )
-    assert refined_attempt["refinement_approval"]["approved_artifact_fingerprint"] == (
-        record_result["data"]["artifact_fingerprint"]
+    assert (
+        refined_attempt["refinement_approval"]["approved_artifact_fingerprint"]
+        == (record_result["data"]["artifact_fingerprint"])
     )
     assert active_draft["refinement_saveable"] is True
-    assert active_draft["refinement_approval"]["approval_id"] == (
-        approve_result["data"]["approval_id"]
+    assert (
+        active_draft["refinement_approval"]["approval_id"]
+        == (approve_result["data"]["approval_id"])
     )
 
 
@@ -2034,9 +2035,7 @@ def test_backlog_generate_returns_authority_review_required_envelope(
                     "amended_spec_version_id": 12,
                     "added_source_item_ids": ["REQ.reporting-export"],
                 },
-                "authority_scope_filter": {
-                    "source_item_ids": ["REQ.reporting-export"]
-                },
+                "authority_scope_filter": {"source_item_ids": ["REQ.reporting-export"]},
             },
             "output_artifact": {
                 "is_complete": False,
@@ -2071,6 +2070,7 @@ def test_backlog_generate_returns_authority_review_required_envelope(
 
 def test_backlog_reconcile_supersedes_legacy_duplicate_active_seed_rows(
     session: Session,
+    engine: Engine,
 ) -> None:
     """Legacy duplicate Backlog saves should collapse to one active seed cohort."""
     product = Product(name="Cartola")
@@ -2120,6 +2120,7 @@ def test_backlog_reconcile_supersedes_legacy_duplicate_active_seed_rows(
     runner = BacklogPhaseRunner(
         product_repo=_FakeProductRepo(),
         workflow_service=_FakeWorkflowService(),
+        engine=engine,
     )
 
     result = runner.reconcile(
@@ -2148,6 +2149,7 @@ def test_backlog_reconcile_supersedes_legacy_duplicate_active_seed_rows(
 
 def test_backlog_reconcile_latest_saved_count_ignores_active_reset_events(
     session: Session,
+    engine: Engine,
 ) -> None:
     """Reset event created_count must not corrupt canonical cohort selection."""
     product = Product(name="Cartola")
@@ -2209,6 +2211,7 @@ def test_backlog_reconcile_latest_saved_count_ignores_active_reset_events(
     runner = BacklogPhaseRunner(
         product_repo=_FakeProductRepo(),
         workflow_service=_FakeWorkflowService(),
+        engine=engine,
     )
 
     result = runner.reconcile(
@@ -2223,6 +2226,7 @@ def test_backlog_reconcile_latest_saved_count_ignores_active_reset_events(
 
 def test_backlog_reconcile_latest_saved_count_uses_legacy_no_action_events(
     session: Session,
+    engine: Engine,
 ) -> None:
     """Legacy saved events without action still select canonical seed cohort."""
     product = Product(name="Cartola")
@@ -2283,6 +2287,7 @@ def test_backlog_reconcile_latest_saved_count_uses_legacy_no_action_events(
     runner = BacklogPhaseRunner(
         product_repo=_FakeProductRepo(),
         workflow_service=_FakeWorkflowService(),
+        engine=engine,
     )
 
     result = runner.reconcile(
@@ -2306,6 +2311,7 @@ def test_backlog_reconcile_latest_saved_count_uses_legacy_no_action_events(
 
 def test_backlog_reconcile_blocks_when_existing_backlog_progressed(
     session: Session,
+    engine: Engine,
 ) -> None:
     """Canonical backlog repair must fail closed once any active row progressed."""
     product = Product(name="Cartola")
@@ -2340,6 +2346,7 @@ def test_backlog_reconcile_blocks_when_existing_backlog_progressed(
     runner = BacklogPhaseRunner(
         product_repo=_FakeProductRepo(),
         workflow_service=_FakeWorkflowService(),
+        engine=engine,
     )
 
     result = runner.reconcile(
@@ -2738,9 +2745,7 @@ def test_reset_active_acceptance_archives_active_backlog_and_preserves_history( 
         .where(UserStory.product_id == product_id)
         .order_by(cast("Any", UserStory.story_id))
     ).all()
-    archived = [
-        row for row in rows if row.archived_reason == "active_backlog_reset"
-    ]
+    archived = [row for row in rows if row.archived_reason == "active_backlog_reset"]
     active = [row for row in rows if not row.is_superseded]
     assert {row.title for row in archived} == {
         "Old delivered story",
@@ -2754,9 +2759,7 @@ def test_reset_active_acceptance_archives_active_backlog_and_preserves_history( 
         "Build post-round review artifact",
     ]
     assert all(row.archived_reason is None for row in active)
-    assert all(
-        row.archive_reset_attempt_id == "backlog-attempt-12" for row in archived
-    )
+    assert all(row.archive_reset_attempt_id == "backlog-attempt-12" for row in archived)
     assert session.exec(
         select(SprintStory).where(SprintStory.story_id == old_done_id)
     ).first()

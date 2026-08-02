@@ -18,6 +18,13 @@ from workflow.requests.onboarding import (
     RecordRepositoryInventory,
     RegisterInitialScope,
 )
+from workflow.requests.product_definition import (
+    DecideBacklog,
+    DecideVision,
+    ReconcileBacklog,
+    RecordBacklogDraft,
+    RecordVisionDraft,
+)
 from workflow.requests.project_shell import AbandonProjectShell, OpenProjectShell
 
 type TransitionRequest = (
@@ -37,23 +44,33 @@ type TransitionRequest = (
     | DecideAuthority
     | RecordAuthorityFeedback
     | RepairAuthority
+    | RecordVisionDraft
+    | DecideVision
+    | RecordBacklogDraft
+    | DecideBacklog
+    | ReconcileBacklog
 )
 
 __all__ = [
     "AbandonProjectShell",
     "CompileAuthority",
     "DecideAuthority",
+    "DecideBacklog",
     "DecideBrownfieldInitialSpec",
     "DecideInitialSpecDraft",
     "DecidePrd",
+    "DecideVision",
     "OpenProjectShell",
+    "ReconcileBacklog",
     "RecordAuthorityFeedback",
+    "RecordBacklogDraft",
     "RecordBrownfieldSpecDraft",
     "RecordChallengeArtifact",
     "RecordInitialSpecDraft",
     "RecordPrdVersion",
     "RecordRepositoryBaseline",
     "RecordRepositoryInventory",
+    "RecordVisionDraft",
     "RegisterInitialScope",
     "RepairAuthority",
     "TransitionRequest",

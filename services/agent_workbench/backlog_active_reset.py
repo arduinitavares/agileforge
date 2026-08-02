@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import json
 from datetime import datetime  # noqa: TC003
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
-from sqlmodel import Session, select
+from sqlmodel import Session, col, select
 
 from models.core import Sprint, SprintStory, Task, UserStory
 from models.enums import StoryStatus, WorkflowEventType
@@ -16,9 +16,6 @@ from orchestrator_agent.agent_tools.backlog_primer.schemes import BacklogItem
 from orchestrator_agent.agent_tools.story_linkage import normalize_requirement_key
 from services.agent_workbench.fingerprints import canonical_hash
 from services.phases.backlog_refinement import project_savable_backlog_items
-
-if TYPE_CHECKING:
-    from sqlalchemy.engine import Engine
 
 _RESET_NOT_REQUIRED = "RESET_NOT_REQUIRED"
 _RESET_IDEMPOTENCY_CONFLICT = "RESET_IDEMPOTENCY_CONFLICT"
@@ -69,108 +66,101 @@ def reset_request_fingerprint(request: ActiveBacklogResetRequest) -> str:
 
 
 def replay_active_backlog_reset(
-    engine: Engine,
+    session: Session,
     request: ActiveBacklogResetRequest,
 ) -> dict[str, Any] | None:
-    """Return a committed reset-active replay without mutating rows."""
+    """Return a reset-active replay within the caller transaction."""
     request_fingerprint = reset_request_fingerprint(request)
-    with Session(engine) as session:
-        return _reset_replay(
-            session,
-            project_id=request.project_id,
-            idempotency_key=request.idempotency_key,
-            request_fingerprint=request_fingerprint,
-        )
+    return _reset_replay(
+        session,
+        project_id=request.project_id,
+        idempotency_key=request.idempotency_key,
+        request_fingerprint=request_fingerprint,
+    )
 
 
 def reset_active_backlog_rows(
-    engine: Engine,
+    session: Session,
     request: ActiveBacklogResetRequest,
 ) -> dict[str, Any]:
-    """Soft-archive active stories and create seed rows from approved artifact."""
+    """Mutate active stories within a transaction owned by the caller."""
     request_fingerprint = reset_request_fingerprint(request)
-    with Session(engine) as session:
-        replay = _reset_replay(
-            session,
-            project_id=request.project_id,
-            idempotency_key=request.idempotency_key,
-            request_fingerprint=request_fingerprint,
+    replay = _reset_replay(
+        session,
+        project_id=request.project_id,
+        idempotency_key=request.idempotency_key,
+        request_fingerprint=request_fingerprint,
+    )
+    if replay is not None:
+        return replay
+
+    projected_items = project_savable_backlog_items(request.artifact)
+    if not projected_items:
+        raise ActiveBacklogResetError(_RESET_BACKLOG_ITEMS_EMPTY)
+    validated_items = [
+        BacklogItem.model_validate(raw_item) for raw_item in projected_items
+    ]
+
+    history_before = _reset_history_snapshot(session)
+    active_stories = session.exec(
+        select(UserStory)
+        .where(UserStory.product_id == request.project_id)
+        .where(UserStory.is_superseded == False)  # noqa: E712
+        .order_by(col(UserStory.story_id))
+    ).all()
+    if not active_stories:
+        raise ActiveBacklogResetError(_RESET_NOT_REQUIRED)
+
+    archived_story_ids: list[int] = []
+    for story in active_stories:
+        story.is_superseded = True
+        story.superseded_by_story_id = None
+        story.archived_reason = "active_backlog_reset"
+        story.archived_at = request.now
+        story.archived_by = request.archived_by
+        story.archive_reset_attempt_id = request.attempt_id
+        story.archive_previous_status = _story_status_value(story.status)
+        if story.story_id is not None:
+            archived_story_ids.append(story.story_id)
+        session.add(story)
+
+    created_story_ids: list[int] = []
+    for item in validated_items:
+        story = _story_from_backlog_item(request.project_id, item)
+        session.add(story)
+        session.flush()
+        if story.story_id is not None:
+            created_story_ids.append(story.story_id)
+
+    metadata = {
+        "action": "active_backlog_reset",
+        "project_id": request.project_id,
+        "attempt_id": request.attempt_id,
+        "artifact_fingerprint": request.expected_artifact_fingerprint,
+        "approved_artifact_fingerprint": request.approved_artifact_fingerprint,
+        "reset_reason": request.reset_reason,
+        "archived_story_ids": archived_story_ids,
+        "created_story_ids": created_story_ids,
+        "archived_count": len(archived_story_ids),
+        "created_count": len(created_story_ids),
+        "idempotency_key": request.idempotency_key,
+        "request_fingerprint": request_fingerprint,
+    }
+    session.add(
+        WorkflowEvent(
+            event_type=WorkflowEventType.BACKLOG_SAVED,
+            product_id=request.project_id,
+            timestamp=request.now,
+            event_metadata=json.dumps(metadata, sort_keys=True),
         )
-        if replay is not None:
-            return replay
-
-        projected_items = project_savable_backlog_items(request.artifact)
-        if not projected_items:
-            raise ActiveBacklogResetError(_RESET_BACKLOG_ITEMS_EMPTY)
-        validated_items = [
-            BacklogItem.model_validate(raw_item) for raw_item in projected_items
-        ]
-
-        history_before = _reset_history_snapshot(session)
-        active_stories = session.exec(
-            select(UserStory)
-            .where(UserStory.product_id == request.project_id)
-            .where(UserStory.is_superseded == False)  # noqa: E712
-            .order_by(cast("Any", UserStory.story_id))
-        ).all()
-        if not active_stories:
-            raise ActiveBacklogResetError(_RESET_NOT_REQUIRED)
-
-        try:
-            archived_story_ids: list[int] = []
-            for story in active_stories:
-                story.is_superseded = True
-                story.superseded_by_story_id = None
-                story.archived_reason = "active_backlog_reset"
-                story.archived_at = request.now
-                story.archived_by = request.archived_by
-                story.archive_reset_attempt_id = request.attempt_id
-                story.archive_previous_status = _story_status_value(story.status)
-                if story.story_id is not None:
-                    archived_story_ids.append(story.story_id)
-                session.add(story)
-
-            created_story_ids: list[int] = []
-            for item in validated_items:
-                story = _story_from_backlog_item(request.project_id, item)
-                session.add(story)
-                session.flush()
-                if story.story_id is not None:
-                    created_story_ids.append(story.story_id)
-
-            metadata = {
-                "action": "active_backlog_reset",
-                "project_id": request.project_id,
-                "attempt_id": request.attempt_id,
-                "artifact_fingerprint": request.expected_artifact_fingerprint,
-                "approved_artifact_fingerprint": request.approved_artifact_fingerprint,
-                "reset_reason": request.reset_reason,
-                "archived_story_ids": archived_story_ids,
-                "created_story_ids": created_story_ids,
-                "archived_count": len(archived_story_ids),
-                "created_count": len(created_story_ids),
-                "idempotency_key": request.idempotency_key,
-                "request_fingerprint": request_fingerprint,
-            }
-            session.add(
-                WorkflowEvent(
-                    event_type=WorkflowEventType.BACKLOG_SAVED,
-                    product_id=request.project_id,
-                    timestamp=request.now,
-                    event_metadata=json.dumps(metadata, sort_keys=True),
-                )
-            )
-            session.flush()
-            _assert_reset_history_preserved(
-                before=history_before,
-                after=_reset_history_snapshot(session),
-                created_story_count=len(created_story_ids),
-            )
-            session.commit()
-        except Exception:
-            session.rollback()
-            raise
-        return {"success": True, "idempotent_replay": False, **metadata}
+    )
+    session.flush()
+    _assert_reset_history_preserved(
+        before=history_before,
+        after=_reset_history_snapshot(session),
+        created_story_count=len(created_story_ids),
+    )
+    return {"success": True, "idempotent_replay": False, **metadata}
 
 
 def _story_from_backlog_item(product_id: int, item: BacklogItem) -> UserStory:

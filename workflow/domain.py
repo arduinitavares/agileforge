@@ -24,17 +24,22 @@ from workflow.handlers import (
     execute_abandon_project_shell,
     execute_compile_authority,
     execute_decide_authority,
+    execute_decide_backlog,
     execute_decide_brownfield_initial_spec,
     execute_decide_initial_spec_draft,
     execute_decide_prd,
+    execute_decide_vision,
     execute_open_project_shell,
+    execute_reconcile_backlog,
     execute_record_authority_feedback,
+    execute_record_backlog_draft,
     execute_record_brownfield_spec_draft,
     execute_record_challenge_artifact,
     execute_record_initial_spec_draft,
     execute_record_prd_version,
     execute_record_repository_baseline,
     execute_record_repository_inventory,
+    execute_record_vision_draft,
     execute_register_initial_scope,
     execute_repair_authority,
     validate_decide_authority_review,
@@ -43,17 +48,22 @@ from workflow.requests import (
     AbandonProjectShell,
     CompileAuthority,
     DecideAuthority,
+    DecideBacklog,
     DecideBrownfieldInitialSpec,
     DecideInitialSpecDraft,
     DecidePrd,
+    DecideVision,
     OpenProjectShell,
+    ReconcileBacklog,
     RecordAuthorityFeedback,
+    RecordBacklogDraft,
     RecordBrownfieldSpecDraft,
     RecordChallengeArtifact,
     RecordInitialSpecDraft,
     RecordPrdVersion,
     RecordRepositoryBaseline,
     RecordRepositoryInventory,
+    RecordVisionDraft,
     RegisterInitialScope,
     RepairAuthority,
     TransitionRequest,
@@ -84,6 +94,13 @@ type _ExistingPositionedRequest = (
 type _AuthorityRequest = (
     CompileAuthority | DecideAuthority | RecordAuthorityFeedback | RepairAuthority
 )
+type _ProductDefinitionRequest = (
+    RecordVisionDraft
+    | DecideVision
+    | RecordBacklogDraft
+    | DecideBacklog
+    | ReconcileBacklog
+)
 type _PositionedTransitionRequest = (
     _ExistingPositionedRequest
     | RecordRepositoryBaseline
@@ -94,6 +111,11 @@ type _PositionedTransitionRequest = (
     | DecideAuthority
     | RecordAuthorityFeedback
     | RepairAuthority
+    | RecordVisionDraft
+    | DecideVision
+    | RecordBacklogDraft
+    | DecideBacklog
+    | ReconcileBacklog
 )
 
 
@@ -312,6 +334,20 @@ class WorkflowDomain:
                 decision_or_failure,
                 evaluated_at,
             )
+        elif isinstance(
+            request,
+            RecordVisionDraft
+            | DecideVision
+            | RecordBacklogDraft
+            | DecideBacklog
+            | ReconcileBacklog,
+        ):
+            result = self._execute_product_definition_request(
+                session,
+                request,
+                decision_or_failure,
+                evaluated_at,
+            )
         elif isinstance(request, RecordRepositoryBaseline):
             result = execute_record_repository_baseline(
                 session,
@@ -390,6 +426,36 @@ class WorkflowDomain:
                 decision,
                 evaluated_at,
             )
+        assert_never(request)
+
+    @staticmethod
+    def _execute_product_definition_request(
+        session: Session,
+        request: _ProductDefinitionRequest,
+        decision: NodeDecision,
+        evaluated_at: datetime,
+    ) -> TransitionResult:
+        """Dispatch the five closed Vision and Backlog transition variants."""
+        if isinstance(request, RecordVisionDraft):
+            return execute_record_vision_draft(
+                session,
+                request,
+                decision,
+                evaluated_at,
+            )
+        if isinstance(request, DecideVision):
+            return execute_decide_vision(session, request, decision, evaluated_at)
+        if isinstance(request, RecordBacklogDraft):
+            return execute_record_backlog_draft(
+                session,
+                request,
+                decision,
+                evaluated_at,
+            )
+        if isinstance(request, DecideBacklog):
+            return execute_decide_backlog(session, request, decision, evaluated_at)
+        if isinstance(request, ReconcileBacklog):
+            return execute_reconcile_backlog(session, request, decision, evaluated_at)
         assert_never(request)
 
     @staticmethod
@@ -514,9 +580,10 @@ class WorkflowDomain:
                 "The requested node is invalid for the current Project facts.",
                 position=position,
             )
-        human_review_waiting = isinstance(request, DecideAuthority) and (
-            decision.category is NodeCategory.WAITING
-        )
+        human_review_waiting = isinstance(
+            request,
+            DecideAuthority | DecideVision | DecideBacklog,
+        ) and (decision.category is NodeCategory.WAITING)
         if decision.category is not NodeCategory.AVAILABLE and not human_review_waiting:
             return TransitionResult(
                 ok=False,

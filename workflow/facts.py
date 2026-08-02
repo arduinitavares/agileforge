@@ -165,9 +165,30 @@ class PhaseArtifactFact(FrozenModel):
     """Current lifecycle state for a phase artifact."""
 
     artifact_type: Literal["vision", "backlog", "roadmap", "story_set", "sprint_plan"]
-    artifact_id: str
+    artifact_id: int | str
     artifact_fingerprint: str
-    status: Literal["draft", "pending_review", "accepted", "rejected", "superseded"]
+    authority_id: int | None = None
+    authority_fingerprint: str | None = None
+    supersedes_artifact_id: int | None = None
+    status: Literal[
+        "draft",
+        "pending_review",
+        "accepted",
+        "rejected",
+        "feedback",
+        "superseded",
+    ]
+
+
+class BacklogReconciliationFact(FrozenModel):
+    """Explicit reconciliation of stale product-definition artifacts."""
+
+    reconciliation_id: int
+    replacement_authority_id: int
+    replacement_authority_fingerprint: str
+    affected_artifact_ids: tuple[int, ...]
+    affected_artifacts_fingerprint: str
+    reconciled_at: _DATETIME
 
 
 class SprintFact(FrozenModel):
@@ -240,6 +261,7 @@ class WorkflowFactSnapshot(FrozenModel):
     authorities: tuple[AuthorityFact, ...] = ()
     authority_feedback: tuple[AuthorityFeedbackFact, ...] = ()
     phase_artifacts: tuple[PhaseArtifactFact, ...] = ()
+    backlog_reconciliations: tuple[BacklogReconciliationFact, ...] = ()
     sprints: tuple[SprintFact, ...] = ()
     stories: tuple[StoryFact, ...] = ()
     tasks: tuple[TaskFact, ...] = ()

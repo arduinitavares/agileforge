@@ -109,6 +109,16 @@ def _seed_active_story(engine: Engine) -> None:
         session.commit()
 
 
+def _reset_with_caller_session(
+    engine: Engine,
+    request: ActiveBacklogResetRequest,
+) -> dict[str, Any]:
+    with Session(engine) as session:
+        result = reset_active_backlog_rows(session, request)
+        session.commit()
+        return result
+
+
 def _assert_reset_left_story_untouched(engine: Engine) -> None:
     with Session(engine) as session:
         story = session.exec(select(UserStory)).one()
@@ -202,7 +212,7 @@ def test_reset_active_archives_all_active_rows_and_preserves_history() -> None: 
         )
         session.commit()
 
-    result = reset_active_backlog_rows(engine, _request())
+    result = _reset_with_caller_session(engine, _request())
 
     assert result["success"] is True
     assert result["idempotent_replay"] is False
@@ -231,9 +241,7 @@ def test_reset_active_archives_all_active_rows_and_preserves_history() -> None: 
         assert done.archive_previous_status == StoryStatus.DONE.value
         assert done.archive_reset_attempt_id == "backlog-attempt-12"
         assert done.archived_by == "po"
-        expected_archived_at = datetime(2026, 6, 2, 12, tzinfo=UTC).replace(
-            tzinfo=None
-        )
+        expected_archived_at = datetime(2026, 6, 2, 12, tzinfo=UTC).replace(tzinfo=None)
         assert done.archived_at == expected_archived_at
         assert done.superseded_by_story_id is None
         assert session.exec(select(SprintStory)).first() is not None
@@ -279,7 +287,10 @@ def test_reset_active_creates_seed_rows_from_host_stripped_artifact() -> None:
         )
         session.commit()
 
-    result = reset_active_backlog_rows(engine, _request(archived_by="system-po"))
+    result = _reset_with_caller_session(
+        engine,
+        _request(archived_by="system-po"),
+    )
 
     assert result["success"] is True
     with Session(engine) as session:
@@ -316,7 +327,7 @@ def test_reset_active_rejects_empty_projected_backlog_before_mutation() -> None:
     _seed_active_story(engine)
 
     with pytest.raises(ActiveBacklogResetError, match="RESET_BACKLOG_ITEMS_EMPTY"):
-        reset_active_backlog_rows(
+        _reset_with_caller_session(
             engine,
             _request(
                 artifact={
@@ -339,7 +350,7 @@ def test_reset_active_rejects_invalid_projected_item_before_mutation() -> None:
     invalid_item["estimated_effort"] = "banana"
 
     with pytest.raises(ValidationError):
-        reset_active_backlog_rows(
+        _reset_with_caller_session(
             engine,
             _request(
                 artifact={
@@ -393,7 +404,7 @@ def test_reset_active_rolls_back_when_history_preservation_fails(
         ActiveBacklogResetError,
         match="RESET_HISTORY_PRESERVATION_FAILED",
     ):
-        reset_active_backlog_rows(engine, _request())
+        _reset_with_caller_session(engine, _request())
 
     _assert_reset_left_story_untouched(engine)
 
@@ -416,8 +427,8 @@ def test_reset_active_idempotency_replays_same_request() -> None:
         session.commit()
 
     request = _request()
-    first = reset_active_backlog_rows(engine, request)
-    second = reset_active_backlog_rows(engine, request)
+    first = _reset_with_caller_session(engine, request)
+    second = _reset_with_caller_session(engine, request)
 
     assert first["success"] is True
     assert second["success"] is True
@@ -446,9 +457,9 @@ def test_reset_active_idempotency_conflict_fails() -> None:
         )
         session.commit()
 
-    reset_active_backlog_rows(engine, _request())
+    _reset_with_caller_session(engine, _request())
     with pytest.raises(ActiveBacklogResetReusedKeyError):
-        reset_active_backlog_rows(
+        _reset_with_caller_session(
             engine,
             _request(reset_reason="different PO reset reason"),
         )

@@ -502,6 +502,206 @@ class RepositoryInventory(SQLModel, table=True):
     recorded_at: datetime = Field(default_factory=utc_now, nullable=False)
 
 
+class VisionArtifact(SQLModel, table=True):
+    """Immutable Vision artifact bound to one accepted authority."""
+
+    __tablename__ = "vision_artifacts"
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id",
+            "vision_artifact_id",
+            name="uq_vision_artifact_project_id",
+        ),
+        UniqueConstraint(
+            "project_id",
+            "vision_artifact_id",
+            "content_fingerprint",
+            name="uq_vision_artifact_review_parent",
+        ),
+        UniqueConstraint(
+            "project_id",
+            "version_number",
+            name="uq_vision_artifact_version",
+        ),
+        UniqueConstraint(
+            "project_id",
+            "content_fingerprint",
+            name="uq_vision_artifact_fingerprint",
+        ),
+        ForeignKeyConstraint(
+            ["project_id", "supersedes_vision_artifact_id"],
+            ["vision_artifacts.project_id", "vision_artifacts.vision_artifact_id"],
+            name="fk_vision_artifact_supersedes",
+        ),
+    )
+
+    vision_artifact_id: int | None = Field(default=None, primary_key=True)
+    project_id: int = Field(foreign_key="products.product_id", index=True)
+    authority_id: int = Field(
+        foreign_key="compiled_spec_authority.authority_id",
+        index=True,
+    )
+    authority_fingerprint: str = Field(index=True)
+    version_number: int
+    canonical_content_json: str = Field(sa_type=Text)
+    content_fingerprint: str = Field(index=True)
+    supersedes_vision_artifact_id: int | None = Field(default=None, index=True)
+    created_by: str = Field(index=True)
+    created_at: datetime = Field(default_factory=utc_now, nullable=False)
+
+
+class VisionArtifactDecision(SQLModel, table=True):
+    """Append-only review decision for one immutable Vision artifact."""
+
+    __tablename__ = "vision_artifact_decisions"
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id",
+            "vision_artifact_id",
+            name="uq_vision_artifact_decision",
+        ),
+        CheckConstraint(
+            "decision IN ('accepted', 'rejected', 'feedback')",
+            name="ck_vision_artifact_decision",
+        ),
+        ForeignKeyConstraint(
+            ["project_id", "vision_artifact_id", "artifact_fingerprint"],
+            [
+                "vision_artifacts.project_id",
+                "vision_artifacts.vision_artifact_id",
+                "vision_artifacts.content_fingerprint",
+            ],
+            name="fk_vision_artifact_decision_parent",
+        ),
+    )
+
+    vision_artifact_decision_id: int | None = Field(default=None, primary_key=True)
+    project_id: int = Field(index=True)
+    vision_artifact_id: int = Field(index=True)
+    artifact_fingerprint: str = Field(index=True)
+    decision: str = Field(index=True)
+    rationale: str = Field(sa_type=Text)
+    reviewer: str = Field(index=True)
+    idempotency_key: str = Field(index=True)
+    decided_at: datetime = Field(default_factory=utc_now, nullable=False)
+
+
+class BacklogArtifact(SQLModel, table=True):
+    """Immutable Backlog artifact bound to one accepted authority."""
+
+    __tablename__ = "backlog_artifacts"
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id",
+            "backlog_artifact_id",
+            name="uq_backlog_artifact_project_id",
+        ),
+        UniqueConstraint(
+            "project_id",
+            "backlog_artifact_id",
+            "content_fingerprint",
+            name="uq_backlog_artifact_review_parent",
+        ),
+        UniqueConstraint(
+            "project_id",
+            "version_number",
+            name="uq_backlog_artifact_version",
+        ),
+        UniqueConstraint(
+            "project_id",
+            "content_fingerprint",
+            name="uq_backlog_artifact_fingerprint",
+        ),
+        ForeignKeyConstraint(
+            ["project_id", "supersedes_backlog_artifact_id"],
+            [
+                "backlog_artifacts.project_id",
+                "backlog_artifacts.backlog_artifact_id",
+            ],
+            name="fk_backlog_artifact_supersedes",
+        ),
+    )
+
+    backlog_artifact_id: int | None = Field(default=None, primary_key=True)
+    project_id: int = Field(foreign_key="products.product_id", index=True)
+    authority_id: int = Field(
+        foreign_key="compiled_spec_authority.authority_id",
+        index=True,
+    )
+    authority_fingerprint: str = Field(index=True)
+    version_number: int
+    canonical_content_json: str = Field(sa_type=Text)
+    content_fingerprint: str = Field(index=True)
+    supersedes_backlog_artifact_id: int | None = Field(default=None, index=True)
+    created_by: str = Field(index=True)
+    created_at: datetime = Field(default_factory=utc_now, nullable=False)
+
+
+class BacklogArtifactDecision(SQLModel, table=True):
+    """Append-only review decision for one immutable Backlog artifact."""
+
+    __tablename__ = "backlog_artifact_decisions"
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id",
+            "backlog_artifact_id",
+            name="uq_backlog_artifact_decision",
+        ),
+        CheckConstraint(
+            "decision IN ('accepted', 'rejected', 'feedback')",
+            name="ck_backlog_artifact_decision",
+        ),
+        ForeignKeyConstraint(
+            ["project_id", "backlog_artifact_id", "artifact_fingerprint"],
+            [
+                "backlog_artifacts.project_id",
+                "backlog_artifacts.backlog_artifact_id",
+                "backlog_artifacts.content_fingerprint",
+            ],
+            name="fk_backlog_artifact_decision_parent",
+        ),
+    )
+
+    backlog_artifact_decision_id: int | None = Field(default=None, primary_key=True)
+    project_id: int = Field(index=True)
+    backlog_artifact_id: int = Field(index=True)
+    artifact_fingerprint: str = Field(index=True)
+    decision: str = Field(index=True)
+    rationale: str = Field(sa_type=Text)
+    reviewer: str = Field(index=True)
+    idempotency_key: str = Field(index=True)
+    decided_at: datetime = Field(default_factory=utc_now, nullable=False)
+
+
+class BacklogAuthorityReconciliation(SQLModel, table=True):
+    """Explicit audit record for stale artifacts under replacement authority."""
+
+    __tablename__ = "backlog_authority_reconciliations"
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id",
+            "replacement_authority_id",
+            "replacement_authority_fingerprint",
+            name="uq_backlog_authority_reconciliation",
+        ),
+    )
+
+    backlog_authority_reconciliation_id: int | None = Field(
+        default=None,
+        primary_key=True,
+    )
+    project_id: int = Field(foreign_key="products.product_id", index=True)
+    replacement_authority_id: int = Field(
+        foreign_key="compiled_spec_authority.authority_id",
+        index=True,
+    )
+    replacement_authority_fingerprint: str = Field(index=True)
+    affected_artifact_ids_json: str = Field(sa_type=Text)
+    affected_artifacts_fingerprint: str = Field(index=True)
+    reconciled_by: str = Field(index=True)
+    reconciled_at: datetime = Field(default_factory=utc_now, nullable=False)
+
+
 class WorkflowNodeAttempt(SQLModel, table=True):
     """Durable lease and input identity for one agentic node execution."""
 

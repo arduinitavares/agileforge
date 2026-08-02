@@ -20,6 +20,9 @@ from models.core import (
 from models.enums import SprintStatus, StoryStatus
 from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance, SpecRegistry
 from models.workflow import (
+    BacklogArtifact,
+    BacklogArtifactDecision,
+    BacklogAuthorityReconciliation,
     ChallengeArtifact,
     DiscoveryRun,
     DiscoveryRunAbandonment,
@@ -31,6 +34,8 @@ from models.workflow import (
     RepositoryInventory,
     SpecDraft,
     SpecDraftDecision,
+    VisionArtifact,
+    VisionArtifactDecision,
     WorkflowNodeAttempt,
     WorkflowNodeAttemptOutcome,
 )
@@ -40,11 +45,13 @@ from workflow.contracts import JsonValue
 from workflow.facts import (
     AuthorityFact,
     AuthorityFeedbackFact,
+    BacklogReconciliationFact,
     ChallengeArtifactFact,
     DiscoveryRunAbandonmentFact,
     DiscoveryRunFact,
     InitialScopeRegistrationFact,
     NodeAttemptFact,
+    PhaseArtifactFact,
     PrdVersionFact,
     ProjectAbandonmentFact,
     ProjectFact,
@@ -72,12 +79,26 @@ if TYPE_CHECKING:
 
 _JSON_OBJECT = TypeAdapter(dict[str, JsonValue])
 _STRING_LIST = TypeAdapter(list[str])
+_INT_LIST = TypeAdapter(list[int])
 type _AuthorityStatus = Literal["pending_review", "accepted", "rejected", "stale"]
 type _AttemptOutcome = Literal["success", "failure", "obsolete"]
 type _DiscoveryPurpose = Literal["initial", "extension"]
 type _ProjectOrigin = Literal["greenfield", "brownfield"]
-type _ReviewArtifactType = Literal["prd", "spec_draft", "authority"]
+type _ReviewArtifactType = Literal[
+    "prd",
+    "spec_draft",
+    "authority",
+    "vision",
+    "backlog",
+]
 type _ReviewOutcome = Literal["accepted", "rejected", "feedback"]
+type _PhaseStatus = Literal[
+    "pending_review",
+    "accepted",
+    "rejected",
+    "feedback",
+    "superseded",
+]
 type _SpecDraftKind = Literal["initial", "amendment"]
 type _SprintFactStatus = Literal["planned", "active", "completed"]
 
@@ -122,6 +143,14 @@ class _AuthorityLoad:
     reviews: tuple[ReviewDecisionFact, ...]
 
 
+@dataclass(frozen=True)
+class _PhaseArtifactLoad:
+    """Product-definition artifact facts and exact review facts."""
+
+    facts: tuple[PhaseArtifactFact, ...]
+    reviews: tuple[ReviewDecisionFact, ...]
+
+
 class WorkflowFactLoadError(RuntimeError):
     """Raised when stored rows cannot form one consistent Project snapshot."""
 
@@ -156,6 +185,10 @@ class WorkflowFactRepository:
             spec_versions,
         )
         authority_load = self._authorities(project_id, spec_versions)
+        phase_load = self._phase_artifacts(
+            project_id,
+            {item.authority_id: item for item in authority_load.facts},
+        )
         repository_baselines = self._repository_baselines(project_id)
         sprints = self._sprints(project_id)
         stories = self._stories(project_id, frozenset(spec_versions))
@@ -190,7 +223,7 @@ class WorkflowFactRepository:
                     )
                     for item in spec_drafts
                 },
-                authority_load.reviews,
+                (*authority_load.reviews, *phase_load.reviews),
             ),
             spec_drafts=spec_drafts,
             initial_registrations=self._initial_registrations(
@@ -210,7 +243,12 @@ class WorkflowFactRepository:
                 project_id,
                 {item.authority_id: item for item in authority_load.facts},
             ),
-            phase_artifacts=(),
+            phase_artifacts=phase_load.facts,
+            backlog_reconciliations=self._backlog_reconciliations(
+                project_id,
+                {item.authority_id: item for item in authority_load.facts},
+                phase_load.facts,
+            ),
             sprints=sprints,
             stories=stories,
             tasks=self._tasks(
@@ -544,8 +582,7 @@ class WorkflowFactRepository:
             authority = authorities.get(row.source_authority_id)
             if (
                 authority is None
-                or authority.authority_fingerprint
-                != row.source_authority_fingerprint
+                or authority.authority_fingerprint != row.source_authority_fingerprint
             ):
                 message = (
                     "Forced relationship corruption in authority feedback: "
@@ -565,6 +602,300 @@ class WorkflowFactRepository:
                 )
             )
         return tuple(facts)
+
+    def _phase_artifacts(
+        self,
+        project_id: int,
+        authorities: dict[int, AuthorityFact],
+    ) -> _PhaseArtifactLoad:
+        """Load immutable Vision/Backlog versions and append-only decisions."""
+        vision_rows = self._session.exec(
+            select(VisionArtifact)
+            .where(col(VisionArtifact.project_id) == project_id)
+            .order_by(col(VisionArtifact.vision_artifact_id)),
+            execution_options=self._query_options(),
+        ).all()
+        backlog_rows = self._session.exec(
+            select(BacklogArtifact)
+            .where(col(BacklogArtifact.project_id) == project_id)
+            .order_by(col(BacklogArtifact.backlog_artifact_id)),
+            execution_options=self._query_options(),
+        ).all()
+        vision_decisions = self._session.exec(
+            select(VisionArtifactDecision)
+            .where(col(VisionArtifactDecision.project_id) == project_id)
+            .order_by(col(VisionArtifactDecision.vision_artifact_decision_id)),
+            execution_options=self._query_options(),
+        ).all()
+        backlog_decisions = self._session.exec(
+            select(BacklogArtifactDecision)
+            .where(col(BacklogArtifactDecision.project_id) == project_id)
+            .order_by(col(BacklogArtifactDecision.backlog_artifact_decision_id)),
+            execution_options=self._query_options(),
+        ).all()
+
+        vision_by_id = {
+            self._required_id(row.vision_artifact_id, "Vision artifact"): row
+            for row in vision_rows
+        }
+        backlog_by_id = {
+            self._required_id(row.backlog_artifact_id, "Backlog artifact"): row
+            for row in backlog_rows
+        }
+        if set(vision_by_id) & set(backlog_by_id):
+            message = "Vision and Backlog artifact identities overlap."
+            raise self._error(message)
+
+        vision_decisions_by_id: dict[int, VisionArtifactDecision] = {}
+        review_facts: list[ReviewDecisionFact] = []
+        for row in vision_decisions:
+            artifact = vision_by_id.get(row.vision_artifact_id)
+            if (
+                artifact is None
+                or artifact.content_fingerprint != row.artifact_fingerprint
+            ):
+                message = "Vision decision does not match its artifact."
+                raise self._error(message)
+            if row.vision_artifact_id in vision_decisions_by_id:
+                message = "Vision artifact has contradictory decisions."
+                raise self._error(message)
+            vision_decisions_by_id[row.vision_artifact_id] = row
+            review_facts.append(
+                self._review_decision_fact(
+                    _ReviewDecisionSource(
+                        decision_id=self._required_id(
+                            row.vision_artifact_decision_id,
+                            "Vision decision",
+                        ),
+                        artifact_type="vision",
+                        artifact_id=row.vision_artifact_id,
+                        artifact_fingerprint=row.artifact_fingerprint,
+                        decision=row.decision,
+                        decided_at=row.decided_at,
+                    )
+                )
+            )
+
+        backlog_decisions_by_id: dict[int, BacklogArtifactDecision] = {}
+        for row in backlog_decisions:
+            artifact = backlog_by_id.get(row.backlog_artifact_id)
+            if (
+                artifact is None
+                or artifact.content_fingerprint != row.artifact_fingerprint
+            ):
+                message = "Backlog decision does not match its artifact."
+                raise self._error(message)
+            if row.backlog_artifact_id in backlog_decisions_by_id:
+                message = "Backlog artifact has contradictory decisions."
+                raise self._error(message)
+            backlog_decisions_by_id[row.backlog_artifact_id] = row
+            review_facts.append(
+                self._review_decision_fact(
+                    _ReviewDecisionSource(
+                        decision_id=self._required_id(
+                            row.backlog_artifact_decision_id,
+                            "Backlog decision",
+                        ),
+                        artifact_type="backlog",
+                        artifact_id=row.backlog_artifact_id,
+                        artifact_fingerprint=row.artifact_fingerprint,
+                        decision=row.decision,
+                        decided_at=row.decided_at,
+                    )
+                )
+            )
+
+        superseded_vision_ids = {
+            row.supersedes_vision_artifact_id
+            for row in vision_rows
+            if row.supersedes_vision_artifact_id is not None
+        }
+        superseded_backlog_ids = {
+            row.supersedes_backlog_artifact_id
+            for row in backlog_rows
+            if row.supersedes_backlog_artifact_id is not None
+        }
+        facts: list[PhaseArtifactFact] = []
+        for artifact_id, row in vision_by_id.items():
+            self._validate_phase_artifact(
+                artifact_id=artifact_id,
+                canonical_content_json=row.canonical_content_json,
+                content_fingerprint=row.content_fingerprint,
+                authority_id=row.authority_id,
+                authority_fingerprint=row.authority_fingerprint,
+                authorities=authorities,
+                supersedes_artifact_id=row.supersedes_vision_artifact_id,
+                known_artifact_ids=frozenset(vision_by_id),
+                label="Vision",
+            )
+            decision = vision_decisions_by_id.get(artifact_id)
+            facts.append(
+                PhaseArtifactFact(
+                    artifact_type="vision",
+                    artifact_id=artifact_id,
+                    artifact_fingerprint=row.content_fingerprint,
+                    authority_id=row.authority_id,
+                    authority_fingerprint=row.authority_fingerprint,
+                    supersedes_artifact_id=row.supersedes_vision_artifact_id,
+                    status=self._phase_status(
+                        None if decision is None else decision.decision,
+                        superseded=artifact_id in superseded_vision_ids,
+                    ),
+                )
+            )
+        for artifact_id, row in backlog_by_id.items():
+            self._validate_phase_artifact(
+                artifact_id=artifact_id,
+                canonical_content_json=row.canonical_content_json,
+                content_fingerprint=row.content_fingerprint,
+                authority_id=row.authority_id,
+                authority_fingerprint=row.authority_fingerprint,
+                authorities=authorities,
+                supersedes_artifact_id=row.supersedes_backlog_artifact_id,
+                known_artifact_ids=frozenset(backlog_by_id),
+                label="Backlog",
+            )
+            decision = backlog_decisions_by_id.get(artifact_id)
+            facts.append(
+                PhaseArtifactFact(
+                    artifact_type="backlog",
+                    artifact_id=artifact_id,
+                    artifact_fingerprint=row.content_fingerprint,
+                    authority_id=row.authority_id,
+                    authority_fingerprint=row.authority_fingerprint,
+                    supersedes_artifact_id=row.supersedes_backlog_artifact_id,
+                    status=self._phase_status(
+                        None if decision is None else decision.decision,
+                        superseded=artifact_id in superseded_backlog_ids,
+                    ),
+                )
+            )
+        return _PhaseArtifactLoad(
+            facts=tuple(sorted(facts, key=lambda item: int(item.artifact_id))),
+            reviews=tuple(
+                sorted(
+                    review_facts, key=lambda item: (item.decided_at, item.decision_id)
+                )
+            ),
+        )
+
+    def _backlog_reconciliations(
+        self,
+        project_id: int,
+        authorities: dict[int, AuthorityFact],
+        artifacts: tuple[PhaseArtifactFact, ...],
+    ) -> tuple[BacklogReconciliationFact, ...]:
+        rows = self._session.exec(
+            select(BacklogAuthorityReconciliation)
+            .where(col(BacklogAuthorityReconciliation.project_id) == project_id)
+            .order_by(
+                col(BacklogAuthorityReconciliation.reconciled_at),
+                col(BacklogAuthorityReconciliation.backlog_authority_reconciliation_id),
+            ),
+            execution_options=self._query_options(),
+        ).all()
+        artifact_ids = {
+            int(item.artifact_id)
+            for item in artifacts
+            if isinstance(item.artifact_id, int)
+        }
+        facts: list[BacklogReconciliationFact] = []
+        for row in rows:
+            authority = authorities.get(row.replacement_authority_id)
+            if (
+                authority is None
+                or authority.authority_fingerprint
+                != row.replacement_authority_fingerprint
+            ):
+                message = "Backlog reconciliation authority does not match."
+                raise self._error(message)
+            try:
+                affected_ids = tuple(
+                    _INT_LIST.validate_json(row.affected_artifact_ids_json)
+                )
+            except ValidationError as exc:
+                message = "Backlog reconciliation artifact IDs are invalid."
+                raise self._error(message) from exc
+            if (
+                not affected_ids
+                or affected_ids != tuple(sorted(set(affected_ids)))
+                or not set(affected_ids) <= artifact_ids
+            ):
+                message = (
+                    "Backlog reconciliation does not reference exact Project artifacts."
+                )
+                raise self._error(message)
+            expected_fingerprint = canonical_hash(
+                {
+                    "replacement_authority_id": row.replacement_authority_id,
+                    "replacement_authority_fingerprint": (
+                        row.replacement_authority_fingerprint
+                    ),
+                    "affected_artifact_ids": affected_ids,
+                }
+            )
+            if row.affected_artifacts_fingerprint != expected_fingerprint:
+                message = "Backlog reconciliation fingerprint changed."
+                raise self._error(message)
+            facts.append(
+                BacklogReconciliationFact(
+                    reconciliation_id=self._required_id(
+                        row.backlog_authority_reconciliation_id,
+                        "Backlog authority reconciliation",
+                    ),
+                    replacement_authority_id=row.replacement_authority_id,
+                    replacement_authority_fingerprint=(
+                        row.replacement_authority_fingerprint
+                    ),
+                    affected_artifact_ids=affected_ids,
+                    affected_artifacts_fingerprint=expected_fingerprint,
+                    reconciled_at=row.reconciled_at,
+                )
+            )
+        return tuple(facts)
+
+    @staticmethod
+    def _validate_phase_artifact(  # noqa: PLR0913
+        *,
+        artifact_id: int,
+        canonical_content_json: str,
+        content_fingerprint: str,
+        authority_id: int,
+        authority_fingerprint: str,
+        authorities: dict[int, AuthorityFact],
+        supersedes_artifact_id: int | None,
+        known_artifact_ids: frozenset[int],
+        label: str,
+    ) -> None:
+        authority = authorities.get(authority_id)
+        if (
+            authority is None
+            or authority.authority_fingerprint != authority_fingerprint
+        ):
+            message = f"{label} artifact authority does not match."
+            raise WorkflowFactRepository._error(message)
+        try:
+            canonical_content = _JSON_OBJECT.validate_json(canonical_content_json)
+        except ValidationError as exc:
+            message = f"Stored canonical {label} artifact JSON is invalid."
+            raise WorkflowFactRepository._error(message) from exc
+        if canonical_hash(canonical_content) != content_fingerprint:
+            message = f"Stored canonical {label} artifact fingerprint changed."
+            raise WorkflowFactRepository._error(message)
+        if supersedes_artifact_id is not None and (
+            supersedes_artifact_id not in known_artifact_ids
+            or supersedes_artifact_id >= artifact_id
+        ):
+            message = f"{label} artifact supersession is invalid."
+            raise WorkflowFactRepository._error(message)
+
+    @staticmethod
+    def _phase_status(decision: str | None, *, superseded: bool) -> _PhaseStatus:
+        if superseded:
+            return "superseded"
+        if decision is None:
+            return "pending_review"
+        return WorkflowFactRepository._review_outcome(decision)
 
     def _review_decisions(
         self,

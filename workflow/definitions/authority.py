@@ -141,6 +141,23 @@ def _authority_state(snapshot: WorkflowFactSnapshot) -> _AuthorityState:
     )
 
 
+def accepted_current_authority(
+    snapshot: WorkflowFactSnapshot,
+) -> tuple[AuthorityFact | None, bool]:
+    """Return the exact accepted authority for the one current spec."""
+    state = _authority_state(snapshot)
+    if state.conflict:
+        return None, True
+    if (
+        state.candidate is None
+        or state.decision is None
+        or state.decision.decision != "accepted"
+        or state.candidate.status != "accepted"
+    ):
+        return None, False
+    return state.candidate, False
+
+
 def _compile_attempt_result(
     snapshot: WorkflowFactSnapshot,
     evaluated_at: datetime,
@@ -263,8 +280,7 @@ def _feedback_for_candidate(
 ) -> bool:
     return any(
         feedback.source_authority_id == candidate.authority_id
-        and feedback.source_authority_fingerprint
-        == candidate.authority_fingerprint
+        and feedback.source_authority_fingerprint == candidate.authority_fingerprint
         for feedback in snapshot.authority_feedback
     )
 
@@ -434,4 +450,9 @@ def authority_graph() -> WorkflowGraph:
     )
 
 
-__all__ = ["AUTHORITY_NODES", "VISION_BOUNDARY_NODE", "authority_graph"]
+__all__ = [
+    "AUTHORITY_NODES",
+    "VISION_BOUNDARY_NODE",
+    "accepted_current_authority",
+    "authority_graph",
+]

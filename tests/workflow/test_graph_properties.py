@@ -18,6 +18,7 @@ from workflow.contracts import (
 from workflow.facts import (
     AuthorityFact,
     AuthorityFeedbackFact,
+    BacklogReconciliationFact,
     ChallengeArtifactFact,
     DiscoveryRunAbandonmentFact,
     DiscoveryRunFact,
@@ -227,6 +228,19 @@ AUTHORITATIVE_SNAPSHOT_VARIANTS: tuple[tuple[str, object], ...] = (
                 artifact_id="vision:11",
                 artifact_fingerprint="sha256:vision",
                 status="accepted",
+            ),
+        ),
+    ),
+    (
+        "backlog_reconciliations",
+        (
+            BacklogReconciliationFact(
+                reconciliation_id=12,
+                replacement_authority_id=10,
+                replacement_authority_fingerprint="sha256:authority",
+                affected_artifact_ids=(11,),
+                affected_artifacts_fingerprint="sha256:reconciliation",
+                reconciled_at=EVALUATED_AT,
             ),
         ),
     ),

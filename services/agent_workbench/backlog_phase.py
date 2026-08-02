@@ -9,11 +9,20 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Final, Protocol, cast
 
 import anyio
-from sqlmodel import Session, select
+from pydantic import TypeAdapter
+from sqlmodel import Session, col, func, select
 
-from models.core import UserStory
+from models.core import Product, UserStory
 from models.db import get_engine
+from models.enums import StoryStatus, WorkflowEventType
+from models.events import WorkflowEvent
+from models.specs import CompiledSpecAuthority
+from models.workflow import BacklogArtifact, BacklogArtifactDecision
 from orchestrator_agent.agent_tools.backlog_primer import tools as backlog_primer_tools
+from orchestrator_agent.agent_tools.backlog_primer.schemes import (
+    BacklogItem,
+    OutputSchema,
+)
 from orchestrator_agent.agent_tools.backlog_primer.tools import save_backlog_tool
 from repositories.product import ProductRepository
 from services.agent_workbench.backlog_active_reset import (
@@ -52,14 +61,16 @@ from services.phases.backlog_service import (
 )
 from services.workflow import WorkflowService
 from tools.orchestrator_tools import select_project
+from workflow.contracts import JsonObject
+from workflow.fingerprints import canonical_hash, canonical_json
 
 if TYPE_CHECKING:
     from google.adk.tools import ToolContext
     from sqlalchemy.engine import Engine
-
-    from models.core import Product
 else:
     ToolContext = Any
+
+_JSON_OBJECT = TypeAdapter(JsonObject)
 
 _REFINE_RECORD_IDEMPOTENCY_REUSED_MESSAGE = (
     "Backlog refinement idempotency key reused with different request"
@@ -278,10 +289,15 @@ class BacklogPhaseRunner:
         if isinstance(product, dict):
             return product
         try:
-            data = reconcile_active_backlog(
-                project_id=project_id,
-                idempotency_key=idempotency_key,
-            )
+            engine = self._engine or get_engine()
+            with Session(engine) as session:
+                data = reconcile_active_backlog(
+                    session,
+                    project_id=project_id,
+                    idempotency_key=idempotency_key,
+                    reconciled_at=datetime.now(UTC),
+                )
+                session.commit()
         except BacklogReconciliationError as exc:
             return _error_envelope(
                 ErrorCode.MUTATION_FAILED,
@@ -610,36 +626,38 @@ class BacklogPhaseRunner:
         if schema_error is not None:
             return schema_error
         try:
-            data = await reset_active_backlog(
-                project_id=project_id,
-                attempt_id=attempt_id,
-                expected_artifact_fingerprint=expected_artifact_fingerprint,
-                expected_state=expected_state,
-                reset_reason=reset_reason,
-                archive_all_active_stories=archive_all_active_stories,
-                idempotency_key=idempotency_key,
-                save_state=lambda state: self._save_session_state(
-                    str(project_id), state
-                ),
-                now_iso=_now_iso,
-                hydrate_context=lambda: self._hydrate_context(
-                    str(project_id), project_id
-                ),
-                reset_rows=lambda request: reset_active_backlog_rows(
-                    engine,
-                    request,
-                ),
-                reset_replay=lambda request: replay_active_backlog_reset(
-                    engine,
-                    request,
-                ),
-                replacement_blocked=lambda blocked_project_id: (
-                    _active_backlog_replacement_blocked(
-                        engine,
-                        project_id=blocked_project_id,
-                    )
-                ),
-            )
+            with Session(engine) as session:
+                data = await reset_active_backlog(
+                    project_id=project_id,
+                    attempt_id=attempt_id,
+                    expected_artifact_fingerprint=expected_artifact_fingerprint,
+                    expected_state=expected_state,
+                    reset_reason=reset_reason,
+                    archive_all_active_stories=archive_all_active_stories,
+                    idempotency_key=idempotency_key,
+                    save_state=lambda state: self._save_session_state(
+                        str(project_id), state
+                    ),
+                    now_iso=_now_iso,
+                    hydrate_context=lambda: self._hydrate_context(
+                        str(project_id), project_id
+                    ),
+                    reset_rows=lambda request: reset_active_backlog_rows(
+                        session,
+                        request,
+                    ),
+                    reset_replay=lambda request: replay_active_backlog_reset(
+                        session,
+                        request,
+                    ),
+                    replacement_blocked=lambda blocked_project_id: (
+                        _active_backlog_replacement_blocked(
+                            session,
+                            project_id=blocked_project_id,
+                        )
+                    ),
+                )
+                session.commit()
         except ActiveBacklogResetReusedKeyError as exc:
             return _error_envelope(ErrorCode.IDEMPOTENCY_KEY_REUSED, str(exc))
         except ActiveBacklogResetError as exc:
@@ -711,6 +729,215 @@ class BacklogPhaseRunner:
         ).reject_unless_current(project_id=project_id)
 
 
+def record_backlog_draft_in_session(  # noqa: PLR0913
+    session: Session,
+    *,
+    project_id: int,
+    authority_id: int,
+    authority_fingerprint: str,
+    canonical_content: JsonObject,
+    content_fingerprint: str,
+    supersedes_backlog_artifact_id: int | None,
+    artifact_id: int,
+    actor: str,
+    recorded_at: datetime,
+) -> BacklogArtifact:
+    """Validate and append one immutable Backlog artifact in caller transaction."""
+    if session.get(Product, project_id) is None:
+        message = f"Project {project_id} not found."
+        raise ValueError(message)
+    validated = OutputSchema.model_validate(canonical_content)
+    normalized = _JSON_OBJECT.validate_python(validated.model_dump(mode="json"))
+    if not validated.is_complete or not validated.backlog_items:
+        message = "Backlog output is incomplete and cannot enter review."
+        raise ValueError(message)
+    if normalized != canonical_content:
+        message = "Backlog content must be the exact host-validated canonical output."
+        raise ValueError(message)
+    if canonical_hash(canonical_content) != content_fingerprint:
+        message = "Backlog content fingerprint does not match canonical content."
+        raise ValueError(message)
+
+    parent: BacklogArtifact | None = None
+    if supersedes_backlog_artifact_id is not None:
+        parent = session.exec(
+            select(BacklogArtifact).where(
+                col(BacklogArtifact.project_id) == project_id,
+                col(BacklogArtifact.backlog_artifact_id)
+                == supersedes_backlog_artifact_id,
+            )
+        ).one_or_none()
+        if parent is None:
+            message = "Backlog supersession parent does not belong to this Project."
+            raise ValueError(message)
+
+    version_number = (
+        session.exec(
+            select(func.count())
+            .select_from(BacklogArtifact)
+            .where(col(BacklogArtifact.project_id) == project_id)
+        ).one()
+        + 1
+    )
+    row = BacklogArtifact(
+        backlog_artifact_id=artifact_id,
+        project_id=project_id,
+        authority_id=authority_id,
+        authority_fingerprint=authority_fingerprint,
+        version_number=version_number,
+        canonical_content_json=canonical_json(canonical_content),
+        content_fingerprint=content_fingerprint,
+        supersedes_backlog_artifact_id=(
+            None if parent is None else parent.backlog_artifact_id
+        ),
+        created_by=actor,
+        created_at=recorded_at,
+    )
+    session.add(row)
+    session.flush()
+    return row
+
+
+def record_backlog_decision_in_session(  # noqa: PLR0913
+    session: Session,
+    *,
+    artifact: BacklogArtifact,
+    decision: str,
+    rationale: str,
+    reviewer: str,
+    idempotency_key: str,
+    decided_at: datetime,
+) -> BacklogArtifactDecision:
+    """Append one exact decision and install accepted Backlog stories atomically."""
+    existing = session.exec(
+        select(BacklogArtifactDecision).where(
+            col(BacklogArtifactDecision.project_id) == artifact.project_id,
+            col(BacklogArtifactDecision.backlog_artifact_id)
+            == artifact.backlog_artifact_id,
+        )
+    ).one_or_none()
+    if existing is not None:
+        message = "Backlog artifact already has a terminal review decision."
+        raise ValueError(message)
+    if decision == "accepted":
+        persist_accepted_backlog_in_session(
+            session,
+            artifact=artifact,
+            idempotency_key=idempotency_key,
+            accepted_at=decided_at,
+        )
+    row = BacklogArtifactDecision(
+        project_id=artifact.project_id,
+        backlog_artifact_id=artifact.backlog_artifact_id,
+        artifact_fingerprint=artifact.content_fingerprint,
+        decision=decision,
+        rationale=rationale,
+        reviewer=reviewer,
+        idempotency_key=idempotency_key,
+        decided_at=decided_at,
+    )
+    session.add(row)
+    session.flush()
+    return row
+
+
+def persist_accepted_backlog_in_session(
+    session: Session,
+    *,
+    artifact: BacklogArtifact,
+    idempotency_key: str,
+    accepted_at: datetime,
+) -> tuple[int, ...]:
+    """Validate and install accepted Backlog content without owning transaction."""
+    content = _JSON_OBJECT.validate_json(artifact.canonical_content_json)
+    validated = OutputSchema.model_validate(content)
+    authority = session.get(CompiledSpecAuthority, artifact.authority_id)
+    if authority is None:
+        message = "Accepted Backlog authority does not exist."
+        raise ValueError(message)
+    active_stories = session.exec(
+        select(UserStory)
+        .where(col(UserStory.product_id) == artifact.project_id)
+        .where(col(UserStory.is_superseded).is_(False))
+    ).all()
+    blocked = [
+        story
+        for story in active_stories
+        if backlog_primer_tools._blocks_backlog_replacement(session, story)
+    ]
+    if blocked:
+        blocked_ids = tuple(
+            story.story_id for story in blocked if story.story_id is not None
+        )
+        message = f"BACKLOG_REPLACEMENT_BLOCKED: {blocked_ids}"
+        raise ValueError(message)
+    for story in active_stories:
+        if story.story_origin == "backlog_seed":
+            story.is_superseded = True
+            story.updated_at = accepted_at
+            session.add(story)
+
+    created_ids: list[int] = []
+    for item in validated.backlog_items:
+        story = _story_from_validated_backlog_item(
+            artifact.project_id,
+            item,
+            accepted_spec_version_id=authority.spec_version_id,
+        )
+        session.add(story)
+        session.flush()
+        if story.story_id is not None:
+            created_ids.append(story.story_id)
+    session.add(
+        WorkflowEvent(
+            event_type=WorkflowEventType.BACKLOG_SAVED,
+            product_id=artifact.project_id,
+            timestamp=accepted_at,
+            event_metadata=canonical_json(
+                {
+                    "action": "backlog_artifact_accepted",
+                    "idempotency_key": idempotency_key,
+                    "backlog_artifact_id": artifact.backlog_artifact_id,
+                    "artifact_fingerprint": artifact.content_fingerprint,
+                    "approved_artifact_fingerprint": artifact.content_fingerprint,
+                    "authority_id": artifact.authority_id,
+                    "authority_fingerprint": artifact.authority_fingerprint,
+                    "created_story_ids": created_ids,
+                    "created_count": len(created_ids),
+                }
+            ),
+        )
+    )
+    session.flush()
+    return tuple(created_ids)
+
+
+def _story_from_validated_backlog_item(
+    project_id: int,
+    item: BacklogItem,
+    *,
+    accepted_spec_version_id: int,
+) -> UserStory:
+    effort_points = {"S": 1, "M": 3, "L": 5, "XL": 8}
+    return UserStory(
+        title=item.requirement,
+        product_id=project_id,
+        status=StoryStatus.TO_DO,
+        rank=str(item.priority),
+        story_points=effort_points[item.estimated_effort],
+        story_description=item.justification,
+        acceptance_criteria=None,
+        source_requirement=backlog_primer_tools.normalize_requirement_key(
+            item.requirement
+        ),
+        refinement_slot=item.priority,
+        story_origin="backlog_seed",
+        is_refined=False,
+        is_superseded=False,
+        accepted_spec_version_id=accepted_spec_version_id,
+    )
+
+
 def _now_iso() -> str:
     """Return canonical UTC timestamp."""
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
@@ -721,18 +948,21 @@ def _build_tool_context(context: object) -> ToolContext:
     return cast("ToolContext", context)
 
 
-def _active_backlog_replacement_blocked(engine: Engine, *, project_id: int) -> bool:
+def _active_backlog_replacement_blocked(
+    session: Session,
+    *,
+    project_id: int,
+) -> bool:
     """Return whether current active backlog rows would block normal save."""
-    with Session(engine) as session:
-        active_stories = session.exec(
-            select(UserStory)
-            .where(UserStory.product_id == project_id)
-            .where(UserStory.is_superseded == False)  # noqa: E712
-        ).all()
-        return any(
-            backlog_primer_tools._blocks_backlog_replacement(session, story)
-            for story in active_stories
-        )
+    active_stories = session.exec(
+        select(UserStory)
+        .where(UserStory.product_id == project_id)
+        .where(UserStory.is_superseded == False)  # noqa: E712
+    ).all()
+    return any(
+        backlog_primer_tools._blocks_backlog_replacement(session, story)
+        for story in active_stories
+    )
 
 
 def _load_operations_payload(
@@ -887,8 +1117,7 @@ def _repairable_scope_extension_amended_spec_version(
     if not (
         isinstance(added_source_item_ids, list)
         and any(
-            isinstance(item, str) and item.strip()
-            for item in added_source_item_ids
+            isinstance(item, str) and item.strip() for item in added_source_item_ids
         )
     ):
         return None
@@ -974,9 +1203,7 @@ def _backlog_runtime_error(*, project_id: int, data: dict[str, Any]) -> dict[str
         return _error_envelope(
             ErrorCode.AUTHORITY_REVIEW_REQUIRED,
             message,
-            details={
-                key: value for key, value in details.items() if value is not None
-            },
+            details={key: value for key, value in details.items() if value is not None},
             remediation=[
                 "Complete authority review for the pending scope extension.",
                 "Accept the amended authority before generating extension backlog.",

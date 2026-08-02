@@ -368,7 +368,9 @@ def test_root_definition_has_named_children_in_lifecycle_order() -> None:
         "execution",
         "scope_extension",
     )
-    onboarding, authority, vision, *later_children = ROOT_GRAPH.root.children
+    onboarding, authority, vision, backlog, planning, *later_children = (
+        ROOT_GRAPH.root.children
+    )
     assert tuple(node.node_id for node in onboarding.nodes) == (
         "onboarding.greenfield.challenge",
         "onboarding.greenfield.prd",
@@ -388,7 +390,18 @@ def test_root_definition_has_named_children_in_lifecycle_order() -> None:
         "authority.feedback",
         "authority.repair",
     )
-    assert tuple(node.node_id for node in vision.nodes) == ("vision.generate",)
+    assert tuple(node.node_id for node in vision.nodes) == (
+        "vision.generate",
+        "vision.review",
+    )
+    assert tuple(node.node_id for node in backlog.nodes) == (
+        "backlog.generate",
+        "backlog.review",
+        "backlog.reconcile",
+    )
+    assert tuple(node.node_id for node in planning.nodes) == (
+        "planning.roadmap.generate",
+    )
     assert all(not child.nodes for child in later_children)
 
 
