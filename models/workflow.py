@@ -996,6 +996,120 @@ class SprintPlanArtifactDecision(SQLModel, table=True):
     decided_at: datetime = Field(default_factory=utc_now, nullable=False)
 
 
+class TaskCompletionEvidence(SQLModel, table=True):
+    """Immutable close evidence for one Task in one Sprint."""
+
+    __tablename__ = "task_completion_evidence"
+    __table_args__ = (
+        UniqueConstraint(
+            "task_id",
+            "sprint_id",
+            name="uq_task_completion_evidence",
+        ),
+        CheckConstraint(
+            "acceptance_result IN ('partially_met', 'fully_met')",
+            name="ck_task_completion_acceptance",
+        ),
+    )
+
+    task_completion_evidence_id: int | None = Field(default=None, primary_key=True)
+    project_id: int = Field(foreign_key="products.product_id", index=True)
+    sprint_id: int = Field(foreign_key="sprints.sprint_id", index=True)
+    task_id: int = Field(foreign_key="tasks.task_id", index=True)
+    outcome_summary: str = Field(sa_type=Text)
+    artifact_refs_json: str = Field(sa_type=Text)
+    acceptance_result: str = Field(index=True)
+    checklist_result_json: str = Field(sa_type=Text)
+    evidence_fingerprint: str = Field(index=True)
+    completed_by: str = Field(index=True)
+    completed_at: datetime = Field(nullable=False)
+
+
+class StoryClosure(SQLModel, table=True):
+    """Immutable Story closure bound to exact Task completion facts."""
+
+    __tablename__ = "story_closures"
+    __table_args__ = (
+        UniqueConstraint("story_id", "sprint_id", name="uq_story_closure"),
+    )
+
+    story_closure_id: int | None = Field(default=None, primary_key=True)
+    project_id: int = Field(foreign_key="products.product_id", index=True)
+    sprint_id: int = Field(foreign_key="sprints.sprint_id", index=True)
+    story_id: int = Field(foreign_key="user_stories.story_id", index=True)
+    completion_fingerprint: str = Field(index=True)
+    resolution: str
+    delivered: str = Field(sa_type=Text)
+    evidence: str = Field(sa_type=Text)
+    known_gaps: str = Field(sa_type=Text)
+    closed_by: str = Field(index=True)
+    closed_at: datetime = Field(nullable=False)
+
+
+class SprintReview(SQLModel, table=True):
+    """Persisted review of one exact terminal Sprint work set."""
+
+    __tablename__ = "sprint_reviews"
+    __table_args__ = (
+        UniqueConstraint("sprint_id", name="uq_sprint_review"),
+    )
+
+    sprint_review_id: int | None = Field(default=None, primary_key=True)
+    project_id: int = Field(foreign_key="products.product_id", index=True)
+    sprint_id: int = Field(foreign_key="sprints.sprint_id", index=True)
+    review_fingerprint: str = Field(index=True)
+    reviewed_by: str = Field(index=True)
+    reviewed_at: datetime = Field(nullable=False)
+
+
+class SprintClosure(SQLModel, table=True):
+    """Explicit Sprint close fact bound to its persisted review."""
+
+    __tablename__ = "sprint_closures"
+    __table_args__ = (
+        UniqueConstraint("sprint_id", name="uq_sprint_closure"),
+    )
+
+    sprint_closure_id: int | None = Field(default=None, primary_key=True)
+    project_id: int = Field(foreign_key="products.product_id", index=True)
+    sprint_id: int = Field(foreign_key="sprints.sprint_id", index=True)
+    review_fingerprint: str = Field(index=True)
+    closed_by: str = Field(index=True)
+    closed_at: datetime = Field(nullable=False)
+
+
+class PostSprintTriage(SQLModel, table=True):
+    """Append-only current-or-corrected triage for one completed Sprint."""
+
+    __tablename__ = "post_sprint_triage"
+    __table_args__ = (
+        CheckConstraint(
+            "impact IN ('none', 'backlog', 'specification')",
+            name="ck_post_sprint_triage_impact",
+        ),
+        UniqueConstraint(
+            "project_id",
+            "sprint_id",
+            "supersedes_triage_id",
+            name="uq_post_sprint_triage_correction",
+        ),
+    )
+
+    triage_id: int | None = Field(default=None, primary_key=True)
+    project_id: int = Field(foreign_key="products.product_id", index=True)
+    sprint_id: int = Field(foreign_key="sprints.sprint_id", index=True)
+    impact: str = Field(index=True)
+    canonical_payload_json: str = Field(sa_type=Text)
+    payload_fingerprint: str = Field(index=True)
+    supersedes_triage_id: int | None = Field(
+        default=None,
+        foreign_key="post_sprint_triage.triage_id",
+        index=True,
+    )
+    recorded_by: str = Field(index=True)
+    recorded_at: datetime = Field(nullable=False)
+
+
 class WorkflowNodeAttempt(SQLModel, table=True):
     """Durable lease and input identity for one agentic node execution."""
 

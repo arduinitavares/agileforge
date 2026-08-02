@@ -29,6 +29,7 @@ from workflow.handlers import (
     execute_decide_initial_spec_draft,
     execute_decide_prd,
     execute_decide_vision,
+    execute_execution_request,
     execute_open_project_shell,
     execute_planning_request,
     execute_reconcile_backlog,
@@ -51,7 +52,10 @@ from workflow.handlers import (
 from workflow.requests import (
     AbandonProjectShell,
     ApplyStoryDependencies,
+    CloseSprint,
+    CloseStory,
     CompileAuthority,
+    CompleteTask,
     DecideAuthority,
     DecideBacklog,
     DecideBrownfieldInitialSpec,
@@ -68,6 +72,7 @@ from workflow.requests import (
     RecordBrownfieldSpecDraft,
     RecordChallengeArtifact,
     RecordInitialSpecDraft,
+    RecordPostSprintTriage,
     RecordPrdVersion,
     RecordRepositoryBaseline,
     RecordRepositoryInventory,
@@ -78,6 +83,7 @@ from workflow.requests import (
     RegisterInitialScope,
     RepairAuthority,
     RepairStoryReadiness,
+    ReviewSprint,
     StartSprint,
     TransitionRequest,
 )
@@ -125,6 +131,13 @@ type _PlanningRequest = (
     | DecideSprintPlan
     | StartSprint
 )
+type _ExecutionRequest = (
+    CompleteTask
+    | CloseStory
+    | ReviewSprint
+    | CloseSprint
+    | RecordPostSprintTriage
+)
 type _PositionedTransitionRequest = (
     _ExistingPositionedRequest
     | RecordRepositoryBaseline
@@ -141,6 +154,7 @@ type _PositionedTransitionRequest = (
     | DecideBacklog
     | ReconcileBacklog
     | _PlanningRequest
+    | _ExecutionRequest
 )
 
 
@@ -194,7 +208,15 @@ class WorkflowDomain:
                 raise
             except WorkflowFactLoadError as error:
                 session.rollback()
-                if isinstance(request, RegisterInitialScope):
+                if isinstance(
+                    request,
+                    RegisterInitialScope
+                    | CompleteTask
+                    | CloseStory
+                    | ReviewSprint
+                    | CloseSprint
+                    | RecordPostSprintTriage,
+                ):
                     return self._fact_conflict(str(error))
                 raise
             except Exception:
@@ -349,17 +371,34 @@ class WorkflowDomain:
         evaluated_at: datetime,
     ) -> TransitionResult:
         """Re-derive and guard a positioned request before handler dispatch."""
-        before = self._position_in_session(
+        decision_or_failure = self._guarded_decision(
             session,
-            request.project_id,
+            request,
             evaluated_at,
         )
-        failure = self._guard_failure(request, before, evaluated_at)
-        if failure is not None:
-            return failure
-        decision_or_failure = self._available_decision(before, request)
         if isinstance(decision_or_failure, TransitionResult):
             return decision_or_failure
+
+        if isinstance(
+            request,
+            CompleteTask
+            | CloseStory
+            | ReviewSprint
+            | CloseSprint
+            | RecordPostSprintTriage,
+        ):
+            result = execute_execution_request(
+                session,
+                request,
+                decision_or_failure,
+                evaluated_at,
+            )
+            position = self._position_in_session(
+                session,
+                request.project_id,
+                evaluated_at,
+            )
+            return result.model_copy(update={"position": position})
 
         if isinstance(
             request,
@@ -447,6 +486,23 @@ class WorkflowDomain:
             evaluated_at,
         )
         return result.model_copy(update={"position": position})
+
+    def _guarded_decision(
+        self,
+        session: Session,
+        request: _PositionedTransitionRequest,
+        evaluated_at: datetime,
+    ) -> NodeDecision | TransitionResult:
+        """Return the exact current decision or its failed position guard."""
+        before = self._position_in_session(
+            session,
+            request.project_id,
+            evaluated_at,
+        )
+        failure = self._guard_failure(request, before, evaluated_at)
+        if failure is not None:
+            return failure
+        return self._available_decision(before, request)
 
     @staticmethod
     def _execute_authority_request(
@@ -645,7 +701,8 @@ class WorkflowDomain:
             | DecideBacklog
             | DecideRoadmap
             | DecideStory
-            | DecideSprintPlan,
+            | DecideSprintPlan
+            | ReviewSprint,
         ) and (decision.category is NodeCategory.WAITING)
         if decision.category is not NodeCategory.AVAILABLE and not human_review_waiting:
             return TransitionResult(

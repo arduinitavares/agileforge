@@ -26,7 +26,12 @@ from models.enums import (
     WorkflowEventType,
 )
 from models.events import StoryCompletionLog, TaskExecutionLog, WorkflowEvent
-from models.workflow import SprintPlanArtifact, SprintPlanArtifactDecision
+from models.workflow import (
+    SprintClosure,
+    SprintPlanArtifact,
+    SprintPlanArtifactDecision,
+    SprintReview,
+)
 from orchestrator_agent.agent_tools.sprint_planner_tool.schemes import (
     SprintPlannerOutput,
     validate_task_decomposition_quality,
@@ -36,6 +41,7 @@ from orchestrator_agent.agent_tools.sprint_planner_tool.tools import (
     save_sprint_plan_tool,
 )
 from repositories.product import ProductRepository
+from repositories.workflow import WorkflowFactRepository
 from services.agent_workbench.error_codes import ErrorCode, workbench_error
 from services.agent_workbench.execution_guard import AcceptedAuthorityExecutionGuard
 from services.agent_workbench.fingerprints import canonical_hash
@@ -101,6 +107,7 @@ from utils.task_metadata import (
     parse_task_metadata,
     serialize_task_metadata,
 )
+from workflow.execution_integrity import sprint_review_fingerprint
 from workflow.fingerprints import canonical_json
 
 if TYPE_CHECKING:
@@ -572,6 +579,145 @@ def start_sprint_in_session(
     )
     session.flush()
     return sprint
+
+
+@dataclass(frozen=True)
+class SprintReviewInput:
+    """Caller-owned inputs for a persisted Sprint review."""
+
+    project_id: int
+    sprint_id: int
+    review_fingerprint: str
+    reviewed_by: str
+    reviewed_at: datetime
+
+
+@dataclass(frozen=True)
+class SprintCloseInput:
+    """Caller-owned inputs for a persisted Sprint closure."""
+
+    project_id: int
+    sprint_id: int
+    review_fingerprint: str
+    closed_by: str
+    closed_at: datetime
+
+
+def review_sprint_in_session(
+    session: Session,
+    command: SprintReviewInput,
+) -> SprintReview:
+    """Persist one exact Sprint review in the caller's transaction."""
+    snapshot = WorkflowFactRepository(session).load(command.project_id)
+    sprint = next(
+        (item for item in snapshot.sprints if item.sprint_id == command.sprint_id),
+        None,
+    )
+    if sprint is None or sprint.status != "active":
+        message = "Sprint review requires the exact active Project Sprint."
+        raise ValueError(message)
+    attached = tuple(
+        item for item in snapshot.stories if command.sprint_id in item.sprint_ids
+    )
+    closure_ids = {
+        item.story_id
+        for item in snapshot.story_completions
+        if item.sprint_id == command.sprint_id
+    }
+    if (
+        not attached
+        or any(item.status not in {"Done", "Accepted"} for item in attached)
+        or closure_ids != {item.story_id for item in attached}
+    ):
+        message = "Sprint review requires every attached Story terminal."
+        raise ValueError(message)
+    expected = sprint_review_fingerprint(snapshot, command.sprint_id)
+    if command.review_fingerprint != expected:
+        message = "Sprint review fingerprint is stale."
+        raise ValueError(message)
+    existing = session.exec(
+        select(SprintReview).where(col(SprintReview.sprint_id) == command.sprint_id)
+    ).one_or_none()
+    if existing is not None:
+        message = "Sprint review is immutable."
+        raise ValueError(message)
+    row = SprintReview(
+        project_id=command.project_id,
+        sprint_id=command.sprint_id,
+        review_fingerprint=command.review_fingerprint,
+        reviewed_by=command.reviewed_by,
+        reviewed_at=command.reviewed_at,
+    )
+    session.add(row)
+    session.flush()
+    return row
+
+
+def close_sprint_in_session(
+    session: Session,
+    command: SprintCloseInput,
+) -> SprintClosure:
+    """Close one reviewed Sprint in the caller's transaction."""
+    sprint = session.get(Sprint, command.sprint_id)
+    if (
+        sprint is None
+        or sprint.product_id != command.project_id
+        or sprint.status is not SprintStatus.ACTIVE
+    ):
+        message = "Sprint close requires the exact active Project Sprint."
+        raise ValueError(message)
+    review = session.exec(
+        select(SprintReview).where(
+            col(SprintReview.project_id) == command.project_id,
+            col(SprintReview.sprint_id) == command.sprint_id,
+        )
+    ).one_or_none()
+    if review is None or review.review_fingerprint != command.review_fingerprint:
+        message = "Sprint close review fingerprint is stale or missing."
+        raise ValueError(message)
+    snapshot = WorkflowFactRepository(session).load(command.project_id)
+    if (
+        sprint_review_fingerprint(snapshot, command.sprint_id)
+        != command.review_fingerprint
+    ):
+        message = "Sprint facts changed after review."
+        raise ValueError(message)
+    existing = session.exec(
+        select(SprintClosure).where(col(SprintClosure.sprint_id) == command.sprint_id)
+    ).one_or_none()
+    if existing is not None:
+        message = "Sprint closure is immutable."
+        raise ValueError(message)
+    sprint.status = SprintStatus.COMPLETED
+    sprint.completed_at = command.closed_at
+    sprint.updated_at = command.closed_at
+    sprint.close_snapshot_json = None
+    closure = SprintClosure(
+        project_id=command.project_id,
+        sprint_id=command.sprint_id,
+        review_fingerprint=command.review_fingerprint,
+        closed_by=command.closed_by,
+        closed_at=command.closed_at,
+    )
+    session.add(sprint)
+    session.add(closure)
+    session.add(
+        WorkflowEvent(
+            event_type=WorkflowEventType.SPRINT_COMPLETED,
+            timestamp=command.closed_at,
+            product_id=command.project_id,
+            sprint_id=command.sprint_id,
+            event_metadata=canonical_json(
+                {
+                    "action": "sprint_closed",
+                    "review_fingerprint": command.review_fingerprint,
+                }
+            ),
+            duration_seconds=0.0,
+        )
+    )
+    session.flush()
+    return closure
 
 
 @dataclass(frozen=True)

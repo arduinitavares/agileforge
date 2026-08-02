@@ -10,6 +10,7 @@ from workflow.contracts import (
 )
 from workflow.definitions.authority import AUTHORITY_NODES
 from workflow.definitions.backlog import BACKLOG_NODES
+from workflow.definitions.execution import EXECUTION_NODES
 from workflow.definitions.onboarding import (
     BROWNFIELD_ONBOARDING_NODES,
     GREENFIELD_ONBOARDING_NODES,
@@ -101,7 +102,7 @@ ROOT_GRAPH: WorkflowGraph = WorkflowGraph(
                 child_graph_id="planning",
                 nodes=PLANNING_NODES,
             ),
-            ChildGraphSpec(child_graph_id="execution", nodes=()),
+            ChildGraphSpec(child_graph_id="execution", nodes=EXECUTION_NODES),
             ChildGraphSpec(child_graph_id="scope_extension", nodes=()),
         ),
     ),

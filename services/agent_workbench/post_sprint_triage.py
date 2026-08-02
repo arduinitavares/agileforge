@@ -2,11 +2,25 @@
 
 from __future__ import annotations
 
+import typing
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Final, cast
 
+from sqlmodel import Session, col, select
+
+from models.core import Sprint
+from models.enums import SprintStatus, WorkflowEventType
+from models.events import WorkflowEvent
+from models.workflow import PostSprintTriage, SprintClosure
 from services.agent_workbench.fingerprints import canonical_hash
+from workflow.execution_integrity import triage_payload_fingerprint
+from workflow.fingerprints import canonical_json
+
+if typing.TYPE_CHECKING:
+    from datetime import datetime
+
+    from workflow.contracts import JsonObject
 
 TriageListInput = list[object] | list[str] | list[int] | None
 TRIAGE_SCHEMA_VERSION: Final[str] = "agileforge.post_sprint_triage.v1"
@@ -192,6 +206,97 @@ def post_sprint_triage_required(state: dict[str, Any]) -> bool:
     if _positive_int_or_none(state.get("latest_completed_sprint_id")) is None:
         return False
     return current_triage_for_latest_sprint(state) is None
+
+
+@dataclass(frozen=True)
+class PostSprintTriageInput:
+    """Caller-owned inputs for one triage fact or correction."""
+
+    project_id: int
+    sprint_id: int
+    impact: typing.Literal["none", "backlog", "specification"]
+    canonical_payload: JsonObject
+    recorded_by: str
+    recorded_at: datetime
+
+
+def record_post_sprint_triage_in_session(
+    session: Session,
+    command: PostSprintTriageInput,
+) -> PostSprintTriage:
+    """Append exact triage or a correction in the caller's transaction."""
+    sprint = session.get(Sprint, command.sprint_id)
+    if (
+        sprint is None
+        or sprint.product_id != command.project_id
+        or sprint.status is not SprintStatus.COMPLETED
+    ):
+        message = "Post-sprint triage requires the exact completed Project Sprint."
+        raise ValueError(message)
+    closure = session.exec(
+        select(SprintClosure).where(
+            col(SprintClosure.project_id) == command.project_id,
+            col(SprintClosure.sprint_id) == command.sprint_id,
+        )
+    ).one_or_none()
+    if closure is None:
+        message = "Post-sprint triage requires an explicit Sprint closure."
+        raise ValueError(message)
+    rows = session.exec(
+        select(PostSprintTriage)
+        .where(
+            col(PostSprintTriage.project_id) == command.project_id,
+            col(PostSprintTriage.sprint_id) == command.sprint_id,
+        )
+        .order_by(col(PostSprintTriage.triage_id))
+    ).all()
+    superseded = {
+        item.supersedes_triage_id
+        for item in rows
+        if item.supersedes_triage_id is not None
+    }
+    current_rows = tuple(item for item in rows if item.triage_id not in superseded)
+    if len(current_rows) > 1:
+        message = "Post-sprint triage facts conflict."
+        raise ValueError(message)
+    current = current_rows[0] if current_rows else None
+    payload_fingerprint = triage_payload_fingerprint(
+        command.impact,
+        command.canonical_payload,
+    )
+    if current is not None and current.payload_fingerprint == payload_fingerprint:
+        message = "Duplicate post-sprint triage is not a correction."
+        raise ValueError(message)
+    row = PostSprintTriage(
+        project_id=command.project_id,
+        sprint_id=command.sprint_id,
+        impact=command.impact,
+        canonical_payload_json=canonical_json(command.canonical_payload),
+        payload_fingerprint=payload_fingerprint,
+        supersedes_triage_id=current.triage_id if current is not None else None,
+        recorded_by=command.recorded_by,
+        recorded_at=command.recorded_at,
+    )
+    session.add(row)
+    session.add(
+        WorkflowEvent(
+            event_type=WorkflowEventType.POST_SPRINT_TRIAGE_RECORDED,
+            timestamp=command.recorded_at,
+            product_id=command.project_id,
+            sprint_id=command.sprint_id,
+            event_metadata=canonical_json(
+                {
+                    "action": "post_sprint_triage_recorded",
+                    "impact": command.impact,
+                    "payload_fingerprint": payload_fingerprint,
+                    "supersedes_triage_id": row.supersedes_triage_id,
+                }
+            ),
+            duration_seconds=0.0,
+        )
+    )
+    session.flush()
+    return row
 
 
 def _normalize_text(value: object) -> str:

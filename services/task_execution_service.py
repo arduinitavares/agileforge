@@ -5,15 +5,29 @@
 from __future__ import annotations
 
 import json
+import typing
 from contextlib import suppress
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, Self, TypedDict, Unpack
+
+from pydantic import ValidationError
+from sqlmodel import Session, col, select
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
     from datetime import datetime
 
+    from workflow.contracts import JsonObject
+
+from models.core import Sprint, SprintStory, Task, UserStory
 from models.enums import TaskAcceptanceResult, TaskStatus
+from models.events import TaskExecutionLog
+from models.workflow import TaskCompletionEvidence
 from utils.api_schemas import TaskExecutionLogEntry
+from utils.task_metadata import TaskMetadata
+from workflow.execution_integrity import task_evidence_fingerprint
+from workflow.facts import TaskFact
+from workflow.fingerprints import canonical_json
 
 
 class TaskExecutionServiceError(Exception):
@@ -44,6 +58,21 @@ class TaskExecutionServiceError(Exception):
     def task_not_executable(cls) -> Self:
         """Build the 409 error raised for tasks without executable checklist items."""
         return cls(detail="Task has no executable checklist items.", status_code=409)
+
+
+@dataclass(frozen=True)
+class TaskCompletionInput:
+    """Validated caller inputs for one durable Task completion."""
+
+    project_id: int
+    sprint_id: int
+    task_id: int
+    outcome_summary: str
+    artifact_refs: tuple[str, ...]
+    acceptance_result: typing.Literal["partially_met", "fully_met"]
+    checklist_result: JsonObject
+    completed_by: str
+    completed_at: datetime
 
 
 class _TaskLike(Protocol):
@@ -281,3 +310,120 @@ def record_task_execution(
         load_sprint_story=options["load_sprint_story"],
         load_logs=options["load_logs"],
     )
+
+
+def _completion_metadata(
+    task: Task,
+    checklist_result: JsonObject,
+) -> TaskMetadata:
+    if task.metadata_json is None:
+        message = "Task metadata is invalid."
+        raise TaskExecutionServiceError(message, status_code=409)
+    try:
+        metadata = TaskMetadata.model_validate_json(task.metadata_json)
+    except (ValidationError, ValueError, TypeError) as exc:
+        message = "Task metadata is invalid."
+        raise TaskExecutionServiceError(message, status_code=409) from exc
+    if not metadata.checklist_items:
+        raise TaskExecutionServiceError.task_not_executable()
+    if set(checklist_result) != set(metadata.checklist_items):
+        message = "Checklist result must cover every executable checklist item."
+        raise TaskExecutionServiceError(message, status_code=409)
+    return metadata
+
+
+def complete_task_in_session(
+    session: Session,
+    command: TaskCompletionInput,
+) -> TaskCompletionEvidence:
+    """Complete one exact Sprint Task inside the caller's transaction."""
+    sprint = session.get(Sprint, command.sprint_id)
+    task = session.get(Task, command.task_id)
+    if sprint is None or sprint.product_id != command.project_id:
+        raise TaskExecutionServiceError.sprint_not_in_project()
+    if task is None:
+        raise TaskExecutionServiceError.task_not_found()
+    story = session.get(UserStory, task.story_id)
+    membership = session.exec(
+        select(SprintStory).where(
+            col(SprintStory.sprint_id) == command.sprint_id,
+            col(SprintStory.story_id) == task.story_id,
+        )
+    ).one_or_none()
+    if story is None or story.product_id != command.project_id or membership is None:
+        raise TaskExecutionServiceError.task_not_in_sprint()
+    if sprint.status.value != "Active" or task.status in {
+        TaskStatus.DONE,
+        TaskStatus.CANCELLED,
+    }:
+        message = "Task is not open in the active Sprint."
+        raise TaskExecutionServiceError(message, status_code=409)
+    metadata = _completion_metadata(task, command.checklist_result)
+    normalized_outcome = command.outcome_summary.strip()
+    if not normalized_outcome:
+        message = "Task completion requires an outcome summary."
+        raise TaskExecutionServiceError(message, status_code=409)
+    normalized_refs = tuple(
+        sorted({item.strip() for item in command.artifact_refs if item.strip()})
+    )
+    if metadata.artifact_targets and not normalized_refs:
+        message = "Task completion requires artifact references."
+        raise TaskExecutionServiceError(message, status_code=409)
+    existing = session.exec(
+        select(TaskCompletionEvidence).where(
+            col(TaskCompletionEvidence.task_id) == command.task_id,
+            col(TaskCompletionEvidence.sprint_id) == command.sprint_id,
+        )
+    ).one_or_none()
+    if existing is not None:
+        message = "Task completion evidence is immutable."
+        raise TaskExecutionServiceError(message, status_code=409)
+    task_fact = TaskFact(
+        task_id=command.task_id,
+        sprint_id=command.sprint_id,
+        story_id=task.story_id,
+        description=task.description,
+        metadata_json=task.metadata_json or "",
+        status=TaskStatus.DONE.value,
+        dependencies_satisfied=True,
+    )
+    evidence_fingerprint = task_evidence_fingerprint(
+        task_fact,
+        outcome_summary=normalized_outcome,
+        artifact_refs=normalized_refs,
+        acceptance_result=command.acceptance_result,
+        checklist_result=command.checklist_result,
+    )
+    old_status = task.status
+    task.status = TaskStatus.DONE
+    task.updated_at = command.completed_at
+    evidence = TaskCompletionEvidence(
+        project_id=command.project_id,
+        sprint_id=command.sprint_id,
+        task_id=command.task_id,
+        outcome_summary=normalized_outcome,
+        artifact_refs_json=canonical_json(list(normalized_refs)),
+        acceptance_result=command.acceptance_result,
+        checklist_result_json=canonical_json(command.checklist_result),
+        evidence_fingerprint=evidence_fingerprint,
+        completed_by=command.completed_by,
+        completed_at=command.completed_at,
+    )
+    session.add(task)
+    session.add(evidence)
+    session.add(
+        TaskExecutionLog(
+            task_id=command.task_id,
+            sprint_id=command.sprint_id,
+            old_status=old_status,
+            new_status=TaskStatus.DONE,
+            outcome_summary=normalized_outcome,
+            artifact_refs_json=canonical_json(list(normalized_refs)),
+            acceptance_result=TaskAcceptanceResult(command.acceptance_result),
+            notes=canonical_json(command.checklist_result),
+            changed_by=command.completed_by,
+            changed_at=command.completed_at,
+        )
+    )
+    session.flush()
+    return evidence

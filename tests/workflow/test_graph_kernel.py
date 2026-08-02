@@ -368,9 +368,15 @@ def test_root_definition_has_named_children_in_lifecycle_order() -> None:
         "execution",
         "scope_extension",
     )
-    onboarding, authority, vision, backlog, planning, *later_children = (
-        ROOT_GRAPH.root.children
-    )
+    (
+        onboarding,
+        authority,
+        vision,
+        backlog,
+        planning,
+        execution,
+        scope_extension,
+    ) = ROOT_GRAPH.root.children
     assert tuple(node.node_id for node in onboarding.nodes) == (
         "onboarding.greenfield.challenge",
         "onboarding.greenfield.prd",
@@ -410,7 +416,14 @@ def test_root_definition_has_named_children_in_lifecycle_order() -> None:
         "planning.sprint.review",
         "planning.sprint.start",
     )
-    assert all(not child.nodes for child in later_children)
+    assert tuple(node.node_id for node in execution.nodes) == (
+        "execution.task.complete",
+        "execution.story.close",
+        "execution.sprint.review",
+        "execution.sprint.close",
+        "execution.post_sprint_triage",
+    )
+    assert not scope_extension.nodes
 
 
 @pytest.mark.parametrize(

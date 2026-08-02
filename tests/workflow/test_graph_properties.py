@@ -36,10 +36,14 @@ from workflow.facts import (
     ReviewDecisionFact,
     SpecDraftFact,
     SpecVersionFact,
+    SprintClosureFact,
     SprintFact,
+    SprintReviewFact,
+    StoryCompletionFact,
     StoryDependencyFact,
     StoryDependencyReviewFact,
     StoryFact,
+    TaskCompletionFact,
     TaskFact,
     WorkflowFactSnapshot,
 )
@@ -341,11 +345,63 @@ AUTHORITATIVE_SNAPSHOT_VARIANTS: tuple[tuple[str, object], ...] = (
         ),
     ),
     (
+        "task_completions",
+        (
+            TaskCompletionFact(
+                completion_id=17,
+                task_id=14,
+                sprint_id=12,
+                outcome_summary="Implemented and verified.",
+                artifact_refs=("workflow/domain.py",),
+                acceptance_result="fully_met",
+                checklist_result={"Tests pass": "passed"},
+                evidence_fingerprint="sha256:task-completion",
+            ),
+        ),
+    ),
+    (
+        "story_completions",
+        (
+            StoryCompletionFact(
+                completion_id=18,
+                story_id=13,
+                sprint_id=12,
+                completion_fingerprint="sha256:story-completion",
+                resolution="Completed",
+                delivered="Delivered.",
+                evidence="Verified.",
+                known_gaps="None.",
+            ),
+        ),
+    ),
+    (
+        "sprint_reviews",
+        (
+            SprintReviewFact(
+                review_id=19,
+                sprint_id=12,
+                review_fingerprint="sha256:sprint-review",
+            ),
+        ),
+    ),
+    (
+        "sprint_closures",
+        (
+            SprintClosureFact(
+                closure_id=20,
+                sprint_id=12,
+                review_fingerprint="sha256:sprint-review",
+            ),
+        ),
+    ),
+    (
         "post_sprint_triage",
         (
             PostSprintTriageFact(
+                triage_id=16,
                 sprint_id=12,
                 impact="none",
+                canonical_payload={"summary": "No impact."},
                 payload_fingerprint="sha256:triage",
             ),
         ),

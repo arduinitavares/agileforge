@@ -7,7 +7,7 @@ from typing import Annotated, Literal
 
 from pydantic import Field, model_validator
 
-from workflow.contracts import FrozenModel
+from workflow.contracts import FrozenModel, JsonObject
 
 _DATETIME = _datetime.datetime
 
@@ -299,6 +299,7 @@ class StoryFact(FrozenModel):
     status: str
     story_points: int | None = None
     rank: str | None = None
+    sprint_ids: tuple[int, ...] = ()
     sprint_candidate: bool
     readiness_blockers: tuple[str, ...]
 
@@ -315,12 +316,57 @@ class TaskFact(FrozenModel):
     dependencies_satisfied: bool
 
 
+class TaskCompletionFact(FrozenModel):
+    """Immutable Task completion evidence."""
+
+    completion_id: int
+    task_id: int
+    sprint_id: int
+    outcome_summary: str
+    artifact_refs: tuple[str, ...]
+    acceptance_result: Literal["partially_met", "fully_met"]
+    checklist_result: JsonObject
+    evidence_fingerprint: str
+
+
+class StoryCompletionFact(FrozenModel):
+    """Immutable Story closure bound to exact Task facts."""
+
+    completion_id: int
+    story_id: int
+    sprint_id: int
+    completion_fingerprint: str
+    resolution: str
+    delivered: str
+    evidence: str
+    known_gaps: str
+
+
+class SprintReviewFact(FrozenModel):
+    """Persisted review fingerprint for one Sprint."""
+
+    review_id: int
+    sprint_id: int
+    review_fingerprint: str
+
+
+class SprintClosureFact(FrozenModel):
+    """Explicit Sprint close fact bound to a persisted review."""
+
+    closure_id: int
+    sprint_id: int
+    review_fingerprint: str
+
+
 class PostSprintTriageFact(FrozenModel):
     """Post-sprint triage impact record."""
 
+    triage_id: int
     sprint_id: int
     impact: Literal["none", "backlog", "specification"]
+    canonical_payload: JsonObject
     payload_fingerprint: str
+    supersedes_triage_id: int | None = None
 
 
 class NodeAttemptFact(FrozenModel):
@@ -366,5 +412,9 @@ class WorkflowFactSnapshot(FrozenModel):
     story_dependencies: tuple[StoryDependencyFact, ...] = ()
     story_dependency_reviews: tuple[StoryDependencyReviewFact, ...] = ()
     tasks: tuple[TaskFact, ...] = ()
+    task_completions: tuple[TaskCompletionFact, ...] = ()
+    story_completions: tuple[StoryCompletionFact, ...] = ()
+    sprint_reviews: tuple[SprintReviewFact, ...] = ()
+    sprint_closures: tuple[SprintClosureFact, ...] = ()
     post_sprint_triage: tuple[PostSprintTriageFact, ...] = ()
     node_attempts: tuple[NodeAttemptFact, ...] = ()

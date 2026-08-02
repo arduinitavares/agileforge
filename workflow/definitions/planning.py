@@ -68,7 +68,7 @@ def candidate_set_fingerprint(
     return canonical_hash(
         {
             "stories": [
-                item.model_dump(mode="json")
+                item.model_dump(mode="json", exclude={"sprint_ids"})
                 for item in sorted(stories, key=lambda story: story.story_id)
             ],
             "dependencies": [

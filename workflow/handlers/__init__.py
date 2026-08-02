@@ -7,6 +7,7 @@ from workflow.handlers.authority import (
     execute_repair_authority,
     validate_decide_authority_review,
 )
+from workflow.handlers.execution import execute_execution_request
 from workflow.handlers.onboarding import (
     execute_decide_brownfield_initial_spec,
     execute_decide_initial_spec_draft,
@@ -46,6 +47,7 @@ __all__ = [
     "execute_decide_initial_spec_draft",
     "execute_decide_prd",
     "execute_decide_vision",
+    "execute_execution_request",
     "execute_open_project_shell",
     "execute_planning_request",
     "execute_reconcile_backlog",

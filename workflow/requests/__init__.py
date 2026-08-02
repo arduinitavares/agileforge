@@ -6,6 +6,13 @@ from workflow.requests.authority import (
     RecordAuthorityFeedback,
     RepairAuthority,
 )
+from workflow.requests.execution import (
+    CloseSprint,
+    CloseStory,
+    CompleteTask,
+    RecordPostSprintTriage,
+    ReviewSprint,
+)
 from workflow.requests.onboarding import (
     DecideBrownfieldInitialSpec,
     DecideInitialSpecDraft,
@@ -69,12 +76,20 @@ type TransitionRequest = (
     | RecordSprintPlan
     | DecideSprintPlan
     | StartSprint
+    | CompleteTask
+    | CloseStory
+    | ReviewSprint
+    | CloseSprint
+    | RecordPostSprintTriage
 )
 
 __all__ = [
     "AbandonProjectShell",
     "ApplyStoryDependencies",
+    "CloseSprint",
+    "CloseStory",
     "CompileAuthority",
+    "CompleteTask",
     "DecideAuthority",
     "DecideBacklog",
     "DecideBrownfieldInitialSpec",
@@ -91,6 +106,7 @@ __all__ = [
     "RecordBrownfieldSpecDraft",
     "RecordChallengeArtifact",
     "RecordInitialSpecDraft",
+    "RecordPostSprintTriage",
     "RecordPrdVersion",
     "RecordRepositoryBaseline",
     "RecordRepositoryInventory",
@@ -101,6 +117,7 @@ __all__ = [
     "RegisterInitialScope",
     "RepairAuthority",
     "RepairStoryReadiness",
+    "ReviewSprint",
     "StartSprint",
     "TransitionRequest",
 ]

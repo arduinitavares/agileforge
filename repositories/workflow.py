@@ -28,6 +28,7 @@ from models.workflow import (
     DiscoveryRun,
     DiscoveryRunAbandonment,
     InitialScopeRegistration,
+    PostSprintTriage,
     PrdDecision,
     PrdVersion,
     ProjectAbandonment,
@@ -37,11 +38,15 @@ from models.workflow import (
     RoadmapArtifactDecision,
     SpecDraft,
     SpecDraftDecision,
+    SprintClosure,
     SprintPlanArtifact,
     SprintPlanArtifactDecision,
+    SprintReview,
     StoryArtifact,
     StoryArtifactDecision,
+    StoryClosure,
     StoryDependencyReview,
+    TaskCompletionEvidence,
     VisionArtifact,
     VisionArtifactDecision,
     WorkflowNodeAttempt,
@@ -54,6 +59,11 @@ from services.specs.authority_selection import pending_authority_fingerprint
 from utils.spec_schemas import SpecAuthorityCompilationSuccess
 from utils.task_metadata import TaskMetadata, serialize_task_metadata
 from workflow.contracts import JsonValue
+from workflow.execution_integrity import (
+    story_completion_fingerprint,
+    task_evidence_fingerprint,
+    triage_payload_fingerprint,
+)
 from workflow.facts import (
     AuthorityFact,
     AuthorityFeedbackFact,
@@ -66,6 +76,7 @@ from workflow.facts import (
     NodeAttemptFact,
     PhaseArtifactFact,
     PlanningArtifactFact,
+    PostSprintTriageFact,
     PrdVersionFact,
     ProjectAbandonmentFact,
     ProjectFact,
@@ -74,11 +85,15 @@ from workflow.facts import (
     ReviewDecisionFact,
     SpecDraftFact,
     SpecVersionFact,
+    SprintClosureFact,
     SprintFact,
+    SprintReviewFact,
+    StoryCompletionFact,
     StoryDependencyFact,
     StoryDependencyReviewEdgeFact,
     StoryDependencyReviewFact,
     StoryFact,
+    TaskCompletionFact,
     TaskFact,
     WorkflowFactSnapshot,
 )
@@ -270,8 +285,21 @@ class WorkflowFactRepository:
             project_id,
             frozenset(spec_versions),
             planning_load.facts,
+            frozenset(item.sprint_id for item in sprints),
         )
         story_dependencies = self._story_dependencies(project_id)
+        tasks = self._tasks(
+            project_id,
+            frozenset(item.sprint_id for item in sprints),
+            stories,
+        )
+        task_completions = self._task_completions(project_id, tasks)
+        story_completions = self._story_completions(
+            project_id,
+            stories,
+            tasks,
+            task_completions,
+        )
 
         return WorkflowFactSnapshot(
             project=project,
@@ -345,12 +373,12 @@ class WorkflowFactRepository:
                 project_id,
                 stories,
             ),
-            tasks=self._tasks(
-                project_id,
-                frozenset(item.sprint_id for item in sprints),
-                stories,
-            ),
-            post_sprint_triage=(),
+            tasks=tasks,
+            task_completions=task_completions,
+            story_completions=story_completions,
+            sprint_reviews=self._sprint_reviews(project_id, sprints),
+            sprint_closures=self._sprint_closures(project_id, sprints),
+            post_sprint_triage=self._post_sprint_triage(project_id, sprints),
             node_attempts=self._node_attempts(project_id),
         )
 
@@ -2052,6 +2080,7 @@ class WorkflowFactRepository:
         story_id: int,
         artifact: PlanningArtifactFact | None,
         blockers: tuple[str, ...],
+        sprint_ids: tuple[int, ...],
     ) -> StoryFact:
         return StoryFact(
             story_id=story_id,
@@ -2088,6 +2117,7 @@ class WorkflowFactRepository:
             status=row.status.value,
             story_points=row.story_points,
             rank=row.rank,
+            sprint_ids=sprint_ids,
             sprint_candidate=not blockers,
             readiness_blockers=blockers,
         )
@@ -2097,6 +2127,7 @@ class WorkflowFactRepository:
         project_id: int,
         spec_version_ids: frozenset[int],
         planning_artifacts: tuple[PlanningArtifactFact, ...],
+        sprint_ids: frozenset[int],
     ) -> tuple[StoryFact, ...]:
         rows = tuple(
             self._session.exec(
@@ -2122,6 +2153,26 @@ class WorkflowFactRepository:
             self._required_id(row.story_id, "story"): row for row in rows
         }
         story_ids = frozenset(stories_by_id)
+        memberships = (
+            self._session.exec(
+                select(SprintStory)
+                .where(col(SprintStory.story_id).in_(story_ids))
+                .order_by(col(SprintStory.story_id), col(SprintStory.sprint_id)),
+                execution_options=self._query_options(),
+            ).all()
+            if story_ids
+            else []
+        )
+        sprint_ids_by_story: dict[int, list[int]] = {
+            story_id: [] for story_id in story_ids
+        }
+        for membership in memberships:
+            self._require_member(
+                membership.sprint_id,
+                sprint_ids,
+                "task sprint relationship",
+            )
+            sprint_ids_by_story[membership.story_id].append(membership.sprint_id)
         accepted_content_by_story = self._accepted_story_artifacts(planning_artifacts)
         self._validate_story_relationships(
             rows,
@@ -2136,6 +2187,7 @@ class WorkflowFactRepository:
                 story_id,
                 accepted_content_by_story.get(story_id),
                 blockers[story_id],
+                tuple(sprint_ids_by_story[story_id]),
             )
             for story_id, row in stories_by_id.items()
         )
@@ -2335,6 +2387,214 @@ class WorkflowFactRepository:
             )
         return tuple(sorted(facts, key=lambda item: (item.sprint_id, item.task_id)))
 
+    def _task_completions(
+        self,
+        project_id: int,
+        tasks: tuple[TaskFact, ...],
+    ) -> tuple[TaskCompletionFact, ...]:
+        rows = self._session.exec(
+            select(TaskCompletionEvidence)
+            .where(col(TaskCompletionEvidence.project_id) == project_id)
+            .order_by(col(TaskCompletionEvidence.task_completion_evidence_id)),
+            execution_options=self._query_options(),
+        ).all()
+        tasks_by_key = {(item.sprint_id, item.task_id): item for item in tasks}
+        facts: list[TaskCompletionFact] = []
+        for row in rows:
+            key = (row.sprint_id, row.task_id)
+            task = tasks_by_key.get(key)
+            if task is None:
+                message = "Task completion evidence targets a cross-Project task."
+                raise self._error(message)
+            try:
+                artifact_refs = tuple(
+                    _STRING_LIST.validate_json(row.artifact_refs_json)
+                )
+                checklist_result = _JSON_OBJECT.validate_json(
+                    row.checklist_result_json
+                )
+            except ValidationError as exc:
+                message = "Task completion evidence JSON is invalid."
+                raise self._error(message) from exc
+            if (
+                artifact_refs != tuple(sorted(set(artifact_refs)))
+                or canonical_json(list(artifact_refs)) != row.artifact_refs_json
+                or canonical_json(checklist_result) != row.checklist_result_json
+                or row.acceptance_result not in {"partially_met", "fully_met"}
+            ):
+                message = "Task completion evidence is not canonical."
+                raise self._error(message)
+            fact = TaskCompletionFact.model_validate(
+                {
+                    "completion_id": self._required_id(
+                        row.task_completion_evidence_id,
+                        "task completion evidence",
+                    ),
+                    "task_id": row.task_id,
+                    "sprint_id": row.sprint_id,
+                    "outcome_summary": row.outcome_summary,
+                    "artifact_refs": artifact_refs,
+                    "acceptance_result": row.acceptance_result,
+                    "checklist_result": checklist_result,
+                    "evidence_fingerprint": row.evidence_fingerprint,
+                }
+            )
+            expected = task_evidence_fingerprint(
+                task,
+                outcome_summary=fact.outcome_summary,
+                artifact_refs=fact.artifact_refs,
+                acceptance_result=fact.acceptance_result,
+                checklist_result=fact.checklist_result,
+            )
+            if expected != fact.evidence_fingerprint:
+                message = "Task completion evidence fingerprint changed."
+                raise self._error(message)
+            facts.append(fact)
+        return tuple(facts)
+
+    def _story_completions(
+        self,
+        project_id: int,
+        stories: tuple[StoryFact, ...],
+        tasks: tuple[TaskFact, ...],
+        task_completions: tuple[TaskCompletionFact, ...],
+    ) -> tuple[StoryCompletionFact, ...]:
+        rows = self._session.exec(
+            select(StoryClosure)
+            .where(col(StoryClosure.project_id) == project_id)
+            .order_by(col(StoryClosure.story_closure_id)),
+            execution_options=self._query_options(),
+        ).all()
+        stories_by_id = {item.story_id: item for item in stories}
+        facts: list[StoryCompletionFact] = []
+        for row in rows:
+            story = stories_by_id.get(row.story_id)
+            if story is None or row.sprint_id not in story.sprint_ids:
+                message = "Story closure targets a cross-Project Sprint Story."
+                raise self._error(message)
+            expected = story_completion_fingerprint(story, tasks, task_completions)
+            if expected != row.completion_fingerprint:
+                message = "Story closure fingerprint changed."
+                raise self._error(message)
+            facts.append(
+                StoryCompletionFact(
+                    completion_id=self._required_id(
+                        row.story_closure_id,
+                        "story closure",
+                    ),
+                    story_id=row.story_id,
+                    sprint_id=row.sprint_id,
+                    completion_fingerprint=row.completion_fingerprint,
+                    resolution=row.resolution,
+                    delivered=row.delivered,
+                    evidence=row.evidence,
+                    known_gaps=row.known_gaps,
+                )
+            )
+        return tuple(facts)
+
+    def _sprint_reviews(
+        self,
+        project_id: int,
+        sprints: tuple[SprintFact, ...],
+    ) -> tuple[SprintReviewFact, ...]:
+        sprint_ids = frozenset(item.sprint_id for item in sprints)
+        rows = self._session.exec(
+            select(SprintReview)
+            .where(col(SprintReview.project_id) == project_id)
+            .order_by(col(SprintReview.sprint_review_id)),
+            execution_options=self._query_options(),
+        ).all()
+        return tuple(
+            SprintReviewFact(
+                review_id=self._required_id(row.sprint_review_id, "sprint review"),
+                sprint_id=self._required_member_id(
+                    row.sprint_id,
+                    sprint_ids,
+                    "sprint review",
+                ),
+                review_fingerprint=row.review_fingerprint,
+            )
+            for row in rows
+        )
+
+    def _sprint_closures(
+        self,
+        project_id: int,
+        sprints: tuple[SprintFact, ...],
+    ) -> tuple[SprintClosureFact, ...]:
+        sprint_ids = frozenset(item.sprint_id for item in sprints)
+        rows = self._session.exec(
+            select(SprintClosure)
+            .where(col(SprintClosure.project_id) == project_id)
+            .order_by(col(SprintClosure.sprint_closure_id)),
+            execution_options=self._query_options(),
+        ).all()
+        return tuple(
+            SprintClosureFact(
+                closure_id=self._required_id(row.sprint_closure_id, "sprint closure"),
+                sprint_id=self._required_member_id(
+                    row.sprint_id,
+                    sprint_ids,
+                    "sprint closure",
+                ),
+                review_fingerprint=row.review_fingerprint,
+            )
+            for row in rows
+        )
+
+    def _post_sprint_triage(
+        self,
+        project_id: int,
+        sprints: tuple[SprintFact, ...],
+    ) -> tuple[PostSprintTriageFact, ...]:
+        sprint_ids = frozenset(item.sprint_id for item in sprints)
+        rows = self._session.exec(
+            select(PostSprintTriage)
+            .where(col(PostSprintTriage.project_id) == project_id)
+            .order_by(col(PostSprintTriage.triage_id)),
+            execution_options=self._query_options(),
+        ).all()
+        facts: list[PostSprintTriageFact] = []
+        row_ids = {
+            self._required_id(row.triage_id, "post-sprint triage") for row in rows
+        }
+        for row in rows:
+            triage_id = self._required_id(row.triage_id, "post-sprint triage")
+            self._require_member(row.sprint_id, sprint_ids, "post-sprint triage")
+            if (
+                row.supersedes_triage_id is not None
+                and row.supersedes_triage_id not in row_ids
+            ):
+                message = "Post-sprint triage correction parent is missing."
+                raise self._error(message)
+            try:
+                payload = _JSON_OBJECT.validate_json(row.canonical_payload_json)
+            except ValidationError as exc:
+                message = "Post-sprint triage payload is invalid."
+                raise self._error(message) from exc
+            if (
+                canonical_json(payload) != row.canonical_payload_json
+                or row.impact not in {"none", "backlog", "specification"}
+                or triage_payload_fingerprint(row.impact, payload)
+                != row.payload_fingerprint
+            ):
+                message = "Post-sprint triage payload fingerprint changed."
+                raise self._error(message)
+            facts.append(
+                PostSprintTriageFact.model_validate(
+                    {
+                        "triage_id": triage_id,
+                        "sprint_id": row.sprint_id,
+                        "impact": row.impact,
+                        "canonical_payload": payload,
+                        "payload_fingerprint": row.payload_fingerprint,
+                        "supersedes_triage_id": row.supersedes_triage_id,
+                    }
+                )
+            )
+        return tuple(facts)
+
     def _node_attempts(self, project_id: int) -> tuple[NodeAttemptFact, ...]:
         attempts = self._session.exec(
             select(WorkflowNodeAttempt)
@@ -2416,6 +2676,16 @@ class WorkflowFactRepository:
                 f"reference {value} is not owned by this Project."
             )
             raise WorkflowFactRepository._error(message)
+
+    def _required_member_id(
+        self,
+        value: int,
+        values: frozenset[int],
+        label: str,
+    ) -> int:
+        """Validate and return one Project-owned durable identity."""
+        self._require_member(value, values, label)
+        return value
 
     @staticmethod
     def _require_same_run_reference(

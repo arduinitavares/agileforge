@@ -3,14 +3,24 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, Self, TypedDict, Unpack
 
-from models.enums import StoryResolution
+from sqlmodel import Session, col, select
+
+from models.core import Sprint, SprintStory, Task, UserStory
+from models.enums import StoryResolution, TaskStatus
 from models.enums import StoryStatus
+from models.events import StoryCompletionLog
+from models.workflow import StoryClosure, TaskCompletionEvidence
+from repositories.workflow import WorkflowFactRepository
 from utils.api_schemas import StoryTaskProgressSummary
+from workflow.execution_integrity import story_completion_fingerprint
+from workflow.fingerprints import canonical_json
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
+    from datetime import datetime
 
 
 class StoryCloseServiceError(Exception):
@@ -67,6 +77,21 @@ class StoryCloseServiceError(Exception):
             status_code=409,
         )
 
+
+@dataclass(frozen=True)
+class StoryCloseInput:
+    """Validated caller inputs for one durable Story closure."""
+
+    project_id: int
+    sprint_id: int
+    story_id: int
+    completion_fingerprint: str
+    resolution: str
+    delivered: str
+    evidence: str
+    known_gaps: str
+    closed_by: str
+    closed_at: datetime
 
 class _StoryLike(Protocol):
     @property
@@ -271,3 +296,148 @@ def close_story(
         "close_eligible": False,
         "ineligible_reason": None,
     }
+
+
+def _story_close_subject(
+    session: Session,
+    command: StoryCloseInput,
+) -> tuple[Sprint, UserStory]:
+    sprint = session.get(Sprint, command.sprint_id)
+    story = session.get(UserStory, command.story_id)
+    if story is None:
+        raise StoryCloseServiceError.story_not_found()
+    if sprint is None or sprint.product_id != command.project_id:
+        raise StoryCloseServiceError.sprint_not_in_project()
+    membership = session.exec(
+        select(SprintStory).where(
+            col(SprintStory.sprint_id) == command.sprint_id,
+            col(SprintStory.story_id) == command.story_id,
+        )
+    ).one_or_none()
+    if story.product_id != command.project_id or membership is None:
+        raise StoryCloseServiceError.story_not_in_sprint()
+    return sprint, story
+
+
+def _terminal_story_tasks(
+    session: Session,
+    command: StoryCloseInput,
+) -> tuple[tuple[Task, ...], tuple[int, ...]]:
+    tasks = tuple(
+        session.exec(
+            select(Task)
+            .where(col(Task.story_id) == command.story_id)
+            .order_by(col(Task.task_id))
+        ).all()
+    )
+    if not tasks:
+        raise StoryCloseServiceError.no_executable_tasks()
+    if any(
+        item.status not in {TaskStatus.DONE, TaskStatus.CANCELLED} for item in tasks
+    ):
+        raise StoryCloseServiceError.incomplete_tasks()
+    done_ids = tuple(
+        item.task_id
+        for item in tasks
+        if item.status is TaskStatus.DONE and item.task_id is not None
+    )
+    evidence_count = (
+        len(
+            session.exec(
+                select(TaskCompletionEvidence).where(
+                    col(TaskCompletionEvidence.sprint_id) == command.sprint_id,
+                    col(TaskCompletionEvidence.task_id).in_(done_ids),
+                )
+            ).all()
+        )
+        if done_ids
+        else 0
+    )
+    if evidence_count != len(done_ids):
+        message = "Done Tasks require immutable completion evidence."
+        raise StoryCloseServiceError(message, status_code=409)
+    return tasks, done_ids
+
+
+def close_story_in_session(
+    session: Session,
+    command: StoryCloseInput,
+) -> StoryClosure:
+    """Close one Story and append its audit rows in the caller transaction."""
+    sprint, story = _story_close_subject(session, command)
+    if sprint.status.value != "Active":
+        message = "Story close requires an active Sprint."
+        raise StoryCloseServiceError(message, status_code=409)
+    if story.status in {StoryStatus.DONE, StoryStatus.ACCEPTED}:
+        raise StoryCloseServiceError.already_closed(story.status)
+    _tasks, done_ids = _terminal_story_tasks(session, command)
+    snapshot = WorkflowFactRepository(session).load(command.project_id)
+    story_fact = next(
+        item for item in snapshot.stories if item.story_id == command.story_id
+    )
+    expected = story_completion_fingerprint(
+        story_fact,
+        tuple(
+            item
+            for item in snapshot.tasks
+            if item.sprint_id == command.sprint_id
+            and item.story_id == command.story_id
+        ),
+        tuple(
+            item
+            for item in snapshot.task_completions
+            if item.sprint_id == command.sprint_id and item.task_id in done_ids
+        ),
+    )
+    if command.completion_fingerprint != expected:
+        message = "Story completion fingerprint is stale."
+        raise StoryCloseServiceError(message, status_code=409)
+    try:
+        normalized_resolution = StoryResolution(command.resolution)
+    except ValueError as exc:
+        message = "Story resolution is invalid."
+        raise StoryCloseServiceError(message, status_code=409) from exc
+    existing = session.exec(
+        select(StoryClosure).where(
+            col(StoryClosure.story_id) == command.story_id,
+            col(StoryClosure.sprint_id) == command.sprint_id,
+        )
+    ).one_or_none()
+    if existing is not None:
+        message = "Story closure is immutable."
+        raise StoryCloseServiceError(message, status_code=409)
+    old_status = story.status
+    story.status = StoryStatus.DONE
+    story.resolution = normalized_resolution
+    story.completion_notes = command.delivered
+    story.evidence_links = canonical_json([command.evidence])
+    story.completed_at = command.closed_at
+    closure = StoryClosure(
+        project_id=command.project_id,
+        sprint_id=command.sprint_id,
+        story_id=command.story_id,
+        completion_fingerprint=command.completion_fingerprint,
+        resolution=command.resolution,
+        delivered=command.delivered,
+        evidence=command.evidence,
+        known_gaps=command.known_gaps,
+        closed_by=command.closed_by,
+        closed_at=command.closed_at,
+    )
+    session.add(story)
+    session.add(closure)
+    session.add(
+        StoryCompletionLog(
+            story_id=command.story_id,
+            old_status=old_status,
+            new_status=StoryStatus.DONE,
+            resolution=normalized_resolution,
+            delivered=command.delivered,
+            evidence=command.evidence,
+            known_gaps=command.known_gaps,
+            changed_by=command.closed_by,
+            changed_at=command.closed_at,
+        )
+    )
+    session.flush()
+    return closure
