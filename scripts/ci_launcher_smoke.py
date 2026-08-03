@@ -183,18 +183,21 @@ def _verify_stopped(
     child_process_id: int | None,
     port: int | None,
 ) -> None:
-    if process.poll() is None or runtime.group_exists(process.pid):
+    launcher_stopped = process.poll() == 0
+    group_stopped = not runtime.group_exists(process.pid)
+    child_stopped = child_process_id is None or not runtime.process_exists(
+        child_process_id
+    )
+    endpoint_stopped = port is None
+    if port is not None:
+        deadline = runtime.monotonic() + STOP_TIMEOUT_SECONDS
+        while runtime.monotonic() < deadline:
+            if not runtime.endpoint_reachable(port):
+                endpoint_stopped = True
+                break
+            runtime.sleep(POLL_SECONDS)
+    if not all((launcher_stopped, group_stopped, child_stopped, endpoint_stopped)):
         raise SmokeError(ErrorCode.CLEANUP)
-    if child_process_id is not None and runtime.process_exists(child_process_id):
-        raise SmokeError(ErrorCode.CLEANUP)
-    if port is None:
-        return
-    deadline = runtime.monotonic() + STOP_TIMEOUT_SECONDS
-    while runtime.monotonic() < deadline:
-        if not runtime.endpoint_reachable(port):
-            return
-        runtime.sleep(POLL_SECONDS)
-    raise SmokeError(ErrorCode.CLEANUP)
 
 
 def _noop(_process: ManagedProcess) -> None:

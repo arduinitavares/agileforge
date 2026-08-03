@@ -18,7 +18,7 @@ import pytest
 import cli.ci_launcher_smoke_runtime as smoke_runtime
 import scripts.ci_launcher_smoke as smoke
 from cli.dev_profiles import profile_paths
-from cli.dev_server import DashboardConfig, UIChild
+from cli.dev_server import DashboardConfig
 
 if TYPE_CHECKING:
     from typing import TextIO
@@ -27,6 +27,7 @@ SCRIPT_PATH = Path(smoke.__file__).resolve()
 _SHA = "a" * 40
 _PORT = 18_765
 _CHILD_PID = 43_210
+_KILLED_RETURN_CODE = -9
 
 
 @dataclass(slots=True)
@@ -67,6 +68,8 @@ class FakeRuntime:
     expected_sha: str = _SHA
     invalid_command: str | None = None
     endpoint_after_stop: bool = False
+    returncode_after_readiness: int | None = None
+    shutdown_returncode: int = 0
     calls: list[tuple[str, ...]] = field(default_factory=list)
     process: FakeProcess = field(default_factory=FakeProcess)
     child_profile: str = ""
@@ -129,6 +132,8 @@ class FakeRuntime:
         assert result.port == _PORT
         assert expected_sha == self.expected_sha
         self.child_pid = _CHILD_PID
+        if self.returncode_after_readiness is not None:
+            self.process.returncode = self.returncode_after_readiness
         child = profile_paths(self.checkout, self.child_profile)
         return DashboardConfig(
             status="ready",
@@ -142,7 +147,8 @@ class FakeRuntime:
     def stop_ui(self, process: smoke_runtime.ManagedProcess) -> None:
         """Stop the fake launcher group."""
         assert process is self.process
-        self.process.returncode = 0
+        if self.process.returncode is None:
+            self.process.returncode = self.shutdown_returncode
         self.child_pid = None
 
     def process_exists(self, process_id: int) -> bool:
@@ -389,6 +395,45 @@ def test_surviving_endpoint_fails_cleanup_and_profiles_are_removed(
     assert not profile_paths(tmp_path, runtime.child_profile).root.exists()
 
 
+def _assert_abnormal_exit_fails_after_cleanup(
+    tmp_path: Path,
+    profile: str,
+    runtime: FakeRuntime,
+) -> None:
+    profiles = smoke_runtime.LocalProfiles.create(tmp_path, profile)
+
+    with pytest.raises(smoke.SmokeError, match=smoke.ErrorCode.CLEANUP.value):
+        smoke.run_smoke(tmp_path, _request(profile), runtime, profiles)
+
+    assert runtime.process.returncode in (3, 7)
+    assert not profile_paths(tmp_path, profile).root.exists()
+    assert not profile_paths(tmp_path, runtime.child_profile).root.exists()
+
+
+def test_post_readiness_launcher_crash_fails_cleanup(
+    tmp_path: Path,
+    fake_profile_reset: None,
+) -> None:
+    """Reject an already-exited nonzero launcher after readiness."""
+    del fake_profile_reset
+    profile = "ci-smoke-post-ready-crash"
+    runtime = FakeRuntime(tmp_path, profile, returncode_after_readiness=7)
+
+    _assert_abnormal_exit_fails_after_cleanup(tmp_path, profile, runtime)
+
+
+def test_nonzero_launcher_shutdown_fails_cleanup(
+    tmp_path: Path,
+    fake_profile_reset: None,
+) -> None:
+    """Reject a tracked launcher that returns nonzero during shutdown."""
+    del fake_profile_reset
+    profile = "ci-smoke-nonzero-shutdown"
+    runtime = FakeRuntime(tmp_path, profile, shutdown_returncode=3)
+
+    _assert_abnormal_exit_fails_after_cleanup(tmp_path, profile, runtime)
+
+
 def test_safe_environment_excludes_credentials(tmp_path: Path) -> None:
     """Pass no provider, GitHub, proxy, or index credentials to launchers."""
     sensitive = uuid.uuid4().hex
@@ -447,23 +492,54 @@ def test_process_group_maps_existing_stop_policy_to_term_and_kill(
     assert sent == [(999, signal.SIGTERM), (999, getattr(signal, "SIGKILL", 9))]
 
 
-def test_runtime_delegates_bounded_stop_policy(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Pass the process group to the existing finite TERM/KILL policy."""
-    observed: list[tuple[UIChild, float]] = []
+def test_runtime_escalates_stubborn_process_through_real_stop_policy() -> None:
+    """Exercise dev_server's bounded TERM, KILL, and final-wait sequence."""
 
-    def capture_stop(child: UIChild, *, timeout: float) -> None:
-        observed.append((child, timeout))
+    @dataclass(slots=True)
+    class StubbornProcess:
+        pid: int = 991
+        returncode: int | None = None
+        events: list[str] = field(default_factory=list)
+        waits: int = 0
 
-    monkeypatch.setattr(smoke_runtime, "stop_ui", capture_stop)
-    process = FakeProcess()
+        def poll(self) -> int | None:
+            """Report the active process and record policy entry."""
+            self.events.append("poll")
+            return self.returncode
+
+        def wait(self, timeout: float | None = None) -> int:
+            """Time out once, then complete the post-KILL wait."""
+            self.waits += 1
+            self.events.append(f"wait:{timeout}")
+            if self.waits == 1:
+                raise subprocess.TimeoutExpired(
+                    cmd="ui",
+                    timeout=0.0 if timeout is None else timeout,
+                )
+            self.returncode = _KILLED_RETURN_CODE
+            return self.returncode
+
+        def terminate(self) -> None:
+            """Record the graceful-stop attempt."""
+            self.events.append("term")
+
+        def kill(self) -> None:
+            """Record forced escalation."""
+            self.events.append("kill")
+
+    process = StubbornProcess()
 
     smoke_runtime.LocalRuntime({}).stop_ui(process)
 
-    child, timeout = observed[0]
-    assert child.process is process
-    assert timeout == smoke_runtime.STOP_TIMEOUT_SECONDS
+    timeout = smoke_runtime.STOP_TIMEOUT_SECONDS
+    assert process.events == [
+        "poll",
+        "term",
+        f"wait:{timeout}",
+        "kill",
+        f"wait:{timeout}",
+    ]
+    assert process.returncode == _KILLED_RETURN_CODE
 
 
 def test_main_redacts_unexpected_failures(
