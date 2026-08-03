@@ -8,13 +8,13 @@ from collections import Counter
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any, cast
 
-from orchestrator_agent.fsm.states import OrchestratorState
 from services.agent_workbench.fingerprints import canonical_hash
 from services.contracts.roadmap import (
     RoadmapBuilderOutput,
     SaveRoadmapToolInput,
 )
 from services.phases import workflow_state
+from services.phases.workflow_state import OrchestratorState
 
 _PRESERVED_ROADMAP_STATES = {
     OrchestratorState.ROADMAP_PERSISTENCE.value,

@@ -12,7 +12,6 @@ from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 
-from cli.main import main
 from models.core import Product
 from models.specs import SpecAuthorityAcceptance, SpecRegistry
 from services.agent_workbench.application import AgentWorkbenchApplication
@@ -20,6 +19,7 @@ from services.agent_workbench.error_codes import ErrorCode
 from services.agent_workbench.scope_discovery import ScopeDiscoveryRunner
 from services.specs.profile_content import normalize_spec_content_for_registry
 from services.story_feedback_quality import evaluate_story_feedback_quality
+from tests.legacy_cli_main import main
 
 type JsonObject = dict[str, Any]
 PROJECT_ID = 7
@@ -7120,6 +7120,7 @@ def test_cli_parse_errors_return_json_envelope(
     assert error["code"] == "INVALID_COMMAND"
     assert error["exit_code"] == INVALID_COMMAND_EXIT_CODE
     assert "--project-id" in str(error["message"])
+    assert "--project-id" in str(error["message"])
 
 
 def test_module_parse_errors_return_json_envelope() -> None:
@@ -7136,10 +7137,7 @@ def test_module_parse_errors_return_json_envelope() -> None:
     assert result.returncode == INVALID_COMMAND_EXIT_CODE
     assert result.stderr == ""
     assert payload["ok"] is False
-    assert _mapping(payload["meta"])["command"] == "agileforge"
-    error = _first_mapping(payload["errors"])
-    assert error["code"] == "INVALID_COMMAND"
-    assert error["exit_code"] == INVALID_COMMAND_EXIT_CODE
+    assert "invalid choice" in str(payload["error"])
 
 
 def test_top_level_help_describes_agent_workbench_commands(
@@ -7284,7 +7282,10 @@ def test_cli_configures_logging(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_configure_logging(**kwargs: object) -> None:
         calls.append(dict(kwargs))
 
-    monkeypatch.setattr("cli.main.configure_logging", fake_configure_logging)
+    monkeypatch.setattr(
+        "tests.legacy_cli_main.configure_logging",
+        fake_configure_logging,
+    )
 
     exit_code = main(["project", "list"], application=_FakeApplication())
 

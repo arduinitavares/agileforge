@@ -12,14 +12,12 @@ import anyio
 from pydantic import TypeAdapter
 from sqlmodel import Session, col, func, select
 
-from models.core import Product, UserStory
+from models.core import Product, SprintStory, UserStory
 from models.db import get_engine
 from models.enums import StoryStatus, WorkflowEventType
 from models.events import WorkflowEvent
 from models.specs import CompiledSpecAuthority
 from models.workflow import BacklogArtifact, BacklogArtifactDecision
-from orchestrator_agent.agent_tools.backlog_primer import tools as backlog_primer_tools
-from orchestrator_agent.agent_tools.backlog_primer.tools import save_backlog_tool
 from repositories.product import ProductRepository
 from services.agent_workbench.backlog_active_reset import (
     ActiveBacklogResetError,
@@ -59,18 +57,28 @@ from services.phases.backlog_service import (
     reset_active_backlog,
     save_backlog_draft,
 )
-from services.workflow import WorkflowService
-from tools.orchestrator_tools import select_project
+from services.story_linkage import normalize_requirement_key
 from workflow.contracts import JsonObject
 from workflow.fingerprints import canonical_hash, canonical_json
 
 if TYPE_CHECKING:
     from google.adk.tools import ToolContext
     from sqlalchemy.engine import Engine
+
+    from services.workflow import WorkflowService
 else:
     ToolContext = Any
 
 _JSON_OBJECT = TypeAdapter(JsonObject)
+
+
+def select_project(product_id: int, tool_context: ToolContext) -> JsonObject:
+    """Load the legacy hydration adapter only when the dead runner is invoked."""
+    from tools.orchestrator_tools import (  # noqa: PLC0415
+        select_project as legacy_select,
+    )
+
+    return _JSON_OBJECT.validate_python(legacy_select(product_id, tool_context))
 
 _REFINE_RECORD_IDEMPOTENCY_REUSED_MESSAGE = (
     "Backlog refinement idempotency key reused with different request"
@@ -127,7 +135,11 @@ class BacklogPhaseRunner:
     ) -> None:
         """Initialize repositories for CLI Backlog commands."""
         self._product_repo = product_repo or ProductRepository()
-        self._workflow_service = workflow_service or WorkflowService()
+        if workflow_service is None:
+            from services.workflow import WorkflowService  # noqa: PLC0415
+
+            workflow_service = WorkflowService()
+        self._workflow_service = workflow_service
         self._engine = engine
 
     def generate(
@@ -579,6 +591,10 @@ class BacklogPhaseRunner:
         expected_state: str,
         idempotency_key: str,
     ) -> dict[str, Any]:
+        from orchestrator_agent.agent_tools.backlog_primer.tools import (  # noqa: PLC0415
+            save_backlog_tool,
+        )
+
         product = self._load_project(project_id)
         if isinstance(product, dict):
             return product
@@ -863,7 +879,7 @@ def persist_accepted_backlog_in_session(
     blocked = [
         story
         for story in active_stories
-        if backlog_primer_tools._blocks_backlog_replacement(session, story)
+        if _blocks_backlog_replacement(session, story)
     ]
     if blocked:
         blocked_ids = tuple(
@@ -927,9 +943,7 @@ def _story_from_validated_backlog_item(
         story_points=effort_points[item.estimated_effort],
         story_description=item.justification,
         acceptance_criteria=None,
-        source_requirement=backlog_primer_tools.normalize_requirement_key(
-            item.requirement
-        ),
+        source_requirement=normalize_requirement_key(item.requirement),
         refinement_slot=item.priority,
         story_origin="backlog_seed",
         is_refined=False,
@@ -960,8 +974,26 @@ def _active_backlog_replacement_blocked(
         .where(UserStory.is_superseded == False)  # noqa: E712
     ).all()
     return any(
-        backlog_primer_tools._blocks_backlog_replacement(session, story)
+        _blocks_backlog_replacement(session, story)
         for story in active_stories
+    )
+
+
+def _blocks_backlog_replacement(session: Session, story: UserStory) -> bool:
+    """Return whether a Story has progressed beyond replaceable seed state."""
+    if story.story_origin != "backlog_seed":
+        return True
+    if story.is_refined or story.acceptance_criteria:
+        return True
+    if story.status != StoryStatus.TO_DO:
+        return True
+    if story.story_id is None:
+        return False
+    return (
+        session.exec(
+            select(SprintStory).where(SprintStory.story_id == story.story_id)
+        ).first()
+        is not None
     )
 
 

@@ -6,11 +6,11 @@ import hashlib
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from orchestrator_agent.fsm.states import OrchestratorState
 from services.contracts.vision import (
     SaveVisionInput,
 )
 from services.phases import workflow_state
+from services.phases.workflow_state import OrchestratorState
 
 
 class VisionPhaseError(Exception):

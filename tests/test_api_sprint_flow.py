@@ -10,7 +10,6 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlmodel import Session, select
 
-import api as api_module
 from agile_sqlmodel import (
     CompiledSpecAuthority,
     Product,
@@ -31,6 +30,7 @@ from services.agent_workbench.authority_projection import (
     pending_authority_fingerprint,
 )
 from services.agent_workbench.post_sprint_triage import build_triage_payload
+from tests import legacy_api as api_module
 from tests.authority_assumption_fixtures import (
     current_v3_compiled_authority_json,
     historical_v2_compiled_authority,

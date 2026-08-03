@@ -5,7 +5,7 @@ import test from 'node:test';
 import vm from 'node:vm';
 
 const projectHtmlPath = path.resolve(import.meta.dirname, '../frontend/project.html');
-const projectJsPath = path.resolve(import.meta.dirname, '../frontend/project.js');
+const projectJsPath = path.resolve(import.meta.dirname, 'legacy_project.js');
 const projectHtmlSource = fs.readFileSync(projectHtmlPath, 'utf8');
 const projectJsSource = fs.readFileSync(projectJsPath, 'utf8');
 

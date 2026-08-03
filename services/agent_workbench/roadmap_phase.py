@@ -16,7 +16,6 @@ from models.db import get_engine
 from models.enums import WorkflowEventType
 from models.events import WorkflowEvent
 from models.workflow import RoadmapArtifact, RoadmapArtifactDecision
-from orchestrator_agent.agent_tools.roadmap_builder.tools import save_roadmap_tool
 from repositories.product import ProductRepository
 from services.agent_workbench.error_codes import ErrorCode, workbench_error
 from services.agent_workbench.execution_guard import AcceptedAuthorityExecutionGuard
@@ -28,16 +27,24 @@ from services.phases.roadmap_service import (
     save_roadmap_draft,
 )
 from services.roadmap_runtime import run_roadmap_agent_from_state
-from services.workflow import WorkflowService
-from tools.orchestrator_tools import select_project
 from workflow.fingerprints import canonical_hash, canonical_json
 
 if TYPE_CHECKING:
     from google.adk.tools import ToolContext
 
+    from services.workflow import WorkflowService
     from workflow.contracts import JsonObject
 else:
     ToolContext = Any
+
+
+def select_project(product_id: int, tool_context: ToolContext) -> JsonObject:
+    """Load the legacy hydration adapter only when the dead runner is invoked."""
+    from tools.orchestrator_tools import (  # noqa: PLC0415
+        select_project as legacy_select,
+    )
+
+    return cast("JsonObject", legacy_select(product_id, tool_context))
 
 
 class _ProductRepositoryLike(Protocol):
@@ -65,7 +72,11 @@ class RoadmapPhaseRunner:
     ) -> None:
         """Initialize repositories for CLI Roadmap commands."""
         self._product_repo = product_repo or ProductRepository()
-        self._workflow_service = workflow_service or WorkflowService()
+        if workflow_service is None:
+            from services.workflow import WorkflowService  # noqa: PLC0415
+
+            workflow_service = WorkflowService()
+        self._workflow_service = workflow_service
 
     def generate(
         self,
@@ -155,6 +166,10 @@ class RoadmapPhaseRunner:
         expected_state: str,
         idempotency_key: str,
     ) -> dict[str, Any]:
+        from orchestrator_agent.agent_tools.roadmap_builder.tools import (  # noqa: PLC0415
+            save_roadmap_tool,
+        )
+
         product = self._load_project(project_id)
         if isinstance(product, dict):
             return product

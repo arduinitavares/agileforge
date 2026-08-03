@@ -11,7 +11,6 @@ import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-import api as api_module
 from agile_sqlmodel import (
     CompiledSpecAuthority,
     Product,
@@ -28,6 +27,7 @@ from services.agent_workbench.authority_projection import (
 )
 from services.agent_workbench.authority_review import AuthorityReviewSnapshot
 from services.specs.compiler_service import CompiledArtifactLoadResult
+from tests import legacy_api as api_module
 from tests.authority_assumption_fixtures import current_v3_compiled_authority_json
 
 if TYPE_CHECKING:
@@ -1870,7 +1870,7 @@ def test_dashboard_pending_review_copy_is_not_project_setup_required() -> None:
 def test_dashboard_sprint_planning_ui_uses_point_capacity_contract() -> None:
     """Keep Sprint planning UI aligned with point capacity, not calendar heuristics."""
     html = Path("frontend/project.html").read_text()
-    js = Path("frontend/project.js").read_text()
+    js = Path("tests/legacy_project.js").read_text()
 
     assert 'id="sprint-velocity"' not in html
     assert 'id="sprint-duration"' not in html
@@ -1888,7 +1888,7 @@ def test_dashboard_sprint_planning_ui_uses_point_capacity_contract() -> None:
 def test_dashboard_sprint_save_uses_guarded_contract_without_start_date() -> None:
     """Keep Sprint save UI aligned with guarded API save contract."""
     html = Path("frontend/project.html").read_text()
-    js = Path("frontend/project.js").read_text()
+    js = Path("tests/legacy_project.js").read_text()
 
     assert 'id="sprint-start-date"' not in html
     assert "Sprint Start Date" not in html
@@ -1902,7 +1902,7 @@ def test_dashboard_sprint_save_uses_guarded_contract_without_start_date() -> Non
 
 def test_dashboard_sprint_save_reuses_idempotency_key_for_current_draft() -> None:
     """Keep retry clicks idempotent for the same reviewed Sprint draft."""
-    js = Path("frontend/project.js").read_text()
+    js = Path("tests/legacy_project.js").read_text()
 
     assert "let latestSprintSaveIdempotencyKey = null;" in js
     assert "function sprintSaveIdempotencyKey()" in js

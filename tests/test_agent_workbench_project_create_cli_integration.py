@@ -1,6 +1,6 @@
 """End-to-end CLI integration tests for project setup mutations."""
 
-# ruff: noqa: ANN401, D102, D103, D107, PLC0415, PLR0913, S603, TC002
+# ruff: noqa: ANN401, D102, D103, D107, PLC0415, PLR0913, TC002
 
 from __future__ import annotations
 
@@ -15,7 +15,6 @@ import pytest
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, SQLModel, create_engine, select
 
-from cli.main import main
 from db.migrations import ensure_schema_current
 from models.agent_workbench import (
     CliMutationLedger,
@@ -34,6 +33,7 @@ from services.agent_workbench.project_setup import (
 )
 from services.agent_workbench.project_setup_fingerprints import setup_spec_hash
 from tests.authority_assumption_fixtures import current_v3_compiled_authority_json
+from tests.legacy_cli_main import main
 
 GREENFIELD_GATE_EXIT_CODE = 4
 _TEST_COMPILER_VERSION = "3.0.0"
@@ -478,27 +478,23 @@ def _install_compiler(
     )
 
 
-def test_project_create_cli_from_non_repo_cwd_uses_caller_relative_spec(
+def test_project_create_cli_from_non_repo_cwd_opens_graph_project_shell(
     tmp_path: Path,
 ) -> None:
     repo_root = Path(__file__).resolve().parents[1]
     caller_dir = tmp_path / "caller"
     caller_dir.mkdir()
-    spec_file = _write_structured_spec(caller_dir)
-    _write_sitecustomize_compiler_patch(caller_dir)
     business_db_path = tmp_path / "business.sqlite3"
-    session_db_path = tmp_path / "sessions.sqlite3"
     business_engine = _business_engine(business_db_path)
-    draft_id = _accepted_greenfield_draft_id(
-        business_engine,
-        spec_file,
-        amendment_file="specs/spec.json",
-    )
 
     env = os.environ.copy()
     env["PYTHONPATH"] = os.pathsep.join([str(caller_dir), str(repo_root)])
     env["AGILEFORGE_DB_URL"] = f"sqlite:///{business_db_path.as_posix()}"
-    env["AGILEFORGE_SESSION_DB_URL"] = f"sqlite:///{session_db_path.as_posix()}"
+    env["AGILEFORGE_ADK_EXECUTION_TRACE_DB_URL"] = (
+        f"sqlite:///{(tmp_path / 'adk-trace.sqlite3').as_posix()}"
+    )
+    env["MODEL_CONFIG_PATH"] = str(repo_root / "config" / "models.test.yaml")
+    env["OPENROUTER_API_KEY"] = "offline-test-key"
     env["ALLOW_PROD_DB_IN_TEST"] = "1"
     env["RELAX_ZDR_FOR_TESTS"] = "true"
     result = subprocess.run(  # nosec B603
@@ -510,10 +506,12 @@ def test_project_create_cli_from_non_repo_cwd_uses_caller_relative_spec(
             "create",
             "--name",
             "Outside Repo Project",
-            "--greenfield-spec-amendment-draft-id",
-            str(draft_id),
+            "--origin",
+            "greenfield",
             "--idempotency-key",
             "outside-repo-project-001",
+            "--changed-by",
+            "integration-test",
         ],
         cwd=caller_dir,
         env=env,
@@ -522,34 +520,22 @@ def test_project_create_cli_from_non_repo_cwd_uses_caller_relative_spec(
         check=False,
     )
 
+    assert result.stdout, result.stderr
     payload = _payload_from_completed_process(result)
     assert result.returncode == 0, payload
     assert payload["ok"] is True
-    data = payload["data"]
-    project_id = data["project_id"]
+    project_id = payload["output"]["project_id"]
     assert project_id
-    assert Path(data["resolved_spec_path"]) == spec_file.resolve()
-    assert spec_file.resolve().is_relative_to(caller_dir.resolve())
-    assert data["setup_status"] == "authority_compile_required"
-    assert data["fsm_state"] == "SETUP_REQUIRED"
-    assert "pending_authority_id" not in data
-    assert "compiled_authority_id" not in data
-    assert data["next_actions"][0]["command"] == "agileforge authority compile"
-    assert data["next_actions"][0]["args"]["project_id"] == project_id
-    assert data["next_actions"][0]["args"]["spec_version_id"] == data["spec_version_id"]
-    assert (
-        data["next_actions"][0]["args"]["expected_spec_hash"]
-        == data["spec_hash"]
-    )
-    assert (
-        data["next_actions"][0]["args"]["expected_setup_status"]
-        == "authority_compile_required"
-    )
+    assert payload["applied_node_id"] == "onboarding.open_project_shell"
+    assert payload["position"]["project_id"] == project_id
+    assert "fsm_state" not in json.dumps(payload)
+    assert "setup_status" not in json.dumps(payload)
 
     with Session(business_engine) as session:
         project = session.get(Product, project_id)
         assert project is not None
         assert project.name == "Outside Repo Project"
+        assert project.origin == "greenfield"
         assert session.exec(select(CompiledSpecAuthority)).all() == []
         assert session.exec(select(SpecAuthorityAcceptance)).all() == []
 

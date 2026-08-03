@@ -17,14 +17,10 @@ test('create project modal marks required fields with decorative indicators', ()
     );
     assert.match(
         indexHtmlSource,
-        /<label for="modal-spec-path"[^>]*>Specification File\s*Path\s*<span[^>]*aria-hidden="true"[^>]*>\*<\/span><\/label>/,
+        /<label for="modal-project-origin"[^>]*>Origin\s*<span[^>]*aria-hidden="true"[^>]*>\*<\/span><\/label>/,
     );
     assert.match(
         indexHtmlSource,
-        /<input id="modal-spec-path"[^>]*required[^>]*aria-describedby="modal-spec-path-help"[^>]*>/,
-    );
-    assert.match(
-        indexHtmlSource,
-        /<p id="modal-spec-path-help"[^>]*>Provide the absolute path to your markdown specification\.<\/p>/,
+        /<select id="modal-project-origin"[^>]*required[^>]*>/,
     );
 });

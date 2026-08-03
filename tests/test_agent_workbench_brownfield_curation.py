@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Any
 
 from sqlmodel import Session, select
 
-from cli.main import main
 from models.brownfield import (
     BrownfieldScanAttempt,
     BrownfieldSourceArtifact,
@@ -22,6 +21,7 @@ from models.specs import CompiledSpecAuthority, SpecRegistry
 from services.agent_workbench.application import AgentWorkbenchApplication
 from services.agent_workbench.brownfield_curation import BrownfieldCurationRunner
 from services.agent_workbench.error_codes import ErrorCode
+from tests.legacy_cli_main import main
 
 if TYPE_CHECKING:
     import pytest

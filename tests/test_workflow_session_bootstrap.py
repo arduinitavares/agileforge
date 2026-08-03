@@ -11,9 +11,9 @@ from typing import TYPE_CHECKING
 import pytest  # noqa: TC002
 from fastapi.testclient import TestClient
 
-import api as api_module
 from repositories.session import WorkflowSessionRepository
 from services.workflow import WorkflowService
+from tests import legacy_api as api_module
 from utils.runtime_config import resolve_database_target
 
 if TYPE_CHECKING:

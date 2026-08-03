@@ -21,6 +21,41 @@ SPEC_AUTHORITY_COMPILER_PROMPT_HASH = (
 )
 
 
+def render_invariant_summary(invariant: Invariant) -> str:
+    """Render one structured invariant into its stable projection string."""
+    parameters = invariant.parameters
+    if invariant.type == InvariantType.FORBIDDEN_CAPABILITY:
+        value = (
+            parameters.capability
+            if isinstance(parameters, ForbiddenCapabilityParams)
+            else ""
+        )
+        return f"FORBIDDEN_CAPABILITY:{value}"
+    if invariant.type == InvariantType.REQUIRED_FIELD:
+        value = (
+            parameters.field_name
+            if isinstance(parameters, RequiredFieldParams)
+            else ""
+        )
+        return f"REQUIRED_FIELD:{value}"
+    if invariant.type == InvariantType.MAX_VALUE:
+        field_name = (
+            parameters.field_name if isinstance(parameters, MaxValueParams) else ""
+        )
+        max_value = (
+            parameters.max_value if isinstance(parameters, MaxValueParams) else ""
+        )
+        return f"MAX_VALUE:{field_name}<= {max_value}"
+    if invariant.type == InvariantType.RELATION_CONSTRAINT:
+        value = (
+            parameters.expression
+            if isinstance(parameters, RelationConstraintParams)
+            else ""
+        )
+        return f"RELATION_CONSTRAINT:{value}"
+    return f"INVARIANT:{invariant.type}"
+
+
 def _normalize_text(text: str) -> str:
     return " ".join(text.strip().lower().split())
 

@@ -117,6 +117,7 @@ def patch_get_engine_globally(
     # These need explicit patching because they import at module load time
     modules_to_patch = [
         "api",
+        "tests.legacy_api",
         "repositories.product",
         "repositories.story",
         "orchestrator_agent.agent_tools.product_vision_tool.tools",

@@ -75,16 +75,16 @@ def _dotted_attribute_references(module_path: Path) -> set[str]:
 def test_sprint_runtime_consumers_import_sprint_from_models_core_only() -> None:
     """Verify sprint runtime consumers import sprint from models core only."""
     module_names = [
-        "api",
         "services.orchestrator_query_service",
         "services.orchestrator_context_service",
         "tools.export_snapshot",
         "orchestrator_agent.agent_tools.sprint_planner_tool.tools",
     ]
     task_consumers = {
-        "api",
         "orchestrator_agent.agent_tools.sprint_planner_tool.tools",
     }
+
+    assert not _imported_names_from_source(ROOT / "api.py", "models.core")
 
     for module_name in module_names:
         module_path = ROOT / (module_name.replace(".", "/") + ".py")

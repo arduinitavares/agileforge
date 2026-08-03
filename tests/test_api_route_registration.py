@@ -3,8 +3,8 @@
 from fastapi import FastAPI
 from fastapi.routing import APIRoute
 
-import api as api_module
 from routers.sprint import register_manual_sprint_routes, register_sprint_routes
+from tests import legacy_api as api_module
 
 
 def test_manual_sprint_execution_and_packet_routes_are_registered() -> None:

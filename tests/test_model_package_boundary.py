@@ -599,6 +599,9 @@ def test_runtime_modules_import_new_model_boundaries() -> None:
 
     root = Path(__file__).resolve().parents[1]
     api_text = (root / "api.py").read_text(encoding="utf-8")
+    application_text = (root / "services" / "application.py").read_text(
+        encoding="utf-8"
+    )
     product_repo_text = (root / "repositories" / "product.py").read_text(
         encoding="utf-8"
     )
@@ -609,7 +612,12 @@ def test_runtime_modules_import_new_model_boundaries() -> None:
         encoding="utf-8"
     )
 
-    assert "from models.db import ensure_business_db_ready, get_engine" in api_text
+    assert "from models.core" not in api_text
+    assert "from models.enums" not in api_text
+    assert (
+        "from models.db import ensure_business_db_ready, get_engine"
+        in application_text
+    )
     assert "from models.db import get_engine" in product_repo_text
     assert "from models.enums import StoryStatus" in story_close_text
     assert "from models.enums import TaskAcceptanceResult" in task_execution_text
@@ -773,6 +781,12 @@ def test_runtime_modules_import_new_spec_and_event_boundaries() -> None:
     """Verify runtime modules import new spec and event boundaries."""
     root = Path(__file__).resolve().parents[1]
     api_text = (root / "api.py").read_text(encoding="utf-8")
+    authority_handler_text = (
+        root / "workflow" / "handlers" / "authority.py"
+    ).read_text(encoding="utf-8")
+    execution_handler_text = (
+        root / "workflow" / "handlers" / "execution.py"
+    ).read_text(encoding="utf-8")
     orchestrator_context_text = (
         root / "services" / "orchestrator_context_service.py"
     ).read_text(encoding="utf-8")
@@ -783,11 +797,10 @@ def test_runtime_modules_import_new_spec_and_event_boundaries() -> None:
         root / "services" / "specs" / "story_validation_service.py"
     ).read_text(encoding="utf-8")
 
-    assert (
-        "from models.events import StoryCompletionLog, TaskExecutionLog, WorkflowEvent"
-        in api_text
-    )
-    assert "from models.specs import CompiledSpecAuthority" in api_text
+    assert "from models.events" not in api_text
+    assert "from models.specs" not in api_text
+    assert "from models.specs import " in authority_handler_text
+    assert "from services.task_execution_service import (" in execution_handler_text
     assert "from models.specs import " in orchestrator_context_text
     assert "from models.specs import " in compiler_service_text
     assert "from models.specs import " in story_validation_text

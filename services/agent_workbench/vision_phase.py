@@ -14,7 +14,6 @@ from models.core import Product
 from models.enums import WorkflowEventType
 from models.events import WorkflowEvent
 from models.workflow import VisionArtifact, VisionArtifactDecision
-from orchestrator_agent.agent_tools.product_vision_tool.tools import save_vision_tool
 from repositories.product import ProductRepository
 from services.agent_workbench.error_codes import ErrorCode, workbench_error
 from services.contracts.vision import OutputSchema
@@ -25,17 +24,26 @@ from services.phases.vision_service import (
     save_vision_draft,
 )
 from services.vision_runtime import run_vision_agent_from_state
-from services.workflow import WorkflowService
-from tools.orchestrator_tools import select_project
 from workflow.contracts import JsonObject
 from workflow.fingerprints import canonical_hash, canonical_json
 
 if TYPE_CHECKING:
     from google.adk.tools import ToolContext
+
+    from services.workflow import WorkflowService
 else:
     ToolContext = Any
 
 _JSON_OBJECT = TypeAdapter(JsonObject)
+
+
+def select_project(product_id: int, tool_context: ToolContext) -> JsonObject:
+    """Load the legacy hydration adapter only when the dead runner is invoked."""
+    from tools.orchestrator_tools import (  # noqa: PLC0415
+        select_project as legacy_select,
+    )
+
+    return _JSON_OBJECT.validate_python(legacy_select(product_id, tool_context))
 
 
 class _ProductRepositoryLike(Protocol):
@@ -63,7 +71,11 @@ class VisionPhaseRunner:
     ) -> None:
         """Initialize repositories for CLI Vision commands."""
         self._product_repo = product_repo or ProductRepository()
-        self._workflow_service = workflow_service or WorkflowService()
+        if workflow_service is None:
+            from services.workflow import WorkflowService  # noqa: PLC0415
+
+            workflow_service = WorkflowService()
+        self._workflow_service = workflow_service
 
     def generate(
         self,
@@ -129,6 +141,10 @@ class VisionPhaseRunner:
         return _data_envelope(data)
 
     async def _save(self, project_id: int) -> dict[str, Any]:
+        from orchestrator_agent.agent_tools.product_vision_tool.tools import (  # noqa: PLC0415
+            save_vision_tool,
+        )
+
         product = self._load_project(project_id)
         if isinstance(product, dict):
             return product

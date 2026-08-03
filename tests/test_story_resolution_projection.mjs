@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 
-const projectJsPath = path.resolve(import.meta.dirname, '../frontend/project.js');
+const projectJsPath = path.resolve(import.meta.dirname, 'legacy_project.js');
 const projectJsSource = fs.readFileSync(projectJsPath, 'utf8');
 
 function loadFunction(name) {

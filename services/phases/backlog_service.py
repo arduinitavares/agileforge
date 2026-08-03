@@ -11,11 +11,6 @@ from typing import TYPE_CHECKING, Any, cast
 
 from pydantic import ValidationError
 
-from orchestrator_agent.agent_tools.backlog_primer.tools import (
-    INTERNAL_BACKLOG_SAVE_OPTIONS_AUTHORITY,
-    INTERNAL_BACKLOG_SAVE_OPTIONS_KEY,
-)
-from orchestrator_agent.fsm.states import OrchestratorState
 from services.agent_workbench.backlog_active_reset import (
     ActiveBacklogResetRequest,
     reset_request_fingerprint,
@@ -43,6 +38,10 @@ from services.phases.backlog_refinement import (
     operations_from_edited_artifact,
     project_savable_backlog_items,
 )
+from services.phases.workflow_state import OrchestratorState
+
+INTERNAL_BACKLOG_SAVE_OPTIONS_KEY = "_agileforge_internal_backlog_save_options"
+INTERNAL_BACKLOG_SAVE_OPTIONS_AUTHORITY = "services.phases.backlog_service"
 
 if TYPE_CHECKING:
     from services.agent_workbench.backlog_refinement_events import (

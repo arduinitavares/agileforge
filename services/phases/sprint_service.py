@@ -10,12 +10,12 @@ import re
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, Final, TypeGuard, cast
 
-from orchestrator_agent.fsm.states import OrchestratorState
 from services.agent_workbench.fingerprints import canonical_hash
 from services.contracts.sprint import (
     SaveSprintPlanInput,
 )
 from services.phases import workflow_state
+from services.phases.workflow_state import OrchestratorState
 from services.sprint_input import load_sprint_candidates
 from services.sprint_runtime import PUBLIC_TASK_KIND_VALUES
 

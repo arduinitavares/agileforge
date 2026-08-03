@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import api as api_module
 from services import story_close_service, task_execution_service
+from tests import legacy_api as api_module
 from utils import api_schemas, schemes
 
 

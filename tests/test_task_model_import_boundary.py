@@ -92,10 +92,11 @@ def test_task_runtime_consumers_import_task_from_models_core_only() -> None:
     # the shim and are handled in separate tests.
     """Verify task runtime consumers import task from models core only."""
     module_names = [
-        "api",
         "tools.db_tools",
         "orchestrator_agent.agent_tools.sprint_planner_tool.tools",
     ]
+
+    assert not _imported_names_from_source(ROOT / "api.py", "models.core")
 
     for module_name in module_names:
         module_path = ROOT / (module_name.replace(".", "/") + ".py")

@@ -9,7 +9,6 @@ from collections.abc import Awaitable, Callable
 from copy import deepcopy
 from typing import Any, cast
 
-from orchestrator_agent.fsm.states import OrchestratorState
 from services.agent_workbench.fingerprints import canonical_hash
 from services.contracts.story import (
     SaveStoriesInput,
@@ -17,6 +16,7 @@ from services.contracts.story import (
 )
 from services.interview_runtime import hydrate_story_runtime_from_legacy
 from services.phases import workflow_state
+from services.phases.workflow_state import OrchestratorState
 from services.story_feedback_quality import evaluate_story_feedback_quality
 from services.story_linkage import (
     normalize_requirement_key,

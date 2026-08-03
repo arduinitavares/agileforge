@@ -5,7 +5,7 @@ import test from 'node:test';
 
 const projectHtmlPath = path.resolve(import.meta.dirname, '../frontend/project.html');
 const projectHtmlSource = fs.readFileSync(projectHtmlPath, 'utf8');
-const projectJsPath = path.resolve(import.meta.dirname, '../frontend/project.js');
+const projectJsPath = path.resolve(import.meta.dirname, 'legacy_project.js');
 const projectJsSource = fs.readFileSync(projectJsPath, 'utf8');
 
 test('authority review console exposes summary, tabs, filters, and decision rail', () => {

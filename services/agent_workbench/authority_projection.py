@@ -32,6 +32,7 @@ from services.agent_workbench.schema_readiness import (
     SchemaRequirement,
     check_schema_readiness,
 )
+from services.contracts.specification import render_invariant_summary
 from services.specs.authority_selection import (
     accepted_compiled_authority,
     compiled_authority_for_acceptance,
@@ -49,7 +50,6 @@ from services.specs.profile_content import (
     SpecContentNormalizationError,
     normalize_spec_content_for_registry,
 )
-from services.specs.story_validation_service import render_invariant_summary
 
 if TYPE_CHECKING:
     from sqlalchemy.engine import Engine

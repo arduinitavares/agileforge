@@ -8,7 +8,6 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlmodel import Session
 
-import api as api_module
 from agile_sqlmodel import (
     CompiledSpecAuthority,
     Product,
@@ -19,6 +18,7 @@ from services.agent_workbench.authority_projection import (
     pending_authority_fingerprint,
 )
 from services.contracts.vision import SaveVisionInput
+from tests import legacy_api as api_module
 from tests.authority_assumption_fixtures import current_v3_compiled_authority_json
 from utils import failure_artifacts
 

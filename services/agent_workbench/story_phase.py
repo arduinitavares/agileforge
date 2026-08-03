@@ -21,12 +21,6 @@ from models.enums import StoryStatus, TaskStatus, WorkflowEventType
 from models.events import WorkflowEvent
 from models.specs import SpecRegistry
 from models.workflow import StoryArtifact, StoryArtifactDecision
-from orchestrator_agent.agent_tools.user_story_writer_tool.tools import (
-    evaluate_dependency_candidates,
-    save_stories_tool,
-    save_story_patch_tool,
-)
-from orchestrator_agent.fsm.states import OrchestratorState
 from repositories.product import ProductRepository
 from services.agent_workbench.error_codes import ErrorCode, workbench_error
 from services.agent_workbench.execution_guard import AcceptedAuthorityExecutionGuard
@@ -64,6 +58,7 @@ from services.phases.story_service import (
     save_story_draft,
     save_story_patch,
 )
+from services.phases.workflow_state import OrchestratorState
 from services.story_dependencies import (
     dependency_inspect_payload,
     load_story_dependency_graph,
@@ -73,8 +68,6 @@ from services.story_runtime import (
     run_story_agent_from_state,
     run_story_agent_request,
 )
-from services.workflow import WorkflowService
-from tools.orchestrator_tools import select_project
 from workflow.fingerprints import canonical_json
 
 if TYPE_CHECKING:
@@ -83,9 +76,19 @@ if TYPE_CHECKING:
     from google.adk.tools import ToolContext
 
     from models.core import Product
+    from services.workflow import WorkflowService
     from workflow.contracts import JsonObject
 else:
     ToolContext = Any
+
+
+def select_project(product_id: int, tool_context: ToolContext) -> JsonObject:
+    """Load the legacy hydration adapter only when the dead runner is invoked."""
+    from tools.orchestrator_tools import (  # noqa: PLC0415
+        select_project as legacy_select,
+    )
+
+    return cast("JsonObject", legacy_select(product_id, tool_context))
 
 _DEPENDENCY_REVIEW_STATES = {
     "STORY_PERSISTENCE",
@@ -142,7 +145,11 @@ class StoryPhaseRunner:
     ) -> None:
         """Initialize repositories for CLI Story commands."""
         self._product_repo = product_repo or ProductRepository()
-        self._workflow_service = workflow_service or WorkflowService()
+        if workflow_service is None:
+            from services.workflow import WorkflowService  # noqa: PLC0415
+
+            workflow_service = WorkflowService()
+        self._workflow_service = workflow_service
         self._load_stories_metadata = (
             load_stories_metadata or _load_requirement_stories_metadata
         )
@@ -424,6 +431,10 @@ class StoryPhaseRunner:
         target_story_id: int | None,
         target_refinement_slot: int | None,
     ) -> dict[str, Any]:
+        from orchestrator_agent.agent_tools.user_story_writer_tool.tools import (  # noqa: PLC0415
+            evaluate_dependency_candidates,
+        )
+
         product = self._load_project(project_id)
         if isinstance(product, dict):
             return product
@@ -551,6 +562,10 @@ class StoryPhaseRunner:
         expected_state: str,
         idempotency_key: str,
     ) -> dict[str, Any]:
+        from orchestrator_agent.agent_tools.user_story_writer_tool.tools import (  # noqa: PLC0415
+            save_stories_tool,
+        )
+
         product = self._load_project(project_id)
         if isinstance(product, dict):
             return product
@@ -603,6 +618,10 @@ class StoryPhaseRunner:
         target_story_id: int | None,
         target_refinement_slot: int | None,
     ) -> dict[str, Any]:
+        from orchestrator_agent.agent_tools.user_story_writer_tool.tools import (  # noqa: PLC0415
+            save_story_patch_tool,
+        )
+
         product = self._load_project(project_id)
         if isinstance(product, dict):
             return product

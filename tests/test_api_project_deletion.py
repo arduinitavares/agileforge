@@ -7,9 +7,9 @@ import pytest
 from fastapi import HTTPException
 from sqlmodel import Session
 
-import api as api_module
 from models.core import Product
 from repositories.product import ProductRepository, ProjectDeletionConflictError
+from tests import legacy_api as api_module
 
 
 @dataclass

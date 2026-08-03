@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import Protocol
 from uuid import uuid4
 
 from google.adk.apps import App, ResumabilityConfig
@@ -34,11 +34,21 @@ from workflow.contracts import (
     TransitionResult,
     WorkflowError,
     WorkflowErrorCode,
+    WorkflowPosition,
 )
 from workflow.requests import FailNodeAttempt, StartNodeAttempt, TransitionRequest
 
-if TYPE_CHECKING:
-    from workflow.domain import WorkflowDomain
+
+class WorkflowDomainRunnerPort(Protocol):
+    """Domain methods required by durable ADK execution."""
+
+    def position(self, project_id: int) -> WorkflowPosition:
+        """Return the current durable position."""
+        ...
+
+    def transition(self, request: TransitionRequest) -> TransitionResult:
+        """Apply one typed transition."""
+        ...
 
 _TRANSITION_REQUEST = TypeAdapter(TransitionRequest)
 
@@ -56,6 +66,16 @@ class AdkExecutionConfig:
     identity: RunnerIdentity = ADK_EXECUTION_TRACE_IDENTITY
 
 
+@dataclass(frozen=True)
+class AdkRunGuards:
+    """Adapter-supplied position and mutation metadata for one run."""
+
+    position: WorkflowPosition
+    idempotency_key: str
+    actor: str
+    correlation_id: str | None = None
+
+
 class AdkWorkflowRunner:
     """Execute an available decision while durable facts remain authoritative.
 
@@ -68,7 +88,7 @@ class AdkWorkflowRunner:
     def __init__(
         self,
         *,
-        domain: WorkflowDomain,
+        domain: WorkflowDomainRunnerPort,
         registry: AdkRecipeRegistry,
         config: AdkExecutionConfig,
         session_service: BaseSessionService | None = None,
@@ -85,9 +105,15 @@ class AdkWorkflowRunner:
         self,
         decision: NodeDecision,
         input_payload: JsonObject,
+        *,
+        guards: AdkRunGuards | None = None,
     ) -> TransitionResult:
         """Run one recipe outside domain transactions and submit its continuation."""
-        position = self._domain.position(self._config.project_id)
+        position = (
+            guards.position
+            if guards is not None
+            else self._domain.position(self._config.project_id)
+        )
         current = next(
             (
                 item
@@ -106,15 +132,25 @@ class AdkWorkflowRunner:
                     message="The supplied node decision is no longer current.",
                 ),
             )
-        start_key = f"adk-start:{uuid4()}"
+        start_key = (
+            guards.idempotency_key
+            if guards is not None
+            else f"adk-start:{uuid4()}"
+        )
+        request_actor = guards.actor if guards is not None else self._config.actor
+        request_correlation_id = (
+            guards.correlation_id
+            if guards is not None
+            else self._config.correlation_id
+        )
         start_request = StartNodeAttempt(
             project_id=self._config.project_id,
             graph_version=position.graph_version,
             fact_fingerprint=position.fact_fingerprint,
             decision_fingerprint=decision.decision_fingerprint,
             idempotency_key=start_key,
-            actor=self._config.actor,
-            correlation_id=self._config.correlation_id,
+            actor=request_actor,
+            correlation_id=request_correlation_id,
             target_node_id=decision.node_id,
             target_instance_key=decision.instance_key,
             normalized_input=input_payload,
@@ -172,8 +208,8 @@ class AdkWorkflowRunner:
                     failure_code="ADK_EXECUTION_FAILED",
                     failure_message=str(error) or type(error).__name__,
                     idempotency_key=f"{start_key}:failure",
-                    actor=self._config.actor,
-                    correlation_id=self._config.correlation_id,
+                    actor=request_actor,
+                    correlation_id=request_correlation_id,
                 )
             )
             if (
@@ -234,4 +270,4 @@ class AdkWorkflowRunner:
         return RecipeOutput.model_validate(output)
 
 
-__all__ = ["AdkExecutionConfig", "AdkWorkflowRunner"]
+__all__ = ["AdkExecutionConfig", "AdkRunGuards", "AdkWorkflowRunner"]

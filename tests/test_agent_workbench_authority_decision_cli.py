@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 
-from cli.main import main
+from tests.legacy_cli_main import main
 
 if TYPE_CHECKING:
     from services.agent_workbench.authority_decision import AuthorityAcceptRequest

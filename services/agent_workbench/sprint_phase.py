@@ -34,9 +34,6 @@ from models.workflow import (
     SprintStart,
     StoryDependencyReview,
 )
-from orchestrator_agent.agent_tools.sprint_planner_tool.tools import (
-    save_sprint_plan_tool,
-)
 from repositories.product import ProductRepository
 from repositories.workflow import WorkflowFactRepository
 from services.agent_workbench.error_codes import ErrorCode, workbench_error
@@ -94,8 +91,6 @@ from services.task_execution_service import (
     get_task_execution_history,
     record_task_execution,
 )
-from services.workflow import WorkflowService
-from tools.orchestrator_tools import select_project
 from utils.api_schemas import (
     SprintCloseReadiness,
     SprintCloseStorySummary,
@@ -125,9 +120,19 @@ if TYPE_CHECKING:
     from sqlmodel.sql._expression_select_cls import SelectOfScalar
 
     from models.core import Product
+    from services.workflow import WorkflowService
     from workflow.contracts import JsonObject
 else:
     ToolContext = Any
+
+
+def select_project(product_id: int, tool_context: ToolContext) -> JsonObject:
+    """Load the legacy hydration adapter only when the dead runner is invoked."""
+    from tools.orchestrator_tools import (  # noqa: PLC0415
+        select_project as legacy_select,
+    )
+
+    return cast("JsonObject", legacy_select(product_id, tool_context))
 
 _DEPENDENCY_ORDER_FALLBACK_INDEX = 1_000_000
 _DEPENDENCY_RISK_MIN_MATCHED_TERMS = 2
@@ -966,7 +971,11 @@ class SprintPhaseRunner:
     ) -> None:
         """Initialize repositories for CLI Sprint commands."""
         self._product_repo = product_repo or ProductRepository()
-        self._workflow_service = workflow_service or WorkflowService()
+        if workflow_service is None:
+            from services.workflow import WorkflowService  # noqa: PLC0415
+
+            workflow_service = WorkflowService()
+        self._workflow_service = workflow_service
 
     def generate(  # noqa: PLR0913
         self,
@@ -2116,6 +2125,10 @@ class SprintPhaseRunner:
         expected_state: str,
         idempotency_key: str,
     ) -> dict[str, Any]:
+        from orchestrator_agent.agent_tools.sprint_planner_tool.tools import (  # noqa: PLC0415
+            save_sprint_plan_tool,
+        )
+
         product = self._load_project(project_id)
         if isinstance(product, dict):
             return product

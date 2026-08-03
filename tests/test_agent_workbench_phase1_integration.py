@@ -14,7 +14,6 @@ from sqlalchemy import create_engine
 from sqlmodel import Session as SQLModelSession
 from sqlmodel import select
 
-from cli.main import main
 from models.core import Product, Sprint, SprintStory, Team, UserStory
 from models.enums import SprintStatus, StoryStatus
 from models.specs import (
@@ -43,6 +42,7 @@ from services.agent_workbench.scope_extension import (
     evaluate_scope_extension_preconditions,
 )
 from services.agent_workbench.version import STORAGE_SCHEMA_VERSION
+from tests.legacy_cli_main import main
 from tests.typing_helpers import require_id
 from utils.agileforge_spec_profile import (
     TechnicalSpecArtifact,
@@ -74,15 +74,18 @@ PROMPT_HASH = "a" * 64
 SEEDED_STORY_COUNT = 2
 SCHEMA_NOT_READY_EXIT_CODE = 5
 PHASE1_INVARIANT_ID = "INV-0000000000000001"
-PHASE_1_GROUPS = (
+GRAPH_CLI_GROUPS = (
     "project",
     "workflow",
+    "scope",
     "authority",
-    "evidence",
+    "backlog",
+    "brownfield",
+    "discovery",
+    "roadmap",
     "story",
     "sprint",
-    "context",
-    "status",
+    "vision",
 )
 EXTENSION_REQUIREMENT = "Scope Extension Follow-up"
 EXTENSION_STORY_TITLE = "Implement extension workflow follow-up"
@@ -1786,5 +1789,5 @@ def test_phase1_console_script_help_is_wired(tmp_path: Path) -> None:
 
     assert result.returncode == 0
     assert "usage: agileforge" in result.stdout
-    for group in PHASE_1_GROUPS:
+    for group in GRAPH_CLI_GROUPS:
         assert group in result.stdout

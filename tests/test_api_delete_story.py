@@ -11,7 +11,6 @@ from httpx import AsyncClient
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, col, select
 
-import api as api_module
 from agile_sqlmodel import (
     Product,
     Sprint,
@@ -26,6 +25,7 @@ from agile_sqlmodel import (
 )
 from models.core import Team
 from services.story_linkage import normalize_requirement_key
+from tests import legacy_api as api_module
 
 HTTP_OK = 200
 SPRINT_COUNT = 2

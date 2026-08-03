@@ -10,8 +10,8 @@ from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlmodel import create_engine
 
-import api as api_module
 from agile_sqlmodel import ensure_business_db_ready
+from tests import legacy_api as api_module
 
 if TYPE_CHECKING:
     from pathlib import Path

@@ -5,8 +5,8 @@ from types import SimpleNamespace
 import pytest
 from sqlmodel import Session, select
 
-import api as api_module
 from agile_sqlmodel import Task, TaskStatus
+from tests import legacy_api as api_module
 from tests.typing_helpers import require_id
 
 

@@ -4,9 +4,36 @@ from __future__ import annotations
 
 import copy
 from collections.abc import Callable, Collection
+from enum import StrEnum
 from typing import Any
 
-from orchestrator_agent.fsm.states import OrchestratorState
+
+class OrchestratorState(StrEnum):
+    """Legacy phase labels retained only for the pre-Task-17 helper code."""
+
+    SETUP_REQUIRED = "SETUP_REQUIRED"
+    VISION_INTERVIEW = "VISION_INTERVIEW"
+    VISION_REVIEW = "VISION_REVIEW"
+    VISION_PERSISTENCE = "VISION_PERSISTENCE"
+    BACKLOG_INTERVIEW = "BACKLOG_INTERVIEW"
+    BACKLOG_REVIEW = "BACKLOG_REVIEW"
+    BACKLOG_PERSISTENCE = "BACKLOG_PERSISTENCE"
+    ROADMAP_INTERVIEW = "ROADMAP_INTERVIEW"
+    ROADMAP_REVIEW = "ROADMAP_REVIEW"
+    ROADMAP_PERSISTENCE = "ROADMAP_PERSISTENCE"
+    STORY_INTERVIEW = "STORY_INTERVIEW"
+    STORY_REVIEW = "STORY_REVIEW"
+    STORY_PERSISTENCE = "STORY_PERSISTENCE"
+    SPRINT_SETUP = "SPRINT_SETUP"
+    SPRINT_DRAFT = "SPRINT_DRAFT"
+    SPRINT_PERSISTENCE = "SPRINT_PERSISTENCE"
+    SPRINT_VIEW = "SPRINT_VIEW"
+    SPRINT_LIST = "SPRINT_LIST"
+    SPRINT_UPDATE_STORY = "SPRINT_UPDATE_STORY"
+    SPRINT_MODIFY = "SPRINT_MODIFY"
+    SPRINT_COMPLETE = "SPRINT_COMPLETE"
+    SPEC_UPDATE = "SPEC_UPDATE"
+    SPEC_COMPILE = "SPEC_COMPILE"
 
 
 class DownstreamBacklogStaleError(RuntimeError):

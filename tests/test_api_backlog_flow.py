@@ -7,7 +7,6 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlmodel import Session
 
-import api as api_module
 from agile_sqlmodel import (
     CompiledSpecAuthority,
     Product,
@@ -16,6 +15,7 @@ from agile_sqlmodel import (
 )
 from services.contracts.backlog import SaveBacklogInput
 from services.specs.authority_selection import pending_authority_fingerprint
+from tests import legacy_api as api_module
 from tests.authority_assumption_fixtures import current_v3_compiled_authority_json
 
 HTTP_OK = 200

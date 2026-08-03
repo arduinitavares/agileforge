@@ -5,7 +5,6 @@ from datetime import UTC, datetime
 import pytest
 from sqlmodel import Session, select
 
-import api as api_module
 from agile_sqlmodel import (
     Sprint,
     SprintStatus,
@@ -16,6 +15,7 @@ from agile_sqlmodel import (
     WorkflowEvent,
     WorkflowEventType,
 )
+from tests import legacy_api as api_module
 from tests.test_api_sprint_flow import _build_client, _seed_saved_sprint
 
 HTTP_OK = 200
