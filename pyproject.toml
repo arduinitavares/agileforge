@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "agileforge"
 version = "0.1.0"
@@ -39,6 +43,7 @@ py-modules = ["agile_sqlmodel", "api"]
 [tool.setuptools.package-data]
 "adapters.adk.prompts" = ["*.txt"]
 config = ["*.yaml"]
+frontend = ["*.html", "*.js"]
 
 [tool.setuptools.packages.find]
 where = ["."]
@@ -48,6 +53,7 @@ include = [
     "cli",
     "config",
     "db",
+    "frontend",
     "models",
     "repositories",
     "routers",

@@ -6,10 +6,13 @@ import argparse
 import json
 import os
 import platform
+import secrets
+import signal
 import sqlite3
 import stat
 import subprocess
 import sys
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import IntEnum
@@ -33,11 +36,21 @@ from cli.dev_profiles import (
     resolve_checkout_root,
     touch_profile_last_used,
 )
+from cli.dev_server import (
+    LOOPBACK_HOST,
+    UIChild,
+    UIReadinessError,
+    select_loopback_port,
+    start_ui,
+    stop_ui,
+    wait_for_readiness,
+)
 from utils.cli_output import emit
 from workflow.contracts import JsonObject, JsonValue
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Iterator, Mapping, Sequence
+    from types import FrameType
 
 EXPECTED_BUSINESS_TABLES: tuple[str, ...] = (
     "projects",
@@ -56,6 +69,7 @@ _PROVIDER_CREDENTIAL = "OPEN_ROUTER_API_KEY"
 _JSON_OBJECT = TypeAdapter(JsonObject)
 _INVALID_PRODUCTION_OUTPUT = "invalid_production_cli_output"
 _CREDENTIAL_ARGUMENT_ERROR = "forwarded CLI arguments contain provider credential"
+_AUTO_UI_ATTEMPTS = 3
 
 
 class ExitCode(IntEnum):
@@ -362,11 +376,42 @@ class CliRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class UiRequest:
+    """Validated launcher inputs for one managed dashboard process."""
+
+    profile_name: str
+    secrets_file: Path | None
+    ephemeral: bool
+    port: str
+    reload: bool
+    json_output: bool
+    ready_timeout: float
+
+
+@dataclass(frozen=True, slots=True)
 class ProductionJsonResult:
     """Parsed child JSON or one fixed safe invalid-output marker."""
 
     result: JsonObject
     valid: bool
+
+
+class UiReadyResult(BaseModel):
+    """Stable readiness and provenance for one managed dashboard."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    status: Literal["ready"] = "ready"
+    url: str
+    host: Literal["127.0.0.1"] = LOOPBACK_HOST
+    port: int
+    checkout: Path
+    commit: str
+    profile: str
+    profile_mode: ProfileMode
+    ephemeral: bool
+    business_database: Path
+    trace_database: Path
 
 
 def _initialize_profile(
@@ -684,6 +729,164 @@ def _run_cli(
     return result.exit_code
 
 
+def _ephemeral_profile_name(parent_name: str) -> str:
+    suffix = f".ui-{secrets.token_hex(8)}"
+    return f"{parent_name[: 64 - len(suffix)]}{suffix}"
+
+
+def _ui_profile(
+    *,
+    checkout_root: Path,
+    request: UiRequest,
+    runner: CommandRunner,
+    clock: Clock,
+) -> tuple[RuntimeProfile, str, str | None]:
+    parent = load_profile(checkout_root, request.profile_name)
+    _verify_business_schema(parent.business_database)
+    current_commit = _current_commit(runner, checkout_root)
+    if not request.ephemeral:
+        profile = touch_profile_last_used(
+            checkout_root,
+            request.profile_name,
+            now=clock.now(),
+        )
+        return profile, current_commit, None
+
+    child_name = _ephemeral_profile_name(request.profile_name)
+    result = _initialize_profile(
+        checkout_root=checkout_root,
+        request=InitRequest(
+            profile_name=child_name,
+            mode=ProfileMode.ACCEPTANCE,
+            expected_commit=current_commit,
+        ),
+        runner=runner,
+        clock=clock,
+    )
+    return result.profile, current_commit, child_name
+
+
+def _emit_ui_ready(
+    profile: RuntimeProfile,
+    *,
+    current_commit: str,
+    child: UIChild,
+    ephemeral: bool,
+    json_output: bool,
+) -> None:
+    result = UiReadyResult(
+        url=f"{child.url}/dashboard",
+        port=child.port,
+        checkout=profile.checkout.root,
+        commit=current_commit,
+        profile=profile.name,
+        profile_mode=profile.mode,
+        ephemeral=ephemeral,
+        business_database=profile.business_database,
+        trace_database=profile.trace_database,
+    )
+    if json_output:
+        emit(result.model_dump_json(), flush=True)
+        return
+    emit(f"Dashboard ready: {result.url}")
+    emit(f"Checkout: {result.checkout}")
+    emit(f"Commit: {result.commit}")
+    emit(f"Profile: {result.profile} ({result.profile_mode.value})")
+    emit(f"Business database: {result.business_database}")
+    emit(f"Trace database: {result.trace_database}", flush=True)
+
+
+def _interrupt_for_sigterm(_signum: int, _frame: FrameType | None) -> None:
+    raise KeyboardInterrupt
+
+
+@contextmanager
+def _sigterm_as_interrupt() -> Iterator[None]:
+    previous = signal.getsignal(signal.SIGTERM)
+    signal.signal(signal.SIGTERM, _interrupt_for_sigterm)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+
+def _start_ready_ui(
+    *,
+    checkout_root: Path,
+    environment: Mapping[str, str],
+    requested_port: str,
+    reload: bool,
+    ready_timeout: float,
+) -> UIChild:
+    attempts = _AUTO_UI_ATTEMPTS if requested_port == "auto" else 1
+    for attempt in range(attempts):
+        selected_port = (
+            select_loopback_port() if requested_port == "auto" else int(requested_port)
+        )
+        child = start_ui(
+            checkout_root=checkout_root,
+            environment=environment,
+            port=selected_port,
+            reload=reload,
+        )
+        try:
+            wait_for_readiness(child, timeout=ready_timeout)
+        except KeyboardInterrupt:
+            stop_ui(child)
+            raise
+        except UIReadinessError:
+            stop_ui(child)
+            if attempt == attempts - 1:
+                raise
+        else:
+            return child
+    message = "dashboard startup retry invariant failed"
+    raise RuntimeError(message)
+
+
+def _run_ui(
+    *,
+    checkout_root: Path,
+    request: UiRequest,
+    runner: CommandRunner,
+    clock: Clock,
+) -> int:
+    child: UIChild | None = None
+    ephemeral_name: str | None = None
+    with _sigterm_as_interrupt():
+        try:
+            profile, current_commit, ephemeral_name = _ui_profile(
+                checkout_root=checkout_root,
+                request=request,
+                runner=runner,
+                clock=clock,
+            )
+            environment = profile_environment(profile)
+            environment.update(_provider_environment(request.secrets_file))
+            child = _start_ready_ui(
+                checkout_root=profile.checkout.root,
+                environment=environment,
+                requested_port=request.port,
+                reload=request.reload,
+                ready_timeout=request.ready_timeout,
+            )
+            _emit_ui_ready(
+                profile,
+                current_commit=current_commit,
+                child=child,
+                ephemeral=request.ephemeral,
+                json_output=request.json_output,
+            )
+            return child.process.wait()
+        except KeyboardInterrupt:
+            return ExitCode.SUCCESS
+        finally:
+            if child is not None:
+                stop_ui(child)
+            if ephemeral_name is not None:
+                reset_profile(checkout_root, ephemeral_name, ephemeral_name)
+
+
 def _print_json(payload: BaseModel) -> None:
     emit(payload.model_dump_json(indent=2, by_alias=True))
 
@@ -769,6 +972,21 @@ def main(
                 runner=command_runner,
                 clock=command_clock,
             )
+        if arguments.command == "ui":
+            return _run_ui(
+                checkout_root=root,
+                request=UiRequest(
+                    profile_name=arguments.profile,
+                    secrets_file=arguments.secrets_file,
+                    ephemeral=arguments.ephemeral,
+                    port=arguments.port,
+                    reload=arguments.reload,
+                    json_output=json_output,
+                    ready_timeout=arguments.ready_timeout,
+                ),
+                runner=command_runner,
+                clock=command_clock,
+            )
         if arguments.command == "reset":
             removed = reset_profile(
                 root,
@@ -780,7 +998,13 @@ def main(
                 emit(path)
             return ExitCode.SUCCESS
         _unsupported_command(arguments.command)
-    except (GitCommandError, OSError, ValueError, DeveloperCommandError) as error:
+    except (
+        GitCommandError,
+        OSError,
+        ValueError,
+        DeveloperCommandError,
+        UIReadinessError,
+    ) as error:
         _emit_error(error, json_output=json_output)
         return ExitCode.ERROR
 

@@ -5,9 +5,15 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
 import subprocess
+import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
+from urllib.request import urlopen
+
+import pytest
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -18,6 +24,16 @@ _COMMIT_ENVIRONMENT = {
     "GIT_COMMITTER_DATE": "2026-08-03T10:00:00+00:00",
 }
 _WORKTREE_COUNT = 2
+_HTTP_OK = 200
+
+
+@dataclass(frozen=True, slots=True)
+class UiIsolationExpected:
+    """Expected identities for two concurrent worktree dashboards."""
+
+    worktrees: tuple[Path, Path]
+    commits: tuple[str, str]
+    profiles: tuple[dict[str, object], dict[str, object]]
 
 
 def _run(
@@ -100,7 +116,15 @@ def _commit_launcher_fixtures(source_root: Path, clone: Path) -> tuple[str, str]
     )
     _git(clone, "config", "user.name", "Cross Worktree Tests")
     _git(clone, "config", "user.email", "cross-worktree@example.invalid")
-    for relative in ("cli/dev_main.py", "cli/main.py"):
+    copied_files = (
+        "api.py",
+        "cli/dev_main.py",
+        "cli/dev_server.py",
+        "cli/main.py",
+        "frontend/__init__.py",
+        "pyproject.toml",
+    )
+    for relative in copied_files:
         shutil.copy2(source_root / relative, clone / relative)
 
     fixture = clone / "tests" / "dev_runtime" / "cross_worktree_fixture.txt"
@@ -108,8 +132,7 @@ def _commit_launcher_fixtures(source_root: Path, clone: Path) -> tuple[str, str]
     _git(
         clone,
         "add",
-        "cli/dev_main.py",
-        "cli/main.py",
+        *copied_files,
         str(fixture.relative_to(clone)),
     )
     _git(
@@ -150,6 +173,138 @@ def _fake_path_shim(tmp_path: Path) -> Path:
     return fake_bin
 
 
+def _start_ui_launcher(
+    worktree: Path,
+    *,
+    env: Mapping[str, str],
+) -> subprocess.Popen[str]:
+    return subprocess.Popen(  # noqa: S603 - fixed local launcher path
+        (
+            str(worktree / "agileforge-dev"),
+            "ui",
+            "--profile",
+            "local",
+            "--port",
+            "auto",
+            "--json",
+            "--ready-timeout",
+            "30",
+        ),
+        cwd=worktree,
+        env=dict(env),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+
+def _launcher_readiness(process: subprocess.Popen[str]) -> dict[str, object]:
+    assert process.stdout is not None
+    line = process.stdout.readline()
+    assert line, f"launcher exited before readiness with status {process.poll()}"
+    return cast("dict[str, object]", json.loads(line))
+
+
+def _dashboard_config(port: int) -> dict[str, object]:
+    url = f"http://127.0.0.1:{port}/api/dashboard/config"
+    with urlopen(url, timeout=5) as response:  # noqa: S310 - fixed loopback URL
+        assert response.status == _HTTP_OK
+        return cast("dict[str, object]", json.loads(response.read()))
+
+
+def _stop_launcher(process: subprocess.Popen[str]) -> None:
+    if process.poll() is None:
+        process.send_signal(signal.SIGINT)
+    try:
+        process.communicate(timeout=15)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.communicate(timeout=5)
+    assert process.returncode == 0
+
+
+def _assert_process_gone(process_id: int) -> None:
+    for _attempt in range(50):
+        try:
+            os.kill(process_id, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.05)
+    pytest.fail(f"dashboard child still exists: {process_id}")
+
+
+def _assert_cli_isolation(
+    expected: UiIsolationExpected,
+    *,
+    env: Mapping[str, str],
+) -> None:
+    """Prove each production CLI changes only its own profile tree."""
+    root_one = Path(str(expected.profiles[0]["business_database"])).parent
+    root_two = Path(str(expected.profiles[1]["business_database"])).parent
+    snapshot_two = _profile_snapshot(root_two)
+    cli_one = _launcher(
+        expected.worktrees[0],
+        ("cli", "--profile", "local", "--", "project", "list"),
+        env=env,
+    )
+    assert json.loads(cli_one.stdout)["ok"] is True
+    assert f"Checkout: {expected.worktrees[0].resolve()}" in cli_one.stderr
+    assert f"Commit: {expected.commits[0]}" in cli_one.stderr
+    assert "PATH shim must not run" not in cli_one.stderr
+    assert _profile_snapshot(root_two) == snapshot_two
+
+    snapshot_one = _profile_snapshot(root_one)
+    cli_two = _launcher(
+        expected.worktrees[1],
+        ("cli", "--profile", "local", "--", "project", "list"),
+        env=env,
+    )
+    assert json.loads(cli_two.stdout)["ok"] is True
+    assert f"Checkout: {expected.worktrees[1].resolve()}" in cli_two.stderr
+    assert f"Commit: {expected.commits[1]}" in cli_two.stderr
+    assert "PATH shim must not run" not in cli_two.stderr
+    assert _profile_snapshot(root_one) == snapshot_one
+
+
+def _assert_concurrent_ui_isolation(
+    expected: UiIsolationExpected,
+    *,
+    env: Mapping[str, str],
+    launchers: list[subprocess.Popen[str]],
+    process_ids: list[int],
+) -> None:
+    """Run and inspect both local dashboards while cleanup remains caller-owned."""
+    launchers.extend(_start_ui_launcher(path, env=env) for path in expected.worktrees)
+    readiness_one, readiness_two = (
+        _launcher_readiness(process) for process in launchers
+    )
+    port_one = int(cast("int", readiness_one["port"]))
+    port_two = int(cast("int", readiness_two["port"]))
+    assert port_one != port_two
+
+    config_one = _dashboard_config(port_one)
+    config_two = _dashboard_config(port_two)
+    process_ids.extend(
+        (
+            int(cast("int", config_one["process_id"])),
+            int(cast("int", config_two["process_id"])),
+        )
+    )
+    assert config_one["status"] == config_two["status"] == "ready"
+    assert {
+        str(config_one["checkout_root"]),
+        str(config_two["checkout_root"]),
+    } == {str(path.resolve()) for path in expected.worktrees}
+    assert {str(config_one["commit"]), str(config_two["commit"])} == set(
+        expected.commits
+    )
+    assert config_one["business_database"] != config_two["business_database"]
+    assert config_one["trace_database"] != config_two["trace_database"]
+    assert config_one["business_database"] == expected.profiles[0]["business_database"]
+    assert config_two["business_database"] == expected.profiles[1]["business_database"]
+
+
+@pytest.mark.allow_hosts(["127.0.0.1"])
 def test_same_profile_name_is_fully_isolated_across_linked_worktrees(
     tmp_path: Path,
 ) -> None:
@@ -163,6 +318,8 @@ def test_same_profile_name_is_fully_isolated_across_linked_worktrees(
     assert commit_one != commit_two
 
     added_worktrees: list[Path] = []
+    ui_launchers: list[subprocess.Popen[str]] = []
+    dashboard_process_ids: list[int] = []
     try:
         for path, commit in (
             (worktree_one, commit_one),
@@ -210,35 +367,28 @@ def test_same_profile_name_is_fully_isolated_across_linked_worktrees(
         assert profile_one["business_database"] != profile_two["business_database"]
         assert profile_one["trace_database"] != profile_two["trace_database"]
 
-        root_one = Path(str(profile_one["business_database"])).parent
-        root_two = Path(str(profile_two["business_database"])).parent
-        snapshot_two = _profile_snapshot(root_two)
-        cli_one = _launcher(
-            worktree_one,
-            ("cli", "--profile", "local", "--", "project", "list"),
-            env=environment,
+        expected = UiIsolationExpected(
+            worktrees=(worktree_one, worktree_two),
+            commits=(commit_one, commit_two),
+            profiles=(profile_one, profile_two),
         )
-        assert json.loads(cli_one.stdout)["ok"] is True
-        assert f"Checkout: {worktree_one.resolve()}" in cli_one.stderr
-        assert f"Commit: {commit_one}" in cli_one.stderr
-        assert "PATH shim must not run" not in cli_one.stderr
-        assert _profile_snapshot(root_two) == snapshot_two
+        _assert_cli_isolation(expected, env=environment)
 
-        snapshot_one = _profile_snapshot(root_one)
-        cli_two = _launcher(
-            worktree_two,
-            ("cli", "--profile", "local", "--", "project", "list"),
+        _assert_concurrent_ui_isolation(
+            expected,
             env=environment,
+            launchers=ui_launchers,
+            process_ids=dashboard_process_ids,
         )
-        assert json.loads(cli_two.stdout)["ok"] is True
-        assert f"Checkout: {worktree_two.resolve()}" in cli_two.stderr
-        assert f"Commit: {commit_two}" in cli_two.stderr
-        assert "PATH shim must not run" not in cli_two.stderr
-        assert _profile_snapshot(root_one) == snapshot_one
     finally:
+        for process in reversed(ui_launchers):
+            _stop_launcher(process)
         for path in reversed(added_worktrees):
             _run(
                 ("git", "-C", str(clone), "worktree", "remove", "--force", str(path)),
                 cwd=clone,
             )
         _run(("git", "-C", str(clone), "worktree", "prune"), cwd=clone)
+
+    for process_id in dashboard_process_ids:
+        _assert_process_gone(process_id)

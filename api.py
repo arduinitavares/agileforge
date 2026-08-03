@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
-from typing import Literal
+from importlib.resources import files
+from pathlib import Path
+from typing import Literal, cast
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from git import Git
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
 from adapters.adk.model_roles import AGENTIC_MODEL_ROLES
@@ -28,6 +32,7 @@ from workflow.contracts import (
 from workflow.requests import DecideAuthority, OpenProjectShell, TransitionRequest
 
 _TRANSITION_REQUEST = TypeAdapter(TransitionRequest)
+_FRONTEND_ROOT = files("frontend")
 
 
 @asynccontextmanager
@@ -40,7 +45,11 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="AgileForge API", lifespan=lifespan)
-app.mount("/dashboard", StaticFiles(directory="frontend", html=True), name="frontend")
+app.mount(
+    "/dashboard",
+    StaticFiles(directory=str(_FRONTEND_ROOT), html=True),
+    name="frontend",
+)
 
 
 class CreateProjectRequest(BaseModel):
@@ -77,6 +86,19 @@ class PositionedTransitionApiRequest(WorkflowPositionGuards):
 
     instance_key: str | None = None
     input_payload: JsonObject
+
+
+class DashboardConfig(BaseModel):
+    """Non-secret provenance returned by the local readiness endpoint."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    status: Literal["ready"] = "ready"
+    process_id: int
+    checkout_root: Path
+    commit: str
+    business_database: Path
+    trace_database: Path
 
 
 AGENTIC_API_PATHS: dict[str, str] = {
@@ -248,10 +270,43 @@ def _read_payload(result: JsonObject) -> dict[str, object]:
     }
 
 
+def _database_path(environment_name: str) -> Path:
+    value = os.environ.get(environment_name, "")
+    prefix = "sqlite:///"
+    if not value.startswith(prefix):
+        message = f"{environment_name} must contain an absolute SQLite URL"
+        raise RuntimeError(message)
+    path = Path(value.removeprefix(prefix))
+    if not path.is_absolute():
+        message = f"{environment_name} must contain an absolute SQLite URL"
+        raise RuntimeError(message)
+    return path
+
+
+def _checkout_commit(checkout_root: Path) -> str:
+    output = Git().execute(
+        command=["git", "-C", str(checkout_root), "rev-parse", "HEAD"]
+    )
+    return cast("str", output).strip()
+
+
 @app.get("/")
 def root() -> RedirectResponse:
     """Redirect to the workflow dashboard."""
     return RedirectResponse(url="/dashboard")
+
+
+@app.get("/api/dashboard/config")
+def get_dashboard_config() -> DashboardConfig:
+    """Return deterministic local readiness and checkout provenance."""
+    checkout_root = Path(__file__).resolve().parent
+    return DashboardConfig(
+        process_id=os.getpid(),
+        checkout_root=checkout_root,
+        commit=_checkout_commit(checkout_root),
+        business_database=_database_path("AGILEFORGE_DB_URL"),
+        trace_database=_database_path("AGILEFORGE_ADK_EXECUTION_TRACE_DB_URL"),
+    )
 
 
 @app.post("/api/projects")
