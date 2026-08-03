@@ -2,17 +2,22 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Protocol
 
 from pydantic import TypeAdapter
 from sqlmodel import Session, col, select
 
 from models.core import Product, Sprint, UserStory
 from models.events import TaskExecutionLog
+from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance, SpecRegistry
 from models.workflow import WorkflowNodeAttempt, WorkflowNodeAttemptOutcome
 from repositories.workflow import WorkflowFactLoadError, WorkflowFactRepository
-from services.agent_workbench.authority_projection import AuthorityProjectionService
-from services.agent_workbench.authority_review import AuthorityReviewService
+from services.agent_workbench.authority_projection import (
+    AuthorityProjectionService,
+    pending_authority_fingerprint,
+)
+from services.specs.compiler_service import load_compiled_artifact
 from workflow.contracts import JsonObject, JsonValue
 
 if TYPE_CHECKING:
@@ -23,6 +28,7 @@ if TYPE_CHECKING:
     from workflow.facts import SprintFact, WorkflowFactSnapshot
 
 _JSON_OBJECT = TypeAdapter(JsonObject)
+_AUTO_SPEC_CONTENT_LIMIT_BYTES = 64_000
 
 
 def _success(data: JsonObject) -> JsonObject:
@@ -62,14 +68,278 @@ def _result_data(result: JsonObject) -> JsonObject:
     return data if isinstance(data, dict) else {}
 
 
+@dataclass(frozen=True)
+class _ProjectReadContext:
+    """One confirmed durable Project identity for a scoped read."""
+
+    project_id: int
+    product: Product
+
+
+@dataclass(frozen=True)
+class _ProjectReadFailure:
+    """Typed missing-Project result shared by scoped projections."""
+
+    error: JsonObject
+
+
+class _AuthorityReviewProjection(Protocol):
+    """Facts-only authority review projection injected into retained reads."""
+
+    def project(
+        self,
+        *,
+        project: Product,
+        include_spec: str,
+    ) -> JsonObject: ...
+
+
+class DurableAuthorityReviewProjection:
+    """Project durable authority records without workflow recommendations."""
+
+    def __init__(self, *, engine: Engine) -> None:
+        """Bind the projection to durable authority records."""
+        self._engine = engine
+
+    def project(
+        self,
+        *,
+        project: Product,
+        include_spec: str,
+    ) -> JsonObject:
+        """Return accepted and pending authority facts for operator review."""
+        if include_spec not in {"auto", "full", "summary"}:
+            return _error(
+                "INVALID_INPUT",
+                f"Unsupported include_spec value: {include_spec}.",
+                field="include_spec",
+                value=include_spec,
+                allowed=["auto", "full", "summary"],
+            )
+        project_id = project.product_id
+        if project_id is None:
+            return _error(
+                "PROJECT_NOT_FOUND",
+                "Project identity is unavailable.",
+            )
+        with Session(self._engine) as session:
+            specifications = list(
+                session.exec(
+                    select(SpecRegistry)
+                    .where(col(SpecRegistry.product_id) == project_id)
+                    .order_by(col(SpecRegistry.spec_version_id))
+                ).all()
+            )
+            authorities = list(
+                session.exec(
+                    select(CompiledSpecAuthority)
+                    .join(
+                        SpecRegistry,
+                        col(CompiledSpecAuthority.spec_version_id)
+                        == col(SpecRegistry.spec_version_id),
+                    )
+                    .where(col(SpecRegistry.product_id) == project_id)
+                    .order_by(col(CompiledSpecAuthority.authority_id))
+                ).all()
+            )
+            decisions = list(
+                session.exec(
+                    select(SpecAuthorityAcceptance)
+                    .where(col(SpecAuthorityAcceptance.product_id) == project_id)
+                    .order_by(
+                        col(SpecAuthorityAcceptance.decided_at),
+                        col(SpecAuthorityAcceptance.id),
+                    )
+                ).all()
+            )
+
+        specs_by_id = {
+            spec.spec_version_id: spec
+            for spec in specifications
+            if spec.spec_version_id is not None
+        }
+        decisions_by_authority: dict[int, SpecAuthorityAcceptance] = {}
+        for decision in decisions:
+            authority_id = decision.pending_authority_id
+            if authority_id is not None:
+                decisions_by_authority[authority_id] = decision
+
+        rendered: list[JsonValue] = []
+        rendered_by_id: dict[int, JsonObject] = {}
+        accepted_authority_id: int | None = None
+        pending_authority_id: int | None = None
+        for authority in authorities:
+            authority_id = authority.authority_id
+            spec = specs_by_id.get(authority.spec_version_id)
+            if authority_id is None or spec is None:
+                return _error(
+                    "AUTHORITY_FACTS_UNAVAILABLE",
+                    "Stored authority ownership is incomplete.",
+                    project_id=project_id,
+                )
+            decision = decisions_by_authority.get(authority_id)
+            status = self._authority_status(spec=spec, decision=decision)
+            payload_or_error = self._authority_payload(
+                authority=authority,
+                spec=spec,
+                decision=decision,
+                status=status,
+                include_spec=include_spec,
+            )
+            if payload_or_error.get("ok") is False:
+                return payload_or_error
+            rendered.append(payload_or_error)
+            rendered_by_id[authority_id] = payload_or_error
+            if status == "accepted":
+                accepted_authority_id = authority_id
+            elif status == "pending_review":
+                pending_authority_id = authority_id
+
+        accepted = (
+            rendered_by_id.get(accepted_authority_id)
+            if accepted_authority_id is not None
+            else None
+        )
+        pending = (
+            rendered_by_id.get(pending_authority_id)
+            if pending_authority_id is not None
+            else None
+        )
+        findings = pending.get("findings", []) if pending is not None else []
+        return _success(
+            {
+                "schema_version": "agileforge.authority_review_projection.v1",
+                "project": {
+                    "project_id": project_id,
+                    "name": project.name,
+                },
+                "specifications": [
+                    self._specification_payload(spec, include_spec=include_spec)
+                    for spec in specifications
+                ],
+                "authorities": rendered,
+                "accepted_authority": accepted,
+                "pending_authority": pending,
+                "findings": findings,
+            }
+        )
+
+    @staticmethod
+    def _authority_status(
+        *,
+        spec: SpecRegistry,
+        decision: SpecAuthorityAcceptance | None,
+    ) -> str:
+        if decision is not None and decision.status in {"accepted", "rejected"}:
+            return decision.status
+        return "stale" if spec.status == "superseded" else "pending_review"
+
+    def _authority_payload(
+        self,
+        *,
+        authority: CompiledSpecAuthority,
+        spec: SpecRegistry,
+        decision: SpecAuthorityAcceptance | None,
+        status: str,
+        include_spec: str,
+    ) -> JsonObject:
+        load_result = load_compiled_artifact(authority)
+        artifact = load_result.artifact
+        if artifact is None:
+            return _error(
+                "AUTHORITY_ARTIFACT_UNAVAILABLE",
+                load_result.message or "Stored authority artifact is unavailable.",
+                authority_id=authority.authority_id,
+                artifact_status=load_result.status,
+            )
+        findings: list[JsonValue] = [
+            {
+                "kind": "gap",
+                "severity": "review",
+                "message": gap,
+            }
+            for gap in artifact.gaps
+        ]
+        quality = artifact.authority_quality
+        if quality is not None:
+            findings.extend(
+                {
+                    "kind": "authority_quality",
+                    "finding_id": group.group_id,
+                    "severity": group.severity,
+                    "message": group.reason,
+                    "member_ids": list(group.member_ids),
+                }
+                for group in quality.review_groups
+            )
+        terminal_decision: JsonObject | None = None
+        if decision is not None:
+            terminal_decision = {
+                "status": decision.status,
+                "policy": decision.policy,
+                "decided_by": decision.decided_by,
+                "decided_at": _iso(decision.decided_at),
+                "rationale": decision.rationale,
+            }
+        return {
+            "authority_id": authority.authority_id,
+            "authority_fingerprint": pending_authority_fingerprint(authority),
+            "spec_version_id": authority.spec_version_id,
+            "status": status,
+            "compiler_version": authority.compiler_version,
+            "prompt_hash": authority.prompt_hash,
+            "compiled_at": _iso(authority.compiled_at),
+            "terminal_decision": terminal_decision,
+            "specification": self._specification_payload(
+                spec,
+                include_spec=include_spec,
+            ),
+            "invariants": [
+                _validated(invariant.model_dump(mode="json"))
+                for invariant in artifact.invariants
+            ],
+            "findings": findings,
+            "artifact": _validated(artifact.model_dump(mode="json")),
+        }
+
+    @staticmethod
+    def _specification_payload(
+        spec: SpecRegistry,
+        *,
+        include_spec: str,
+    ) -> JsonObject:
+        size_bytes = len(spec.content.encode("utf-8"))
+        content_included = include_spec == "full" or (
+            include_spec == "auto" and size_bytes <= _AUTO_SPEC_CONTENT_LIMIT_BYTES
+        )
+        return {
+            "spec_version_id": spec.spec_version_id,
+            "spec_hash": spec.spec_hash,
+            "status": spec.status,
+            "content_ref": spec.content_ref,
+            "approved_at": _iso(spec.approved_at),
+            "approved_by": spec.approved_by,
+            "size_bytes": size_bytes,
+            "content_included": content_included,
+            "content": spec.content if content_included else None,
+        }
+
+
 class DurableReadProjectionService:
     """Read supported operator views without deriving workflow availability."""
 
-    def __init__(self, *, engine: Engine) -> None:
-        """Bind durable records and existing read-only authority projections."""
+    def __init__(
+        self,
+        *,
+        engine: Engine,
+        authority_review_projection: _AuthorityReviewProjection | None = None,
+    ) -> None:
+        """Bind durable records and injected read-only authority projections."""
         self._engine = engine
         self._authority = AuthorityProjectionService(engine=engine)
-        self._authority_review = AuthorityReviewService(engine=engine)
+        self._authority_review = authority_review_projection or (
+            DurableAuthorityReviewProjection(engine=engine)
+        )
 
     def project_list(self) -> JsonObject:
         """Return durable Project identities and aggregate counts."""
@@ -106,14 +376,11 @@ class DurableReadProjectionService:
 
     def project_show(self, *, project_id: int) -> JsonObject:
         """Return one Project detail without routing state."""
+        context = self._project(project_id)
+        if isinstance(context, _ProjectReadFailure):
+            return context.error
+        product = context.product
         with Session(self._engine) as session:
-            product = session.get(Product, project_id)
-            if product is None:
-                return _error(
-                    "PROJECT_NOT_FOUND",
-                    f"Project {project_id} was not found.",
-                    project_id=project_id,
-                )
             stories = session.exec(
                 select(UserStory).where(col(UserStory.product_id) == project_id)
             ).all()
@@ -142,6 +409,9 @@ class DurableReadProjectionService:
 
     def authority_status(self, *, project_id: int) -> JsonObject:
         """Delegate to the durable authority projection."""
+        project_or_error = self._project(project_id)
+        if isinstance(project_or_error, _ProjectReadFailure):
+            return project_or_error.error
         return _validated(self._authority.status(project_id=project_id))
 
     def authority_invariants(
@@ -151,6 +421,9 @@ class DurableReadProjectionService:
         spec_version_id: int | None = None,
     ) -> JsonObject:
         """Delegate to the durable invariant projection."""
+        project_or_error = self._project(project_id)
+        if isinstance(project_or_error, _ProjectReadFailure):
+            return project_or_error.error
         return _validated(
             self._authority.invariants(
                 project_id=project_id,
@@ -164,13 +437,13 @@ class DurableReadProjectionService:
         project_id: int,
         include_spec: str = "auto",
     ) -> JsonObject:
-        """Return the durable pending-authority review packet."""
-        return _validated(
-            self._authority_review.review(
-                project_id=project_id,
-                include_spec=include_spec,
-                output_format="json",
-            )
+        """Return facts-only accepted and pending authority inspection data."""
+        project_or_error = self._project(project_id)
+        if isinstance(project_or_error, _ProjectReadFailure):
+            return project_or_error.error
+        return self._authority_review.project(
+            project=project_or_error.product,
+            include_spec=include_spec,
         )
 
     def artifact_history(
@@ -181,6 +454,9 @@ class DurableReadProjectionService:
         instance_key: str | None = None,
     ) -> JsonObject:
         """Return durable attempt and outcome history for one exact node."""
+        project_or_error = self._project(project_id)
+        if isinstance(project_or_error, _ProjectReadFailure):
+            return project_or_error.error
         with Session(self._engine) as session:
             statement = select(WorkflowNodeAttempt).where(
                 col(WorkflowNodeAttempt.project_id) == project_id,
@@ -643,6 +919,9 @@ class DurableReadProjectionService:
         flavor: str | None = None,
     ) -> JsonObject:
         """Return a bounded Story packet from durable records and task facts."""
+        project_or_error = self._project(project_id)
+        if isinstance(project_or_error, _ProjectReadFailure):
+            return project_or_error.error
         story = self._story_record(story_id)
         if story is None or story.get("project_id") != project_id:
             return _error(
@@ -701,6 +980,9 @@ class DurableReadProjectionService:
         )
 
     def _snapshot(self, project_id: int) -> WorkflowFactSnapshot | JsonObject:
+        project_or_error = self._project(project_id)
+        if isinstance(project_or_error, _ProjectReadFailure):
+            return project_or_error.error
         with Session(self._engine) as session:
             try:
                 return WorkflowFactRepository(session).load(project_id)
@@ -710,6 +992,20 @@ class DurableReadProjectionService:
                     str(error),
                     project_id=project_id,
                 )
+
+    def _project(self, project_id: int) -> _ProjectReadContext | _ProjectReadFailure:
+        """Establish one Project identity before any project-scoped read."""
+        with Session(self._engine) as session:
+            product = session.get(Product, project_id)
+        if product is None:
+            return _ProjectReadFailure(
+                error=_error(
+                    "PROJECT_NOT_FOUND",
+                    f"Project {project_id} was not found.",
+                    project_id=project_id,
+                )
+            )
+        return _ProjectReadContext(project_id=project_id, product=product)
 
     @staticmethod
     def _select_sprint(
@@ -743,4 +1039,4 @@ class DurableReadProjectionService:
         }
 
 
-__all__ = ["DurableReadProjectionService"]
+__all__ = ["DurableAuthorityReviewProjection", "DurableReadProjectionService"]
