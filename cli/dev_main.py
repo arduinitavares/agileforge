@@ -3,18 +3,17 @@
 from __future__ import annotations
 
 import argparse
-import os
 import platform
 import sqlite3
 import stat
+import subprocess
 import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import IntEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, NoReturn, Protocol, cast
+from typing import TYPE_CHECKING, Literal, NoReturn, Protocol
 
-from git import Git
 from git.exc import GitCommandError
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -103,22 +102,19 @@ class SubprocessCommandRunner:
         env: Mapping[str, str] | None = None,
     ) -> CommandResult:
         """Run one child process without invoking a shell."""
-        command = Git(working_dir=str(cwd))
-        if env is not None:
-            command.update_environment(**dict(env))
-        try:
-            output = command.execute(command=list(arguments))
-        except GitCommandError as error:
-            return CommandResult(
-                arguments=arguments,
-                exit_code=_git_error_status(error),
-                stdout=error.stdout,
-                stderr=error.stderr,
-            )
+        completed = subprocess.run(  # noqa: S603 - fixed argv, never a shell
+            arguments,
+            cwd=cwd,
+            env=None if env is None else dict(env),
+            check=False,
+            capture_output=True,
+            text=True,
+        )
         return CommandResult(
             arguments=arguments,
-            exit_code=0,
-            stdout=cast("str", output),
+            exit_code=completed.returncode,
+            stdout=completed.stdout,
+            stderr=completed.stderr,
         )
 
 
@@ -179,10 +175,6 @@ class DeveloperCommandError(RuntimeError):
 
 class SchemaVerificationError(DeveloperCommandError):
     """Business database does not satisfy the hard-break schema contract."""
-
-
-def _git_error_status(error: GitCommandError) -> int:
-    return error.status if isinstance(error.status, int) else ExitCode.ERROR
 
 
 def _positive_float(value: str) -> float:
@@ -382,7 +374,7 @@ def _initialize_profile(
     )
     finalized = False
     try:
-        environment = {**os.environ, **profile_environment(profile)}
+        environment = profile_environment(profile)
         bootstrap_arguments = (
             sys.executable,
             str(checkout_root / "agile_sqlmodel.py"),

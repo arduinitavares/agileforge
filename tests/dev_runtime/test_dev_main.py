@@ -381,6 +381,75 @@ def test_init_bootstraps_and_verifies_before_manifest(
     assert payload["schema"]["valid"] is True
 
 
+def test_init_schema_bootstrap_receives_only_profile_environment(
+    checkout: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Exclude credentials and parent runtime controls from schema bootstrap."""
+    module = _module()
+    parent_values = {
+        "OPEN_ROUTER_API_KEY": "provider-secret",
+        "AWS_SECRET_ACCESS_KEY": "cloud-secret",
+        "CUSTOM_CREDENTIAL": "custom-secret",
+        "DATABASE_URL": "parent-database",
+        "AGILEFORGE_DB_URL": "parent-business-database",
+        "AGILEFORGE_ADK_EXECUTION_TRACE_DB_URL": "parent-trace-database",
+        "MODEL_CONFIG_PATH": "parent-model-config",
+        "PYTHONPATH": "parent-python-path",
+        "UV_PROJECT_ENVIRONMENT": "parent-uv-environment",
+    }
+    for key, value in parent_values.items():
+        monkeypatch.setenv(key, value)
+    runner = FakeRunner(checkout)
+
+    exit_code = module.main(
+        ["init", "--profile", "sanitized", "--json"],
+        checkout_root=checkout,
+        runner=runner,
+        clock=_clock(),
+    )
+
+    assert exit_code == 0
+    capsys.readouterr()
+    schema_environment = runner.calls[-1][2]
+    paths = module.profile_paths(checkout, "sanitized")
+    assert schema_environment is not None
+    assert schema_environment == {
+        "AGILEFORGE_DB_URL": f"sqlite:///{paths.business_database.as_posix()}",
+        "AGILEFORGE_ADK_EXECUTION_TRACE_DB_URL": (
+            f"sqlite:///{paths.trace_database.as_posix()}"
+        ),
+        "MODEL_CONFIG_PATH": str(checkout / "config" / "models.yaml"),
+    }
+    for secret_value in parent_values.values():
+        assert secret_value not in schema_environment.values()
+
+
+def test_command_runner_does_not_inherit_parent_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pass an explicit child environment without GitPython parent merging."""
+    module = _module()
+    monkeypatch.setenv("OPEN_ROUTER_API_KEY", "must-not-reach-child")
+    monkeypatch.setenv("AGILEFORGE_DB_URL", "must-not-reach-child")
+    probe = (
+        "import os; "
+        "print('OPEN_ROUTER_API_KEY' in os.environ or "
+        "'AGILEFORGE_DB_URL' in os.environ)"
+    )
+
+    result = module.SubprocessCommandRunner().run(
+        (sys.executable, "-c", probe),
+        cwd=tmp_path,
+        env={"SAFE_BOOTSTRAP_VALUE": "1"},
+    )
+
+    assert result.exit_code == 0
+    assert result.stdout == "False\n"
+
+
 @pytest.mark.parametrize(
     ("tables", "schema_exit_code"),
     [(_EXPECTED_TABLES, 9), ({"projects", "products"}, 0)],

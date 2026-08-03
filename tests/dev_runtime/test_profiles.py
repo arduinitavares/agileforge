@@ -12,6 +12,7 @@ import pytest
 from git import Git
 from pydantic import ValidationError
 
+from cli import dev_profiles
 from cli.dev_profiles import (
     CheckoutProvenance,
     ProfileMode,
@@ -209,6 +210,41 @@ def test_prepare_refuses_preexisting_root_without_modifying_it(checkout: Path) -
 
     assert sentinel.read_text(encoding="utf-8") == "keep\n"
     assert set(paths.root.iterdir()) == {sentinel}
+
+
+@pytest.mark.parametrize("failure_call", [1, 2])
+def test_prepare_cleans_claimed_root_after_directory_failure(
+    checkout: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_call: int,
+) -> None:
+    """Remove only newly claimed state when private directory setup fails."""
+    original = dev_profiles._ensure_private_directory
+    call_count = 0
+
+    def fail_selected_directory(checkout_root: Path, path: Path) -> None:
+        nonlocal call_count
+        call_count += 1
+        if call_count == failure_call:
+            message = f"directory failure {failure_call}"
+            raise OSError(message)
+        original(checkout_root, path)
+
+    monkeypatch.setattr(
+        dev_profiles,
+        "_ensure_private_directory",
+        fail_selected_directory,
+    )
+    paths = profile_paths(checkout, f"prepare-failure-{failure_call}")
+
+    with pytest.raises(OSError, match=f"directory failure {failure_call}"):
+        prepare_profile_record(
+            checkout,
+            f"prepare-failure-{failure_call}",
+            runtime=ProfileRuntimeMetadata(uv_version="0.8.0"),
+        )
+
+    assert not paths.root.exists()
 
 
 def test_initialize_refuses_preexisting_root_without_modifying_databases(

@@ -436,9 +436,15 @@ def prepare_profile_record(
         last_used_at=timestamp,
     )
     _create_profile_root(checkout.root, paths.root)
-    for directory in (paths.artifacts, paths.logs):
-        _ensure_private_directory(checkout.root, directory)
-    return profile
+    prepared = False
+    try:
+        for directory in (paths.artifacts, paths.logs):
+            _ensure_private_directory(checkout.root, directory)
+        prepared = True
+        return profile
+    finally:
+        if not prepared:
+            reset_profile(checkout.root, profile_name, profile_name)
 
 
 def initialize_profile_record(
