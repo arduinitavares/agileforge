@@ -1,0 +1,291 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python-312:
+    name: Python 3.12 quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "0.10.12"
+          python-version: "3.12"
+      - name: Verify lock
+        run: uv lock --check
+      - name: Run repository quality gate
+        run: uv run --locked pyrepo-check --all
+
+  python-313:
+    name: Python 3.13 full gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "0.10.12"
+          python-version: "3.13"
+      - name: Verify lock
+        run: uv lock --check
+      - name: Run canonical full gate
+        run: ./agileforge-dev check
+
+  frontend:
+    name: Node frontend tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: "24"
+      - name: Run frontend suites
+        run: >-
+          node --test tests/test_workflow_position_display.mjs
+          tests/test_create_project_modal_required_fields.mjs
+
+  macos-smoke:
+    name: macOS launcher smoke
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "0.10.12"
+          python-version: "3.13"
+      - name: Exercise launcher lifecycle
+        shell: bash
+        env:
+          PROFILE: ci-macos-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+
+          launcher_pid=""
+          child_pid=""
+          ephemeral_profile=""
+          profile_root=".agileforge/dev/profiles/$PROFILE"
+          init_json="$RUNNER_TEMP/agileforge-init.json"
+          info_json="$RUNNER_TEMP/agileforge-info.json"
+          cli_json="$RUNNER_TEMP/agileforge-cli.json"
+          ui_json="$RUNNER_TEMP/agileforge-ui.json"
+          ui_state="$RUNNER_TEMP/agileforge-ui-state.txt"
+          ui_log="$RUNNER_TEMP/agileforge-ui.log"
+
+          stop_pid() {
+            local pid="$1"
+            if [[ -z "$pid" ]] || ! kill -0 "$pid" 2>/dev/null; then
+              return
+            fi
+            kill -TERM "$pid" 2>/dev/null || true
+            for _ in {1..50}; do
+              if ! kill -0 "$pid" 2>/dev/null; then
+                return
+              fi
+              sleep 0.1
+            done
+            kill -KILL "$pid" 2>/dev/null || true
+          }
+
+          cleanup() {
+            set +e
+            stop_pid "$launcher_pid"
+            stop_pid "$child_pid"
+            if [[ -n "$ephemeral_profile" ]] &&
+              [[ -e ".agileforge/dev/profiles/$ephemeral_profile" ]]; then
+              ./agileforge-dev reset \
+                --profile "$ephemeral_profile" \
+                --confirm "$ephemeral_profile" >/dev/null 2>&1
+            fi
+            if [[ -e "$profile_root" ]]; then
+              ./agileforge-dev reset \
+                --profile "$PROFILE" \
+                --confirm "$PROFILE" >/dev/null 2>&1
+            fi
+          }
+          trap cleanup EXIT
+
+          uv lock --check
+          SHA="$(git rev-parse HEAD)"
+          test "$SHA" = "$GITHUB_SHA"
+
+          ./agileforge-dev init \
+            --profile "$PROFILE" \
+            --mode acceptance \
+            --expect-sha "$GITHUB_SHA" \
+            --json >"$init_json"
+          ./agileforge-dev info \
+            --profile "$PROFILE" \
+            --json >"$info_json"
+          ./agileforge-dev cli \
+            --profile "$PROFILE" \
+            --json \
+            -- project list >"$cli_json"
+
+          uv run --locked python - \
+            "$init_json" "$info_json" "$cli_json" "$GITHUB_SHA" "$PROFILE" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+
+          def read_object(raw_path: str) -> dict[str, object]:
+              payload = json.loads(Path(raw_path).read_text(encoding="utf-8"))
+              assert isinstance(payload, dict)
+              return payload
+
+
+          init = read_object(sys.argv[1])
+          info = read_object(sys.argv[2])
+          cli = read_object(sys.argv[3])
+          expected_sha = sys.argv[4]
+          expected_profile = sys.argv[5]
+
+          assert init["status"] == "initialized"
+          init_profile = init["profile"]
+          assert isinstance(init_profile, dict)
+          assert init_profile["name"] == expected_profile
+          assert init_profile["mode"] == "acceptance"
+          assert init_profile["expected_commit"] == expected_sha
+
+          assert info["validation_status"] == "valid"
+          assert info["current_commit"] == expected_sha
+          info_profile = info["profile"]
+          assert isinstance(info_profile, dict)
+          assert info_profile["expected_commit"] == expected_sha
+
+          assert cli["commit"] == expected_sha
+          assert cli["profile"] == expected_profile
+          assert cli["exit_code"] == 0
+          assert cli["command"] == ["project", "list"]
+          result = cli["result"]
+          assert isinstance(result, dict)
+          assert result["ok"] is True
+          PY
+
+          ./agileforge-dev ui \
+            --profile "$PROFILE" \
+            --ephemeral \
+            --port auto \
+            --json \
+            --ready-timeout 30 >"$ui_json" 2>"$ui_log" &
+          launcher_pid=$!
+
+          if ! uv run --locked python - \
+            "$ui_json" "$ui_state" "$GITHUB_SHA" "$PROFILE" <<'PY'
+          import json
+          import sys
+          import time
+          import urllib.request
+          from pathlib import Path
+
+          output_path = Path(sys.argv[1])
+          state_path = Path(sys.argv[2])
+          expected_sha = sys.argv[3]
+          parent_profile = sys.argv[4]
+          deadline = time.monotonic() + 35.0
+
+          while time.monotonic() < deadline:
+              try:
+                  payload = json.loads(output_path.read_text(encoding="utf-8"))
+              except (FileNotFoundError, json.JSONDecodeError):
+                  time.sleep(0.1)
+                  continue
+              assert isinstance(payload, dict)
+              assert payload["status"] == "ready"
+              assert payload["host"] == "127.0.0.1"
+              assert payload["commit"] == expected_sha
+              assert payload["profile_mode"] == "acceptance"
+              assert payload["ephemeral"] is True
+              ephemeral_profile = payload["profile"]
+              assert isinstance(ephemeral_profile, str)
+              assert ephemeral_profile.startswith(f"{parent_profile}.ui-")
+              port = payload["port"]
+              assert isinstance(port, int)
+              with urllib.request.urlopen(
+                  f"http://127.0.0.1:{port}/api/dashboard/config",
+                  timeout=1.0,
+              ) as response:
+                  readiness = json.loads(response.read().decode("utf-8"))
+              assert isinstance(readiness, dict)
+              assert readiness["status"] == "ready"
+              assert readiness["commit"] == expected_sha
+              child_pid = readiness["process_id"]
+              assert isinstance(child_pid, int)
+              assert child_pid > 0
+              state_path.write_text(
+                  f"{child_pid} {ephemeral_profile} {port}\n",
+                  encoding="utf-8",
+              )
+              break
+          else:
+              raise TimeoutError("UI readiness JSON was not available")
+          PY
+          then
+            cat "$ui_log" >&2
+            exit 1
+          fi
+
+          read -r child_pid ephemeral_profile ui_port <"$ui_state"
+          kill -TERM "$launcher_pid"
+          for _ in {1..100}; do
+            if ! kill -0 "$launcher_pid" 2>/dev/null; then
+              break
+            fi
+            sleep 0.1
+          done
+          if kill -0 "$launcher_pid" 2>/dev/null; then
+            cat "$ui_log" >&2
+            exit 1
+          fi
+          launcher_status=0
+          wait "$launcher_pid" || launcher_status=$?
+          test "$launcher_status" -eq 0
+          launcher_pid=""
+
+          if kill -0 "$child_pid" 2>/dev/null; then
+            printf 'UI child still running: %s\n' "$child_pid" >&2
+            exit 1
+          fi
+
+          uv run --locked python - "$ui_port" <<'PY'
+          import sys
+          import time
+          import urllib.error
+          import urllib.request
+
+          url = f"http://127.0.0.1:{sys.argv[1]}/api/dashboard/config"
+          deadline = time.monotonic() + 5.0
+          while time.monotonic() < deadline:
+              try:
+                  urllib.request.urlopen(url, timeout=0.5).close()
+              except (OSError, urllib.error.URLError):
+                  break
+              time.sleep(0.1)
+          else:
+              raise RuntimeError(f"UI remained reachable after shutdown: {url}")
+          PY
+
+          test ! -e ".agileforge/dev/profiles/$ephemeral_profile"
+          ./agileforge-dev reset \
+            --profile "$PROFILE" \
+            --confirm "$PROFILE" >/dev/null
+          test ! -e "$profile_root"
+          child_pid=""
+          ephemeral_profile=""
+          trap - EXIT
