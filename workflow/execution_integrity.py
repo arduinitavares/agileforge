@@ -298,9 +298,7 @@ def sprint_start_audit_metadata(audit: SprintStartAudit) -> JsonObject:
         "sprint_id": audit.sprint_id,
         "team_id": audit.team_id,
         "sprint_plan_artifact_id": audit.sprint_plan_artifact_id,
-        "sprint_plan_artifact_decision_id": (
-            audit.sprint_plan_artifact_decision_id
-        ),
+        "sprint_plan_artifact_decision_id": (audit.sprint_plan_artifact_decision_id),
         "story_dependency_review_id": audit.story_dependency_review_id,
         "plan_fingerprint": audit.plan_fingerprint,
         "candidate_set_fingerprint": audit.candidate_set_fingerprint,
@@ -331,7 +329,9 @@ def _contract_fingerprint(facts: _ExecutionContractFacts) -> str:
     return canonical_hash(
         {
             "start": facts.start.model_dump(mode="json"),
-            "plan": facts.plan.model_dump(mode="json"),
+            "plan": facts.plan.model_copy(update={"status": "accepted"}).model_dump(
+                mode="json"
+            ),
             "decision": facts.decision.model_dump(mode="json"),
             "dependency_review": facts.dependency_review.model_dump(mode="json"),
             "stories": [_accepted_story_payload(item) for item in facts.stories],
@@ -379,9 +379,7 @@ def _start_contract_facts(
     )
     decision = _one_by_id(
         tuple(
-            item
-            for item in snapshot.review_decisions
-            if item.artifact_type == "sprint"
+            item for item in snapshot.review_decisions if item.artifact_type == "sprint"
         ),
         identity=start.sprint_plan_artifact_decision_id,
         identity_of=lambda item: item.decision_id,
@@ -395,7 +393,7 @@ def _start_contract_facts(
     )
     if (
         plan.artifact_type != "sprint_plan"
-        or plan.status != "accepted"
+        or plan.status not in {"accepted", "superseded"}
         or plan.sprint_id != sprint_id
         or plan.source_fingerprint != plan.candidate_set_fingerprint
         or decision.artifact_type != "sprint"
@@ -424,11 +422,7 @@ def _contract_stories(
         _fail("Sprint start selected Story IDs are not canonical.")
     attached = tuple(
         sorted(
-            (
-                item
-                for item in snapshot.stories
-                if start.sprint_id in item.sprint_ids
-            ),
+            (item for item in snapshot.stories if start.sprint_id in item.sprint_ids),
             key=lambda item: item.story_id,
         )
     )
@@ -474,11 +468,7 @@ def _contract_tasks(
 ) -> tuple[TaskFact, ...]:
     tasks = tuple(
         sorted(
-            (
-                item
-                for item in snapshot.tasks
-                if item.sprint_id == start.sprint_id
-            ),
+            (item for item in snapshot.tasks if item.sprint_id == start.sprint_id),
             key=lambda item: (item.story_id, item.task_id),
         )
     )
@@ -596,9 +586,7 @@ def story_completion_eligibility_fingerprint(
             "execution_contract_fingerprint": contract.fingerprint,
             "story": _accepted_story_payload(story),
             "tasks": [item.model_dump(mode="json") for item in tasks],
-            "task_completions": [
-                item.model_dump(mode="json") for item in completions
-            ],
+            "task_completions": [item.model_dump(mode="json") for item in completions],
         }
     )
 

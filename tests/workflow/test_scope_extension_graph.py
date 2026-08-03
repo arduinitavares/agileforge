@@ -19,6 +19,8 @@ from workflow.facts import (
     ChallengeArtifactFact,
     DiscoveryRunAbandonmentFact,
     DiscoveryRunFact,
+    PhaseArtifactFact,
+    PlanningArtifactFact,
     PostSprintTriageFact,
     PrdVersionFact,
     ProjectFact,
@@ -28,6 +30,7 @@ from workflow.facts import (
     SpecDraftFact,
     SpecVersionFact,
     SprintFact,
+    SprintStartFact,
     StoryFact,
     WorkflowFactSnapshot,
 )
@@ -385,6 +388,96 @@ def test_extension_artifact_review_and_rejection_matrix() -> None:
     assert spec_retry.recommendation_kind is RecommendationKind.RECOVERY
 
 
+def _with_accepted_replacement_scope(
+    snapshot: WorkflowFactSnapshot,
+) -> WorkflowFactSnapshot:
+    """Add exact accepted downstream facts for the replacement authority."""
+    authority_fingerprint = "sha256:replacement-authority"
+    return snapshot.model_copy(
+        update={
+            "phase_artifacts": (
+                PhaseArtifactFact(
+                    artifact_type="vision",
+                    artifact_id=901,
+                    artifact_fingerprint="sha256:replacement-vision",
+                    authority_id=REPLACEMENT_AUTHORITY_ID,
+                    authority_fingerprint=authority_fingerprint,
+                    status="accepted",
+                ),
+                PhaseArtifactFact(
+                    artifact_type="backlog",
+                    artifact_id=902,
+                    artifact_fingerprint="sha256:replacement-backlog",
+                    authority_id=REPLACEMENT_AUTHORITY_ID,
+                    authority_fingerprint=authority_fingerprint,
+                    status="accepted",
+                ),
+            ),
+            "planning_artifacts": (
+                PlanningArtifactFact(
+                    artifact_type="roadmap",
+                    artifact_id=903,
+                    artifact_fingerprint="sha256:replacement-roadmap",
+                    source_artifact_id=902,
+                    source_fingerprint="sha256:replacement-backlog",
+                    authority_id=REPLACEMENT_AUTHORITY_ID,
+                    authority_fingerprint=authority_fingerprint,
+                    backlog_artifact_id=902,
+                    backlog_artifact_fingerprint="sha256:replacement-backlog",
+                    status="accepted",
+                ),
+                PlanningArtifactFact(
+                    artifact_type="story",
+                    artifact_id=904,
+                    artifact_fingerprint="sha256:replacement-story",
+                    source_artifact_id=903,
+                    source_fingerprint="sha256:replacement-roadmap",
+                    authority_id=REPLACEMENT_AUTHORITY_ID,
+                    authority_fingerprint=authority_fingerprint,
+                    roadmap_artifact_id=903,
+                    roadmap_artifact_fingerprint="sha256:replacement-roadmap",
+                    requirement_id="REQ-1",
+                    story_ids=(21,),
+                    status="accepted",
+                ),
+                PlanningArtifactFact(
+                    artifact_type="sprint_plan",
+                    artifact_id=905,
+                    artifact_fingerprint="sha256:replacement-sprint-plan",
+                    source_artifact_id=904,
+                    source_fingerprint="sha256:replacement-story",
+                    story_ids=(21,),
+                    sprint_id=11,
+                    candidate_set_fingerprint="sha256:replacement-candidates",
+                    task_content_fingerprint="sha256:replacement-tasks",
+                    status="accepted",
+                ),
+            ),
+            "sprint_starts": (
+                SprintStartFact(
+                    start_id=906,
+                    sprint_id=11,
+                    sprint_plan_artifact_id=905,
+                    sprint_plan_artifact_decision_id=907,
+                    story_dependency_review_id=908,
+                    plan_fingerprint="sha256:replacement-sprint-plan",
+                    candidate_set_fingerprint="sha256:replacement-candidates",
+                    selected_story_ids=(21,),
+                    task_content_fingerprint="sha256:replacement-tasks",
+                    dependency_source_fingerprint="sha256:dependency-source",
+                    dependency_fingerprint="sha256:dependencies",
+                    dependency_rows_fingerprint="sha256:dependency-rows",
+                    decision_fingerprint="sha256:sprint-plan-decision",
+                    audit_event_id=909,
+                    audit_event_fingerprint="sha256:sprint-start-audit",
+                    started_by="operator@example.com",
+                    started_at=EVALUATED_AT,
+                ),
+            ),
+        }
+    )
+
+
 def _accepted_amendment_snapshot() -> WorkflowFactSnapshot:
     snapshot = _with_extension(completed_project_snapshot())
     challenge = ChallengeArtifactFact(
@@ -491,37 +584,41 @@ def test_accepted_replacement_authority_exposes_reconciliation() -> None:
         status="accepted",
         decided_at=EVALUATED_AT,
     )
-    snapshot = accepted.model_copy(
-        update={
-            "spec_versions": (
-                accepted.spec_versions[0].model_copy(update={"status": "superseded"}),
-                SpecVersionFact(
-                    spec_version_id=REPLACEMENT_SPEC_ID,
-                    spec_hash=REPLACEMENT_SPEC_HASH,
-                    status="approved",
-                    approved_at=EVALUATED_AT,
+    snapshot = _with_accepted_replacement_scope(
+        accepted.model_copy(
+            update={
+                "spec_versions": (
+                    accepted.spec_versions[0].model_copy(
+                        update={"status": "superseded"}
+                    ),
+                    SpecVersionFact(
+                        spec_version_id=REPLACEMENT_SPEC_ID,
+                        spec_hash=REPLACEMENT_SPEC_HASH,
+                        status="approved",
+                        approved_at=EVALUATED_AT,
+                    ),
                 ),
-            ),
-            "extension_registrations": (
-                ScopeExtensionRegistrationFact(
-                    registration_id=801,
-                    discovery_run_id=EXTENSION_RUN_ID,
-                    spec_draft_id=AMENDMENT_DRAFT_ID,
-                    spec_version_id=REPLACEMENT_SPEC_ID,
-                    spec_hash=REPLACEMENT_SPEC_HASH,
+                "extension_registrations": (
+                    ScopeExtensionRegistrationFact(
+                        registration_id=801,
+                        discovery_run_id=EXTENSION_RUN_ID,
+                        spec_draft_id=AMENDMENT_DRAFT_ID,
+                        spec_version_id=REPLACEMENT_SPEC_ID,
+                        spec_hash=REPLACEMENT_SPEC_HASH,
+                    ),
                 ),
-            ),
-            "authorities": (*accepted.authorities, replacement_authority),
-            "review_decisions": (
-                *accepted.review_decisions,
-                _review(
-                    decision_id=802,
-                    artifact_type="authority",
-                    artifact_id=REPLACEMENT_AUTHORITY_ID,
-                    fingerprint=replacement_authority.authority_fingerprint,
+                "authorities": (*accepted.authorities, replacement_authority),
+                "review_decisions": (
+                    *accepted.review_decisions,
+                    _review(
+                        decision_id=802,
+                        artifact_type="authority",
+                        artifact_id=REPLACEMENT_AUTHORITY_ID,
+                        fingerprint=replacement_authority.authority_fingerprint,
+                    ),
                 ),
-            ),
-        }
+            }
+        )
     )
 
     assert (

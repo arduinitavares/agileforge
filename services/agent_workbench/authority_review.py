@@ -108,13 +108,15 @@ STRUCTURED_SPEC_ITEM_PREFIXES: Final[tuple[str, ...]] = (
     "EXAMPLE.",
     "OPEN_QUESTION.",
 )
+
+
 @dataclass(frozen=True)
 class _SourceLoad:
-    """Decoded source bytes and resolved path metadata."""
+    """Canonical registry content and optional provenance metadata."""
 
     raw_bytes: bytes
     text: str
-    resolved_path: Path
+    resolved_path: Path | None
     disk_sha256: str
 
 
@@ -128,7 +130,7 @@ class AuthorityReviewSnapshot:
     authority_fingerprint: str | None
     source_spec_hash: str
     disk_spec_hash: str
-    resolved_spec_path: str
+    resolved_spec_path: str | None
     compiler_version: str
     prompt_hash: str
     fsm_state: str
@@ -222,6 +224,17 @@ class AuthorityReviewSnapshot:
         return authority_review_fingerprint(self)
 
     @property
+    def fingerprint_payload(self) -> JsonDict:
+        """Return authoritative review inputs without derived path metadata."""
+        payload = self.payload
+        specification = {
+            key: value
+            for key, value in payload["specification"].items()
+            if key not in {"content_ref", "resolved_spec_path", "disk_status"}
+        }
+        return {**payload, "specification": specification}
+
+    @property
     def review_token(self) -> str:
         """Return the schema-qualified complete review fingerprint."""
         return f"{REVIEW_TOKEN_SCHEMA}:{self.review_fingerprint}"
@@ -282,8 +295,8 @@ def canonical_json_hash(payload: Mapping[str, Any]) -> str:
 
 
 def authority_review_fingerprint(snapshot: AuthorityReviewSnapshot) -> str:
-    """Hash every input represented in one canonical authority review packet."""
-    return canonical_json_hash(snapshot.payload)
+    """Hash authoritative review inputs while excluding provenance metadata."""
+    return canonical_json_hash(snapshot.fingerprint_payload)
 
 
 def coverage_summary_fingerprint(payload: Mapping[str, Any]) -> str:
@@ -444,7 +457,7 @@ def _unsupported_compiled_authority_error(
 def _authority_source_changed_error(
     *,
     raw_path: str | None,
-    resolved_path: Path,
+    resolved_path: Path | None,
     registry_hash: str,
     disk_hash: str,
 ) -> JsonDict:
@@ -453,83 +466,59 @@ def _authority_source_changed_error(
         error=workbench_error(
             ErrorCode.AUTHORITY_SOURCE_CHANGED,
             message=(
-                "Stored specification path content does not match the latest "
+                "Stored canonical specification content does not match its "
                 "registry spec hash."
             ),
             details={
                 "path": raw_path,
-                "resolved_path": str(resolved_path),
+                "resolved_path": (
+                    str(resolved_path) if resolved_path is not None else None
+                ),
                 "registry_spec_hash": registry_hash,
                 "disk_spec_hash": disk_hash,
             },
-            remediation=[
-                "Re-register or recompile the specification before review."
-            ],
-        ),
-    )
-
-
-def _spec_file_not_found_error(
-    raw_path: str | None,
-    resolved_path: Path | None,
-) -> JsonDict:
-    return error_envelope(
-        command=AUTHORITY_REVIEW_COMMAND,
-        error=workbench_error(
-            ErrorCode.SPEC_FILE_NOT_FOUND,
-            message="Stored specification path could not be found on disk.",
-            details={
-                "path": raw_path,
-                "resolved_path": str(resolved_path) if resolved_path else None,
-            },
-            remediation=["Restore the specification file or update the stored path."],
+            remediation=["Re-register or recompile the specification before review."],
         ),
     )
 
 
 def _spec_file_invalid_error(
     raw_path: str | None,
-    resolved_path: Path,
+    resolved_path: Path | None,
     reason: str,
 ) -> JsonDict:
     return error_envelope(
         command=AUTHORITY_REVIEW_COMMAND,
         error=workbench_error(
             ErrorCode.SPEC_FILE_INVALID,
-            message="Stored specification file is not valid strict UTF-8 text.",
+            message="Stored canonical specification content is invalid.",
             details={
                 "path": raw_path,
-                "resolved_path": str(resolved_path),
+                "resolved_path": (
+                    str(resolved_path) if resolved_path is not None else None
+                ),
                 "reason": reason,
             },
-            remediation=["Save the specification as valid UTF-8 and retry review."],
+            remediation=[
+                "Re-register valid canonical specification content and retry review."
+            ],
         ),
     )
 
 
-def _load_source_from_latest_spec(  # noqa: PLR0911
+def _load_source_from_latest_spec(
     spec: SpecRegistry,
     *,
     repo_root: Path,
 ) -> _SourceLoad | JsonDict:
     raw_path = spec.content_ref
-    if not raw_path or not raw_path.strip():
-        return _spec_file_not_found_error(raw_path, None)
-    path = Path(raw_path).expanduser()
-    resolved_path = path if path.is_absolute() else (repo_root / path)
-    resolved_path = resolved_path.expanduser().resolve(strict=False)
-    if not resolved_path.is_file():
-        return _spec_file_not_found_error(raw_path, resolved_path)
+    resolved_path: Path | None = None
+    if raw_path and raw_path.strip():
+        path = Path(raw_path).expanduser()
+        resolved_path = path if path.is_absolute() else (repo_root / path)
+        resolved_path = resolved_path.expanduser().absolute()
     try:
-        raw_bytes = resolved_path.read_bytes()
-    except OSError as exc:
-        return _spec_file_invalid_error(raw_path, resolved_path, str(exc))
-    try:
-        text = raw_bytes.decode("utf-8", errors="strict")
-    except UnicodeDecodeError as exc:
-        return _spec_file_invalid_error(raw_path, resolved_path, str(exc))
-    try:
-        normalized = normalize_spec_content_for_registry(text)
+        normalized = normalize_spec_content_for_registry(spec.content)
     except SpecContentNormalizationError as exc:
         return _spec_file_invalid_error(raw_path, resolved_path, str(exc))
     disk_hash = _normalize_sha256_hash(normalized.spec_hash)
@@ -641,8 +630,8 @@ def build_authority_review_snapshot(  # noqa: PLR0913
     )
     content_truncated = not content_included and len(source.raw_bytes) > source_limit
     compiled_artifact = _load_compiled_artifact(authority)
-    artifact, authority_evidence, classification_evidence = (
-        _authority_artifact_payload(authority)
+    artifact, authority_evidence, classification_evidence = _authority_artifact_payload(
+        authority
     )
     artifact_shape_findings = _compiled_artifact_shape_findings(
         authority,
@@ -690,7 +679,6 @@ def build_authority_review_snapshot(  # noqa: PLR0913
     coverage_payload = {
         "schema": COVERAGE_SCHEMA,
         "spec_version_id": spec.spec_version_id,
-        "resolved_spec_path": str(source.resolved_path),
         "source_content_sha256": source_content_sha256,
         "content_included": content_included,
         "content_truncated": content_truncated,
@@ -718,7 +706,9 @@ def build_authority_review_snapshot(  # noqa: PLR0913
         authority_fingerprint=authority_fingerprint,
         source_spec_hash=source_spec_hash,
         disk_spec_hash=source.disk_sha256,
-        resolved_spec_path=str(source.resolved_path),
+        resolved_spec_path=(
+            str(source.resolved_path) if source.resolved_path is not None else None
+        ),
         compiler_version=authority.compiler_version,
         prompt_hash=authority.prompt_hash,
         fsm_state=fsm_state,
@@ -729,7 +719,7 @@ def build_authority_review_snapshot(  # noqa: PLR0913
         project_name=product.name,
         spec_version_id=spec.spec_version_id,
         content_ref=spec.content_ref,
-        disk_status="readable",
+        disk_status="registry",
         size_bytes=len(source.raw_bytes),
         review_source_limit_bytes=source_limit,
         source_outline=outline,
@@ -1205,8 +1195,7 @@ def _compiled_claim_mismatch_finding(
             "grounding_reason": failure.reason,
         },
         message=(
-            "Compiler assumption does not match the reviewed structured "
-            "specification."
+            "Compiler assumption does not match the reviewed structured specification."
         ),
     )
 
@@ -1517,10 +1506,7 @@ def _render_review_text(packet: JsonDict) -> str:
         f"Recommendation: {recommendation}",
         f"Spec version: {_mapping_value(spec, 'spec_version_id')}",
         f"Pending authority: {_mapping_value(pending, 'authority_id')}",
-        (
-            "Authority fingerprint: "
-            f"{_mapping_value(pending, 'authority_fingerprint')}"
-        ),
+        (f"Authority fingerprint: {_mapping_value(pending, 'authority_fingerprint')}"),
         f"Spec path: {_mapping_value(spec, 'resolved_path')}",
         f"Spec hash: {_mapping_value(spec, 'spec_hash')}",
         (
@@ -1610,9 +1596,7 @@ def _append_text_item_lines(
 ) -> None:
     """Append a capped bullet list from review artifact items."""
     item_lines = [
-        item
-        for item in (_text_item_summary(item) for item in _as_list(value))
-        if item
+        item for item in (_text_item_summary(item) for item in _as_list(value)) if item
     ]
     if not item_lines:
         lines.append(f"- {empty_line}")
@@ -2081,9 +2065,7 @@ def _normalized_persisted_item(item: object, *, fallback_id: str) -> JsonDict:
         "text": _persisted_item_text(item_mapping),
         "support": _persisted_item_support(item_mapping, source_refs),
         "source_refs": source_refs,
-        "source_excerpt": (
-            str(source_excerpt) if source_excerpt is not None else None
-        ),
+        "source_excerpt": (str(source_excerpt) if source_excerpt is not None else None),
     }
 
 

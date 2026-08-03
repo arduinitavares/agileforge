@@ -252,6 +252,28 @@ class _PlanningDecisionLoad:
     reviews: tuple[ReviewDecisionFact, ...]
 
 
+@dataclass(frozen=True)
+class _ScopeReconciliationSources:
+    """Loaded facts that can support a scope-extension reconciliation."""
+
+    registrations: tuple[ScopeExtensionRegistrationFact, ...]
+    authorities: tuple[AuthorityFact, ...]
+    phase_artifacts: tuple[PhaseArtifactFact, ...]
+    planning_artifacts: tuple[PlanningArtifactFact, ...]
+    dependency_reviews: tuple[StoryDependencyReviewFact, ...]
+    sprint_starts: tuple[SprintStartFact, ...]
+
+
+@dataclass(frozen=True)
+class _ScopeReconciliationReferenceIndex:
+    """Canonical immutable reference targets for reconciliation loading."""
+
+    phase: dict[tuple[str, str, str], str]
+    planning: dict[tuple[str, str, str], str]
+    dependency_reviews: frozenset[tuple[str, str]]
+    sprint_starts: frozenset[tuple[str, str]]
+
+
 class WorkflowFactLoadError(RuntimeError):
     """Raised when stored rows cannot form one consistent Project snapshot."""
 
@@ -283,6 +305,12 @@ class WorkflowFactRepository:
         spec_drafts = self._spec_drafts(
             project_id,
             discovery_run_ids,
+            spec_versions,
+        )
+        extension_registrations = self._extension_registrations(
+            project_id,
+            discovery_runs,
+            spec_drafts,
             spec_versions,
         )
         authority_load = self._authorities(project_id, spec_versions)
@@ -395,16 +423,18 @@ class WorkflowFactRepository:
                 {item.spec_draft_id: item.discovery_run_id for item in spec_drafts},
                 spec_versions,
             ),
-            extension_registrations=self._extension_registrations(
-                project_id,
-                discovery_runs,
-                spec_drafts,
-                spec_versions,
-            ),
+            extension_registrations=extension_registrations,
             scope_extension_reconciliations=self._scope_extension_reconciliations(
                 project_id,
                 discovery_runs,
-                authority_load.facts,
+                _ScopeReconciliationSources(
+                    registrations=extension_registrations,
+                    authorities=authority_load.facts,
+                    phase_artifacts=phase_load.facts,
+                    planning_artifacts=planning_load.facts,
+                    dependency_reviews=story_dependency_reviews,
+                    sprint_starts=sprint_starts,
+                ),
             ),
             spec_versions=spec_version_facts,
             repository_baselines=repository_baselines,
@@ -2036,7 +2066,7 @@ class WorkflowFactRepository:
         self,
         project_id: int,
         discovery_runs: tuple[DiscoveryRunFact, ...],
-        authorities: tuple[AuthorityFact, ...],
+        sources: _ScopeReconciliationSources,
     ) -> tuple[ScopeExtensionReconciliationFact, ...]:
         rows = self._session.exec(
             select(ScopeExtensionReconciliation)
@@ -2047,42 +2077,20 @@ class WorkflowFactRepository:
             execution_options=self._query_options(),
         ).all()
         runs = {item.discovery_run_id: item for item in discovery_runs}
-        authority_by_id = {item.authority_id: item for item in authorities}
+        reference_index = self._scope_reconciliation_reference_index(sources)
         facts: list[ScopeExtensionReconciliationFact] = []
         for row in rows:
-            run = runs.get(row.discovery_run_id)
-            authority = authority_by_id.get(row.replacement_authority_id)
-            if (
-                run is None
-                or run.purpose != "extension"
-                or run.closed_at is None
-                or authority is None
-                or authority.authority_fingerprint
-                != row.replacement_authority_fingerprint
-            ):
-                message = "Scope-extension reconciliation relationship is invalid."
-                raise self._error(message)
-            try:
-                references = tuple(
-                    _FACT_REFERENCE_LIST.validate_json(row.artifact_references_json)
-                )
-            except ValidationError as error:
-                message = "Scope-extension reconciliation references are invalid."
-                raise self._error(message) from error
-            payload = [item.model_dump(mode="json") for item in references]
-            if (
-                row.artifact_references_json != canonical_json(payload)
-                or row.artifact_references_fingerprint != canonical_hash(payload)
-                or references
-                != tuple(
-                    sorted(
-                        set(references),
-                        key=lambda item: (item.fact_type, int(item.fact_id)),
-                    )
-                )
-            ):
-                message = "Scope-extension reconciliation references changed."
-                raise self._error(message)
+            self._validate_scope_reconciliation_relationship(
+                project_id,
+                row,
+                runs,
+                sources,
+            )
+            references = self._load_scope_reconciliation_references(
+                project_id,
+                row,
+                reference_index,
+            )
             facts.append(
                 ScopeExtensionReconciliationFact(
                     reconciliation_id=self._required_id(
@@ -2099,6 +2107,205 @@ class WorkflowFactRepository:
                 )
             )
         return tuple(facts)
+
+    @staticmethod
+    def _scope_reconciliation_reference_index(
+        sources: _ScopeReconciliationSources,
+    ) -> _ScopeReconciliationReferenceIndex:
+        phase: dict[tuple[str, str, str], str] = {}
+        for item in sources.phase_artifacts:
+            if item.artifact_type in {"vision", "backlog"}:
+                phase[
+                    (
+                        item.artifact_type,
+                        str(item.artifact_id),
+                        item.artifact_fingerprint,
+                    )
+                ] = item.status
+        planning: dict[tuple[str, str, str], str] = {}
+        for item in sources.planning_artifacts:
+            planning[
+                (
+                    item.artifact_type,
+                    str(item.artifact_id),
+                    item.artifact_fingerprint,
+                )
+            ] = item.status
+        return _ScopeReconciliationReferenceIndex(
+            phase=phase,
+            planning=planning,
+            dependency_reviews=frozenset(
+                (
+                    str(item.review_id),
+                    canonical_hash(item.model_dump(mode="json")),
+                )
+                for item in sources.dependency_reviews
+            ),
+            sprint_starts=frozenset(
+                (
+                    str(item.start_id),
+                    canonical_hash(item.model_dump(mode="json")),
+                )
+                for item in sources.sprint_starts
+            ),
+        )
+
+    def _validate_scope_reconciliation_relationship(
+        self,
+        project_id: int,
+        row: ScopeExtensionReconciliation,
+        runs: dict[int, DiscoveryRunFact],
+        sources: _ScopeReconciliationSources,
+    ) -> None:
+        run = runs.get(row.discovery_run_id)
+        registration = next(
+            (
+                item
+                for item in sources.registrations
+                if item.discovery_run_id == row.discovery_run_id
+            ),
+            None,
+        )
+        authority = next(
+            (
+                item
+                for item in sources.authorities
+                if item.authority_id == row.replacement_authority_id
+            ),
+            None,
+        )
+        if (
+            run is None
+            or run.purpose != "extension"
+            or run.closed_at is None
+            or registration is None
+            or authority is None
+            or authority.spec_version_id != registration.spec_version_id
+            or authority.authority_fingerprint != row.replacement_authority_fingerprint
+        ):
+            message = "Scope-extension reconciliation relationship is invalid."
+            raise self._error(message)
+        acceptances = self._session.exec(
+            select(SpecAuthorityAcceptance).where(
+                col(SpecAuthorityAcceptance.product_id) == project_id,
+                col(SpecAuthorityAcceptance.spec_version_id)
+                == registration.spec_version_id,
+                col(SpecAuthorityAcceptance.pending_authority_id)
+                == row.replacement_authority_id,
+                col(SpecAuthorityAcceptance.authority_fingerprint)
+                == row.replacement_authority_fingerprint,
+                col(SpecAuthorityAcceptance.status) == "accepted",
+            ),
+            execution_options=self._query_options(),
+        ).all()
+        if len(acceptances) != 1:
+            message = "Scope-extension reconciliation relationship is invalid."
+            raise self._error(message)
+
+    def _load_scope_reconciliation_references(
+        self,
+        project_id: int,
+        row: ScopeExtensionReconciliation,
+        index: _ScopeReconciliationReferenceIndex,
+    ) -> tuple[FactReference, ...]:
+        try:
+            references = tuple(
+                _FACT_REFERENCE_LIST.validate_json(row.artifact_references_json)
+            )
+        except ValidationError as error:
+            message = "Scope-extension reconciliation references are invalid."
+            raise self._error(message) from error
+        payload = [item.model_dump(mode="json") for item in references]
+        if any(not item.fact_id.isdigit() for item in references):
+            message = "Scope-extension reconciliation references are invalid."
+            raise self._error(message)
+        canonical_references = tuple(
+            sorted(
+                set(references),
+                key=lambda item: (item.fact_type, int(item.fact_id)),
+            )
+        )
+        if (
+            row.artifact_references_json != canonical_json(payload)
+            or row.artifact_references_fingerprint != canonical_hash(payload)
+            or references != canonical_references
+        ):
+            message = "Scope-extension reconciliation references changed."
+            raise self._error(message)
+        self._validate_scope_reconciliation_reference_set(
+            project_id,
+            references,
+            index,
+        )
+        return references
+
+    def _validate_scope_reconciliation_reference_set(
+        self,
+        project_id: int,
+        references: tuple[FactReference, ...],
+        index: _ScopeReconciliationReferenceIndex,
+    ) -> None:
+        reference_types = tuple(item.fact_type for item in references)
+        required_singletons = {
+            "vision",
+            "backlog",
+            "roadmap",
+            "sprint_plan",
+            "story_readiness",
+            "sprint_start",
+            "scope_downstream_state",
+        }
+        invalid_shape = (
+            any(reference_types.count(item) != 1 for item in required_singletons)
+            or reference_types.count("story") < 1
+            or reference_types.count("story_dependency_review") > 1
+            or any(not item.fingerprint.startswith("sha256:") for item in references)
+        )
+        if invalid_shape:
+            message = "Scope-extension reconciliation references are invalid."
+            raise self._error(message)
+        if any(
+            not self._scope_reconciliation_reference_is_valid(
+                project_id,
+                reference,
+                index,
+            )
+            for reference in references
+        ):
+            message = (
+                "Scope-extension reconciliation reference relationship is invalid."
+            )
+            raise self._error(message)
+
+    @staticmethod
+    def _scope_reconciliation_reference_is_valid(
+        project_id: int,
+        reference: FactReference,
+        index: _ScopeReconciliationReferenceIndex,
+    ) -> bool:
+        key = (
+            reference.fact_type,
+            reference.fact_id,
+            reference.fingerprint,
+        )
+        if reference.fact_type in {"vision", "backlog"}:
+            return index.phase.get(key) in {"accepted", "superseded"}
+        if reference.fact_type in {"roadmap", "story", "sprint_plan"}:
+            return index.planning.get(key) in {"accepted", "superseded"}
+        if reference.fact_type == "story_dependency_review":
+            return (
+                reference.fact_id,
+                reference.fingerprint,
+            ) in index.dependency_reviews
+        if reference.fact_type == "sprint_start":
+            return (
+                reference.fact_id,
+                reference.fingerprint,
+            ) in index.sprint_starts
+        return reference.fact_type in {
+            "story_readiness",
+            "scope_downstream_state",
+        } and reference.fact_id == str(project_id)
 
     def _authorities(
         self,
@@ -2286,7 +2493,7 @@ class WorkflowFactRepository:
                 or sprint.status not in {SprintStatus.ACTIVE, SprintStatus.COMPLETED}
                 or sprint.started_at != row.started_at
                 or plan is None
-                or plan.status != "accepted"
+                or plan.status not in {"accepted", "superseded"}
                 or plan.sprint_id != row.sprint_id
                 or plan.artifact_fingerprint != row.plan_fingerprint
                 or plan.candidate_set_fingerprint != row.candidate_set_fingerprint

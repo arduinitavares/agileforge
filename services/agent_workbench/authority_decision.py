@@ -194,7 +194,7 @@ class ReviewedAuthoritySnapshot:
     authority_fingerprint: str
     source_spec_hash: str
     disk_spec_hash: str
-    resolved_spec_path: str
+    resolved_spec_path: str | None
     compiler_version: str
     prompt_hash: str
     fsm_state: str
@@ -425,8 +425,7 @@ class AuthorityDecisionRunner:
             )
         if (
             isinstance(recorded, dict)
-            and _first_error_code(recorded)
-            == ErrorCode.AUTHORITY_ALREADY_DECIDED.value
+            and _first_error_code(recorded) == ErrorCode.AUTHORITY_ALREADY_DECIDED.value
             and not self._finalize_validation_failed(
                 mutation_event_id=mutation_event_id,
                 lease_owner=lease_owner,
@@ -670,10 +669,10 @@ class AuthorityDecisionRunner:
         actual_fsm_state: object,
         actual_setup_status: object,
     ) -> bool:
-        if (
-            actual_fsm_state in {None, snapshot.fsm_state}
-            and actual_setup_status in {None, snapshot.setup_status}
-        ):
+        if actual_fsm_state in {None, snapshot.fsm_state} and actual_setup_status in {
+            None,
+            snapshot.setup_status,
+        }:
             return True
         return (
             snapshot.fsm_state == "SETUP_REQUIRED"
@@ -1276,9 +1275,7 @@ def normalized_decision_request_hash(
                 else None
             ),
             "reason": (
-                request.reason
-                if isinstance(request, AuthorityRejectRequest)
-                else None
+                request.reason if isinstance(request, AuthorityRejectRequest) else None
             ),
         }
     )
@@ -1467,8 +1464,7 @@ def _validate_incomplete_review_overrides(
         return _invalid_override_error(
             command=command,
             message=(
-                "Incomplete review override does not match a current blocking "
-                "finding."
+                "Incomplete review override does not match a current blocking finding."
             ),
             details={"unmatched_overrides": extra_keys},
         )
@@ -1513,9 +1509,7 @@ def _invalid_override_error(
             ErrorCode.INVALID_COMMAND,
             message=message,
             details=details,
-            remediation=[
-                "Resolve fatal authority review findings before accepting."
-            ],
+            remediation=["Resolve fatal authority review findings before accepting."],
         ),
     )
 
@@ -1557,9 +1551,7 @@ def _is_scope_extension_acceptance(
     if isinstance(context, Mapping):
         if context.get("schema") != "agileforge.scope_extension.v1":
             return False
-        amended_spec_version_id = _workflow_int(
-            context.get("amended_spec_version_id")
-        )
+        amended_spec_version_id = _workflow_int(context.get("amended_spec_version_id"))
         return amended_spec_version_id == spec_version_id and workflow_has_setup_spec
     return scope_discovery is not None and workflow_has_setup_spec
 
@@ -1590,8 +1582,7 @@ def _response_data(
             "next_actions": [
                 {
                     "command": (
-                        f"agileforge {route.next_command} --project-id "
-                        f"{row.product_id}"
+                        f"agileforge {route.next_command} --project-id {row.product_id}"
                     ),
                     "reason": route.next_reason,
                 }
@@ -1789,9 +1780,7 @@ def _success(data: JsonDict) -> JsonDict:
 
 def _command_for_decision(decision: Literal["accept", "reject"]) -> str:
     return (
-        AUTHORITY_ACCEPT_COMMAND
-        if decision == "accept"
-        else AUTHORITY_REJECT_COMMAND
+        AUTHORITY_ACCEPT_COMMAND if decision == "accept" else AUTHORITY_REJECT_COMMAND
     )
 
 

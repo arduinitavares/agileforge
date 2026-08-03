@@ -19,6 +19,7 @@ from models.workflow import (
     SpecDraft,
     SpecDraftDecision,
 )
+from services.specs.authority_selection import pending_authority_fingerprint
 from services.specs.lifecycle_service import (
     ApprovedCanonicalSpec,
     register_approved_spec_from_canonical_json,
@@ -652,6 +653,7 @@ def _authority_is_accepted(
     project_id: int,
     authority_id: int,
     authority_fingerprint: str,
+    registration: ScopeExtensionRegistration,
 ) -> bool:
     authority = session.get(CompiledSpecAuthority, authority_id)
     acceptance = session.exec(
@@ -664,7 +666,10 @@ def _authority_is_accepted(
     return (
         authority is not None
         and acceptance is not None
+        and authority.spec_version_id == registration.spec_version_id
+        and acceptance.spec_version_id == registration.spec_version_id
         and acceptance.authority_fingerprint == authority_fingerprint
+        and pending_authority_fingerprint(authority) == authority_fingerprint
     )
 
 
@@ -675,19 +680,37 @@ def _execute_reconciliation(
     evaluated_at: datetime,
 ) -> TransitionResult:
     run = _open_run(session, request.project_id)
+    registration = session.exec(
+        select(ScopeExtensionRegistration).where(
+            col(ScopeExtensionRegistration.project_id) == request.project_id,
+            col(ScopeExtensionRegistration.discovery_run_id)
+            == request.discovery_run_id,
+        )
+    ).one_or_none()
+    authority_references = tuple(
+        item for item in decision.fact_references if item.fact_type == "authority"
+    )
+    advertised_authority = (
+        authority_references[0] if len(authority_references) == 1 else None
+    )
     if (
         run is None
         or run.discovery_run_id != request.discovery_run_id
         or not _run_matches_decision(run, decision)
+        or registration is None
+        or advertised_authority is None
+        or advertised_authority.fact_id != str(request.replacement_authority_id)
+        or advertised_authority.fingerprint != request.replacement_authority_fingerprint
         or not _authority_is_accepted(
             session,
             project_id=request.project_id,
             authority_id=request.replacement_authority_id,
             authority_fingerprint=request.replacement_authority_fingerprint,
+            registration=registration,
         )
     ):
         return _conflict("Reconciliation does not target accepted replacement facts.")
-    expected = tuple(
+    expected_artifacts = tuple(
         item
         for item in decision.fact_references
         if item.fact_type in {"vision", "backlog", "roadmap", "story"}
@@ -700,9 +723,20 @@ def _execute_reconciliation(
         )
         for item in request.artifact_references
     )
-    if supplied != expected or len(supplied) != len(set(supplied)):
+    if supplied != expected_artifacts or len(supplied) != len(set(supplied)):
         return _conflict("Reconciliation artifact relationships changed.")
-    payload = [item.model_dump(mode="json") for item in supplied]
+    evidence = tuple(
+        item for item in decision.fact_references if item.fact_type != "authority"
+    )
+    canonical_evidence = tuple(
+        sorted(
+            set(evidence),
+            key=lambda item: (item.fact_type, int(item.fact_id)),
+        )
+    )
+    if not evidence or evidence != canonical_evidence:
+        return _conflict("Reconciliation evidence is not canonical.")
+    payload = [item.model_dump(mode="json") for item in evidence]
     row = ScopeExtensionReconciliation(
         project_id=request.project_id,
         discovery_run_id=request.discovery_run_id,

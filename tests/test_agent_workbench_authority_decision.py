@@ -719,8 +719,8 @@ def test_accept_honors_summary_review_token(
 ) -> None:
     """A decision token from summary review mode remains a valid guard."""
     _make_schema_v3_ready(_engine(session))
-    project_id, _spec_version_id, _authority_id, _path = (
-        _seed_pending_review_project(session, tmp_path=tmp_path)
+    project_id, _spec_version_id, _authority_id, _path = _seed_pending_review_project(
+        session, tmp_path=tmp_path
     )
     summary_snapshot = build_authority_review_snapshot(
         project_id=project_id,
@@ -805,11 +805,9 @@ def test_reject_regenerated_pending_authority_after_stale_rejected_workflow_stat
     tmp_path: Path,
 ) -> None:
     _make_schema_v3_ready(_engine(session))
-    project_id, spec_version_id, old_authority_id, _path = (
-        _seed_pending_review_project(
-            session,
-            tmp_path=tmp_path,
-        )
+    project_id, spec_version_id, old_authority_id, _path = _seed_pending_review_project(
+        session,
+        tmp_path=tmp_path,
     )
     workflow = _workflow_for(project_id)
     runner = _runner(session, workflow)
@@ -870,11 +868,9 @@ def test_accept_regenerated_pending_authority_after_stale_rejected_workflow_stat
     tmp_path: Path,
 ) -> None:
     _make_schema_v3_ready(_engine(session))
-    project_id, spec_version_id, old_authority_id, _path = (
-        _seed_pending_review_project(
-            session,
-            tmp_path=tmp_path,
-        )
+    project_id, spec_version_id, old_authority_id, _path = _seed_pending_review_project(
+        session,
+        tmp_path=tmp_path,
     )
     workflow = _workflow_for(project_id)
     runner = _runner(session, workflow)
@@ -1513,7 +1509,7 @@ def test_decision_replay_runs_before_current_pending_state_validation(
     assert result == first
 
 
-def test_changed_disk_hash_after_review_fails_authority_source_changed(
+def test_changed_provenance_file_after_review_does_not_block_acceptance(
     session: Session,
     tmp_path: Path,
 ) -> None:
@@ -1533,11 +1529,11 @@ def test_changed_disk_hash_after_review_fails_authority_source_changed(
         _accept_request(project_id=project_id, review_token=snapshot.review_token)
     )
 
-    assert result["ok"] is False
-    assert result["errors"][0]["code"] == "AUTHORITY_SOURCE_CHANGED"
+    assert result["ok"] is True
+    assert _terminal_rows(session)[0].status == "accepted"
 
 
-def test_missing_disk_spec_at_decision_fails_specific_error(
+def test_missing_provenance_file_at_decision_does_not_block_acceptance(
     session: Session,
     tmp_path: Path,
 ) -> None:
@@ -1552,11 +1548,11 @@ def test_missing_disk_spec_at_decision_fails_specific_error(
         _accept_request(project_id=project_id, review_token=snapshot.review_token)
     )
 
-    assert result["ok"] is False
-    assert result["errors"][0]["code"] == "AUTHORITY_SOURCE_UNAVAILABLE"
+    assert result["ok"] is True
+    assert _terminal_rows(session)[0].status == "accepted"
 
 
-def test_invalid_structured_spec_at_decision_blocks_acceptance(
+def test_invalid_provenance_file_at_decision_does_not_block_acceptance(
     session: Session,
     tmp_path: Path,
 ) -> None:
@@ -1571,9 +1567,8 @@ def test_invalid_structured_spec_at_decision_blocks_acceptance(
         _accept_request(project_id=project_id, review_token=snapshot.review_token)
     )
 
-    assert result["ok"] is False
-    assert result["errors"][0]["code"] == "SPEC_FILE_INVALID"
-    assert _terminal_rows(session) == []
+    assert result["ok"] is True
+    assert _terminal_rows(session)[0].status == "accepted"
 
 
 def test_progress_failure_rolls_back_decision_row(
@@ -1617,9 +1612,7 @@ def test_workflow_failure_after_decision_marks_recovery_required(
 
     assert result["ok"] is False
     assert result["errors"][0]["code"] == "MUTATION_RECOVERY_REQUIRED"
-    assert result["errors"][0]["details"]["completed_steps"] == [
-        "decision_recorded"
-    ]
+    assert result["errors"][0]["details"]["completed_steps"] == ["decision_recorded"]
     assert result["errors"][0]["details"]["next_step"] == "workflow_state_written"
     ledger = _ledger_for_key(session, "accept-key")
     assert ledger.status == MutationStatus.RECOVERY_REQUIRED.value
@@ -1744,12 +1737,15 @@ def test_concurrent_accept_reject_records_one_terminal_decision(
         results = list(executor.map(lambda fn: fn(), [accept, reject]))
 
     assert sum(1 for result in results if result["ok"]) == 1
-    assert sum(
-        1
-        for result in results
-        if not result["ok"]
-        and result["errors"][0]["code"] == "AUTHORITY_ALREADY_DECIDED"
-    ) == 1
+    assert (
+        sum(
+            1
+            for result in results
+            if not result["ok"]
+            and result["errors"][0]["code"] == "AUTHORITY_ALREADY_DECIDED"
+        )
+        == 1
+    )
     assert len(_terminal_rows(session)) == 1
 
 

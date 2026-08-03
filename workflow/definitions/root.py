@@ -21,7 +21,8 @@ from workflow.definitions.planning import PLANNING_NODES
 from workflow.definitions.scope_extension import (
     SCOPE_EXTENSION_NODES,
     scope_execution_is_complete,
-    scope_reconciliation_is_current,
+    scope_reconciled_snapshot,
+    scope_reconciliation_retires_node,
 )
 from workflow.definitions.vision import VISION_NODES
 from workflow.facts import WorkflowFactSnapshot
@@ -90,15 +91,50 @@ _ABANDON_SHELL_NODE = NodeSpec(
 def _scope_aware_lifecycle_node(node: NodeSpec) -> NodeSpec:
     """Retire historical downstream routing only after exact reconciliation."""
 
+    def completed_plan_is_current(snapshot: WorkflowFactSnapshot) -> bool:
+        plans = tuple(
+            item
+            for item in snapshot.planning_artifacts
+            if item.artifact_type == "sprint_plan"
+        )
+        parent_ids = {
+            item.supersedes_artifact_id
+            for item in plans
+            if item.supersedes_artifact_id is not None
+        }
+        current = tuple(
+            item
+            for item in plans
+            if item.artifact_id not in parent_ids and item.status != "superseded"
+        )
+        if len(current) != 1 or current[0].status != "accepted":
+            return False
+        plan = current[0]
+        starts = tuple(
+            item
+            for item in snapshot.sprint_starts
+            if item.sprint_plan_artifact_id == plan.artifact_id
+            and item.plan_fingerprint == plan.artifact_fingerprint
+        )
+        completed_sprint_ids = {
+            item.sprint_id for item in snapshot.sprints if item.status == "completed"
+        }
+        return len(starts) == 1 and starts[0].sprint_id in completed_sprint_ids
+
     def evaluate_rule(
         snapshot: WorkflowFactSnapshot,
         evaluated_at: datetime,
     ) -> tuple[RuleEvaluation, ...]:
-        reconciled = scope_reconciliation_is_current(snapshot)
-        completed_historical_plan = node.node_id in {
-            "planning.sprint.plan",
-            "planning.sprint.start",
-        } and scope_execution_is_complete(snapshot)
+        reconciled = scope_reconciliation_retires_node(snapshot, node.node_id)
+        completed_historical_plan = (
+            node.node_id
+            in {
+                "planning.sprint.plan",
+                "planning.sprint.start",
+            }
+            and scope_execution_is_complete(snapshot)
+            and completed_plan_is_current(snapshot)
+        )
         if reconciled or completed_historical_plan:
             return (
                 RuleEvaluation(
@@ -110,7 +146,10 @@ def _scope_aware_lifecycle_node(node: NodeSpec) -> NodeSpec:
                     ),
                 ),
             )
-        return node.evaluate_rule(snapshot, evaluated_at)
+        return node.evaluate_rule(
+            scope_reconciled_snapshot(snapshot),
+            evaluated_at,
+        )
 
     return replace(node, evaluate_rule=evaluate_rule)
 

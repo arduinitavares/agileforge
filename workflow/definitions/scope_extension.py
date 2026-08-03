@@ -13,12 +13,21 @@ from workflow.contracts import (
     RecommendationKind,
 )
 from workflow.definitions.authority import AUTHORITY_NODES, accepted_current_authority
+from workflow.definitions.planning import (
+    readiness_fingerprint,
+    story_dependency_source_fingerprint,
+)
+from workflow.fingerprints import canonical_hash
 from workflow.graph import (
     ChildGraphSpec,
     NodeSpec,
     RuleCategory,
     RuleEvaluation,
     WorkflowGraph,
+)
+from workflow.planning_integrity import (
+    active_dependency_review_edges,
+    dependency_review_fingerprint,
 )
 
 if TYPE_CHECKING:
@@ -27,10 +36,13 @@ if TYPE_CHECKING:
     from workflow.facts import (
         AuthorityFact,
         DiscoveryRunFact,
+        PhaseArtifactFact,
+        PlanningArtifactFact,
         PrdVersionFact,
         ReviewDecisionFact,
         ScopeExtensionRegistrationFact,
         SpecDraftFact,
+        StoryFact,
         WorkflowFactSnapshot,
     )
 
@@ -41,6 +53,15 @@ class _RunState:
 
     run: DiscoveryRunFact | None
     conflict: bool
+
+
+@dataclass(frozen=True)
+class _DownstreamEvidence:
+    """Exact current downstream facts or one closed prerequisite problem."""
+
+    references: tuple[FactReference, ...] = ()
+    blocker: tuple[str, str] | None = None
+    conflict: bool = False
 
 
 def _evaluation(
@@ -679,35 +700,198 @@ def _authority_rule(
     return _authority_after_registration(snapshot, state.run, registration)
 
 
-def _downstream_references(
+def _current_phase_artifact(
     snapshot: WorkflowFactSnapshot,
-    authority_id: int,
-    authority_fingerprint: str,
-) -> tuple[FactReference, ...]:
-    references = [
-        _reference(item.artifact_type, int(item.artifact_id), item.artifact_fingerprint)
-        for item in snapshot.phase_artifacts
-        if (
-            item.status == "accepted"
-            and item.artifact_type in {"vision", "backlog"}
-            and (
-                item.authority_id != authority_id
-                or item.authority_fingerprint != authority_fingerprint
-            )
-        )
-    ]
-    references.extend(
-        _reference(item.artifact_type, item.artifact_id, item.artifact_fingerprint)
-        for item in snapshot.planning_artifacts
-        if (
-            item.status == "accepted"
-            and item.artifact_type in {"roadmap", "story"}
-            and (
-                item.authority_id != authority_id
-                or item.authority_fingerprint != authority_fingerprint
-            )
-        )
+    artifact_type: str,
+) -> tuple[PhaseArtifactFact | None, bool]:
+    rows = tuple(
+        item for item in snapshot.phase_artifacts if item.artifact_type == artifact_type
     )
+    if not rows:
+        return None, False
+    if any(
+        isinstance(item.artifact_id, bool) or not isinstance(item.artifact_id, int)
+        for item in rows
+    ):
+        return None, True
+    by_id = {int(item.artifact_id): item for item in rows}
+    parents = {
+        item.supersedes_artifact_id
+        for item in rows
+        if item.supersedes_artifact_id is not None
+    }
+    current = tuple(
+        item
+        for item in rows
+        if int(item.artifact_id) not in parents and item.status != "superseded"
+    )
+    conflict = (
+        len(by_id) != len(rows)
+        or not parents <= set(by_id)
+        or any(
+            parent is not None and parent >= int(item.artifact_id)
+            for item in rows
+            if (parent := item.supersedes_artifact_id) is not None
+        )
+        or len(current) != 1
+    )
+    return (current[0] if len(current) == 1 else None), conflict
+
+
+def _current_planning_artifacts(
+    snapshot: WorkflowFactSnapshot,
+    artifact_type: str,
+) -> tuple[tuple[PlanningArtifactFact, ...], bool]:
+    rows = tuple(
+        item
+        for item in snapshot.planning_artifacts
+        if item.artifact_type == artifact_type
+    )
+    if not rows:
+        return (), False
+    groups: dict[str, list[PlanningArtifactFact]] = {}
+    for item in rows:
+        if artifact_type == "story":
+            if item.requirement_id is None:
+                return (), True
+            group_key = item.requirement_id
+        else:
+            group_key = artifact_type
+        groups.setdefault(group_key, []).append(item)
+    current: list[PlanningArtifactFact] = []
+    for group_rows in groups.values():
+        by_id = {item.artifact_id: item for item in group_rows}
+        parents = {
+            item.supersedes_artifact_id
+            for item in group_rows
+            if item.supersedes_artifact_id is not None
+        }
+        leaves = tuple(
+            item
+            for item in group_rows
+            if item.artifact_id not in parents and item.status != "superseded"
+        )
+        if (
+            len(by_id) != len(group_rows)
+            or not parents <= set(by_id)
+            or any(
+                parent is not None and parent >= item.artifact_id
+                for item in group_rows
+                if (parent := item.supersedes_artifact_id) is not None
+            )
+            or len(leaves) != 1
+        ):
+            return (), True
+        current.append(leaves[0])
+    return (
+        tuple(
+            sorted(
+                current,
+                key=lambda item: (item.requirement_id or "", item.artifact_id),
+            )
+        ),
+        False,
+    )
+
+
+def _downstream_state_fingerprint(snapshot: WorkflowFactSnapshot) -> str:
+    review_types = {"vision", "backlog", "roadmap", "story", "sprint"}
+    return canonical_hash(
+        {
+            "phase_artifacts": [
+                item.model_dump(mode="json")
+                for item in sorted(
+                    snapshot.phase_artifacts,
+                    key=lambda item: (item.artifact_type, str(item.artifact_id)),
+                )
+            ],
+            "backlog_reconciliations": [
+                item.model_dump(mode="json")
+                for item in sorted(
+                    snapshot.backlog_reconciliations,
+                    key=lambda item: item.reconciliation_id,
+                )
+            ],
+            "backlog_requirements": [
+                item.model_dump(mode="json")
+                for item in sorted(
+                    snapshot.backlog_requirements,
+                    key=lambda item: (item.backlog_artifact_id, item.requirement_id),
+                )
+            ],
+            "planning_artifacts": [
+                item.model_dump(mode="json")
+                for item in sorted(
+                    snapshot.planning_artifacts,
+                    key=lambda item: (
+                        item.artifact_type,
+                        item.requirement_id or "",
+                        item.artifact_id,
+                    ),
+                )
+            ],
+            "review_decisions": [
+                item.model_dump(mode="json")
+                for item in sorted(
+                    (
+                        item
+                        for item in snapshot.review_decisions
+                        if item.artifact_type in review_types
+                    ),
+                    key=lambda item: (
+                        item.artifact_type,
+                        item.artifact_id,
+                        item.decision_id,
+                    ),
+                )
+            ],
+            "stories": [
+                item.model_dump(mode="json")
+                for item in sorted(snapshot.stories, key=lambda item: item.story_id)
+            ],
+            "story_dependencies": [
+                item.model_dump(mode="json")
+                for item in sorted(
+                    snapshot.story_dependencies,
+                    key=lambda item: (
+                        item.dependent_story_id,
+                        item.prerequisite_story_id,
+                        item.dependency_id,
+                    ),
+                )
+            ],
+            "story_dependency_reviews": [
+                item.model_dump(mode="json")
+                for item in sorted(
+                    snapshot.story_dependency_reviews,
+                    key=lambda item: item.review_id,
+                )
+            ],
+            "sprints": [
+                item.model_dump(mode="json")
+                for item in sorted(snapshot.sprints, key=lambda item: item.sprint_id)
+            ],
+            "sprint_starts": [
+                item.model_dump(mode="json")
+                for item in sorted(
+                    snapshot.sprint_starts,
+                    key=lambda item: item.start_id,
+                )
+            ],
+            "tasks": [
+                item.model_dump(mode="json")
+                for item in sorted(
+                    snapshot.tasks,
+                    key=lambda item: (item.sprint_id, item.story_id, item.task_id),
+                )
+            ],
+        }
+    )
+
+
+def _sorted_references(
+    references: list[FactReference],
+) -> tuple[FactReference, ...]:
     return tuple(
         sorted(
             references,
@@ -716,21 +900,440 @@ def _downstream_references(
     )
 
 
-def scope_reconciliation_is_current(snapshot: WorkflowFactSnapshot) -> bool:
-    """Return whether reconciliation covers exact downstream replacement facts."""
+def _phase_evidence(snapshot: WorkflowFactSnapshot) -> _DownstreamEvidence:
+    references: list[FactReference] = []
+    for artifact_type in ("vision", "backlog"):
+        artifact, conflict = _current_phase_artifact(snapshot, artifact_type)
+        if conflict:
+            return _DownstreamEvidence(conflict=True)
+        if artifact is None:
+            return _DownstreamEvidence(
+                blocker=(
+                    "DOWNSTREAM_ARTIFACT_MISSING",
+                    (
+                        f"Current {artifact_type} facts are required before "
+                        "reconciliation."
+                    ),
+                )
+            )
+        if artifact.status != "accepted":
+            return _DownstreamEvidence(
+                blocker=(
+                    "DOWNSTREAM_REVIEW_UNRESOLVED",
+                    f"Current {artifact_type} review must be accepted first.",
+                )
+            )
+        references.append(
+            _reference(
+                artifact_type,
+                int(artifact.artifact_id),
+                artifact.artifact_fingerprint,
+            )
+        )
+    return _DownstreamEvidence(references=tuple(references))
+
+
+def _planning_evidence(snapshot: WorkflowFactSnapshot) -> _DownstreamEvidence:
+    references: list[FactReference] = []
+    for artifact_type in ("roadmap", "story", "sprint_plan"):
+        artifacts, conflict = _current_planning_artifacts(snapshot, artifact_type)
+        if conflict:
+            return _DownstreamEvidence(conflict=True)
+        if not artifacts:
+            return _DownstreamEvidence(
+                blocker=(
+                    "DOWNSTREAM_ARTIFACT_MISSING",
+                    (
+                        f"Current {artifact_type} facts are required before "
+                        "reconciliation."
+                    ),
+                )
+            )
+        if any(item.status != "accepted" for item in artifacts):
+            return _DownstreamEvidence(
+                blocker=(
+                    "DOWNSTREAM_REVIEW_UNRESOLVED",
+                    f"Current {artifact_type} review must be accepted first.",
+                )
+            )
+        references.extend(
+            _reference(
+                artifact_type,
+                item.artifact_id,
+                item.artifact_fingerprint,
+            )
+            for item in artifacts
+        )
+    return _DownstreamEvidence(references=tuple(references))
+
+
+def _candidate_stories(snapshot: WorkflowFactSnapshot) -> tuple[StoryFact, ...]:
+    return tuple(
+        sorted(
+            (item for item in snapshot.stories if item.sprint_candidate),
+            key=lambda item: item.story_id,
+        )
+    )
+
+
+def _dependency_candidate_problem(
+    snapshot: WorkflowFactSnapshot,
+    candidates: tuple[StoryFact, ...],
+) -> _DownstreamEvidence | None:
+    if any(not item.content_accepted for item in candidates):
+        return _DownstreamEvidence(
+            blocker=(
+                "STORY_CONTENT_NOT_ACCEPTED",
+                "Current candidate Story content must be accepted first.",
+            )
+        )
+    candidate_ids = {item.story_id for item in candidates}
+    if any(
+        item.status == "proposed"
+        and (
+            item.dependent_story_id in candidate_ids
+            or item.prerequisite_story_id in candidate_ids
+        )
+        for item in snapshot.story_dependencies
+    ):
+        return _DownstreamEvidence(
+            blocker=(
+                "STORY_DEPENDENCIES_UNREVIEWED",
+                "Current candidate Story dependencies require review.",
+            )
+        )
+    return None
+
+
+def _reviewed_dependency_evidence(
+    snapshot: WorkflowFactSnapshot,
+    candidates: tuple[StoryFact, ...],
+) -> _DownstreamEvidence:
+    if not candidates:
+        return _DownstreamEvidence()
+    source = story_dependency_source_fingerprint(candidates)
+    selected_story_ids = tuple(item.story_id for item in candidates)
+    reviews = tuple(
+        item
+        for item in snapshot.story_dependency_reviews
+        if item.source_fingerprint == source
+        and item.selected_story_ids == selected_story_ids
+    )
+    if len(reviews) > 1:
+        return _DownstreamEvidence(conflict=True)
+    if not reviews:
+        return _DownstreamEvidence(
+            blocker=(
+                "STORY_DEPENDENCIES_UNREVIEWED",
+                "Current candidate Story dependencies require review.",
+            )
+        )
+    try:
+        current_edges = active_dependency_review_edges(snapshot.story_dependencies)
+    except ValueError:
+        return _DownstreamEvidence(conflict=True)
+    review = reviews[0]
+    if (
+        review.reviewed_edges != current_edges
+        or review.dependency_fingerprint != dependency_review_fingerprint(current_edges)
+    ):
+        return _DownstreamEvidence(
+            blocker=(
+                "STORY_DEPENDENCY_REVIEW_STALE",
+                "Current dependency review no longer matches Story facts.",
+            )
+        )
+    return _DownstreamEvidence(
+        references=(
+            _reference(
+                "story_dependency_review",
+                review.review_id,
+                canonical_hash(review.model_dump(mode="json")),
+            ),
+        )
+    )
+
+
+def _dependency_evidence(snapshot: WorkflowFactSnapshot) -> _DownstreamEvidence:
+    candidates = _candidate_stories(snapshot)
+    problem = _dependency_candidate_problem(snapshot, candidates)
+    if problem is not None:
+        return problem
+    return _reviewed_dependency_evidence(snapshot, candidates)
+
+
+def _readiness_evidence(snapshot: WorkflowFactSnapshot) -> _DownstreamEvidence:
+    candidates = _candidate_stories(snapshot)
+    if any(item.story_points is None or item.rank is None for item in candidates):
+        return _DownstreamEvidence(
+            blocker=(
+                "STORY_READINESS_INCOMPLETE",
+                "Current candidate Stories require readiness repair.",
+            )
+        )
+    return _DownstreamEvidence(
+        references=(
+            _reference(
+                "story_readiness",
+                snapshot.project.project_id,
+                readiness_fingerprint(snapshot.stories),
+            ),
+        )
+    )
+
+
+def _execution_evidence(snapshot: WorkflowFactSnapshot) -> _DownstreamEvidence:
+    completion_blocker = _execution_completion_blocker(snapshot)
+    if completion_blocker is not None:
+        return _DownstreamEvidence(blocker=completion_blocker)
+    plans, conflict = _current_planning_artifacts(snapshot, "sprint_plan")
+    if conflict or len(plans) != 1:
+        return _DownstreamEvidence(conflict=True)
+    current_plan = plans[0]
+    starts = tuple(
+        item
+        for item in snapshot.sprint_starts
+        if item.sprint_plan_artifact_id == current_plan.artifact_id
+        and item.plan_fingerprint == current_plan.artifact_fingerprint
+    )
+    if len(starts) > 1:
+        return _DownstreamEvidence(conflict=True)
+    if not starts:
+        return _DownstreamEvidence(
+            blocker=(
+                "SPRINT_START_REQUIRED",
+                "The accepted current Sprint plan has not been started.",
+            )
+        )
+    return _DownstreamEvidence(
+        references=(
+            _reference(
+                "sprint_start",
+                starts[0].start_id,
+                canonical_hash(starts[0].model_dump(mode="json")),
+            ),
+        )
+    )
+
+
+def _downstream_evidence(snapshot: WorkflowFactSnapshot) -> _DownstreamEvidence:
+    references: list[FactReference] = []
+    for evidence in (
+        _phase_evidence(snapshot),
+        _planning_evidence(snapshot),
+        _dependency_evidence(snapshot),
+        _readiness_evidence(snapshot),
+        _execution_evidence(snapshot),
+    ):
+        if evidence.conflict or evidence.blocker is not None:
+            return evidence
+        references.extend(evidence.references)
+    references.append(
+        _reference(
+            "scope_downstream_state",
+            snapshot.project.project_id,
+            _downstream_state_fingerprint(snapshot),
+        )
+    )
+    return _DownstreamEvidence(references=_sorted_references(references))
+
+
+def _persisted_reconciliation_references(
+    snapshot: WorkflowFactSnapshot,
+) -> tuple[FactReference, ...] | None:
     authority, conflict = accepted_current_authority(snapshot)
     if conflict or authority is None:
-        return False
-    expected = _downstream_references(
-        snapshot,
-        authority.authority_id,
-        authority.authority_fingerprint,
-    )
-    return any(
-        item.replacement_authority_id == authority.authority_id
-        and item.replacement_authority_fingerprint == authority.authority_fingerprint
-        and item.artifact_references == expected
+        return None
+    matching = tuple(
+        item
         for item in snapshot.scope_extension_reconciliations
+        if item.replacement_authority_id == authority.authority_id
+        and item.replacement_authority_fingerprint == authority.authority_fingerprint
+    )
+    return matching[0].artifact_references if len(matching) == 1 else None
+
+
+def _current_reconciliation_references(
+    snapshot: WorkflowFactSnapshot,
+) -> tuple[FactReference, ...] | None:
+    persisted = _persisted_reconciliation_references(snapshot)
+    evidence = _downstream_evidence(snapshot)
+    if (
+        persisted is None
+        or evidence.conflict
+        or evidence.blocker is not None
+        or persisted != evidence.references
+    ):
+        return None
+    return persisted
+
+
+def scope_reconciliation_is_current(snapshot: WorkflowFactSnapshot) -> bool:
+    """Return whether reconciliation covers exact current downstream facts."""
+    return _current_reconciliation_references(snapshot) is not None
+
+
+_NODE_RECONCILIATION_FACT_TYPE: dict[str, str] = {
+    "vision.generate": "vision",
+    "vision.review": "vision",
+    "backlog.generate": "backlog",
+    "backlog.review": "backlog",
+    "backlog.reconcile": "backlog",
+    "planning.roadmap.generate": "roadmap",
+    "planning.roadmap.review": "roadmap",
+    "planning.story.generate": "story",
+    "planning.story.review": "story",
+    "planning.story_dependencies": "story_dependency_review",
+    "planning.story_readiness": "story_readiness",
+    "planning.sprint.plan": "sprint_plan",
+    "planning.sprint.review": "sprint_plan",
+    "planning.sprint.start": "sprint_start",
+}
+
+
+def _current_references_for_type(
+    snapshot: WorkflowFactSnapshot,
+    fact_type: str,
+) -> tuple[FactReference, ...] | None:
+    if fact_type in {"vision", "backlog"}:
+        artifact, conflict = _current_phase_artifact(snapshot, fact_type)
+        if conflict or artifact is None or artifact.status != "accepted":
+            return None
+        return (
+            _reference(
+                fact_type,
+                int(artifact.artifact_id),
+                artifact.artifact_fingerprint,
+            ),
+        )
+    if fact_type in {"roadmap", "story", "sprint_plan"}:
+        artifacts, conflict = _current_planning_artifacts(snapshot, fact_type)
+        if (
+            conflict
+            or not artifacts
+            or any(item.status != "accepted" for item in artifacts)
+        ):
+            return None
+        return tuple(
+            _reference(fact_type, item.artifact_id, item.artifact_fingerprint)
+            for item in artifacts
+        )
+    evidence = {
+        "story_dependency_review": _dependency_evidence,
+        "story_readiness": _readiness_evidence,
+        "sprint_start": _execution_evidence,
+    }[fact_type](snapshot)
+    if evidence.conflict or evidence.blocker is not None:
+        return None
+    return tuple(item for item in evidence.references if item.fact_type == fact_type)
+
+
+def scope_reconciliation_retires_node(
+    snapshot: WorkflowFactSnapshot,
+    node_id: str,
+) -> bool:
+    """Retire only lifecycle nodes backed by exact persisted references."""
+    fact_type = _NODE_RECONCILIATION_FACT_TYPE.get(node_id)
+    persisted = _persisted_reconciliation_references(snapshot)
+    if fact_type is None or persisted is None:
+        return False
+    current = _current_references_for_type(snapshot, fact_type)
+    expected = tuple(item for item in persisted if item.fact_type == fact_type)
+    return current is not None and current == expected
+
+
+def scope_reconciled_snapshot(
+    snapshot: WorkflowFactSnapshot,
+) -> WorkflowFactSnapshot:
+    """Project only exact reconciled artifacts onto current authority lineage."""
+    authority, conflict = accepted_current_authority(snapshot)
+    references = _persisted_reconciliation_references(snapshot)
+    if conflict or authority is None or references is None:
+        return snapshot
+    reference_keys = {
+        (item.fact_type, item.fact_id, item.fingerprint) for item in references
+    }
+    phase_artifacts = tuple(
+        item.model_copy(
+            update={
+                "authority_id": authority.authority_id,
+                "authority_fingerprint": authority.authority_fingerprint,
+            }
+        )
+        if (
+            item.artifact_type,
+            str(item.artifact_id),
+            item.artifact_fingerprint,
+        )
+        in reference_keys
+        else item
+        for item in snapshot.phase_artifacts
+    )
+    planning_artifacts = tuple(
+        item.model_copy(
+            update={
+                "authority_id": authority.authority_id,
+                "authority_fingerprint": authority.authority_fingerprint,
+            }
+        )
+        if (
+            item.artifact_type,
+            str(item.artifact_id),
+            item.artifact_fingerprint,
+        )
+        in reference_keys
+        else item
+        for item in snapshot.planning_artifacts
+    )
+    stories = tuple(
+        item.model_copy(
+            update={
+                "authority_id": authority.authority_id,
+                "authority_fingerprint": authority.authority_fingerprint,
+            }
+        )
+        if item.story_artifact_id is not None
+        and item.content_fingerprint is not None
+        and (
+            "story",
+            str(item.story_artifact_id),
+            item.content_fingerprint,
+        )
+        in reference_keys
+        else item
+        for item in snapshot.stories
+    )
+    return snapshot.model_copy(
+        update={
+            "phase_artifacts": phase_artifacts,
+            "planning_artifacts": planning_artifacts,
+            "stories": stories,
+        }
+    )
+
+
+def _available_reconciliation(
+    snapshot: WorkflowFactSnapshot,
+    instance: str,
+    authority: AuthorityFact,
+) -> tuple[RuleEvaluation, ...]:
+    evidence = _downstream_evidence(snapshot)
+    if evidence.conflict:
+        return _invalid(instance)
+    if evidence.blocker is not None:
+        return _blocked(*evidence.blocker, instance_key=instance)
+    return _evaluation(
+        RuleCategory.AVAILABLE,
+        "SCOPE_EXTENSION_RECONCILIATION_REQUIRED",
+        instance_key=instance,
+        references=(
+            _reference(
+                "authority",
+                authority.authority_id,
+                authority.authority_fingerprint,
+            ),
+            *evidence.references,
+        ),
     )
 
 
@@ -760,23 +1363,7 @@ def _reconciliation_rule(
             "Accept replacement authority before reconciliation.",
             instance_key=instance,
         )
-    return _evaluation(
-        RuleCategory.AVAILABLE,
-        "SCOPE_EXTENSION_RECONCILIATION_REQUIRED",
-        instance_key=instance,
-        references=(
-            _reference(
-                "authority",
-                authority.authority_id,
-                authority.authority_fingerprint,
-            ),
-            *_downstream_references(
-                snapshot,
-                authority.authority_id,
-                authority.authority_fingerprint,
-            ),
-        ),
-    )
+    return _available_reconciliation(snapshot, instance, authority)
 
 
 def _abandon_rule(
@@ -936,5 +1523,7 @@ __all__ = [
     "SCOPE_EXTENSION_NODES",
     "scope_execution_is_complete",
     "scope_extension_graph",
+    "scope_reconciled_snapshot",
     "scope_reconciliation_is_current",
+    "scope_reconciliation_retires_node",
 ]

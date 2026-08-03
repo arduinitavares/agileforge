@@ -335,12 +335,10 @@ def test_review_returns_pending_authority_packet_with_guard_tokens(
     tmp_path: Path,
 ) -> None:
     """Review returns a pending packet with decision guard tokens."""
-    project_id, spec_version_id, authority_id, spec_path = (
-        _seed_pending_review_project(
-            session,
-            tmp_path=tmp_path,
-            spec_content=_base_spec(),
-        )
+    project_id, spec_version_id, authority_id, spec_path = _seed_pending_review_project(
+        session,
+        tmp_path=tmp_path,
+        spec_content=_base_spec(),
     )
 
     result = AuthorityReviewService(engine=_engine(session)).review(
@@ -357,9 +355,7 @@ def test_review_returns_pending_authority_packet_with_guard_tokens(
     assert data["spec"]["resolved_path"] == str(spec_path.resolve())
     assert data["pending_authority"]["authority_id"] == authority_id
     assert data["pending_authority"]["authority_fingerprint"] == (
-        pending_authority_fingerprint(
-            session.get(CompiledSpecAuthority, authority_id)
-        )
+        pending_authority_fingerprint(session.get(CompiledSpecAuthority, authority_id))
     )
     assert guard_tokens == {
         "review_token": guard_tokens["review_token"],
@@ -415,9 +411,7 @@ def test_review_missing_project_returns_project_not_found(
     session: Session,
 ) -> None:
     """Missing projects return the stable project lookup error."""
-    result = AuthorityReviewService(engine=_engine(session)).review(
-        project_id=999_999
-    )
+    result = AuthorityReviewService(engine=_engine(session)).review(project_id=999_999)
 
     assert result["ok"] is False
     assert result["errors"][0]["code"] == "PROJECT_NOT_FOUND"
@@ -738,7 +732,7 @@ def test_review_malformed_compiled_artifact_blocks_acceptance(
         {
             "kind": "accepted_normative_count",
             "count": "not-an-integer",
-        }
+        },
     ]
     malformed_artifact["invariants"] = "bad"
     project_id, _spec_version_id, authority_id, _spec_path = (
@@ -851,10 +845,7 @@ def test_review_malformed_compiled_artifact_blocks_acceptance(
         },
         {
             "id": "ASM-2",
-            "text": (
-                "{'kind': 'accepted_normative_count', "
-                "'count': 'not-an-integer'}"
-            ),
+            "text": ("{'kind': 'accepted_normative_count', 'count': 'not-an-integer'}"),
             "support": "inferred",
             "source_refs": [],
             "source_excerpt": None,
@@ -931,11 +922,11 @@ def test_review_includes_full_source_under_default_limit(
     assert spec["source_content_sha256"] == sha256_prefixed(_base_spec().encode())
 
 
-def test_review_uses_latest_spec_content_ref_instead_of_product_path(
+def test_review_uses_registered_content_not_product_or_provenance_file(
     session: Session,
     tmp_path: Path,
 ) -> None:
-    """Review reads and hashes the latest SpecRegistry content_ref path only."""
+    """Review uses stored content while retaining paths as metadata only."""
     spec_a = _base_spec()
     spec_b = _agileforge_spec_profile_payload(
         artifact_id="SPEC.product-path",
@@ -959,6 +950,7 @@ def test_review_uses_latest_spec_content_ref_instead_of_product_path(
     product.spec_file_path = str(spec_path_b)
     session.add(product)
     session.commit()
+    spec_path_a.write_text(spec_b, encoding="utf-8")
 
     result = AuthorityReviewService(engine=_engine(session)).review(
         project_id=project_id
@@ -968,6 +960,7 @@ def test_review_uses_latest_spec_content_ref_instead_of_product_path(
     assert spec["spec_version_id"] == spec_version_id
     assert spec["resolved_path"] == str(spec_path_a.resolve())
     assert spec["source_content"] == spec_a
+    assert spec["disk_status"] == "registry"
     assert spec["disk_sha256"] == sha256_prefixed(spec_a.encode("utf-8"))
     assert spec["disk_sha256"] != sha256_prefixed(spec_b.encode("utf-8"))
 
@@ -976,7 +969,7 @@ def test_review_missing_latest_spec_content_ref_does_not_fallback_to_product_pat
     session: Session,
     tmp_path: Path,
 ) -> None:
-    """Review returns a source error when latest SpecRegistry has no content_ref."""
+    """Review succeeds from stored content without any provenance path."""
     project_id, _spec_version_id, _authority_id, spec_path = (
         _seed_pending_review_project(
             session,
@@ -995,18 +988,21 @@ def test_review_missing_latest_spec_content_ref_does_not_fallback_to_product_pat
         project_id=project_id
     )
 
-    assert result["ok"] is False
-    assert result["errors"][0]["code"] == "SPEC_FILE_NOT_FOUND"
-    assert result["errors"][0]["details"]["path"] is None
+    assert result["ok"] is True
+    reviewed = result["data"]["spec"]
+    assert reviewed["content_ref"] is None
+    assert reviewed["resolved_path"] is None
+    assert reviewed["disk_status"] == "registry"
+    assert reviewed["source_content"] == _base_spec()
 
 
-def test_review_blocks_stale_registry_hash_without_leaking_source(
+def test_review_blocks_registry_content_hash_mismatch_without_leaking_source(
     session: Session,
     tmp_path: Path,
 ) -> None:
-    """Hash mismatch returns AUTHORITY_SOURCE_CHANGED without source content."""
+    """An internally inconsistent registry row fails closed."""
     original = _base_spec()
-    project_id, _spec_version_id, _authority_id, spec_path = (
+    project_id, _spec_version_id, _authority_id, _spec_path = (
         _seed_pending_review_project(
             session,
             tmp_path=tmp_path,
@@ -1018,7 +1014,11 @@ def test_review_blocks_stale_registry_hash_without_leaking_source(
         requirement_statement="This stale file must not be disclosed.",
         acceptance=["The stale source remains undisclosed."],
     )
-    spec_path.write_text(changed, encoding="utf-8")
+    spec = session.get(SpecRegistry, _spec_version_id)
+    assert spec is not None
+    spec.spec_hash = sha256_prefixed(changed.encode("utf-8"))
+    session.add(spec)
+    session.commit()
 
     result = AuthorityReviewService(engine=_engine(session)).review(
         project_id=project_id
@@ -1028,19 +1028,19 @@ def test_review_blocks_stale_registry_hash_without_leaking_source(
     assert result["data"] is None
     assert result["errors"][0]["code"] == "AUTHORITY_SOURCE_CHANGED"
     assert result["errors"][0]["details"]["registry_spec_hash"] == (
-        sha256_prefixed(original.encode("utf-8"))
+        sha256_prefixed(changed.encode("utf-8"))
     )
     assert result["errors"][0]["details"]["disk_spec_hash"] == (
-        sha256_prefixed(changed.encode("utf-8"))
+        sha256_prefixed(original.encode("utf-8"))
     )
     assert "source_content" not in result["errors"][0]["details"]
 
 
-def test_review_resolves_symlink_and_blocks_mismatched_target_hash(
+def test_review_treats_symlink_target_as_non_authoritative_metadata(
     session: Session,
     tmp_path: Path,
 ) -> None:
-    """Symlink paths report resolved targets and block mismatched content."""
+    """A mismatched symlink target does not replace stored registry content."""
     original = _base_spec()
     target_path = tmp_path / "target.json"
     target_path.write_text(
@@ -1072,11 +1072,12 @@ def test_review_resolves_symlink_and_blocks_mismatched_target_hash(
     )
 
     assert authority_id
-    assert result["ok"] is False
-    assert result["errors"][0]["code"] == "AUTHORITY_SOURCE_CHANGED"
-    assert result["errors"][0]["details"]["resolved_path"] == str(
-        target_path.resolve()
-    )
+    assert result["ok"] is True
+    reviewed = result["data"]["spec"]
+    assert reviewed["content_ref"] == str(symlink_path)
+    assert reviewed["resolved_path"] == str(symlink_path.absolute())
+    assert reviewed["source_content"] == original
+    assert reviewed["disk_sha256"] == sha256_prefixed(original.encode("utf-8"))
 
 
 def test_review_omits_large_structured_source_and_marks_omission_complete(
@@ -1701,7 +1702,8 @@ def test_review_blocks_tampered_typed_claims_with_full_details_and_identity(
             "artifact_id",
             "claimed_source_item_ids",
             "actual_source_item_ids",
-        } <= finding["details"].keys()
+        }
+        <= finding["details"].keys()
         for finding in findings
     )
     assert len({finding["finding_id"] for finding in findings}) == len(findings)
@@ -1806,13 +1808,9 @@ def test_review_packet_exposes_scope_discovery_provenance(
         "assumptions": ["Reviewers are available before authority acceptance."],
         "non_goals": ["Do not generate PRDs inside AgileForge."],
         "risks": ["Agents may try to skip discovery artifacts."],
-        "evidence_conflicts": [
-            "ADR and context disagreed on the first command."
-        ],
+        "evidence_conflicts": ["ADR and context disagreed on the first command."],
         "open_questions": [],
-        "glossary_changes": [
-            {"term": "Challenge Artifact", "status": "settled"}
-        ],
+        "glossary_changes": [{"term": "Challenge Artifact", "status": "settled"}],
     }
     assert discovery["prd"] == {
         "prd_id": 1,
@@ -1833,9 +1831,10 @@ def test_review_packet_exposes_scope_discovery_provenance(
         "evidence_conflict_count": 1,
     }
     assert not isinstance(snapshot, dict)
-    assert snapshot.payload["scope_discovery_fingerprint"] == discovery[
-        "scope_discovery_fingerprint"
-    ]
+    assert (
+        snapshot.payload["scope_discovery_fingerprint"]
+        == discovery["scope_discovery_fingerprint"]
+    )
 
 
 def test_authority_review_packet_exposes_authority_quality(
@@ -1980,11 +1979,11 @@ def test_review_full_include_spec_includes_large_structured_source(
     assert spec["coverage_summary"]["omission_assessment"] == "complete"
 
 
-def test_review_token_changes_when_disk_hash_changes(
+def test_review_token_is_stable_when_provenance_file_changes(
     session: Session,
     tmp_path: Path,
 ) -> None:
-    """Review token changes when the on-disk source hash changes."""
+    """Derived provenance-file changes do not alter review authority."""
     project_id, _spec_version_id, _authority_id, spec_path = (
         _seed_pending_review_project(
             session,
@@ -1997,25 +1996,17 @@ def test_review_token_changes_when_disk_hash_changes(
     first = service.review(project_id=project_id)["data"]["guard_tokens"]
     changed = _agileforge_spec_profile_payload(
         requirement_statement="The review output must include fresh guard tokens.",
-        acceptance=[
-            "The authority review packet includes fresh guard token evidence."
-        ],
+        acceptance=["The authority review packet includes fresh guard token evidence."],
     )
     spec_path.write_text(changed, encoding="utf-8")
-    spec = session.get(SpecRegistry, _spec_version_id)
-    assert spec is not None
-    spec.spec_hash = canonical_spec_hash(
-        TechnicalSpecArtifact.model_validate_json(changed)
-    )
-    session.add(spec)
-    session.commit()
     second = service.review(project_id=project_id)["data"]["guard_tokens"]
 
-    assert first["review_token"] != second["review_token"]
-    assert first["expected_disk_spec_hash"] != second["expected_disk_spec_hash"]
-    assert first["expected_authority_fingerprint"] == second[
-        "expected_authority_fingerprint"
-    ]
+    assert first["review_token"] == second["review_token"]
+    assert first["expected_disk_spec_hash"] == second["expected_disk_spec_hash"]
+    assert (
+        first["expected_authority_fingerprint"]
+        == second["expected_authority_fingerprint"]
+    )
 
 
 def test_review_snapshot_recomputes_packet_review_token(
@@ -2040,7 +2031,9 @@ def test_review_snapshot_recomputes_packet_review_token(
         project_id=project_id
     )
 
-    expected_token = f"{REVIEW_TOKEN_SCHEMA}:{canonical_json_hash(snapshot.payload)}"
+    expected_token = (
+        f"{REVIEW_TOKEN_SCHEMA}:{canonical_json_hash(snapshot.fingerprint_payload)}"
+    )
     assert snapshot.review_token == expected_token
     assert result["data"]["guard_tokens"]["review_token"] == expected_token
     assert result["data"]["guard_tokens"] == snapshot.guard_tokens
@@ -2092,11 +2085,11 @@ def test_coverage_fingerprint_sorts_nested_covered_by_and_source_refs() -> None:
     assert coverage_summary_fingerprint(first) == coverage_summary_fingerprint(second)
 
 
-def test_missing_spec_file_returns_spec_file_not_found(
+def test_missing_provenance_file_does_not_block_review(
     session: Session,
     tmp_path: Path,
 ) -> None:
-    """Missing source files return SPEC_FILE_NOT_FOUND."""
+    """A deleted provenance file does not block stored-content review."""
     project_id, _spec_version_id, _authority_id, spec_path = (
         _seed_pending_review_project(
             session,
@@ -2110,16 +2103,18 @@ def test_missing_spec_file_returns_spec_file_not_found(
         project_id=project_id
     )
 
-    assert result["ok"] is False
-    assert result["errors"][0]["code"] == "SPEC_FILE_NOT_FOUND"
-    assert result["errors"][0]["details"]["resolved_path"] == str(spec_path.resolve())
+    assert result["ok"] is True
+    reviewed = result["data"]["spec"]
+    assert reviewed["resolved_path"] == str(spec_path.resolve())
+    assert reviewed["source_content"] == _base_spec()
+    assert reviewed["disk_status"] == "registry"
 
 
-def test_invalid_utf8_spec_file_returns_spec_file_invalid(
+def test_invalid_registry_content_returns_spec_file_invalid(
     session: Session,
     tmp_path: Path,
 ) -> None:
-    """Invalid UTF-8 source files return SPEC_FILE_INVALID."""
+    """Invalid authoritative registry content fails closed."""
     project_id, _spec_version_id, _authority_id, _spec_path = (
         _seed_pending_review_project(
             session,
@@ -2135,4 +2130,4 @@ def test_invalid_utf8_spec_file_returns_spec_file_invalid(
 
     assert result["ok"] is False
     assert result["errors"][0]["code"] == "SPEC_FILE_INVALID"
-    assert "utf-8" in result["errors"][0]["details"]["reason"]
+    assert "non-JSON spec content" in result["errors"][0]["details"]["reason"]
