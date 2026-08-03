@@ -170,6 +170,28 @@ def test_initialize_persists_private_atomic_manifest(checkout: Path) -> None:
     assert list(paths.root.glob(".profile.*.tmp")) == []
 
 
+def test_initialize_refuses_preexisting_root_without_modifying_databases(
+    checkout: Path,
+) -> None:
+    """Refuse stale database adoption from a manifest-free profile root."""
+    paths = profile_paths(checkout, "stale-databases")
+    paths.root.mkdir(parents=True)
+    business_bytes = b"stale business database\x00\x01"
+    trace_bytes = b"stale trace database\x02\x03"
+    paths.business_database.write_bytes(business_bytes)
+    paths.trace_database.write_bytes(trace_bytes)
+
+    with pytest.raises(FileExistsError, match="profile root already exists"):
+        initialize_profile_record(checkout, "stale-databases")
+
+    assert paths.business_database.read_bytes() == business_bytes
+    assert paths.trace_database.read_bytes() == trace_bytes
+    assert set(paths.root.iterdir()) == {
+        paths.business_database,
+        paths.trace_database,
+    }
+
+
 def test_profile_fingerprints_are_deterministic(checkout: Path) -> None:
     """Hash model configuration and sorted tracked schema sources canonically."""
     profile = initialize_profile_record(checkout, "fingerprint")

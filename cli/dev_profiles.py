@@ -308,6 +308,20 @@ def _ensure_private_directory(checkout_root: Path, path: Path) -> None:
     path.chmod(_DIRECTORY_MODE)
 
 
+def _create_profile_root(checkout_root: Path, path: Path) -> None:
+    _validate_state_path(checkout_root, path)
+    try:
+        path.mkdir(mode=_DIRECTORY_MODE, parents=True, exist_ok=False)
+    except FileExistsError as error:
+        message = f"profile root already exists: {path}"
+        raise FileExistsError(message) from error
+    metadata = path.lstat()
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+        message = f"profile root must be a real directory: {path}"
+        raise ValueError(message)
+    path.chmod(_DIRECTORY_MODE)
+
+
 def _write_profile(
     checkout_root: Path,
     paths: ProfilePaths,
@@ -375,9 +389,6 @@ def initialize_profile_record(
     """Create and atomically persist one profile provenance record."""
     checkout = _checkout_provenance(checkout_root)
     paths = profile_paths(checkout.root, profile_name)
-    if paths.manifest.exists():
-        message = f"profile already exists: {profile_name}"
-        raise FileExistsError(message)
     if mode is ProfileMode.ACCEPTANCE:
         if (
             expected_commit is None
@@ -413,7 +424,8 @@ def initialize_profile_record(
         created_at=timestamp,
         last_used_at=timestamp,
     )
-    for directory in (paths.root, paths.artifacts, paths.logs):
+    _create_profile_root(checkout.root, paths.root)
+    for directory in (paths.artifacts, paths.logs):
         _ensure_private_directory(checkout.root, directory)
     _write_profile(checkout.root, paths, profile)
     return profile
