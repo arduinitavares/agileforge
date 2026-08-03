@@ -1497,7 +1497,7 @@ def _hard_ban_is_non_normative_only(
     ):
         return False
     if not context.original_source_map:
-        return True
+        return False
     original_id = (
         context.original_invariants[index].id
         if index < len(context.original_invariants)

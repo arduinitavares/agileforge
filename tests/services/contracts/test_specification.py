@@ -1335,6 +1335,65 @@ def test_normalizer_filters_non_normative_decision_hard_ban() -> None:
     )
 
 
+def test_normalizer_keeps_hard_ban_without_original_source_map() -> None:
+    """Repaired evidence cannot prove a hard ban was originally non-normative."""
+    source_text = canonical_spec_json(
+        TechnicalSpecArtifact.model_validate(
+            {
+                "schema_version": "agileforge.spec.v1",
+                "artifact_id": "SPEC.decision-filter-missing-map",
+                "title": "Decision Filter Missing Map Spec",
+                "status": "draft",
+                "version": "0.1",
+                "created_at": "2026-06-05",
+                "updated_at": "2026-06-05",
+                "summary": "Exercise missing provenance handling.",
+                "problem_statement": "Missing provenance must stay fail-closed.",
+                "items": [
+                    {
+                        "id": "DECISION.research-before-algorithm",
+                        "type": "DECISION",
+                        "status": "accepted",
+                        "title": "Research before algorithm",
+                        "statement": "Research before deciding final algorithm.",
+                    }
+                ],
+            }
+        )
+    )
+    payload = _legacy_success_payload()
+    payload["invariants"] = [
+        {
+            "id": "INV-1111111111111111",
+            "type": "FORBIDDEN_CAPABILITY",
+            "parameters": {"capability": "final algorithm"},
+        }
+    ]
+    payload["source_map"] = [
+        {
+            "invariant_id": "INV-1111111111111111",
+            "excerpt": "Research before deciding final algorithm.",
+            "location": "DECISION.research-before-algorithm.statement",
+        }
+    ]
+    success = SpecAuthorityCompilationSuccess.model_validate(payload)
+    original_invariants = [
+        invariant.model_copy(deep=True) for invariant in success.invariants
+    ]
+
+    removed = normalizer._filter_non_normative_source_hard_bans(
+        success,
+        source_text=source_text,
+        original_invariants=original_invariants,
+        original_source_map=[],
+    )
+
+    assert removed == 0
+    assert [invariant.type for invariant in success.invariants] == [
+        InvariantType.FORBIDDEN_CAPABILITY
+    ]
+
+
 def test_normalizer_filters_non_normative_open_question_hard_ban() -> None:
     """OPEN_QUESTION guidance must not become a hard forbidden invariant."""
     source_text = canonical_spec_json(
