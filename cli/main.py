@@ -20,6 +20,7 @@ from cli.workflow_commands import (
     workflow_next,
     workflow_position,
 )
+from services.agent_workbench.version import agileforge_version
 from services.application import AgenticActionRequest, production_application
 from utils.logging_config import configure_logging
 from utils.model_config import get_model_id
@@ -363,6 +364,7 @@ def _install_read_commands(
 def build_parser() -> argparse.ArgumentParser:
     """Build the graph-backed command tree."""
     parser = _ArgumentParser(prog="agileforge")
+    parser.add_argument("--version", action="version", version=agileforge_version())
     subparsers = parser.add_subparsers(
         dest="group",
         required=True,

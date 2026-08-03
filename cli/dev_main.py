@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import platform
 import sqlite3
 import stat
@@ -14,8 +16,9 @@ from enum import IntEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, NoReturn, Protocol
 
+from dotenv import dotenv_values
 from git.exc import GitCommandError
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
 from cli.dev_profiles import (
     ProfileMode,
@@ -48,6 +51,8 @@ FORBIDDEN_BUSINESS_TABLES: tuple[str, ...] = (
 _MAX_PORT = 65_535
 _MIN_UV_VERSION_PARTS = 2
 _GIT_COMMIT_LENGTH = 40
+_PROVIDER_CREDENTIAL = "OPEN_ROUTER_API_KEY"
+_JSON_OBJECT = TypeAdapter(dict[str, object])
 
 
 class ExitCode(IntEnum):
@@ -167,6 +172,22 @@ class ErrorResult(BaseModel):
     status: Literal["error"] = "error"
     exit_code: Literal[1] = 1
     error: str
+
+
+class CliResult(BaseModel):
+    """Combined production result and launcher provenance."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    checkout: Path
+    commit: str
+    profile: str
+    profile_mode: ProfileMode
+    business_database: Path
+    trace_database: Path
+    command: tuple[str, ...]
+    exit_code: int
+    result: dict[str, object]
 
 
 class DeveloperCommandError(RuntimeError):
@@ -327,6 +348,16 @@ class InitRequest:
     expected_commit: str | None
 
 
+@dataclass(frozen=True, slots=True)
+class CliRequest:
+    """Validated launcher inputs for one production CLI process."""
+
+    profile_name: str
+    raw_arguments: tuple[str, ...]
+    secrets_file: Path | None
+    json_output: bool
+
+
 def _initialize_profile(
     *,
     checkout_root: Path,
@@ -444,6 +475,128 @@ def _profile_info(
     )
 
 
+def _forwarded_arguments(raw_arguments: Sequence[str]) -> tuple[str, ...]:
+    if not raw_arguments or raw_arguments[0] != "--":
+        message = "production CLI arguments must follow --"
+        raise DeveloperCommandError(message)
+    forwarded = tuple(raw_arguments[1:])
+    if not forwarded:
+        message = "production CLI command is required after --"
+        raise DeveloperCommandError(message)
+    return forwarded
+
+
+def _provider_environment(secrets_file: Path | None) -> dict[str, str]:
+    file_value: str | None = None
+    if secrets_file is not None:
+        metadata = secrets_file.lstat()
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+            message = f"secrets file must be a regular file: {secrets_file}"
+            raise DeveloperCommandError(message)
+        values = dotenv_values(
+            dotenv_path=secrets_file,
+            verbose=False,
+            interpolate=False,
+        )
+        file_value = values.get(_PROVIDER_CREDENTIAL)
+
+    if _PROVIDER_CREDENTIAL in os.environ:
+        return {_PROVIDER_CREDENTIAL: os.environ[_PROVIDER_CREDENTIAL]}
+    if file_value is not None:
+        return {_PROVIDER_CREDENTIAL: file_value}
+    return {}
+
+
+def _redact_text(value: str, secret_values: tuple[str, ...]) -> str:
+    redacted = value
+    for secret in secret_values:
+        if secret:
+            redacted = redacted.replace(secret, "[REDACTED]")
+    return redacted
+
+
+def _production_json(
+    stdout: str,
+    *,
+    secret_values: tuple[str, ...],
+) -> dict[str, object]:
+    try:
+        payload = _JSON_OBJECT.validate_json(stdout)
+    except ValidationError as error:
+        message = "production CLI stdout must contain exactly one JSON object"
+        raise DeveloperCommandError(message) from error
+    serialized = json.dumps(payload, sort_keys=True, default=str)
+    redacted = _redact_text(serialized, secret_values)
+    return _JSON_OBJECT.validate_json(redacted)
+
+
+def _emit_cli_provenance(
+    profile: RuntimeProfile,
+    *,
+    current_commit: str,
+) -> None:
+    emit(f"Checkout: {profile.checkout.root}", file=sys.stderr)
+    emit(f"Commit: {current_commit}", file=sys.stderr)
+    emit(f"Profile: {profile.name} ({profile.mode.value})", file=sys.stderr)
+    emit(f"Business database: {profile.business_database}", file=sys.stderr)
+    emit(f"Trace database: {profile.trace_database}", file=sys.stderr)
+
+
+def _run_cli(
+    *,
+    checkout_root: Path,
+    request: CliRequest,
+    runner: CommandRunner,
+    clock: Clock,
+) -> int:
+    forwarded = _forwarded_arguments(request.raw_arguments)
+    profile = load_profile(checkout_root, request.profile_name)
+    _verify_business_schema(profile.business_database)
+    current_commit = _current_commit(runner, checkout_root)
+    profile = touch_profile_last_used(
+        checkout_root,
+        request.profile_name,
+        now=clock.now(),
+    )
+    environment = profile_environment(profile)
+    environment.update(_provider_environment(request.secrets_file))
+    secret_values = tuple(
+        value
+        for key, value in environment.items()
+        if key == _PROVIDER_CREDENTIAL and value
+    )
+    child_arguments = (sys.executable, "-m", "cli.main", *forwarded)
+    result = runner.run(
+        child_arguments,
+        cwd=profile.checkout.root,
+        env=environment,
+    )
+
+    if request.json_output:
+        _print_json(
+            CliResult(
+                checkout=profile.checkout.root,
+                commit=current_commit,
+                profile=profile.name,
+                profile_mode=profile.mode,
+                business_database=profile.business_database,
+                trace_database=profile.trace_database,
+                command=forwarded,
+                exit_code=result.exit_code,
+                result=_production_json(
+                    result.stdout,
+                    secret_values=secret_values,
+                ),
+            )
+        )
+        return result.exit_code
+
+    sys.stdout.write(result.stdout)
+    _emit_cli_provenance(profile, current_commit=current_commit)
+    sys.stderr.write(_redact_text(result.stderr, secret_values))
+    return result.exit_code
+
+
 def _print_json(payload: BaseModel) -> None:
     emit(payload.model_dump_json(indent=2, by_alias=True))
 
@@ -517,6 +670,18 @@ def main(
             )
             _emit_info(result, json_output=json_output)
             return ExitCode.SUCCESS
+        if arguments.command == "cli":
+            return _run_cli(
+                checkout_root=root,
+                request=CliRequest(
+                    profile_name=arguments.profile,
+                    raw_arguments=tuple(arguments.agileforge_arguments),
+                    secrets_file=arguments.secrets_file,
+                    json_output=json_output,
+                ),
+                runner=command_runner,
+                clock=command_clock,
+            )
         if arguments.command == "reset":
             removed = reset_profile(
                 root,

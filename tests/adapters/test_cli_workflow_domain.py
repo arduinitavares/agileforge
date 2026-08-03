@@ -1,8 +1,12 @@
 """CLI adapter tests for the WorkflowDomain cutover."""
 
+import importlib
 from pathlib import Path
 from typing import cast
 
+import pytest
+
+from cli import main as cli_main
 from cli.workflow_commands import (
     AuthorityDecisionArguments,
     ProjectShellArguments,
@@ -14,6 +18,26 @@ from cli.workflow_commands import (
 from tests.adapters.test_command_renderer import position_fixture
 from workflow.contracts import WorkflowPosition
 from workflow.requests import DecideAuthority, OpenProjectShell
+
+
+def test_version_does_not_compose_production_application(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Print installed package version before application composition."""
+    version_module = importlib.import_module("services.agent_workbench.version")
+
+    def fail_composition() -> None:
+        message = "production application must not be composed"
+        raise AssertionError(message)
+
+    monkeypatch.setattr(cli_main, "production_application", fail_composition)
+
+    with pytest.raises(SystemExit) as error:
+        cli_main.main(["--version"])
+
+    assert error.value.code == 0
+    assert capsys.readouterr().out == f"{version_module.agileforge_version()}\n"
 
 
 class _FakeApplication:
