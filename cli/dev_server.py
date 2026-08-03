@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import socket
-import subprocess
+import subprocess  # nosec B404
 import sys
 import time
 from dataclasses import dataclass
@@ -131,7 +131,7 @@ def start_ui(
     )
     if reload:
         arguments = (*arguments, "--reload")
-    process = subprocess.Popen(  # noqa: S603 - fixed argv, never a shell
+    process = subprocess.Popen(  # noqa: S603  # nosec B603
         arguments,
         cwd=checkout_root,
         env=dict(environment),
@@ -209,7 +209,10 @@ def _read_ready_payload(
     timeout: float,
 ) -> DashboardConfig:
     url = f"{child.url}{READINESS_PATH}"
-    with urlopen(url, timeout=timeout) as response:  # noqa: S310 - fixed loopback URL
+    with urlopen(  # noqa: S310  # nosec B310
+        url,
+        timeout=timeout,
+    ) as response:
         if response.status != _HTTP_OK:
             message = f"dashboard readiness returned HTTP {response.status}"
             raise UIReadinessError(message)

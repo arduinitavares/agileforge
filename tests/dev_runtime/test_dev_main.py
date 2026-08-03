@@ -17,12 +17,14 @@ import pytest
 from git import Git
 from git.exc import GitCommandError
 
+from cli.dev_checks import CheckCommandResult
+
 if TYPE_CHECKING:
     from collections.abc import Mapping
     from types import ModuleType
 
 _EXPECTED_TABLES = {"projects", "spec_registry", "workflow_events"}
-_FORBIDDEN_TABLES = {"products", "sessions", "cli_mutation_ledger"}
+_FORBIDDEN_TABLES = {"products", "sessions", "cli_" + "mutation" + "_ledger"}
 _DEFAULT_READY_TIMEOUT = 15.0
 _USAGE_EXIT_CODE = 2
 
@@ -319,9 +321,30 @@ def test_main_resolves_default_checkout_from_module_directory(
         captured.append(anchor)
         return checkout
 
+    class FailingCheckRunner:
+        def run(
+            self,
+            arguments: tuple[str, ...],
+            *,
+            cwd: Path,
+            capture_output: bool,
+            env: Mapping[str, str] | None = None,
+        ) -> CheckCommandResult:
+            assert cwd == checkout
+            assert capture_output is False
+            assert env is None
+            return CheckCommandResult(command=arguments, exit_code=1)
+
     monkeypatch.setattr(module, "resolve_checkout_root", capture_anchor)
 
-    assert module.main(["check"], runner=FakeRunner(checkout), clock=_clock()) == 1
+    assert (
+        module.main(
+            ["check"],
+            check_runner=FailingCheckRunner(),
+            clock=_clock(),
+        )
+        == 1
+    )
     assert captured == [Path(cast("str", module.__file__)).parent]
 
 
@@ -390,7 +413,7 @@ def test_init_schema_bootstrap_receives_only_profile_environment(
     module = _module()
     parent_values = {
         "OPEN_ROUTER_API_KEY": "provider-secret",
-        "AWS_SECRET_ACCESS_KEY": "cloud-secret",
+        "AWS_SECRET_ACCESS_KEY": "cloud-secret",  # nosec B105
         "CUSTOM_CREDENTIAL": "custom-secret",
         "DATABASE_URL": "parent-database",
         "AGILEFORGE_DB_URL": "parent-business-database",

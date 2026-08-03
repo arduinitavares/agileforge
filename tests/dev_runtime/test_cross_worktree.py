@@ -6,7 +6,7 @@ import json
 import os
 import shutil
 import signal
-import subprocess
+import subprocess  # nosec B404
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -42,7 +42,7 @@ def _run(
     cwd: Path,
     env: Mapping[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    completed = subprocess.run(  # noqa: S603 - fixed local test commands
+    completed = subprocess.run(  # noqa: S603  # nosec B603
         arguments,
         cwd=cwd,
         env=None if env is None else dict(env),
@@ -118,11 +118,13 @@ def _commit_launcher_fixtures(source_root: Path, clone: Path) -> tuple[str, str]
     _git(clone, "config", "user.email", "cross-worktree@example.invalid")
     copied_files = (
         "api.py",
+        "cli/dev_checks.py",
         "cli/dev_main.py",
         "cli/dev_server.py",
         "cli/main.py",
         "frontend/__init__.py",
         "pyproject.toml",
+        "uv.lock",
     )
     for relative in copied_files:
         shutil.copy2(source_root / relative, clone / relative)
@@ -178,7 +180,7 @@ def _start_ui_launcher(
     *,
     env: Mapping[str, str],
 ) -> subprocess.Popen[str]:
-    return subprocess.Popen(  # noqa: S603 - fixed local launcher path
+    return subprocess.Popen(  # noqa: S603  # nosec B603
         (
             str(worktree / "agileforge-dev"),
             "ui",
@@ -207,7 +209,7 @@ def _launcher_readiness(process: subprocess.Popen[str]) -> dict[str, object]:
 
 def _dashboard_config(port: int) -> dict[str, object]:
     url = f"http://127.0.0.1:{port}/api/dashboard/config"
-    with urlopen(url, timeout=5) as response:  # noqa: S310 - fixed loopback URL
+    with urlopen(url, timeout=5) as response:  # noqa: S310  # nosec B310
         assert response.status == _HTTP_OK
         return cast("dict[str, object]", json.loads(response.read()))
 

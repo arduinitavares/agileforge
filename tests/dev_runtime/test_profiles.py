@@ -142,7 +142,10 @@ def test_profile_contracts_are_frozen_and_forbid_unknown_fields(
 
     with pytest.raises(ValidationError, match="extra_forbidden"):
         CheckoutProvenance.model_validate(
-            {**profile.checkout.model_dump(mode="json"), "token": "secret"}
+            {
+                **profile.checkout.model_dump(mode="json"),
+                "token": "secret",  # nosec B105
+            }
         )
 
 

@@ -36,6 +36,7 @@ dependencies = [
 [package.dev-dependencies]
 dev = [
     { name = "bandit" },
+    { name = "pyrepo-check" },
     { name = "pytest-cov" },
     { name = "ty" },
 ]
@@ -66,6 +67,7 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "bandit", specifier = ">=1.9.4" },
+    { name = "pyrepo-check", git = "https://github.com/arduinitavares/pyrepo-check.git?rev=8f88465e1ca88bf29b508f3c0f4eb96f4de31623" },
     { name = "pytest-cov", specifier = ">=7.0.0" },
     { name = "ty", specifier = ">=0.0.26" },
 ]
@@ -2122,6 +2124,11 @@ sdist = { url = "https://files.pythonhosted.org/packages/1a/51/27a5ad5f939d08f69
 wheels = [
     { url = "https://files.pythonhosted.org/packages/73/b8/a0e2790ae249d6f38c9f66de7a211621a7ab2650217bcd04e1262f578a56/pyopenssl-26.2.0-py3-none-any.whl", hash = "sha256:4f9d971bc5298b8bc1fab282803da04bf000c755d4ad9d99b52de2569ca19a70", size = 55823, upload-time = "2026-05-04T23:06:08.395Z" },
 ]
+
+[[package]]
+name = "pyrepo-check"
+version = "0.1.0"
+source = { git = "https://github.com/arduinitavares/pyrepo-check.git?rev=8f88465e1ca88bf29b508f3c0f4eb96f4de31623#8f88465e1ca88bf29b508f3c0f4eb96f4de31623" }
 
 [[package]]
 name = "pytest"

@@ -7,7 +7,7 @@ import json
 import signal
 import socket
 import sqlite3
-import subprocess
+import subprocess  # nosec B404
 import sys
 from dataclasses import dataclass, field
 from datetime import UTC, datetime

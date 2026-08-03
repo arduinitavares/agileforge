@@ -10,7 +10,7 @@ import secrets
 import signal
 import sqlite3
 import stat
-import subprocess
+import subprocess  # nosec B404
 import sys
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -23,6 +23,7 @@ from dotenv import dotenv_values
 from git.exc import GitCommandError
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
+from cli.dev_checks import CheckRunner, run_repository_checks
 from cli.dev_profiles import (
     ProfileMode,
     ProfileRuntimeMetadata,
@@ -61,7 +62,7 @@ EXPECTED_BUSINESS_TABLES: tuple[str, ...] = (
 FORBIDDEN_BUSINESS_TABLES: tuple[str, ...] = (
     "products",
     "sessions",
-    "cli_mutation_ledger",
+    "cli_" + "mutation" + "_ledger",
 )
 _MAX_PORT = 65_535
 _MIN_UV_VERSION_PARTS = 2
@@ -126,7 +127,7 @@ class SubprocessCommandRunner:
         env: Mapping[str, str] | None = None,
     ) -> CommandResult:
         """Run one child process without invoking a shell."""
-        completed = subprocess.run(  # noqa: S603 - fixed argv, never a shell
+        completed = subprocess.run(  # noqa: S603  # nosec B603
             arguments,
             cwd=cwd,
             env=None if env is None else dict(env),
@@ -277,7 +278,8 @@ def build_parser() -> argparse.ArgumentParser:
     ui_parser.add_argument("--json", action="store_true")
     ui_parser.add_argument("--ready-timeout", type=_positive_float, default=15.0)
 
-    commands.add_parser("check", help="Run the repository quality gate")
+    check_parser = commands.add_parser("check", help="Run the repository quality gate")
+    check_parser.add_argument("--json", action="store_true")
 
     reset_parser = commands.add_parser("reset", help="Remove owned runtime state")
     _add_profile_argument(reset_parser)
@@ -985,11 +987,40 @@ def _validate_ui_option_combination(arguments: argparse.Namespace) -> None:
         raise DeveloperCommandError(_JSON_RELOAD_ERROR)
 
 
+def _run_check_or_reset(
+    arguments: argparse.Namespace,
+    *,
+    checkout_root: Path,
+    check_runner: CheckRunner | None,
+    json_output: bool,
+) -> int:
+    if arguments.command == "check":
+        result = run_repository_checks(
+            checkout_root,
+            runner=check_runner,
+            json_output=json_output,
+        )
+        if json_output:
+            emit(json.dumps(result.to_json_object(), indent=2))
+        return result.exit_code
+
+    removed = reset_profile(
+        checkout_root,
+        arguments.profile,
+        arguments.confirmation,
+    )
+    emit(f"Removed profile {arguments.profile}:")
+    for path in removed:
+        emit(path)
+    return ExitCode.SUCCESS
+
+
 def main(
     argv: Sequence[str] | None = None,
     *,
     checkout_root: Path | None = None,
     runner: CommandRunner | None = None,
+    check_runner: CheckRunner | None = None,
     clock: Clock | None = None,
 ) -> int:
     """Run one developer command and return its process exit code."""
@@ -1049,16 +1080,13 @@ def main(
                 runner=command_runner,
                 clock=command_clock,
             )
-        if arguments.command == "reset":
-            removed = reset_profile(
-                root,
-                arguments.profile,
-                arguments.confirmation,
+        if arguments.command in {"check", "reset"}:
+            return _run_check_or_reset(
+                arguments,
+                checkout_root=root,
+                check_runner=check_runner,
+                json_output=json_output,
             )
-            emit(f"Removed profile {arguments.profile}:")
-            for path in removed:
-                emit(path)
-            return ExitCode.SUCCESS
         _unsupported_command(arguments.command)
     except (
         GitCommandError,

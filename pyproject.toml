@@ -221,6 +221,7 @@ error-on-warning = true
 [dependency-groups]
 dev = [
     "bandit>=1.9.4",
+    "pyrepo-check @ git+https://github.com/arduinitavares/pyrepo-check.git@8f88465e1ca88bf29b508f3c0f4eb96f4de31623",
     "pytest-cov>=7.0.0",
     "ty>=0.0.26",
 ]
