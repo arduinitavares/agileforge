@@ -7,22 +7,138 @@ from typing import TYPE_CHECKING
 import pytest
 from google.adk.agents import BaseAgent, InvocationContext
 from google.adk.events import Event
+from google.adk.workflow import START
 
 from adapters.adk.recipes import (
+    AGENTIC_NODE_IDS,
     AdkRecipe,
     AdkRecipeRegistry,
+    AgenticRecipeNodes,
     AttemptCompletionContext,
+    RecipeOutput,
     UnknownAdkRecipeError,
+    build_agentic_recipe_registry,
     build_backlog_generation_workflow,
+)
+from workflow.definitions.root import ROOT_GRAPH
+from workflow.requests import (
+    CompileAuthority,
+    RecordBacklogDraft,
+    RecordRoadmapDraft,
+    RecordSprintPlan,
+    RecordStoryDraft,
+    RecordVisionDraft,
+    RepairAuthority,
 )
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
 
-    from workflow.requests import RecordBacklogDraft
+    from workflow.contracts import JsonObject
+    from workflow.requests.base import PositionedRequest
 
 RECIPE_TIMEOUT_SECONDS = 7.0
 RECIPE_MAX_ATTEMPTS = 2
+EXPECTED_AGENTIC_NODE_IDS = (
+    "authority.compile",
+    "authority.repair",
+    "vision.generate",
+    "backlog.generate",
+    "planning.roadmap.generate",
+    "planning.story.generate",
+    "planning.sprint.plan",
+)
+COMPLETION_CONTEXT = AttemptCompletionContext(
+    project_id=17,
+    graph_version="agileforge.workflow.v1",
+    fact_fingerprint="sha256:facts",
+    decision_fingerprint="sha256:decision",
+    instance_key=None,
+    attempt_id=23,
+    attempt_fingerprint="sha256:attempt",
+    idempotency_key="complete-agentic-node",
+    actor="operator@example.com",
+    correlation_id="task-15-review",
+)
+REQUEST_CASES: tuple[
+    tuple[str, type[PositionedRequest], JsonObject],
+    ...,
+] = (
+    (
+        "authority.compile",
+        CompileAuthority,
+        {
+            "spec_version_id": 3,
+            "expected_spec_hash": "sha256:spec",
+            "compiler_model": "fake/compiler",
+        },
+    ),
+    (
+        "authority.repair",
+        RepairAuthority,
+        {
+            "source_authority_id": 5,
+            "source_authority_fingerprint": "sha256:authority",
+        },
+    ),
+    (
+        "vision.generate",
+        RecordVisionDraft,
+        {
+            "authority_id": 5,
+            "authority_fingerprint": "sha256:authority",
+            "canonical_content": {"vision": "Focused"},
+            "content_fingerprint": "sha256:vision",
+            "supersedes_vision_artifact_id": None,
+        },
+    ),
+    (
+        "backlog.generate",
+        RecordBacklogDraft,
+        {
+            "authority_id": 5,
+            "authority_fingerprint": "sha256:authority",
+            "canonical_content": {"backlog_items": []},
+            "content_fingerprint": "sha256:backlog",
+            "supersedes_backlog_artifact_id": None,
+        },
+    ),
+    (
+        "planning.roadmap.generate",
+        RecordRoadmapDraft,
+        {
+            "backlog_artifact_id": 7,
+            "backlog_artifact_fingerprint": "sha256:backlog",
+            "canonical_content": {"releases": []},
+            "content_fingerprint": "sha256:roadmap",
+            "supersedes_roadmap_artifact_id": None,
+        },
+    ),
+    (
+        "planning.story.generate",
+        RecordStoryDraft,
+        {
+            "requirement_id": "REQ-1",
+            "roadmap_artifact_id": 11,
+            "roadmap_artifact_fingerprint": "sha256:roadmap",
+            "canonical_content": {"stories": []},
+            "content_fingerprint": "sha256:story",
+            "supersedes_story_artifact_id": None,
+        },
+    ),
+    (
+        "planning.sprint.plan",
+        RecordSprintPlan,
+        {
+            "team_name": "Platform",
+            "selected_story_ids": [13],
+            "canonical_task_plan": {"tasks": []},
+            "plan_fingerprint": "sha256:plan",
+            "candidate_set_fingerprint": "sha256:candidates",
+            "supersedes_sprint_plan_artifact_id": None,
+        },
+    ),
+)
 
 
 class FakeLeafAgent(BaseAgent):
@@ -36,6 +152,29 @@ class FakeLeafAgent(BaseAgent):
     ) -> AsyncGenerator[Event, None]:
         del ctx
         yield Event(author=self.name, output=self.response)
+
+
+def _agentic_nodes() -> AgenticRecipeNodes:
+    """Build a complete provider-free retained-node replacement set."""
+    return AgenticRecipeNodes(
+        authority_compile=FakeLeafAgent(name="fake_authority_compile", response={}),
+        authority_repair=FakeLeafAgent(name="fake_authority_repair", response={}),
+        vision_generation=FakeLeafAgent(name="fake_vision", response={}),
+        backlog_generation=FakeLeafAgent(name="fake_backlog", response={}),
+        roadmap_generation=FakeLeafAgent(name="fake_roadmap", response={}),
+        story_generation=FakeLeafAgent(name="fake_story", response={}),
+        sprint_planning=FakeLeafAgent(name="fake_sprint", response={}),
+    )
+
+
+def _complete_registry() -> AdkRecipeRegistry:
+    return build_agentic_recipe_registry(
+        nodes=_agentic_nodes(),
+        execution_settings={
+            "timeout_seconds": RECIPE_TIMEOUT_SECONDS,
+            "max_attempts": RECIPE_MAX_ATTEMPTS,
+        },
+    )
 
 
 def _adapter(
@@ -68,6 +207,69 @@ def test_recipe_registry_fails_closed_for_unknown_node() -> None:
 
     with pytest.raises(UnknownAdkRecipeError):
         registry.require("authority.review")
+
+
+def test_recipe_registry_covers_each_stable_agentic_domain_node_once() -> None:
+    """Keep the declared execution inventory complete, unique, and graph-bound."""
+    graph_node_ids = {node.node_id for node in ROOT_GRAPH.root.iter_nodes()}
+    registry = _complete_registry()
+
+    assert AGENTIC_NODE_IDS == EXPECTED_AGENTIC_NODE_IDS
+    assert set(AGENTIC_NODE_IDS) <= graph_node_ids
+    assert registry.node_ids == EXPECTED_AGENTIC_NODE_IDS
+    assert len(registry.node_ids) == len(set(registry.node_ids))
+    registered_recipe_ids = tuple(
+        registry.require(node_id).node_id for node_id in registry.node_ids
+    )
+    assert registered_recipe_ids == EXPECTED_AGENTIC_NODE_IDS
+    for node_id in registry.node_ids:
+        recipe = registry.require(node_id)
+        assert recipe.workflow.timeout == RECIPE_TIMEOUT_SECONDS
+        assert recipe.workflow.retry_config is not None
+        assert recipe.workflow.retry_config.max_attempts == RECIPE_MAX_ATTEMPTS
+        assert not hasattr(recipe, "prerequisites")
+        assert not hasattr(recipe, "next_command")
+
+
+@pytest.mark.parametrize(("node_id", "request_type", "payload"), REQUEST_CASES)
+def test_complete_registry_adapts_each_output_to_its_typed_request(
+    node_id: str,
+    request_type: type[PositionedRequest],
+    payload: JsonObject,
+) -> None:
+    """Bind validated leaf output to one node-specific positioned request."""
+    recipe = _complete_registry().require(node_id)
+
+    request = recipe.output_adapter(RecipeOutput(payload=payload), COMPLETION_CONTEXT)
+
+    assert isinstance(request, request_type)
+    assert request.project_id == COMPLETION_CONTEXT.project_id
+    assert request.attempt_id == COMPLETION_CONTEXT.attempt_id
+    assert request.attempt_fingerprint == COMPLETION_CONTEXT.attempt_fingerprint
+
+
+def test_backlog_recipe_fans_out_and_joins_before_validated_output() -> None:
+    """Run bounded parallel validation branches before one terminal output."""
+    workflow = build_backlog_generation_workflow(
+        leaf_agent=FakeLeafAgent(name="fake", response={"ok": True}),
+        execution_settings={
+            "timeout_seconds": RECIPE_TIMEOUT_SECONDS,
+            "max_attempts": RECIPE_MAX_ATTEMPTS,
+        },
+    )
+    assert workflow.graph is not None
+    edges = {
+        (edge.from_node.name, edge.to_node.name) for edge in workflow.graph.edges
+    }
+
+    assert edges == {
+        (START.name, "generate_backlog"),
+        ("generate_backlog", "validate_structure"),
+        ("generate_backlog", "validate_round_trip"),
+        ("validate_structure", "join_backlog_validations"),
+        ("validate_round_trip", "join_backlog_validations"),
+        ("join_backlog_validations", "emit_validated_backlog"),
+    }
 
 
 def test_recipe_contains_execution_only_without_business_prerequisites() -> None:

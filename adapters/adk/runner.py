@@ -57,7 +57,13 @@ class AdkExecutionConfig:
 
 
 class AdkWorkflowRunner:
-    """Execute an available decision while durable facts remain authoritative."""
+    """Execute an available decision while durable facts remain authoritative.
+
+    Recovery starts a replacement attempt only after the prior lease expires.
+    Provider execution is therefore at least once: a crash after provider work
+    but before durable outcome recording can repeat provider cost. ADK session
+    state remains optional execution trace and is never recovery authority.
+    """
 
     def __init__(
         self,

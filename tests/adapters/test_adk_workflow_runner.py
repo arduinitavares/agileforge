@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+import asyncio
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from google.adk.agents import BaseAgent, InvocationContext
@@ -10,7 +12,7 @@ from google.adk.events import Event
 from google.adk.sessions import InMemorySessionService
 from google.adk.sessions import Session as AdkSession
 from pydantic import TypeAdapter
-from sqlmodel import Session, select
+from sqlmodel import Session, col, select
 
 from adapters.adk.recipes import (
     AdkRecipe,
@@ -28,13 +30,20 @@ from models.workflow import (
     WorkflowNodeAttemptOutcome,
 )
 from services.specs.authority_selection import pending_authority_fingerprint
+from utils.runtime_config import ADK_EXECUTION_TRACE_IDENTITY
 from utils.spec_schemas import SpecAuthorityCompilationSuccess
 from workflow.clock import FixedClock
-from workflow.contracts import JsonObject, NodeDecision, WorkflowErrorCode
+from workflow.contracts import (
+    JsonObject,
+    NodeCategory,
+    NodeDecision,
+    RecommendationKind,
+    WorkflowErrorCode,
+)
 from workflow.definitions.product_definition import product_definition_graph
 from workflow.domain import WorkflowDomain
 from workflow.fingerprints import canonical_hash
-from workflow.requests import RecordBacklogDraft
+from workflow.requests import RecordBacklogDraft, StartNodeAttempt
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -42,7 +51,21 @@ if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
 
 EVALUATED_AT = datetime(2026, 8, 3, 12, tzinfo=UTC)
+LEASE_SECONDS = 60
+EXPECTED_RECOVERY_ATTEMPT_COUNT = 2
+EXECUTION_SETTINGS: JsonObject = {"timeout_seconds": 5.0, "max_attempts": 1}
 JSON_OBJECT = TypeAdapter(JsonObject)
+
+
+@dataclass
+class MutableClock:
+    """Clock advanced across an expiry-recovery runner test."""
+
+    now_value: datetime
+
+    def now(self) -> datetime:
+        """Return the controlled current time."""
+        return self.now_value
 
 
 class FakeLeafAgent(BaseAgent):
@@ -208,13 +231,13 @@ def _build_runner(
     project_id: int,
     leaf: FakeLeafAgent,
     sessions: TrackingSessionService,
+    clock: MutableClock | None = None,
 ) -> tuple[AdkWorkflowRunner, WorkflowDomain]:
-    settings: JsonObject = {"timeout_seconds": 5.0, "max_attempts": 1}
     recipe = AdkRecipe(
         node_id="backlog.generate",
         workflow=build_backlog_generation_workflow(
             leaf_agent=leaf,
-            execution_settings=settings,
+            execution_settings=EXECUTION_SETTINGS,
         ),
         output_adapter=_adapter,
     )
@@ -222,7 +245,7 @@ def _build_runner(
     domain = WorkflowDomain(
         engine=engine,
         graph=product_definition_graph(),
-        clock=FixedClock(now_value=EVALUATED_AT),
+        clock=clock or FixedClock(now_value=EVALUATED_AT),
         adk_recipe_registry=registry,
     )
     runner = AdkWorkflowRunner(
@@ -232,8 +255,8 @@ def _build_runner(
         config=AdkExecutionConfig(
             project_id=project_id,
             model_id="fake/model",
-            execution_settings=settings,
-            lease_seconds=60,
+            execution_settings=EXECUTION_SETTINGS,
+            lease_seconds=LEASE_SECONDS,
             actor="operator@example.com",
             correlation_id="task-15",
         ),
@@ -326,3 +349,108 @@ def test_output_validation_failure_records_failure_without_business_fact(
         assert session.exec(select(BacklogArtifact)).all() == []
         outcome = session.exec(select(WorkflowNodeAttemptOutcome)).one()
         assert outcome.status == "failure"
+
+
+async def _create_then_delete_old_trace(
+    sessions: TrackingSessionService,
+    *,
+    attempt_id: int,
+) -> None:
+    """Delete the optional ADK trace for a crashed attempt."""
+    session_id = str(attempt_id)
+    await sessions.create_session(
+        app_name=ADK_EXECUTION_TRACE_IDENTITY.app_name,
+        user_id=ADK_EXECUTION_TRACE_IDENTITY.user_id,
+        session_id=session_id,
+    )
+    await sessions.delete_session(
+        app_name=ADK_EXECUTION_TRACE_IDENTITY.app_name,
+        user_id=ADK_EXECUTION_TRACE_IDENTITY.user_id,
+        session_id=session_id,
+    )
+    assert (
+        await sessions.get_session(
+            app_name=ADK_EXECUTION_TRACE_IDENTITY.app_name,
+            user_id=ADK_EXECUTION_TRACE_IDENTITY.user_id,
+            session_id=session_id,
+        )
+        is None
+    )
+
+
+def test_runner_replaces_expired_crash_attempt_after_old_trace_deletion(
+    engine: Engine,
+) -> None:
+    """Recover at least once after expiry without relying on old ADK trace."""
+    project_id, authority_id, authority_fingerprint = _seed(engine)
+    response: JsonObject = {
+        "authority_id": authority_id,
+        "authority_fingerprint": authority_fingerprint,
+        "content": _backlog_payload(),
+    }
+    normalized_input: JsonObject = {"prompt": "build backlog"}
+    clock = MutableClock(EVALUATED_AT)
+    sessions = TrackingSessionService()
+    runner, domain = _build_runner(
+        engine,
+        project_id=project_id,
+        leaf=FakeLeafAgent(name="fake_backlog", response=response),
+        sessions=sessions,
+        clock=clock,
+    )
+    position = domain.position(project_id)
+    initial_decision = _decision(domain, project_id)
+    crashed = domain.transition(
+        StartNodeAttempt(
+            project_id=project_id,
+            graph_version=position.graph_version,
+            fact_fingerprint=position.fact_fingerprint,
+            decision_fingerprint=initial_decision.decision_fingerprint,
+            idempotency_key="crashed-backlog-attempt",
+            actor="operator@example.com",
+            correlation_id="task-15-recovery",
+            target_node_id=initial_decision.node_id,
+            target_instance_key=initial_decision.instance_key,
+            normalized_input=normalized_input,
+            model_id="fake/model",
+            execution_settings=EXECUTION_SETTINGS,
+            lease_seconds=LEASE_SECONDS,
+        )
+    )
+    old_attempt_id = crashed.output.get("attempt_id")
+    assert crashed.ok is True
+    assert isinstance(old_attempt_id, int)
+    waiting = _decision(domain, project_id)
+    assert waiting.category is NodeCategory.WAITING
+    assert waiting.valid_until == EVALUATED_AT + timedelta(seconds=LEASE_SECONDS)
+    asyncio.run(_create_then_delete_old_trace(sessions, attempt_id=old_attempt_id))
+    clock.now_value += timedelta(seconds=LEASE_SECONDS)
+
+    recovery = _decision(domain, project_id)
+    old_reference = next(
+        item for item in recovery.fact_references if item.fact_type == "node_attempt"
+    )
+    result = runner.run(recovery, normalized_input)
+
+    assert recovery.category is NodeCategory.AVAILABLE
+    assert recovery.recommendation_kind is RecommendationKind.RECOVERY
+    assert old_reference.fact_id == str(old_attempt_id)
+    assert result.ok is True
+    with Session(engine) as session:
+        attempts = session.exec(
+            select(WorkflowNodeAttempt).order_by(
+                col(WorkflowNodeAttempt.workflow_node_attempt_id)
+            )
+        ).all()
+        outcomes = session.exec(select(WorkflowNodeAttemptOutcome)).all()
+        assert len(attempts) == EXPECTED_RECOVERY_ATTEMPT_COUNT
+        replacement_id = attempts[1].workflow_node_attempt_id
+        assert replacement_id is not None
+        assert replacement_id != old_attempt_id
+        assert {
+            item.workflow_node_attempt_id: item.status for item in outcomes
+        } == {
+            old_attempt_id: "obsolete",
+            replacement_id: "success",
+        }
+        assert session.exec(select(BacklogArtifact)).one() is not None
