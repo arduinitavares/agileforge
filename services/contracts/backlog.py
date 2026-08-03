@@ -84,7 +84,7 @@ class SaveBacklogInput(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    project_id: Annotated[int, Field(description="The product ID.")]
+    project_id: Annotated[int, Field(description="The Project ID.")]
     idempotency_key: Annotated[
         str | None,
         Field(

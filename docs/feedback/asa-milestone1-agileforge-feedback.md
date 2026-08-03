@@ -37,7 +37,7 @@ as generic AgileForge workflow/bridge behavior, not ASA-specific special cases.
 - Out of scope:
   - #129 brownfield setup.
   - #130 authority compiler source-map/model repair.
-  - Product Goal / scope-extension workflow.
+  - project goal / scope-extension workflow.
 
 #### Authority compiler source-map repair
 
@@ -62,7 +62,7 @@ as generic AgileForge workflow/bridge behavior, not ASA-specific special cases.
 
 - Original feedback item: `Post-sprint story reconciliation leaves saveable
   draft in unsaveable FSM state`.
-- Product issue considered: real bridge executability bug. `story history`
+- AgileForge issue considered: real bridge executability bug. `story history`
   could report `save.available=true` and `expected_state=STORY_REVIEW`, while
   the persisted FSM stayed in `STORY_INTERVIEW`.
 - Fix status: fixed in `d7ad6bf fix(workflow): recover post-sprint story
@@ -78,7 +78,7 @@ as generic AgileForge workflow/bridge behavior, not ASA-specific special cases.
 
 - Original feedback item: `Story draft marked saveable despite unresolved
   dependency candidates`.
-- Product issue considered: real gate-contract bug. Story generation/quality
+- AgileForge issue considered: real gate-contract bug. Story generation/quality
   allowed `save.available=true`, while `story save` later rejected explicit
   unresolved dependency candidates.
 - Fix status: fixed in `987ea0e fix(story): align dependency saveability
@@ -96,7 +96,7 @@ as generic AgileForge workflow/bridge behavior, not ASA-specific special cases.
 
 - Original feedback item: `Workflow next routes to sprint generation when no
   sprint candidates remain`.
-- Product issue considered: real routing bug. `workflow next` could advertise
+- AgileForge issue considered: real routing bug. `workflow next` could advertise
   `sprint generate` after post-sprint `impact=none` even when `sprint
   candidates` had `count=0`.
 - Fix status: partially fixed earlier in `d85e32b fix(workflow): route
@@ -116,7 +116,7 @@ as generic AgileForge workflow/bridge behavior, not ASA-specific special cases.
 
 - Source: follow-up UI observation during ASA workflow, not one of the original
   2026-06-10 CLI field-note sections.
-- Product issue considered: real UI affordance bug. Requirements already
+- AgileForge issue considered: real UI affordance bug. Requirements already
   consumed by the active Story completion scope could still expose selection
   controls for planning another sprint.
 - Fix status: fixed in `204bb75 fix(ui): block consumed story sprint
@@ -133,7 +133,7 @@ as generic AgileForge workflow/bridge behavior, not ASA-specific special cases.
 - Original feedback item: `Active sprint state hides sprint generation attempt
   history`, plus follow-up velocity inspection where `agileforge sprint history
   --project-id 3` returned `count=0` despite durable completed Sprint rows.
-- Product issue considered: real read-projection bug. The command exposed only
+- AgileForge issue considered: real read-projection bug. The command exposed only
   transient Sprint planner attempts, so completed Sprint execution evidence
   required direct DB inspection.
 - Fix status: fixed in `dev/sprint-history-execution-projection`.
@@ -150,7 +150,7 @@ as generic AgileForge workflow/bridge behavior, not ASA-specific special cases.
 
 - Original feedback item: `Sprint task update command omits required
   close-evidence arguments`.
-- Product issue considered: real command-contract bug. `workflow next` and
+- AgileForge issue considered: real command-contract bug. `workflow next` and
   `sprint task next/show` could advertise `sprint task update` commands for
   `Done` transitions without the close evidence that mutation validation
   requires.
@@ -167,7 +167,7 @@ as generic AgileForge workflow/bridge behavior, not ASA-specific special cases.
 
 - Original feedback item: `Sprint-active dashboard still shows unrelated Story
   draft context`, tracked as issue #138.
-- Product issue considered: real UI routing bug. The saved Sprint workspace
+- AgileForge issue considered: real UI routing bug. The saved Sprint workspace
   already knew how to render active Sprint execution, but a state refresh with
   `preserveView=true` could accept backend `SPRINT_VIEW` while keeping
   `viewPhaseId='story'`. That made the sidebar show Sprint execution while the
@@ -185,7 +185,7 @@ as generic AgileForge workflow/bridge behavior, not ASA-specific special cases.
 
 - Source: ASA project reached `SPRINT_COMPLETE` with no refined Sprint
   candidates after its original roadmap scope was effectively exhausted.
-- Product issue considered: real framework gap. Mature projects can need new
+- AgileForge issue considered: real framework gap. Mature projects can need new
   product scope after all accepted backlog/roadmap/story work is complete, and
   the correct path should not be project recreation, manual spec bypass, or
   forced backlog refinement.
@@ -332,7 +332,7 @@ as generic AgileForge workflow/bridge behavior, not ASA-specific special cases.
   `capacity analysis does not match locked Sprint selection`.
 - Recovery used: generated a narrower sprint with explicit selected story IDs
   and capacity guidance. That produced a valid `SPRINT_DRAFT`.
-- Product feedback: the failure was recoverable, but the CLI summary did not
+- AgileForge feedback: the failure was recoverable, but the CLI summary did not
   surface enough actionable validation detail by itself. Users need a clear
   way to inspect the exact validation findings and offending fields without
   reading raw history payloads.
@@ -346,7 +346,7 @@ as generic AgileForge workflow/bridge behavior, not ASA-specific special cases.
 - Expected user need: while a sprint is active, it is still useful to inspect
   the generation attempt that produced that active sprint, especially after a
   prior failed generation attempt.
-- Product feedback: consider exposing current active sprint generation history,
+- AgileForge feedback: consider exposing current active sprint generation history,
   or clarifying in CLI help/output that `sprint history` only reports draft
   generation attempts in specific workflow states.
 
@@ -360,7 +360,7 @@ as generic AgileForge workflow/bridge behavior, not ASA-specific special cases.
 - Observed result: required guard values are present and accurate, but task
   update guards live under `data.task_ticket.guards`, and story close guards
   live under `data.guards`.
-- Product feedback: the guard model works well, but bulk CLI execution would be
+- AgileForge feedback: the guard model works well, but bulk CLI execution would be
   easier if `task show`, `story readiness`, or companion commands exposed a
   compact machine-readable summary mode with `id`, `status`, `fingerprint`, and
   next update command only.
@@ -383,7 +383,7 @@ as generic AgileForge workflow/bridge behavior, not ASA-specific special cases.
 - Command: `agileforge sprint candidates --project-id 3`
 - Observed result: `count=0`, message `Found 0 sprint candidates for
   selected-story scope. Excluded: 11 non-refined requirements.`
-- Product feedback: this is a workflow-routing gap. When there are no sprint
+- AgileForge feedback: this is a workflow-routing gap. When there are no sprint
   candidates and pending non-refined requirements remain, `workflow next` should
   route to Story generation/refinement or explicit reconciliation, not only to
   `sprint generate`.
@@ -404,7 +404,7 @@ as generic AgileForge workflow/bridge behavior, not ASA-specific special cases.
   Setup#...` and unqualified current-draft story names.
 - Recovery used: refined the same requirement with explicit feedback to omit
   unresolved dependency candidates. `attempt-2` saved successfully.
-- Product feedback: the Story quality/saveability gate should catch unresolved
+- AgileForge feedback: the Story quality/saveability gate should catch unresolved
   dependency candidates before reporting `save.available=true`, or the save
   error should be surfaced as part of the draft quality findings.
 
@@ -417,7 +417,7 @@ as generic AgileForge workflow/bridge behavior, not ASA-specific special cases.
   exposed a `status=To Do` and the fingerprint for the next task ticket.
 - Follow-up verification: `agileforge sprint tasks --project-id 3` showed all
   13 tasks were actually `Done`.
-- Product feedback: the task update response should clearly identify the
+- AgileForge feedback: the task update response should clearly identify the
   updated task status and separately label any next-task ticket. Otherwise a
   CLI user can reasonably think the mutation was accepted but did not change
   task state.
@@ -434,7 +434,7 @@ as generic AgileForge workflow/bridge behavior, not ASA-specific special cases.
   `sprint-attempt-1`.
 - Observed result: history summary showed `attempt_count=0` even though the
   active draft/save path had just used `sprint-attempt-1`.
-- Product feedback: clarify whether `task_count` means story/workstream groups
+- AgileForge feedback: clarify whether `task_count` means story/workstream groups
   or actionable tasks, and expose the active sprint generation attempt in
   history or a dedicated active-sprint planning summary.
 
@@ -469,7 +469,7 @@ as generic AgileForge workflow/bridge behavior, not ASA-specific special cases.
   STORY_PERSISTENCE`
 - Observed result: `ok=false`, error code `INVALID_COMMAND`, message
   `Story phase cannot complete unless current state is STORY_PERSISTENCE.`
-- Product feedback: post-sprint story-impact reconciliation can produce or
+- AgileForge feedback: post-sprint story-impact reconciliation can produce or
   reuse a complete saveable Story draft without transitioning the session FSM
   to the state required by the save command. The workflow becomes stuck between
   `STORY_INTERVIEW` and `STORY_REVIEW`; `workflow next` routes to generation,

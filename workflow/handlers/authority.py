@@ -8,7 +8,7 @@ from sqlmodel import Session, col, select
 
 from models.authority_curation import AuthorityFeedbackAttempt
 from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance, SpecRegistry
-from services.agent_workbench.authority_review import (
+from services.authority_review_projection import (
     AuthorityReviewSnapshot,
     authority_review_fingerprint,
     build_authority_review_snapshot_in_session,

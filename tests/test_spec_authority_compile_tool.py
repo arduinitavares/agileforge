@@ -91,19 +91,19 @@ def _assert_v3_instruction_contract(instructions: str) -> None:
 
 
 @pytest.fixture
-def sample_product(session: Session, engine: Engine) -> Project:
-    """Create a product without spec."""
+def sample_project(session: Session, engine: Engine) -> Project:
+    """Create a project without spec."""
     spec_tools.engine = engine
 
-    product = Project(
+    project = Project(
         name="Compile Tool Project",
         description="Project for compile tool tests",
         vision="Keep spec authority deterministic",
     )
-    session.add(product)
+    session.add(project)
     session.commit()
-    session.refresh(product)
-    return product
+    session.refresh(project)
+    return project
 
 
 @pytest.fixture
@@ -138,12 +138,12 @@ def compiler_stub(monkeypatch: pytest.MonkeyPatch) -> object:
 
 
 def test_compile_tool_blocks_unapproved_spec(
-    session: Session, sample_product: Project, sample_spec_content: str
+    session: Session, sample_project: Project, sample_spec_content: str
 ) -> None:
     """Compilation should fail for unapproved spec versions."""
     del session
     reg_result = register_spec_version(
-        {"project_id": sample_product.project_id, "content": sample_spec_content},
+        {"project_id": sample_project.project_id, "content": sample_spec_content},
         tool_context=None,
     )
 
@@ -357,14 +357,14 @@ def test_compiler_instructions_require_v3_typed_assumption_contract() -> None:
 
 def test_compile_tool_compiles_and_returns_summary(
     session: Session,
-    sample_product: Project,
+    sample_project: Project,
     sample_spec_content: str,
     compiler_stub: object,
 ) -> None:
     """Compilation should create authority and return summary payload."""
     del compiler_stub
     reg_result = register_spec_version(
-        {"project_id": sample_product.project_id, "content": sample_spec_content},
+        {"project_id": sample_project.project_id, "content": sample_spec_content},
         tool_context=None,
     )
     spec_version_id = reg_result["spec_version_id"]
@@ -395,20 +395,20 @@ def test_compile_tool_compiles_and_returns_summary(
 
     assert authority is not None
 
-    session.refresh(sample_product)
-    assert sample_product.compiled_authority_json is not None
+    session.refresh(sample_project)
+    assert sample_project.compiled_authority_json is not None
 
 
 def test_compile_tool_returns_cached_when_already_compiled(
     session: Session,
-    sample_product: Project,
+    sample_project: Project,
     sample_spec_content: str,
     compiler_stub: object,
 ) -> None:
     """Compilation tool should be idempotent for existing authority."""
     del compiler_stub
     reg_result = register_spec_version(
-        {"project_id": sample_product.project_id, "content": sample_spec_content},
+        {"project_id": sample_project.project_id, "content": sample_spec_content},
         tool_context=None,
     )
     spec_version_id = reg_result["spec_version_id"]
@@ -433,13 +433,13 @@ def test_compile_tool_returns_cached_when_already_compiled(
     assert result["cached"] is True
     assert result["authority_id"] == first["authority_id"]
 
-    session.refresh(sample_product)
-    assert sample_product.compiled_authority_json is not None
+    session.refresh(sample_project)
+    assert sample_project.compiled_authority_json is not None
 
 
 def test_compile_tool_uses_content_ref_when_content_empty(
     session: Session,
-    sample_product: Project,
+    sample_project: Project,
     tmp_path: Path,
     compiler_stub: object,
 ) -> None:
@@ -461,7 +461,7 @@ def test_compile_tool_uses_content_ref_when_content_empty(
 
     reg_result = register_spec_version(
         {
-            "project_id": sample_product.project_id,
+            "project_id": sample_project.project_id,
             "content": "",
             "content_ref": str(spec_path),
         },
@@ -521,13 +521,13 @@ def _build_raw_compiler_output(excerpt: str, field_name: str) -> str:
 
 def test_compile_persists_compiled_artifact_and_normalized_ids(
     session: Session,
-    sample_product: Project,
+    sample_project: Project,
     sample_spec_content: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Compilation should persist normalized artifact and deterministic IDs."""
     reg_result = register_spec_version(
-        {"project_id": sample_product.project_id, "content": sample_spec_content},
+        {"project_id": sample_project.project_id, "content": sample_spec_content},
         tool_context=None,
     )
     spec_version_id = reg_result["spec_version_id"]
@@ -589,13 +589,13 @@ def test_compile_persists_compiled_artifact_and_normalized_ids(
 
 def test_compile_cache_hit_does_not_change_compiled_artifact(
     session: Session,
-    sample_product: Project,
+    sample_project: Project,
     sample_spec_content: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Cache hits reuse one row; forced recompilation appends exact history."""
     reg_result = register_spec_version(
-        {"project_id": sample_product.project_id, "content": sample_spec_content},
+        {"project_id": sample_project.project_id, "content": sample_spec_content},
         tool_context=None,
     )
     spec_version_id = reg_result["spec_version_id"]
@@ -679,7 +679,7 @@ def test_compile_cache_hit_does_not_change_compiled_artifact(
 
 def test_compile_persists_invocation_failure_artifact(
     session: Session,
-    sample_product: Project,
+    sample_project: Project,
     sample_spec_content: str,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -687,7 +687,7 @@ def test_compile_persists_invocation_failure_artifact(
     """Verify compile persists invocation failure artifact."""
     del session
     reg_result = register_spec_version(
-        {"project_id": sample_product.project_id, "content": sample_spec_content},
+        {"project_id": sample_project.project_id, "content": sample_spec_content},
         tool_context=None,
     )
     spec_version_id = reg_result["spec_version_id"]
@@ -718,13 +718,13 @@ def test_compile_persists_invocation_failure_artifact(
     assert result["failure_stage"] == "invocation_exception"
     artifact = failure_artifacts.read_failure_artifact(result["failure_artifact_id"])
     assert artifact is not None
-    assert artifact["project_id"] == sample_product.project_id
+    assert artifact["project_id"] == sample_project.project_id
     assert artifact["raw_output"] == '{"partial": true}'
 
 
 def test_compile_persists_normalizer_failure_artifact(
     session: Session,
-    sample_product: Project,
+    sample_project: Project,
     sample_spec_content: str,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -732,7 +732,7 @@ def test_compile_persists_normalizer_failure_artifact(
     """Verify compile persists normalizer failure artifact."""
     del session
     reg_result = register_spec_version(
-        {"project_id": sample_product.project_id, "content": sample_spec_content},
+        {"project_id": sample_project.project_id, "content": sample_spec_content},
         tool_context=None,
     )
     spec_version_id = reg_result["spec_version_id"]
@@ -760,6 +760,6 @@ def test_compile_persists_normalizer_failure_artifact(
     assert result["failure_stage"] == "output_validation"
     artifact = failure_artifacts.read_failure_artifact(result["failure_artifact_id"])
     assert artifact is not None
-    assert artifact["project_id"] == sample_product.project_id
+    assert artifact["project_id"] == sample_project.project_id
     assert artifact["raw_output"] == "{}"
     assert artifact["validation_errors"]

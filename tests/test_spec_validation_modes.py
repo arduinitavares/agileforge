@@ -184,17 +184,17 @@ def _build_authority_for_alignment(
 
 @pytest.fixture
 def setup_validation_case(session: Session, engine: Engine) -> tuple[UserStory, int]:
-    """Create one product/spec/story tuple for mode tests."""
+    """Create one project/spec/story tuple for mode tests."""
     spec_tools.engine = engine
-    product = Project(name="Validation Modes", vision="Test")
-    session.add(product)
+    project = Project(name="Validation Modes", vision="Test")
+    session.add(project)
     session.commit()
-    session.refresh(product)
+    session.refresh(project)
 
     spec_version_id = _create_compiled_spec(
-        session, require_id(product.project_id, "project_id")
+        session, require_id(project.project_id, "project_id")
     )
-    story = _create_story(session, require_id(product.project_id, "project_id"))
+    story = _create_story(session, require_id(project.project_id, "project_id"))
     return story, spec_version_id
 
 
@@ -621,7 +621,7 @@ def test_deterministic_forbidden_capability_still_fails_for_integrity_enforcemen
         source_map=[
             SourceMapEntry(
                 invariant_id=invariant.id,
-                excerpt="The product must not implement plagiarism detection.",
+                excerpt="The project must not implement plagiarism detection.",
                 location="Project Constraints",
             )
         ],
@@ -661,7 +661,7 @@ def test_deterministic_forbidden_capability_not_suppressed_by_generic_references
         source_map=[
             SourceMapEntry(
                 invariant_id=invariant.id,
-                excerpt="The product must not include a web dashboard.",
+                excerpt="The project must not include a web dashboard.",
                 location="Project Constraints",
             )
         ],
@@ -741,13 +741,13 @@ def test_hybrid_mode_ignores_policy_boilerplate_when_llm_passes(
 ) -> None:
     """Verify hybrid mode ignores policy boilerplate when llm passes."""
     spec_tools.engine = engine
-    product = Project(name="Policy Context", vision="Test")
-    session.add(product)
+    project = Project(name="Policy Context", vision="Test")
+    session.add(project)
     session.commit()
-    session.refresh(product)
+    session.refresh(project)
 
     spec = SpecRegistry(
-        project_id=require_id(product.project_id, "project_id"),
+        project_id=require_id(project.project_id, "project_id"),
         content="# Spec",
         content_ref=None,
         spec_hash="b" * 64,
@@ -760,7 +760,7 @@ def test_hybrid_mode_ignores_policy_boilerplate_when_llm_passes(
     session.commit()
     session.refresh(spec)
 
-    story = _create_orphan_story(session, require_id(product.project_id, "project_id"))
+    story = _create_orphan_story(session, require_id(project.project_id, "project_id"))
     story.acceptance_criteria = (
         "Given the final report, when external references are used, "
         "then they are appropriately cited to comply with the plagiarism policy."
@@ -813,7 +813,7 @@ def test_hybrid_mode_ignores_policy_boilerplate_when_llm_passes(
     session.refresh(compiled)
     session.add(
         SpecAuthorityAcceptance(
-            project_id=require_id(product.project_id, "project_id"),
+            project_id=require_id(project.project_id, "project_id"),
             spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
             status="accepted",
             policy="test",

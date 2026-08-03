@@ -14,7 +14,6 @@ _CONFIG_ROOT_ENV = "AGILEFORGE_CONFIG_ROOT"
 _LEGACY_DB_FILENAMES = frozenset({"agile_simple.db", "agile_sqlmodel.db"})
 _TRUE_VALUES = {"1", "true", "yes", "on"}
 _DEFAULT_API_HOST = "127.0.0.1"
-_AS_BUILT_ASSESSOR_BATCH_SIZE_MAX = 50
 
 
 def get_config_root() -> Path:
@@ -106,10 +105,6 @@ class RunnerIdentity:
     user_id: str
 
 
-WORKFLOW_RUNNER_IDENTITY = RunnerIdentity(
-    app_name="agile_orchestrator",
-    user_id="local_developer",
-)
 ADK_EXECUTION_TRACE_IDENTITY = RunnerIdentity(
     app_name="agileforge_graph_execution",
     user_id="workflow_adapter",
@@ -133,10 +128,6 @@ STORY_RUNNER_IDENTITY = RunnerIdentity(
 SPRINT_RUNNER_IDENTITY = RunnerIdentity(
     app_name="sprint_planner",
     user_id="dashboard_sprint",
-)
-AS_BUILT_RUNNER_IDENTITY = RunnerIdentity(
-    app_name="as_built_assessor",
-    user_id="dashboard_as_built",
 )
 SPEC_AUTHORITY_COMPILER_IDENTITY = RunnerIdentity(
     app_name="spec_authority_compiler",
@@ -305,34 +296,6 @@ def get_story_writer_max_tokens(default: int = 16384) -> int:
 def get_sprint_planner_max_tokens(default: int = 8192) -> int:
     """Return the max token budget for the sprint planner."""
     return get_int_env("SPRINT_PLANNER_MAX_TOKENS", default)
-
-
-def get_as_built_assessor_max_tokens(default: int = 8192) -> int:
-    """Return the max token budget for the as-built assessor."""
-    return get_int_env("AS_BUILT_ASSESSOR_MAX_TOKENS", default)
-
-
-def get_as_built_assessor_timeout_seconds(default: float = 120.0) -> float:
-    """Return the bounded runtime for the as-built assessor model call."""
-    value = get_optional_env("AS_BUILT_ASSESSOR_TIMEOUT_SECONDS")
-    if value is None:
-        return default
-    return float(value)
-
-
-def get_as_built_assessor_batch_size(default: int = 10) -> int:
-    """Return the maximum authority targets per as-built assessor batch."""
-    value = get_int_env("AS_BUILT_ASSESSOR_BATCH_SIZE", default)
-    if value < 1:
-        msg = "AS_BUILT_ASSESSOR_BATCH_SIZE must be at least 1."
-        raise RuntimeConfigError(msg)
-    if value > _AS_BUILT_ASSESSOR_BATCH_SIZE_MAX:
-        msg = (
-            "AS_BUILT_ASSESSOR_BATCH_SIZE must be at most "
-            f"{_AS_BUILT_ASSESSOR_BATCH_SIZE_MAX}."
-        )
-        raise RuntimeConfigError(msg)
-    return value
 
 
 def is_spec_compiler_schema_disabled() -> bool:

@@ -20,11 +20,11 @@ if TYPE_CHECKING:
 def _history(
     session: Session,
 ) -> tuple[int, int, CompiledSpecAuthority, CompiledSpecAuthority]:
-    product = Project(name="Authority Selection")
-    session.add(product)
+    project = Project(name="Authority Selection")
+    session.add(project)
     session.commit()
-    session.refresh(product)
-    project_id = require_id(product.project_id, "project_id")
+    session.refresh(project)
+    project_id = require_id(project.project_id, "project_id")
     spec = SpecRegistry(
         project_id=project_id,
         spec_hash="sha256:selection",
@@ -87,18 +87,18 @@ def test_latest_compiled_authority_orders_by_authority_id_desc(
     assert selected.authority_id == newest.authority_id
 
 
-def test_latest_compiled_authority_for_product_prefers_newest_spec_then_row(
+def test_latest_compiled_authority_for_project_prefers_newest_spec_then_row(
     session: Session,
 ) -> None:
     """Cross-spec status selection stays project-owned and deterministic."""
-    product = Project(name="Selected Project")
-    other_product = Project(name="Other Project")
-    session.add_all([product, other_product])
+    project = Project(name="Selected Project")
+    other_project = Project(name="Other Project")
+    session.add_all([project, other_project])
     session.commit()
-    session.refresh(product)
-    session.refresh(other_product)
-    project_id = require_id(product.project_id, "project_id")
-    other_project_id = require_id(other_product.project_id, "project_id")
+    session.refresh(project)
+    session.refresh(other_project)
+    project_id = require_id(project.project_id, "project_id")
+    other_project_id = require_id(other_project.project_id, "project_id")
     specs = [
         SpecRegistry(
             project_id=owner_id,
@@ -144,7 +144,7 @@ def test_latest_compiled_authority_for_product_prefers_newest_spec_then_row(
     )
     session.commit()
 
-    selected = authority_selection.latest_compiled_authority_for_product(
+    selected = authority_selection.latest_compiled_authority_for_project(
         session,
         project_id=project_id,
     )
@@ -219,7 +219,7 @@ def test_latest_accepted_authority_decision_orders_by_time_then_id(
     assert selected.id == decisions[2].id
 
 
-def test_latest_accepted_authority_decision_for_product_orders_across_specs(
+def test_latest_accepted_authority_decision_for_project_orders_across_specs(
     session: Session,
 ) -> None:
     """Project recovery selects accepted decisions by time, then insertion id."""
@@ -289,7 +289,7 @@ def test_latest_accepted_authority_decision_for_product_orders_across_specs(
     session.add_all(decisions)
     session.commit()
 
-    selected = authority_selection.latest_accepted_authority_decision_for_product(
+    selected = authority_selection.latest_accepted_authority_decision_for_project(
         session,
         project_id=project_id,
     )
@@ -375,16 +375,16 @@ def test_accepted_compiled_authority_uses_latest_deterministic_decision(
     assert selected is second
 
 
-def test_accepted_compiled_authority_rejects_foreign_product_spec(
+def test_accepted_compiled_authority_rejects_foreign_project_spec(
     session: Session,
 ) -> None:
-    """The selected spec must belong to the requested product."""
+    """The selected spec must belong to the requested project."""
     _, spec_version_id, _, accepted = _history(session)
-    foreign_product = Project(name="Foreign Authority Selection")
-    session.add(foreign_product)
+    foreign_project = Project(name="Foreign Authority Selection")
+    session.add(foreign_project)
     session.commit()
-    session.refresh(foreign_product)
-    foreign_project_id = require_id(foreign_product.project_id, "project_id")
+    session.refresh(foreign_project)
+    foreign_project_id = require_id(foreign_project.project_id, "project_id")
     session.add(
         SpecAuthorityAcceptance(
             project_id=foreign_project_id,

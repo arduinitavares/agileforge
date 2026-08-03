@@ -37,7 +37,7 @@ from services.specs.authority_selection import (
     compiled_authority_by_id,
     latest_accepted_authority_decision,
     latest_compiled_authority,
-    latest_compiled_authority_for_product,
+    latest_compiled_authority_for_project,
 )
 from services.specs.profile_content import (
     STRUCTURED_SPEC_FORMAT,
@@ -2960,7 +2960,7 @@ def _load_compile_version_context(
     )
 
 
-def _update_product_compiled_authority_cache(
+def _update_project_compiled_authority_cache(
     session: Session,
     *,
     project: Project | None,
@@ -2971,7 +2971,7 @@ def _update_product_compiled_authority_cache(
     """Backfill the project-level compiled authority cache when a project exists."""
     if project is None:
         return None
-    boundary = "product_authority_cache_persisted"
+    boundary = "project_authority_cache_persisted"
     if lease_guard is not None and not lease_guard(boundary):
         return _mutation_lease_lost_result()
     project.compiled_authority_json = compiled_artifact_json
@@ -3110,7 +3110,7 @@ def _cached_compilation_result(
     scope_themes_count = len(artifact.scope_themes)
     invariants_count = len(artifact.invariants)
 
-    cache_error = _update_product_compiled_authority_cache(
+    cache_error = _update_project_compiled_authority_cache(
         session,
         project=context.project,
         compiled_artifact_json=cast(
@@ -3797,7 +3797,7 @@ def _persist_compiled_authority(  # noqa: PLR0913
     if progress_error is not None:
         return progress_error
 
-    cache_error = _update_product_compiled_authority_cache(
+    cache_error = _update_project_compiled_authority_cache(
         session,
         project=context.project,
         compiled_artifact_json=compiled_artifact_json,
@@ -4336,7 +4336,7 @@ def check_spec_authority_status(  # noqa: PLR0911
                 "success": False,
                 "error": "Latest approved spec is missing its primary key",
             }
-        latest_authority = latest_compiled_authority_for_product(
+        latest_authority = latest_compiled_authority_for_project(
             session,
             project_id=parsed.project_id,
         )

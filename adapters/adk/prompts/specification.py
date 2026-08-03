@@ -11,8 +11,7 @@ Note on retries:
 
 from __future__ import annotations
 
-from pathlib import Path
-
+from adapters.adk.prompts import load_prompt
 from services.contracts.specification import (
     SPEC_AUTHORITY_COMPILER_PROMPT_HASH as EXPECTED_SPEC_AUTHORITY_COMPILER_PROMPT_HASH,
 )
@@ -20,11 +19,8 @@ from services.contracts.specification import (
     SPEC_AUTHORITY_COMPILER_VERSION,
     compute_prompt_hash,
 )
-from utils.helper import load_instruction
 
-_INSTRUCTIONS_PATH = Path(__file__).with_name("specification.txt")
-
-SPEC_AUTHORITY_COMPILER_INSTRUCTIONS: str = load_instruction(_INSTRUCTIONS_PATH)
+SPEC_AUTHORITY_COMPILER_INSTRUCTIONS: str = load_prompt("specification.txt")
 
 SPEC_AUTHORITY_COMPILER_PROMPT_HASH: str = compute_prompt_hash(
     SPEC_AUTHORITY_COMPILER_INSTRUCTIONS

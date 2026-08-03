@@ -22,7 +22,7 @@ Vision → Specification Authority → Initial Backlog → Roadmap → User Stor
 ### 🧠 Intelligent Agents
 | Agent | Role | Capabilities |
 |-------|------|--------------|
-| **Product Vision Tool** | Project Owner | **Strategic Initiation:** Constructs a 7-component "True North" vision statement using the "Bucket Brigade" stateless pattern. |
+| **product vision Tool** | Project Owner | **Strategic Initiation:** Constructs a 7-component "True North" vision statement using the "Bucket Brigade" stateless pattern. |
 | **Spec Authority Compiler** | Architect | **Feasibility Filter:** A non-conversational compiler that extracts deterministic "Definition of Done" constraints from technical specs. |
 | **Backlog Primer** | Project Owner | **Pre-Planning:** Converts Vision into a prioritized list of Gross Requirements (not User Stories) using T-Shirt sizing. |
 | **Roadmap Builder** | Project Owner | **Strategic Planning:** Maps requirements to time-based milestones, respecting technical dependencies and themes. |
@@ -117,7 +117,7 @@ uvicorn api:app --reload
 
 ## 📖 Usage Examples
 
-### 1. Create a New Product Vision
+### 1. Create a New product vision
 
 ```
 You: I want to build a recipe discovery app for home cooks
@@ -251,7 +251,7 @@ pytest tests/ --cov=. --cov-report=html
 ## 🛣️ Roadmap
 
 ### ✅ Completed (v1.1)
-- [x] Product Vision Tool (7-component gathering)
+- [x] product vision Tool (7-component gathering)
 - [x] Specification Authority System (Compiler & Validation Gates)
 - [x] Backlog Primer (Gross Requirements Generation)
 - [x] Roadmap Builder (Now/Next/Later prioritization)

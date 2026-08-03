@@ -14,9 +14,6 @@ from models.authority_curation import (
     AuthorityFeedbackAttempt,
 )
 from models.core import Project
-from services.agent_workbench.schema_readiness import (
-    check_authority_curation_readiness,
-)
 from tests.typing_helpers import require_id
 
 if TYPE_CHECKING:
@@ -29,16 +26,6 @@ def test_authority_curation_tables_are_created(engine: Engine) -> None:
 
     assert "authority_feedback_attempts" in table_names
     assert "authority_curation_attempts" in table_names
-
-
-def test_authority_curation_schema_readiness_passes_for_fresh_schema(
-    engine: Engine,
-) -> None:
-    """Readiness check must accept metadata-created curation storage."""
-    result = check_authority_curation_readiness(engine)
-
-    assert result.ok is True
-    assert result.missing == {}
 
 
 def test_authority_curation_create_all_defaults_match_models(
@@ -88,7 +75,7 @@ def test_authority_feedback_idempotency_key_is_unique_per_project(
     engine: Engine,
 ) -> None:
     """Feedback attempts must durably guard idempotency replay keys."""
-    project_id = _seed_product(engine)
+    project_id = _seed_project(engine)
 
     with Session(engine) as session:
         session.add(
@@ -114,7 +101,7 @@ def test_authority_curation_idempotency_key_is_unique_per_project(
     engine: Engine,
 ) -> None:
     """Curation attempts must durably guard idempotency replay keys."""
-    project_id = _seed_product(engine)
+    project_id = _seed_project(engine)
 
     with Session(engine) as session:
         session.add(
@@ -140,7 +127,7 @@ def test_authority_curation_allows_one_running_attempt_per_authority(
     engine: Engine,
 ) -> None:
     """Only one running curation may exist for one project/source authority."""
-    project_id = _seed_product(engine)
+    project_id = _seed_project(engine)
 
     with Session(engine) as session:
         session.add(
@@ -186,14 +173,14 @@ def _column_defaults(engine: Engine, table_name: str) -> dict[str, str | None]:
     }
 
 
-def _seed_product(engine: Engine) -> int:
-    """Create a product for curation persistence tests."""
+def _seed_project(engine: Engine) -> int:
+    """Create a project for curation persistence tests."""
     with Session(engine) as session:
-        product = Project(name="Authority Curation Persistence Project")
-        session.add(product)
+        project = Project(name="Authority Curation Persistence Project")
+        session.add(project)
         session.commit()
-        session.refresh(product)
-        return require_id(product.project_id, "project_id")
+        session.refresh(project)
+        return require_id(project.project_id, "project_id")
 
 
 def _feedback_attempt(

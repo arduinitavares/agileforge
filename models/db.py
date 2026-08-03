@@ -12,16 +12,32 @@ from sqlalchemy import event
 from sqlalchemy.engine import Engine
 from sqlmodel import SQLModel, create_engine
 
-from models import agent_workbench as _agent_workbench_models  # noqa: F401
-from models import authority_curation as _authority_curation_models  # noqa: F401
-from models import brownfield as _brownfield_models  # noqa: F401
-from models import workflow as _workflow_models  # noqa: F401
+from models import (
+    agent_workbench,
+    authority_curation,
+    brownfield,
+    core,
+    events,
+    specs,
+    workflow,
+)
 from utils.runtime_config import get_business_db_target, get_database_echo
 
 if TYPE_CHECKING:
     import sqlite3
+    from types import ModuleType
 
 logger: logging.Logger = logging.getLogger(name=__name__)
+
+_CURRENT_MODEL_MODULES: tuple[ModuleType, ...] = (
+    core,
+    specs,
+    events,
+    workflow,
+    agent_workbench,
+    authority_curation,
+    brownfield,
+)
 
 
 def _is_pytest_running() -> bool:

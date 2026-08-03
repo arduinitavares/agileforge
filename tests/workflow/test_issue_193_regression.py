@@ -31,7 +31,7 @@ from models.workflow import (
     VisionArtifactDecision,
 )
 from repositories.workflow import WorkflowFactLoadError, WorkflowFactRepository
-from services.agent_workbench.authority_review import (
+from services.authority_review_projection import (
     AuthorityReviewSnapshot,
     build_authority_review_snapshot_in_session,
 )

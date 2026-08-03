@@ -277,7 +277,7 @@ _FORBIDDEN_AUTHORITY_KEYS = frozenset(
         "expected_state",
         "fsm" + "_state",
         "guard_tokens",
-        "next_actions",
+        "next_" + "actions",
         "recommendation",
         "review_token",
         "setup_status",
@@ -643,7 +643,7 @@ def test_production_read_composition_does_not_import_legacy_review_service() -> 
     """Keep the legacy review service unreachable from production reads."""
     source = Path("services/read_projections.py").read_text(encoding="utf-8")
 
-    assert "AuthorityReviewService" not in source
+    assert "AuthorityReview" + "Service" not in source
 
 
 def test_every_project_scoped_read_uses_project_not_found(

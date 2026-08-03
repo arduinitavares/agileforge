@@ -76,8 +76,8 @@ def test_leaf_agents_do_not_own_persistence_or_routing() -> None:
     assert not _matching_prefixes(imported, LEAF_FORBIDDEN_PREFIXES)
 
 
-def test_relocated_modules_do_not_load_temporary_root_orchestrator() -> None:
-    """Import new owners without loading the temporary legacy root composition."""
+def test_retained_modules_import_without_deleted_root_composition() -> None:
+    """Import current owners without loading the deleted root composition."""
     for module_name in (
         "services.contracts",
         "services.contracts.as_built",
@@ -92,10 +92,11 @@ def test_relocated_modules_do_not_load_temporary_root_orchestrator() -> None:
         "services.contracts.story",
         "services.contracts.vision",
         "adapters.adk.agents",
-        "adapters.adk.agents.as_built",
         "adapters.adk.agents.authority",
         "adapters.adk.agents.backlog",
+        "adapters.adk.agents.brownfield",
         "adapters.adk.agents.roadmap",
+        "adapters.adk.agents.spec_validator",
         "adapters.adk.agents.specification",
         "adapters.adk.agents.sprint",
         "adapters.adk.agents.story",

@@ -1,10 +1,6 @@
 """Prompt contract tests for the sprint planner instructions."""
 
-from pathlib import Path
-
-INSTRUCTIONS_PATH = (
-    Path(__file__).resolve().parents[2] / "adapters" / "adk" / "prompts" / "sprint.txt"
-)
+from adapters.adk.prompts import load_prompt
 
 
 def _require_substring(instructions: str, expected: str) -> None:
@@ -19,7 +15,7 @@ def _require_exact_line(lines: set[str], expected: str) -> None:
 
 def test_sprint_planner_instructions_pin_task_kind_contract() -> None:
     """Pin the sprint planner's task-kind and decomposition prompt contract."""
-    instructions = INSTRUCTIONS_PATH.read_text(encoding="utf-8")
+    instructions = load_prompt("sprint.txt")
     lines = set(instructions.splitlines())
 
     _require_exact_line(

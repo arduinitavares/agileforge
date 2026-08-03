@@ -239,10 +239,10 @@ def main() -> None:
         help="Output JSONL path",
     )
     parser.add_argument(
-        "--product-id",
+        "--project-id",
         type=int,
         default=None,
-        help="Optional product id filter",
+        help="Optional Project ID filter",
     )
     parser.add_argument(
         "--limit",

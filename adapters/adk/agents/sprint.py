@@ -1,17 +1,14 @@
 """Sprint Planner agent definition."""
 
-from pathlib import Path
-
 from google.adk.agents import Agent
 from google.adk.models.lite_llm import LiteLlm
 
+from adapters.adk.prompts import load_prompt
 from services.contracts.sprint import SprintPlannerInput, SprintPlannerOutput
-from utils.helper import load_instruction
 from utils.model_config import get_model_id, get_openrouter_extra_body
 from utils.runtime_config import get_openrouter_api_key
 
-INSTRUCTIONS_PATH: Path = Path(__file__).parents[1] / "prompts" / "sprint.txt"
-SPRINT_PLANNER_INSTRUCTIONS = load_instruction(INSTRUCTIONS_PATH)
+SPRINT_PLANNER_INSTRUCTIONS = load_prompt("sprint.txt")
 
 model: LiteLlm = LiteLlm(
     model=get_model_id("sprint_planner"),

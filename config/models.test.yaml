@@ -2,18 +2,11 @@ models:
   brownfield_curator: "openrouter/openai/gpt-oss-20b:free"
   spec_authority_compiler: "openrouter/openai/gpt-oss-20b:free"
   product_vision: "openrouter/openai/gpt-oss-20b:free"
-  product_roadmap: "openrouter/openai/gpt-oss-20b:free"
-  product_user_story: "openrouter/openai/gpt-oss-20b:free"
-  story_draft: "openrouter/openai/gpt-oss-20b:free"
   spec_validator: "openrouter/openai/gpt-oss-20b:free"
-  story_refiner: "openrouter/openai/gpt-oss-20b:free"
-  invest_validator: "openrouter/openai/gpt-oss-20b:free"
-  negation_checker: "openrouter/openai/gpt-oss-20b:free"
   backlog_primer: "openrouter/openai/gpt-oss-20b:free"
   roadmap_builder: "openrouter/openai/gpt-oss-20b:free"
   user_story_writer: "openrouter/openai/gpt-oss-20b:free"
   sprint_planner: "openrouter/openai/gpt-oss-20b:free"
-  as_built_assessor: "openrouter/openai/gpt-oss-20b:free"
 
 story_pipeline:
   mode: "single"

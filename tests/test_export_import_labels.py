@@ -41,11 +41,11 @@ if TYPE_CHECKING:
 
 
 def _seed_case_data(session: Session) -> tuple[int, int]:
-    product = Project(name="Label Project", vision="Labeling")
-    session.add(product)
+    project = Project(name="Label Project", vision="Labeling")
+    session.add(project)
     session.commit()
-    session.refresh(product)
-    project_id = require_id(product.project_id, "project_id")
+    session.refresh(project)
+    project_id = require_id(project.project_id, "project_id")
 
     theme = Theme(project_id=project_id, title="Theme", description="")
     session.add(theme)

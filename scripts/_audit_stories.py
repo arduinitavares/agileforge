@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Quick audit: show acceptance_criteria status for product 8 stories."""
+"""Quick audit: show acceptance_criteria status for project 8 stories."""
 
 import sys
 from pathlib import Path
@@ -12,12 +12,12 @@ from sqlmodel import Session, col, select
 
 from agile_sqlmodel import UserStory, get_engine
 
-PRODUCT_ID = 8
+PROJECT_ID = 8
 
 with Session(get_engine()) as s:
     stories = s.exec(
         select(UserStory)
-        .where(UserStory.project_id == PRODUCT_ID)
+        .where(UserStory.project_id == PROJECT_ID)
         .order_by(col(UserStory.story_id))
     ).all()
     has_ac = 0

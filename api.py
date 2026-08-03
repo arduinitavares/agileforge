@@ -11,6 +11,7 @@ from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
+from adapters.adk.model_roles import AGENTIC_MODEL_ROLES
 from services.application import (
     AgenticActionRequest,
     AgileForgeApplication,
@@ -124,18 +125,6 @@ POSITIONED_API_PATHS: dict[str, str] = {
     "review_sprint": "sprint/review",
     "start_scope_extension": "scope/extension/start",
     "start_sprint": "sprint/start",
-}
-
-
-_AGENTIC_MODEL_KEYS: dict[str, str] = {
-    "onboarding.brownfield.curation": "brownfield_curator",
-    "authority.compile": "spec_authority_compiler",
-    "authority.repair": "spec_authority_compiler",
-    "vision.generate": "product_vision",
-    "backlog.generate": "backlog_primer",
-    "planning.roadmap.generate": "roadmap_builder",
-    "planning.story.generate": "user_story_writer",
-    "planning.sprint.plan": "sprint_planner",
 }
 
 
@@ -537,7 +526,7 @@ def _run_agentic(
             node_id=node_id,
             instance_key=req.instance_key,
             input_payload=req.input_payload,
-            model_id=req.model_id or get_model_id(_AGENTIC_MODEL_KEYS[node_id]),
+            model_id=req.model_id or get_model_id(AGENTIC_MODEL_ROLES[node_id]),
             idempotency_key=req.idempotency_key,
             actor=req.changed_by,
             correlation_id=req.correlation_id,

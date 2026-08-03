@@ -17,13 +17,13 @@ if TYPE_CHECKING:
 def test_source_attempt_is_unique_per_project(engine: Engine) -> None:
     """Verify source artifact attempt IDs are unique per project."""
     with Session(engine) as session:
-        product = Project(name="Brownfield Project")
-        session.add(product)
+        project = Project(name="Brownfield Project")
+        session.add(project)
         session.commit()
-        session.refresh(product)
+        session.refresh(project)
 
         first_artifact = BrownfieldSourceArtifact(
-            project_id=product.project_id,
+            project_id=project.project_id,
             attempt_id="source-attempt-1",
             artifact_fingerprint="artifact-fingerprint-1",
             request_hash="request-hash-1",
@@ -32,7 +32,7 @@ def test_source_attempt_is_unique_per_project(engine: Engine) -> None:
         session.commit()
 
         duplicate_artifact = BrownfieldSourceArtifact(
-            project_id=product.project_id,
+            project_id=project.project_id,
             attempt_id="source-attempt-1",
             artifact_fingerprint="artifact-fingerprint-2",
             request_hash="request-hash-2",

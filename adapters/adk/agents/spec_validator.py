@@ -1,16 +1,12 @@
 """ADK leaf agent for spec-backed story validation."""
 
-from pathlib import Path
-
 from google.adk.agents import LlmAgent
 from google.adk.models.lite_llm import LiteLlm
 
+from adapters.adk.prompts import load_prompt
 from services.contracts.specification_validation import SpecValidationResult
-from utils.helper import load_instruction
 from utils.model_config import get_model_id, get_openrouter_extra_body
 from utils.runtime_config import get_openrouter_api_key, get_spec_validator_max_tokens
-
-_INSTRUCTIONS_PATH = Path(__file__).parents[1] / "prompts" / "spec_validator.txt"
 
 
 def _spec_validator_model() -> LiteLlm:
@@ -29,7 +25,7 @@ def build_spec_validator_agent() -> LlmAgent:
     return LlmAgent(
         name="SpecValidatorAgent",
         model=_spec_validator_model(),
-        instruction=load_instruction(_INSTRUCTIONS_PATH),
+        instruction=load_prompt("spec_validator.txt"),
         description=(
             "Validates story compliance with technical specifications using "
             "structured logic checks."

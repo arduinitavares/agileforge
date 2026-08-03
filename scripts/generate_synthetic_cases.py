@@ -137,7 +137,7 @@ def generate_synthetic_cases(
 
         syn_data = mutate_case(source, m_type, m_payload)
         syn_id = 9100 + i  # Changed from 7000 to be safe
-        prod_id = source.get("project_id", 7)
+        project_id = source.get("project_id", 7)
 
         syn_case_record = {
             "case_id": f"p7-syn-{i}",
@@ -148,7 +148,7 @@ def generate_synthetic_cases(
             "notes": f"Mutation: {m_type}",
             "tags": ["synthetic", m_type],
             "enabled": True,
-            "project_id": prod_id,
+            "project_id": project_id,
             "story_title": syn_data["story_title"],
             "spec_source": "synthetic",
             "label_source": "synthetic",
@@ -156,7 +156,7 @@ def generate_synthetic_cases(
 
         syn_story_record = {
             "story_id": syn_id,
-            "project_id": prod_id,
+            "project_id": project_id,
             "title": syn_data["story_title"],
             "description": syn_data.get("story_description", ""),
             "acceptance_criteria": syn_data.get("acceptance_criteria", ""),
@@ -287,7 +287,7 @@ def main() -> None:
             fail_reasons = [r.strip() for r in fail_reasons.split(",") if r.strip()]
 
         # FIX: Ensure project_id is correctly mapped for P8 cases
-        # cases_for_labeling doesn't have project_id, so we usually default to 7 (Quadra).  # noqa: E501
+        # cases_for_labeling has no project_id, so default to 7 (Quadra).
         # But if case_id starts with 'p8', it's Project 8.
         project_id = sc.get("project_id", 7)
         if str(sc.get("case_id", "")).startswith("p8-"):

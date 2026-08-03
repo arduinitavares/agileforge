@@ -15,7 +15,7 @@ The handoff model uses two canonical artifacts instead of one overloaded task pr
 
 Neither packet is itself the prompt. Prompts, briefs, and agent-specific formats are renderings built on top of these canonical payloads, and the implementation already exposes optional rendered views alongside the canonical JSON.
 
-## Product Principle
+## Packet Principle
 
 The core principle remains:
 
@@ -49,7 +49,7 @@ The Story Packet is the session-bootstrap artifact. It owns:
 - story acceptance criteria in canonical constraints fields
 - story-scoped task plan context
 - sprint context
-- product context
+- Project context
 - pinned spec-binding metadata
 - validation freshness and findings
 - story-level compliance boundaries
@@ -90,7 +90,7 @@ The current data model already supports deterministic assembly:
 - `UserStory` carries story title, description, acceptance criteria, persona, and validation evidence
 - `Task` carries the execution slice plus canonical `metadata_json`
 - `Sprint` carries goal, dates, status, and team context
-- `Product` carries vision/product context
+- `Project` carries project identity and product vision context
 - `SprintStory` provides the authoritative story-to-sprint membership
 
 Important current limitations still shape the contract:

@@ -26,12 +26,6 @@ from services.agent_workbench.envelope import (
 )
 from services.agent_workbench.error_codes import ErrorCode, workbench_error
 from services.agent_workbench.fingerprints import canonical_hash
-from services.agent_workbench.schema_readiness import (
-    AUTHORITY_CURATION_REQUIREMENTS,
-    SchemaReadiness,
-    SchemaRequirement,
-    check_schema_readiness,
-)
 from services.contracts.specification import render_invariant_summary
 from services.specs.authority_selection import (
     accepted_compiled_authority,
@@ -60,58 +54,6 @@ JsonDict = dict[str, Any]
 
 AUTHORITY_STATUS_COMMAND: Final[str] = "agileforge authority status"
 AUTHORITY_INVARIANTS_COMMAND: Final[str] = "agileforge authority invariants"
-
-_AUTHORITY_REQUIREMENTS: Final[tuple[SchemaRequirement, ...]] = (
-    SchemaRequirement(
-        "projects",
-        ("project_id", "name", "spec_file_path", "updated_at"),
-    ),
-    SchemaRequirement(
-        "spec_registry",
-        (
-            "spec_version_id",
-            "project_id",
-            "spec_hash",
-            "content",
-            "content_ref",
-            "status",
-            "created_at",
-            "approved_at",
-        ),
-    ),
-    SchemaRequirement(
-        "compiled_spec_authority",
-        (
-            "authority_id",
-            "spec_version_id",
-            "compiler_version",
-            "prompt_hash",
-            "compiled_at",
-            "compiled_artifact_json",
-            "scope_themes",
-            "invariants",
-            "eligible_feature_ids",
-            "rejected_features",
-            "spec_gaps",
-        ),
-    ),
-    SchemaRequirement(
-        "spec_authority_acceptance",
-        (
-            "id",
-            "project_id",
-            "spec_version_id",
-            "status",
-            "policy",
-            "decided_by",
-            "decided_at",
-            "compiler_version",
-            "prompt_hash",
-            "spec_hash",
-        ),
-    ),
-)
-
 
 @dataclass(frozen=True)
 class _AuthoritySelection:
@@ -168,24 +110,6 @@ def _success(
         "warnings": [warning.to_dict() for warning in warnings or []],
         "errors": [],
     }
-
-
-def _schema_error(command: str, readiness: SchemaReadiness) -> JsonDict:
-    """Return the stable schema-not-ready error envelope."""
-    return error_envelope(
-        command=command,
-        error=workbench_error(
-            ErrorCode.SCHEMA_NOT_READY,
-            message=(
-                "Database schema is missing required tables or columns for this "
-                "read-only command."
-            ),
-            details={"missing": readiness.missing},
-            remediation=[
-                "Run the application startup or migration command before using the CLI."
-            ],
-        ),
-    )
 
 
 def _project_not_found_error(command: str, project_id: int) -> JsonDict:
@@ -482,7 +406,6 @@ def _build_status_data(
         session,
         project_id=project_id,
         selection=selection,
-        curation_ready=_curation_projection_ready(session),
     )
     context = _StatusContext(
         project_id=project_id,
@@ -494,14 +417,6 @@ def _build_status_data(
         feedback_curation=feedback_curation,
     )
     return _status_data(context), warnings
-
-
-def _curation_projection_ready(session: Session) -> bool:
-    """Return whether optional curation projection tables can be queried."""
-    return check_schema_readiness(
-        cast("Engine", session.get_bind()),
-        AUTHORITY_CURATION_REQUIREMENTS,
-    ).ok
 
 
 def _feedback_curation_defaults() -> JsonDict:
@@ -538,11 +453,8 @@ def _feedback_curation_for_selection(
     *,
     project_id: int,
     selection: _AuthoritySelection,
-    curation_ready: bool,
 ) -> JsonDict:
     """Return feedback/curation metadata for the current review lineage."""
-    if not curation_ready:
-        return _feedback_curation_defaults()
     pending_authority_id = _pending_authority_id(selection.pending_authority)
     rejected_source_authority_id = _rejected_curation_source_authority_id(selection)
     if rejected_source_authority_id is not None:
@@ -550,7 +462,6 @@ def _feedback_curation_for_selection(
             session,
             project_id=project_id,
             authority_id=rejected_source_authority_id,
-            curation_ready=curation_ready,
         )
         if (
             pending_authority_id is None
@@ -562,7 +473,6 @@ def _feedback_curation_for_selection(
         session,
         project_id=project_id,
         authority_id=pending_authority_id,
-        curation_ready=curation_ready,
     )
 
 
@@ -595,10 +505,9 @@ def _latest_feedback_and_curation(
     *,
     project_id: int,
     authority_id: int | None,
-    curation_ready: bool,
 ) -> JsonDict:
     """Return bounded feedback and curation status for the authority status view."""
-    if authority_id is None or not curation_ready:
+    if authority_id is None:
         return _feedback_curation_defaults()
 
     feedback = session.exec(
@@ -1017,10 +926,6 @@ class AuthorityProjectionService:
 
     def status(self, *, project_id: int) -> JsonDict:
         """Return authority status for a project."""
-        schema_error = self._check_schema(AUTHORITY_STATUS_COMMAND)
-        if schema_error is not None:
-            return schema_error
-
         with Session(self._engine) as session:
             project = session.get(Project, project_id)
             if project is None:
@@ -1078,23 +983,12 @@ class AuthorityProjectionService:
         spec_version_id: int | None = None,
     ) -> JsonDict:
         """Return invariants for accepted or explicitly requested authority."""
-        schema_error = self._check_schema(AUTHORITY_INVARIANTS_COMMAND)
-        if schema_error is not None:
-            return schema_error
-
         with Session(self._engine) as session:
             return self._invariants_from_session(
                 session=session,
                 project_id=project_id,
                 spec_version_id=spec_version_id,
             )
-
-    def _check_schema(self, command: str) -> JsonDict | None:
-        """Return a schema error envelope when required tables are absent."""
-        readiness = check_schema_readiness(self._engine, _AUTHORITY_REQUIREMENTS)
-        if readiness.ok:
-            return None
-        return _schema_error(command, readiness)
 
     def _resolve_spec_path(
         self,

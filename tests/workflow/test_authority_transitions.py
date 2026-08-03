@@ -23,8 +23,8 @@ from models.workflow import (
     WorkflowNodeAttemptOutcome,
     WorkflowTransitionReceipt,
 )
-from services.agent_workbench import authority_review as authority_review_service
-from services.agent_workbench.authority_review import (
+from services import authority_review_projection
+from services.authority_review_projection import (
     AuthorityReviewSnapshot,
     build_authority_review_snapshot_in_session,
 )
@@ -475,9 +475,7 @@ def test_persisted_old_compile_attempt_does_not_scope_replacement_spec(
     domain = _domain(engine)
     old_position = domain.position(project_id)
     old_decision = _decision(old_position, "authority.compile")
-    assert old_decision.instance_key == (
-        f"spec:{old_spec_version_id}:{old_spec_hash}"
-    )
+    assert old_decision.instance_key == (f"spec:{old_spec_version_id}:{old_spec_hash}")
     with Session(engine) as session:
         _seed_compile_attempt(
             session,
@@ -854,7 +852,7 @@ def test_low_level_authority_services_keep_exact_caller_session_open(
             lifecycle.setattr(session, "close", reject_lifecycle_call)
             lifecycle.setattr(compiler_service, "Session", reject_replacement_session)
             lifecycle.setattr(
-                authority_review_service,
+                authority_review_projection,
                 "Session",
                 reject_replacement_session,
             )
@@ -992,8 +990,7 @@ def test_post_flush_decision_failure_rolls_back_and_identical_retry_replays(
         assert session.exec(select(SpecAuthorityAcceptance)).all() == []
         decision_receipts = session.exec(
             select(WorkflowTransitionReceipt).where(
-                WorkflowTransitionReceipt.idempotency_key
-                == "decision-post-flush"
+                WorkflowTransitionReceipt.idempotency_key == "decision-post-flush"
             )
         ).all()
         assert decision_receipts == []

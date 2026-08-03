@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Apply spec-authority validation to refined stories for a product."""
+"""Apply spec-authority validation to refined stories for a project."""
 
 from __future__ import annotations
 
@@ -49,7 +49,7 @@ class ValidationRunResult:
     """Aggregate result for a script invocation."""
 
     project_id: int
-    product_name: str = ""
+    project_name: str = ""
     mode: str = "deterministic"
     status: Literal["success", "noop", "error"] = "success"
     spec_version_id: int | None = None
@@ -187,18 +187,18 @@ def _require_spec_version_id(result: ValidationRunResult) -> int:
 
 
 def apply_validation(project_id: int, mode: str | None = None) -> ValidationRunResult:
-    """Validate all canonical refined stories for a product and return structured results."""  # noqa: E501
+    """Validate refined stories for one Project and return structured results."""
     active_mode = _effective_mode(mode)
     result = ValidationRunResult(project_id=project_id, mode=active_mode)
 
     with Session(engine) as session:
-        product = session.get(Project, project_id)
-        if not product:
+        project = session.get(Project, project_id)
+        if not project:
             result.status = "error"
             result.message = f"Project {project_id} not found."
             return result
 
-        result.product_name = product.name
+        result.project_name = project.name
         spec = session.exec(
             select(SpecRegistry)
             .where(
@@ -210,13 +210,13 @@ def apply_validation(project_id: int, mode: str | None = None) -> ValidationRunR
 
         if not spec:
             result.status = "error"
-            result.message = f"No approved spec found for product {project_id}."
+            result.message = f"No approved spec found for project {project_id}."
             return result
 
         spec_version_id = spec.spec_version_id
         if spec_version_id is None:
             result.status = "error"
-            result.message = f"Approved spec for product {project_id} has no ID."
+            result.message = f"Approved spec for project {project_id} has no ID."
             return result
 
         result.spec_version_id = spec_version_id
@@ -233,7 +233,7 @@ def apply_validation(project_id: int, mode: str | None = None) -> ValidationRunR
     if not stories:
         result.status = "noop"
         result.message = (
-            f"No refined stories found for product {project_id}. Nothing to validate."
+            f"No refined stories found for project {project_id}. Nothing to validate."
         )
         return result
 
@@ -311,8 +311,8 @@ def _emit_run_logs(  # noqa: C901
 
     if not quiet:
         label = f"Project {result.project_id}"
-        if result.product_name:
-            label += f" '{result.product_name}'"
+        if result.project_name:
+            label += f" '{result.project_name}'"
         _log_info(f"Applying validation to {label}.")
         _log_info(f"Validation mode: {result.mode}")
         if result.spec_version_id is not None:
@@ -348,14 +348,14 @@ def _emit_run_logs(  # noqa: C901
 def main(argv: list[str] | None = None) -> int:
     """Return main."""
     parser = argparse.ArgumentParser(
-        description="Apply spec-authority validation to all stories for a product."
+        description="Apply spec-authority validation to all stories for a project."
     )
     parser.add_argument(
         "project_id",
         nargs="?",
         type=int,
         default=None,
-        help="Project ID to validate. Defaults to the most recently created product.",
+        help="Project ID to validate. Defaults to the most recently created project.",
     )
     parser.add_argument(
         "--mode",

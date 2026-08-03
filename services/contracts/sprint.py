@@ -278,7 +278,7 @@ class SprintPlannerOutput(BaseModel):
         Field(min_length=3, description="Single sprint objective statement."),
     ]
     sprint_number: Annotated[
-        int, Field(ge=1, description="Sprint number for this product.")
+        int, Field(ge=1, description="Sprint number for this Project.")
     ]
     selected_stories: Annotated[
         list[SprintPlannerSelectedStory],

@@ -1096,22 +1096,22 @@ def validate_story_with_spec_authority(
             )
 
         if spec_version.project_id != story.project_id:
-            product_match_message = (
-                "Spec version belongs to a different product "
+            project_match_message = (
+                "Spec version belongs to a different project "
                 f"(expected {story.project_id}, got {spec_version.project_id})"
             )
             return _build_failed_validation_result(
                 failure_context,
                 _FailedValidationDetails(
-                    rule="SPEC_PRODUCT_MATCH",
+                    rule="SPEC_PROJECT_MATCH",
                     expected=f"Project {story.project_id}",
                     actual=f"Project {spec_version.project_id}",
-                    message=product_match_message,
+                    message=project_match_message,
                     error=(
-                        "Project mismatch: story belongs to product "
+                        "Project mismatch: story belongs to project "
                         f"{story.project_id}, "
                         f"but spec version {parsed.spec_version_id} belongs to "
-                        f"product {spec_version.project_id}"
+                        f"project {spec_version.project_id}"
                     ),
                 ),
             )

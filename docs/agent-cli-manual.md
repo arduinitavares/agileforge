@@ -6,8 +6,8 @@ authors who need deterministic command contracts, recovery rules, and safe
 workflow sequencing.
 
 The CLI is JSON-first. Agents should parse JSON envelopes, inspect error codes,
-and follow explicit remediation and `next_actions` fields. Do not scrape human
-help text when a JSON command or schema is available.
+and follow explicit remediation fields. Do not scrape human help text when a
+JSON command or schema is available.
 
 ## Current Scope
 
@@ -1578,7 +1578,6 @@ Success shape:
     "command": "agileforge project list",
     "command_version": "1",
     "agileforge_version": "0.1.0",
-    "storage_schema_version": "2",
     "generated_at": "2026-05-16T17:20:12Z",
     "correlation_id": "69767371-fd30-4bf3-861e-a83e9127d5e7"
   }
@@ -1611,7 +1610,6 @@ Failure shape:
     "command": "agileforge project create",
     "command_version": "1",
     "agileforge_version": "0.1.0",
-    "storage_schema_version": "2",
     "generated_at": "2026-05-16T17:20:12Z",
     "correlation_id": "69767371-fd30-4bf3-861e-a83e9127d5e7"
   }
@@ -2470,7 +2468,7 @@ Agent rules:
 - If a command returns `MUTATION_IN_PROGRESS`, wait briefly and inspect the
   mutation event before retrying.
 - If a command returns `MUTATION_RECOVERY_REQUIRED`, inspect the mutation event
-  and follow `data.next_actions` or `errors[0].remediation`.
+  and follow `errors[0].remediation`.
 - If a command returns `IDEMPOTENCY_KEY_REUSED`, do not keep retrying. Generate
   a new idempotency key only after reviewing why the request differs.
 - If a command returns `MUTATION_RESUME_CONFLICT`, another worker may have won a
@@ -2610,16 +2608,14 @@ Registered CLI error codes include:
 | `STALE_AUTHORITY_VERSION` | Accepted authority version changed. | Re-read authority before retry. |
 | `CONFIRMATION_REQUIRED` | Destructive confirmation missing. | Add required confirmation flags only after review. |
 | `ACTIVE_STATE_BLOCKS_DELETE` | Active workflow blocks destructive op. | Stop or complete/reset workflow first. |
-| `SCHEMA_VERSION_MISMATCH` | Storage schema version incompatible. | Run schema migration/check outside workflow. |
 | `MUTATION_FAILED` | Mutation failed without a more specific code. | Inspect details and mutation ledger. |
 | `MUTATION_ROLLBACK` | Mutation rolled back or needs recovery. | Inspect mutation ledger. |
 | `MUTATION_IN_PROGRESS` | Active lease exists. | Wait or inspect event. |
-| `MUTATION_RECOVERY_REQUIRED` | Durable recovery is required. | Follow `next_actions` and remediation. |
+| `MUTATION_RECOVERY_REQUIRED` | Durable recovery is required. | Inspect the mutation event and follow remediation. |
 | `MUTATION_RESUME_CONFLICT` | Another worker acquired recovery. | Re-read mutation event. |
 | `MUTATION_RECOVERY_INVALID` | Recovery link is invalid. | Refresh mutation list and use correct event id. |
 | `IDEMPOTENCY_KEY_REUSED` | Same key used with different request. | Stop and generate a new reviewed attempt. |
 | `MUTATION_NOT_FOUND` | Mutation event id does not exist. | Refresh mutation list. |
-| `WORKFLOW_SESSION_FAILED` | Workflow session setup failed. | Inspect recovery state and retry setup if directed. |
 
 Agents should use the command-specific schema for exact possible errors:
 
@@ -2695,7 +2691,7 @@ from pathlib import Path
 
 payload = json.loads(Path(sys.argv[1]).read_text())
 data = payload.get("data", {})
-commands = data.get("next_valid_commands") or data.get("next_actions") or []
+commands = data.get("next_valid_commands") or []
 print("command_count", len(commands) if isinstance(commands, list) else "unknown")
 for command in commands[:12] if isinstance(commands, list) else []:
     print("command", command if isinstance(command, str) else command.get("command"))
@@ -2802,7 +2798,7 @@ An AgileForge CLI skill should implement these steps.
 
 1. Parse the JSON envelope.
 2. If `ok: true`, store `data.mutation_event_id` when present.
-3. Follow `data.next_actions` when present.
+3. Store returned workflow position and mutation evidence when present.
 4. If `ok: false`, branch on `errors[0].code`.
 5. For recovery errors, inspect `mutation show` and use exact remediation.
 6. Never create a second mutation attempt until idempotency replay and recovery

@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import html
-from typing import Any, Final, cast
+from typing import TYPE_CHECKING, Final
+
+if TYPE_CHECKING:
+    from workflow.contracts import JsonObject, JsonValue
 
 TASK_SCHEMA_VERSION: Final[str] = "task_packet.v2"
 STORY_SCHEMA_VERSION: Final[str] = "story_packet.v1"
@@ -71,42 +74,42 @@ def _escape_xml(text: object) -> str:
     return html.escape(str(text or ""), quote=True) if text else ""
 
 
-def _as_mapping(value: object) -> dict[str, Any]:
-    return cast("dict[str, Any]", value) if isinstance(value, dict) else {}
+def _as_mapping(value: JsonValue) -> JsonObject:
+    return value if isinstance(value, dict) else {}
 
 
-def _as_list(value: object) -> list[Any]:
+def _as_list(value: JsonValue) -> list[JsonValue]:
     return list(value) if isinstance(value, list) else []
 
 
-def _schema_version(packet: dict[str, Any]) -> str:
+def _schema_version(packet: JsonObject) -> str:
     return str(packet.get("schema_version") or "").strip().lower()
 
 
-def _task_checklist_items(packet: dict[str, Any]) -> list[Any]:
+def _task_checklist_items(packet: JsonObject) -> list[JsonValue]:
     task = _as_mapping(packet.get("task"))
     return _as_list(task.get("checklist_items"))
 
 
-def _story_acceptance_criteria_items(packet: dict[str, Any]) -> list[Any]:
+def _story_acceptance_criteria_items(packet: JsonObject) -> list[JsonValue]:
     constraints = _as_mapping(packet.get("constraints"))
     return _as_list(constraints.get("story_acceptance_criteria_items"))
 
 
-def _story_task_plan_items(packet: dict[str, Any]) -> list[dict[str, Any]]:
+def _story_task_plan_items(packet: JsonObject) -> list[JsonObject]:
     task_plan = _as_mapping(packet.get("task_plan"))
     tasks = _as_list(task_plan.get("tasks"))
     return [task for task in tasks if isinstance(task, dict)]
 
 
-def _story_metadata(packet: dict[str, Any]) -> dict[str, Any]:
+def _story_metadata(packet: JsonObject) -> JsonObject:
     if _schema_version(packet) == STORY_SCHEMA_VERSION:
         return _as_mapping(packet.get("story"))
     context = _as_mapping(packet.get("context"))
     return _as_mapping(context.get("story"))
 
 
-def _render_invariants_markdown(invariants: list[Any]) -> str:
+def _render_invariants_markdown(invariants: list[JsonValue]) -> str:
     if not invariants:
         return "* No pinned specification invariants found.\n"
 
@@ -120,13 +123,13 @@ def _render_invariants_markdown(invariants: list[Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _task_plan_xml_line(task: dict[str, Any]) -> str:
+def _task_plan_xml_line(task: JsonObject) -> str:
     task_id = task.get("id", "unknown")
     description = _escape_xml(task.get("description", ""))
     return f"  - [{task_id}] {description}"
 
 
-def _task_plan_md_line(task: dict[str, Any]) -> str:
+def _task_plan_md_line(task: JsonObject) -> str:
     task_id = task.get("id", "unknown")
     description = _escape_md(task.get("description", ""))
     return f"- [{task_id}] {description}"
@@ -134,18 +137,18 @@ def _task_plan_md_line(task: dict[str, Any]) -> str:
 
 def _append_xml_bullets(
     parts: list[str],
-    items: list[object],
+    items: list[JsonValue],
     *,
     prefix: str,
 ) -> None:
     parts.extend(f"{prefix}{_escape_xml(item)}" for item in items)
 
 
-def _append_md_checklist(parts: list[str], items: list[object]) -> None:
+def _append_md_checklist(parts: list[str], items: list[JsonValue]) -> None:
     parts.extend(f"- [ ] {_escape_md(item)}" for item in items)
 
 
-def _append_xml_checklist(parts: list[str], items: list[object]) -> None:
+def _append_xml_checklist(parts: list[str], items: list[JsonValue]) -> None:
     parts.extend(f"- [ ] {_escape_xml(item)}" for item in items)
 
 
@@ -153,7 +156,7 @@ def _append_invariant_xml_section(
     parts: list[str],
     *,
     tag: str,
-    invariants: list[Any],
+    invariants: list[JsonValue],
     empty_line: str,
 ) -> None:
     parts.append(f"<{tag}>")
@@ -180,8 +183,8 @@ def _append_execution_protocol(parts: list[str], steps: tuple[str, ...]) -> None
 def _append_task_completion_report(
     parts: list[str],
     *,
-    task: dict[str, Any],
-    checklist_items: list[Any],
+    task: JsonObject,
+    checklist_items: list[JsonValue],
 ) -> None:
     task_label = _escape_xml(task.get("label", task.get("description", "Task")))
     parts.append("<completion_report>")
@@ -209,9 +212,9 @@ def _append_task_completion_report(
 def _append_story_completion_report(
     parts: list[str],
     *,
-    story: dict[str, Any],
-    ac_items: list[Any],
-    task_plan_items: list[dict[str, Any]],
+    story: JsonObject,
+    ac_items: list[JsonValue],
+    task_plan_items: list[JsonObject],
 ) -> None:
     story_label = _escape_xml(story.get("title", "Story"))
     parts.append("<completion_report>")
@@ -244,8 +247,8 @@ def _append_story_completion_report(
 
 def _task_agent_context_lines(
     *,
-    story: dict[str, Any],
-    sprint: dict[str, Any],
+    story: JsonObject,
+    sprint: JsonObject,
 ) -> list[str]:
     lines = ["<context>"]
     if sprint.get("goal"):
@@ -259,12 +262,12 @@ def _task_agent_context_lines(
     return lines
 
 
-def _task_agent_task_lines(task: dict[str, Any]) -> list[str]:
+def _task_agent_task_lines(task: JsonObject) -> list[str]:
     description = _escape_xml(task.get("description", "Unknown task"))
     return ["<task>", f"  {description}", "</task>\n"]
 
 
-def _task_agent_task_context_lines(task: dict[str, Any]) -> list[str]:
+def _task_agent_task_context_lines(task: JsonObject) -> list[str]:
     artifact_targets = _as_list(task.get("artifact_targets"))
     workstream_tags = _as_list(task.get("workstream_tags"))
     lines = [
@@ -285,7 +288,7 @@ def _task_agent_task_context_lines(task: dict[str, Any]) -> list[str]:
     return lines
 
 
-def _task_agent_checklist_lines(checklist_items: list[Any]) -> list[str]:
+def _task_agent_checklist_lines(checklist_items: list[JsonValue]) -> list[str]:
     lines = ["<task_checklist>"]
     if checklist_items:
         _append_xml_bullets(lines, checklist_items, prefix="  - ")
@@ -295,7 +298,7 @@ def _task_agent_checklist_lines(checklist_items: list[Any]) -> list[str]:
     return lines
 
 
-def _render_task_agent_prompt(packet: dict[str, Any]) -> str:
+def _render_task_agent_prompt(packet: JsonObject) -> str:
     task = _as_mapping(packet.get("task"))
     context = _as_mapping(packet.get("context"))
     constraints = _as_mapping(packet.get("constraints"))
@@ -332,9 +335,9 @@ def _render_task_agent_prompt(packet: dict[str, Any]) -> str:
 
 def _story_agent_context_lines(
     *,
-    story: dict[str, Any],
-    sprint: dict[str, Any],
-    product: dict[str, Any],
+    story: JsonObject,
+    sprint: JsonObject,
+    project: JsonObject,
 ) -> list[str]:
     lines = ["<context>"]
     if sprint.get("goal"):
@@ -344,14 +347,14 @@ def _story_agent_context_lines(
     if story.get("story_description"):
         description = _escape_xml(story.get("story_description"))
         lines.append(f"  <story_description>{description}</story_description>")
-    if product.get("vision_excerpt"):
-        vision_excerpt = _escape_xml(product.get("vision_excerpt"))
+    if project.get("vision_excerpt"):
+        vision_excerpt = _escape_xml(project.get("vision_excerpt"))
         lines.append(f"  <product_vision>{vision_excerpt}</product_vision>")
     lines.append("</context>\n")
     return lines
 
 
-def _story_agent_acceptance_lines(ac_items: list[Any]) -> list[str]:
+def _story_agent_acceptance_lines(ac_items: list[JsonValue]) -> list[str]:
     lines = ["<story_acceptance_criteria>"]
     if ac_items:
         _append_xml_bullets(lines, ac_items, prefix="  - ")
@@ -362,7 +365,7 @@ def _story_agent_acceptance_lines(ac_items: list[Any]) -> list[str]:
 
 
 def _story_task_plan_reference_lines(
-    task_plan_items: list[dict[str, Any]],
+    task_plan_items: list[JsonObject],
 ) -> list[str]:
     lines = ["<task_plan_reference>"]
     if task_plan_items:
@@ -373,12 +376,12 @@ def _story_task_plan_reference_lines(
     return lines
 
 
-def _render_story_agent_prompt(packet: dict[str, Any]) -> str:
+def _render_story_agent_prompt(packet: JsonObject) -> str:
     story = _as_mapping(packet.get("story"))
     context = _as_mapping(packet.get("context"))
     constraints = _as_mapping(packet.get("constraints"))
     sprint = _as_mapping(context.get("sprint"))
-    product = _as_mapping(context.get("product"))
+    project = _as_mapping(context.get("project"))
     ac_items = _story_acceptance_criteria_items(packet)
     task_plan_items = _story_task_plan_items(packet)
 
@@ -389,7 +392,7 @@ def _render_story_agent_prompt(packet: dict[str, Any]) -> str:
         )
     ]
     parts.extend(
-        _story_agent_context_lines(story=story, sprint=sprint, product=product)
+        _story_agent_context_lines(story=story, sprint=sprint, project=project)
     )
     parts.extend(_story_agent_acceptance_lines(ac_items))
     parts.extend(_story_task_plan_reference_lines(task_plan_items))
@@ -413,12 +416,12 @@ def _render_story_agent_prompt(packet: dict[str, Any]) -> str:
     return "\n".join(parts)
 
 
-def _render_story_human_brief(packet: dict[str, Any]) -> str:
+def _render_story_human_brief(packet: JsonObject) -> str:
     story = _story_metadata(packet)
     context = _as_mapping(packet.get("context"))
     constraints = _as_mapping(packet.get("constraints"))
     sprint = _as_mapping(context.get("sprint"))
-    product = _as_mapping(context.get("product"))
+    project = _as_mapping(context.get("project"))
     ac_items = _story_acceptance_criteria_items(packet)
     task_plan_items = _story_task_plan_items(packet)
 
@@ -428,8 +431,8 @@ def _render_story_human_brief(packet: dict[str, Any]) -> str:
     parts.append("## Story Brief")
     if sprint.get("goal"):
         parts.append(f"**Sprint Goal**: {_escape_md(sprint.get('goal'))}")
-    if product.get("vision_excerpt"):
-        vision_excerpt = _escape_md(product.get("vision_excerpt"))
+    if project.get("vision_excerpt"):
+        vision_excerpt = _escape_md(project.get("vision_excerpt"))
         parts.append(f"**product vision**: {vision_excerpt}\n")
 
     parts.append("## Story Acceptance Criteria")
@@ -453,13 +456,13 @@ def _render_story_human_brief(packet: dict[str, Any]) -> str:
     return "\n".join(parts)
 
 
-def _render_task_human_brief(packet: dict[str, Any]) -> str:
+def _render_task_human_brief(packet: JsonObject) -> str:
     task = _as_mapping(packet.get("task"))
     context = _as_mapping(packet.get("context"))
     constraints = _as_mapping(packet.get("constraints"))
     story = _story_metadata(packet)
     sprint = _as_mapping(context.get("sprint"))
-    product = _as_mapping(context.get("product"))
+    project = _as_mapping(context.get("project"))
     checklist_items = _task_checklist_items(packet)
 
     parts = [
@@ -469,7 +472,7 @@ def _render_task_human_brief(packet: dict[str, Any]) -> str:
         f"**Task Kind**: {_escape_md(task.get('task_kind', 'other'))}",
     ]
     parts.extend(_task_profile_lines(task))
-    parts.extend(_parent_story_orientation_lines(story, sprint, product))
+    parts.extend(_parent_story_orientation_lines(story, sprint, project))
 
     parts.append("## Task Checklist")
     if checklist_items:
@@ -492,7 +495,7 @@ def _render_task_human_brief(packet: dict[str, Any]) -> str:
     return "\n".join(parts)
 
 
-def _task_profile_lines(task: dict[str, Any]) -> list[str]:
+def _task_profile_lines(task: JsonObject) -> list[str]:
     artifact_targets = _as_list(task.get("artifact_targets"))
     workstream_tags = _as_list(task.get("workstream_tags"))
     lines: list[str] = []
@@ -513,9 +516,9 @@ def _task_profile_lines(task: dict[str, Any]) -> list[str]:
 
 
 def _parent_story_orientation_lines(
-    story: dict[str, Any],
-    sprint: dict[str, Any],
-    product: dict[str, Any],
+    story: JsonObject,
+    sprint: JsonObject,
+    project: JsonObject,
 ) -> list[str]:
     lines = ["## Parent Story Orientation"]
     if story.get("title"):
@@ -524,27 +527,27 @@ def _parent_story_orientation_lines(
             lines.append(f"> {_escape_md(story.get('story_description'))}\n")
     if sprint.get("goal"):
         lines.append(f"**Sprint Goal**: {_escape_md(sprint.get('goal'))}\n")
-    if product.get("vision_excerpt"):
-        vision_excerpt = _escape_md(product.get("vision_excerpt"))
+    if project.get("vision_excerpt"):
+        vision_excerpt = _escape_md(project.get("vision_excerpt"))
         lines.append(f"**product vision**: {vision_excerpt}\n")
     return lines
 
 
-def render_human_brief(packet: dict[str, Any]) -> str:
+def render_human_brief(packet: JsonObject) -> str:
     """Render the canonical packet into a clean Markdown brief for developers."""
     if _schema_version(packet) == STORY_SCHEMA_VERSION:
         return _render_story_human_brief(packet)
     return _render_task_human_brief(packet)
 
 
-def render_agent_prompt(packet: dict[str, Any]) -> str:
+def render_agent_prompt(packet: JsonObject) -> str:
     """Render the canonical packet into a strict XML-tagged agent prompt."""
     if _schema_version(packet) == STORY_SCHEMA_VERSION:
         return _render_story_agent_prompt(packet)
     return _render_task_agent_prompt(packet)
 
 
-def render_packet(packet: dict[str, Any], flavor: str) -> str:
+def render_packet(packet: JsonObject, flavor: str) -> str:
     """Dispatch packet rendering across supported output flavors."""
     normalized = (flavor or "").strip().lower()
     if normalized in ("human", "markdown", "brief"):

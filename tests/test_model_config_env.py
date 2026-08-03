@@ -5,7 +5,10 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import yaml
+from pydantic import TypeAdapter
 
+from adapters.adk.model_roles import RETAINED_MODEL_ROLES
 from utils import model_config
 from utils.model_config import (
     get_model_id,
@@ -13,25 +16,23 @@ from utils.model_config import (
     get_story_pipeline_mode,
 )
 
-_RUNTIME_MODEL_KEYS: tuple[str, ...] = (
-    "spec_authority_compiler",
-    "product_vision",
-    "product_roadmap",
-    "product_user_story",
-    "story_draft",
-    "spec_validator",
-    "story_refiner",
-    "invest_validator",
-    "negation_checker",
-    "backlog_primer",
-    "roadmap_builder",
-    "user_story_writer",
-    "sprint_planner",
-    "as_built_assessor",
-)
+_RUNTIME_MODEL_KEYS = tuple(sorted(RETAINED_MODEL_ROLES))
 _TEST_MODEL_CONFIG_PATH: Path = (
     Path(__file__).resolve().parents[1] / "config" / "models.test.yaml"
 )
+_PRODUCTION_MODEL_CONFIG_PATH: Path = (
+    Path(__file__).resolve().parents[1] / "config" / "models.yaml"
+)
+_CONFIG_OBJECT = TypeAdapter(dict[str, object])
+_MODEL_MAPPING = TypeAdapter(dict[str, str])
+
+
+def _configured_model_roles(path: Path) -> frozenset[str]:
+    payload = _CONFIG_OBJECT.validate_python(
+        yaml.safe_load(path.read_text(encoding="utf-8"))
+    )
+    models = _MODEL_MAPPING.validate_python(payload.get("models"))
+    return frozenset(models)
 
 
 @pytest.fixture
@@ -43,13 +44,12 @@ def temp_model_config(tmp_path: Path) -> Path:
 models:
   spec_authority_compiler: "openrouter/openai/gpt-5-mini"
   product_vision: "openrouter/openai/gpt-5-mini"
-  product_roadmap: "openrouter/openai/gpt-5-mini"
-  product_user_story: "openrouter/openai/gpt-5-mini"
-  story_draft: "openrouter/openai/gpt-5-mini"
+  roadmap_builder: "openrouter/openai/gpt-5-mini"
+  user_story_writer: "openrouter/openai/gpt-5-mini"
   spec_validator: "openrouter/openai/gpt-5-mini"
-  story_refiner: "openrouter/openai/gpt-5-mini"
-  invest_validator: "openrouter/openai/gpt-5-mini"
   backlog_primer: "openrouter/openai/gpt-5-mini"
+  sprint_planner: "openrouter/openai/gpt-5-mini"
+  brownfield_curator: "openrouter/openai/gpt-5-mini"
 
 story_pipeline:
   mode: "single"
@@ -101,6 +101,14 @@ def test_test_model_config_uses_pinned_free_model(
         }
     finally:
         model_config.clear_config_cache()
+
+
+def test_model_configs_exactly_match_live_production_roles() -> None:
+    """Keep production and test config equal to the retained recipe roles."""
+    expected = frozenset(_RUNTIME_MODEL_KEYS)
+
+    assert _configured_model_roles(_PRODUCTION_MODEL_CONFIG_PATH) == expected
+    assert _configured_model_roles(_TEST_MODEL_CONFIG_PATH) == expected
 
 
 def test_relax_zdr_for_tests_toggles_privacy(monkeypatch: pytest.MonkeyPatch) -> None:

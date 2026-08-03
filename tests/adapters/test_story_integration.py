@@ -19,10 +19,7 @@ from google.adk.sessions import InMemorySessionService
 from google.genai import types
 from pydantic import ValidationError
 
-from adapters.adk.agents.story import (
-    INSTRUCTIONS_PATH,
-    create_user_story_writer_agent,
-)
+from adapters.adk.agents.story import create_user_story_writer_agent
 from services.contracts.story import (
     UserStoryWriterInput,
     UserStoryWriterOutput,
@@ -100,7 +97,7 @@ def _write_diagnostic_artifact(diagnostic: _DiagnosticArtifact) -> None:
     """Persist a replay diagnostic artifact."""
     artifact = {
         "source_payload_path": str(INPUT_FIXTURE_PATH),
-        "instruction_path": str(INSTRUCTIONS_PATH),
+        "instruction_resource": "adapters.adk.prompts/story.txt",
         "target_schema": UserStoryWriterOutput.__name__,
         "payload_length": len(diagnostic.payload_text),
         "raw_output": diagnostic.raw_output,

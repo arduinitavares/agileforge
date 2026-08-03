@@ -1,29 +1,21 @@
-"""Script for benchmark product structure."""
+"""Benchmark Project hierarchy queries against an in-memory database."""
 
-import sys
 import time
-from pathlib import Path
 
 from sqlalchemy import Engine, event
 from sqlmodel import Session, SQLModel, create_engine
 
-from utils.cli_output import emit
-
-# Add project root to path
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
+import tools.db_tools
 from agile_sqlmodel import Project, StoryStatus, UserStory
 from models.core import Epic, Feature, Theme
-from tools.db_tools import query_product_structure
+from tools.db_tools import query_project_structure
+from utils.cli_output import emit
 
 # Setup in-memory DB for benchmarking
 engine = create_engine("sqlite:///:memory:")
 SQLModel.metadata.create_all(engine)
 
 # Patch the engine in db_tools
-import tools.db_tools  # noqa: E402
-
-
 def _benchmark_engine() -> Engine:
     return engine
 
@@ -39,24 +31,24 @@ def _require_id(value: int | None, name: str) -> int:
 
 
 def seed_database(
-    product_count: int = 1,
-    themes_per_product: int = 5,
+    project_count: int = 1,
+    themes_per_project: int = 5,
     epics_per_theme: int = 5,
     features_per_epic: int = 5,
     stories_per_feature: int = 5,
 ) -> None:
     """Return seed database."""
     with Session(engine) as session:
-        for p in range(product_count):
-            product = Project(
+        for p in range(project_count):
+            project = Project(
                 name=f"Project {p}", vision="Vision", description="Description"
             )
-            session.add(product)
+            session.add(project)
             session.commit()
-            session.refresh(product)
-            project_id = _require_id(product.project_id, "Project ID")
+            session.refresh(project)
+            project_id = _require_id(project.project_id, "Project ID")
 
-            for t in range(themes_per_product):
+            for t in range(themes_per_project):
                 theme = Theme(
                     title=f"Theme {t}",
                     description="Desc",
@@ -96,7 +88,10 @@ def seed_database(
                             session.add(story)
         session.commit()
     emit(
-        f"Seeded DB with {product_count} projects, {themes_per_product} themes/prod, {epics_per_theme} epics/theme, {features_per_epic} features/epic, {stories_per_feature} stories/feature."  # noqa: E501
+        f"Seeded DB with {project_count} projects, "
+        f"{themes_per_project} themes/project, {epics_per_theme} epics/theme, "
+        f"{features_per_epic} features/epic, "
+        f"{stories_per_feature} stories/feature."
     )
 
 
@@ -106,21 +101,13 @@ def benchmark() -> None:
     query_count = 0
 
     @event.listens_for(Engine, "before_cursor_execute")
-    def before_cursor_execute(  # noqa: PLR0913
-        conn: object,
-        cursor: object,
-        statement: object,
-        parameters: object,
-        context: object,
-        executemany: object,
-    ) -> None:
-        del conn, cursor, statement, parameters, context, executemany
+    def before_cursor_execute(*_event_args: object) -> None:
         nonlocal query_count
         query_count += 1
 
     # Measure
     start_time = time.time()
-    result = query_product_structure(1)
+    result = query_project_structure(1)
     end_time = time.time()
 
     duration = end_time - start_time
@@ -129,8 +116,8 @@ def benchmark() -> None:
     emit(f"Query Count: {query_count}")
 
     if not result["success"]:
-        emit("Error in query_product_structure")
-        sys.exit(1)
+        emit("Error in query_project_structure")
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

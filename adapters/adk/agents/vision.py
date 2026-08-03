@@ -6,22 +6,18 @@ product vision statement. If information is missing, it returns a
 draft and clarifying questions.
 """
 
-from pathlib import Path
-
 from google.adk.agents import Agent
 from google.adk.models.lite_llm import LiteLlm
 
+from adapters.adk.prompts import load_prompt
 from services.contracts.vision import InputSchema, OutputSchema
-from utils.helper import load_instruction
 from utils.model_config import get_model_id, get_openrouter_extra_body
 from utils.runtime_config import (
     get_openrouter_api_key,
     get_vision_interviewer_max_tokens,
 )
 
-# --- Load Instruction ---
-INSTRUCTIONS_PATH: Path = Path(__file__).parents[1] / "prompts" / "vision.txt"
-instructions = load_instruction(INSTRUCTIONS_PATH)
+instructions = load_prompt("vision.txt")
 
 # --- Initialize Model with drop_params to prevent logging issues ---
 _max_tokens = get_vision_interviewer_max_tokens()

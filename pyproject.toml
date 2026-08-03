@@ -35,12 +35,17 @@ package = true
 [tool.setuptools]
 py-modules = ["agile_sqlmodel", "api"]
 
+[tool.setuptools.package-data]
+"adapters.adk.prompts" = ["*.txt"]
+config = ["*.yaml"]
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = [
     "adapters",
     "adapters.*",
     "cli",
+    "config",
     "db",
     "models",
     "repositories",

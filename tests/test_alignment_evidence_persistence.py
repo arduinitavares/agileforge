@@ -36,15 +36,15 @@ from utils.spec_schemas import (
 
 
 @pytest.fixture
-def product_with_spec(session: Session, engine: Engine) -> tuple[Project, int]:
-    """Create product with a pre-compiled spec authority."""
+def project_with_spec(session: Session, engine: Engine) -> tuple[Project, int]:
+    """Create project with a pre-compiled spec authority."""
     spec_tools.engine = engine
 
-    product = Project(name="Alignment Project", vision="Test")
-    session.add(product)
+    project = Project(name="Alignment Project", vision="Test")
+    session.add(project)
     session.commit()
-    session.refresh(product)
-    project_id = _require_id(product.project_id, "product.project_id")
+    session.refresh(project)
+    project_id = _require_id(project.project_id, "project.project_id")
 
     spec_content = "# Spec\n\n## Invariants\n- Stories MUST NOT include web features."
     spec_hash = hashlib.sha256(spec_content.encode()).hexdigest()
@@ -123,7 +123,7 @@ def product_with_spec(session: Session, engine: Engine) -> tuple[Project, int]:
     )
     session.commit()
 
-    return product, spec_version_id
+    return project, spec_version_id
 
 
 def _require_id(value: int | None, label: str) -> int:
@@ -179,15 +179,15 @@ def _create_story(session: Session, project_id: int, title: str) -> UserStory:
 def test_alignment_failure_persisted(
     engine: Engine,
     session: Session,
-    product_with_spec: tuple[Project, int],
+    project_with_spec: tuple[Project, int],
 ) -> None:
     """Alignment rejection persists alignment_failures in evidence."""
     spec_tools.engine: Engine = engine
-    product, spec_version_id = product_with_spec
+    project, spec_version_id = project_with_spec
 
     story: UserStory = _create_story(
         session,
-        _require_id(product.project_id, "product.project_id"),
+        _require_id(project.project_id, "project.project_id"),
         title="Web dashboard",
     )
     result: dict[str, Any] = validate_story_with_spec_authority(
@@ -210,15 +210,15 @@ def test_alignment_warning_persisted(engine: Engine, session: Session) -> None:
     """Alignment warning persists alignment_warnings in evidence."""
     spec_tools.engine = engine
 
-    product = Project(name="Warn Project", vision="Test")
-    session.add(product)
+    project = Project(name="Warn Project", vision="Test")
+    session.add(project)
     session.commit()
-    session.refresh(product)
+    session.refresh(project)
 
     # Create an approved spec + precompiled authority with zero invariants.
     reg: dict[str, Any] = register_spec_version(
         {
-            "project_id": product.project_id,
+            "project_id": project.project_id,
             "content": "# Spec\n\n## Notes\n- No requirements here",
         },
         tool_context=None,
@@ -259,7 +259,7 @@ def test_alignment_warning_persisted(engine: Engine, session: Session) -> None:
     assert accepted_spec is not None
     session.add(
         SpecAuthorityAcceptance(
-            project_id=_require_id(product.project_id, "product.project_id"),
+            project_id=_require_id(project.project_id, "project.project_id"),
             spec_version_id=spec_version_id,
             status="accepted",
             policy="test",
@@ -275,7 +275,7 @@ def test_alignment_warning_persisted(engine: Engine, session: Session) -> None:
 
     story: UserStory = _create_story(
         session,
-        _require_id(product.project_id, "product.project_id"),
+        _require_id(project.project_id, "project.project_id"),
         title="Normal story",
     )
     result: dict[str, Any] = validate_story_with_spec_authority(
@@ -294,15 +294,15 @@ def test_alignment_warning_persisted(engine: Engine, session: Session) -> None:
 def test_alignment_evidence_includes_spec_and_hash(
     engine: Engine,
     session: Session,
-    product_with_spec: tuple[Project, int],
+    project_with_spec: tuple[Project, int],
 ) -> None:
     """Evidence includes spec_version_id and input_hash without vision access."""
     spec_tools.engine = engine
-    product, spec_version_id = product_with_spec
+    project, spec_version_id = project_with_spec
 
     story: UserStory = _create_story(
         session,
-        _require_id(product.project_id, "product.project_id"),
+        _require_id(project.project_id, "project.project_id"),
         title="Web dashboard",
     )
     validate_story_with_spec_authority(

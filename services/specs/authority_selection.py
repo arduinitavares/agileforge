@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import json
 from json import JSONDecodeError
-from typing import Any, cast
 
-from sqlmodel import Session, select
+from sqlmodel import Session, col, select
 
 from models.specs import (
     CompiledSpecAuthority,
@@ -118,27 +117,27 @@ def latest_compiled_authority(
     return session.exec(
         select(CompiledSpecAuthority)
         .where(CompiledSpecAuthority.spec_version_id == spec_version_id)
-        .order_by(cast("Any", CompiledSpecAuthority.authority_id).desc())
+        .order_by(col(CompiledSpecAuthority.authority_id).desc())
     ).first()
 
 
-def latest_compiled_authority_for_product(
+def latest_compiled_authority_for_project(
     session: Session,
     *,
     project_id: int,
 ) -> CompiledSpecAuthority | None:
-    """Load the newest row for the newest compiled spec owned by a product."""
+    """Load the newest row for the newest compiled spec owned by a project."""
     return session.exec(
         select(CompiledSpecAuthority)
         .join(
             SpecRegistry,
-            cast("Any", CompiledSpecAuthority.spec_version_id)
-            == SpecRegistry.spec_version_id,
+            col(CompiledSpecAuthority.spec_version_id)
+            == col(SpecRegistry.spec_version_id),
         )
         .where(SpecRegistry.project_id == project_id)
         .order_by(
-            cast("Any", SpecRegistry.spec_version_id).desc(),
-            cast("Any", CompiledSpecAuthority.authority_id).desc(),
+            col(SpecRegistry.spec_version_id).desc(),
+            col(CompiledSpecAuthority.authority_id).desc(),
         )
     ).first()
 
@@ -165,7 +164,7 @@ def latest_accepted_authority_decision(
     project_id: int,
     spec_version_id: int,
 ) -> SpecAuthorityAcceptance | None:
-    """Load the newest accepted decision for a product/spec pair."""
+    """Load the newest accepted decision for a project/spec pair."""
     return session.exec(
         select(SpecAuthorityAcceptance)
         .where(
@@ -174,18 +173,18 @@ def latest_accepted_authority_decision(
             SpecAuthorityAcceptance.status == "accepted",
         )
         .order_by(
-            cast("Any", SpecAuthorityAcceptance.decided_at).desc(),
-            cast("Any", SpecAuthorityAcceptance.id).desc(),
+            col(SpecAuthorityAcceptance.decided_at).desc(),
+            col(SpecAuthorityAcceptance.id).desc(),
         )
     ).first()
 
 
-def latest_accepted_authority_decision_for_product(
+def latest_accepted_authority_decision_for_project(
     session: Session,
     *,
     project_id: int,
 ) -> SpecAuthorityAcceptance | None:
-    """Load the newest accepted decision across all specs owned by a product."""
+    """Load the newest accepted decision across all specs owned by a project."""
     return session.exec(
         select(SpecAuthorityAcceptance)
         .where(
@@ -193,8 +192,8 @@ def latest_accepted_authority_decision_for_product(
             SpecAuthorityAcceptance.status == "accepted",
         )
         .order_by(
-            cast("Any", SpecAuthorityAcceptance.decided_at).desc(),
-            cast("Any", SpecAuthorityAcceptance.id).desc(),
+            col(SpecAuthorityAcceptance.decided_at).desc(),
+            col(SpecAuthorityAcceptance.id).desc(),
         )
     ).first()
 
@@ -205,7 +204,7 @@ def accepted_compiled_authority(
     project_id: int,
     spec_version_id: int,
 ) -> CompiledSpecAuthority | None:
-    """Load the exact accepted authority for one product-owned spec."""
+    """Load the exact accepted authority for one project-owned spec."""
     spec = session.get(SpecRegistry, spec_version_id)
     if spec is None or spec.project_id != project_id:
         return None

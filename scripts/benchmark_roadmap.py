@@ -80,14 +80,14 @@ def generate_roadmap_data(
 
 
 def run_benchmark() -> float:
-    # create product
+    # create project
     """Return run benchmark."""
     with Session(engine) as session:
-        product = Project(name="Benchmark Project", vision="Speed")
-        session.add(product)
+        project = Project(name="Benchmark Project", vision="Speed")
+        session.add(project)
         session.commit()
-        session.refresh(product)
-        project_id = _require_id(product.project_id, "Project ID")
+        session.refresh(project)
+        project_id = _require_id(project.project_id, "Project ID")
 
     # generate data
     # Increase load to make the difference obvious
@@ -108,7 +108,7 @@ def run_benchmark() -> float:
 
     if result["success"]:
         emit(f"Success! Duration: {duration:.4f} seconds")
-        emit(result["message"])
+        emit(result.get("message") or "Roadmap persisted.")
     else:
         emit(f"Failed: {result}")
 

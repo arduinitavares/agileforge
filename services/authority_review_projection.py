@@ -1,4 +1,4 @@
-"""Read-only pending authority review packet service."""
+"""Facts-only authority review snapshot for guarded workflow decisions."""
 
 from __future__ import annotations
 
@@ -12,9 +12,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, cast
 
 from pydantic import ValidationError
-from sqlmodel import Session, select
+from sqlmodel import Session, col, select
 
-from models import db as model_db
 from models.agent_workbench import (
     DiscoveryChallengeArtifact,
     DiscoveryPrd,
@@ -22,16 +21,13 @@ from models.agent_workbench import (
 )
 from models.core import Project
 from services.agent_workbench.authority_projection import (
-    _AUTHORITY_REQUIREMENTS,
     _iso_z,
     _load_authority_selection,
     _project_not_found_error,
-    _schema_error,
     pending_authority_fingerprint,
 )
 from services.agent_workbench.envelope import error_envelope
 from services.agent_workbench.error_codes import ErrorCode, workbench_error
-from services.agent_workbench.schema_readiness import check_schema_readiness
 from services.specs.compiler_service import (
     compiled_authority_read_failure,
     compiled_authority_schema_unsupported_details,
@@ -75,8 +71,6 @@ from utils.spec_authority_ir import (
 )
 
 if TYPE_CHECKING:
-    from sqlalchemy.engine import Connection, Engine
-
     from models.specs import CompiledSpecAuthority, SpecRegistry
     from utils.spec_schemas import (
         Invariant,
@@ -89,11 +83,9 @@ if TYPE_CHECKING:
 JsonDict = dict[str, Any]
 
 AUTHORITY_REVIEW_COMMAND: Final[str] = "agileforge authority review"
-REVIEW_TOKEN_SCHEMA: Final[str] = "agileforge.authority_review.v1"  # noqa: S105
+_REVIEW_SCHEMA: Final[str] = "agileforge.authority_review.v1"
 COVERAGE_SCHEMA: Final[str] = "agileforge.authority_coverage_summary.v1"
 DEFAULT_REVIEW_SOURCE_LIMIT_BYTES: Final[int] = 262_144
-AUTHORITY_REVIEW_TEXT_ITEM_LIMIT: Final[int] = 7
-AUTHORITY_REVIEW_TEXT_LINE_LIMIT: Final[int] = 220
 STRUCTURED_SPEC_ITEM_PREFIXES: Final[tuple[str, ...]] = (
     "GOAL.",
     "NON_GOAL.",
@@ -121,8 +113,21 @@ class _SourceLoad:
 
 
 @dataclass(frozen=True)
+class _ReviewInputs:
+    """Exact durable records needed to derive one review snapshot."""
+
+    session: Session
+    project_id: int
+    project: Project
+    spec: SpecRegistry
+    authority: CompiledSpecAuthority
+    include_spec: str
+    repo_root: Path
+
+
+@dataclass(frozen=True)
 class AuthorityReviewSnapshot:
-    """Canonical authority review-token snapshot plus packet render inputs."""
+    """Canonical facts-only authority review snapshot."""
 
     schema: str
     project_id: int
@@ -235,26 +240,7 @@ class AuthorityReviewSnapshot:
     @property
     def review_token(self) -> str:
         """Return the schema-qualified complete review fingerprint."""
-        return f"{REVIEW_TOKEN_SCHEMA}:{self.review_fingerprint}"
-
-    @property
-    def guard_tokens(self) -> JsonDict:
-        """Return decision guard tokens derived from the canonical snapshot."""
-        return {
-            "review_token": self.review_token,
-            "review_fingerprint": self.review_fingerprint,
-            "pending_authority_id": self.pending_authority_id,
-            "expected_authority_fingerprint": self.authority_fingerprint,
-            "expected_source_spec_hash": self.source_spec_hash,
-            "expected_disk_spec_hash": self.disk_spec_hash,
-            "expected_resolved_spec_path": self.resolved_spec_path,
-            "expected_content_included": self.content_included,
-            "expected_omission_assessment": self.omission_assessment,
-            "expected_coverage_summary_fingerprint": (
-                self.coverage_summary_fingerprint
-            ),
-        }
-
+        return f"{_REVIEW_SCHEMA}:{self.review_fingerprint}"
 
 @dataclass(frozen=True)
 class _AuthorityEvidence:
@@ -347,71 +333,6 @@ def _sort_int(value: object) -> int:
         return int(str(value))
     except (TypeError, ValueError):
         return 0
-
-
-class AuthorityReviewService:
-    """Read-only service that builds pending authority review packets."""
-
-    def __init__(self, *, engine: Engine | None = None) -> None:
-        """Initialize the review service with a read-only target engine."""
-        self._engine = engine or model_db.get_engine()
-        self._repo_root = Path(__file__).resolve().parents[2]
-
-    def review(
-        self,
-        *,
-        project_id: int,
-        include_spec: str = "auto",
-        output_format: str = "json",
-    ) -> dict[str, Any]:
-        """Return a deterministic review packet for pending authority."""
-        if include_spec not in {"auto", "full", "summary"}:
-            return _invalid_input_error(
-                "include_spec",
-                include_spec,
-                ["auto", "full", "summary"],
-            )
-        if output_format not in {"json", "text"}:
-            return _invalid_input_error(
-                "output_format",
-                output_format,
-                ["json", "text"],
-            )
-
-        readiness = check_schema_readiness(self._engine, _AUTHORITY_REQUIREMENTS)
-        if not readiness.ok:
-            return _schema_error(AUTHORITY_REVIEW_COMMAND, readiness)
-
-        with Session(self._engine) as session:
-            snapshot = build_authority_review_snapshot_in_session(
-                session,
-                project_id=project_id,
-                include_spec=include_spec,
-                repo_root=self._repo_root,
-            )
-            if not isinstance(snapshot, AuthorityReviewSnapshot):
-                return cast("JsonDict", snapshot)
-
-            packet = _render_review_packet(snapshot)
-            if output_format == "text":
-                packet["text"] = _render_review_text(packet)
-            return _success(packet)
-
-
-def _success(data: JsonDict) -> JsonDict:
-    return {"ok": True, "data": data, "warnings": [], "errors": []}
-
-
-def _invalid_input_error(field_name: str, value: str, allowed: list[str]) -> JsonDict:
-    return error_envelope(
-        command=AUTHORITY_REVIEW_COMMAND,
-        error=workbench_error(
-            ErrorCode.INVALID_COMMAND,
-            message=f"Unsupported {field_name}: {value}.",
-            details={"field": field_name, "value": value, "allowed": allowed},
-            remediation=[f"Use one of: {', '.join(allowed)}."],
-        ),
-    )
 
 
 def _authority_not_pending_error(project_id: int) -> JsonDict:
@@ -565,50 +486,32 @@ def build_authority_review_snapshot_in_session(
             spec_version_id=authority.spec_version_id,
             observed_schema_version=load_result.observed_schema_version,
         )
-    return build_authority_review_snapshot(
-        project_id=project_id,
-        project=project,
-        spec=spec,
-        authority=authority,
-        include_spec=include_spec,
-        repo_root=repo_root,
-        engine=session.get_bind(),
-        session=session,
+    return _build_authority_review_snapshot(
+        _ReviewInputs(
+            session=session,
+            project_id=project_id,
+            project=project,
+            spec=spec,
+            authority=authority,
+            include_spec=include_spec,
+            repo_root=repo_root or Path(__file__).resolve().parents[1],
+        )
     )
 
 
-def build_authority_review_snapshot(  # noqa: PLR0913
-    *,
-    project_id: int,
-    project: Project | None = None,
-    spec: SpecRegistry | None = None,
-    authority: CompiledSpecAuthority | None = None,
-    include_spec: str = "auto",
-    repo_root: Path | None = None,
-    engine: Engine | Connection | None = None,
-    session: Session | None = None,
+def _build_authority_review_snapshot(
+    inputs: _ReviewInputs,
 ) -> AuthorityReviewSnapshot | JsonDict:
-    """Build the canonical review snapshot without rendering a packet."""
-    if project is None or spec is None or authority is None:
-        if session is not None:
-            return build_authority_review_snapshot_in_session(
-                session,
-                project_id=project_id,
-                include_spec=include_spec,
-                repo_root=repo_root,
-            )
-        review_engine = engine or model_db.get_engine()
-        with Session(review_engine) as owned_session:
-            return build_authority_review_snapshot_in_session(
-                owned_session,
-                project_id=project_id,
-                include_spec=include_spec,
-                repo_root=repo_root,
-            )
-
+    """Build the canonical review snapshot without routing recommendations."""
+    session = inputs.session
+    project_id = inputs.project_id
+    project = inputs.project
+    spec = inputs.spec
+    authority = inputs.authority
+    include_spec = inputs.include_spec
     source = _load_source_from_latest_spec(
         spec,
-        repo_root=repo_root or Path(__file__).resolve().parents[2],
+        repo_root=inputs.repo_root,
     )
     if not isinstance(source, _SourceLoad):
         return cast("JsonDict", source)
@@ -686,7 +589,6 @@ def build_authority_review_snapshot(  # noqa: PLR0913
     pending_authority_id = authority.authority_id
     source_spec_hash = _normalize_sha256_hash(spec.spec_hash)
     scope_discovery = _scope_discovery_provenance(
-        engine=engine or model_db.get_engine(),
         session=session,
         project_id=project_id,
         amended_spec_hash=source_spec_hash,
@@ -694,7 +596,7 @@ def build_authority_review_snapshot(  # noqa: PLR0913
     omission_assessment = coverage_summary["omission_assessment"]
 
     return AuthorityReviewSnapshot(
-        schema=REVIEW_TOKEN_SCHEMA,
+        schema=_REVIEW_SCHEMA,
         project_id=project_id,
         pending_authority_id=pending_authority_id,
         authority_fingerprint=authority_fingerprint,
@@ -737,93 +639,79 @@ def build_authority_review_snapshot(  # noqa: PLR0913
 
 def _scope_discovery_provenance(
     *,
-    engine: Engine | Connection,
-    session: Session | None = None,
+    session: Session,
     project_id: int,
     amended_spec_hash: str,
 ) -> JsonDict | None:
     """Return Scope Discovery provenance for a pending discovered authority."""
-    if session is None:
-        with Session(engine) as owned_session:
-            return _scope_discovery_provenance(
-                engine=engine,
-                session=owned_session,
-                project_id=project_id,
-                amended_spec_hash=amended_spec_hash,
-            )
-    else:
-        draft = session.exec(
-            select(DiscoverySpecAmendmentDraft)
-            .where(
-                DiscoverySpecAmendmentDraft.project_id == project_id,
-                DiscoverySpecAmendmentDraft.amended_spec_hash == amended_spec_hash,
-            )
-            .order_by(
-                cast("Any", DiscoverySpecAmendmentDraft.spec_amendment_draft_id).desc()
-            )
-        ).first()
-        if draft is None:
-            return None
-        prd = session.get(DiscoveryPrd, draft.prd_id)
-        challenge = session.get(
-            DiscoveryChallengeArtifact,
-            draft.challenge_artifact_id,
+    draft = session.exec(
+        select(DiscoverySpecAmendmentDraft)
+        .where(
+            DiscoverySpecAmendmentDraft.project_id == project_id,
+            DiscoverySpecAmendmentDraft.amended_spec_hash == amended_spec_hash,
         )
-        if prd is None or challenge is None:
-            return None
-        challenge_payload = _json_object(challenge.content_json)
-        validation_payload = _json_object(draft.validation_json)
-        provenance: JsonDict = {
-            "challenge_artifact": {
-                "challenge_artifact_id": challenge.challenge_artifact_id,
-                "producer": challenge.producer,
-                "readiness": challenge.readiness,
-                "original_idea": challenge.original_idea,
-                "artifact_fingerprint": challenge.artifact_fingerprint,
-                "assumptions": _list_value(challenge_payload, "assumptions"),
-                "non_goals": _list_value(challenge_payload, "non_goals"),
-                "risks": _list_value(challenge_payload, "risks"),
-                "evidence_conflicts": _list_value(
-                    challenge_payload,
-                    "evidence_conflicts",
-                ),
-                "open_questions": _list_value(challenge_payload, "open_questions"),
-                "glossary_changes": _list_value(challenge_payload, "glossary_changes"),
-            },
-            "prd": {
-                "prd_id": prd.prd_id,
-                "producer": prd.producer,
-                "status": prd.status,
-                "version": prd.version,
-                "title": prd.title,
-                "artifact_fingerprint": prd.artifact_fingerprint,
-                "reviewed_by": prd.reviewed_by,
-            },
-            "spec_amendment": {
-                "spec_amendment_draft_id": draft.spec_amendment_draft_id,
-                "status": draft.status,
-                "artifact_fingerprint": draft.artifact_fingerprint,
-                "base_spec_version_id": draft.base_spec_version_id,
-                "base_spec_hash": draft.base_spec_hash,
-                "amended_spec_hash": draft.amended_spec_hash,
-                "validation": validation_payload,
-            },
-            "readiness": {
-                "challenge_readiness": challenge.readiness,
-                "prd_status": prd.status,
-                "spec_amendment_status": draft.status,
-                "open_questions_status": (
-                    "open"
-                    if _list_value(challenge_payload, "open_questions")
-                    else "closed"
-                ),
-                "evidence_conflict_count": len(
-                    _list_value(challenge_payload, "evidence_conflicts")
-                ),
-            },
-        }
-        provenance["scope_discovery_fingerprint"] = canonical_json_hash(provenance)
-        return provenance
+        .order_by(col(DiscoverySpecAmendmentDraft.spec_amendment_draft_id).desc())
+    ).first()
+    if draft is None:
+        return None
+    prd = session.get(DiscoveryPrd, draft.prd_id)
+    challenge = session.get(
+        DiscoveryChallengeArtifact,
+        draft.challenge_artifact_id,
+    )
+    if prd is None or challenge is None:
+        return None
+    challenge_payload = _json_object(challenge.content_json)
+    validation_payload = _json_object(draft.validation_json)
+    provenance: JsonDict = {
+        "challenge_artifact": {
+            "challenge_artifact_id": challenge.challenge_artifact_id,
+            "producer": challenge.producer,
+            "readiness": challenge.readiness,
+            "original_idea": challenge.original_idea,
+            "artifact_fingerprint": challenge.artifact_fingerprint,
+            "assumptions": _list_value(challenge_payload, "assumptions"),
+            "non_goals": _list_value(challenge_payload, "non_goals"),
+            "risks": _list_value(challenge_payload, "risks"),
+            "evidence_conflicts": _list_value(
+                challenge_payload,
+                "evidence_conflicts",
+            ),
+            "open_questions": _list_value(challenge_payload, "open_questions"),
+            "glossary_changes": _list_value(challenge_payload, "glossary_changes"),
+        },
+        "prd": {
+            "prd_id": prd.prd_id,
+            "producer": prd.producer,
+            "status": prd.status,
+            "version": prd.version,
+            "title": prd.title,
+            "artifact_fingerprint": prd.artifact_fingerprint,
+            "reviewed_by": prd.reviewed_by,
+        },
+        "spec_amendment": {
+            "spec_amendment_draft_id": draft.spec_amendment_draft_id,
+            "status": draft.status,
+            "artifact_fingerprint": draft.artifact_fingerprint,
+            "base_spec_version_id": draft.base_spec_version_id,
+            "base_spec_hash": draft.base_spec_hash,
+            "amended_spec_hash": draft.amended_spec_hash,
+            "validation": validation_payload,
+        },
+        "readiness": {
+            "challenge_readiness": challenge.readiness,
+            "prd_status": prd.status,
+            "spec_amendment_status": draft.status,
+            "open_questions_status": (
+                "open" if _list_value(challenge_payload, "open_questions") else "closed"
+            ),
+            "evidence_conflict_count": len(
+                _list_value(challenge_payload, "evidence_conflicts")
+            ),
+        },
+    }
+    provenance["scope_discovery_fingerprint"] = canonical_json_hash(provenance)
+    return provenance
 
 
 def _json_object(raw_json: str | None) -> JsonDict:
@@ -1280,279 +1168,6 @@ def _artifact_with_review_findings(
     return {**artifact, "gaps": [*gaps, *appended]}
 
 
-def _render_review_packet(snapshot: AuthorityReviewSnapshot) -> JsonDict:
-    review_summary = _review_summary(
-        review_findings=snapshot.review_findings,
-        ir_packet_limits=snapshot.ir_packet_limits,
-        artifact=snapshot.artifact,
-    )
-    spec_payload = {
-        "spec_version_id": snapshot.spec_version_id,
-        "content_ref": snapshot.content_ref,
-        "resolved_path": snapshot.resolved_spec_path,
-        "spec_hash": snapshot.source_spec_hash,
-        "disk_status": snapshot.disk_status,
-        "disk_sha256": snapshot.disk_spec_hash,
-        "size_bytes": snapshot.size_bytes,
-        "review_source_limit_bytes": snapshot.review_source_limit_bytes,
-        "source_outline": snapshot.source_outline,
-        "source_units": snapshot.source_units,
-        "coverage_summary": snapshot.coverage_summary,
-        "coverage_summary_fingerprint": snapshot.coverage_summary_fingerprint,
-        "coverage_diagnostics": snapshot.coverage_diagnostics,
-        "excerpt": snapshot.excerpt,
-        "content_included": snapshot.content_included,
-        "content_truncated": snapshot.content_truncated,
-        "source_content": snapshot.source_content,
-        "source_content_sha256": snapshot.source_content_sha256,
-    }
-    if snapshot.structured_spec_snapshot is not None:
-        spec_payload.update(snapshot.structured_spec_snapshot)
-
-    return {
-        "project": {
-            "project_id": snapshot.project_id,
-            "name": snapshot.project_name,
-        },
-        "spec": spec_payload,
-        "pending_authority": {
-            "authority_id": snapshot.pending_authority_id,
-            "spec_version_id": snapshot.pending_spec_version_id,
-            "authority_fingerprint": snapshot.authority_fingerprint,
-            "compiler_version": snapshot.compiler_version,
-            "prompt_hash": snapshot.prompt_hash,
-            "compiled_at": snapshot.compiled_at,
-            "artifact": snapshot.artifact,
-            "ir_provenance": snapshot.ir_provenance,
-            "authority_mappings": snapshot.authority_mappings,
-            "review_findings": snapshot.review_findings,
-            "review_summary": review_summary,
-            "coverage_summary": snapshot.ir_coverage_summary,
-            "ir_packet_limits": snapshot.ir_packet_limits,
-        },
-        "scope_discovery": snapshot.scope_discovery,
-        "review_findings": snapshot.review_findings,
-        "review_summary": review_summary,
-        "review_guidance": _review_guidance(),
-        "next_actions": [
-            _accept_next_action(snapshot, review_summary),
-            {
-                "command": (
-                    "agileforge authority reject --project-id "
-                    f"{snapshot.project_id} --review-token "
-                    f'{snapshot.review_token} --reason "..." '
-                    "--idempotency-key <idempotency_key>"
-                ),
-                "mode": "human",
-                "installed": True,
-                "requires_cli_installation": False,
-                "requires": ["review_token", "reason", "idempotency_key"],
-                "reason": "Record that the pending authority must not be used.",
-            },
-        ],
-        "guard_tokens": snapshot.guard_tokens,
-    }
-
-
-def _review_summary(
-    *,
-    review_findings: Sequence[Mapping[str, Any]],
-    ir_packet_limits: Mapping[str, Any],
-    artifact: Mapping[str, Any],
-) -> JsonDict:
-    """Return a compact actionable summary of review blockers."""
-    blocking = [
-        finding for finding in review_findings if finding.get("severity") == "blocking"
-    ]
-    overrideable = [
-        finding for finding in blocking if finding.get("override_allowed") is not False
-    ]
-    non_overrideable = [
-        finding for finding in blocking if finding.get("override_allowed") is False
-    ]
-    quality = artifact.get("authority_quality")
-    quality_summary = (
-        quality.get("summary")
-        if isinstance(quality, Mapping) and isinstance(quality.get("summary"), Mapping)
-        else {}
-    )
-    return {
-        "acceptance_status": "blocked" if blocking else "accept_ready",
-        "blocking_finding_count": len(blocking),
-        "blocking_finding_codes": sorted(
-            {str(finding.get("code") or "") for finding in blocking}
-        ),
-        "overrideable_blocking_finding_count": len(overrideable),
-        "non_overrideable_blocking_finding_count": len(non_overrideable),
-        "packet_truncated": bool(ir_packet_limits.get("truncated")),
-        "compiler_gap_count": _artifact_gap_count(artifact.get("gaps")),
-        "compiler_assumption_count": _artifact_item_count(artifact.get("assumptions")),
-        "compiler_invariant_count": _artifact_item_count(artifact.get("invariants")),
-        "compiler_eligible_feature_rule_count": _artifact_item_count(
-            artifact.get("eligible_feature_rules")
-        ),
-        "compiler_rejected_feature_count": _artifact_item_count(
-            artifact.get("rejected_features")
-        ),
-        "quality_merged_invariant_count": int(
-            quality_summary.get("merged_invariant_count") or 0
-        ),
-        "quality_merged_assumption_count": int(
-            quality_summary.get("merged_assumption_count") or 0
-        ),
-        "quality_review_group_count": int(
-            quality_summary.get("review_group_count") or 0
-        ),
-        "quality_near_duplicate_group_count": int(
-            quality_summary.get("near_duplicate_group_count") or 0
-        ),
-        "quality_over_split_group_count": int(
-            quality_summary.get("over_split_group_count") or 0
-        ),
-        "quality_noisy_assumption_group_count": int(
-            quality_summary.get("noisy_assumption_group_count") or 0
-        ),
-    }
-
-
-def _artifact_item_count(value: object) -> int:
-    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
-        return 0
-    return len(value)
-
-
-def _artifact_gap_count(value: object) -> int:
-    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
-        return 0
-    count = 0
-    for item in value:
-        if not isinstance(item, dict):
-            count += 1
-            continue
-        gap = cast("dict[str, object]", item)
-        gap_id = str(gap.get("id", ""))
-        if not gap_id.startswith(("GAP-COVERAGE-", "GAP-REVIEW-")):
-            count += 1
-    return count
-
-
-def _accept_next_action(
-    snapshot: AuthorityReviewSnapshot,
-    review_summary: Mapping[str, Any],
-) -> JsonDict:
-    """Return an accept action annotated with review blocking status."""
-    action: JsonDict = {
-        "command": f"agileforge authority accept --project-id {snapshot.project_id}",
-        "mode": "human",
-        "installed": True,
-        "requires_cli_installation": False,
-        "requires": [],
-        "reason": "Record the reviewed pending authority as canonical.",
-    }
-    if review_summary.get("acceptance_status") == "blocked":
-        codes = [
-            str(code)
-            for code in _as_list(review_summary.get("blocking_finding_codes"))
-            if str(code)
-        ]
-        action.update(
-            {
-                "blocked": True,
-                "review_summary": dict(review_summary),
-                "requires": ["fatal_review_resolution"],
-                "reason": (
-                    "Authority review has blocking findings; resolve them or "
-                    "rerun review before accepting. "
-                    f"Blocking codes: {', '.join(codes)}."
-                ),
-            }
-        )
-    return action
-
-
-def _render_review_text(packet: JsonDict) -> str:
-    """Return a compact human-readable review summary."""
-    project = _mapping_or_none(packet.get("project"))
-    spec = _mapping_or_none(packet.get("spec"))
-    pending = _mapping_or_none(packet.get("pending_authority"))
-    guards = _mapping_or_none(packet.get("guard_tokens"))
-    summary = _mapping_or_none(packet.get("review_summary")) or {}
-    artifact = _mapping_or_none(_mapping_value(pending, "artifact")) or {}
-    next_actions = packet.get("next_actions")
-    actions = next_actions if isinstance(next_actions, list) else []
-    acceptance_status = str(summary.get("acceptance_status") or "unknown")
-    recommendation = (
-        "accept"
-        if acceptance_status == "accept_ready"
-        else "reject or resolve blocking findings"
-    )
-    lines = [
-        f"Authority review for project {_mapping_value(project, 'project_id')}",
-        f"Project: {_mapping_value(project, 'project_id')}",
-        f"Project name: {_mapping_value(project, 'name')}",
-        f"Status: {acceptance_status}",
-        f"Recommendation: {recommendation}",
-        f"Spec version: {_mapping_value(spec, 'spec_version_id')}",
-        f"Pending authority: {_mapping_value(pending, 'authority_id')}",
-        (f"Authority fingerprint: {_mapping_value(pending, 'authority_fingerprint')}"),
-        f"Spec path: {_mapping_value(spec, 'resolved_path')}",
-        f"Spec hash: {_mapping_value(spec, 'spec_hash')}",
-        (
-            "Omission assessment: "
-            f"{_mapping_value(guards, 'expected_omission_assessment')}"
-        ),
-        f"Review token: {_mapping_value(guards, 'review_token')}",
-        (
-            "Counts: "
-            f"invariants={summary.get('compiler_invariant_count', 0)}, "
-            f"gaps={summary.get('compiler_gap_count', 0)}, "
-            f"assumptions={summary.get('compiler_assumption_count', 0)}, "
-            f"excluded={summary.get('compiler_rejected_feature_count', 0)}"
-        ),
-        "",
-        "Preserved requirements:",
-    ]
-    _append_text_item_lines(
-        lines,
-        artifact.get("invariants"),
-        empty_line="No preserved requirements found.",
-    )
-    lines.append("")
-    lines.append("Gaps:")
-    _append_text_item_lines(
-        lines,
-        artifact.get("gaps"),
-        empty_line="No blocking gaps found.",
-    )
-    lines.append("")
-    lines.append("Assumptions:")
-    assumptions = artifact.get("assumptions")
-    _append_text_item_lines(
-        lines,
-        _rendered_assumption_items(assumptions),
-        empty_line="No assumptions recorded.",
-    )
-    lines.append("")
-    lines.append("Excluded/non-current scope:")
-    _append_text_item_lines(
-        lines,
-        artifact.get("rejected_features"),
-        empty_line="No NON_GOAL or future-scope exclusions recorded.",
-    )
-    lines.append("")
-    lines.append("Warnings:")
-    _append_warning_lines(lines, summary=summary, artifact=artifact)
-    lines.extend(
-        [
-            "",
-            "Commands:",
-            f"ACCEPT: {_action_command(actions, index=0)}",
-            f"REJECT: {_action_command(actions, index=1)}",
-        ]
-    )
-    return "\n".join(lines)
-
-
 def _rendered_assumption_items(value: object) -> list[JsonDict]:
     """Render valid typed assumptions and safely preserve malformed entries."""
     rendered: list[JsonDict] = []
@@ -1574,161 +1189,6 @@ def _rendered_assumption_items(value: object) -> list[JsonDict]:
         item["assumption_key"] = canonical_assumption_key(assumption)
         rendered.append(item)
     return rendered
-
-
-def _append_text_item_lines(
-    lines: list[str],
-    value: object,
-    *,
-    empty_line: str,
-) -> None:
-    """Append a capped bullet list from review artifact items."""
-    item_lines = [
-        item for item in (_text_item_summary(item) for item in _as_list(value)) if item
-    ]
-    if not item_lines:
-        lines.append(f"- {empty_line}")
-        return
-    lines.extend(
-        f"- {_truncate_review_text_line(item)}"
-        for item in item_lines[:AUTHORITY_REVIEW_TEXT_ITEM_LIMIT]
-    )
-    remaining = len(item_lines) - AUTHORITY_REVIEW_TEXT_ITEM_LIMIT
-    if remaining > 0:
-        lines.append(f"- ... {remaining} more")
-
-
-def _text_item_summary(item: object) -> str:
-    """Return a compact human text summary for a review artifact item."""
-    if isinstance(item, Mapping):
-        item_mapping = cast("Mapping[object, object]", item)
-        item_id = str(item_mapping.get("id") or "").strip()
-        source_excerpt = _first_text_field(item_mapping, ("source_excerpt",))
-        text = _first_text_field(
-            item_mapping,
-            ("text", "description", "summary", "title"),
-        )
-        if source_excerpt and text and source_excerpt != text:
-            text = f"{source_excerpt} ({text})"
-        elif source_excerpt:
-            text = source_excerpt
-        if item_id and text:
-            return f"{item_id}: {text}"
-        return text or item_id
-    if isinstance(item, str):
-        return item.strip()
-    return ""
-
-
-def _first_text_field(item: Mapping[object, object], keys: tuple[str, ...]) -> str:
-    """Return the first non-empty text field from a mapping."""
-    for key in keys:
-        value = item.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return ""
-
-
-def _truncate_review_text_line(text: str) -> str:
-    """Keep review text compact enough for comments and issues."""
-    if len(text) <= AUTHORITY_REVIEW_TEXT_LINE_LIMIT:
-        return text
-    return f"{text[: AUTHORITY_REVIEW_TEXT_LINE_LIMIT - 4].rstrip()} ..."
-
-
-def _int_mapping_value(mapping: Mapping[object, object], key: str) -> int:
-    """Return an integer mapping value, defaulting invalid input to zero."""
-    value = mapping.get(key)
-    if isinstance(value, int):
-        return value
-    if isinstance(value, str):
-        try:
-            return int(value)
-        except ValueError:
-            return 0
-    return 0
-
-
-def _append_warning_lines(
-    lines: list[str],
-    *,
-    summary: Mapping[object, object],
-    artifact: Mapping[object, object],
-) -> None:
-    """Append duplicate and over-split authority-quality warning summaries."""
-    warning_count = _int_mapping_value(summary, "quality_review_group_count")
-    near_duplicate_count = _int_mapping_value(
-        summary,
-        "quality_near_duplicate_group_count",
-    )
-    over_split_count = _int_mapping_value(summary, "quality_over_split_group_count")
-    noisy_assumption_count = _int_mapping_value(
-        summary,
-        "quality_noisy_assumption_group_count",
-    )
-    merged_invariant_count = _int_mapping_value(
-        summary,
-        "quality_merged_invariant_count",
-    )
-    merged_assumption_count = _int_mapping_value(
-        summary,
-        "quality_merged_assumption_count",
-    )
-    if not any(
-        (
-            warning_count,
-            near_duplicate_count,
-            over_split_count,
-            noisy_assumption_count,
-            merged_invariant_count,
-            merged_assumption_count,
-        )
-    ):
-        lines.append("- No duplicate/over-split authority-quality warnings recorded.")
-        return
-    lines.append(
-        "- duplicate/over-split groups: "
-        f"{near_duplicate_count + over_split_count}; "
-        f"merged invariants: {merged_invariant_count}; "
-        f"merged assumptions: {merged_assumption_count}; "
-        f"noisy assumptions: {noisy_assumption_count}"
-    )
-    quality = _mapping_or_none(artifact.get("authority_quality")) or {}
-    review_groups = _as_list(quality.get("review_groups"))
-    for group in review_groups[:AUTHORITY_REVIEW_TEXT_ITEM_LIMIT]:
-        group_mapping = _mapping_or_none(group)
-        if group_mapping is None:
-            continue
-        group_type = str(group_mapping.get("group_type") or "quality_warning")
-        reason = _first_text_field(group_mapping, ("reason", "summary", "text"))
-        suffix = f": {reason}" if reason else ""
-        lines.append(
-            f"- {_truncate_review_text_line(group_type.replace('_', '-') + suffix)}"
-        )
-    remaining = len(review_groups) - AUTHORITY_REVIEW_TEXT_ITEM_LIMIT
-    if remaining > 0:
-        lines.append(f"- ... {remaining} more warning groups")
-
-
-def _action_command(actions: list[object], *, index: int) -> str:
-    if index >= len(actions):
-        return ""
-    action = _mapping_or_none(actions[index])
-    if action is None:
-        return ""
-    return str(action.get("command", ""))
-
-
-def _mapping_value(mapping: Mapping[object, object] | None, key: str) -> object:
-    if mapping is None:
-        return ""
-    return mapping.get(key, "")
-
-
-def _mapping_or_none(value: object) -> Mapping[object, object] | None:
-    if isinstance(value, Mapping):
-        return cast("Mapping[object, object]", value)
-    return None
 
 
 def _review_source_limit() -> int:
@@ -2301,40 +1761,3 @@ def _normalize_evidence_text(text: str) -> str:
 
 def _dedupe_sorted(values: Iterable[object]) -> list[str]:
     return sorted({str(value) for value in values if value is not None and str(value)})
-
-
-def _review_guidance() -> JsonDict:
-    return {
-        "decision_question": (
-            "Does this compiled interpretation correctly represent the spec?"
-        ),
-        "acceptance_statement": (
-            "Accept only if this compiled interpretation correctly represents "
-            "the spec. Reject if invariants are invented, duplicated, "
-            "incorrectly sourced, or omit mandatory requirements."
-        ),
-        "checklist": [
-            (
-                "Every mandatory requirement in the spec appears in the authority "
-                "or is intentionally represented by a broader invariant."
-            ),
-            (
-                "No authority invariant invents a requirement that is absent from "
-                "the spec."
-            ),
-            "Forbidden capabilities and security constraints are captured.",
-            "Known gaps are real gaps, not missed requirements.",
-            "The source map points back to directly supporting spec sections.",
-        ],
-        "assessment_schema": {
-            "recommendation": "accept | reject | needs_human",
-            "confidence": "high | medium | low",
-            "summary": "string",
-            "blocking_findings": [],
-            "non_blocking_findings": [],
-            "missing_requirements": [],
-            "invented_requirements": [],
-            "gap_assessment": [],
-            "decision_rationale": "string",
-        },
-    }

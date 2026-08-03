@@ -52,18 +52,18 @@ from utils.spec_schemas import (
 
 
 @pytest.fixture
-def sample_product(session: Session, engine: Engine) -> Project:
-    """Create a product for authority gate tests."""
+def sample_project(session: Session, engine: Engine) -> Project:
+    """Create a project for authority gate tests."""
     spec_tools.engine = engine
-    product = Project(
+    project = Project(
         name="Authority Gate Project",
         description="Project for authority gate tests",
         vision="Keep authority explicit",
     )
-    session.add(product)
+    session.add(project)
     session.commit()
-    session.refresh(product)
-    return product
+    session.refresh(project)
+    return project
 
 
 def _create_compiled_artifact_json() -> str:
@@ -239,7 +239,7 @@ class TestAuthorityGateExistingAccepted:
 
     def test_ensure_accepted_spec_authority_delegates_to_service_adapter(
         self,
-        sample_product: Project,
+        sample_project: Project,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Tool adapter should delegate to the service while preserving legacy seams."""
@@ -256,14 +256,14 @@ class TestAuthorityGateExistingAccepted:
         )
 
         result = spec_tools.ensure_accepted_spec_authority(
-            project_id=require_id(sample_product.project_id, "project_id"),
+            project_id=require_id(sample_project.project_id, "project_id"),
             spec_content="# Spec",
             recompile=True,
         )
 
         assert result == 321  # noqa: PLR2004
         assert captured["project_id"] == require_id(
-            sample_product.project_id, "project_id"
+            sample_project.project_id, "project_id"
         )
         assert captured["spec_content"] == "# Spec"
         assert captured["recompile"] is True
@@ -273,7 +273,7 @@ class TestAuthorityGateExistingAccepted:
         assert captured["_logger"] is spec_tools.logger
 
     def test_ensure_accepted_spec_authority_returns_existing_version_id(
-        self, session: Session, sample_product: Project, engine: Engine
+        self, session: Session, sample_project: Project, engine: Engine
     ) -> None:
         """When accepted authority exists, return its spec_version_id without calling update."""
         # Import here to test the function we're about to implement
@@ -283,7 +283,7 @@ class TestAuthorityGateExistingAccepted:
 
         # Arrange: create accepted authority
         spec_version, _compiled = _create_spec_and_compiled_authority(
-            session, require_id(sample_product.project_id, "project_id"), accepted=True
+            session, require_id(sample_project.project_id, "project_id"), accepted=True
         )
         expected_spec_version_id = require_id(
             spec_version.spec_version_id, "spec_version_id"
@@ -294,7 +294,7 @@ class TestAuthorityGateExistingAccepted:
             spec_tools, "update_spec_and_compile_authority"
         ) as mock_update:
             result = ensure_accepted_spec_authority(
-                project_id=require_id(sample_product.project_id, "project_id"),
+                project_id=require_id(sample_project.project_id, "project_id"),
                 spec_content="Some new spec content",  # Should be ignored
             )
 
@@ -303,7 +303,7 @@ class TestAuthorityGateExistingAccepted:
         mock_update.assert_not_called()
 
     def test_story_generation_uses_existing_accepted_spec_version_id(
-        self, session: Session, sample_product: Project, engine: Engine
+        self, session: Session, sample_project: Project, engine: Engine
     ) -> None:
         """Story generation should use existing accepted authority's spec_version_id."""
         from tools.spec_tools import ensure_accepted_spec_authority  # noqa: PLC0415
@@ -312,12 +312,12 @@ class TestAuthorityGateExistingAccepted:
 
         # Arrange
         spec_version, _compiled = _create_spec_and_compiled_authority(
-            session, require_id(sample_product.project_id, "project_id"), accepted=True
+            session, require_id(sample_project.project_id, "project_id"), accepted=True
         )
 
         # Act
         spec_version_id = ensure_accepted_spec_authority(
-            project_id=require_id(sample_product.project_id, "project_id"),
+            project_id=require_id(sample_project.project_id, "project_id"),
         )
 
         # Assert
@@ -335,7 +335,7 @@ class TestAuthorityGateNoAcceptedAuthority:
     """Tests for when no accepted authority exists."""
 
     def test_ensure_accepted_spec_authority_calls_update_when_no_accepted(
-        self, session: Session, sample_product: Project, engine: Engine
+        self, session: Session, sample_project: Project, engine: Engine
     ) -> None:
         """When no accepted authority exists, call update_spec_and_compile_authority."""
         del session
@@ -343,12 +343,12 @@ class TestAuthorityGateNoAcceptedAuthority:
 
         spec_tools.engine = engine
 
-        # Arrange: no accepted authority exists (product is clean)
+        # Arrange: no accepted authority exists (project is clean)
         mock_return = {
             "success": True,
             "accepted": True,
             "spec_version_id": 999,
-            "project_id": require_id(sample_product.project_id, "project_id"),
+            "project_id": require_id(sample_project.project_id, "project_id"),
         }
 
         # Act
@@ -356,7 +356,7 @@ class TestAuthorityGateNoAcceptedAuthority:
             spec_tools, "update_spec_and_compile_authority", return_value=mock_return
         ) as mock_update:
             result = ensure_accepted_spec_authority(
-                project_id=require_id(sample_product.project_id, "project_id"),
+                project_id=require_id(sample_project.project_id, "project_id"),
                 spec_content="# New Spec\nContent here",
             )
 
@@ -364,13 +364,13 @@ class TestAuthorityGateNoAcceptedAuthority:
         mock_update.assert_called_once()
         call_args = mock_update.call_args
         assert call_args[0][0]["project_id"] == require_id(
-            sample_product.project_id, "project_id"
+            sample_project.project_id, "project_id"
         )
         assert call_args[0][0]["spec_content"] == "# New Spec\nContent here"
         assert result == 999  # noqa: PLR2004
 
     def test_ensure_accepted_spec_authority_with_content_ref(
-        self, session: Session, sample_product: Project, engine: Engine
+        self, session: Session, sample_project: Project, engine: Engine
     ) -> None:
         """When content_ref is provided instead of spec_content, pass it through."""
         del session
@@ -382,14 +382,14 @@ class TestAuthorityGateNoAcceptedAuthority:
             "success": True,
             "accepted": True,
             "spec_version_id": 888,
-            "project_id": require_id(sample_product.project_id, "project_id"),
+            "project_id": require_id(sample_project.project_id, "project_id"),
         }
 
         with patch.object(
             spec_tools, "update_spec_and_compile_authority", return_value=mock_return
         ) as mock_update:
             result = ensure_accepted_spec_authority(
-                project_id=require_id(sample_product.project_id, "project_id"),
+                project_id=require_id(sample_project.project_id, "project_id"),
                 content_ref="specs/my_spec.md",
             )
 
@@ -399,7 +399,7 @@ class TestAuthorityGateNoAcceptedAuthority:
         assert result == 888  # noqa: PLR2004
 
     def test_ensure_accepted_spec_authority_calls_update_exactly_once(
-        self, session: Session, sample_product: Project, engine: Engine
+        self, session: Session, sample_project: Project, engine: Engine
     ) -> None:
         """Update should be called exactly once even on repeated calls (after first success)."""
         from tools.spec_tools import ensure_accepted_spec_authority  # noqa: PLC0415
@@ -411,7 +411,7 @@ class TestAuthorityGateNoAcceptedAuthority:
             "success": True,
             "accepted": True,
             "spec_version_id": 777,
-            "project_id": require_id(sample_product.project_id, "project_id"),
+            "project_id": require_id(sample_project.project_id, "project_id"),
         }
 
         with patch.object(
@@ -419,20 +419,20 @@ class TestAuthorityGateNoAcceptedAuthority:
         ) as mock_update:
             # First call
             first_result = ensure_accepted_spec_authority(
-                project_id=require_id(sample_product.project_id, "project_id"),
+                project_id=require_id(sample_project.project_id, "project_id"),
                 spec_content="# Spec",
             )
 
             # Mock the accepted authority now exists (simulating DB side effect)
             _create_spec_and_compiled_authority(
                 session,
-                require_id(sample_product.project_id, "project_id"),
+                require_id(sample_project.project_id, "project_id"),
                 accepted=True,
             )
 
             # Second call - should find existing and not call update
             second_result = ensure_accepted_spec_authority(  # noqa: F841
-                project_id=require_id(sample_product.project_id, "project_id"),
+                project_id=require_id(sample_project.project_id, "project_id"),
                 spec_content="# Different spec",  # Should be ignored
             )
 
@@ -450,7 +450,7 @@ class TestAuthorityGateMissingSpecContent:
     """Tests for error handling when spec content is missing."""
 
     def test_ensure_accepted_spec_authority_raises_without_spec_content(
-        self, session: Session, sample_product: Project, engine: Engine
+        self, session: Session, sample_project: Project, engine: Engine
     ) -> None:
         """When no accepted authority exists and no spec_content/content_ref, raise error."""
         del session
@@ -463,7 +463,7 @@ class TestAuthorityGateMissingSpecContent:
         # Act & Assert
         with pytest.raises(RuntimeError) as exc:
             ensure_accepted_spec_authority(
-                project_id=require_id(sample_product.project_id, "project_id"),
+                project_id=require_id(sample_project.project_id, "project_id"),
                 # No spec_content or content_ref provided
             )
 
@@ -474,7 +474,7 @@ class TestAuthorityGateMissingSpecContent:
         )
 
     def test_ensure_accepted_spec_authority_error_message_is_helpful(
-        self, session: Session, sample_product: Project, engine: Engine
+        self, session: Session, sample_project: Project, engine: Engine
     ) -> None:
         """Error message should guide user to provide spec content or file path."""
         del session
@@ -484,7 +484,7 @@ class TestAuthorityGateMissingSpecContent:
 
         with pytest.raises(RuntimeError) as exc:
             ensure_accepted_spec_authority(
-                project_id=require_id(sample_product.project_id, "project_id")
+                project_id=require_id(sample_project.project_id, "project_id")
             )
 
         message = str(exc.value)
@@ -501,7 +501,7 @@ class TestAuthorityGateUpdateFailure:
     """Tests for error handling when update_spec_and_compile_authority fails."""
 
     def test_ensure_accepted_spec_authority_raises_on_update_failure(
-        self, session: Session, sample_product: Project, engine: Engine
+        self, session: Session, sample_project: Project, engine: Engine
     ) -> None:
         """When update returns success=False, raise RuntimeError."""
         del session
@@ -523,7 +523,7 @@ class TestAuthorityGateUpdateFailure:
             pytest.raises(RuntimeError) as exc,
         ):
             ensure_accepted_spec_authority(
-                project_id=require_id(sample_product.project_id, "project_id"),
+                project_id=require_id(sample_project.project_id, "project_id"),
                 spec_content="# Invalid spec",
             )
 
@@ -531,7 +531,7 @@ class TestAuthorityGateUpdateFailure:
         assert "failed" in message or "error" in message
 
     def test_ensure_accepted_spec_authority_raises_on_not_accepted(
-        self, session: Session, sample_product: Project, engine: Engine
+        self, session: Session, sample_project: Project, engine: Engine
     ) -> None:
         """When update returns accepted=False, raise RuntimeError."""
         del session
@@ -555,7 +555,7 @@ class TestAuthorityGateUpdateFailure:
             pytest.raises(RuntimeError) as exc,
         ):
             ensure_accepted_spec_authority(
-                project_id=require_id(sample_product.project_id, "project_id"),
+                project_id=require_id(sample_project.project_id, "project_id"),
                 spec_content="# Spec",
             )
 
@@ -563,7 +563,7 @@ class TestAuthorityGateUpdateFailure:
         assert "accepted" in message or "not accepted" in message.replace(" ", "")
 
     def test_ensure_accepted_spec_authority_does_not_call_story_gen_on_failure(
-        self, session: Session, sample_product: Project, engine: Engine
+        self, session: Session, sample_project: Project, engine: Engine
     ) -> None:
         """Story generation should not proceed if authority gate fails."""
         del session
@@ -579,7 +579,7 @@ class TestAuthorityGateUpdateFailure:
             # The function should raise before any story generation could happen
             with pytest.raises(RuntimeError):
                 ensure_accepted_spec_authority(
-                    project_id=require_id(sample_product.project_id, "project_id"),
+                    project_id=require_id(sample_project.project_id, "project_id"),
                     spec_content="# Spec",
                 )
 
@@ -593,7 +593,7 @@ class TestSpecVersionIdInjection:
     """Tests verifying spec_version_id is properly injected into pipeline inputs."""
 
     def test_returned_spec_version_id_is_valid_integer(
-        self, session: Session, sample_product: Project, engine: Engine
+        self, session: Session, sample_project: Project, engine: Engine
     ) -> None:
         """ensure_accepted_spec_authority should return a valid integer spec_version_id."""
         from tools.spec_tools import ensure_accepted_spec_authority  # noqa: PLC0415
@@ -602,12 +602,12 @@ class TestSpecVersionIdInjection:
 
         # Arrange: create accepted authority
         spec_version, _compiled = _create_spec_and_compiled_authority(
-            session, require_id(sample_product.project_id, "project_id"), accepted=True
+            session, require_id(sample_project.project_id, "project_id"), accepted=True
         )
 
         # Act
         result = ensure_accepted_spec_authority(
-            project_id=require_id(sample_product.project_id, "project_id")
+            project_id=require_id(sample_project.project_id, "project_id")
         )
 
         # Assert
@@ -616,7 +616,7 @@ class TestSpecVersionIdInjection:
         assert result == require_id(spec_version.spec_version_id, "spec_version_id")
 
     def test_recompile_flag_is_passed_through(
-        self, session: Session, sample_product: Project, engine: Engine
+        self, session: Session, sample_project: Project, engine: Engine
     ) -> None:
         """Recompile flag should be passed to update_spec_and_compile_authority."""
         del session
@@ -634,7 +634,7 @@ class TestSpecVersionIdInjection:
             spec_tools, "update_spec_and_compile_authority", return_value=mock_return
         ) as mock_update:
             ensure_accepted_spec_authority(
-                project_id=require_id(sample_product.project_id, "project_id"),
+                project_id=require_id(sample_project.project_id, "project_id"),
                 spec_content="# Spec",
                 recompile=True,
             )
@@ -652,7 +652,7 @@ class TestAuthorityGateFailureArtifact:
     """Tests for handling accepted authorities that have compilation FAILURE artifacts."""
 
     def test_ensure_accepted_spec_authority_ignores_failure_artifact(
-        self, session: Session, sample_product: Project, engine: Engine
+        self, session: Session, sample_project: Project, engine: Engine
     ) -> None:
         """
         When accepted authority exists but compiled_artifact_json is a FAILURE envelope,.
@@ -665,7 +665,7 @@ class TestAuthorityGateFailureArtifact:
 
         # Arrange: Create an accepted authority with a FAILURE artifact
         _spec_version, compiled, acceptance = _create_spec_with_failure_authority(
-            session, require_id(sample_product.project_id, "project_id")
+            session, require_id(sample_project.project_id, "project_id")
         )
 
         # Verify fixture setup: we have an acceptance with a failure artifact
@@ -684,7 +684,7 @@ class TestAuthorityGateFailureArtifact:
             spec_tools, "update_spec_and_compile_authority", return_value=mock_return
         ) as mock_update:
             result = ensure_accepted_spec_authority(
-                project_id=require_id(sample_product.project_id, "project_id"),
+                project_id=require_id(sample_project.project_id, "project_id"),
                 spec_content="# Valid Spec\nWith proper content.",
             )
 
@@ -693,7 +693,7 @@ class TestAuthorityGateFailureArtifact:
         assert result == 999  # The new version ID from recompilation  # noqa: PLR2004
 
     def test_failure_artifact_requires_spec_content_for_recompilation(
-        self, session: Session, sample_product: Project, engine: Engine
+        self, session: Session, sample_project: Project, engine: Engine
     ) -> None:
         """
         When accepted authority has FAILURE artifact and no spec_content is provided,.
@@ -706,13 +706,13 @@ class TestAuthorityGateFailureArtifact:
 
         # Arrange: Create an accepted authority with a FAILURE artifact
         _create_spec_with_failure_authority(
-            session, require_id(sample_product.project_id, "project_id")
+            session, require_id(sample_project.project_id, "project_id")
         )
 
         # Act & Assert: without spec_content, we can't proceed
         with pytest.raises(RuntimeError):
             ensure_accepted_spec_authority(
-                project_id=require_id(sample_product.project_id, "project_id"),
+                project_id=require_id(sample_project.project_id, "project_id"),
                 # No spec_content - can't recompile
             )
 
@@ -728,7 +728,7 @@ class TestAuthorityGateLogging:
     def test_authority_gate_logs_reuse(
         self,
         session: Session,
-        sample_product: Project,
+        sample_project: Project,
         engine: Engine,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
@@ -739,11 +739,11 @@ class TestAuthorityGateLogging:
         caplog.set_level(logging.INFO, logger="tools.spec_tools")
 
         _create_spec_and_compiled_authority(
-            session, require_id(sample_product.project_id, "project_id"), accepted=True
+            session, require_id(sample_project.project_id, "project_id"), accepted=True
         )
 
         ensure_accepted_spec_authority(
-            project_id=require_id(sample_product.project_id, "project_id")
+            project_id=require_id(sample_project.project_id, "project_id")
         )
 
         reuse_records = [
@@ -753,13 +753,13 @@ class TestAuthorityGateLogging:
         ]
         assert reuse_records
         assert reuse_records[0].__dict__.get("project_id") == require_id(
-            sample_product.project_id, "project_id"
+            sample_project.project_id, "project_id"
         )
 
     def test_authority_gate_logs_compile(
         self,
         session: Session,
-        sample_product: Project,
+        sample_project: Project,
         engine: Engine,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
@@ -774,14 +774,14 @@ class TestAuthorityGateLogging:
             "success": True,
             "accepted": True,
             "spec_version_id": 444,
-            "project_id": require_id(sample_product.project_id, "project_id"),
+            "project_id": require_id(sample_project.project_id, "project_id"),
         }
 
         with patch.object(
             spec_tools, "update_spec_and_compile_authority", return_value=mock_return
         ):
             ensure_accepted_spec_authority(
-                project_id=require_id(sample_product.project_id, "project_id"),
+                project_id=require_id(sample_project.project_id, "project_id"),
                 spec_content="# Spec",
             )
 
@@ -792,13 +792,13 @@ class TestAuthorityGateLogging:
         ]
         assert compile_records
         assert compile_records[0].__dict__.get("project_id") == require_id(
-            sample_product.project_id, "project_id"
+            sample_project.project_id, "project_id"
         )
 
     def test_authority_gate_logs_fail(
         self,
         session: Session,
-        sample_product: Project,
+        sample_project: Project,
         engine: Engine,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
@@ -811,7 +811,7 @@ class TestAuthorityGateLogging:
 
         with pytest.raises(RuntimeError):
             ensure_accepted_spec_authority(
-                project_id=require_id(sample_product.project_id, "project_id")
+                project_id=require_id(sample_project.project_id, "project_id")
             )
 
         fail_records = [

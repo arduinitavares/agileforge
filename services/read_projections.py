@@ -17,6 +17,12 @@ from services.agent_workbench.authority_projection import (
     AuthorityProjectionService,
     pending_authority_fingerprint,
 )
+from services.packet_renderer import render_packet
+from services.packets.canonical import (
+    CanonicalPacketError,
+    build_story_packet,
+    build_task_packet,
+)
 from services.specs.compiler_service import load_compiled_artifact
 from workflow.contracts import JsonObject, JsonValue
 
@@ -887,28 +893,20 @@ class DurableReadProjectionService:
         task_id: int,
         flavor: str | None = None,
     ) -> JsonObject:
-        """Return a bounded task execution packet from durable facts."""
-        detail = self.sprint_task_show(
-            project_id=project_id,
-            sprint_id=sprint_id,
-            task_id=task_id,
-        )
-        if detail.get("ok") is not True:
-            return detail
-        task = _result_data(detail).get("task")
-        story_id = task.get("story_id") if isinstance(task, dict) else None
-        story = self._story_record(story_id) if isinstance(story_id, int) else None
-        return _success(
-            {
-                "schema_version": "agileforge.task_packet.v1",
-                "flavor": flavor or "default",
-                "project_id": project_id,
-                "sprint_id": sprint_id,
-                "task": task,
-                "story": story,
-                "completion": _result_data(detail).get("completion"),
-            }
-        )
+        """Return canonical task_packet.v2 from durable current records."""
+        try:
+            with Session(self._engine) as session:
+                packet = build_task_packet(
+                    session,
+                    project_id=project_id,
+                    sprint_id=sprint_id,
+                    task_id=task_id,
+                )
+        except CanonicalPacketError as error:
+            return _error(error.code, str(error), **error.details)
+        if flavor:
+            packet["render"] = render_packet(packet, flavor)
+        return _success(packet)
 
     def story_packet(
         self,
@@ -918,36 +916,20 @@ class DurableReadProjectionService:
         story_id: int,
         flavor: str | None = None,
     ) -> JsonObject:
-        """Return a bounded Story packet from durable records and task facts."""
-        project_or_error = self._project(project_id)
-        if isinstance(project_or_error, _ProjectReadFailure):
-            return project_or_error.error
-        story = self._story_record(story_id)
-        if story is None or story.get("project_id") != project_id:
-            return _error(
-                "STORY_NOT_FOUND",
-                f"Story {story_id} was not found for Project {project_id}.",
-                project_id=project_id,
-                story_id=story_id,
-            )
-        snapshot_or_error = self._snapshot(project_id)
-        if isinstance(snapshot_or_error, dict):
-            return snapshot_or_error
-        tasks: list[JsonValue] = [
-            _validated(item.model_dump(mode="json"))
-            for item in snapshot_or_error.tasks
-            if item.sprint_id == sprint_id and item.story_id == story_id
-        ]
-        return _success(
-            {
-                "schema_version": "agileforge.story_packet.v1",
-                "flavor": flavor or "default",
-                "project_id": project_id,
-                "sprint_id": sprint_id,
-                "story": story,
-                "tasks": tasks,
-            }
-        )
+        """Return canonical story_packet.v1 from durable current records."""
+        try:
+            with Session(self._engine) as session:
+                packet = build_story_packet(
+                    session,
+                    project_id=project_id,
+                    sprint_id=sprint_id,
+                    story_id=story_id,
+                )
+        except CanonicalPacketError as error:
+            return _error(error.code, str(error), **error.details)
+        if flavor:
+            packet["render"] = render_packet(packet, flavor)
+        return _success(packet)
 
     def context_pack(self, *, project_id: int, phase: str) -> JsonObject:
         """Return bounded non-routing context for retained automation readers."""

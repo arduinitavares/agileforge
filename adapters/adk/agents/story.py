@@ -1,26 +1,19 @@
 """User Story Writer Agent."""
 
-from pathlib import Path
-
 from google.adk.agents import Agent
 from google.adk.models.lite_llm import LiteLlm
 
+from adapters.adk.prompts import load_prompt
 from services.contracts.story import (
     UserStoryPatchOutput,
     UserStoryWriterInput,
     UserStoryWriterOutput,
 )
-from utils.helper import load_instruction
 from utils.model_config import get_model_id, get_openrouter_extra_body
 from utils.runtime_config import get_openrouter_api_key, get_story_writer_max_tokens
 
-# Load instruction text
-INSTRUCTIONS_PATH: Path = Path(__file__).parents[1] / "prompts" / "story.txt"
-USER_STORY_WRITER_INSTRUCTIONS = load_instruction(INSTRUCTIONS_PATH)
-PATCH_INSTRUCTIONS_PATH: Path = (
-    Path(__file__).parents[1] / "prompts" / "story_patch.txt"
-)
-USER_STORY_PATCH_INSTRUCTIONS = load_instruction(PATCH_INSTRUCTIONS_PATH)
+USER_STORY_WRITER_INSTRUCTIONS = load_prompt("story.txt")
+USER_STORY_PATCH_INSTRUCTIONS = load_prompt("story_patch.txt")
 
 
 def _create_story_writer_model() -> LiteLlm:

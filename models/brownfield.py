@@ -1,4 +1,4 @@
-"""Brownfield product-spec curation persistence models."""
+"""Brownfield Project-spec curation persistence models."""
 
 from __future__ import annotations
 

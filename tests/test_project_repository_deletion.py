@@ -54,11 +54,11 @@ def _seed_authority_project(
     name: str,
     decision_status: str = "accepted",
 ) -> _SeededAuthorityProject:
-    product = Project(name=name)
-    session.add(product)
+    project = Project(name=name)
+    session.add(project)
     session.flush()
-    assert product.project_id is not None
-    project_id = product.project_id
+    assert project.project_id is not None
+    project_id = project.project_id
 
     spec = SpecRegistry(
         project_id=project_id,
@@ -217,21 +217,21 @@ def test_delete_project_neutralizes_external_story_self_reference(
 ) -> None:
     """Preserve an outside story after deleting the story it referenced."""
     with Session(engine) as session:
-        deleted_product = Project(name="Deleted project")
-        surviving_product = Project(name="Surviving project")
-        session.add(deleted_product)
-        session.add(surviving_product)
+        deleted_project = Project(name="Deleted project")
+        surviving_project = Project(name="Surviving project")
+        session.add(deleted_project)
+        session.add(surviving_project)
         session.flush()
-        assert deleted_product.project_id is not None
-        assert surviving_product.project_id is not None
+        assert deleted_project.project_id is not None
+        assert surviving_project.project_id is not None
 
         deleted_story = UserStory(
             title="Deleted story",
-            project_id=deleted_product.project_id,
+            project_id=deleted_project.project_id,
         )
         surviving_story = UserStory(
             title="Surviving story",
-            project_id=surviving_product.project_id,
+            project_id=surviving_project.project_id,
         )
         session.add(deleted_story)
         session.add(surviving_story)
@@ -240,7 +240,7 @@ def test_delete_project_neutralizes_external_story_self_reference(
         assert surviving_story.story_id is not None
         surviving_story.superseded_by_story_id = deleted_story.story_id
         cross_project_dependency = UserStoryDependency(
-            project_id=surviving_product.project_id,
+            project_id=surviving_project.project_id,
             dependent_story_id=surviving_story.story_id,
             prerequisite_story_id=deleted_story.story_id,
             status="active",
@@ -253,7 +253,7 @@ def test_delete_project_neutralizes_external_story_self_reference(
         assert cross_project_dependency.dependency_id is not None
 
         assert (
-            ProjectRepository(session).delete_project(deleted_product.project_id)
+            ProjectRepository(session).delete_project(deleted_project.project_id)
             is True
         )
 
@@ -274,15 +274,15 @@ def test_delete_project_nulls_surviving_story_feature_reference(
 ) -> None:
     """Preserve a survivor after deleting the foreign feature it referenced."""
     with Session(engine) as session:
-        deleted_product = Project(name="Feature target project")
-        surviving_product = Project(name="Feature survivor project")
-        session.add(deleted_product)
-        session.add(surviving_product)
+        deleted_project = Project(name="Feature target project")
+        surviving_project = Project(name="Feature survivor project")
+        session.add(deleted_project)
+        session.add(surviving_project)
         session.flush()
-        assert deleted_product.project_id is not None
-        assert surviving_product.project_id is not None
+        assert deleted_project.project_id is not None
+        assert surviving_project.project_id is not None
 
-        theme = Theme(title="Target theme", project_id=deleted_product.project_id)
+        theme = Theme(title="Target theme", project_id=deleted_project.project_id)
         session.add(theme)
         session.flush()
         assert theme.theme_id is not None
@@ -297,7 +297,7 @@ def test_delete_project_nulls_surviving_story_feature_reference(
 
         surviving_story = UserStory(
             title="Surviving story with foreign feature",
-            project_id=surviving_product.project_id,
+            project_id=surviving_project.project_id,
             feature_id=feature.feature_id,
         )
         session.add(surviving_story)
@@ -305,14 +305,14 @@ def test_delete_project_nulls_surviving_story_feature_reference(
         assert surviving_story.story_id is not None
 
         assert (
-            ProjectRepository(session).delete_project(deleted_product.project_id)
+            ProjectRepository(session).delete_project(deleted_project.project_id)
             is True
         )
 
         stored_survivor = session.get(UserStory, surviving_story.story_id)
         assert stored_survivor is not None
         assert stored_survivor.feature_id is None
-        assert session.get(Project, surviving_product.project_id) is not None
+        assert session.get(Project, surviving_project.project_id) is not None
         assert session.get(Feature, feature.feature_id) is None
 
 
@@ -321,31 +321,31 @@ def test_delete_project_removes_cross_project_sprint_story_links(
 ) -> None:
     """Delete pure sprint-story links when either linked parent is deleted."""
     with Session(engine) as session:
-        deleted_product = Project(name="Sprint-story target")
-        surviving_product = Project(name="Sprint-story survivor")
+        deleted_project = Project(name="Sprint-story target")
+        surviving_project = Project(name="Sprint-story survivor")
         team = Team(name="Cross-project sprint team")
-        session.add(deleted_product)
-        session.add(surviving_product)
+        session.add(deleted_project)
+        session.add(surviving_project)
         session.add(team)
         session.flush()
-        assert deleted_product.project_id is not None
-        assert surviving_product.project_id is not None
+        assert deleted_project.project_id is not None
+        assert surviving_project.project_id is not None
         assert team.team_id is not None
 
         deleted_story = UserStory(
             title="Target story",
-            project_id=deleted_product.project_id,
+            project_id=deleted_project.project_id,
         )
         surviving_story = UserStory(
             title="Surviving story",
-            project_id=surviving_product.project_id,
+            project_id=surviving_project.project_id,
         )
         deleted_sprint = Sprint(
-            project_id=deleted_product.project_id,
+            project_id=deleted_project.project_id,
             team_id=team.team_id,
         )
         surviving_sprint = Sprint(
-            project_id=surviving_product.project_id,
+            project_id=surviving_project.project_id,
             team_id=team.team_id,
         )
         session.add(deleted_story)
@@ -371,11 +371,11 @@ def test_delete_project_removes_cross_project_sprint_story_links(
         session.commit()
 
         assert (
-            ProjectRepository(session).delete_project(deleted_product.project_id)
+            ProjectRepository(session).delete_project(deleted_project.project_id)
             is True
         )
 
-        assert session.get(Project, surviving_product.project_id) is not None
+        assert session.get(Project, surviving_project.project_id) is not None
         assert session.get(UserStory, surviving_story.story_id) is not None
         assert session.get(Sprint, surviving_sprint.sprint_id) is not None
         assert (
@@ -394,7 +394,7 @@ def test_delete_project_removes_cross_project_sprint_story_links(
         )
 
 
-def test_delete_project_preserves_foreign_product_acceptance_history(
+def test_delete_project_preserves_foreign_project_acceptance_history(
     engine: Engine,
 ) -> None:
     """Block deletion before cascading an accepted decision on the target spec."""
@@ -404,11 +404,11 @@ def test_delete_project_preserves_foreign_product_acceptance_history(
             name="Acceptance target",
             decision_status="rejected",
         )
-        surviving_product = Project(name="Acceptance survivor")
-        session.add(surviving_product)
+        surviving_project = Project(name="Acceptance survivor")
+        session.add(surviving_project)
         session.flush()
-        assert surviving_product.project_id is not None
-        surviving_project_id = surviving_product.project_id
+        assert surviving_project.project_id is not None
+        surviving_project_id = surviving_project.project_id
         target_spec = session.get(SpecRegistry, seeded.spec_version_id)
         assert target_spec is not None
         target_authority_id = next(iter(seeded.authority_ids))
@@ -416,7 +416,7 @@ def test_delete_project_preserves_foreign_product_acceptance_history(
         assert target_authority is not None
 
         foreign_acceptance = SpecAuthorityAcceptance(
-            project_id=surviving_product.project_id,
+            project_id=surviving_project.project_id,
             spec_version_id=seeded.spec_version_id,
             status="accepted",
             policy="test",
@@ -449,21 +449,21 @@ def test_delete_project_removes_misowned_story_dependency(
 ) -> None:
     """Delete a pure dependency row owned by the project, preserving its stories."""
     with Session(engine) as session:
-        deleted_product = Project(name="Dependency owner target")
-        surviving_product = Project(name="Dependency story survivor")
-        session.add(deleted_product)
-        session.add(surviving_product)
+        deleted_project = Project(name="Dependency owner target")
+        surviving_project = Project(name="Dependency story survivor")
+        session.add(deleted_project)
+        session.add(surviving_project)
         session.flush()
-        assert deleted_product.project_id is not None
-        assert surviving_product.project_id is not None
+        assert deleted_project.project_id is not None
+        assert surviving_project.project_id is not None
 
         dependent_story = UserStory(
             title="Surviving dependent",
-            project_id=surviving_product.project_id,
+            project_id=surviving_project.project_id,
         )
         prerequisite_story = UserStory(
             title="Surviving prerequisite",
-            project_id=surviving_product.project_id,
+            project_id=surviving_project.project_id,
         )
         session.add(dependent_story)
         session.add(prerequisite_story)
@@ -472,7 +472,7 @@ def test_delete_project_removes_misowned_story_dependency(
         assert prerequisite_story.story_id is not None
 
         dependency = UserStoryDependency(
-            project_id=deleted_product.project_id,
+            project_id=deleted_project.project_id,
             dependent_story_id=dependent_story.story_id,
             prerequisite_story_id=prerequisite_story.story_id,
             status="active",
@@ -484,11 +484,11 @@ def test_delete_project_removes_misowned_story_dependency(
         assert dependency.dependency_id is not None
 
         assert (
-            ProjectRepository(session).delete_project(deleted_product.project_id)
+            ProjectRepository(session).delete_project(deleted_project.project_id)
             is True
         )
 
-        assert session.get(Project, surviving_product.project_id) is not None
+        assert session.get(Project, surviving_project.project_id) is not None
         assert session.get(UserStory, dependent_story.story_id) is not None
         assert session.get(UserStory, prerequisite_story.story_id) is not None
         assert session.get(UserStoryDependency, dependency.dependency_id) is None
@@ -504,16 +504,16 @@ def test_delete_progressed_project_removes_task_execution_logs(
             == 1
         )
 
-        product = Project(name="Progressed project")
+        project = Project(name="Progressed project")
         team = Team(name="Delivery team")
-        session.add(product)
+        session.add(project)
         session.add(team)
         session.flush()
-        assert product.project_id is not None
+        assert project.project_id is not None
         assert team.team_id is not None
 
-        story = UserStory(title="Progressed story", project_id=product.project_id)
-        sprint = Sprint(project_id=product.project_id, team_id=team.team_id)
+        story = UserStory(title="Progressed story", project_id=project.project_id)
+        sprint = Sprint(project_id=project.project_id, team_id=team.team_id)
         session.add(story)
         session.add(sprint)
         session.flush()
@@ -536,7 +536,7 @@ def test_delete_progressed_project_removes_task_execution_logs(
         session.commit()
         assert execution_log.log_id is not None
 
-        project_id = product.project_id
+        project_id = project.project_id
         story_id = story.story_id
         sprint_id = sprint.sprint_id
         task_id = task.task_id
@@ -553,30 +553,30 @@ def test_delete_progressed_project_removes_task_execution_logs(
 
 
 def test_delete_project_removes_sprint_only_workflow_events(engine: Engine) -> None:
-    """Delete events linked through a target sprint even without a product ID."""
+    """Delete events linked through a target sprint even without a project ID."""
     with Session(engine) as session:
         assert (
             session.connection().exec_driver_sql("PRAGMA foreign_keys").scalar_one()
             == 1
         )
 
-        deleted_product = Project(name="Event target project")
-        surviving_product = Project(name="Event survivor project")
+        deleted_project = Project(name="Event target project")
+        surviving_project = Project(name="Event survivor project")
         team = Team(name="Event delivery team")
-        session.add(deleted_product)
-        session.add(surviving_product)
+        session.add(deleted_project)
+        session.add(surviving_project)
         session.add(team)
         session.flush()
-        assert deleted_product.project_id is not None
-        assert surviving_product.project_id is not None
+        assert deleted_project.project_id is not None
+        assert surviving_project.project_id is not None
         assert team.team_id is not None
 
         deleted_sprint = Sprint(
-            project_id=deleted_product.project_id,
+            project_id=deleted_project.project_id,
             team_id=team.team_id,
         )
         surviving_sprint = Sprint(
-            project_id=surviving_product.project_id,
+            project_id=surviving_project.project_id,
             team_id=team.team_id,
         )
         session.add(deleted_sprint)
@@ -592,7 +592,7 @@ def test_delete_project_removes_sprint_only_workflow_events(engine: Engine) -> N
         )
         surviving_event = WorkflowEvent(
             event_type=WorkflowEventType.SPRINT_STARTED,
-            project_id=surviving_product.project_id,
+            project_id=surviving_project.project_id,
             sprint_id=surviving_sprint.sprint_id,
         )
         session.add(deleted_event)
@@ -601,10 +601,10 @@ def test_delete_project_removes_sprint_only_workflow_events(engine: Engine) -> N
         assert deleted_event.event_id is not None
         assert surviving_event.event_id is not None
 
-        deleted_project_id = deleted_product.project_id
+        deleted_project_id = deleted_project.project_id
         deleted_sprint_id = deleted_sprint.sprint_id
         deleted_event_id = deleted_event.event_id
-        surviving_project_id = surviving_product.project_id
+        surviving_project_id = surviving_project.project_id
         surviving_sprint_id = surviving_sprint.sprint_id
         surviving_event_id = surviving_event.event_id
 
@@ -626,13 +626,13 @@ def test_delete_project_removes_authority_curation_rows(engine: Engine) -> None:
             == 1
         )
 
-        product = Project(name="Curated project")
-        session.add(product)
+        project = Project(name="Curated project")
+        session.add(project)
         session.flush()
-        assert product.project_id is not None
+        assert project.project_id is not None
 
         feedback = AuthorityFeedbackAttempt(
-            project_id=product.project_id,
+            project_id=project.project_id,
             feedback_attempt_id="feedback-delete",
             source_authority_id=1,
             source_authority_fingerprint="sha256:authority",
@@ -642,7 +642,7 @@ def test_delete_project_removes_authority_curation_rows(engine: Engine) -> None:
             idempotency_key="feedback-delete",
         )
         curation = AuthorityCurationAttempt(
-            project_id=product.project_id,
+            project_id=project.project_id,
             curation_attempt_id="curation-delete",
             source_authority_id=1,
             source_authority_fingerprint="sha256:authority",
@@ -657,7 +657,7 @@ def test_delete_project_removes_authority_curation_rows(engine: Engine) -> None:
         assert feedback.feedback_row_id is not None
         assert curation.curation_row_id is not None
 
-        project_id = product.project_id
+        project_id = project.project_id
         feedback_row_id = feedback.feedback_row_id
         curation_row_id = curation.curation_row_id
 
@@ -678,13 +678,13 @@ def test_delete_project_removes_discovery_rows(
             == 1
         )
 
-        product = Project(name="Discovered project")
-        session.add(product)
+        project = Project(name="Discovered project")
+        session.add(project)
         session.flush()
-        assert product.project_id is not None
+        assert project.project_id is not None
 
         challenge = DiscoveryChallengeArtifact(
-            project_id=product.project_id,
+            project_id=project.project_id,
             producer="test",
             readiness="ready_for_prd",
             original_idea="Delete this project.",
@@ -698,7 +698,7 @@ def test_delete_project_removes_discovery_rows(
         assert challenge.challenge_artifact_id is not None
 
         prd = DiscoveryPrd(
-            project_id=product.project_id,
+            project_id=project.project_id,
             challenge_artifact_id=challenge.challenge_artifact_id,
             producer="test",
             status="accepted",
@@ -714,7 +714,7 @@ def test_delete_project_removes_discovery_rows(
         assert prd.prd_id is not None
 
         draft = DiscoverySpecAmendmentDraft(
-            project_id=product.project_id,
+            project_id=project.project_id,
             prd_id=prd.prd_id,
             challenge_artifact_id=challenge.challenge_artifact_id,
             status="accepted",
@@ -730,7 +730,7 @@ def test_delete_project_removes_discovery_rows(
         session.commit()
         assert draft.spec_amendment_draft_id is not None
 
-        project_id = product.project_id
+        project_id = project.project_id
         challenge_id = challenge.challenge_artifact_id
         prd_id = prd.prd_id
         draft_id = draft.spec_amendment_draft_id
@@ -752,16 +752,16 @@ def test_delete_project_nulls_surviving_discovery_prd_reference(
             == 1
         )
 
-        deleted_product = Project(name="Discovery target project")
-        surviving_product = Project(name="Discovery survivor project")
-        session.add(deleted_product)
-        session.add(surviving_product)
+        deleted_project = Project(name="Discovery target project")
+        surviving_project = Project(name="Discovery survivor project")
+        session.add(deleted_project)
+        session.add(surviving_project)
         session.flush()
-        assert deleted_product.project_id is not None
-        assert surviving_product.project_id is not None
+        assert deleted_project.project_id is not None
+        assert surviving_project.project_id is not None
 
         deleted_challenge = DiscoveryChallengeArtifact(
-            project_id=deleted_product.project_id,
+            project_id=deleted_project.project_id,
             producer="test",
             readiness="ready_for_prd",
             original_idea="Delete this discovery graph.",
@@ -771,7 +771,7 @@ def test_delete_project_nulls_surviving_discovery_prd_reference(
             idempotency_key="deleted-challenge",
         )
         surviving_challenge = DiscoveryChallengeArtifact(
-            project_id=surviving_product.project_id,
+            project_id=surviving_project.project_id,
             producer="test",
             readiness="ready_for_prd",
             original_idea="Preserve this discovery graph.",
@@ -787,7 +787,7 @@ def test_delete_project_nulls_surviving_discovery_prd_reference(
         assert surviving_challenge.challenge_artifact_id is not None
 
         deleted_prd = DiscoveryPrd(
-            project_id=deleted_product.project_id,
+            project_id=deleted_project.project_id,
             challenge_artifact_id=deleted_challenge.challenge_artifact_id,
             producer="test",
             status="accepted",
@@ -803,7 +803,7 @@ def test_delete_project_nulls_surviving_discovery_prd_reference(
         assert deleted_prd.prd_id is not None
 
         surviving_prd = DiscoveryPrd(
-            project_id=surviving_product.project_id,
+            project_id=surviving_project.project_id,
             challenge_artifact_id=surviving_challenge.challenge_artifact_id,
             producer="test",
             status="accepted",
@@ -819,9 +819,9 @@ def test_delete_project_nulls_surviving_discovery_prd_reference(
         session.commit()
         assert surviving_prd.prd_id is not None
 
-        deleted_project_id = deleted_product.project_id
+        deleted_project_id = deleted_project.project_id
         deleted_prd_id = deleted_prd.prd_id
-        surviving_project_id = surviving_product.project_id
+        surviving_project_id = surviving_project.project_id
         surviving_challenge_id = surviving_challenge.challenge_artifact_id
         surviving_prd_id = surviving_prd.prd_id
 
@@ -846,14 +846,14 @@ def test_delete_project_nulls_surviving_story_spec_pin(engine: Engine) -> None:
             name="Pinned spec target",
             decision_status="rejected",
         )
-        surviving_product = Project(name="Pinned story survivor")
-        session.add(surviving_product)
+        surviving_project = Project(name="Pinned story survivor")
+        session.add(surviving_project)
         session.flush()
-        assert surviving_product.project_id is not None
+        assert surviving_project.project_id is not None
 
         surviving_story = UserStory(
             title="Cross-project pinned story",
-            project_id=surviving_product.project_id,
+            project_id=surviving_project.project_id,
             accepted_spec_version_id=seeded.spec_version_id,
         )
         session.add(surviving_story)
@@ -865,7 +865,7 @@ def test_delete_project_nulls_surviving_story_spec_pin(engine: Engine) -> None:
         stored_survivor = session.get(UserStory, surviving_story.story_id)
         assert stored_survivor is not None
         assert stored_survivor.accepted_spec_version_id is None
-        assert session.get(Project, surviving_product.project_id) is not None
+        assert session.get(Project, surviving_project.project_id) is not None
         assert session.get(SpecRegistry, seeded.spec_version_id) is None
 
 
@@ -874,16 +874,16 @@ def test_delete_project_rejects_cross_project_discovery_dependency(
 ) -> None:
     """Reject deletion before mutation when another project requires its challenge."""
     with Session(engine) as session:
-        deleted_product = Project(name="Discovery dependency target")
-        surviving_product = Project(name="Discovery dependency survivor")
-        session.add(deleted_product)
-        session.add(surviving_product)
+        deleted_project = Project(name="Discovery dependency target")
+        surviving_project = Project(name="Discovery dependency survivor")
+        session.add(deleted_project)
+        session.add(surviving_project)
         session.flush()
-        assert deleted_product.project_id is not None
-        assert surviving_product.project_id is not None
+        assert deleted_project.project_id is not None
+        assert surviving_project.project_id is not None
 
         deleted_challenge = DiscoveryChallengeArtifact(
-            project_id=deleted_product.project_id,
+            project_id=deleted_project.project_id,
             producer="test",
             readiness="ready_for_prd",
             original_idea="A challenge referenced by another project.",
@@ -897,7 +897,7 @@ def test_delete_project_rejects_cross_project_discovery_dependency(
         assert deleted_challenge.challenge_artifact_id is not None
 
         surviving_prd = DiscoveryPrd(
-            project_id=surviving_product.project_id,
+            project_id=surviving_project.project_id,
             challenge_artifact_id=deleted_challenge.challenge_artifact_id,
             producer="test",
             status="accepted",
@@ -929,7 +929,7 @@ def test_delete_project_rejects_cross_project_discovery_dependency(
         event.listen(engine, "before_cursor_execute", capture_dml)
         try:
             with pytest.raises(ProjectDeletionConflictError) as exc_info:
-                ProjectRepository(session).delete_project(deleted_product.project_id)
+                ProjectRepository(session).delete_project(deleted_project.project_id)
         finally:
             event.remove(engine, "before_cursor_execute", capture_dml)
 
@@ -938,7 +938,7 @@ def test_delete_project_rejects_cross_project_discovery_dependency(
         )
         assert exc_info.value.references == ("discovery_prds.challenge_artifact_id",)
         assert dml_statements == []
-        assert session.get(Project, deleted_product.project_id) is not None
+        assert session.get(Project, deleted_project.project_id) is not None
         assert (
             session.get(
                 DiscoveryChallengeArtifact,
@@ -946,7 +946,7 @@ def test_delete_project_rejects_cross_project_discovery_dependency(
             )
             is not None
         )
-        assert session.get(Project, surviving_product.project_id) is not None
+        assert session.get(Project, surviving_project.project_id) is not None
         assert session.get(DiscoveryPrd, surviving_prd.prd_id) is not None
 
 
@@ -955,16 +955,16 @@ def test_delete_project_inventories_all_cross_project_discovery_dependencies(
 ) -> None:
     """Report every non-null discovery FK that would orphan surviving data."""
     with Session(engine) as session:
-        deleted_product = Project(name="Discovery inventory target")
-        surviving_product = Project(name="Discovery inventory survivor")
-        session.add(deleted_product)
-        session.add(surviving_product)
+        deleted_project = Project(name="Discovery inventory target")
+        surviving_project = Project(name="Discovery inventory survivor")
+        session.add(deleted_project)
+        session.add(surviving_project)
         session.flush()
-        assert deleted_product.project_id is not None
-        assert surviving_product.project_id is not None
+        assert deleted_project.project_id is not None
+        assert surviving_project.project_id is not None
 
         target_challenge = DiscoveryChallengeArtifact(
-            project_id=deleted_product.project_id,
+            project_id=deleted_project.project_id,
             producer="test",
             readiness="ready_for_prd",
             original_idea="Inventory inbound references.",
@@ -978,7 +978,7 @@ def test_delete_project_inventories_all_cross_project_discovery_dependencies(
         assert target_challenge.challenge_artifact_id is not None
 
         target_prd = DiscoveryPrd(
-            project_id=deleted_product.project_id,
+            project_id=deleted_project.project_id,
             challenge_artifact_id=target_challenge.challenge_artifact_id,
             producer="test",
             status="accepted",
@@ -990,7 +990,7 @@ def test_delete_project_inventories_all_cross_project_discovery_dependencies(
             idempotency_key="inventory-target-prd",
         )
         survivor_prd = DiscoveryPrd(
-            project_id=surviving_product.project_id,
+            project_id=surviving_project.project_id,
             challenge_artifact_id=target_challenge.challenge_artifact_id,
             producer="test",
             status="accepted",
@@ -1007,7 +1007,7 @@ def test_delete_project_inventories_all_cross_project_discovery_dependencies(
         assert target_prd.prd_id is not None
 
         survivor_draft = DiscoverySpecAmendmentDraft(
-            project_id=surviving_product.project_id,
+            project_id=surviving_project.project_id,
             prd_id=target_prd.prd_id,
             challenge_artifact_id=target_challenge.challenge_artifact_id,
             status="ready_for_review",
@@ -1022,15 +1022,15 @@ def test_delete_project_inventories_all_cross_project_discovery_dependencies(
         session.commit()
 
         with pytest.raises(ProjectDeletionConflictError) as exc_info:
-            ProjectRepository(session).delete_project(deleted_product.project_id)
+            ProjectRepository(session).delete_project(deleted_project.project_id)
 
         assert exc_info.value.references == (
             "discovery_prds.challenge_artifact_id",
             "discovery_spec_amendment_drafts.challenge_artifact_id",
             "discovery_spec_amendment_drafts.prd_id",
         )
-        assert session.get(Project, deleted_product.project_id) is not None
-        assert session.get(Project, surviving_product.project_id) is not None
+        assert session.get(Project, deleted_project.project_id) is not None
+        assert session.get(Project, surviving_project.project_id) is not None
         assert (
             session.get(
                 DiscoveryChallengeArtifact,

@@ -2,18 +2,11 @@ models:
   brownfield_curator: "openrouter/openai/gpt-5.6-luna"
   spec_authority_compiler: "openrouter/openai/gpt-5.6-luna"
   product_vision: "openrouter/openai/gpt-5.6-luna"
-  product_roadmap: "openrouter/openai/gpt-5.6-luna"
-  product_user_story: "openrouter/openai/gpt-5.6-luna"
-  story_draft: "openrouter/openai/gpt-5.6-luna"
   spec_validator: "openrouter/openai/gpt-5.6-luna"
-  story_refiner: "openrouter/openai/gpt-5.6-luna"
-  invest_validator: "openrouter/openai/gpt-5.6-luna"
-  negation_checker: "openrouter/openai/gpt-5.6-luna"
   backlog_primer: "openrouter/openai/gpt-5.6-luna"
   roadmap_builder: "openrouter/openai/gpt-5.6-luna"
   user_story_writer: "openrouter/openai/gpt-5.6-luna"
   sprint_planner: "openrouter/openai/gpt-5.6-luna"
-  as_built_assessor: "openrouter/openai/gpt-5.6-luna"
 
 story_pipeline:
   mode: "single"

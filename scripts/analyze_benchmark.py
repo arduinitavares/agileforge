@@ -24,10 +24,10 @@ def analyze_benchmark(cases_path: str | Path) -> None:  # noqa: C901
             for r in reasons:
                 fail_reasons[r] += 1
 
-    product_spec_counts = collections.defaultdict(int)
+    project_spec_counts = collections.defaultdict(int)
     for c in cases:
         key = f"p{c.get('project_id')}-v{c.get('spec_version_id')}"
-        product_spec_counts[key] += 1
+        project_spec_counts[key] += 1
 
     content_hashes = collections.defaultdict(list)
     for c in cases:
@@ -46,9 +46,9 @@ def analyze_benchmark(cases_path: str | Path) -> None:  # noqa: C901
     for r, count in sorted(fail_reasons.items(), key=lambda x: x[1], reverse=True):
         emit(f"  {r}: {count}")
 
-    emit("\nProduct/Spec Distribution:")
+    emit("\nProject/Spec Distribution:")
     for key, count in sorted(
-        product_spec_counts.items(), key=lambda x: x[1], reverse=True
+        project_spec_counts.items(), key=lambda x: x[1], reverse=True
     ):
         emit(f"  {key}: {count}")
 

@@ -1,4 +1,4 @@
-"""Fix corrupted sprint data for product 2."""
+"""Fix corrupted sprint data for Project 2."""
 
 import sys
 from pathlib import Path
@@ -19,6 +19,8 @@ from agile_sqlmodel import (
     WorkflowEvent,
     engine,
 )
+
+PROJECT_ID = 2
 
 
 def main() -> None:  # noqa: C901
@@ -85,12 +87,16 @@ def main() -> None:  # noqa: C901
 
         # Verify
         emit("\n=== VERIFICATION ===")
-        stories = s.exec(select(UserStory).where(UserStory.project_id == 2)).all()  # noqa: PLR2004
+        stories = s.exec(
+            select(UserStory).where(UserStory.project_id == PROJECT_ID)
+        ).all()
         for st in stories:
             emit(f"Story {st.story_id}: status={st.status.value}")
 
-        sprints = s.exec(select(Sprint).where(Sprint.project_id == 2)).all()  # noqa: PLR2004
-        emit(f"Sprints for product 2: {len(sprints)}")
+        sprints = s.exec(
+            select(Sprint).where(Sprint.project_id == PROJECT_ID)
+        ).all()
+        emit(f"Sprints for Project {PROJECT_ID}: {len(sprints)}")
 
 
 if __name__ == "__main__":

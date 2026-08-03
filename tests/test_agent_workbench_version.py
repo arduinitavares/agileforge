@@ -8,9 +8,8 @@ from services.agent_workbench import version
 
 
 def test_version_constants_are_stable() -> None:
-    """Expose stable command and storage schema versions."""
+    """Expose the stable command contract version."""
     assert version.COMMAND_VERSION == "1"
-    assert version.STORAGE_SCHEMA_VERSION == "9"
 
 
 def test_agileforge_version_uses_package_metadata(

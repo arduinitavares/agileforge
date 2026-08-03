@@ -11,6 +11,7 @@ from typing import Literal, NoReturn, Protocol, cast
 
 from pydantic import TypeAdapter, ValidationError
 
+from adapters.adk.model_roles import AGENTIC_MODEL_ROLES
 from cli.workflow_commands import (
     AGENTIC_REQUEST_KINDS,
     COMMAND_PREFIXES,
@@ -37,16 +38,6 @@ _AGENTIC_REQUEST_NODES: dict[str, str] = {
     "record_roadmap_draft": "planning.roadmap.generate",
     "record_story_draft": "planning.story.generate",
     "record_sprint_plan": "planning.sprint.plan",
-}
-_AGENTIC_MODEL_KEYS: dict[str, str] = {
-    "record_brownfield_spec_draft": "brownfield_curator",
-    "compile_authority": "spec_authority_compiler",
-    "repair_authority": "spec_authority_compiler",
-    "record_vision_draft": "product_vision",
-    "record_backlog_draft": "backlog_primer",
-    "record_roadmap_draft": "roadmap_builder",
-    "record_story_draft": "user_story_writer",
-    "record_sprint_plan": "sprint_planner",
 }
 
 
@@ -611,14 +602,15 @@ def _run_transition(args: argparse.Namespace, application: _Application) -> int:
 
 def _run_agentic(args: argparse.Namespace, application: _Application) -> int:
     request_kind = cast("str", args.request_kind)
-    model_id = args.model_id or get_model_id(_AGENTIC_MODEL_KEYS[request_kind])
+    node_id = _AGENTIC_REQUEST_NODES[request_kind]
+    model_id = args.model_id or get_model_id(AGENTIC_MODEL_ROLES[node_id])
     result = application.run_agentic_action(
         AgenticActionRequest(
             project_id=args.project_id,
             graph_version=args.graph_version,
             fact_fingerprint=args.expected_fact_fingerprint,
             decision_fingerprint=args.expected_decision_fingerprint,
-            node_id=_AGENTIC_REQUEST_NODES[request_kind],
+            node_id=node_id,
             instance_key=args.instance_key,
             input_payload=_read_json_object(args.input_file),
             model_id=model_id,

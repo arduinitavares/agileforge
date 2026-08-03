@@ -2,8 +2,7 @@
 """
 Tools for querying features and story-related data.
 
-Extracted from legacy product_user_story_tool/tools.py to preserve
-query_features_for_stories functionality after legacy agent removal.
+Provides current Project-scoped story query projections.
 """
 
 import logging
@@ -111,7 +110,7 @@ class QueryFeaturesOutput(BaseModel):
 
     success: Annotated[bool, Field(description="Whether query succeeded")]
     project_id: Annotated[int, Field(description="Project ID")]
-    product_name: Annotated[str, Field(description="Project name")]
+    project_name: Annotated[str, Field(description="Project name")]
     features_flat: Annotated[
         list[FeatureForStory],
         Field(description="Flat list of features with REQUIRED theme/epic metadata"),
@@ -366,7 +365,7 @@ def _build_query_output(
     return QueryFeaturesOutput(
         success=True,
         project_id=query_input.project_id,
-        product_name=project.name,
+        project_name=project.name,
         features_flat=features_list,
         structure=structure,
         total_features=len(features_list),

@@ -214,7 +214,7 @@ class SpecAuthorityCompilerInput(BaseModel):
     ]
     project_id: Annotated[
         int | None,
-        Field(default=None, description="Optional product identifier."),
+        Field(default=None, description="Optional Project identifier."),
     ]
     spec_version_id: Annotated[
         int | None,
@@ -1125,7 +1125,7 @@ class StoryDraftInput(BaseModel):
             )
         ),
     ]
-    product_context: Annotated[
+    project_context: Annotated[
         dict[str, Any],
         Field(description="Project context (id, name, vision, time_frame)."),
     ]

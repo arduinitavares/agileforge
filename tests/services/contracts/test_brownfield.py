@@ -30,7 +30,7 @@ def _canonical_spec() -> dict[str, object]:
         "created_at": "2026-08-03",
         "updated_at": "2026-08-03",
         "summary": "Initial scope curated from selected repository evidence.",
-        "problem_statement": "Existing behavior needs reviewed product authority.",
+        "problem_statement": "Existing behavior needs reviewed Project authority.",
         "items": [
             {
                 "id": "REQ.brownfield.contract",

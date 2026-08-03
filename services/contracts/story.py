@@ -32,7 +32,7 @@ class SaveStoriesInput(BaseModel):
     ]
     project_id: Annotated[
         int,
-        Field(description="The product ID to attach stories to."),
+        Field(description="The Project ID to attach stories to."),
     ]
     parent_requirement: Annotated[
         str,
@@ -86,7 +86,7 @@ class SaveStoryPatchInput(BaseModel):
     ]
     project_id: Annotated[
         int,
-        Field(description="The product ID that owns the target story."),
+        Field(description="The Project ID that owns the target story."),
     ]
     parent_requirement: Annotated[
         str,

@@ -1,18 +1,14 @@
 """Roadmap Builder Agent."""
 
-from pathlib import Path
-
 from google.adk.agents import Agent
 from google.adk.models.lite_llm import LiteLlm
 
+from adapters.adk.prompts import load_prompt
 from services.contracts.roadmap import RoadmapBuilderInput, RoadmapBuilderOutput
-from utils.helper import load_instruction
 from utils.model_config import get_model_id, get_openrouter_extra_body
 from utils.runtime_config import get_openrouter_api_key, get_roadmap_builder_max_tokens
 
-# Load instruction text
-INSTRUCTIONS_PATH: Path = Path(__file__).parents[1] / "prompts" / "roadmap.txt"
-ROADMAP_INSTRUCTIONS = load_instruction(INSTRUCTIONS_PATH)
+ROADMAP_INSTRUCTIONS = load_prompt("roadmap.txt")
 
 # Initialize Model
 _max_tokens = get_roadmap_builder_max_tokens()

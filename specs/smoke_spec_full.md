@@ -4,8 +4,8 @@
 This spec defines the minimal but complete requirements used by the smoke harness to validate
 Spec Authority compilation + acceptance + story pipeline (draft/refine) + deterministic gate.
 
-## Product Context
-- Product: Smoke Harness Demo
+## Project Context
+- Project: Smoke Harness Demo
 - Primary persona: Automation Engineer
 - Primary theme: Core Data Quality
 

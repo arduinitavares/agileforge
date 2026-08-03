@@ -98,7 +98,7 @@ from services.specs.lifecycle_service import (
     ApproveSpecVersionInput as _service_ApproveSpecVersionInput,
 )
 from services.specs.lifecycle_service import (
-    LinkSpecToProductInput as _service_LinkSpecToProductInput,
+    LinkSpecToProjectInput as _service_LinkSpecToProjectInput,
 )
 from services.specs.lifecycle_service import (
     ReadProjectSpecificationInput as _service_ReadProjectSpecificationInput,
@@ -113,7 +113,7 @@ from services.specs.lifecycle_service import (
     approve_spec_version as _service_approve_spec_version,
 )
 from services.specs.lifecycle_service import (
-    link_spec_to_product as _service_link_spec_to_product,
+    link_spec_to_project as _service_link_spec_to_project,
 )
 from services.specs.lifecycle_service import (
     read_project_specification as _service_read_project_specification,
@@ -175,7 +175,7 @@ _LEGACY_DB_EXPORTS = (engine, get_engine)
 # --- Input Schemas ---
 
 SaveProjectSpecificationInput = _service_SaveProjectSpecificationInput
-LinkSpecToProductInput = _service_LinkSpecToProductInput
+LinkSpecToProjectInput = _service_LinkSpecToProjectInput
 ReadProjectSpecificationInput = _service_ReadProjectSpecificationInput
 PreviewSpecAuthorityInput = _service_PreviewSpecAuthorityInput
 
@@ -219,12 +219,12 @@ def save_project_specification(
     )
 
 
-def link_spec_to_product(
+def link_spec_to_project(
     params: dict[str, Any],
     tool_context: ToolContext | None = None,
 ) -> dict[str, Any]:
     """Compatibility adapter over the public lifecycle service boundary."""
-    return _service_link_spec_to_product(
+    return _service_link_spec_to_project(
         params,
         tool_context=tool_context,
     )

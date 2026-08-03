@@ -34,7 +34,7 @@ _MAX_SPEC_SIZE_KB = 100
 _DEFAULT_GET_ENGINE = get_engine
 
 
-class LinkSpecToProductInput(BaseModel):
+class LinkSpecToProjectInput(BaseModel):
     """Input schema for linking an on-disk specification to a project."""
 
     project_id: int = Field(
@@ -139,20 +139,6 @@ def _compile_spec_authority_from_path(
     )
 
 
-def _compile_linked_spec_authority(
-    *,
-    project_id: int,
-    spec_path: str,
-    tool_context: ToolContext | None,
-) -> dict[str, Any]:
-    """Backwards-compatible compile seam for link-side tests and callers."""
-    return _compile_spec_authority_from_path(
-        project_id=project_id,
-        spec_path=spec_path,
-        tool_context=tool_context,
-    )
-
-
 def extract_markdown_sections(spec_text: str) -> list[str]:
     """Extract up to 20 markdown headings for navigation."""
     headings = re.findall(r"^#{1,3}\s+(.+)$", spec_text, re.MULTILINE)
@@ -232,7 +218,7 @@ def _load_spec_text_from_file(path_str: str) -> tuple[str, float] | dict[str, An
 
 
 def _write_backup_spec_file(
-    *, product_name: str, project_id: int, spec_text: str
+    *, project_name: str, project_id: int, spec_text: str
 ) -> tuple[str, float] | dict[str, Any]:
     file_size_kb = len(spec_text) / 1024
     if file_size_kb > _MAX_SPEC_SIZE_KB:
@@ -247,7 +233,7 @@ def _write_backup_spec_file(
     specs_dir = Path("specs")
     specs_dir.mkdir(exist_ok=True)
 
-    safe_name = re.sub(r"[^\w\s-]", "", product_name.lower())
+    safe_name = re.sub(r"[^\w\s-]", "", project_name.lower())
     safe_name = re.sub(r"[-\s]+", "_", safe_name)
     spec_filename = f"{safe_name}_{project_id}_spec.md"
     spec_path_obj = specs_dir / spec_filename
@@ -277,7 +263,7 @@ def _resolve_spec_storage(
         return spec_text, parsed.content, file_size_kb, False
 
     saved = _write_backup_spec_file(
-        product_name=project.name,
+        project_name=project.name,
         project_id=parsed.project_id,
         spec_text=parsed.content,
     )
@@ -386,13 +372,13 @@ def approve_spec_version(
         }
 
 
-def link_spec_to_product(
+def link_spec_to_project(
     params: dict[str, Any],
     tool_context: ToolContext | None = None,
 ) -> dict[str, Any]:
     """Link an on-disk specification file to a project and compile authority."""
     try:
-        parsed = LinkSpecToProductInput.model_validate(_normalize_input_params(params))
+        parsed = LinkSpecToProjectInput.model_validate(_normalize_input_params(params))
     except ValueError as exc:
         return {"success": False, "error": f"Invalid parameters: {exc}"}
 
@@ -430,13 +416,13 @@ def link_spec_to_product(
         session.add(project)
         session.commit()
 
-        product_name = project.name
+        project_name = project.name
 
     action = "updated" if is_update else "linked"
     logger.info(
         "Spec %s for %r -> %s (%.1fKB)",
         action,
-        product_name,
+        project_name,
         parsed.spec_path,
         file_size_kb,
     )
@@ -444,7 +430,7 @@ def link_spec_to_product(
     if tool_context and tool_context.state is not None:
         tool_context.state["spec_persisted"] = True
 
-    compile_result = _compile_linked_spec_authority(
+    compile_result = _compile_spec_authority_from_path(
         project_id=parsed.project_id,
         spec_path=parsed.spec_path,
         tool_context=tool_context,
@@ -658,14 +644,14 @@ def read_project_specification(
 __all__ = [
     "ApproveSpecVersionInput",
     "ApprovedCanonicalSpec",
-    "LinkSpecToProductInput",
+    "LinkSpecToProjectInput",
     "ReadProjectSpecificationInput",
     "RegisterSpecVersionInput",
     "SaveProjectSpecificationInput",
     "approve_spec_version",
     "extract_markdown_sections",
     "hydrate_spec_state",
-    "link_spec_to_product",
+    "link_spec_to_project",
     "read_project_specification",
     "register_approved_spec_from_canonical_json",
     "register_spec_version",

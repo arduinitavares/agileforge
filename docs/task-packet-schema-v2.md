@@ -22,12 +22,12 @@ type TaskPacket = {
   };
 
   source_snapshot: {
-    product_id: number;
+    project_id: number;
     sprint_id: number;
     story_id: number;
     task_id: number;
 
-    product_updated_at: string;
+    project_updated_at: string;
     sprint_updated_at: string;
     sprint_story_added_at: string;
     story_updated_at: string;
@@ -38,6 +38,7 @@ type TaskPacket = {
     accepted_spec_version_id: number | null;
     validation_validated_at: string | null;
     validation_input_hash: string | null;
+    compiled_authority_id: number | null;
     compiled_authority_compiled_at: string | null;
   };
 
@@ -78,8 +79,8 @@ type TaskPacket = {
       team_name: string | null;
     };
 
-    product: {
-      product_id: number;
+    project: {
+      project_id: number;
       name: string;
       vision_excerpt: string | null;
     };
@@ -159,7 +160,7 @@ type TaskPacket = {
 - Task Packet v2 continues to use story-pinned authority only.
 - `task_hard_constraints` are resolved from task-local `relevant_invariant_ids` against the pinned compiled authority.
 - `story_compliance_boundaries` are still derived from validation finding invariant IDs because those are relevant execution boundaries inherited from the parent story.
-- The packet never falls back to newer product authority when a story is unpinned.
+- The packet never falls back to newer Project authority when a story is unpinned.
 
 ### Story/task separation
 
@@ -169,7 +170,7 @@ type TaskPacket = {
 
 ### Source fingerprint
 
-- `source_fingerprint` must change when task, story, sprint, sprint membership, task metadata, pinned authority, validation evidence, or product timestamps relevant to the packet change.
+- `source_fingerprint` must change when task, story, sprint, sprint membership, task metadata, pinned authority, validation evidence, or Project timestamps relevant to the packet change.
 
 ## Public Endpoint
 

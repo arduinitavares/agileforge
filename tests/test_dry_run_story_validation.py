@@ -24,11 +24,11 @@ def test_load_accepted_invariants_uses_exact_valid_authority(
     session: Session,
 ) -> None:
     """Dry-run inspection ignores retained malformed authority history."""
-    product = Project(name="Dry Run Project")
-    session.add(product)
+    project = Project(name="Dry Run Project")
+    session.add(project)
     session.commit()
-    session.refresh(product)
-    project_id = require_id(product.project_id, "project_id")
+    session.refresh(project)
+    project_id = require_id(project.project_id, "project_id")
     spec = SpecRegistry(
         project_id=project_id,
         spec_hash="dry-run-spec",

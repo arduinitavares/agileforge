@@ -80,11 +80,11 @@ def test_story_validation_blocks_malformed_v3_before_checks_or_evidence(
         session.get_bind,
     )
 
-    product = Project(name="Validation Project", vision="Test")
-    session.add(product)
+    project = Project(name="Validation Project", vision="Test")
+    session.add(project)
     session.commit()
-    session.refresh(product)
-    project_id = require_id(product.project_id, "project_id")
+    session.refresh(project)
+    project_id = require_id(project.project_id, "project_id")
 
     story = UserStory(
         project_id=project_id,
@@ -215,11 +215,11 @@ def test_story_validation_stays_on_exact_accepted_row_with_newer_pending_candida
     """A newer pending compile cannot replace the accepted execution authority."""
     from services.specs import story_validation_service  # noqa: PLC0415
 
-    product = Project(name="Pinned Validation", vision="Test")
-    session.add(product)
+    project = Project(name="Pinned Validation", vision="Test")
+    session.add(project)
     session.commit()
-    session.refresh(product)
-    project_id = require_id(product.project_id, "project_id")
+    session.refresh(project)
+    project_id = require_id(project.project_id, "project_id")
     story = UserStory(
         project_id=project_id,
         title="Pinned story",
@@ -311,11 +311,11 @@ def test_story_validation_moves_only_to_exact_newly_accepted_row(
     """A terminal acceptance moves validation to the referenced v3 row."""
     from services.specs import story_validation_service  # noqa: PLC0415
 
-    product = Project(name="Accepted V3 Validation", vision="Test")
-    session.add(product)
+    project = Project(name="Accepted V3 Validation", vision="Test")
+    session.add(project)
     session.commit()
-    session.refresh(product)
-    project_id = require_id(product.project_id, "project_id")
+    session.refresh(project)
+    project_id = require_id(project.project_id, "project_id")
     story = UserStory(
         project_id=project_id,
         title="Accepted story",
@@ -579,11 +579,11 @@ def test_persist_validation_evidence_updates_story_and_acceptance(
         persist_validation_evidence,
     )
 
-    product = Project(name="Evidence Project", vision="Test")
-    session.add(product)
+    project = Project(name="Evidence Project", vision="Test")
+    session.add(project)
     session.commit()
-    session.refresh(product)
-    project_id = require_id(product.project_id, "project_id")
+    session.refresh(project)
+    project_id = require_id(project.project_id, "project_id")
 
     story = UserStory(
         project_id=project_id,
@@ -636,11 +636,11 @@ def test_validate_story_with_spec_authority_uses_service_owned_defaults(
     """Verify validate story with spec authority uses service owned defaults."""
     from services.specs import story_validation_service  # noqa: PLC0415
 
-    product = Project(name="Validation Project", vision="Test")
-    session.add(product)
+    project = Project(name="Validation Project", vision="Test")
+    session.add(project)
     session.commit()
-    session.refresh(product)
-    project_id = require_id(product.project_id, "project_id")
+    session.refresh(project)
+    project_id = require_id(project.project_id, "project_id")
 
     story = UserStory(
         project_id=project_id,

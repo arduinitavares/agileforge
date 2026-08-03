@@ -227,7 +227,7 @@ class SaveRoadmapToolInput(BaseModel):
 
     project_id: Annotated[
         int,
-        Field(description="The ID of the product to update."),
+        Field(description="The ID of the Project to update."),
     ]
     roadmap_data: Annotated[
         RoadmapBuilderOutput,

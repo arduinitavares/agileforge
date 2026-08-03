@@ -23,7 +23,6 @@ class ErrorCode(StrEnum):
     INVALID_COMMAND = "INVALID_COMMAND"
     COMMAND_EXCEPTION = "COMMAND_EXCEPTION"
     COMMAND_NOT_IMPLEMENTED = "COMMAND_NOT_IMPLEMENTED"
-    SCHEMA_NOT_READY = "SCHEMA_NOT_READY"
     PROJECT_NOT_FOUND = "PROJECT_NOT_FOUND"
     PROJECT_ALREADY_EXISTS = "PROJECT_ALREADY_EXISTS"
     STORY_NOT_FOUND = "STORY_NOT_FOUND"
@@ -61,7 +60,6 @@ class ErrorCode(StrEnum):
     STALE_AUTHORITY_VERSION = "STALE_AUTHORITY_VERSION"
     CONFIRMATION_REQUIRED = "CONFIRMATION_REQUIRED"
     ACTIVE_STATE_BLOCKS_DELETE = "ACTIVE_STATE_BLOCKS_DELETE"
-    SCHEMA_VERSION_MISMATCH = "SCHEMA_VERSION_MISMATCH"
     MUTATION_FAILED = "MUTATION_FAILED"
     SPRINT_GENERATION_MODEL_RESPONSE_INVALID = (
         "SPRINT_GENERATION_MODEL_RESPONSE_INVALID"
@@ -73,7 +71,6 @@ class ErrorCode(StrEnum):
     MUTATION_RECOVERY_INVALID = "MUTATION_RECOVERY_INVALID"
     IDEMPOTENCY_KEY_REUSED = "IDEMPOTENCY_KEY_REUSED"
     MUTATION_NOT_FOUND = "MUTATION_NOT_FOUND"
-    WORKFLOW_SESSION_FAILED = "WORKFLOW_SESSION_FAILED"
     TRIAGE_ALREADY_RECORDED = "TRIAGE_ALREADY_RECORDED"
     TRIAGE_FINGERPRINT_MISMATCH = "TRIAGE_FINGERPRINT_MISMATCH"
     TRIAGE_EXPECTED_STATE_MISMATCH = "TRIAGE_EXPECTED_STATE_MISMATCH"
@@ -143,12 +140,6 @@ _ERROR_REGISTRY: dict[ErrorCode, ErrorMetadata] = {
         default_exit_code=2,
         retryable=False,
         description="The command is registered but not implemented.",
-    ),
-    ErrorCode.SCHEMA_NOT_READY: ErrorMetadata(
-        code=ErrorCode.SCHEMA_NOT_READY.value,
-        default_exit_code=5,
-        retryable=True,
-        description="Required schema objects are missing.",
     ),
     ErrorCode.PROJECT_NOT_FOUND: ErrorMetadata(
         code=ErrorCode.PROJECT_NOT_FOUND.value,
@@ -372,12 +363,6 @@ _ERROR_REGISTRY: dict[ErrorCode, ErrorMetadata] = {
         retryable=False,
         description="Active workflow state blocks deletion.",
     ),
-    ErrorCode.SCHEMA_VERSION_MISMATCH: ErrorMetadata(
-        code=ErrorCode.SCHEMA_VERSION_MISMATCH.value,
-        default_exit_code=5,
-        retryable=True,
-        description="Storage schema version is incompatible.",
-    ),
     ErrorCode.MUTATION_FAILED: ErrorMetadata(
         code=ErrorCode.MUTATION_FAILED.value,
         default_exit_code=1,
@@ -431,12 +416,6 @@ _ERROR_REGISTRY: dict[ErrorCode, ErrorMetadata] = {
         default_exit_code=4,
         retryable=False,
         description="The requested mutation was not found.",
-    ),
-    ErrorCode.WORKFLOW_SESSION_FAILED: ErrorMetadata(
-        code=ErrorCode.WORKFLOW_SESSION_FAILED.value,
-        default_exit_code=1,
-        retryable=True,
-        description="Workflow session setup failed.",
     ),
     ErrorCode.TRIAGE_ALREADY_RECORDED: ErrorMetadata(
         code=ErrorCode.TRIAGE_ALREADY_RECORDED.value,

@@ -26,7 +26,7 @@ def export_snapshot_command(
     output_dir: Path,
     engine_override: Engine | None = None,
 ) -> Path:
-    """Generate a snapshot HTML file for a product.
+    """Generate a snapshot HTML file for a Project.
 
     Args:
         project_id: Project identifier.
@@ -46,7 +46,7 @@ def export_snapshot_command(
 def main(argv: list[str] | None = None) -> int:
     """Return main."""
     parser = argparse.ArgumentParser(description="Export project snapshot HTML")
-    parser.add_argument("--product-id", type=int, required=True, help="Project ID")
+    parser.add_argument("--project-id", type=int, required=True, help="Project ID")
     parser.add_argument(
         "--output-dir",
         type=str,

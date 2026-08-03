@@ -1,8 +1,3 @@
-"""Script for fix persona drift."""
-
-from utils.cli_output import emit
-
-# scripts/fix_persona_drift.py
 """
 Automated persona correction for existing user stories.
 
@@ -11,28 +6,24 @@ with domain-specific personas. Safe to run with dry_run=True for preview.
 
 Usage:
     # Preview changes
-    python scripts/fix_persona_drift.py --product-id 1 --dry-run
+    python scripts/fix_persona_drift.py --project-id 1 --dry-run
 
     # Apply changes
-    python scripts/fix_persona_drift.py --product-id 1
+    python scripts/fix_persona_drift.py --project-id 1
 
     # Generate review report
-    python scripts/fix_persona_drift.py --product-id 1 --report-only
+    python scripts/fix_persona_drift.py --project-id 1 --report-only
 """
 
-import argparse  # noqa: E402
-import csv  # noqa: E402
-import re  # noqa: E402
-import sys  # noqa: E402
-from pathlib import Path  # noqa: E402
+import argparse
+import csv
+import re
 
-# Add project root to path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+from sqlmodel import Session, select
 
-from sqlmodel import Session, select  # noqa: E402
-
-from agile_sqlmodel import Project, UserStory, get_engine  # noqa: E402
-from models.core import Feature  # noqa: E402
+from agile_sqlmodel import Project, UserStory, get_engine
+from models.core import Feature
+from utils.cli_output import emit
 
 _MODEL_IMPORT_BOUNDARY = (Feature,)
 
@@ -96,9 +87,9 @@ def suggest_persona_replacement(current_persona: str, feature_title: str) -> str
     return "automation engineer"
 
 
-def analyze_product_personas(project_id: int) -> dict:
+def analyze_project_personas(project_id: int) -> dict:
     """
-    Analyze persona distribution in a product's stories.
+    Analyze persona distribution in a project's stories.
 
     Args:
         project_id: Project ID to analyze
@@ -107,8 +98,8 @@ def analyze_product_personas(project_id: int) -> dict:
         Dict with persona statistics
     """
     with Session(get_engine()) as session:
-        product = session.get(Project, project_id)
-        if not product:
+        project = session.get(Project, project_id)
+        if not project:
             msg = f"Project {project_id} not found"
             raise ValueError(msg)
 
@@ -133,7 +124,7 @@ def analyze_product_personas(project_id: int) -> dict:
                     generic_count += 1
 
         return {
-            "product_name": product.name,
+            "project_name": project.name,
             "total_stories": len(stories),
             "persona_distribution": persona_counts,
             "generic_persona_count": generic_count,
@@ -148,7 +139,7 @@ def fix_story_personas(  # noqa: C901, PLR0912
     verbose: bool = True,
 ) -> dict:
     """
-    Fix personas in all stories for a product.
+    Fix personas in all stories for a project.
 
     Args:
         project_id: Project ID to fix
@@ -160,8 +151,8 @@ def fix_story_personas(  # noqa: C901, PLR0912
         Dict with fix statistics
     """
     with Session(get_engine()) as session:
-        product = session.get(Project, project_id)
-        if not product:
+        project = session.get(Project, project_id)
+        if not project:
             msg = f"Project {project_id} not found"
             raise ValueError(msg)
 
@@ -263,8 +254,8 @@ def generate_review_report(
         output_file: Output CSV filename
     """
     with Session(get_engine()) as session:
-        product = session.get(Project, project_id)
-        if not product:
+        project = session.get(Project, project_id)
+        if not project:
             msg = f"Project {project_id} not found"
             raise ValueError(msg)
 
@@ -329,21 +320,21 @@ def main() -> None:
         epilog="""
 Examples:
   # Preview changes
-  python scripts/fix_persona_drift.py --product-id 1 --dry-run
+  python scripts/fix_persona_drift.py --project-id 1 --dry-run
 
   # Apply fixes
-  python scripts/fix_persona_drift.py --product-id 1
+  python scripts/fix_persona_drift.py --project-id 1
 
   # Use custom default persona
-  python scripts/fix_persona_drift.py --product-id 1 --persona "engineering QA reviewer"
+  python scripts/fix_persona_drift.py --project-id 1 --persona "engineering QA reviewer"
 
   # Generate manual review report
-  python scripts/fix_persona_drift.py --product-id 1 --report-only
+  python scripts/fix_persona_drift.py --project-id 1 --report-only
         """,
     )
 
     parser.add_argument(
-        "--product-id", type=int, required=True, help="Project ID to process"
+        "--project-id", type=int, required=True, help="Project ID to process"
     )
     parser.add_argument(
         "--persona",
@@ -363,15 +354,15 @@ Examples:
 
     try:
         if args.report_only:
-            emit(f"Generating persona review report for product {args.project_id}...")
+            emit(f"Generating persona review report for project {args.project_id}...")
             generate_review_report(args.project_id)
 
         else:
             # Analyze first
-            emit(f"Analyzing product {args.project_id}...\n")
-            analysis = analyze_product_personas(args.project_id)
+            emit(f"Analyzing project {args.project_id}...\n")
+            analysis = analyze_project_personas(args.project_id)
 
-            emit(f"Project: {analysis['product_name']}")
+            emit(f"Project: {analysis['project_name']}")
             emit(f"Total Stories: {analysis['total_stories']}")
             emit(f"Generic Personas: {analysis['generic_persona_count']}")
             emit(f"Missing Personas: {analysis['no_persona_count']}")
@@ -411,9 +402,9 @@ Examples:
                 emit(f"\n⚠️  {stats['skipped_count']} stories require manual review")
                 emit("   Run with --report-only to generate a review CSV")
 
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         emit(f"❌ Error: {e}")
-        sys.exit(1)
+        raise SystemExit(1) from e
 
 
 if __name__ == "__main__":

@@ -69,12 +69,12 @@ def test_delete_project_removes_sprints_and_story_logs(tmp_path: Path) -> None:
     engine = _create_sqlite_engine(db_path)
 
     with Session(engine) as session:
-        product = Project(name="Test Project")
+        project = Project(name="Test Project")
         team = Team(name="Test Team")
-        session.add(product)
+        session.add(project)
         session.add(team)
         session.flush()
-        project_id = require_id(product.project_id, "project_id")
+        project_id = require_id(project.project_id, "project_id")
         team_id = require_id(team.team_id, "team_id")
 
         session.add(ProjectTeam(project_id=project_id, team_id=team_id))
@@ -129,10 +129,10 @@ def test_delete_project_removes_sprints_and_story_logs(tmp_path: Path) -> None:
     delete_project(project_id, str(db_path))
 
     with Session(engine) as session:
-        product_exists = session.exec(
+        project_exists = session.exec(
             select(Project).where(Project.project_id == project_id)
         ).first()
-        assert product_exists is None
+        assert project_exists is None
         sprint_exists = session.exec(
             select(Sprint).where(Sprint.project_id == project_id)
         ).first()
@@ -151,10 +151,10 @@ def test_delete_project_allows_pre_acceptance_authority_shell(tmp_path: Path) ->
     engine = _create_sqlite_engine(db_path)
 
     with Session(engine) as session:
-        product = Project(name="Spec Project")
-        session.add(product)
+        project = Project(name="Spec Project")
+        session.add(project)
         session.flush()
-        project_id = require_id(product.project_id, "project_id")
+        project_id = require_id(project.project_id, "project_id")
 
         spec = SpecRegistry(
             project_id=project_id,
@@ -194,10 +194,10 @@ def test_delete_project_preserves_historically_accepted_authority(
     engine = _create_sqlite_engine(db_path)
 
     with Session(engine) as session:
-        product = Project(name="Accepted Authority Project")
-        session.add(product)
+        project = Project(name="Accepted Authority Project")
+        session.add(project)
         session.flush()
-        project_id = require_id(product.project_id, "project_id")
+        project_id = require_id(project.project_id, "project_id")
 
         spec = SpecRegistry(
             project_id=project_id,
@@ -248,15 +248,15 @@ def test_delete_project_preserves_historically_accepted_authority(
 
 
 def test_delete_project_removes_brownfield_artifacts(tmp_path: Path) -> None:
-    """Ensure delete_project clears brownfield artifact records before product."""
+    """Ensure delete_project clears brownfield artifact records before project."""
     db_path = tmp_path / "delete_project_brownfield.db"
     engine = _create_sqlite_engine(db_path)
 
     with Session(engine) as session:
-        product = Project(name="Brownfield Project")
-        session.add(product)
+        project = Project(name="Brownfield Project")
+        session.add(project)
         session.flush()
-        project_id = require_id(product.project_id, "project_id")
+        project_id = require_id(project.project_id, "project_id")
 
         session.add(
             BrownfieldSourceArtifact(

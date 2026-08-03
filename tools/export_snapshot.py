@@ -39,7 +39,7 @@ if TYPE_CHECKING:
 
 class _ExportSnapshotError(ValueError):
     @classmethod
-    def product_not_found(cls, project_id: int) -> _ExportSnapshotError:
+    def project_not_found(cls, project_id: int) -> _ExportSnapshotError:
         message = f"Project {project_id} not found"
         return cls(message)
 
@@ -111,7 +111,7 @@ def export_project_snapshot_html(
     with Session(engine_to_use) as session:
         project = session.get(Project, project_id)
         if not project:
-            raise _ExportSnapshotError.product_not_found(project_id)
+            raise _ExportSnapshotError.project_not_found(project_id)
 
         themes = list(
             session.exec(select(Theme).where(Theme.project_id == project_id)).all()
@@ -187,7 +187,7 @@ def _get_latest_approved_spec(
 
 
 def _resolve_spec_content(
-    product: Project,
+    project: Project,
     approved_spec: SpecRegistry | None,
 ) -> tuple[str, dict[str, Any]]:
     if approved_spec:
@@ -207,9 +207,9 @@ def _resolve_spec_content(
         "approved_by": None,
         "approved_at": None,
         "approval_notes": None,
-        "content_ref": product.spec_file_path,
+        "content_ref": project.spec_file_path,
     }
-    return product.technical_spec or "(No technical spec available)", meta
+    return project.technical_spec or "(No technical spec available)", meta
 
 
 def _load_compiled_authority(
@@ -304,8 +304,8 @@ def _render_snapshot_html(context: _SnapshotRenderContext) -> str:
   <h1>Project Snapshot</h1>
   <p class="muted">Generated at {generated_at} (UTC)</p>
   <div class="card">
-    <h2>{product_name}</h2>
-    <p>{product_description}</p>
+    <h2>{project_name}</h2>
+    <p>{project_description}</p>
     <p class="muted">Read-only snapshot of current project state.</p>
   </div>
 
@@ -362,8 +362,8 @@ def _render_snapshot_html(context: _SnapshotRenderContext) -> str:
 """.format(
         generated_at=generated_at,
         styles=styles,
-        product_name=html.escape(context.project.name or "(Unnamed Project)"),
-        product_description=html.escape(context.project.description or ""),
+        project_name=html.escape(context.project.name or "(Unnamed Project)"),
+        project_description=html.escape(context.project.description or ""),
         story_summary=_format_story_summary(context.stories),
         all_story_summary=_format_all_story_summary(context.all_stories),
         sprint_summary=_format_sprint_summary_line(

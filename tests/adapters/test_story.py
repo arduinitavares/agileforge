@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 from pydantic import ValidationError
 
 from adapters.adk.agents.story import (
-    INSTRUCTIONS_PATH,
+    USER_STORY_WRITER_INSTRUCTIONS,
     create_user_story_patch_agent,
     create_user_story_writer_agent,
     root_agent,
@@ -86,7 +84,7 @@ def test_user_story_patch_agent_uses_patch_output_schema() -> None:
 
 def test_high_story_example_omits_placeholder_warning() -> None:
     """Verify the high-story example omits placeholder warnings."""
-    instructions = Path(INSTRUCTIONS_PATH).read_text(encoding="utf-8")
+    instructions = USER_STORY_WRITER_INSTRUCTIONS
     assert (
         '"decomposition_warning": "Only include this key if score is Low"'
         not in instructions
@@ -95,7 +93,7 @@ def test_high_story_example_omits_placeholder_warning() -> None:
 
 def test_instructions_forbid_warning_on_non_low_scores() -> None:
     """Verify instructions forbid warning on non low scores."""
-    instructions = Path(INSTRUCTIONS_PATH).read_text(encoding="utf-8")
+    instructions = USER_STORY_WRITER_INSTRUCTIONS
     assert (
         "Never include `decomposition_warning` on a story scored `High` or `Medium`."
         in instructions

@@ -1,14 +1,10 @@
 """Prompt contract checks for the Backlog Primer agent."""
 
-from pathlib import Path
-
-INSTRUCTIONS_PATH = (
-    Path(__file__).resolve().parents[2] / "adapters" / "adk" / "prompts" / "backlog.txt"
-)
+from adapters.adk.prompts import load_prompt
 
 
 def _instructions() -> str:
-    return INSTRUCTIONS_PATH.read_text(encoding="utf-8")
+    return load_prompt("backlog.txt")
 
 
 def test_backlog_prompt_defines_model_owned_brownfield_output_fields() -> None:

@@ -2,7 +2,7 @@
 
 ## Summary
 
-Story Packet v1 is the canonical story-session bootstrap artifact. It is assembled deterministically from persisted project data, anchored by `story_id + sprint_id`, and carries the story completion contract plus inherited product/sprint/spec context.
+Story Packet v1 is the canonical story-session bootstrap artifact. It is assembled deterministically from persisted project data, anchored by `story_id + sprint_id`, and carries the story completion contract plus inherited Project/Sprint/spec context.
 
 This packet is the stable bootstrap companion to `task_packet.v2`.
 
@@ -22,11 +22,11 @@ type StoryPacket = {
   };
 
   source_snapshot: {
-    product_id: number;
+    project_id: number;
     sprint_id: number;
     story_id: number;
 
-    product_updated_at: string;
+    project_updated_at: string;
     sprint_updated_at: string;
     sprint_story_added_at: string;
     story_updated_at: string;
@@ -35,6 +35,7 @@ type StoryPacket = {
     accepted_spec_version_id: number | null;
     validation_validated_at: string | null;
     validation_input_hash: string | null;
+    compiled_authority_id: number | null;
     compiled_authority_compiled_at: string | null;
     task_plan_hash: string;
   };
@@ -75,8 +76,8 @@ type StoryPacket = {
       team_name: string | null;
     };
 
-    product: {
-      product_id: number;
+    project: {
+      project_id: number;
       name: string;
       vision_excerpt: string | null;
     };
@@ -154,7 +155,7 @@ type StoryPacket = {
 
 ### Source fingerprint
 
-- `source_fingerprint` must change when story, sprint, sprint membership, validation, authority, product, or task-plan inputs relevant to the packet change.
+- `source_fingerprint` must change when story, sprint, sprint membership, validation, authority, Project, or task-plan inputs relevant to the packet change.
 - `task_plan_hash` captures the serialized `task_plan.tasks` payload so task description, status, metadata, checklist, and other serialized task-plan changes affect story-packet freshness deterministically.
 
 ## Public Endpoint

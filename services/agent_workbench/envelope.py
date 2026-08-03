@@ -7,7 +7,6 @@ from uuid import uuid4
 
 from services.agent_workbench.version import (
     COMMAND_VERSION,
-    STORAGE_SCHEMA_VERSION,
     agileforge_version,
 )
 
@@ -59,10 +58,7 @@ class WorkbenchError:
 def utc_now_iso() -> str:
     """Return the current UTC timestamp in CLI envelope format."""
     return (
-        datetime.now(tz=UTC)
-        .replace(microsecond=0)
-        .isoformat()
-        .replace("+00:00", "Z")
+        datetime.now(tz=UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     )
 
 
@@ -80,7 +76,6 @@ def _meta(
         "command": command,
         "command_version": command_version or COMMAND_VERSION,
         "agileforge_version": agileforge_version(),
-        "storage_schema_version": STORAGE_SCHEMA_VERSION,
         "generated_at": generated_at or utc_now_iso(),
         "correlation_id": correlation_id or str(uuid4()),
     }

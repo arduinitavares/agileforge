@@ -15,10 +15,10 @@ from sqlmodel import Session, select
 from agile_sqlmodel import Project, Task, UserStory
 from models.core import Epic, Feature, Theme
 from tools.db_tools import (
-    CreateOrGetProductInput,
+    CreateOrGetProjectInput,
     CreateTaskInput,
     CreateUserStoryInput,
-    create_or_get_product,
+    create_or_get_project,
     create_task,
     create_user_story,
     persist_roadmap,
@@ -28,13 +28,13 @@ from tools.db_tools import (
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 
-def test_create_product_new(engine: Engine) -> None:
-    """Test creating a new product."""
+def test_create_project_new(engine: Engine) -> None:
+    """Test creating a new Project."""
     del engine
 
-    result = create_or_get_product(
-        CreateOrGetProductInput(
-            product_name="Test Project",
+    result = create_or_get_project(
+        CreateOrGetProjectInput(
+            project_name="Test Project",
             vision="To revolutionize testing",
             description=None,
         )
@@ -46,26 +46,26 @@ def test_create_product_new(engine: Engine) -> None:
     assert "Test Project" in result["message"]
 
 
-def test_create_product_existing(engine: Engine) -> None:
-    """Test getting an existing product without duplication."""
-    # Create first product
-    result1 = create_or_get_product(
-        CreateOrGetProductInput(
-            product_name="Existing Project", vision=None, description=None
+def test_create_project_existing(engine: Engine) -> None:
+    """Test getting an existing Project without duplication."""
+    # Create first Project
+    result1 = create_or_get_project(
+        CreateOrGetProjectInput(
+            project_name="Existing Project", vision=None, description=None
         )
     )
     assert result1["action"] == "created"
 
-    # Get same product again
-    result2 = create_or_get_product(
-        CreateOrGetProductInput(
-            product_name="Existing Project", vision=None, description=None
+    # Get same Project again
+    result2 = create_or_get_project(
+        CreateOrGetProjectInput(
+            project_name="Existing Project", vision=None, description=None
         )
     )
     assert result2["action"] == "updated"
     assert result2["project_id"] == result1["project_id"]
 
-    # Verify only one product exists
+    # Verify only one Project exists
     with Session(engine) as session:
         projects = session.exec(select(Project)).all()
         assert len(projects) == 1
@@ -73,13 +73,13 @@ def test_create_product_existing(engine: Engine) -> None:
 
 def test_persist_roadmap(engine: Engine) -> None:
     """Test persisting a roadmap hierarchy."""
-    # Create product first
-    prod_result = create_or_get_product(
-        CreateOrGetProductInput(
-            product_name="Roadmap Project", vision=None, description=None
+    # Create Project first
+    project_result = create_or_get_project(
+        CreateOrGetProjectInput(
+            project_name="Roadmap Project", vision=None, description=None
         )
     )
-    project_id = prod_result["project_id"]
+    project_id = project_result["project_id"]
 
     # Define roadmap
     roadmap = [
@@ -104,9 +104,12 @@ def test_persist_roadmap(engine: Engine) -> None:
     result = persist_roadmap(project_id, roadmap)
 
     assert result["success"] is True
-    assert result["created"]["themes"][0]["id"] == 1
-    assert len(result["created"]["epics"]) == 1
-    assert len(result["created"]["features"]) == 2  # noqa: PLR2004
+    created = result.get("created")
+    assert created is not None
+    assert created["themes"][0]["id"] == 1
+    assert len(created["epics"]) == 1
+    expected_feature_count = 2
+    assert len(created["features"]) == expected_feature_count
 
     # Verify hierarchy in database
     with Session(engine) as session:
@@ -125,12 +128,12 @@ def test_persist_roadmap(engine: Engine) -> None:
 def test_create_user_story(engine: Engine) -> None:
     """Test creating a user story under a feature."""
     # Setup hierarchy
-    prod_result = create_or_get_product(
-        CreateOrGetProductInput(
-            product_name="Story Project", vision=None, description=None
+    project_result = create_or_get_project(
+        CreateOrGetProjectInput(
+            project_name="Story Project", vision=None, description=None
         )
     )
-    project_id = prod_result["project_id"]
+    project_id = project_result["project_id"]
 
     roadmap = [
         {
@@ -150,7 +153,9 @@ def test_create_user_story(engine: Engine) -> None:
     ]
 
     roadmap_result = persist_roadmap(project_id, roadmap)
-    feature_id = roadmap_result["created"]["features"][0]["id"]
+    created = roadmap_result.get("created")
+    assert created is not None
+    feature_id = created["features"][0]["id"]
 
     # Create user story
     story_result = create_user_story(
@@ -165,8 +170,8 @@ def test_create_user_story(engine: Engine) -> None:
     )
 
     assert story_result["success"] is True
-    assert story_result["story_id"] == 1
-    assert story_result["feature_id"] == feature_id
+    assert story_result.get("story_id") == 1
+    assert story_result.get("feature_id") == feature_id
 
     # Verify in database
     with Session(engine) as session:
@@ -178,12 +183,12 @@ def test_create_user_story(engine: Engine) -> None:
 def test_create_task(engine: Engine) -> None:
     """Test creating a task under a story."""
     # Setup full hierarchy
-    prod_result = create_or_get_product(
-        CreateOrGetProductInput(
-            product_name="Task Project", vision=None, description=None
+    project_result = create_or_get_project(
+        CreateOrGetProjectInput(
+            project_name="Task Project", vision=None, description=None
         )
     )
-    project_id = prod_result["project_id"]
+    project_id = project_result["project_id"]
 
     roadmap = [
         {
@@ -203,7 +208,9 @@ def test_create_task(engine: Engine) -> None:
     ]
 
     roadmap_result = persist_roadmap(project_id, roadmap)
-    feature_id = roadmap_result["created"]["features"][0]["id"]
+    created = roadmap_result.get("created")
+    assert created is not None
+    feature_id = created["features"][0]["id"]
 
     story_result = create_user_story(
         CreateUserStoryInput(
@@ -215,7 +222,8 @@ def test_create_task(engine: Engine) -> None:
             story_points=None,
         )
     )
-    story_id = story_result["story_id"]
+    story_id = story_result.get("story_id")
+    assert story_id is not None
 
     # Create task
     task_result = create_task(
@@ -227,7 +235,7 @@ def test_create_task(engine: Engine) -> None:
     )
 
     assert task_result["success"] is True
-    assert task_result["task_id"] == 1
+    assert task_result.get("task_id") == 1
 
     # Verify in database
     with Session(engine) as session:
@@ -235,28 +243,28 @@ def test_create_task(engine: Engine) -> None:
         assert len(tasks) == 1
 
 
-def test_query_product_structure(engine: Engine) -> None:
-    """Test querying full product structure."""
+def test_query_project_structure(engine: Engine) -> None:
+    """Test querying full Project structure."""
     del engine
 
     from tools.db_tools import (  # noqa: PLC0415
-        CreateOrGetProductInput,
+        CreateOrGetProjectInput,
         CreateUserStoryInput,
-        create_or_get_product,
+        create_or_get_project,
         create_user_story,
         persist_roadmap,
-        query_product_structure,
+        query_project_structure,
     )
 
     # Setup hierarchy
-    prod_result = create_or_get_product(
-        CreateOrGetProductInput(
-            product_name="Query Project",
+    project_result = create_or_get_project(
+        CreateOrGetProjectInput(
+            project_name="Query Project",
             vision="Test vision statement",
             description=None,
         )
     )
-    project_id = prod_result["project_id"]
+    project_id = project_result["project_id"]
 
     roadmap = [
         {
@@ -276,7 +284,9 @@ def test_query_product_structure(engine: Engine) -> None:
     ]
 
     roadmap_result = persist_roadmap(project_id, roadmap)
-    feature_id = roadmap_result["created"]["features"][0]["id"]
+    created = roadmap_result.get("created")
+    assert created is not None
+    feature_id = created["features"][0]["id"]
 
     create_user_story(
         CreateUserStoryInput(
@@ -290,16 +300,18 @@ def test_query_product_structure(engine: Engine) -> None:
     )
 
     # Query structure
-    result = query_product_structure(project_id)
+    result = query_project_structure(project_id)
 
     assert result["success"] is True
-    assert result["structure"]["project"]["name"] == "Query Project"
-    assert result["structure"]["project"]["vision"] == "Test vision statement"
-    assert len(result["structure"]["themes"]) == 1
-    assert len(result["structure"]["themes"][0]["epics"]) == 1
-    assert len(result["structure"]["themes"][0]["epics"][0]["features"]) == 1
+    structure = result.get("structure")
+    assert structure is not None
+    assert structure["project"]["name"] == "Query Project"
+    assert structure["project"]["vision"] == "Test vision statement"
+    assert len(structure["themes"]) == 1
+    assert len(structure["themes"][0]["epics"]) == 1
+    assert len(structure["themes"][0]["epics"][0]["features"]) == 1
     assert (
-        len(result["structure"]["themes"][0]["epics"][0]["features"][0]["stories"]) == 1
+        len(structure["themes"][0]["epics"][0]["features"][0]["stories"]) == 1
     )
 
 
@@ -307,15 +319,15 @@ def test_get_story_details(engine: Engine) -> None:
     """Test fetching details for a specific story by ID."""
     del engine
 
-    # Arrange: Create a product and story
-    product_result = create_or_get_product(
-        CreateOrGetProductInput(
-            product_name="Story Details Test Project",
+    # Arrange: Create a Project and story
+    project_result = create_or_get_project(
+        CreateOrGetProjectInput(
+            project_name="Story Details Test Project",
             vision="Test vision for story details",
             description=None,
         )
     )
-    project_id = product_result["project_id"]
+    project_id = project_result["project_id"]
 
     # Create roadmap structure
     roadmap = [
@@ -338,20 +350,24 @@ def test_get_story_details(engine: Engine) -> None:
     ]
 
     roadmap_result = persist_roadmap(project_id, roadmap)
-    feature_id = roadmap_result["created"]["features"][0]["id"]
+    created = roadmap_result.get("created")
+    assert created is not None
+    feature_id = created["features"][0]["id"]
 
     # Create a test story
+    expected_story_points = 3
     story_result = create_user_story(
         CreateUserStoryInput(
             project_id=project_id,
             feature_id=feature_id,
             title="Test Story for Details",
             description="As a tester, I want to retrieve story details so that I can verify the functionality.",  # noqa: E501
-            story_points=3,
+            story_points=expected_story_points,
             acceptance_criteria="- Story details can be fetched\n- All fields are returned correctly",  # noqa: E501
         )
     )
-    story_id = story_result["story_id"]
+    story_id = story_result.get("story_id")
+    assert story_id is not None
 
     # Act: Call the get_story_details function
     from tools.db_tools import get_story_details  # noqa: PLC0415
@@ -361,19 +377,19 @@ def test_get_story_details(engine: Engine) -> None:
     # Assert: Verify the returned details
     assert result["success"] is True
     assert result["story_id"] == story_id
-    assert result["title"] == "Test Story for Details"
+    assert result.get("title") == "Test Story for Details"
     assert (
-        result["description"]
+        result.get("description")
         == "As a tester, I want to retrieve story details so that I can verify the functionality."  # noqa: E501
     )
     assert (
-        result["acceptance_criteria"]
+        result.get("acceptance_criteria")
         == "- Story details can be fetched\n- All fields are returned correctly"
     )
-    assert result["status"] == "To Do"  # StoryStatus enum value
-    assert result["story_points"] == 3  # noqa: PLR2004
-    assert result["feature_id"] == feature_id
-    assert result["project_id"] == project_id
+    assert result.get("status") == "To Do"  # StoryStatus enum value
+    assert result.get("story_points") == expected_story_points
+    assert result.get("feature_id") == feature_id
+    assert result.get("project_id") == project_id
     assert "created_at" in result
     assert "updated_at" in result
 
@@ -389,5 +405,7 @@ def test_get_story_details_not_found(engine: Engine) -> None:
 
     # Assert: Verify the error message
     assert result["success"] is False
-    assert "not found" in result["message"].lower()
+    message = result.get("message")
+    assert message is not None
+    assert "not found" in message.lower()
     assert result["story_id"] == 999999  # noqa: PLR2004

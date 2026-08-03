@@ -1,65 +1,55 @@
 """Focused unit tests for the packet renderer (prompt contract split)."""
 
-from typing import Any
-
 from services.packet_renderer import render_human_brief, render_packet
+from workflow.contracts import JsonObject, JsonValue
 
 
-def _minimal_packet(  # noqa: PLR0913
-    *,
-    schema_version: object = "task_packet.v2",
-    task_label: object = "Implement feature X",
-    task_description: object = "Build the feature",
-    ac_items: object = None,
-    task_checklist_items: object = None,
-    sprint_goal: object = None,
-    story_title: object = None,
-    story_description: object = None,
-    task_kind: object = "implementation",
-    artifact_targets: object = None,
-    workstream_tags: object = None,
-    task_hard_constraints: object = None,
-    story_compliance_boundaries: object = None,
-    task_plan: object = None,
-) -> dict[str, Any]:
+def _minimal_packet(**overrides: JsonValue) -> JsonObject:
     """Build the smallest valid packet dict for renderer testing."""
-    story_payload = {
+    schema_version = overrides.get("schema_version", "task_packet.v2")
+    task_plan = overrides.get("task_plan")
+    story_payload: JsonObject = {
         "story_id": 7,
-        "title": story_title,
-        "story_description": story_description,
+        "title": overrides.get("story_title"),
+        "story_description": overrides.get("story_description"),
     }
-    packet = {
+    context: JsonObject = {
+        "sprint": {
+            "sprint_id": 3,
+            "goal": overrides.get("sprint_goal"),
+        },
+        "project": {
+            "name": "Test Project",
+        },
+    }
+    packet: JsonObject = {
         "schema_version": schema_version,
         "task": {
             "task_id": 1,
-            "label": task_label,
-            "description": task_description,
+            "label": overrides.get("task_label", "Implement feature X"),
+            "description": overrides.get("task_description", "Build the feature"),
             "status": "To Do",
-            "task_kind": task_kind,
-            "artifact_targets": artifact_targets or [],
-            "workstream_tags": workstream_tags or [],
-            "checklist_items": task_checklist_items or [],
+            "task_kind": overrides.get("task_kind", "implementation"),
+            "artifact_targets": overrides.get("artifact_targets") or [],
+            "workstream_tags": overrides.get("workstream_tags") or [],
+            "checklist_items": overrides.get("task_checklist_items") or [],
         },
-        "context": {
-            "sprint": {
-                "sprint_id": 3,
-                "goal": sprint_goal,
-            },
-            "product": {
-                "name": "Test Project",
-            },
-        },
+        "context": context,
         "constraints": {
-            "acceptance_criteria_items": ac_items or [],
-            "task_hard_constraints": task_hard_constraints or [],
-            "story_compliance_boundaries": story_compliance_boundaries or [],
-            "story_acceptance_criteria_items": ac_items or [],
+            "acceptance_criteria_items": overrides.get("ac_items") or [],
+            "task_hard_constraints": (
+                overrides.get("task_hard_constraints") or []
+            ),
+            "story_compliance_boundaries": (
+                overrides.get("story_compliance_boundaries") or []
+            ),
+            "story_acceptance_criteria_items": overrides.get("ac_items") or [],
         },
     }
     if schema_version == "story_packet.v1":
         packet["story"] = story_payload
     else:
-        packet["context"]["story"] = story_payload
+        context["story"] = story_payload
     if task_plan is not None:
         packet["task_plan"] = {"tasks": task_plan}
     return packet
@@ -83,10 +73,11 @@ def test_render_packet_uses_task_checklist_for_task_packets() -> None:
 
     assert "Task Checklist" in output
     assert "Verify every task checklist item before claiming completion." in output
-    assert (
-        "This prompt assumes the session was already initialized with the parent story prompt. If not, restart with Copy Story Prompt."  # noqa: E501
-        in output
+    expected_bootstrap_note = (
+        "This prompt assumes the session was already initialized with the parent "
+        "story prompt. If not, restart with Copy Story Prompt."
     )
+    assert expected_bootstrap_note in output
     assert "- [ ] Confirm request shape" in output
     assert "- [ ] Add request tests" in output
     assert "Acceptance Criteria Checklist" not in output

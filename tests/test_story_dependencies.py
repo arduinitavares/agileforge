@@ -32,15 +32,15 @@ REVIEWED_AT = datetime(2026, 8, 2, 12, tzinfo=UTC)
 
 
 def _story_pair(session: Session) -> tuple[int, int, int]:
-    product = Project(name="Dependency Test Project")
-    session.add(product)
+    project = Project(name="Dependency Test Project")
+    session.add(project)
     session.commit()
-    session.refresh(product)
-    assert product.project_id is not None
+    session.refresh(project)
+    assert project.project_id is not None
 
     prerequisite = UserStory(
         title="Capture market data",
-        project_id=product.project_id,
+        project_id=project.project_id,
         rank="101",
         source_requirement="REQ.live",
         refinement_slot=1,
@@ -50,7 +50,7 @@ def _story_pair(session: Session) -> tuple[int, int, int]:
     )
     dependent = UserStory(
         title="Generate recommendation",
-        project_id=product.project_id,
+        project_id=project.project_id,
         rank="102",
         source_requirement="REQ.live",
         refinement_slot=2,
@@ -65,7 +65,7 @@ def _story_pair(session: Session) -> tuple[int, int, int]:
     session.refresh(dependent)
     assert prerequisite.story_id is not None
     assert dependent.story_id is not None
-    return product.project_id, dependent.story_id, prerequisite.story_id
+    return project.project_id, dependent.story_id, prerequisite.story_id
 
 
 def _make_story(
@@ -275,7 +275,7 @@ def test_dependency_table_accepts_proposed_edge(session: Session) -> None:
 
 
 def test_dependency_table_prevents_duplicate_edge(session: Session) -> None:
-    """Reject duplicate dependency edges for one product and story pair."""
+    """Reject duplicate dependency edges for one project and story pair."""
     project_id, dependent_story_id, prerequisite_story_id = _story_pair(session)
     session.add(
         UserStoryDependency(
@@ -399,17 +399,17 @@ def test_detect_cycle_returns_cycle_path() -> None:
 
 def test_inspect_payload_separates_active_and_proposed_edges(session: Session) -> None:
     """Expose active and proposed dependency edges in separate inspect buckets."""
-    product = Project(name="Dependency Inspect Project")
-    session.add(product)
+    project = Project(name="Dependency Inspect Project")
+    session.add(project)
     session.commit()
-    session.refresh(product)
-    assert product.project_id is not None
-    story_a = _make_story(session, project_id=product.project_id, title="A", slot=1)
-    story_b = _make_story(session, project_id=product.project_id, title="B", slot=2)
-    story_c = _make_story(session, project_id=product.project_id, title="C", slot=3)
+    session.refresh(project)
+    assert project.project_id is not None
+    story_a = _make_story(session, project_id=project.project_id, title="A", slot=1)
+    story_b = _make_story(session, project_id=project.project_id, title="B", slot=2)
+    story_c = _make_story(session, project_id=project.project_id, title="C", slot=3)
     session.add(
         UserStoryDependency(
-            project_id=product.project_id,
+            project_id=project.project_id,
             dependent_story_id=story_b,
             prerequisite_story_id=story_a,
             status="active",
@@ -419,7 +419,7 @@ def test_inspect_payload_separates_active_and_proposed_edges(session: Session) -
     )
     session.add(
         UserStoryDependency(
-            project_id=product.project_id,
+            project_id=project.project_id,
             dependent_story_id=story_c,
             prerequisite_story_id=story_b,
             status="proposed",
@@ -429,7 +429,7 @@ def test_inspect_payload_separates_active_and_proposed_edges(session: Session) -
     )
     session.commit()
 
-    payload = dependency_inspect_payload(session, project_id=product.project_id)
+    payload = dependency_inspect_payload(session, project_id=project.project_id)
 
     assert payload["active_edge_count"] == 1
     assert payload["proposed_edge_count"] == 1

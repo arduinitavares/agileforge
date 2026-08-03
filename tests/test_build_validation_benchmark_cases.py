@@ -81,11 +81,11 @@ def test_strict_spec_resolution_requires_exact_accepted_valid_authority(
     session: Session,
 ) -> None:
     """Strict cases reject missing or malformed acceptance; permissive is explicit."""
-    product = Project(name="Benchmark Builder Project")
-    session.add(product)
+    project = Project(name="Benchmark Builder Project")
+    session.add(project)
     session.commit()
-    session.refresh(product)
-    project_id = require_id(product.project_id, "project_id")
+    session.refresh(project)
+    project_id = require_id(project.project_id, "project_id")
     spec = SpecRegistry(
         project_id=project_id,
         spec_hash="builder-spec",

@@ -59,23 +59,23 @@ def _reset_console_logging(
     clear_runtime_config_cache()
 
 
-def _seed_product_with_stories(
+def _seed_project_with_stories(
     session: Session,
     *,
     refined_story_count: int = 2,
     include_unrefined: bool = False,
     include_spec: bool = True,
 ) -> tuple[int, list[int]]:
-    product = Project(name="Validation Project")
-    session.add(product)
+    project = Project(name="Validation Project")
+    session.add(project)
     session.commit()
-    session.refresh(product)
-    assert product.project_id is not None
+    session.refresh(project)
+    assert project.project_id is not None
 
     if include_spec:
         session.add(
             SpecRegistry(
-                project_id=product.project_id,
+                project_id=project.project_id,
                 spec_hash="abc123",
                 content="# Approved Spec",
                 status="approved",
@@ -85,7 +85,7 @@ def _seed_product_with_stories(
     story_ids: list[int] = []
     for idx in range(refined_story_count):
         story = UserStory(
-            project_id=product.project_id,
+            project_id=project.project_id,
             title=f"Story {idx + 1}",
             story_description="As a user, I want concise validation logs.",
             acceptance_criteria="- Given a story\n- When validation runs\n- Then evidence is stored",  # noqa: E501
@@ -100,7 +100,7 @@ def _seed_product_with_stories(
     if include_unrefined:
         session.add(
             UserStory(
-                project_id=product.project_id,
+                project_id=project.project_id,
                 title="Unrefined story",
                 story_description="Draft only",
                 acceptance_criteria="- TBD",
@@ -110,18 +110,18 @@ def _seed_product_with_stories(
         )
 
     session.commit()
-    return product.project_id, story_ids
+    return project.project_id, story_ids
 
 
 def test_invariant_summary_uses_exact_accepted_valid_authority(
     session: Session,
 ) -> None:
     """Invariant details never come from retained or pending rows."""
-    product = Project(name="Invariant Summary Project")
-    session.add(product)
+    project = Project(name="Invariant Summary Project")
+    session.add(project)
     session.commit()
-    session.refresh(product)
-    project_id = require_id(product.project_id, "project_id")
+    session.refresh(project)
+    project_id = require_id(project.project_id, "project_id")
     spec = SpecRegistry(
         project_id=project_id,
         spec_hash="summary-spec",
@@ -197,7 +197,7 @@ def test_default_cli_output_is_concise(
     session: Session,
 ) -> None:
     """Verify default cli output is concise."""
-    project_id, story_ids = _seed_product_with_stories(session, include_unrefined=True)
+    project_id, story_ids = _seed_project_with_stories(session, include_unrefined=True)
 
     def fake_validate(payload: dict[str, object]) -> dict[str, object]:
         if payload["story_id"] == story_ids[0]:
@@ -255,7 +255,7 @@ def test_verbose_cli_output_includes_story_details(
     session: Session,
 ) -> None:
     """Verify verbose cli output includes story details."""
-    project_id, story_ids = _seed_product_with_stories(session)
+    project_id, story_ids = _seed_project_with_stories(session)
 
     def fake_validate(payload: dict[str, object]) -> dict[str, object]:
         if payload["story_id"] == story_ids[0]:
@@ -313,7 +313,7 @@ def test_quiet_cli_output_suppresses_routine_progress(
     session: Session,
 ) -> None:
     """Verify quiet cli output suppresses routine progress."""
-    project_id, _story_ids = _seed_product_with_stories(session)
+    project_id, _story_ids = _seed_project_with_stories(session)
 
     monkeypatch.setattr(
         validation_script,
@@ -341,7 +341,7 @@ def test_quiet_cli_output_suppresses_routine_progress(
 
 def test_no_refined_stories_is_a_clear_noop(session: Session) -> None:
     """Verify no refined stories is a clear noop."""
-    project_id, _story_ids = _seed_product_with_stories(
+    project_id, _story_ids = _seed_project_with_stories(
         session,
         refined_story_count=0,
         include_unrefined=True,
@@ -353,18 +353,18 @@ def test_no_refined_stories_is_a_clear_noop(session: Session) -> None:
 
     assert exit_code == 0
     assert (
-        f"No refined stories found for product {project_id}. Nothing to validate."
+        f"No refined stories found for project {project_id}. Nothing to validate."
         in stream.getvalue()
     )
 
 
 def test_missing_approved_spec_returns_non_zero(session: Session) -> None:
     """Verify missing approved spec returns non zero."""
-    project_id, _story_ids = _seed_product_with_stories(session, include_spec=False)
+    project_id, _story_ids = _seed_project_with_stories(session, include_spec=False)
 
     stream = io.StringIO()
     with redirect_stderr(stream):
         exit_code = validation_script.main([str(project_id)])
 
     assert exit_code == 1
-    assert f"No approved spec found for product {project_id}." in stream.getvalue()
+    assert f"No approved spec found for project {project_id}." in stream.getvalue()

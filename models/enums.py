@@ -89,7 +89,7 @@ class TimeFrame(StrEnum):
 
 
 class SpecAuthorityStatus(StrEnum):
-    """Status of compiled spec authority for a product."""
+    """Status of compiled spec authority for a Project."""
 
     CURRENT = "current"
     STALE = "stale"

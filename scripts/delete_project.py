@@ -48,13 +48,13 @@ def delete_project(project_id: int, db_path: str) -> None:
     event.listen(engine, "connect", _set_sqlite_pragma)
     try:
         with Session(engine) as session:
-            product = session.get(Project, project_id)
-            if product is None:
+            project = session.get(Project, project_id)
+            if project is None:
                 emit(f"Project ID {project_id} not found.")
                 return
 
             emit(
-                f"Found product: {product.name} (ID: {project_id}). "
+                f"Found project: {project.name} (ID: {project_id}). "
                 "preparing to delete..."
             )
             deleted = ProjectRepository(session).delete_project(project_id)

@@ -107,7 +107,7 @@ def _create_feature_hierarchy(
     prefix: str,
     detail: str,
 ) -> Feature:
-    """Create theme/epic/feature records for a test product."""
+    """Create theme/epic/feature records for a test project."""
     theme = Theme(
         project_id=project_id,
         title=f"{prefix} Theme",
@@ -138,23 +138,23 @@ def _create_feature_hierarchy(
 
 
 @pytest.fixture
-def sample_product(session: Session, engine: Engine) -> Project:
-    """Create a product for testing."""
+def sample_project(session: Session, engine: Engine) -> Project:
+    """Create a project for testing."""
     spec_tools.engine = engine
 
-    product = Project(
+    project = Project(
         name="Validation Test Project",
         description="Project for validation pinning tests",
         vision="Test validation pinning",
     )
-    session.add(product)
+    session.add(project)
     session.commit()
-    session.refresh(product)
-    return product
+    session.refresh(project)
+    return project
 
 
 @pytest.fixture
-def compiled_spec(session: Session, sample_product: Project) -> SpecRegistry:
+def compiled_spec(session: Session, sample_project: Project) -> SpecRegistry:
     """Create a registered, approved, and compiled spec version."""
     spec_content = """
 # Test Specification
@@ -169,7 +169,7 @@ def compiled_spec(session: Session, sample_product: Project) -> SpecRegistry:
 - Maximum 10 items per page
 """
     reg_result = register_spec_version(
-        {"project_id": sample_product.project_id, "content": spec_content},
+        {"project_id": sample_project.project_id, "content": spec_content},
         tool_context=None,
     )
     spec_version_id = reg_result["spec_version_id"]
@@ -194,7 +194,7 @@ def compiled_spec(session: Session, sample_product: Project) -> SpecRegistry:
     assert authority is not None
     session.add(
         SpecAuthorityAcceptance(
-            project_id=_require_id(sample_product.project_id, "project_id"),
+            project_id=_require_id(sample_project.project_id, "project_id"),
             spec_version_id=spec_version_id,
             status="accepted",
             policy="test",
@@ -212,9 +212,9 @@ def compiled_spec(session: Session, sample_product: Project) -> SpecRegistry:
 
 
 @pytest.fixture
-def sample_story(session: Session, sample_product: Project) -> UserStory:
+def sample_story(session: Session, sample_project: Project) -> UserStory:
     """Create a user story for testing (with full hierarchy)."""
-    project_id = _require_id(sample_product.project_id, "sample_product.project_id")
+    project_id = _require_id(sample_project.project_id, "sample_project.project_id")
     feature = _create_feature_hierarchy(
         session,
         project_id=project_id,
@@ -415,13 +415,13 @@ class TestFailFastIfNotCompiled:
         assert "not found" in result["error"].lower()
 
     def test_validation_fails_for_uncompiled_spec(
-        self, sample_product: Project, sample_story: UserStory, engine: Engine
+        self, sample_project: Project, sample_story: UserStory, engine: Engine
     ) -> None:
         """Clear error when spec exists but is not compiled."""
         spec_tools.engine = engine
 
         reg_result = register_spec_version(
-            {"project_id": sample_product.project_id, "content": "Draft spec content"},
+            {"project_id": sample_project.project_id, "content": "Draft spec content"},
             tool_context=None,
         )
         spec_version_id = reg_result["spec_version_id"]
@@ -435,14 +435,14 @@ class TestFailFastIfNotCompiled:
         assert "not compiled" in result["error"].lower()
 
     def test_validation_fails_for_approved_but_uncompiled_spec(
-        self, sample_product: Project, sample_story: UserStory, engine: Engine
+        self, sample_project: Project, sample_story: UserStory, engine: Engine
     ) -> None:
         """Approved but uncompiled spec fails with clear message."""
         spec_tools.engine = engine
 
         reg_result = register_spec_version(
             {
-                "project_id": sample_product.project_id,
+                "project_id": sample_project.project_id,
                 "content": "Approved but not compiled",
             },
             tool_context=None,
@@ -502,7 +502,7 @@ class TestEvidencePersistence:
     def test_evidence_persisted_on_validation_fail(
         self,
         session: Session,
-        sample_product: Project,
+        sample_project: Project,
         compiled_spec: SpecRegistry,
         engine: Engine,
     ) -> None:
@@ -512,8 +512,8 @@ class TestEvidencePersistence:
         feature = _create_feature_hierarchy(
             session,
             project_id=_require_id(
-                sample_product.project_id,
-                "sample_product.project_id",
+                sample_project.project_id,
+                "sample_project.project_id",
             ),
             prefix="Fail",
             detail="fail test",
@@ -521,8 +521,8 @@ class TestEvidencePersistence:
 
         bad_story = UserStory(
             project_id=_require_id(
-                sample_product.project_id,
-                "sample_product.project_id",
+                sample_project.project_id,
+                "sample_project.project_id",
             ),
             feature_id=_require_id(feature.feature_id, "fail feature_id"),
             title="Bad story title",
@@ -595,14 +595,14 @@ class TestDeterministicInputHashing:
     def test_same_story_content_produces_same_hash(
         self,
         session: Session,
-        sample_product: Project,
+        sample_project: Project,
         compiled_spec: SpecRegistry,
         engine: Engine,
     ) -> None:
         """Identical story content produces identical input_hash."""
         spec_tools.engine = engine
 
-        project_id = _require_id(sample_product.project_id, "sample_product.project_id")
+        project_id = _require_id(sample_project.project_id, "sample_project.project_id")
         feature = _create_feature_hierarchy(
             session,
             project_id=project_id,
@@ -666,14 +666,14 @@ class TestDeterministicInputHashing:
     def test_different_story_content_produces_different_hash(
         self,
         session: Session,
-        sample_product: Project,
+        sample_project: Project,
         compiled_spec: SpecRegistry,
         engine: Engine,
     ) -> None:
         """Different story content produces different input_hash."""
         spec_tools.engine = engine
 
-        project_id = _require_id(sample_product.project_id, "sample_product.project_id")
+        project_id = _require_id(sample_project.project_id, "sample_project.project_id")
         feature = _create_feature_hierarchy(
             session,
             project_id=project_id,
@@ -732,29 +732,29 @@ class TestDeterministicInputHashing:
 class TestWrongSpecVersionIdFails:
     """Tests that using wrong spec_version_id fails deterministically."""
 
-    def test_validation_fails_for_spec_from_different_product(
+    def test_validation_fails_for_spec_from_different_project(
         self,
         session: Session,
-        sample_product: Project,
+        sample_project: Project,
         sample_story: UserStory,
         compiled_spec: SpecRegistry,
         engine: Engine,
     ) -> None:
-        """Validation fails if spec belongs to different product."""
-        del sample_product, compiled_spec
+        """Validation fails if spec belongs to different project."""
+        del sample_project, compiled_spec
         spec_tools.engine = engine
 
-        other_product = Project(
+        other_project = Project(
             name="Other Project",
-            description="Different product",
+            description="Different project",
             vision="Different vision",
         )
-        session.add(other_product)
+        session.add(other_project)
         session.commit()
-        session.refresh(other_product)
+        session.refresh(other_project)
 
         reg_result = register_spec_version(
-            {"project_id": other_product.project_id, "content": "Other product spec"},
+            {"project_id": other_project.project_id, "content": "Other project spec"},
             tool_context=None,
         )
         other_spec_id = reg_result["spec_version_id"]
@@ -779,7 +779,7 @@ class TestWrongSpecVersionIdFails:
 
         assert result["success"] is False
         assert (
-            "product" in result["error"].lower()
+            "project" in result["error"].lower()
             or "mismatch" in result["error"].lower()
         )
 

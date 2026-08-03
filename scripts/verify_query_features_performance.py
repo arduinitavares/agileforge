@@ -54,11 +54,11 @@ def setup_data(
     SQLModel.metadata.create_all(test_engine)
 
     with Session(test_engine) as session:
-        product = Project(name="Benchmark Project")
-        session.add(product)
+        project = Project(name="Benchmark Project")
+        session.add(project)
         session.commit()
-        session.refresh(product)
-        project_id = _require_id(product.project_id, "Project ID")
+        session.refresh(project)
+        project_id = _require_id(project.project_id, "Project ID")
 
         for t in range(num_themes):
             theme = Theme(title=f"Theme {t}", project_id=project_id)
