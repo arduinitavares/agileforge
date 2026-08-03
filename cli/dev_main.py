@@ -55,6 +55,7 @@ _GIT_COMMIT_LENGTH = 40
 _PROVIDER_CREDENTIAL = "OPEN_ROUTER_API_KEY"
 _JSON_OBJECT = TypeAdapter(JsonObject)
 _INVALID_PRODUCTION_OUTPUT = "invalid_production_cli_output"
+_CREDENTIAL_ARGUMENT_ERROR = "forwarded CLI arguments contain provider credential"
 
 
 class ExitCode(IntEnum):
@@ -551,11 +552,37 @@ def _redact_json_value(
     if isinstance(value, list):
         return [_redact_json_value(item, secret_values=secret_values) for item in value]
     if isinstance(value, dict):
-        return {
-            key: _redact_json_value(item, secret_values=secret_values)
-            for key, item in value.items()
-        }
+        return _redact_json_object(value, secret_values=secret_values)
     return value
+
+
+def _redact_json_object(
+    value: JsonObject,
+    *,
+    secret_values: tuple[str, ...],
+) -> JsonObject:
+    redacted: JsonObject = {}
+    for key, item in value.items():
+        redacted_key = _redact_text(key, secret_values)
+        redacted[redacted_key] = _redact_json_value(
+            item,
+            secret_values=secret_values,
+        )
+    return redacted
+
+
+def _reject_credential_arguments(
+    arguments: tuple[str, ...],
+    *,
+    secret_values: tuple[str, ...],
+) -> None:
+    if any(
+        secret in argument
+        for secret in secret_values
+        for argument in arguments
+        if secret
+    ):
+        raise DeveloperCommandError(_CREDENTIAL_ARGUMENT_ERROR)
 
 
 def _invalid_production_json() -> ProductionJsonResult:
@@ -581,10 +608,7 @@ def _production_json(
     except ValidationError:
         return _invalid_production_json()
     return ProductionJsonResult(
-        result={
-            key: _redact_json_value(value, secret_values=secret_values)
-            for key, value in payload.items()
-        },
+        result=_redact_json_object(payload, secret_values=secret_values),
         valid=True,
     )
 
@@ -624,6 +648,7 @@ def _run_cli(
         for key, value in environment.items()
         if key == _PROVIDER_CREDENTIAL and value
     )
+    _reject_credential_arguments(forwarded, secret_values=secret_values)
     child_arguments = (sys.executable, "-m", "cli.main", *forwarded)
     result = runner.run(
         child_arguments,

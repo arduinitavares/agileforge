@@ -26,6 +26,7 @@ _RAW_FAILURE_EXIT = 7
 _JSON_FAILURE_EXIT = 9
 _INVALID_CHILD_EXIT = 13
 _INVALID_CHILD_RESULT = {"ok": False, "error": "invalid_production_cli_output"}
+_CREDENTIAL_ARGUMENT_ERROR = "forwarded CLI arguments contain provider credential"
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,7 +132,11 @@ def _string_values(value: object) -> tuple[str, ...]:
     if isinstance(value, list):
         return tuple(item for child in value for item in _string_values(child))
     if isinstance(value, dict):
-        return tuple(item for child in value.values() for item in _string_values(child))
+        keys = tuple(key for key in value if isinstance(key, str))
+        values = tuple(
+            item for child in value.values() for item in _string_values(child)
+        )
+        return (*keys, *values)
     return ()
 
 
@@ -417,6 +422,59 @@ def test_cli_raw_mode_preserves_child_streams_and_exit_code(
     assert "production diagnostic" in captured.err
 
 
+@pytest.mark.parametrize("json_output", [False, True], ids=["raw", "json"])
+@pytest.mark.parametrize("embedded", [False, True], ids=["exact", "embedded"])
+def test_cli_rejects_credential_bearing_forwarded_arguments(
+    checkout: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    json_output: bool,
+    embedded: bool,
+) -> None:
+    """Reject secret argv before constructing or spawning the production child."""
+    credential_value = 'argument"\\\nsecret-\u00e7'
+    monkeypatch.setenv("OPEN_ROUTER_API_KEY", credential_value)
+    forwarded_value = (
+        f"prefix={credential_value}:suffix" if embedded else credential_value
+    )
+    runner = _runner(checkout)
+    arguments = ["cli", "--profile", "local"]
+    if json_output:
+        arguments.append("--json")
+    arguments.extend(("--", "project", "show", forwarded_value))
+
+    exit_code = dev_main.main(
+        arguments,
+        checkout_root=checkout,
+        runner=runner,
+        clock=_clock(),
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert len(runner.calls) == 1
+    assert all(
+        credential_value not in argument
+        for call_arguments, _cwd, _environment in runner.calls
+        for argument in call_arguments
+    )
+    assert credential_value not in captured.out
+    assert credential_value not in captured.err
+    if json_output:
+        assert captured.err == ""
+        payload = json.loads(captured.out)
+        assert payload == {
+            "status": "error",
+            "exit_code": 1,
+            "error": _CREDENTIAL_ARGUMENT_ERROR,
+        }
+        assert "command" not in payload
+    else:
+        assert captured.out == ""
+        assert captured.err == f"error: {_CREDENTIAL_ARGUMENT_ERROR}\n"
+
+
 def test_cli_json_mode_wraps_provenance_and_redacts_secret(
     checkout: Path,
     tmp_path: Path,
@@ -490,11 +548,16 @@ def test_cli_json_mode_recursively_redacts_escaped_credential_values(
             {
                 "ok": True,
                 "direct": credential_value,
+                f"direct-key-{credential_value}": "direct-key-value",
                 "nested": {
                     "items": [
                         f"before {credential_value} after",
-                        {"value": credential_value},
-                    ]
+                        {f"nested-key-{credential_value}": credential_value},
+                    ],
+                    "collision": {
+                        credential_value: "discarded-on-collision",
+                        "[REDACTED]": "deterministic-last-value",
+                    },
                 },
             }
         ),
@@ -515,11 +578,13 @@ def test_cli_json_mode_recursively_redacts_escaped_credential_values(
     assert result == {
         "ok": True,
         "direct": "[REDACTED]",
+        "direct-key-[REDACTED]": "direct-key-value",
         "nested": {
             "items": [
                 "before [REDACTED] after",
-                {"value": "[REDACTED]"},
-            ]
+                {"nested-key-[REDACTED]": "[REDACTED]"},
+            ],
+            "collision": {"[REDACTED]": "deterministic-last-value"},
         },
     }
     assert all(credential_value not in value for value in _string_values(payload))
