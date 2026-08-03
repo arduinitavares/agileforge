@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import hashlib
 import json
+import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
@@ -28,7 +30,7 @@ from adapters.adk.recipes import (
     build_agentic_recipe_registry,
     build_backlog_generation_workflow,
 )
-from adapters.adk.runner import AdkExecutionConfig, AdkWorkflowRunner
+from adapters.adk.runner import AdkExecutionConfig, AdkRunGuards, AdkWorkflowRunner
 from models.core import Product
 from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance, SpecRegistry
 from models.workflow import (
@@ -118,6 +120,41 @@ class FakeLeafAgent(BaseAgent):
         del ctx
         if self.failure_message is not None:
             raise RuntimeError(self.failure_message)
+        yield Event(author=self.name, output=self.response)
+
+
+class CountingLeafAgent(BaseAgent):
+    """Provider-free leaf recording each external execution."""
+
+    response: object
+    calls: list[str]
+
+    async def _run_async_impl(
+        self,
+        ctx: InvocationContext,
+    ) -> AsyncGenerator[Event, None]:
+        del ctx
+        self.calls.append("provider")
+        yield Event(author=self.name, output=self.response)
+
+
+class BlockingLeafAgent(BaseAgent):
+    """Hold the first provider call open while a duplicate start arrives."""
+
+    response: object
+    calls: list[str]
+    started: threading.Event
+    release: threading.Event
+
+    async def _run_async_impl(
+        self,
+        ctx: InvocationContext,
+    ) -> AsyncGenerator[Event, None]:
+        del ctx
+        self.calls.append("provider")
+        if len(self.calls) == 1:
+            self.started.set()
+            await asyncio.to_thread(self.release.wait)
         yield Event(author=self.name, output=self.response)
 
 
@@ -358,9 +395,7 @@ def _validating_brownfield_leaf(
         assert node_input.inventory.selected_for_model == ("README.md",)
         assert node_input.selected_evidence[0].path == "README.md"
         observations.append(node_input)
-        return BrownfieldCurationOutput(
-            canonical_spec=_brownfield_spec_artifact()
-        )
+        return BrownfieldCurationOutput(canonical_spec=_brownfield_spec_artifact())
 
     return AdkWorkflow(
         name="fake_brownfield_curator",
@@ -601,7 +636,7 @@ def _build_runner(
     engine: Engine,
     *,
     project_id: int,
-    leaf: FakeLeafAgent,
+    leaf: BaseAgent | AdkWorkflow,
     sessions: TrackingSessionService,
     clock: MutableClock | None = None,
 ) -> tuple[AdkWorkflowRunner, WorkflowDomain]:
@@ -668,9 +703,112 @@ def test_runner_executes_fake_leaf_and_commits_validated_output(engine: Engine) 
         outcome = session.exec(select(WorkflowNodeAttemptOutcome)).one()
         assert outcome.status == "success"
         assert session.exec(select(BacklogArtifact)).one() is not None
-        assert sessions.created_session_ids == [
-            str(attempt.workflow_node_attempt_id)
-        ]
+        assert sessions.created_session_ids == [str(attempt.workflow_node_attempt_id)]
+
+
+def test_sequential_transport_retry_replays_terminal_result_without_provider(
+    engine: Engine,
+) -> None:
+    """Return the completed command receipt for the same transport key."""
+    project_id, authority_id, authority_fingerprint = _seed(engine)
+    response: JsonObject = {
+        "authority_id": authority_id,
+        "authority_fingerprint": authority_fingerprint,
+        "content": _backlog_payload(),
+    }
+    calls: list[str] = []
+    leaf = CountingLeafAgent(
+        name="counting_backlog",
+        response=response,
+        calls=calls,
+    )
+    runner, domain = _build_runner(
+        engine,
+        project_id=project_id,
+        leaf=leaf,
+        sessions=TrackingSessionService(),
+    )
+    position = domain.position(project_id)
+    decision = _decision(domain, project_id)
+    guards = AdkRunGuards(
+        position=position,
+        idempotency_key="dashboard-retry-41",
+        actor="dashboard-user",
+        correlation_id="retry-41",
+    )
+
+    first = runner.run(decision, {"prompt": "build backlog"}, guards=guards)
+    replay = runner.run(decision, {"prompt": "build backlog"}, guards=guards)
+
+    assert first.ok is True
+    assert replay == first.model_copy(update={"replayed": True})
+    assert leaf.calls == ["provider"]
+    with Session(engine) as session:
+        assert len(session.exec(select(WorkflowNodeAttempt)).all()) == 1
+        assert len(session.exec(select(WorkflowNodeAttemptOutcome)).all()) == 1
+
+
+def test_concurrent_duplicate_start_never_enters_provider_twice(
+    engine: Engine,
+) -> None:
+    """Short-circuit a replay while the live attempt is outside its transaction."""
+    project_id, authority_id, authority_fingerprint = _seed(engine)
+    response: JsonObject = {
+        "authority_id": authority_id,
+        "authority_fingerprint": authority_fingerprint,
+        "content": _backlog_payload(),
+    }
+    calls: list[str] = []
+    started = threading.Event()
+    release = threading.Event()
+    leaf = BlockingLeafAgent(
+        name="blocking_backlog",
+        response=response,
+        calls=calls,
+        started=started,
+        release=release,
+    )
+    runner, domain = _build_runner(
+        engine,
+        project_id=project_id,
+        leaf=leaf,
+        sessions=TrackingSessionService(),
+    )
+    position = domain.position(project_id)
+    decision = _decision(domain, project_id)
+    guards = AdkRunGuards(
+        position=position,
+        idempotency_key="dashboard-concurrent-41",
+        actor="dashboard-user",
+        correlation_id="concurrent-41",
+    )
+    normalized_input: JsonObject = {"prompt": "build backlog"}
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        first_future = executor.submit(
+            runner.run,
+            decision,
+            normalized_input,
+            guards=guards,
+        )
+        assert started.wait(timeout=5)
+        try:
+            replay = runner.run(
+                decision,
+                normalized_input,
+                guards=guards,
+            )
+            assert replay.ok is True
+            assert replay.replayed is True
+            assert leaf.calls == ["provider"]
+        finally:
+            release.set()
+        first = first_future.result(timeout=5)
+
+    assert first.ok is True
+    with Session(engine) as session:
+        assert len(session.exec(select(WorkflowNodeAttempt)).all()) == 1
+        assert len(session.exec(select(WorkflowNodeAttemptOutcome)).all()) == 1
 
 
 def test_provider_failure_records_failure_and_returns_external_error(
@@ -748,10 +886,7 @@ def test_brownfield_runner_persists_exact_inventory_bound_canonical_spec(
     assert len(observations) == 1
     observed = observations[0]
     assert observed.inventory.repository_inventory_id == inventory_id
-    assert (
-        observed.inventory.repository_inventory_fingerprint
-        == inventory_fingerprint
-    )
+    assert observed.inventory.repository_inventory_fingerprint == inventory_fingerprint
     with Session(engine) as session:
         inventory = session.exec(select(RepositoryInventory)).one()
         draft = session.exec(select(SpecDraft)).one()
@@ -765,9 +900,7 @@ def test_brownfield_runner_persists_exact_inventory_bound_canonical_spec(
         )
         completion_request = json.loads(completion_receipt.request_json)
         attempt_input = json.loads(attempt.normalized_input_json)
-        normalized = normalize_spec_content_for_registry(
-            draft.canonical_content_json
-        )
+        normalized = normalize_spec_content_for_registry(draft.canonical_content_json)
         expected = normalize_spec_content_for_registry(
             canonical_spec_json(_brownfield_spec_artifact())
         )
@@ -780,8 +913,9 @@ def test_brownfield_runner_persists_exact_inventory_bound_canonical_spec(
             == inventory_fingerprint
         )
         assert (
-            attempt_input["curation_input"]["inventory"]
-            ["repository_inventory_fingerprint"]
+            attempt_input["curation_input"]["inventory"][
+                "repository_inventory_fingerprint"
+            ]
             == inventory_fingerprint
         )
         assert normalized.content == expected.content
@@ -964,9 +1098,7 @@ def test_runner_replaces_expired_crash_attempt_after_old_trace_deletion(
         replacement_id = attempts[1].workflow_node_attempt_id
         assert replacement_id is not None
         assert replacement_id != old_attempt_id
-        assert {
-            item.workflow_node_attempt_id: item.status for item in outcomes
-        } == {
+        assert {item.workflow_node_attempt_id: item.status for item in outcomes} == {
             old_attempt_id: "obsolete",
             replacement_id: "success",
         }
@@ -983,9 +1115,9 @@ def test_authority_runner_executes_provider_once_before_completion_transaction(
     observer = ReceiptObserver(engine=engine, calls=calls)
     compiler_leaf = TransactionObservingLeafAgent(
         name="observing_authority_compiler",
-        response=SpecAuthorityCompilerEnvelope(
-            result=_authority_artifact()
-        ).model_dump(mode="json"),
+        response=SpecAuthorityCompilerEnvelope(result=_authority_artifact()).model_dump(
+            mode="json"
+        ),
         observer=observer,
     )
     registry = build_agentic_recipe_registry(

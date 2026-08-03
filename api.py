@@ -18,7 +18,12 @@ from services.application import (
 )
 from utils.api_schemas import WorkflowPositionGuards
 from utils.model_config import get_model_id
-from workflow.contracts import JsonObject, TransitionResult
+from workflow.contracts import (
+    JsonObject,
+    NodeCategory,
+    TransitionResult,
+    WorkflowPosition,
+)
 from workflow.requests import DecideAuthority, OpenProjectShell, TransitionRequest
 
 _TRANSITION_REQUEST = TypeAdapter(TransitionRequest)
@@ -198,11 +203,60 @@ def _result_payload(result: TransitionResult) -> dict[str, object]:
         raise TypeError(type(result).__name__)
     if not result.ok:
         status = 409 if result.error is not None else 400
+        detail = result.model_dump(mode="json")
+        if result.position is not None:
+            detail["actions"] = _workflow_actions(result.position)
         raise HTTPException(
             status_code=status,
-            detail=result.model_dump(mode="json"),
+            detail=detail,
         )
     return {"status": "success", "data": result.model_dump(mode="json")}
+
+
+def _workflow_actions(position: WorkflowPosition) -> list[JsonObject]:
+    """Advertise one fixed API route for each exact available decision."""
+    actions: list[JsonObject] = []
+    for decision in position.decisions:
+        if decision.category is not NodeCategory.AVAILABLE:
+            continue
+        request_kind = decision.request_kind
+        if request_kind == "decide_authority":
+            endpoint = "authority/decision"
+            transport = "authority"
+        elif request_kind in AGENTIC_API_PATHS:
+            endpoint = AGENTIC_API_PATHS[request_kind]
+            transport = "agentic"
+        elif request_kind in POSITIONED_API_PATHS:
+            endpoint = POSITIONED_API_PATHS[request_kind]
+            transport = "positioned"
+        else:
+            continue
+        actions.append(
+            {
+                "node_id": decision.node_id,
+                "instance_key": decision.instance_key,
+                "decision_fingerprint": decision.decision_fingerprint,
+                "request_kind": request_kind,
+                "endpoint": endpoint,
+                "transport": transport,
+            }
+        )
+    return actions
+
+
+def _read_payload(result: JsonObject) -> dict[str, object]:
+    """Translate one typed read projection envelope to HTTP."""
+    if result.get("ok") is not True:
+        errors = result.get("errors")
+        first = errors[0] if isinstance(errors, list) and errors else None
+        code = first.get("code") if isinstance(first, dict) else None
+        status = 404 if isinstance(code, str) and code.endswith("NOT_FOUND") else 409
+        raise HTTPException(status_code=status, detail=result)
+    return {
+        "status": "success",
+        "data": result.get("data", {}),
+        "warnings": result.get("warnings", []),
+    }
 
 
 @app.get("/")
@@ -220,15 +274,241 @@ def create_project(req: CreateProjectRequest) -> dict[str, object]:
 @app.get("/api/projects")
 def get_projects() -> dict[str, object]:
     """Return Project identity without a routing projection."""
-    projects = [item.model_dump(mode="json") for item in _application().projects()]
-    return {"status": "success", "data": projects}
+    return _read_payload(_application().reads.project_list())
+
+
+@app.get("/api/projects/{project_id}")
+def get_project(project_id: int) -> dict[str, object]:
+    """Return one non-routing Project detail projection."""
+    return _read_payload(_application().reads.project_show(project_id=project_id))
 
 
 @app.get("/api/projects/{project_id}/position")
 def get_project_position(project_id: int) -> dict[str, object]:
     """Return the only workflow routing projection."""
     position = _application().position(project_id=project_id)
-    return {"status": "success", "data": position.model_dump(mode="json")}
+    return {
+        "status": "success",
+        "data": position.model_dump(mode="json"),
+        "actions": _workflow_actions(position),
+    }
+
+
+@app.get("/api/projects/{project_id}/authority/status")
+def get_authority_status(project_id: int) -> dict[str, object]:
+    """Return durable authority status without routing state."""
+    return _read_payload(_application().reads.authority_status(project_id=project_id))
+
+
+@app.get("/api/projects/{project_id}/authority/invariants")
+def get_authority_invariants(
+    project_id: int,
+    spec_version_id: int | None = None,
+) -> dict[str, object]:
+    """Return durable compiled authority invariants."""
+    return _read_payload(
+        _application().reads.authority_invariants(
+            project_id=project_id,
+            spec_version_id=spec_version_id,
+        )
+    )
+
+
+@app.get("/api/projects/{project_id}/authority/review")
+def get_authority_review(
+    project_id: int,
+    include_spec: str = "auto",
+) -> dict[str, object]:
+    """Return the pending authority review packet."""
+    return _read_payload(
+        _application().reads.authority_review(
+            project_id=project_id,
+            include_spec=include_spec,
+        )
+    )
+
+
+def _artifact_history(
+    *,
+    project_id: int,
+    node_id: str,
+    instance_key: str | None = None,
+) -> dict[str, object]:
+    return _read_payload(
+        _application().reads.artifact_history(
+            project_id=project_id,
+            node_id=node_id,
+            instance_key=instance_key,
+        )
+    )
+
+
+@app.get("/api/projects/{project_id}/vision/history")
+def get_vision_history(project_id: int) -> dict[str, object]:
+    """Return durable Vision attempt history."""
+    return _artifact_history(project_id=project_id, node_id="vision.generate")
+
+
+@app.get("/api/projects/{project_id}/backlog/history")
+def get_backlog_history(project_id: int) -> dict[str, object]:
+    """Return durable Backlog attempt history."""
+    return _artifact_history(project_id=project_id, node_id="backlog.generate")
+
+
+@app.get("/api/projects/{project_id}/roadmap/history")
+def get_roadmap_history(project_id: int) -> dict[str, object]:
+    """Return durable Roadmap attempt history."""
+    return _artifact_history(
+        project_id=project_id,
+        node_id="planning.roadmap.generate",
+    )
+
+
+@app.get("/api/projects/{project_id}/story/pending")
+def get_story_pending(project_id: int) -> dict[str, object]:
+    """Return durable pending Story coverage."""
+    return _read_payload(_application().reads.story_pending(project_id=project_id))
+
+
+@app.get("/api/projects/{project_id}/story/history")
+def get_story_history(
+    project_id: int,
+    instance_key: str | None = None,
+) -> dict[str, object]:
+    """Return durable Story attempt history."""
+    return _artifact_history(
+        project_id=project_id,
+        node_id="planning.story.generate",
+        instance_key=instance_key,
+    )
+
+
+@app.get("/api/projects/{project_id}/story/dependencies")
+def get_story_dependencies(project_id: int) -> dict[str, object]:
+    """Return durable Story dependency inspection data."""
+    return _read_payload(
+        _application().reads.story_dependencies_inspect(project_id=project_id)
+    )
+
+
+@app.get("/api/stories/{story_id}")
+def get_story(story_id: int) -> dict[str, object]:
+    """Return one durable Story record."""
+    return _read_payload(_application().reads.story_show(story_id=story_id))
+
+
+@app.get("/api/projects/{project_id}/sprint/candidates")
+def get_sprint_candidates(project_id: int) -> dict[str, object]:
+    """Return durable Sprint candidate Story facts."""
+    return _read_payload(_application().reads.sprint_candidates(project_id=project_id))
+
+
+@app.get("/api/projects/{project_id}/sprint/history")
+def get_sprint_history(project_id: int) -> dict[str, object]:
+    """Return durable Sprint planning and execution history."""
+    return _read_payload(_application().reads.sprint_history(project_id=project_id))
+
+
+@app.get("/api/projects/{project_id}/sprint/metrics")
+def get_sprint_metrics(project_id: int) -> dict[str, object]:
+    """Return durable Sprint metrics."""
+    return _read_payload(_application().reads.sprint_metrics(project_id=project_id))
+
+
+@app.get("/api/projects/{project_id}/sprints")
+def get_sprints(project_id: int) -> dict[str, object]:
+    """Return retained Sprint list and history data."""
+    return _read_payload(_application().reads.sprint_history(project_id=project_id))
+
+
+@app.get("/api/projects/{project_id}/sprints/{sprint_id}")
+def get_sprint(project_id: int, sprint_id: int) -> dict[str, object]:
+    """Return one durable Sprint status projection."""
+    return _read_payload(
+        _application().reads.sprint_status(
+            project_id=project_id,
+            sprint_id=sprint_id,
+        )
+    )
+
+
+@app.get("/api/projects/{project_id}/sprints/{sprint_id}/tasks")
+def get_sprint_tasks(project_id: int, sprint_id: int) -> dict[str, object]:
+    """Return durable task tickets for one Sprint."""
+    return _read_payload(
+        _application().reads.sprint_tasks(
+            project_id=project_id,
+            sprint_id=sprint_id,
+        )
+    )
+
+
+@app.get("/api/projects/{project_id}/sprints/{sprint_id}/tasks/{task_id}")
+def get_sprint_task(
+    project_id: int,
+    sprint_id: int,
+    task_id: int,
+) -> dict[str, object]:
+    """Return one durable Sprint task ticket."""
+    return _read_payload(
+        _application().reads.sprint_task_show(
+            project_id=project_id,
+            sprint_id=sprint_id,
+            task_id=task_id,
+        )
+    )
+
+
+@app.get("/api/projects/{project_id}/sprints/{sprint_id}/tasks/{task_id}/execution")
+def get_task_execution(
+    project_id: int,
+    sprint_id: int,
+    task_id: int,
+) -> dict[str, object]:
+    """Return retained execution history for one task."""
+    return _read_payload(
+        _application().reads.sprint_task_history(
+            project_id=project_id,
+            sprint_id=sprint_id,
+            task_id=task_id,
+        )
+    )
+
+
+@app.get("/api/projects/{project_id}/sprints/{sprint_id}/tasks/{task_id}/packet")
+def get_task_packet(
+    project_id: int,
+    sprint_id: int,
+    task_id: int,
+    flavor: str | None = None,
+) -> dict[str, object]:
+    """Return a bounded task context packet."""
+    return _read_payload(
+        _application().reads.task_packet(
+            project_id=project_id,
+            sprint_id=sprint_id,
+            task_id=task_id,
+            flavor=flavor,
+        )
+    )
+
+
+@app.get("/api/projects/{project_id}/sprints/{sprint_id}/stories/{story_id}/packet")
+def get_story_packet(
+    project_id: int,
+    sprint_id: int,
+    story_id: int,
+    flavor: str | None = None,
+) -> dict[str, object]:
+    """Return a bounded Story context packet."""
+    return _read_payload(
+        _application().reads.story_packet(
+            project_id=project_id,
+            sprint_id=sprint_id,
+            story_id=story_id,
+            flavor=flavor,
+        )
+    )
 
 
 @app.post("/api/projects/{project_id}/authority/decision")

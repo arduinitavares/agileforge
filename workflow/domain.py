@@ -9,7 +9,7 @@ from sqlalchemy import event
 from sqlalchemy.exc import OperationalError
 from sqlmodel import Session, col, select
 
-from models.workflow import WorkflowTransitionReceipt
+from models.workflow import WorkflowNodeAttempt, WorkflowTransitionReceipt
 from repositories.workflow import WorkflowFactLoadError, WorkflowFactRepository
 from workflow.contracts import (
     NodeCategory,
@@ -130,6 +130,7 @@ class AdkRecipeRegistryProtocol(Protocol):
 
     def require(self, node_id: str) -> object:
         """Return a recipe or raise LookupError when the node is unregistered."""
+
 
 _SQLITE_BUSY_TIMEOUT_MS = 1_000
 _SQLITE_LOCK_MESSAGES = ("database is locked", "database table is locked")
@@ -588,8 +589,7 @@ class WorkflowDomain:
             or row.fact_fingerprint != request.fact_fingerprint
             or row.decision_fingerprint != request.decision_fingerprint
             or evaluated_at >= as_utc(row.lease_expires_at)
-            or row.business_fact_fingerprint
-            != business_fact_fingerprint(snapshot)
+            or row.business_fact_fingerprint != business_fact_fingerprint(snapshot)
         )
         if mismatch:
             return self._obsolete_attempt(
@@ -621,7 +621,7 @@ class WorkflowDomain:
                 output=result.output,
                 evaluated_at=evaluated_at,
             )
-        return result.model_copy(
+        terminal_result = result.model_copy(
             update={
                 "position": self._position_in_session(
                     session,
@@ -630,6 +630,13 @@ class WorkflowDomain:
                 )
             }
         )
+        self._complete_attempt_start_receipt(
+            session,
+            row,
+            terminal_result,
+            evaluated_at,
+        )
+        return terminal_result
 
     def _execute_failed_attempt(
         self,
@@ -655,8 +662,7 @@ class WorkflowDomain:
             or row.attempt_fingerprint != request.attempt_fingerprint
             or row.graph_version != self._graph.graph_version
             or evaluated_at >= as_utc(row.lease_expires_at)
-            or row.business_fact_fingerprint
-            != business_fact_fingerprint(snapshot)
+            or row.business_fact_fingerprint != business_fact_fingerprint(snapshot)
         )
         if mismatch:
             return self._obsolete_attempt(
@@ -666,15 +672,30 @@ class WorkflowDomain:
                 evaluated_at=evaluated_at,
             )
         record_failure_outcome(session, request, evaluated_at)
+        position = self._position_in_session(
+            session,
+            request.project_id,
+            evaluated_at,
+        )
+        command_result = TransitionResult(
+            ok=False,
+            position=position,
+            error=WorkflowError(
+                code=WorkflowErrorCode.EXTERNAL_EXECUTION_FAILED,
+                message="ADK recipe execution or output validation failed.",
+            ),
+        )
+        self._complete_attempt_start_receipt(
+            session,
+            row,
+            command_result,
+            evaluated_at,
+        )
         return TransitionResult(
             ok=True,
             applied_node_id=row.node_id,
             output={"attempt_id": request.attempt_id, "status": "failure"},
-            position=self._position_in_session(
-                session,
-                request.project_id,
-                evaluated_at,
-            ),
+            position=position,
         )
 
     def _obsolete_attempt(
@@ -698,7 +719,7 @@ class WorkflowDomain:
                 attempt_id=attempt_id,
                 evaluated_at=evaluated_at,
             )
-        return TransitionResult(
+        result = TransitionResult(
             ok=False,
             position=self._position_in_session(session, project_id, evaluated_at),
             error=WorkflowError(
@@ -706,6 +727,14 @@ class WorkflowDomain:
                 message="The node attempt is no longer authoritative.",
             ),
         )
+        if row is not None:
+            self._complete_attempt_start_receipt(
+                session,
+                row,
+                result,
+                evaluated_at,
+            )
+        return result
 
     def _execute_positioned(
         self,
@@ -1176,6 +1205,29 @@ class WorkflowDomain:
         evaluated_at: datetime,
     ) -> None:
         """Persist the immutable result before the transaction commit."""
+        receipt.result_json = canonical_json(result.model_dump(mode="json"))
+        receipt.completed_at = evaluated_at
+        session.add(receipt)
+        session.flush()
+
+    @staticmethod
+    def _complete_attempt_start_receipt(
+        session: Session,
+        attempt: WorkflowNodeAttempt,
+        result: TransitionResult,
+        evaluated_at: datetime,
+    ) -> None:
+        """Persist the terminal command outcome under the transport start key."""
+        receipt = session.exec(
+            select(WorkflowTransitionReceipt).where(
+                col(WorkflowTransitionReceipt.request_kind) == "start_node_attempt",
+                col(WorkflowTransitionReceipt.idempotency_key)
+                == attempt.idempotency_key,
+            )
+        ).one_or_none()
+        if receipt is None:
+            msg = "A durable node attempt has no start transition receipt."
+            raise RuntimeError(msg)
         receipt.result_json = canonical_json(result.model_dump(mode="json"))
         receipt.completed_at = evaluated_at
         session.add(receipt)

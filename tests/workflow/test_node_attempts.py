@@ -23,6 +23,7 @@ from models.workflow import (
     BacklogArtifact,
     WorkflowNodeAttempt,
     WorkflowNodeAttemptOutcome,
+    WorkflowTransitionReceipt,
 )
 from services.specs.authority_selection import pending_authority_fingerprint
 from utils.spec_schemas import SpecAuthorityCompilationSuccess
@@ -366,6 +367,39 @@ def test_completion_writes_business_fact_and_success_outcome_atomically(
         assert outcome.status == "success"
         assert outcome.output_json is not None
         assert outcome.output_fingerprint is not None
+
+
+def test_completed_attempt_updates_start_receipt_with_terminal_command_result(
+    engine: Engine,
+) -> None:
+    """Replay the prior command result through the original transport key."""
+    project_id, authority_id, authority_fingerprint = _seed_accepted_authority(engine)
+    domain = _domain(engine, MutableClock(EVALUATED_AT), _registry())
+    start_request = _start_request(domain, project_id)
+    started = domain.transition(start_request)
+    attempt_id, attempt_fingerprint = _attempt_identity(started)
+    completed = domain.transition(
+        _completion_request(
+            start_request=start_request,
+            attempt_id=attempt_id,
+            attempt_fingerprint=attempt_fingerprint,
+            authority=(authority_id, authority_fingerprint),
+        )
+    )
+
+    replay = domain.transition(start_request)
+
+    assert completed.ok is True
+    assert replay == completed.model_copy(update={"replayed": True})
+    with Session(engine) as session:
+        start_receipt = session.exec(
+            select(WorkflowTransitionReceipt).where(
+                WorkflowTransitionReceipt.request_kind == "start_node_attempt"
+            )
+        ).one()
+        assert start_receipt.result_json is not None
+        persisted = TransitionResult.model_validate_json(start_receipt.result_json)
+        assert persisted == completed
 
 
 def test_process_crash_before_outcome_leaves_recoverable_active_attempt(

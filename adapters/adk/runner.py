@@ -50,6 +50,7 @@ class WorkflowDomainRunnerPort(Protocol):
         """Apply one typed transition."""
         ...
 
+
 _TRANSITION_REQUEST = TypeAdapter(TransitionRequest)
 
 
@@ -76,6 +77,21 @@ class AdkRunGuards:
     correlation_id: str | None = None
 
 
+@dataclass(frozen=True)
+class AdkRunRequest:
+    """Exact transport guards and input for one durable agentic command."""
+
+    graph_version: str
+    fact_fingerprint: str
+    decision_fingerprint: str
+    node_id: str
+    instance_key: str | None
+    input_payload: JsonObject
+    idempotency_key: str
+    actor: str
+    correlation_id: str | None = None
+
+
 class AdkWorkflowRunner:
     """Execute an available decision while durable facts remain authoritative.
 
@@ -97,9 +113,7 @@ class AdkWorkflowRunner:
         self._domain = domain
         self._registry = registry
         self._config = config
-        self._session_service = session_service or DatabaseSessionService(
-            db_url=get_adk_execution_trace_db_target().async_sqlite_url
-        )
+        self._session_service = session_service
 
     def run(
         self,
@@ -133,39 +147,49 @@ class AdkWorkflowRunner:
                 ),
             )
         start_key = (
-            guards.idempotency_key
-            if guards is not None
-            else f"adk-start:{uuid4()}"
+            guards.idempotency_key if guards is not None else f"adk-start:{uuid4()}"
         )
         request_actor = guards.actor if guards is not None else self._config.actor
         request_correlation_id = (
-            guards.correlation_id
-            if guards is not None
-            else self._config.correlation_id
+            guards.correlation_id if guards is not None else self._config.correlation_id
         )
+        return self.run_request(
+            AdkRunRequest(
+                graph_version=position.graph_version,
+                fact_fingerprint=position.fact_fingerprint,
+                decision_fingerprint=decision.decision_fingerprint,
+                node_id=decision.node_id,
+                instance_key=decision.instance_key,
+                input_payload=input_payload,
+                idempotency_key=start_key,
+                actor=request_actor,
+                correlation_id=request_correlation_id,
+            )
+        )
+
+    def run_request(self, request: AdkRunRequest) -> TransitionResult:
+        """Submit exact transport guards before any provider-side work."""
         start_request = StartNodeAttempt(
             project_id=self._config.project_id,
-            graph_version=position.graph_version,
-            fact_fingerprint=position.fact_fingerprint,
-            decision_fingerprint=decision.decision_fingerprint,
-            idempotency_key=start_key,
-            actor=request_actor,
-            correlation_id=request_correlation_id,
-            target_node_id=decision.node_id,
-            target_instance_key=decision.instance_key,
-            normalized_input=input_payload,
+            graph_version=request.graph_version,
+            fact_fingerprint=request.fact_fingerprint,
+            decision_fingerprint=request.decision_fingerprint,
+            idempotency_key=request.idempotency_key,
+            actor=request.actor,
+            correlation_id=request.correlation_id,
+            target_node_id=request.node_id,
+            target_instance_key=request.instance_key,
+            normalized_input=request.input_payload,
             model_id=self._config.model_id,
             execution_settings=self._config.execution_settings,
             lease_seconds=self._config.lease_seconds,
         )
         started = self._domain.transition(start_request)
-        if not started.ok:
+        if not started.ok or started.replayed:
             return started
         attempt_id = started.output.get("attempt_id")
         attempt_fingerprint = started.output.get("attempt_fingerprint")
-        if not isinstance(attempt_id, int) or not isinstance(
-            attempt_fingerprint, str
-        ):
+        if not isinstance(attempt_id, int) or not isinstance(attempt_fingerprint, str):
             msg = "StartNodeAttempt returned an invalid durable receipt."
             raise TypeError(msg)
         context = AttemptCompletionContext(
@@ -181,12 +205,12 @@ class AdkWorkflowRunner:
             correlation_id=start_request.correlation_id,
         )
         try:
-            recipe = self._registry.require(decision.node_id)
+            recipe = self._registry.require(request.node_id)
             output = asyncio.run(
                 self._run_recipe(
                     recipe,
                     attempt_id=attempt_id,
-                    input_payload=input_payload,
+                    input_payload=request.input_payload,
                 )
             )
             completion = recipe.output_adapter(output, context)
@@ -207,9 +231,9 @@ class AdkWorkflowRunner:
                     attempt_fingerprint=attempt_fingerprint,
                     failure_code="ADK_EXECUTION_FAILED",
                     failure_message=str(error) or type(error).__name__,
-                    idempotency_key=f"{start_key}:failure",
-                    actor=request_actor,
-                    correlation_id=request_correlation_id,
+                    idempotency_key=f"{request.idempotency_key}:failure",
+                    actor=request.actor,
+                    correlation_id=request.correlation_id,
                 )
             )
             if (
@@ -225,9 +249,7 @@ class AdkWorkflowRunner:
                     message="ADK recipe execution or output validation failed.",
                 ),
             )
-        return self._domain.transition(
-            _TRANSITION_REQUEST.validate_python(completion)
-        )
+        return self._domain.transition(_TRANSITION_REQUEST.validate_python(completion))
 
     async def _run_recipe(
         self,
@@ -236,8 +258,14 @@ class AdkWorkflowRunner:
         attempt_id: int,
         input_payload: JsonObject,
     ) -> RecipeOutput:
+        session_service = self._session_service
+        if session_service is None:
+            session_service = DatabaseSessionService(
+                db_url=get_adk_execution_trace_db_target().async_sqlite_url
+            )
+            self._session_service = session_service
         session_id = str(attempt_id)
-        await self._session_service.create_session(
+        await session_service.create_session(
             app_name=self._config.identity.app_name,
             user_id=self._config.identity.user_id,
             session_id=session_id,
@@ -247,13 +275,11 @@ class AdkWorkflowRunner:
             root_agent=recipe.workflow,
             resumability_config=ResumabilityConfig(is_resumable=True),
         )
-        runner = Runner(app=app, session_service=self._session_service)
+        runner = Runner(app=app, session_service=session_service)
         message = types.Content(
             role="user",
             parts=[
-                types.Part(
-                    text=RecipeInput(payload=input_payload).model_dump_json()
-                )
+                types.Part(text=RecipeInput(payload=input_payload).model_dump_json())
             ],
         )
         output: object | None = None
@@ -270,4 +296,9 @@ class AdkWorkflowRunner:
         return RecipeOutput.model_validate(output)
 
 
-__all__ = ["AdkExecutionConfig", "AdkRunGuards", "AdkWorkflowRunner"]
+__all__ = [
+    "AdkExecutionConfig",
+    "AdkRunGuards",
+    "AdkRunRequest",
+    "AdkWorkflowRunner",
+]

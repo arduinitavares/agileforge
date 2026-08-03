@@ -50,8 +50,91 @@ _AGENTIC_MODEL_KEYS: dict[str, str] = {
 }
 
 
+class _ReadProjection(Protocol):
+    """Non-routing read methods used by CLI handlers."""
+
+    def project_list(self) -> JsonObject: ...
+
+    def project_show(self, *, project_id: int) -> JsonObject: ...
+
+    def authority_status(self, *, project_id: int) -> JsonObject: ...
+
+    def authority_invariants(
+        self,
+        *,
+        project_id: int,
+        spec_version_id: int | None = None,
+    ) -> JsonObject: ...
+
+    def authority_review(
+        self,
+        *,
+        project_id: int,
+        include_spec: str = "auto",
+    ) -> JsonObject: ...
+
+    def artifact_history(
+        self,
+        *,
+        project_id: int,
+        node_id: str,
+        instance_key: str | None = None,
+    ) -> JsonObject: ...
+
+    def story_show(self, *, story_id: int) -> JsonObject: ...
+
+    def story_pending(self, *, project_id: int) -> JsonObject: ...
+
+    def story_dependencies_inspect(self, *, project_id: int) -> JsonObject: ...
+
+    def sprint_candidates(self, *, project_id: int) -> JsonObject: ...
+
+    def sprint_history(self, *, project_id: int) -> JsonObject: ...
+
+    def sprint_metrics(self, *, project_id: int) -> JsonObject: ...
+
+    def sprint_status(
+        self,
+        *,
+        project_id: int,
+        sprint_id: int | None = None,
+    ) -> JsonObject: ...
+
+    def sprint_tasks(
+        self,
+        *,
+        project_id: int,
+        sprint_id: int | None = None,
+    ) -> JsonObject: ...
+
+    def sprint_task_show(
+        self,
+        *,
+        project_id: int,
+        task_id: int,
+        sprint_id: int | None = None,
+    ) -> JsonObject: ...
+
+    def sprint_task_history(
+        self,
+        *,
+        project_id: int,
+        task_id: int,
+        sprint_id: int | None = None,
+    ) -> JsonObject: ...
+
+    def context_pack(self, *, project_id: int, phase: str) -> JsonObject: ...
+
+    def status(self, *, project_id: int) -> JsonObject: ...
+
+
 class _Application(Protocol):
     """Application methods used by CLI handlers."""
+
+    @property
+    def reads(self) -> _ReadProjection:
+        """Return the injected non-routing projection."""
+        ...
 
     def position(self, *, project_id: int) -> WorkflowPosition:
         """Return one current position."""
@@ -118,9 +201,13 @@ def _add_transition_leaf(
     parser.set_defaults(command_handler=_run_transition)
 
 
-def _install_transition_commands(subparsers: argparse._SubParsersAction) -> None:
-    branches: dict[tuple[str, ...], argparse._SubParsersAction] = {(): subparsers}
-    parsers: dict[tuple[str, ...], argparse.ArgumentParser] = {}
+def _install_transition_commands(
+    subparsers: argparse._SubParsersAction,
+    *,
+    branches: dict[tuple[str, ...], argparse._SubParsersAction],
+    parsers: dict[tuple[str, ...], argparse.ArgumentParser],
+) -> None:
+    branches[()] = subparsers
     for request_kind, full_prefix in COMMAND_PREFIXES.items():
         parts = full_prefix[1:]
         if parts[0] == "project":
@@ -143,6 +230,143 @@ def _install_transition_commands(subparsers: argparse._SubParsersAction) -> None
             parent = current
 
 
+def _install_authority_reads(
+    authority_sub: argparse._SubParsersAction,
+) -> None:
+    status = authority_sub.add_parser("status")
+    status.add_argument("--project-id", type=int, required=True)
+    status.set_defaults(command_handler=_authority_status)
+    invariants = authority_sub.add_parser("invariants")
+    invariants.add_argument("--project-id", type=int, required=True)
+    invariants.add_argument("--spec-version-id", type=int)
+    invariants.set_defaults(command_handler=_authority_invariants)
+    review = authority_sub.add_parser("review")
+    review.add_argument("--project-id", type=int, required=True)
+    review.add_argument(
+        "--include-spec",
+        choices=("auto", "full", "summary"),
+        default="auto",
+    )
+    review.set_defaults(command_handler=_authority_review)
+
+
+def _install_artifact_history_reads(
+    branches: dict[tuple[str, ...], argparse._SubParsersAction],
+) -> None:
+    for group, node_id in (
+        ("vision", "vision.generate"),
+        ("backlog", "backlog.generate"),
+        ("roadmap", "planning.roadmap.generate"),
+    ):
+        history = branches[(group,)].add_parser("history")
+        history.add_argument("--project-id", type=int, required=True)
+        history.set_defaults(
+            command_handler=_artifact_history,
+            history_node_id=node_id,
+        )
+
+
+def _install_story_reads(
+    story_sub: argparse._SubParsersAction,
+    *,
+    branches: dict[tuple[str, ...], argparse._SubParsersAction],
+    parsers: dict[tuple[str, ...], argparse.ArgumentParser],
+) -> None:
+    show = story_sub.add_parser("show")
+    show.add_argument("--story-id", type=int, required=True)
+    show.set_defaults(command_handler=_story_show)
+    pending = story_sub.add_parser("pending")
+    pending.add_argument("--project-id", type=int, required=True)
+    pending.set_defaults(command_handler=_story_pending)
+    history = story_sub.add_parser("history")
+    history.add_argument("--project-id", type=int, required=True)
+    history.add_argument("--instance-key")
+    history.set_defaults(
+        command_handler=_artifact_history,
+        history_node_id="planning.story.generate",
+    )
+    dependencies = story_sub.add_parser("dependencies")
+    dependencies_sub = dependencies.add_subparsers(
+        dest="dependency_action",
+        required=True,
+    )
+    parsers[("story", "dependencies")] = dependencies
+    branches[("story", "dependencies")] = dependencies_sub
+    inspect = dependencies_sub.add_parser("inspect")
+    inspect.add_argument("--project-id", type=int, required=True)
+    inspect.set_defaults(command_handler=_story_dependencies)
+
+
+def _install_sprint_reads(
+    sprint_sub: argparse._SubParsersAction,
+    *,
+    branches: dict[tuple[str, ...], argparse._SubParsersAction],
+    parsers: dict[tuple[str, ...], argparse.ArgumentParser],
+) -> None:
+    for action, handler in (
+        ("candidates", _sprint_candidates),
+        ("history", _sprint_history),
+        ("metrics", _sprint_metrics),
+        ("status", _sprint_status),
+        ("tasks", _sprint_tasks),
+    ):
+        read = sprint_sub.add_parser(action)
+        read.add_argument("--project-id", type=int, required=True)
+        if action in {"status", "tasks"}:
+            read.add_argument("--sprint-id", type=int)
+        read.set_defaults(command_handler=handler)
+    task = sprint_sub.add_parser("task")
+    task_sub = task.add_subparsers(dest="task_action", required=True)
+    parsers[("sprint", "task")] = task
+    branches[("sprint", "task")] = task_sub
+    for action, handler in (
+        ("show", _sprint_task_show),
+        ("history", _sprint_task_history),
+    ):
+        read = task_sub.add_parser(action)
+        read.add_argument("--project-id", type=int, required=True)
+        read.add_argument("--task-id", type=int, required=True)
+        read.add_argument("--sprint-id", type=int)
+        read.set_defaults(command_handler=handler)
+
+
+def _install_read_commands(
+    subparsers: argparse._SubParsersAction,
+    *,
+    branches: dict[tuple[str, ...], argparse._SubParsersAction],
+    parsers: dict[tuple[str, ...], argparse.ArgumentParser],
+) -> None:
+    for group in ("authority", "vision", "backlog", "roadmap", "story", "sprint"):
+        group_parser = subparsers.add_parser(group)
+        group_sub = group_parser.add_subparsers(
+            dest=f"{group}_action",
+            required=True,
+        )
+        parsers[(group,)] = group_parser
+        branches[(group,)] = group_sub
+    _install_authority_reads(branches[("authority",)])
+    _install_artifact_history_reads(branches)
+    _install_story_reads(
+        branches[("story",)],
+        branches=branches,
+        parsers=parsers,
+    )
+    _install_sprint_reads(
+        branches[("sprint",)],
+        branches=branches,
+        parsers=parsers,
+    )
+    context = subparsers.add_parser("context")
+    context_sub = context.add_subparsers(dest="context_action", required=True)
+    context_pack = context_sub.add_parser("pack")
+    context_pack.add_argument("--project-id", type=int, required=True)
+    context_pack.add_argument("--phase", default="sprint-planning")
+    context_pack.set_defaults(command_handler=_context_pack)
+    status = subparsers.add_parser("status")
+    status.add_argument("--project-id", type=int, required=True)
+    status.set_defaults(command_handler=_status)
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the graph-backed command tree."""
     parser = _ArgumentParser(prog="agileforge")
@@ -152,8 +376,18 @@ def build_parser() -> argparse.ArgumentParser:
         parser_class=_ArgumentParser,
     )
 
+    branches: dict[tuple[str, ...], argparse._SubParsersAction] = {(): subparsers}
+    parsers: dict[tuple[str, ...], argparse.ArgumentParser] = {}
+
     project = subparsers.add_parser("project")
     project_sub = project.add_subparsers(dest="project_action", required=True)
+    parsers[("project",)] = project
+    branches[("project",)] = project_sub
+    project_list = project_sub.add_parser("list")
+    project_list.set_defaults(command_handler=_project_list)
+    project_show = project_sub.add_parser("show")
+    project_show.add_argument("--project-id", type=int, required=True)
+    project_show.set_defaults(command_handler=_project_show)
     create = project_sub.add_parser("create")
     create.add_argument("--name", required=True)
     create.add_argument("--origin", choices=("greenfield", "brownfield"), required=True)
@@ -174,8 +408,149 @@ def build_parser() -> argparse.ArgumentParser:
     position.add_argument("--include-optional", action="store_true")
     position.set_defaults(command_handler=_workflow_position)
 
-    _install_transition_commands(subparsers)
+    _install_read_commands(
+        subparsers,
+        branches=branches,
+        parsers=parsers,
+    )
+
+    _install_transition_commands(
+        subparsers,
+        branches=branches,
+        parsers=parsers,
+    )
     return parser
+
+
+def _emit_read(result: JsonObject) -> int:
+    _write_json(result)
+    return 0 if result.get("ok") is True else 1
+
+
+def _project_list(_args: argparse.Namespace, application: _Application) -> int:
+    return _emit_read(application.reads.project_list())
+
+
+def _project_show(args: argparse.Namespace, application: _Application) -> int:
+    return _emit_read(application.reads.project_show(project_id=args.project_id))
+
+
+def _authority_status(args: argparse.Namespace, application: _Application) -> int:
+    return _emit_read(application.reads.authority_status(project_id=args.project_id))
+
+
+def _authority_invariants(
+    args: argparse.Namespace,
+    application: _Application,
+) -> int:
+    return _emit_read(
+        application.reads.authority_invariants(
+            project_id=args.project_id,
+            spec_version_id=args.spec_version_id,
+        )
+    )
+
+
+def _authority_review(args: argparse.Namespace, application: _Application) -> int:
+    return _emit_read(
+        application.reads.authority_review(
+            project_id=args.project_id,
+            include_spec=args.include_spec,
+        )
+    )
+
+
+def _artifact_history(args: argparse.Namespace, application: _Application) -> int:
+    return _emit_read(
+        application.reads.artifact_history(
+            project_id=args.project_id,
+            node_id=args.history_node_id,
+            instance_key=getattr(args, "instance_key", None),
+        )
+    )
+
+
+def _story_show(args: argparse.Namespace, application: _Application) -> int:
+    return _emit_read(application.reads.story_show(story_id=args.story_id))
+
+
+def _story_pending(args: argparse.Namespace, application: _Application) -> int:
+    return _emit_read(application.reads.story_pending(project_id=args.project_id))
+
+
+def _story_dependencies(
+    args: argparse.Namespace,
+    application: _Application,
+) -> int:
+    return _emit_read(
+        application.reads.story_dependencies_inspect(project_id=args.project_id)
+    )
+
+
+def _sprint_candidates(args: argparse.Namespace, application: _Application) -> int:
+    return _emit_read(application.reads.sprint_candidates(project_id=args.project_id))
+
+
+def _sprint_history(args: argparse.Namespace, application: _Application) -> int:
+    return _emit_read(application.reads.sprint_history(project_id=args.project_id))
+
+
+def _sprint_metrics(args: argparse.Namespace, application: _Application) -> int:
+    return _emit_read(application.reads.sprint_metrics(project_id=args.project_id))
+
+
+def _sprint_status(args: argparse.Namespace, application: _Application) -> int:
+    return _emit_read(
+        application.reads.sprint_status(
+            project_id=args.project_id,
+            sprint_id=args.sprint_id,
+        )
+    )
+
+
+def _sprint_tasks(args: argparse.Namespace, application: _Application) -> int:
+    return _emit_read(
+        application.reads.sprint_tasks(
+            project_id=args.project_id,
+            sprint_id=args.sprint_id,
+        )
+    )
+
+
+def _sprint_task_show(args: argparse.Namespace, application: _Application) -> int:
+    return _emit_read(
+        application.reads.sprint_task_show(
+            project_id=args.project_id,
+            task_id=args.task_id,
+            sprint_id=args.sprint_id,
+        )
+    )
+
+
+def _sprint_task_history(
+    args: argparse.Namespace,
+    application: _Application,
+) -> int:
+    return _emit_read(
+        application.reads.sprint_task_history(
+            project_id=args.project_id,
+            task_id=args.task_id,
+            sprint_id=args.sprint_id,
+        )
+    )
+
+
+def _context_pack(args: argparse.Namespace, application: _Application) -> int:
+    return _emit_read(
+        application.reads.context_pack(
+            project_id=args.project_id,
+            phase=args.phase,
+        )
+    )
+
+
+def _status(args: argparse.Namespace, application: _Application) -> int:
+    return _emit_read(application.reads.status(project_id=args.project_id))
 
 
 def _open_project_shell(args: argparse.Namespace, application: _Application) -> int:

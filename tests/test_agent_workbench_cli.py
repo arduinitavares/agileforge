@@ -3219,8 +3219,7 @@ def test_discovery_challenge_record_cli_reports_ready_artifact_blockers(
     assert payload["ok"] is False
     assert error["code"] == ErrorCode.CHALLENGE_ARTIFACT_INVALID.value
     assert any(
-        _mapping(blocker)["field"] == "content.open_questions"
-        for blocker in blockers
+        _mapping(blocker)["field"] == "content.open_questions" for blocker in blockers
     )
 
 
@@ -3910,9 +3909,7 @@ def test_scope_extension_start_cli_routes_spec_amendment_id_to_application(
 
     payload = _stdout_payload(capsys)
     assert rc == 0
-    assert _mapping(payload["meta"])["command"] == (
-        "agileforge scope extension start"
-    )
+    assert _mapping(payload["meta"])["command"] == ("agileforge scope extension start")
     assert app.calls == [
         (
             "scope_extension_start",
@@ -7137,7 +7134,7 @@ def test_module_parse_errors_return_json_envelope() -> None:
     assert result.returncode == INVALID_COMMAND_EXIT_CODE
     assert result.stderr == ""
     assert payload["ok"] is False
-    assert "invalid choice" in str(payload["error"])
+    assert "--project-id" in str(payload["error"])
 
 
 def test_top_level_help_describes_agent_workbench_commands(

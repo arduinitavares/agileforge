@@ -2,18 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from functools import cache
 from typing import TYPE_CHECKING, Protocol
 
 from workflow.contracts import (
     FrozenModel,
     JsonObject,
-    NodeCategory,
-    RecommendationKind,
     TransitionResult,
-    WorkflowError,
-    WorkflowErrorCode,
     WorkflowPosition,
 )
 
@@ -32,6 +27,109 @@ class WorkflowDomainPort(Protocol):
     def transition(self, request: TransitionRequest) -> TransitionResult:
         """Apply one exact typed transition."""
         ...
+
+
+class _ReadProjectionPort(Protocol):
+    """Supported non-routing reads exposed to production transports."""
+
+    def project_list(self) -> JsonObject: ...
+
+    def project_show(self, *, project_id: int) -> JsonObject: ...
+
+    def authority_status(self, *, project_id: int) -> JsonObject: ...
+
+    def authority_invariants(
+        self,
+        *,
+        project_id: int,
+        spec_version_id: int | None = None,
+    ) -> JsonObject: ...
+
+    def authority_review(
+        self,
+        *,
+        project_id: int,
+        include_spec: str = "auto",
+    ) -> JsonObject: ...
+
+    def artifact_history(
+        self,
+        *,
+        project_id: int,
+        node_id: str,
+        instance_key: str | None = None,
+    ) -> JsonObject: ...
+
+    def story_show(self, *, story_id: int) -> JsonObject: ...
+
+    def story_pending(self, *, project_id: int) -> JsonObject: ...
+
+    def story_dependencies_inspect(self, *, project_id: int) -> JsonObject: ...
+
+    def sprint_candidates(self, *, project_id: int) -> JsonObject: ...
+
+    def sprint_history(self, *, project_id: int) -> JsonObject: ...
+
+    def sprint_metrics(self, *, project_id: int) -> JsonObject: ...
+
+    def sprint_status(
+        self,
+        *,
+        project_id: int,
+        sprint_id: int | None = None,
+    ) -> JsonObject: ...
+
+    def sprint_tasks(
+        self,
+        *,
+        project_id: int,
+        sprint_id: int | None = None,
+    ) -> JsonObject: ...
+
+    def sprint_task_show(
+        self,
+        *,
+        project_id: int,
+        task_id: int,
+        sprint_id: int | None = None,
+    ) -> JsonObject: ...
+
+    def sprint_task_history(
+        self,
+        *,
+        project_id: int,
+        task_id: int,
+        sprint_id: int | None = None,
+    ) -> JsonObject: ...
+
+    def sprint_review(
+        self,
+        *,
+        project_id: int,
+        sprint_id: int | None = None,
+    ) -> JsonObject: ...
+
+    def task_packet(
+        self,
+        *,
+        project_id: int,
+        sprint_id: int,
+        task_id: int,
+        flavor: str | None = None,
+    ) -> JsonObject: ...
+
+    def story_packet(
+        self,
+        *,
+        project_id: int,
+        sprint_id: int,
+        story_id: int,
+        flavor: str | None = None,
+    ) -> JsonObject: ...
+
+    def context_pack(self, *, project_id: int, phase: str) -> JsonObject: ...
+
+    def status(self, *, project_id: int) -> JsonObject: ...
 
 
 _EXECUTION_SETTINGS: JsonObject = {
@@ -57,16 +155,6 @@ class AgenticActionRequest(FrozenModel):
     correlation_id: str | None = None
 
 
-class ProjectSummary(FrozenModel):
-    """Non-routing Project list projection."""
-
-    id: int
-    name: str
-
-
-type ProjectReader = Callable[[], tuple[ProjectSummary, ...]]
-
-
 class AgileForgeApplication:
     """Expose the narrow workflow application interface to transports."""
 
@@ -75,18 +163,20 @@ class AgileForgeApplication:
         *,
         workflow_domain: WorkflowDomainPort,
         recipe_registry: AdkRecipeRegistry | None = None,
-        project_reader: ProjectReader | None = None,
+        read_projection: _ReadProjectionPort | None = None,
     ) -> None:
         """Retain exactly one workflow authority."""
         self._workflow_domain = workflow_domain
         self._recipe_registry = recipe_registry
-        self._project_reader = project_reader
+        self._read_projection = read_projection
 
-    def projects(self) -> tuple[ProjectSummary, ...]:
-        """Return the non-routing Project list projection."""
-        if self._project_reader is None:
-            return ()
-        return self._project_reader()
+    @property
+    def reads(self) -> _ReadProjectionPort:
+        """Return the injected durable non-routing projection."""
+        if self._read_projection is None:
+            message = "Read operations require an injected durable projection."
+            raise RuntimeError(message)
+        return self._read_projection
 
     def position(self, *, project_id: int) -> WorkflowPosition:
         """Return the current durable workflow position."""
@@ -103,46 +193,10 @@ class AgileForgeApplication:
         """Run one exact available agentic decision through durable ADK attempts."""
         from adapters.adk.runner import (  # noqa: PLC0415
             AdkExecutionConfig,
-            AdkRunGuards,
+            AdkRunRequest,
             AdkWorkflowRunner,
         )
 
-        position = self.position(project_id=request.project_id)
-        decision = next(
-            (
-                item
-                for item in position.decisions
-                if item.node_id == request.node_id
-                and item.instance_key == request.instance_key
-                and item.decision_fingerprint == request.decision_fingerprint
-            ),
-            None,
-        )
-        if (
-            position.graph_version != request.graph_version
-            or position.fact_fingerprint != request.fact_fingerprint
-            or decision is None
-        ):
-            return TransitionResult(
-                ok=False,
-                position=position,
-                error=WorkflowError(
-                    code=WorkflowErrorCode.STALE_POSITION,
-                    message="The supplied workflow action is no longer current.",
-                ),
-            )
-        if decision.category is not NodeCategory.AVAILABLE or (
-            decision.recommendation_kind
-            not in {RecommendationKind.REQUIRED, RecommendationKind.RECOVERY}
-        ):
-            return TransitionResult(
-                ok=False,
-                position=position,
-                error=WorkflowError(
-                    code=WorkflowErrorCode.TRANSITION_NOT_AVAILABLE,
-                    message="The supplied workflow action is not executable.",
-                ),
-            )
         if self._recipe_registry is None:
             msg = "Agentic execution requires a production recipe registry."
             raise RuntimeError(msg)
@@ -158,11 +212,14 @@ class AgileForgeApplication:
                 correlation_id=request.correlation_id,
             ),
         )
-        return runner.run(
-            decision,
-            request.input_payload,
-            guards=AdkRunGuards(
-                position=position,
+        return runner.run_request(
+            AdkRunRequest(
+                graph_version=request.graph_version,
+                fact_fingerprint=request.fact_fingerprint,
+                decision_fingerprint=request.decision_fingerprint,
+                node_id=request.node_id,
+                instance_key=request.instance_key,
+                input_payload=request.input_payload,
                 idempotency_key=request.idempotency_key,
                 actor=request.actor,
                 correlation_id=request.correlation_id,
@@ -191,7 +248,9 @@ def production_application() -> AgileForgeApplication:
         build_agentic_recipe_registry,
     )
     from models.db import ensure_business_db_ready, get_engine  # noqa: PLC0415
-    from repositories.product import ProductRepository  # noqa: PLC0415
+    from services.read_projections import (  # noqa: PLC0415
+        DurableReadProjectionService,
+    )
     from workflow.clock import SystemClock  # noqa: PLC0415
     from workflow.definitions.root import project_graph  # noqa: PLC0415
     from workflow.domain import WorkflowDomain  # noqa: PLC0415
@@ -219,24 +278,16 @@ def production_application() -> AgileForgeApplication:
         adk_recipe_registry=registry,
     )
 
-    def read_projects() -> tuple[ProjectSummary, ...]:
-        return tuple(
-            ProjectSummary(id=item.product_id, name=item.name)
-            for item in ProductRepository().get_all()
-            if item.product_id is not None
-        )
-
     return AgileForgeApplication(
         workflow_domain=domain,
         recipe_registry=registry,
-        project_reader=read_projects,
+        read_projection=DurableReadProjectionService(engine=engine),
     )
 
 
 __all__ = [
     "AgenticActionRequest",
     "AgileForgeApplication",
-    "ProjectSummary",
     "WorkflowDomainPort",
     "production_application",
 ]

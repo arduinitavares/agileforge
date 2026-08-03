@@ -14,7 +14,7 @@ async function fetchProjects() {
         const response = await fetch('/api/projects');
         if (!response.ok) throw new Error('Failed to load projects.');
         const payload = await response.json();
-        projects = Array.isArray(payload.data) ? payload.data : [];
+        projects = Array.isArray(payload.data?.items) ? payload.data.items : [];
         renderProjects();
     } catch (error) {
         if (container) container.textContent = error.message;

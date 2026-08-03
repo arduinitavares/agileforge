@@ -1856,21 +1856,20 @@ def test_dashboard_reject_empty_reason_returns_request_boundary_error(
     assert errors[0]["type"] == "string_too_short"
 
 
-def test_dashboard_pending_review_copy_is_not_project_setup_required() -> None:
-    """Keep the dashboard pending review panel copy authority-specific."""
+def test_dashboard_replaces_stale_authority_panel_with_position_actions() -> None:
+    """Render workflow decisions without the removed setup-authority panel."""
     html = Path("frontend/project.html").read_text()
-    marker = 'id="authority-review-card"'
 
-    assert marker in html
-    review_card = html[html.index(marker) : html.index(marker) + 1200]
-    assert "Pending Authority Review" in review_card
-    assert "Project Setup Required" not in review_card
+    assert 'id="workflow-position-panel"' in html
+    assert 'id="workflow-action-dialog"' in html
+    assert 'id="authority-review-card"' not in html
+    assert "Project Setup Required" not in html
 
 
 def test_dashboard_sprint_planning_ui_uses_point_capacity_contract() -> None:
-    """Keep Sprint planning UI aligned with point capacity, not calendar heuristics."""
+    """Keep the production decision form free of removed calendar heuristics."""
     html = Path("frontend/project.html").read_text()
-    js = Path("tests/legacy_project.js").read_text()
+    js = Path("frontend/project.js").read_text()
 
     assert 'id="sprint-velocity"' not in html
     assert 'id="sprint-duration"' not in html
@@ -1881,35 +1880,33 @@ def test_dashboard_sprint_planning_ui_uses_point_capacity_contract() -> None:
     assert "SPRINT_VELOCITY_LIMITS" not in js
     assert "team_velocity_assumption" not in js
     assert "sprint_duration_days" not in js
-    assert "Max Story Points" in html
-    assert "project metrics recommendation" in html
+    assert "workflow-action-fields" in html
+    assert "required_inputs" in js
+    assert "input_payload" in js
 
 
-def test_dashboard_sprint_save_uses_guarded_contract_without_start_date() -> None:
-    """Keep Sprint save UI aligned with guarded API save contract."""
+def test_dashboard_actions_use_graph_guards_without_legacy_sprint_state() -> None:
+    """Keep production actions on exact graph guards, not Sprint phase state."""
     html = Path("frontend/project.html").read_text()
-    js = Path("tests/legacy_project.js").read_text()
+    js = Path("frontend/project.js").read_text()
 
     assert 'id="sprint-start-date"' not in html
     assert "Sprint Start Date" not in html
     assert "sprint-start-date" not in js
     assert "sprint_start_date" not in js
-    assert "attempt_id" in js
-    assert "expected_artifact_fingerprint" in js
-    assert "expected_state: 'SPRINT_DRAFT'" in js
+    assert "expected_fact_fingerprint" in js
+    assert "expected_decision_fingerprint" in js
+    assert "expected_state" not in js
     assert "idempotency_key" in js
 
 
-def test_dashboard_sprint_save_reuses_idempotency_key_for_current_draft() -> None:
-    """Keep retry clicks idempotent for the same reviewed Sprint draft."""
-    js = Path("tests/legacy_project.js").read_text()
+def test_dashboard_captures_idempotency_key_with_exact_rendered_decision() -> None:
+    """Keep retries for one rendered decision on one transport key."""
+    js = Path("frontend/project.js").read_text()
 
-    assert "let latestSprintSaveIdempotencyKey = null;" in js
-    assert "function sprintSaveIdempotencyKey()" in js
-    assert "idempotency_key: sprintSaveIdempotencyKey()" in js
-    assert "latestSprintSaveIdempotencyKey = null;" in js
-    save_payload_index = js.index("idempotency_key: sprintSaveIdempotencyKey()")
-    assert "Date.now()" not in js[save_payload_index : save_payload_index + 120]
+    assert "idempotencyKey" in js
+    assert "renderedWorkflowActions.set" in js
+    assert "Date.now()" not in js
 
 
 def test_state_forces_setup_required_when_product_missing_spec(
