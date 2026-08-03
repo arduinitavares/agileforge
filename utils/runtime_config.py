@@ -69,14 +69,6 @@ class RuntimeConfigError(RuntimeError):
         )
 
     @classmethod
-    def shared_session_database(cls) -> RuntimeConfigError:
-        """Build an error when business and session DBs point to the same file."""
-        return cls(
-            "AGILEFORGE_SESSION_DB_URL must point to a different SQLite file than "
-            "AGILEFORGE_DB_URL."
-        )
-
-    @classmethod
     def shared_adk_execution_trace_database(cls) -> RuntimeConfigError:
         """Build an error when business and ADK trace DBs share one file."""
         return cls(
@@ -259,19 +251,6 @@ def get_business_db_target() -> DatabaseTarget:
 
 
 @lru_cache(maxsize=1)
-def get_session_db_target() -> DatabaseTarget:
-    """Return the configured session database target."""
-    target = resolve_database_target(None, env_name="AGILEFORGE_SESSION_DB_URL")
-    business_target = get_business_db_target()
-    if (
-        target.sqlite_path is not None
-        and target.sqlite_path == business_target.sqlite_path
-    ):
-        raise RuntimeConfigError.shared_session_database()
-    return target
-
-
-@lru_cache(maxsize=1)
 def get_adk_execution_trace_db_target() -> DatabaseTarget:
     """Return the separate ADK execution-trace database target."""
     target = resolve_database_target(
@@ -388,6 +367,5 @@ def get_api_reload(default: bool = True) -> bool:
 def clear_runtime_config_cache() -> None:
     """Clear cached runtime settings for tests."""
     get_business_db_target.cache_clear()
-    get_session_db_target.cache_clear()
     get_adk_execution_trace_db_target.cache_clear()
     get_database_echo.cache_clear()

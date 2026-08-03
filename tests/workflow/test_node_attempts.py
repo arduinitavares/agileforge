@@ -17,7 +17,7 @@ from adapters.adk.recipes import (
     RecipeInput,
     RecipeOutput,
 )
-from models.core import Product
+from models.core import Project
 from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance, SpecRegistry
 from models.workflow import (
     BacklogArtifact,
@@ -74,12 +74,12 @@ def _authority_artifact() -> SpecAuthorityCompilationSuccess:
 def _seed_accepted_authority(engine: Engine) -> tuple[int, int, str]:
     artifact = _authority_artifact()
     with Session(engine) as session:
-        project = Product(name="Task 15", origin="greenfield")
+        project = Project(name="Task 15", origin="greenfield")
         session.add(project)
         session.flush()
-        assert project.product_id is not None
+        assert project.project_id is not None
         spec = SpecRegistry(
-            product_id=project.product_id,
+            project_id=project.project_id,
             spec_hash="sha256:task-15-spec",
             content='{"scope":"task-15"}',
             status="approved",
@@ -108,7 +108,7 @@ def _seed_accepted_authority(engine: Engine) -> tuple[int, int, str]:
         assert authority_fingerprint is not None
         session.add(
             SpecAuthorityAcceptance(
-                product_id=project.product_id,
+                project_id=project.project_id,
                 spec_version_id=spec.spec_version_id,
                 status="accepted",
                 policy="manual",
@@ -125,7 +125,7 @@ def _seed_accepted_authority(engine: Engine) -> tuple[int, int, str]:
             )
         )
         session.commit()
-        return project.product_id, authority.authority_id, authority_fingerprint
+        return project.project_id, authority.authority_id, authority_fingerprint
 
 
 def _registry() -> AdkRecipeRegistry:
@@ -461,7 +461,7 @@ def test_late_model_result_is_recorded_obsolete_without_authority_fact(
     started = domain.transition(start_request)
     attempt_id, attempt_fingerprint = _attempt_identity(started)
     with Session(engine) as session:
-        project = session.get(Product, project_id)
+        project = session.get(Project, project_id)
         assert project is not None
         project.name = "Task 15 changed"
         session.add(project)

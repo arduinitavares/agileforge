@@ -369,7 +369,7 @@ class AuthorityRegenerateRunner:
         """Validate project/spec ownership and approval guards."""
         with Session(self.engine) as session:
             spec_version = session.get(SpecRegistry, request.spec_version_id)
-            if spec_version is None or spec_version.product_id != request.project_id:
+            if spec_version is None or spec_version.project_id != request.project_id:
                 return error_envelope(
                     command=AUTHORITY_REGENERATE_COMMAND,
                     error=workbench_error(

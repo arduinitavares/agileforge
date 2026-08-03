@@ -212,7 +212,7 @@ class SpecAuthorityCompilerInput(BaseModel):
         str | None,
         Field(default=None, description="Optional domain hint for extraction."),
     ]
-    product_id: Annotated[
+    project_id: Annotated[
         int | None,
         Field(default=None, description="Optional product identifier."),
     ]
@@ -1127,7 +1127,7 @@ class StoryDraftInput(BaseModel):
     ]
     product_context: Annotated[
         dict[str, Any],
-        Field(description="Product context (id, name, vision, time_frame)."),
+        Field(description="Project context (id, name, vision, time_frame)."),
     ]
     spec_version_id: Annotated[
         int,

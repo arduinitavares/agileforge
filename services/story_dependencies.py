@@ -61,7 +61,7 @@ def load_story_dependency_graph(
     """Load dependency graph, excluding invalid edges from planner-ready output."""
     edge_rows = session.exec(
         select(UserStoryDependency)
-        .where(UserStoryDependency.product_id == project_id)
+        .where(UserStoryDependency.project_id == project_id)
         .order_by(col(UserStoryDependency.dependent_story_id))
     ).all()
     endpoint_ids = {
@@ -257,7 +257,7 @@ def apply_story_dependencies_in_session(
         story.story_id: story for story in stories if story.story_id is not None
     }
     if set(stories_by_id) != selected or any(
-        story.product_id != project_id or story.is_superseded or not story.is_refined
+        story.project_id != project_id or story.is_superseded or not story.is_refined
         for story in stories_by_id.values()
     ):
         message = "Dependency review does not target exact active Project stories."
@@ -302,7 +302,7 @@ def apply_story_dependencies_in_session(
             ]
         )
     existing_rows = session.exec(
-        select(UserStoryDependency).where(UserStoryDependency.product_id == project_id)
+        select(UserStoryDependency).where(UserStoryDependency.project_id == project_id)
     ).all()
     existing_by_pair = {
         (row.dependent_story_id, row.prerequisite_story_id): row
@@ -325,7 +325,7 @@ def apply_story_dependencies_in_session(
         dependent_story_id, prerequisite_story_id = pair
         session.add(
             UserStoryDependency(
-                product_id=project_id,
+                project_id=project_id,
                 dependent_story_id=dependent_story_id,
                 prerequisite_story_id=prerequisite_story_id,
                 status="active",
@@ -351,8 +351,7 @@ def apply_story_dependencies_in_session(
         WorkflowEvent(
             event_type=WorkflowEventType.STORY_DEPENDENCIES_APPLIED,
             timestamp=reviewed_at,
-            product_id=project_id,
-            session_id=None,
+            project_id=project_id,
             duration_seconds=0.0,
             event_metadata=canonical_json(
                 {
@@ -387,7 +386,7 @@ def _load_edge_rows_by_key(
     project_id: int,
 ) -> dict[tuple[int, int], UserStoryDependency]:
     edge_rows = session.exec(
-        select(UserStoryDependency).where(UserStoryDependency.product_id == project_id)
+        select(UserStoryDependency).where(UserStoryDependency.project_id == project_id)
     ).all()
     return {
         (edge.dependent_story_id, edge.prerequisite_story_id): edge
@@ -433,7 +432,7 @@ def _edge_issue(
     cross_project_ids = [
         story.story_id
         for story in (dependent, prerequisite)
-        if story.story_id is not None and story.product_id != project_id
+        if story.story_id is not None and story.project_id != project_id
     ]
     if cross_project_ids:
         return DependencyGraphIssue(

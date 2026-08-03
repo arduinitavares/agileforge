@@ -6,7 +6,7 @@
 
 > **A developer tool for agent-assisted agile planning and execution, governed by Spec Authority.**
 
-AgileForge orchestrates the full agile backbone from product vision to sprint execution. It gives agents a bounded workflow, a SQLite-backed project memory, and a read-only CLI for inspecting project context safely.
+AgileForge runs the agile backbone from product vision to sprint execution. It gives agents guarded Project workflows, durable SQLite facts, and a CLI for inspecting or applying exact workflow decisions.
 
 This project began as a **TCC (Trabalho de Conclusão de Curso)** research initiative exploring how AI agents can autonomously orchestrate Agile workflows with a **Spec-Driven Architecture**.
 
@@ -22,10 +22,10 @@ Vision → Specification Authority → Initial Backlog → Roadmap → User Stor
 ### 🧠 Intelligent Agents
 | Agent | Role | Capabilities |
 |-------|------|--------------|
-| **Product Vision Tool** | Product Owner | **Strategic Initiation:** Constructs a 7-component "True North" vision statement using the "Bucket Brigade" stateless pattern. |
+| **Product Vision Tool** | Project Owner | **Strategic Initiation:** Constructs a 7-component "True North" vision statement using the "Bucket Brigade" stateless pattern. |
 | **Spec Authority Compiler** | Architect | **Feasibility Filter:** A non-conversational compiler that extracts deterministic "Definition of Done" constraints from technical specs. |
-| **Backlog Primer** | Product Owner | **Pre-Planning:** Converts Vision into a prioritized list of Gross Requirements (not User Stories) using T-Shirt sizing. |
-| **Roadmap Builder** | Product Owner | **Strategic Planning:** Maps requirements to time-based milestones, respecting technical dependencies and themes. |
+| **Backlog Primer** | Project Owner | **Pre-Planning:** Converts Vision into a prioritized list of Gross Requirements (not User Stories) using T-Shirt sizing. |
+| **Roadmap Builder** | Project Owner | **Strategic Planning:** Maps requirements to time-based milestones, respecting technical dependencies and themes. |
 | **User Story Writer** | PO Assistant | **Requirement Refinement:** Decomposes requirements into INVEST-ready "Vertical Slices" using the "Three Cs" protocol. |
 | **Sprint Planner** | Scrum Master | **Tactical Planning:** Facilitates scope selection via a "Pull System" and auto-decomposes stories into technical tasks. |
 
@@ -40,37 +40,22 @@ Vision → Specification Authority → Initial Backlog → Roadmap → User Stor
 
 ## 🏗️ Architecture
 
-```
-┌──────────────────────────────────────────────────────────────────────────┐
-│                          Orchestrator Agent                              │
-│           (Explicit FSM, Registry & Bucket Brigade Routing)              │
-├──────────────────────────────────────────────────────────────────────────┤
-│  ┌──────────────┐   ┌──────────────┐   ┌──────────────┐  ┌────────────┐  │
-│  │ Product      │   │ Spec Auth    │   │ Backlog      │  │ Roadmap    │  │
-│  │ Vision Tool  │   │ Compiler     │   │ Primer       │  │ Builder    │  │
-│  └──────────────┘   └──────────────┘   └──────────────┘  └────────────┘  │
-│                               │                                          │
-│                        ┌──────▼──────┐                                   │
-│                        │ Spec Registry│                                  │
-│                        │ & Authority  │                                  │
-│                        └──────┬───────┘                                  │
-│                               │                                          │
-│  ┌────────────────────────────▼─────────────────────────────────────────┐│
-│  │              Tactical & Execution Tools                              ││
-│  │  (User Story Writer -> Sprint Planner -> Execution)                  ││
-│  └──────────────────────────────────────────────────────────────────────┘│
-├──────────────────────────────────────────────────────────────────────────┤
-│                          SQLite Database                                 │
-│  (Products, Specs, CompiledAuthority, Epics, Stories)                    │
-└──────────────────────────────────────────────────────────────────────────┘
-```
+`WorkflowDomain.position(project_id)` derives available, waiting, blocked,
+invalid, or terminal nodes from durable Project facts. Guarded task-specific
+commands submit typed requests through `WorkflowDomain.transition(request)`.
+ADK recipes execute eligible agent work but do not own routing state.
+
+A greenfield or brownfield intake opens a Project Shell first. Discovery,
+repository inventory, curation, authority, planning, and execution records all
+belong to that Project identity. Repository onboarding remains operator-led:
+the operator selects the source, reviews inventory and curation artifacts, and
+submits the exact guarded transition advertised by `workflow position`.
 
 ### Design Patterns
-- **Explicit FSM**: Control flow logic separated from LLM reasoning; states defined in registry.
+- **Derived Workflow Graph**: One immutable fact snapshot drives routing and transition guards.
 - **Spec Authority Pattern**: Compiler pattern for deterministic invariants.
-- **Bucket Brigade Communication**: Agents pass structured state through the orchestrator.
+- **Durable Project Facts**: Restarts and deleted execution traces do not alter workflow position.
 - **Schema-Driven Validation**: All I/O validated by Pydantic schemas.
-- **Tool Context Caching**: Read-only tools support transparent caching with TTL.
 
 ---
 
@@ -98,7 +83,6 @@ cp .env.example .env
 # Then edit .env and set:
 # - OPEN_ROUTER_API_KEY
 # - AGILEFORGE_DB_URL
-# - AGILEFORGE_SESSION_DB_URL
 ```
 
 ### Agent CLI
@@ -154,7 +138,7 @@ Agent: Great! Vision saved. Now, do you want to define the Technical Specificati
 You: Here is the technical spec for MealMuse... [Pastes Spec]
 
 Agent: Spec compiled and Authority accepted.
-I will now generate the Initial Product Backlog (Gross Requirements) before we build the Roadmap.
+I will now generate the Initial Project Backlog (Gross Requirements) before we build the Roadmap.
 
 You: Proceed.
 
@@ -183,20 +167,12 @@ agileforge/
 ├── SPEC_DRIVEN_ARCHITECTURE_PLAN.md # Spec Authority Architecture
 ├── CLAUDE.md                        # TCC requirements and methodology
 │
-├── orchestrator_agent/
-│   ├── agent.py                     # Root agent with all tools
-│   ├── instructions.txt             # State machine routing
-│   └── agent_tools/
-│       ├── product_vision_tool/           # Vision gathering (Stage 1)
-│       ├── spec_authority_compiler_agent/ # Spec Compiler (Feasibility)
-│       ├── backlog_primer/                # Gross Requirements (Pre-Planning)
-│       ├── roadmap_builder/               # Roadmap (Stage 2)
-│       ├── user_story_writer_tool/        # Story Refinement ("Three Cs")
-│       └── sprint_planner_tool/           # Sprint Planning (Scope & Tasks)
+├── workflow/                        # Derived graph, facts, requests, handlers
+├── adapters/adk/                    # Leaf-agent execution recipes
+├── services/application.py          # Production WorkflowDomain boundary
 │
 ├── tools/
-│   ├── orchestrator_tools.py        # Read-only query tools
-│   ├── db_tools.py                  # Database mutation tools
+│   ├── db_tools.py                  # Database utilities
 │   └── spec_tools.py                # Spec persistence and authority tools
 │
 ├── utils/
@@ -213,7 +189,7 @@ agileforge/
 ## 🗄️ Database Schema
 
 ```
-products ─┬─> spec_registry ─> compiled_spec_authority
+projects ─┬─> spec_registry ─> compiled_spec_authority
           │
           ├─> themes ─┬─> epics ─┬─> features
           │           │          │
@@ -225,7 +201,7 @@ products ─┬─> spec_registry ─> compiled_spec_authority
 ```
 
 Key tables:
-- **products**: Top-level container
+- **projects**: Top-level container
 - **spec_registry**: Versioned technical specifications
 - **compiled_spec_authority**: Deterministic invariants compiled from specs
 - **user_stories**: INVEST-ready stories with spec validation

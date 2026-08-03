@@ -1,4 +1,4 @@
-"""This module defines the input and output schemas for the Product Vision Agent."""
+"""Input and output schemas for the product vision agent."""
 
 from typing import Annotated
 
@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 class SaveVisionInput(BaseModel):
     """Schema for the temporary legacy Vision write entry point."""
 
-    product_id: Annotated[
+    project_id: Annotated[
         int | None,
         Field(
             description="ID of the project to update. If None, creates a NEW project."
@@ -74,10 +74,10 @@ class VisionComponents(BaseModel):
 
 class InputSchema(BaseModel):
     """
-    Schema for the input arguments the Orchestrator MUST provide to the tool.
+    Schema for the input arguments the workflow adapter MUST provide to the tool.
 
     CRITICAL: All fields must be REQUIRED (no defaults) so the Google ADK
-    knows to force the Orchestrator to generate/provide them.
+    knows to force the workflow adapter to generate/provide them.
     """
 
     user_raw_text: Annotated[
@@ -112,7 +112,7 @@ class InputSchema(BaseModel):
         Field(
             description=(
                 "Compiled authority JSON (invariants/constraints) from the "
-                "orchestrator. "
+                "workflow adapter. "
                 "If no authority is available yet, pass an empty string."
             ),
         ),
@@ -120,7 +120,7 @@ class InputSchema(BaseModel):
 
 
 class OutputSchema(BaseModel):
-    """The structured response returned by the Product Vision Agent."""
+    """The structured response returned by the product vision agent."""
 
     # A. The State (To be saved to DB)
     updated_components: Annotated[
@@ -141,7 +141,7 @@ class OutputSchema(BaseModel):
         ),
     ]
 
-    # C. Metadata (For Orchestrator logic)
+    # C. Metadata (For workflow adapter logic)
     is_complete: Annotated[
         bool,
         Field(

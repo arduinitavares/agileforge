@@ -113,7 +113,7 @@ def test_output_schema_rejects_legacy_output_contract_fields() -> None:
 def test_save_sprint_plan_input_omits_calendar_fields() -> None:
     """Ensure the agent-facing save tool input has no calendar fields."""
     field_names = set(SaveSprintPlanInput.model_fields)
-    assert "product_id" in field_names
+    assert "project_id" in field_names
     assert "team_id" in field_names
     assert "team_name" in field_names
     assert "sprint" + "_start_date" not in field_names

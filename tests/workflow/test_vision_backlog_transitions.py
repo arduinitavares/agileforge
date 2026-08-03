@@ -12,11 +12,10 @@ import pytest
 from pydantic import TypeAdapter
 from sqlmodel import Session, col, select
 
-import services.agent_workbench.backlog_active_reset as backlog_active_reset_module
 import services.agent_workbench.backlog_phase as backlog_phase_module
 import services.agent_workbench.backlog_reconciliation as backlog_reconciliation_module
 import services.agent_workbench.vision_phase as vision_phase_module
-from models.core import Product, Sprint, SprintStory, Team, UserStory
+from models.core import Project, Sprint, SprintStory, Team, UserStory
 from models.enums import SprintStatus, StoryStatus, WorkflowEventType
 from models.events import WorkflowEvent
 from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance, SpecRegistry
@@ -70,9 +69,6 @@ CALLER_SESSION_FUNCTIONS: dict[ModuleType, frozenset[str]] = {
             "persist_accepted_backlog_in_session",
         }
     ),
-    backlog_active_reset_module: frozenset(
-        {"replay_active_backlog_reset", "reset_active_backlog_rows"}
-    ),
     backlog_reconciliation_module: frozenset(
         {"reconcile_active_backlog", "reconcile_stale_backlog_in_session"}
     ),
@@ -91,7 +87,7 @@ class _RequestGuards(TypedDict):
 
 def _authority_artifact() -> SpecAuthorityCompilationSuccess:
     return SpecAuthorityCompilationSuccess(
-        scope_themes=["Product definition"],
+        scope_themes=["Project definition"],
         invariants=[],
         eligible_feature_rules=[],
         gaps=[],
@@ -109,12 +105,12 @@ def _seed_accepted_authority(
 ) -> tuple[int, int, str]:
     artifact = _authority_artifact()
     with Session(engine) as session:
-        project = Product(name=name, origin="greenfield")
+        project = Project(name=name, origin="greenfield")
         session.add(project)
         session.flush()
-        assert project.product_id is not None
+        assert project.project_id is not None
         spec = SpecRegistry(
-            product_id=project.product_id,
+            project_id=project.project_id,
             spec_hash="sha256:task-10-spec",
             content='{"scope":"task-10"}',
             status="approved",
@@ -143,7 +139,7 @@ def _seed_accepted_authority(
         assert authority_fingerprint is not None
         session.add(
             SpecAuthorityAcceptance(
-                product_id=project.product_id,
+                project_id=project.project_id,
                 spec_version_id=spec.spec_version_id,
                 status="accepted",
                 policy="manual",
@@ -160,7 +156,7 @@ def _seed_accepted_authority(
             )
         )
         session.commit()
-        return project.product_id, authority.authority_id, authority_fingerprint
+        return project.project_id, authority.authority_id, authority_fingerprint
 
 
 def _domain(engine: Engine) -> WorkflowDomain:
@@ -192,7 +188,7 @@ def _vision_content(statement: str = "Build reliable product decisions.") -> Jso
     return {
         "updated_components": {
             "project_name": "Task 10 Project",
-            "target_user": "Product operators",
+            "target_user": "Project operators",
             "problem": "Workflow state can drift",
             "product_category": "Developer tool",
             "key_benefit": "Durable decisions",
@@ -389,13 +385,13 @@ def _replace_accepted_authority(
     with Session(engine) as session:
         old_spec = session.exec(
             select(SpecRegistry).where(
-                col(SpecRegistry.product_id) == project_id,
+                col(SpecRegistry.project_id) == project_id,
                 col(SpecRegistry.status) == "approved",
             )
         ).one()
         old_spec.status = "superseded"
         replacement_spec = SpecRegistry(
-            product_id=project_id,
+            project_id=project_id,
             spec_hash=f"sha256:replacement-spec-{suffix}",
             content=canonical_json({"scope": suffix}),
             status="approved",
@@ -424,7 +420,7 @@ def _replace_accepted_authority(
         assert fingerprint is not None
         session.add(
             SpecAuthorityAcceptance(
-                product_id=project_id,
+                project_id=project_id,
                 spec_version_id=replacement_spec.spec_version_id,
                 status="accepted",
                 policy="manual",
@@ -457,7 +453,7 @@ def _select_story_in_sprint(
         session.flush()
         assert team.team_id is not None
         sprint = Sprint(
-            product_id=project_id,
+            project_id=project_id,
             team_id=team.team_id,
             goal="Protect selected work",
             status=SprintStatus.PLANNED,
@@ -812,7 +808,7 @@ def test_progressed_active_backlog_blocks_replacement_without_partial_decision(
     with Session(engine) as session:
         session.add(
             UserStory(
-                product_id=project_id,
+                project_id=project_id,
                 title="Progressed story",
                 status=StoryStatus.IN_PROGRESS,
                 story_origin="backlog_seed",
@@ -886,11 +882,11 @@ def test_authority_reconciliation_binds_replacement_and_exact_stale_artifact_ids
     replacement_artifact = _authority_artifact()
     with Session(engine) as session:
         old_spec = session.exec(
-            select(SpecRegistry).where(SpecRegistry.product_id == project_id)
+            select(SpecRegistry).where(SpecRegistry.project_id == project_id)
         ).one()
         old_spec.status = "superseded"
         replacement_spec = SpecRegistry(
-            product_id=project_id,
+            project_id=project_id,
             spec_hash="sha256:replacement-spec",
             content='{"scope":"replacement"}',
             status="approved",
@@ -919,7 +915,7 @@ def test_authority_reconciliation_binds_replacement_and_exact_stale_artifact_ids
         assert replacement_fingerprint is not None
         session.add(
             SpecAuthorityAcceptance(
-                product_id=project_id,
+                project_id=project_id,
                 spec_version_id=replacement_spec.spec_version_id,
                 status="accepted",
                 policy="manual",
@@ -1001,7 +997,7 @@ def test_authority_reconciliation_binds_replacement_and_exact_stale_artifact_ids
             {
                 "event_id": event.event_id,
                 "event_type": event.event_type.value,
-                "project_id": event.product_id,
+                "project_id": event.project_id,
                 "timestamp": event.timestamp,
                 "metadata": expected_metadata,
             }
@@ -1021,12 +1017,12 @@ def test_authority_reconciliation_binds_replacement_and_exact_stale_artifact_ids
         row.reconciled_by = "operator@example.com"
         event = session.get(WorkflowEvent, row.audit_event_id)
         assert event is not None
-        other_project = Product(name="Audit Drift Project", origin="greenfield")
+        other_project = Project(name="Audit Drift Project", origin="greenfield")
         session.add(other_project)
         session.flush()
-        assert other_project.product_id is not None
-        wrong_project_id = other_project.product_id
-        event.product_id = wrong_project_id
+        assert other_project.project_id is not None
+        wrong_project_id = other_project.project_id
+        event.project_id = wrong_project_id
         session.add_all([row, event])
         session.commit()
     with pytest.raises(WorkflowFactLoadError):
@@ -1036,7 +1032,7 @@ def test_authority_reconciliation_binds_replacement_and_exact_stale_artifact_ids
         row = session.exec(select(BacklogAuthorityReconciliation)).one()
         event = session.get(WorkflowEvent, row.audit_event_id)
         assert event is not None
-        event.product_id = project_id
+        event.project_id = project_id
         event.event_metadata = canonical_json(
             {"action": "backlog_authority_reconciliation_tampered"}
         )
@@ -1052,7 +1048,7 @@ def test_authority_reconciliation_binds_replacement_and_exact_stale_artifact_ids
         original_event.event_metadata = canonical_json(expected_metadata)
         replacement_event = WorkflowEvent(
             event_type=WorkflowEventType.BACKLOG_SAVED,
-            product_id=project_id,
+            project_id=project_id,
             timestamp=EVALUATED_AT,
             event_metadata=canonical_json(expected_metadata),
         )
@@ -1243,7 +1239,7 @@ def test_post_flush_handler_failure_rolls_back_then_retry_and_replay_once(
             ).all()
             == []
         )
-        project = session.get(Product, project_id)
+        project = session.get(Project, project_id)
         assert project is not None
         assert project.vision is None
         receipts = session.exec(select(WorkflowTransitionReceipt)).all()
@@ -1284,7 +1280,7 @@ def test_sprint_selected_story_blocks_active_backlog_replacement(
     domain = _domain(engine)
     with Session(engine) as session:
         story = UserStory(
-            product_id=project_id,
+            project_id=project_id,
             title="Selected seed story",
             status=StoryStatus.TO_DO,
             story_origin="backlog_seed",
@@ -1407,7 +1403,7 @@ def test_persisted_authority_and_artifact_fingerprint_tampering_fails_closed(
     with Session(engine) as session:
         acceptance = session.exec(
             select(SpecAuthorityAcceptance).where(
-                col(SpecAuthorityAcceptance.product_id) == authority_project
+                col(SpecAuthorityAcceptance.project_id) == authority_project
             )
         ).one()
         acceptance.authority_fingerprint = "sha256:tampered-authority"

@@ -26,7 +26,7 @@ class StoryRepository:
     def delete_by_requirement(
         self,
         *,
-        product_id: int,
+        project_id: int,
         normalized_requirement: str,
         chunk_size: int = 500,
     ) -> int:
@@ -37,7 +37,7 @@ class StoryRepository:
                 story_id
                 for story_id in session.exec(
                     select(UserStory.story_id).where(
-                        UserStory.product_id == product_id,
+                        UserStory.project_id == project_id,
                         UserStory.source_requirement == normalized_requirement,
                     )
                 ).all()

@@ -11,7 +11,7 @@ import pytest
 
 from agile_sqlmodel import (
     CompiledSpecAuthority,
-    Product,
+    Project,
     SpecAuthorityAcceptance,
     SpecRegistry,
     UserStory,
@@ -41,13 +41,13 @@ if TYPE_CHECKING:
 
 
 def _seed_case_data(session: Session) -> tuple[int, int]:
-    product = Product(name="Label Product", vision="Labeling")
+    product = Project(name="Label Project", vision="Labeling")
     session.add(product)
     session.commit()
     session.refresh(product)
-    product_id = require_id(product.product_id, "product_id")
+    project_id = require_id(product.project_id, "project_id")
 
-    theme = Theme(product_id=product_id, title="Theme", description="")
+    theme = Theme(project_id=project_id, title="Theme", description="")
     session.add(theme)
     session.commit()
     session.refresh(theme)
@@ -64,7 +64,7 @@ def _seed_case_data(session: Session) -> tuple[int, int]:
     feature_id = require_id(feature.feature_id, "feature_id")
 
     story = UserStory(
-        product_id=product_id,
+        project_id=project_id,
         feature_id=feature_id,
         title="As a user, I want exports",
         story_description="As a user, I want exports for reporting.",
@@ -76,7 +76,7 @@ def _seed_case_data(session: Session) -> tuple[int, int]:
     story_id = require_id(story.story_id, "story_id")
 
     spec = SpecRegistry(
-        product_id=product_id,
+        project_id=project_id,
         content="# Spec",
         content_ref=None,
         spec_hash="a" * 64,
@@ -146,7 +146,7 @@ def _seed_case_data(session: Session) -> tuple[int, int]:
     session.flush()
     session.add(
         SpecAuthorityAcceptance(
-            product_id=product_id,
+            project_id=project_id,
             spec_version_id=spec_version_id,
             status="accepted",
             policy="test",

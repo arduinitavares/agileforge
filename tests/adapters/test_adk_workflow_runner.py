@@ -31,7 +31,7 @@ from adapters.adk.recipes import (
     build_backlog_generation_workflow,
 )
 from adapters.adk.runner import AdkExecutionConfig, AdkRunGuards, AdkWorkflowRunner
-from models.core import Product
+from models.core import Project
 from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance, SpecRegistry
 from models.workflow import (
     BacklogArtifact,
@@ -233,12 +233,12 @@ def _seed(engine: Engine) -> tuple[int, int, str]:
         prompt_hash="a" * 64,
     )
     with Session(engine) as session:
-        project = Product(name="Runner", origin="greenfield")
+        project = Project(name="Runner", origin="greenfield")
         session.add(project)
         session.flush()
-        assert project.product_id is not None
+        assert project.project_id is not None
         spec = SpecRegistry(
-            product_id=project.product_id,
+            project_id=project.project_id,
             spec_hash="sha256:runner-spec",
             content='{"scope":"runner"}',
             status="approved",
@@ -267,7 +267,7 @@ def _seed(engine: Engine) -> tuple[int, int, str]:
         assert fingerprint is not None
         session.add(
             SpecAuthorityAcceptance(
-                product_id=project.product_id,
+                project_id=project.project_id,
                 spec_version_id=spec.spec_version_id,
                 status="accepted",
                 policy="manual",
@@ -284,7 +284,7 @@ def _seed(engine: Engine) -> tuple[int, int, str]:
             )
         )
         session.commit()
-        return project.product_id, authority.authority_id, fingerprint
+        return project.project_id, authority.authority_id, fingerprint
 
 
 def _backlog_payload() -> JsonObject:
@@ -323,12 +323,12 @@ def _authority_artifact() -> SpecAuthorityCompilationSuccess:
 
 def _seed_authority_compile_target(engine: Engine) -> tuple[int, int, str]:
     with Session(engine) as session:
-        project = Product(name="Runner compile", origin="greenfield")
+        project = Project(name="Runner compile", origin="greenfield")
         session.add(project)
         session.flush()
-        assert project.product_id is not None
+        assert project.project_id is not None
         spec = SpecRegistry(
-            product_id=project.product_id,
+            project_id=project.project_id,
             spec_hash="sha256:runner-compile-spec",
             content='{"scope":"runner compile"}',
             status="approved",
@@ -338,7 +338,7 @@ def _seed_authority_compile_target(engine: Engine) -> tuple[int, int, str]:
         session.add(spec)
         session.commit()
         assert spec.spec_version_id is not None
-        return project.product_id, spec.spec_version_id, spec.spec_hash
+        return project.project_id, spec.spec_version_id, spec.spec_hash
 
 
 def _unused_leaf(name: str) -> FakeLeafAgent:
@@ -1183,7 +1183,7 @@ def test_authority_runner_executes_provider_once_before_completion_transaction(
             "spec_source": '{"scope":"runner compile"}',
             "spec_content_ref": None,
             "domain_hint": None,
-            "product_id": project_id,
+            "project_id": project_id,
             "spec_version_id": spec_version_id,
             "spec_source_format": "agileforge.spec.v1",
         },

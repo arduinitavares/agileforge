@@ -19,7 +19,7 @@ project_root = Path(__file__).parent.parent
 sys.path.append(str(project_root))
 
 from agile_sqlmodel import (  # noqa: E402
-    Product,
+    Project,
     SpecRegistry,
     UserStory,
     get_engine,
@@ -48,7 +48,7 @@ class StoryValidationOutcome:
 class ValidationRunResult:
     """Aggregate result for a script invocation."""
 
-    product_id: int
+    project_id: int
     product_name: str = ""
     mode: str = "deterministic"
     status: Literal["success", "noop", "error"] = "success"
@@ -90,11 +90,11 @@ def _effective_mode(explicit_mode: str | None) -> str:
     )
 
 
-def _load_invariant_map(product_id: int, spec_version_id: int) -> dict[str, dict]:
+def _load_invariant_map(project_id: int, spec_version_id: int) -> dict[str, dict]:
     with Session(engine) as session:
         authority = accepted_compiled_authority(
             session,
-            product_id=product_id,
+            project_id=project_id,
             spec_version_id=spec_version_id,
         )
         loaded = load_compiled_artifact(authority) if authority is not None else None
@@ -186,23 +186,23 @@ def _require_spec_version_id(result: ValidationRunResult) -> int:
     return spec_version_id
 
 
-def apply_validation(product_id: int, mode: str | None = None) -> ValidationRunResult:
+def apply_validation(project_id: int, mode: str | None = None) -> ValidationRunResult:
     """Validate all canonical refined stories for a product and return structured results."""  # noqa: E501
     active_mode = _effective_mode(mode)
-    result = ValidationRunResult(product_id=product_id, mode=active_mode)
+    result = ValidationRunResult(project_id=project_id, mode=active_mode)
 
     with Session(engine) as session:
-        product = session.get(Product, product_id)
+        product = session.get(Project, project_id)
         if not product:
             result.status = "error"
-            result.message = f"Product {product_id} not found."
+            result.message = f"Project {project_id} not found."
             return result
 
         result.product_name = product.name
         spec = session.exec(
             select(SpecRegistry)
             .where(
-                SpecRegistry.product_id == product_id,
+                SpecRegistry.project_id == project_id,
                 SpecRegistry.status == "approved",
             )
             .order_by(col(SpecRegistry.spec_version_id).desc())
@@ -210,20 +210,20 @@ def apply_validation(product_id: int, mode: str | None = None) -> ValidationRunR
 
         if not spec:
             result.status = "error"
-            result.message = f"No approved spec found for product {product_id}."
+            result.message = f"No approved spec found for product {project_id}."
             return result
 
         spec_version_id = spec.spec_version_id
         if spec_version_id is None:
             result.status = "error"
-            result.message = f"Approved spec for product {product_id} has no ID."
+            result.message = f"Approved spec for product {project_id} has no ID."
             return result
 
         result.spec_version_id = spec_version_id
-        invariant_map = _load_invariant_map(product_id, spec_version_id)
+        invariant_map = _load_invariant_map(project_id, spec_version_id)
         stories = session.exec(
             select(UserStory)
-            .where(UserStory.product_id == product_id)
+            .where(UserStory.project_id == project_id)
             .where(UserStory.is_refined == True)  # noqa: E712
             .where(UserStory.is_superseded == False)  # noqa: E712
             .order_by(col(UserStory.story_id).asc())
@@ -233,7 +233,7 @@ def apply_validation(product_id: int, mode: str | None = None) -> ValidationRunR
     if not stories:
         result.status = "noop"
         result.message = (
-            f"No refined stories found for product {product_id}. Nothing to validate."
+            f"No refined stories found for product {project_id}. Nothing to validate."
         )
         return result
 
@@ -310,7 +310,7 @@ def _emit_run_logs(  # noqa: C901
         _log_info(selected_latest_message)
 
     if not quiet:
-        label = f"Product {result.product_id}"
+        label = f"Project {result.project_id}"
         if result.product_name:
             label += f" '{result.product_name}'"
         _log_info(f"Applying validation to {label}.")
@@ -351,11 +351,11 @@ def main(argv: list[str] | None = None) -> int:
         description="Apply spec-authority validation to all stories for a product."
     )
     parser.add_argument(
-        "product_id",
+        "project_id",
         nargs="?",
         type=int,
         default=None,
-        help="Product ID to validate. Defaults to the most recently created product.",
+        help="Project ID to validate. Defaults to the most recently created product.",
     )
     parser.add_argument(
         "--mode",
@@ -382,22 +382,22 @@ def main(argv: list[str] | None = None) -> int:
     configure_logging(console=True, console_logger_names=(LOGGER_NAME,))
 
     selected_latest_message = None
-    if args.product_id is None:
+    if args.project_id is None:
         with Session(engine) as session:
             latest = session.exec(
-                select(Product).order_by(col(Product.product_id).desc())
+                select(Project).order_by(col(Project.project_id).desc())
             ).first()
-        if not latest or latest.product_id is None:
-            logger.error("No products found in DB.")
+        if not latest or latest.project_id is None:
+            logger.error("No projects found in DB.")
             return 1
-        product_id = latest.product_id
+        project_id = latest.project_id
         selected_latest_message = (
-            f"(No product_id given - using latest: {product_id} '{latest.name}')"
+            f"(No project_id given - using latest: {project_id} '{latest.name}')"
         )
     else:
-        product_id = args.product_id
+        project_id = args.project_id
 
-    result = apply_validation(product_id, mode=args.mode)
+    result = apply_validation(project_id, mode=args.mode)
     _emit_run_logs(
         result,
         verbose=args.verbose,

@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from models.core import Product
+from models.core import Project
 from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance, SpecRegistry
 from services.specs import authority_selection
 from tests.authority_assumption_fixtures import current_v3_compiled_authority_json
@@ -20,13 +20,13 @@ if TYPE_CHECKING:
 def _history(
     session: Session,
 ) -> tuple[int, int, CompiledSpecAuthority, CompiledSpecAuthority]:
-    product = Product(name="Authority Selection")
+    product = Project(name="Authority Selection")
     session.add(product)
     session.commit()
     session.refresh(product)
-    product_id = require_id(product.product_id, "product_id")
+    project_id = require_id(product.project_id, "project_id")
     spec = SpecRegistry(
-        product_id=product_id,
+        project_id=project_id,
         spec_hash="sha256:selection",
         content="selection",
         status="approved",
@@ -53,7 +53,7 @@ def _history(
     session.commit()
     for row in rows:
         session.refresh(row)
-    return product_id, spec_version_id, rows[0], rows[1]
+    return project_id, spec_version_id, rows[0], rows[1]
 
 
 def test_compiled_authority_by_id_rejects_spec_version_mismatch(
@@ -91,25 +91,25 @@ def test_latest_compiled_authority_for_product_prefers_newest_spec_then_row(
     session: Session,
 ) -> None:
     """Cross-spec status selection stays project-owned and deterministic."""
-    product = Product(name="Selected Product")
-    other_product = Product(name="Other Product")
+    product = Project(name="Selected Project")
+    other_product = Project(name="Other Project")
     session.add_all([product, other_product])
     session.commit()
     session.refresh(product)
     session.refresh(other_product)
-    product_id = require_id(product.product_id, "product_id")
-    other_product_id = require_id(other_product.product_id, "product_id")
+    project_id = require_id(product.project_id, "project_id")
+    other_project_id = require_id(other_product.project_id, "project_id")
     specs = [
         SpecRegistry(
-            product_id=owner_id,
+            project_id=owner_id,
             spec_hash=spec_hash,
             content=spec_hash,
             status="approved",
         )
         for owner_id, spec_hash in (
-            (product_id, "sha256:selected-old"),
-            (product_id, "sha256:selected-new"),
-            (other_product_id, "sha256:other"),
+            (project_id, "sha256:selected-old"),
+            (project_id, "sha256:selected-new"),
+            (other_project_id, "sha256:other"),
         )
     ]
     session.add_all(specs)
@@ -146,7 +146,7 @@ def test_latest_compiled_authority_for_product_prefers_newest_spec_then_row(
 
     selected = authority_selection.latest_compiled_authority_for_product(
         session,
-        product_id=product_id,
+        project_id=project_id,
     )
 
     assert selected is not None
@@ -159,9 +159,9 @@ def test_compiled_authority_for_acceptance_uses_exact_pending_id(
     session: Session,
 ) -> None:
     """Terminal decisions never fall forward to a newer pending row."""
-    product_id, spec_version_id, accepted_row, _ = _history(session)
+    project_id, spec_version_id, accepted_row, _ = _history(session)
     acceptance = SpecAuthorityAcceptance(
-        product_id=product_id,
+        project_id=project_id,
         spec_version_id=spec_version_id,
         status="accepted",
         policy="test",
@@ -184,11 +184,11 @@ def test_latest_accepted_authority_decision_orders_by_time_then_id(
     session: Session,
 ) -> None:
     """Accepted decision lookup deterministically breaks timestamp ties by id."""
-    product_id, spec_version_id, old, newest = _history(session)
+    project_id, spec_version_id, old, newest = _history(session)
     decided_at = datetime.now(UTC)
     decisions = [
         SpecAuthorityAcceptance(
-            product_id=product_id,
+            project_id=project_id,
             spec_version_id=spec_version_id,
             status=status,
             policy="test",
@@ -211,7 +211,7 @@ def test_latest_accepted_authority_decision_orders_by_time_then_id(
 
     selected = authority_selection.latest_accepted_authority_decision(
         session,
-        product_id=product_id,
+        project_id=project_id,
         spec_version_id=spec_version_id,
     )
 
@@ -223,9 +223,9 @@ def test_latest_accepted_authority_decision_for_product_orders_across_specs(
     session: Session,
 ) -> None:
     """Project recovery selects accepted decisions by time, then insertion id."""
-    product_id, spec_version_id, old, _ = _history(session)
+    project_id, spec_version_id, old, _ = _history(session)
     other_spec = SpecRegistry(
-        product_id=product_id,
+        project_id=project_id,
         spec_hash="sha256:selection-other",
         content="other",
         status="approved",
@@ -254,7 +254,7 @@ def test_latest_accepted_authority_decision_for_product_orders_across_specs(
     decided_at = datetime.now(UTC)
     decisions = [
         SpecAuthorityAcceptance(
-            product_id=product_id,
+            project_id=project_id,
             spec_version_id=selected_spec_version_id,
             status="accepted",
             policy="test",
@@ -291,7 +291,7 @@ def test_latest_accepted_authority_decision_for_product_orders_across_specs(
 
     selected = authority_selection.latest_accepted_authority_decision_for_product(
         session,
-        product_id=product_id,
+        project_id=project_id,
     )
 
     assert selected is not None
@@ -303,9 +303,9 @@ def test_accepted_compiled_authority_selects_exact_accepted_row(
     session: Session,
 ) -> None:
     """Execution selection ignores retained history and newer pending rows."""
-    product_id, spec_version_id, retained, accepted = _history(session)
+    project_id, spec_version_id, retained, accepted = _history(session)
     acceptance = SpecAuthorityAcceptance(
-        product_id=product_id,
+        project_id=project_id,
         spec_version_id=spec_version_id,
         status="accepted",
         policy="test",
@@ -333,7 +333,7 @@ def test_accepted_compiled_authority_selects_exact_accepted_row(
 
     selected = authority_selection.accepted_compiled_authority(
         session,
-        product_id=product_id,
+        project_id=project_id,
         spec_version_id=spec_version_id,
     )
 
@@ -346,11 +346,11 @@ def test_accepted_compiled_authority_uses_latest_deterministic_decision(
     session: Session,
 ) -> None:
     """Multiple accepted decisions use decided-at then id ordering."""
-    product_id, spec_version_id, first, second = _history(session)
+    project_id, spec_version_id, first, second = _history(session)
     decided_at = datetime.now(UTC)
     decisions = [
         SpecAuthorityAcceptance(
-            product_id=product_id,
+            project_id=project_id,
             spec_version_id=spec_version_id,
             status="accepted",
             policy="test",
@@ -368,7 +368,7 @@ def test_accepted_compiled_authority_uses_latest_deterministic_decision(
 
     selected = authority_selection.accepted_compiled_authority(
         session,
-        product_id=product_id,
+        project_id=project_id,
         spec_version_id=spec_version_id,
     )
 
@@ -380,14 +380,14 @@ def test_accepted_compiled_authority_rejects_foreign_product_spec(
 ) -> None:
     """The selected spec must belong to the requested product."""
     _, spec_version_id, _, accepted = _history(session)
-    foreign_product = Product(name="Foreign Authority Selection")
+    foreign_product = Project(name="Foreign Authority Selection")
     session.add(foreign_product)
     session.commit()
     session.refresh(foreign_product)
-    foreign_product_id = require_id(foreign_product.product_id, "product_id")
+    foreign_project_id = require_id(foreign_product.project_id, "project_id")
     session.add(
         SpecAuthorityAcceptance(
-            product_id=foreign_product_id,
+            project_id=foreign_project_id,
             spec_version_id=spec_version_id,
             status="accepted",
             policy="test",
@@ -403,7 +403,7 @@ def test_accepted_compiled_authority_rejects_foreign_product_spec(
     assert (
         authority_selection.accepted_compiled_authority(
             session,
-            product_id=foreign_product_id,
+            project_id=foreign_project_id,
             spec_version_id=spec_version_id,
         )
         is None
@@ -414,9 +414,9 @@ def test_accepted_compiled_authority_rejects_acceptance_authority_spec_mismatch(
     session: Session,
 ) -> None:
     """A mismatched acceptance target never falls back to another row."""
-    product_id, spec_version_id, _, accepted = _history(session)
+    project_id, spec_version_id, _, accepted = _history(session)
     other_spec = SpecRegistry(
-        product_id=product_id,
+        project_id=project_id,
         spec_hash="sha256:other-spec",
         content="other",
         status="approved",
@@ -439,7 +439,7 @@ def test_accepted_compiled_authority_rejects_acceptance_authority_spec_mismatch(
     session.commit()
     session.add(
         SpecAuthorityAcceptance(
-            product_id=product_id,
+            project_id=project_id,
             spec_version_id=spec_version_id,
             status="accepted",
             policy="test",
@@ -455,7 +455,7 @@ def test_accepted_compiled_authority_rejects_acceptance_authority_spec_mismatch(
     assert (
         authority_selection.accepted_compiled_authority(
             session,
-            product_id=product_id,
+            project_id=project_id,
             spec_version_id=spec_version_id,
         )
         is None
@@ -477,9 +477,9 @@ def test_accepted_compiled_authority_rejects_acceptance_provenance_mismatch(
     replacement: str,
 ) -> None:
     """Accepted execution requires exact compiler, prompt, and spec provenance."""
-    product_id, spec_version_id, _, authority = _history(session)
+    project_id, spec_version_id, _, authority = _history(session)
     acceptance = SpecAuthorityAcceptance(
-        product_id=product_id,
+        project_id=project_id,
         spec_version_id=spec_version_id,
         status="accepted",
         policy="test",
@@ -496,7 +496,7 @@ def test_accepted_compiled_authority_rejects_acceptance_provenance_mismatch(
     assert (
         authority_selection.accepted_compiled_authority(
             session,
-            product_id=product_id,
+            project_id=project_id,
             spec_version_id=spec_version_id,
         )
         is None
@@ -507,10 +507,10 @@ def test_accepted_compiled_authority_rejects_blank_acceptance_spec_hash(
     session: Session,
 ) -> None:
     """A blank decision-time hash never bypasses exact spec provenance."""
-    product_id, spec_version_id, _, authority = _history(session)
+    project_id, spec_version_id, _, authority = _history(session)
     session.add(
         SpecAuthorityAcceptance(
-            product_id=product_id,
+            project_id=project_id,
             spec_version_id=spec_version_id,
             status="accepted",
             policy="test",
@@ -526,7 +526,7 @@ def test_accepted_compiled_authority_rejects_blank_acceptance_spec_hash(
     assert (
         authority_selection.accepted_compiled_authority(
             session,
-            product_id=product_id,
+            project_id=project_id,
             spec_version_id=spec_version_id,
         )
         is None
@@ -537,7 +537,7 @@ def test_accepted_v3_authority_requires_acceptance_fingerprint(
     session: Session,
 ) -> None:
     """A v3 decision without immutable artifact identity is not executable."""
-    product_id, spec_version_id, _, authority = _history(session)
+    project_id, spec_version_id, _, authority = _history(session)
     authority.compiled_artifact_json = current_v3_compiled_authority_json(
         prompt_hash=authority.prompt_hash,
     )
@@ -545,7 +545,7 @@ def test_accepted_v3_authority_requires_acceptance_fingerprint(
     session.commit()
     session.add(
         SpecAuthorityAcceptance(
-            product_id=product_id,
+            project_id=project_id,
             spec_version_id=spec_version_id,
             status="accepted",
             policy="test",
@@ -562,7 +562,7 @@ def test_accepted_v3_authority_requires_acceptance_fingerprint(
     assert (
         authority_selection.accepted_compiled_authority(
             session,
-            product_id=product_id,
+            project_id=project_id,
             spec_version_id=spec_version_id,
         )
         is None
@@ -573,7 +573,7 @@ def test_accepted_v3_authority_rejects_post_acceptance_artifact_mutation(
     session: Session,
 ) -> None:
     """A valid in-place artifact mutation invalidates the accepted decision."""
-    product_id, spec_version_id, _, authority = _history(session)
+    project_id, spec_version_id, _, authority = _history(session)
     authority.compiled_artifact_json = current_v3_compiled_authority_json(
         prompt_hash=authority.prompt_hash,
         scope_themes=["accepted"],
@@ -581,7 +581,7 @@ def test_accepted_v3_authority_rejects_post_acceptance_artifact_mutation(
     session.add(authority)
     session.commit()
     acceptance = SpecAuthorityAcceptance(
-        product_id=product_id,
+        project_id=project_id,
         spec_version_id=spec_version_id,
         status="accepted",
         policy="test",
@@ -607,7 +607,7 @@ def test_accepted_v3_authority_rejects_post_acceptance_artifact_mutation(
     assert (
         authority_selection.accepted_compiled_authority(
             session,
-            product_id=product_id,
+            project_id=project_id,
             spec_version_id=spec_version_id,
         )
         is None

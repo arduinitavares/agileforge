@@ -75,7 +75,7 @@ def _authority_matches_acceptance(
     """Return whether one exact row still matches its accepted provenance."""
     if (
         acceptance.status != "accepted"
-        or acceptance.product_id != spec.product_id
+        or acceptance.project_id != spec.project_id
         or acceptance.spec_version_id != spec.spec_version_id
         or authority.authority_id != acceptance.pending_authority_id
         or authority.spec_version_id != acceptance.spec_version_id
@@ -125,7 +125,7 @@ def latest_compiled_authority(
 def latest_compiled_authority_for_product(
     session: Session,
     *,
-    product_id: int,
+    project_id: int,
 ) -> CompiledSpecAuthority | None:
     """Load the newest row for the newest compiled spec owned by a product."""
     return session.exec(
@@ -135,7 +135,7 @@ def latest_compiled_authority_for_product(
             cast("Any", CompiledSpecAuthority.spec_version_id)
             == SpecRegistry.spec_version_id,
         )
-        .where(SpecRegistry.product_id == product_id)
+        .where(SpecRegistry.project_id == project_id)
         .order_by(
             cast("Any", SpecRegistry.spec_version_id).desc(),
             cast("Any", CompiledSpecAuthority.authority_id).desc(),
@@ -162,14 +162,14 @@ def compiled_authority_for_acceptance(
 def latest_accepted_authority_decision(
     session: Session,
     *,
-    product_id: int,
+    project_id: int,
     spec_version_id: int,
 ) -> SpecAuthorityAcceptance | None:
     """Load the newest accepted decision for a product/spec pair."""
     return session.exec(
         select(SpecAuthorityAcceptance)
         .where(
-            SpecAuthorityAcceptance.product_id == product_id,
+            SpecAuthorityAcceptance.project_id == project_id,
             SpecAuthorityAcceptance.spec_version_id == spec_version_id,
             SpecAuthorityAcceptance.status == "accepted",
         )
@@ -183,13 +183,13 @@ def latest_accepted_authority_decision(
 def latest_accepted_authority_decision_for_product(
     session: Session,
     *,
-    product_id: int,
+    project_id: int,
 ) -> SpecAuthorityAcceptance | None:
     """Load the newest accepted decision across all specs owned by a product."""
     return session.exec(
         select(SpecAuthorityAcceptance)
         .where(
-            SpecAuthorityAcceptance.product_id == product_id,
+            SpecAuthorityAcceptance.project_id == project_id,
             SpecAuthorityAcceptance.status == "accepted",
         )
         .order_by(
@@ -202,16 +202,16 @@ def latest_accepted_authority_decision_for_product(
 def accepted_compiled_authority(
     session: Session,
     *,
-    product_id: int,
+    project_id: int,
     spec_version_id: int,
 ) -> CompiledSpecAuthority | None:
     """Load the exact accepted authority for one product-owned spec."""
     spec = session.get(SpecRegistry, spec_version_id)
-    if spec is None or spec.product_id != product_id:
+    if spec is None or spec.project_id != project_id:
         return None
     acceptance = latest_accepted_authority_decision(
         session,
-        product_id=product_id,
+        project_id=project_id,
         spec_version_id=spec_version_id,
     )
     if acceptance is None:

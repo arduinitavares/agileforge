@@ -40,7 +40,6 @@ from services.agent_workbench.story_phase import (
     record_story_draft_in_session,
     repair_story_readiness_in_session,
 )
-from services.sprint_input import candidate_set_in_session
 from services.story_dependencies import (
     ApplyStoryDependenciesInput,
     StoryDependencyGraphError,
@@ -78,7 +77,12 @@ from workflow.requests.planning import (
 if TYPE_CHECKING:
     from datetime import datetime
 
-    from workflow.facts import PlanningArtifactFact, WorkflowFactSnapshot
+    from workflow.facts import (
+        PlanningArtifactFact,
+        StoryDependencyFact,
+        StoryFact,
+        WorkflowFactSnapshot,
+    )
 
 
 type PlanningRequest = (
@@ -98,6 +102,16 @@ type StoryPlanningRequest = (
     RecordStoryDraft | DecideStory | ApplyStoryDependencies | RepairStoryReadiness
 )
 type SprintPlanningRequest = RecordSprintPlan | DecideSprintPlan | StartSprint
+
+
+def _candidate_set_in_session(
+    session: Session,
+    *,
+    project_id: int,
+) -> tuple[tuple[StoryFact, ...], tuple[StoryDependencyFact, ...]]:
+    snapshot = WorkflowFactRepository(session).load(project_id)
+    stories = tuple(item for item in snapshot.stories if item.sprint_candidate)
+    return stories, snapshot.story_dependencies
 
 
 def _success(decision: NodeDecision, output: dict[str, object]) -> TransitionResult:
@@ -477,7 +491,7 @@ def execute_apply_story_dependencies(
     decision: NodeDecision,
     evaluated_at: datetime,
 ) -> TransitionResult:
-    stories, _dependencies = candidate_set_in_session(
+    stories, _dependencies = _candidate_set_in_session(
         session,
         project_id=request.project_id,
     )
@@ -563,7 +577,7 @@ def execute_record_sprint_plan(
     decision: NodeDecision,
     evaluated_at: datetime,
 ) -> TransitionResult:
-    stories, dependencies = candidate_set_in_session(
+    stories, dependencies = _candidate_set_in_session(
         session,
         project_id=request.project_id,
     )
@@ -687,7 +701,7 @@ def execute_start_sprint(
             col(SprintPlanArtifactDecision.decision) == "accepted",
         )
     ).one_or_none()
-    stories, dependencies = candidate_set_in_session(
+    stories, dependencies = _candidate_set_in_session(
         session,
         project_id=request.project_id,
     )

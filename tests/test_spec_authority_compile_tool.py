@@ -1,4 +1,4 @@
-"""Tests for Spec Authority compile tool used by the orchestrator."""
+"""Tests for the Spec Authority compile tool used by the workflow adapter."""
 
 import asyncio
 import json
@@ -12,7 +12,7 @@ from adapters.adk.prompts.specification import (
     SPEC_AUTHORITY_COMPILER_INSTRUCTIONS,
     SPEC_AUTHORITY_COMPILER_VERSION,
 )
-from agile_sqlmodel import CompiledSpecAuthority, Product
+from agile_sqlmodel import CompiledSpecAuthority, Project
 from services.contracts.specification import (
     compute_invariant_id_from_payload,
     compute_prompt_hash,
@@ -91,13 +91,13 @@ def _assert_v3_instruction_contract(instructions: str) -> None:
 
 
 @pytest.fixture
-def sample_product(session: Session, engine: Engine) -> Product:
+def sample_product(session: Session, engine: Engine) -> Project:
     """Create a product without spec."""
     spec_tools.engine = engine
 
-    product = Product(
-        name="Compile Tool Product",
-        description="Product for compile tool tests",
+    product = Project(
+        name="Compile Tool Project",
+        description="Project for compile tool tests",
         vision="Keep spec authority deterministic",
     )
     session.add(product)
@@ -138,12 +138,12 @@ def compiler_stub(monkeypatch: pytest.MonkeyPatch) -> object:
 
 
 def test_compile_tool_blocks_unapproved_spec(
-    session: Session, sample_product: Product, sample_spec_content: str
+    session: Session, sample_product: Project, sample_spec_content: str
 ) -> None:
     """Compilation should fail for unapproved spec versions."""
     del session
     reg_result = register_spec_version(
-        {"product_id": sample_product.product_id, "content": sample_spec_content},
+        {"project_id": sample_product.project_id, "content": sample_spec_content},
         tool_context=None,
     )
 
@@ -192,13 +192,13 @@ def test_tool_runtime_helpers_delegate_to_compiler_service(
     def fake_invoke(
         spec_content: str,
         content_ref: str | None,
-        product_id: int | None,
+        project_id: int | None,
         spec_version_id: int | None,
     ) -> str:
         captured["invoke"] = {
             "spec_content": spec_content,
             "content_ref": content_ref,
-            "product_id": product_id,
+            "project_id": project_id,
             "spec_version_id": spec_version_id,
         }
         return "raw-json"
@@ -254,7 +254,7 @@ def test_tool_runtime_helpers_delegate_to_compiler_service(
         spec_tools._invoke_spec_authority_compiler(
             spec_content="spec text",
             content_ref="spec.md",
-            product_id=7,
+            project_id=7,
             spec_version_id=11,
         )
         == "raw-json"
@@ -262,7 +262,7 @@ def test_tool_runtime_helpers_delegate_to_compiler_service(
     assert captured["invoke"] == {
         "spec_content": "spec text",
         "content_ref": "spec.md",
-        "product_id": 7,
+        "project_id": 7,
         "spec_version_id": 11,
     }
 
@@ -283,13 +283,13 @@ def test_tool_compiler_failure_and_extractor_helpers_delegate_to_service(
         *,
         spec_content: str,
         content_ref: str | None,
-        product_id: int,
+        project_id: int,
         spec_version_id: int,
     ) -> object:
         captured["extract"] = {
             "spec_content": spec_content,
             "content_ref": content_ref,
-            "product_id": product_id,
+            "project_id": project_id,
             "spec_version_id": spec_version_id,
         }
         return extractor_result
@@ -309,7 +309,7 @@ def test_tool_compiler_failure_and_extractor_helpers_delegate_to_service(
 
     assert (
         spec_tools._compiler_failure_result(
-            product_id=3,
+            project_id=3,
             spec_version_id=5,
             content_ref="spec.md",
             failure_stage="compile",
@@ -322,7 +322,7 @@ def test_tool_compiler_failure_and_extractor_helpers_delegate_to_service(
         == failure_result
     )
     assert captured["failure"] == {
-        "product_id": 3,
+        "project_id": 3,
         "spec_version_id": 5,
         "content_ref": "spec.md",
         "failure_stage": "compile",
@@ -337,7 +337,7 @@ def test_tool_compiler_failure_and_extractor_helpers_delegate_to_service(
         spec_tools._extract_spec_authority_llm(
             spec_content="spec text",
             content_ref="spec.md",
-            product_id=13,
+            project_id=13,
             spec_version_id=21,
         )
         is extractor_result
@@ -345,7 +345,7 @@ def test_tool_compiler_failure_and_extractor_helpers_delegate_to_service(
     assert captured["extract"] == {
         "spec_content": "spec text",
         "content_ref": "spec.md",
-        "product_id": 13,
+        "project_id": 13,
         "spec_version_id": 21,
     }
 
@@ -357,14 +357,14 @@ def test_compiler_instructions_require_v3_typed_assumption_contract() -> None:
 
 def test_compile_tool_compiles_and_returns_summary(
     session: Session,
-    sample_product: Product,
+    sample_product: Project,
     sample_spec_content: str,
     compiler_stub: object,
 ) -> None:
     """Compilation should create authority and return summary payload."""
     del compiler_stub
     reg_result = register_spec_version(
-        {"product_id": sample_product.product_id, "content": sample_spec_content},
+        {"project_id": sample_product.project_id, "content": sample_spec_content},
         tool_context=None,
     )
     spec_version_id = reg_result["spec_version_id"]
@@ -401,14 +401,14 @@ def test_compile_tool_compiles_and_returns_summary(
 
 def test_compile_tool_returns_cached_when_already_compiled(
     session: Session,
-    sample_product: Product,
+    sample_product: Project,
     sample_spec_content: str,
     compiler_stub: object,
 ) -> None:
     """Compilation tool should be idempotent for existing authority."""
     del compiler_stub
     reg_result = register_spec_version(
-        {"product_id": sample_product.product_id, "content": sample_spec_content},
+        {"project_id": sample_product.project_id, "content": sample_spec_content},
         tool_context=None,
     )
     spec_version_id = reg_result["spec_version_id"]
@@ -439,7 +439,7 @@ def test_compile_tool_returns_cached_when_already_compiled(
 
 def test_compile_tool_uses_content_ref_when_content_empty(
     session: Session,
-    sample_product: Product,
+    sample_product: Project,
     tmp_path: Path,
     compiler_stub: object,
 ) -> None:
@@ -461,7 +461,7 @@ def test_compile_tool_uses_content_ref_when_content_empty(
 
     reg_result = register_spec_version(
         {
-            "product_id": sample_product.product_id,
+            "project_id": sample_product.project_id,
             "content": "",
             "content_ref": str(spec_path),
         },
@@ -521,13 +521,13 @@ def _build_raw_compiler_output(excerpt: str, field_name: str) -> str:
 
 def test_compile_persists_compiled_artifact_and_normalized_ids(
     session: Session,
-    sample_product: Product,
+    sample_product: Project,
     sample_spec_content: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Compilation should persist normalized artifact and deterministic IDs."""
     reg_result = register_spec_version(
-        {"product_id": sample_product.product_id, "content": sample_spec_content},
+        {"project_id": sample_product.project_id, "content": sample_spec_content},
         tool_context=None,
     )
     spec_version_id = reg_result["spec_version_id"]
@@ -589,13 +589,13 @@ def test_compile_persists_compiled_artifact_and_normalized_ids(
 
 def test_compile_cache_hit_does_not_change_compiled_artifact(
     session: Session,
-    sample_product: Product,
+    sample_product: Project,
     sample_spec_content: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Cache hits reuse one row; forced recompilation appends exact history."""
     reg_result = register_spec_version(
-        {"product_id": sample_product.product_id, "content": sample_spec_content},
+        {"project_id": sample_product.project_id, "content": sample_spec_content},
         tool_context=None,
     )
     spec_version_id = reg_result["spec_version_id"]
@@ -679,7 +679,7 @@ def test_compile_cache_hit_does_not_change_compiled_artifact(
 
 def test_compile_persists_invocation_failure_artifact(
     session: Session,
-    sample_product: Product,
+    sample_product: Project,
     sample_spec_content: str,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -687,7 +687,7 @@ def test_compile_persists_invocation_failure_artifact(
     """Verify compile persists invocation failure artifact."""
     del session
     reg_result = register_spec_version(
-        {"product_id": sample_product.product_id, "content": sample_spec_content},
+        {"project_id": sample_product.project_id, "content": sample_spec_content},
         tool_context=None,
     )
     spec_version_id = reg_result["spec_version_id"]
@@ -718,13 +718,13 @@ def test_compile_persists_invocation_failure_artifact(
     assert result["failure_stage"] == "invocation_exception"
     artifact = failure_artifacts.read_failure_artifact(result["failure_artifact_id"])
     assert artifact is not None
-    assert artifact["project_id"] == sample_product.product_id
+    assert artifact["project_id"] == sample_product.project_id
     assert artifact["raw_output"] == '{"partial": true}'
 
 
 def test_compile_persists_normalizer_failure_artifact(
     session: Session,
-    sample_product: Product,
+    sample_product: Project,
     sample_spec_content: str,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -732,7 +732,7 @@ def test_compile_persists_normalizer_failure_artifact(
     """Verify compile persists normalizer failure artifact."""
     del session
     reg_result = register_spec_version(
-        {"product_id": sample_product.product_id, "content": sample_spec_content},
+        {"project_id": sample_product.project_id, "content": sample_spec_content},
         tool_context=None,
     )
     spec_version_id = reg_result["spec_version_id"]
@@ -760,6 +760,6 @@ def test_compile_persists_normalizer_failure_artifact(
     assert result["failure_stage"] == "output_validation"
     artifact = failure_artifacts.read_failure_artifact(result["failure_artifact_id"])
     assert artifact is not None
-    assert artifact["project_id"] == sample_product.product_id
+    assert artifact["project_id"] == sample_product.project_id
     assert artifact["raw_output"] == "{}"
     assert artifact["validation_errors"]

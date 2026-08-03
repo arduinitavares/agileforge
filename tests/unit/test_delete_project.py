@@ -15,8 +15,8 @@ from agile_sqlmodel import (
     BrownfieldSpecApproval,
     BrownfieldSpecDraftAttempt,
     CompiledSpecAuthority,
-    Product,
-    ProductTeam,
+    Project,
+    ProjectTeam,
     SpecAuthorityAcceptance,
     SpecRegistry,
     Sprint,
@@ -27,7 +27,7 @@ from agile_sqlmodel import (
     UserStory,
 )
 from models.core import Epic, Feature, Team, Theme
-from repositories.product import ProjectDeletionConflictError
+from repositories.project import ProjectDeletionConflictError
 from scripts.delete_project import delete_project, resolve_db_path
 from tests.typing_helpers import require_id
 from utils.runtime_config import RuntimeConfigError, clear_runtime_config_cache
@@ -69,17 +69,17 @@ def test_delete_project_removes_sprints_and_story_logs(tmp_path: Path) -> None:
     engine = _create_sqlite_engine(db_path)
 
     with Session(engine) as session:
-        product = Product(name="Test Product")
+        product = Project(name="Test Project")
         team = Team(name="Test Team")
         session.add(product)
         session.add(team)
         session.flush()
-        product_id = require_id(product.product_id, "product_id")
+        project_id = require_id(product.project_id, "project_id")
         team_id = require_id(team.team_id, "team_id")
 
-        session.add(ProductTeam(product_id=product_id, team_id=team_id))
+        session.add(ProjectTeam(project_id=project_id, team_id=team_id))
 
-        theme = Theme(title="Theme", product_id=product_id)
+        theme = Theme(title="Theme", project_id=project_id)
         session.add(theme)
         session.flush()
         theme_id = require_id(theme.theme_id, "theme_id")
@@ -96,7 +96,7 @@ def test_delete_project_removes_sprints_and_story_logs(tmp_path: Path) -> None:
 
         story = UserStory(
             title="Story",
-            product_id=product_id,
+            project_id=project_id,
             feature_id=feature_id,
         )
         session.add(story)
@@ -109,7 +109,7 @@ def test_delete_project_removes_sprints_and_story_logs(tmp_path: Path) -> None:
             goal="Goal",
             start_date=date.today(),  # noqa: DTZ011
             end_date=date.today() + timedelta(days=7),  # noqa: DTZ011
-            product_id=product_id,
+            project_id=project_id,
             team_id=team_id,
         )
         session.add(sprint)
@@ -126,15 +126,15 @@ def test_delete_project_removes_sprints_and_story_logs(tmp_path: Path) -> None:
         )
         session.commit()
 
-    delete_project(product_id, str(db_path))
+    delete_project(project_id, str(db_path))
 
     with Session(engine) as session:
         product_exists = session.exec(
-            select(Product).where(Product.product_id == product_id)
+            select(Project).where(Project.project_id == project_id)
         ).first()
         assert product_exists is None
         sprint_exists = session.exec(
-            select(Sprint).where(Sprint.product_id == product_id)
+            select(Sprint).where(Sprint.project_id == project_id)
         ).first()
         assert sprint_exists is None
         assert session.exec(select(UserStory)).first() is None
@@ -151,13 +151,13 @@ def test_delete_project_allows_pre_acceptance_authority_shell(tmp_path: Path) ->
     engine = _create_sqlite_engine(db_path)
 
     with Session(engine) as session:
-        product = Product(name="Spec Product")
+        product = Project(name="Spec Project")
         session.add(product)
         session.flush()
-        product_id = require_id(product.product_id, "product_id")
+        project_id = require_id(product.project_id, "project_id")
 
         spec = SpecRegistry(
-            product_id=product_id,
+            project_id=project_id,
             spec_hash="spec-hash",
             content="# Spec",
             status="approved",
@@ -178,10 +178,10 @@ def test_delete_project_allows_pre_acceptance_authority_shell(tmp_path: Path) ->
         )
         session.commit()
 
-    delete_project(product_id, str(db_path))
+    delete_project(project_id, str(db_path))
 
     with Session(engine) as session:
-        assert session.get(Product, product_id) is None
+        assert session.get(Project, project_id) is None
         assert session.exec(select(CompiledSpecAuthority)).first() is None
         assert session.exec(select(SpecRegistry)).first() is None
 
@@ -194,13 +194,13 @@ def test_delete_project_preserves_historically_accepted_authority(
     engine = _create_sqlite_engine(db_path)
 
     with Session(engine) as session:
-        product = Product(name="Accepted Authority Product")
+        product = Project(name="Accepted Authority Project")
         session.add(product)
         session.flush()
-        product_id = require_id(product.product_id, "product_id")
+        project_id = require_id(product.project_id, "project_id")
 
         spec = SpecRegistry(
-            product_id=product_id,
+            project_id=project_id,
             spec_hash="accepted-spec-hash",
             content="# Accepted spec",
             status="approved",
@@ -222,7 +222,7 @@ def test_delete_project_preserves_historically_accepted_authority(
         authority_id = require_id(authority.authority_id, "authority_id")
 
         acceptance = SpecAuthorityAcceptance(
-            product_id=product_id,
+            project_id=project_id,
             spec_version_id=spec_version_id,
             status="accepted",
             policy="test",
@@ -237,11 +237,11 @@ def test_delete_project_preserves_historically_accepted_authority(
         acceptance_id = require_id(acceptance.id, "acceptance_id")
 
     with pytest.raises(ProjectDeletionConflictError) as exc_info:
-        delete_project(product_id, str(db_path))
+        delete_project(project_id, str(db_path))
 
     assert exc_info.value.references == ("spec_authority_acceptance.status",)
     with Session(engine) as session:
-        assert session.get(Product, product_id) is not None
+        assert session.get(Project, project_id) is not None
         assert session.get(SpecRegistry, spec_version_id) is not None
         assert session.get(CompiledSpecAuthority, authority_id) is not None
         assert session.get(SpecAuthorityAcceptance, acceptance_id) is not None
@@ -253,14 +253,14 @@ def test_delete_project_removes_brownfield_artifacts(tmp_path: Path) -> None:
     engine = _create_sqlite_engine(db_path)
 
     with Session(engine) as session:
-        product = Product(name="Brownfield Product")
+        product = Project(name="Brownfield Project")
         session.add(product)
         session.flush()
-        product_id = require_id(product.product_id, "product_id")
+        project_id = require_id(product.project_id, "project_id")
 
         session.add(
             BrownfieldSourceArtifact(
-                project_id=product_id,
+                project_id=project_id,
                 attempt_id="source-attempt-1",
                 artifact_fingerprint="source-fingerprint-1",
                 request_hash="source-request-hash-1",
@@ -268,7 +268,7 @@ def test_delete_project_removes_brownfield_artifacts(tmp_path: Path) -> None:
         )
         session.add(
             BrownfieldScanAttempt(
-                project_id=product_id,
+                project_id=project_id,
                 attempt_id="scan-attempt-1",
                 artifact_fingerprint="scan-artifact-fingerprint-1",
                 source_fingerprint="source-fingerprint-1",
@@ -278,7 +278,7 @@ def test_delete_project_removes_brownfield_artifacts(tmp_path: Path) -> None:
         )
         session.add(
             BrownfieldSpecDraftAttempt(
-                project_id=product_id,
+                project_id=project_id,
                 attempt_id="draft-attempt-1",
                 artifact_fingerprint="draft-artifact-fingerprint-1",
                 origin="scan",
@@ -290,7 +290,7 @@ def test_delete_project_removes_brownfield_artifacts(tmp_path: Path) -> None:
         )
         session.add(
             BrownfieldSpecApproval(
-                project_id=product_id,
+                project_id=project_id,
                 approval_attempt_id="approval-attempt-1",
                 approval_fingerprint="approval-fingerprint-1",
                 draft_attempt_id="draft-attempt-1",
@@ -302,38 +302,14 @@ def test_delete_project_removes_brownfield_artifacts(tmp_path: Path) -> None:
         )
         session.commit()
 
-    delete_project(product_id, str(db_path))
+    delete_project(project_id, str(db_path))
 
     with Session(engine) as session:
-        assert session.exec(select(Product)).first() is None
+        assert session.exec(select(Project)).first() is None
         assert session.exec(select(BrownfieldSpecApproval)).first() is None
         assert session.exec(select(BrownfieldSpecDraftAttempt)).first() is None
         assert session.exec(select(BrownfieldScanAttempt)).first() is None
         assert session.exec(select(BrownfieldSourceArtifact)).first() is None
-
-
-def test_delete_project_tolerates_missing_brownfield_tables(tmp_path: Path) -> None:
-    """Ensure delete_project supports legacy schemas without brownfield tables."""
-    db_path = tmp_path / "delete_project_legacy.db"
-    engine = _create_sqlite_engine(db_path)
-
-    with engine.begin() as conn:
-        conn.exec_driver_sql("DROP TABLE brownfield_spec_approvals")
-        conn.exec_driver_sql("DROP TABLE brownfield_spec_draft_attempts")
-        conn.exec_driver_sql("DROP TABLE brownfield_scan_attempts")
-        conn.exec_driver_sql("DROP TABLE brownfield_source_artifacts")
-
-    with Session(engine) as session:
-        product = Product(name="Legacy Product")
-        session.add(product)
-        session.flush()
-        product_id = require_id(product.product_id, "product_id")
-        session.commit()
-
-    delete_project(product_id, str(db_path))
-
-    with Session(engine) as session:
-        assert session.exec(select(Product)).first() is None
 
 
 def test_resolve_db_path_prefers_explicit_argument(

@@ -43,8 +43,6 @@ include = [
     "cli",
     "db",
     "models",
-    "orchestrator_agent",
-    "orchestrator_agent.*",
     "repositories",
     "routers",
     "services",
@@ -72,7 +70,6 @@ source = [
     "cli",
     "db",
     "models",
-    "orchestrator_agent",
     "repositories",
     "routers",
     "services",
@@ -175,49 +172,11 @@ convention = "pep257"
 "api.py" = ["BLE001", "TC002", "TC003"]
 "notebooks/learning.ipynb" = ["ASYNC250", "BLE001", "EM101", "T201", "T203", "TRY003"]
 "notebooks/testing_db.ipynb" = ["ANN001", "ANN201", "E501", "EM101", "S608", "T201", "TRY003"]
-"orchestrator_agent/__init__.py" = ["D104"]
-"orchestrator_agent/agent_tools/backlog_primer/agent.py" = ["D400"]
-"orchestrator_agent/agent_tools/backlog_primer/tools.py" = ["C901", "E501", "PLR0912", "PLR0915", "T201"]
-"orchestrator_agent/agent_tools/product_vision_tool/__init__.py" = ["D400"]
-"orchestrator_agent/agent_tools/product_vision_tool/agent.py" = ["D400"]
-"orchestrator_agent/agent_tools/product_vision_tool/schemes.py" = ["D200", "D205", "D401", "E501"]
-"orchestrator_agent/agent_tools/product_vision_tool/tools.py" = ["BLE001", "C901", "D200", "D205", "D400", "D401", "E501", "PLR0912", "PLR0915", "T201", "UP045"]
-"orchestrator_agent/agent_tools/roadmap_builder/schemes.py" = ["E501"]
-"orchestrator_agent/agent_tools/roadmap_builder/tools.py" = ["D205", "D401"]
-"orchestrator_agent/agent_tools/spec_authority_compiler_agent/agent.py" = ["E501"]
-"orchestrator_agent/agent_tools/spec_authority_compiler_agent/instructions_source.py" = ["E501"]
-"orchestrator_agent/agent_tools/spec_authority_compiler_agent/normalizer.py" = ["C901", "E501", "PLR0911", "PLR0912", "PLR0915", "SIM102", "TRY300", "TRY400"]
-"orchestrator_agent/agent_tools/spec_validator_agent/__init__.py" = ["D104"]
-"orchestrator_agent/agent_tools/spec_validator_agent/agent.py" = ["D100", "E501"]
-"orchestrator_agent/agent_tools/spec_validator_agent/schemes.py" = ["E501", "EM101", "EM102", "TRY003"]
-"orchestrator_agent/agent_tools/sprint_planner_tool/agent.py" = ["D200"]
-"orchestrator_agent/agent_tools/sprint_planner_tool/schemes.py" = ["C901", "E501", "PERF401", "PLR0912", "PLR0915"]
-"orchestrator_agent/agent_tools/sprint_planner_tool/tools.py" = ["ANN401", "BLE001", "C416", "C901", "EM101", "PLR0911", "PLR0912", "PLR0915", "TRY003"]
-"orchestrator_agent/agent_tools/story_linkage.py" = ["PLR2004"]
-"orchestrator_agent/agent_tools/user_story_writer_tool/agent.py" = ["D401"]
-"orchestrator_agent/agent_tools/user_story_writer_tool/schemes.py" = ["ANN001", "ANN202", "ANN206", "E501", "EM101", "PIE810", "TRY003"]
-"orchestrator_agent/agent_tools/user_story_writer_tool/tools.py" = ["C901", "E501", "EM101", "T201", "TRY003"]
-"orchestrator_agent/agent_tools/utils/resilience.py" = ["ANN003", "ANN204", "C901", "D107", "D200", "E501", "G004", "PLR0912", "PLR0913", "PLR0915", "RUF005", "TRY300", "TRY400"]
-"orchestrator_agent/fsm/__init__.py" = ["D104"]
-"orchestrator_agent/fsm/controller.py" = ["ANN204", "C901", "D100", "D107", "D200", "D205", "D401", "E501", "PLR0912", "PLR0915", "SIM102", "T201"]
-"orchestrator_agent/fsm/definitions.py" = ["D100", "D101", "D106", "E501", "PLW0108"]
-"orchestrator_agent/fsm/deterministic_tool_adapters.py" = ["ANN401", "PLR0913", "TC003", "UP045"]
-"orchestrator_agent/fsm/states.py" = ["D100", "D101", "UP042"]
 "repositories/__init__.py" = ["D104"]
-"repositories/product.py" = ["ANN204", "C901", "D100", "D107", "E501", "PLR0912"]
-"repositories/session.py" = ["ANN204", "D100", "D107", "D401", "E501", "EM101", "TRY003"]
-"services/orchestrator_context_service.py" = ["I001"]
 "services/story_close_service.py" = ["I001"]
 "repositories/story.py" = ["ANN204", "D100", "D107"]
 "services/__init__.py" = ["D104"]
 "services/packets/packet_service.py" = ["D103", "D107", "EM101", "TC003", "TRY003"]
-"services/phases/backlog_service.py" = ["D103", "D107", "EM101", "EM102", "PLR0913", "TC003", "TRY003"]
-"services/phases/roadmap_service.py" = ["D103", "D107", "EM101", "EM102", "PLR0913", "TC003", "TRY003"]
-"services/phases/sprint_service.py" = ["ANN401", "ARG001", "D103", "D107", "EM101", "EM102", "PLR0913", "TC003", "TRY003"]
-"services/phases/story_service.py" = ["ANN401", "C901", "D103", "D107", "EM101", "EM102", "PLR0912", "PLR0913", "TC003", "TRY003"]
-"services/phases/vision_service.py" = ["D103", "D107", "EM101", "EM102", "PLR0913", "TC003", "TRY003"]
-"services/phases/workflow_state.py" = ["D103", "PLR0913", "TC003"]
-"tools/orchestrator_tools.py" = ["TC003", "UP047"]
 
 [tool.bandit]
 exclude_dirs = [".venv", "notebooks"]

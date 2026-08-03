@@ -13,7 +13,7 @@ from sqlalchemy.pool import StaticPool
 from sqlalchemy.schema import UniqueConstraint
 from sqlmodel import Session, SQLModel, create_engine
 
-from models.core import Product
+from models.core import Project
 from models.db import set_sqlite_pragma
 from models.specs import SpecRegistry
 from models.workflow import (
@@ -69,13 +69,13 @@ def seed_project_with_initial_run(
     name: str,
 ) -> _SeededProject:
     """Persist a greenfield Project shell and its initial discovery run."""
-    project = Product(name=name, origin="greenfield")
+    project = Project(name=name, origin="greenfield")
     session.add(project)
     session.flush()
-    assert project.product_id is not None
+    assert project.project_id is not None
 
     discovery_run = DiscoveryRun(
-        project_id=project.product_id,
+        project_id=project.project_id,
         purpose="initial",
         ordinal=1,
     )
@@ -84,7 +84,7 @@ def seed_project_with_initial_run(
     session.refresh(discovery_run)
     assert discovery_run.discovery_run_id is not None
     return _SeededProject(
-        project_id=project.product_id,
+        project_id=project.project_id,
         discovery_run_id=discovery_run.discovery_run_id,
     )
 
@@ -109,7 +109,7 @@ def seed_initial_registration(
         provenance_path=None,
     )
     spec = SpecRegistry(
-        product_id=seeded.project_id,
+        project_id=seeded.project_id,
         spec_hash=f"sha256:{name}:spec",
         content=f"# {name}",
     )
@@ -270,7 +270,7 @@ def test_initial_spec_draft_with_base_spec_is_rejected(
     with Session(workflow_engine) as session:
         seeded = seed_project_with_initial_run(session, name="initial-base")
         spec = SpecRegistry(
-            product_id=seeded.project_id,
+            project_id=seeded.project_id,
             spec_hash="sha256:base",
             content="# Base",
         )

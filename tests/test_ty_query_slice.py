@@ -28,7 +28,7 @@ def test_ty_query_slice_is_clean() -> None:
             "tools/story_query_tools.py",
             "tools/db_tools.py",
             "repositories/story.py",
-            "services/orchestrator_context_service.py",
+            "services/read_projections.py",
             "--output-format",
             "concise",
         ],

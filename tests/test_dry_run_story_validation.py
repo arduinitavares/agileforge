@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 from agile_sqlmodel import (
     CompiledSpecAuthority,
-    Product,
+    Project,
     SpecAuthorityAcceptance,
     SpecRegistry,
 )
@@ -24,13 +24,13 @@ def test_load_accepted_invariants_uses_exact_valid_authority(
     session: Session,
 ) -> None:
     """Dry-run inspection ignores retained malformed authority history."""
-    product = Product(name="Dry Run Product")
+    product = Project(name="Dry Run Project")
     session.add(product)
     session.commit()
     session.refresh(product)
-    product_id = require_id(product.product_id, "product_id")
+    project_id = require_id(product.project_id, "project_id")
     spec = SpecRegistry(
-        product_id=product_id,
+        project_id=project_id,
         spec_hash="dry-run-spec",
         content="# Dry run",
         status="approved",
@@ -75,7 +75,7 @@ def test_load_accepted_invariants_uses_exact_valid_authority(
     session.flush()
     session.add(
         SpecAuthorityAcceptance(
-            product_id=product_id,
+            project_id=project_id,
             spec_version_id=spec_version_id,
             status="accepted",
             policy="test",
@@ -91,7 +91,7 @@ def test_load_accepted_invariants_uses_exact_valid_authority(
 
     invariants = dry_run._load_accepted_invariants(
         session,
-        product_id=product_id,
+        project_id=project_id,
         spec_version_id=spec_version_id,
     )
 

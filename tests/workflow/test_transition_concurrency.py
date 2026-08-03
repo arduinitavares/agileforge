@@ -12,7 +12,7 @@ from sqlalchemy import event
 from sqlmodel import Session, SQLModel, create_engine, select
 
 import workflow.domain as workflow_domain_module
-from models.core import Product
+from models.core import Project
 from models.db import set_sqlite_pragma
 from models.workflow import DiscoveryRun, WorkflowTransitionReceipt
 from workflow import OpenProjectShell, WorkflowDomain
@@ -115,7 +115,7 @@ def test_two_concurrent_identical_requests_apply_once_and_replay_once(
     assert sum(not result.replayed for result in results) == 1
     assert all(result.ok for result in results)
     with Session(sqlite_file_engine) as session:
-        assert len(session.exec(select(Product)).all()) == 1
+        assert len(session.exec(select(Project)).all()) == 1
         assert len(session.exec(select(DiscoveryRun)).all()) == 1
         receipts = session.exec(select(WorkflowTransitionReceipt)).all()
         assert len(receipts) == 1

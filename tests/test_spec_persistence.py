@@ -19,7 +19,7 @@ import pytest
 from sqlalchemy.engine import Engine
 from sqlmodel import Session
 
-from agile_sqlmodel import Product
+from agile_sqlmodel import Project
 from tests.typing_helpers import make_tool_context, require_id
 from tools.spec_tools import (
     read_project_specification,
@@ -73,7 +73,7 @@ class TestSaveProjectSpecification:
     def test_save_spec_from_file_path_success(
         self,
         db_session: Session,
-        sample_product: Product,
+        sample_product: Project,
         compile_stub: dict[str, object],
     ) -> None:
         """
@@ -102,7 +102,7 @@ class TestSaveProjectSpecification:
         # Act
         result = save_project_specification(
             {
-                "product_id": require_id(sample_product.product_id, "product_id"),
+                "project_id": require_id(sample_product.project_id, "project_id"),
                 "spec_source": "file",
                 "content": str(spec_path),
             }
@@ -123,7 +123,7 @@ class TestSaveProjectSpecification:
         # Assert - Database persistence
         db_session.expire_all()  # Force fresh read
         product = db_session.get(
-            Product, require_id(sample_product.product_id, "product_id")
+            Project, require_id(sample_product.project_id, "project_id")
         )
         assert product is not None
         assert product.technical_spec is not None
@@ -135,7 +135,7 @@ class TestSaveProjectSpecification:
     def test_save_spec_from_pasted_text_success(
         self,
         db_session: Session,
-        sample_product: Product,
+        sample_product: Project,
         compile_stub: dict[str, object],
     ) -> None:
         """
@@ -147,13 +147,13 @@ class TestSaveProjectSpecification:
             - Backup file is created in specs/ directory
             - File path points to created backup file
             - Backup file contains exact pasted content
-            - Filename includes product_id.
+            - Filename includes project_id.
         """
         if not save_project_specification:
             pytest.fail("Tool not implemented yet")
 
         # Arrange
-        pasted_spec = """# My Product Specification
+        pasted_spec = """# My Project Specification
 ## Features
 - Feature 1: User authentication
 - Feature 2: Dashboard
@@ -166,7 +166,7 @@ class TestSaveProjectSpecification:
         # Act
         result = save_project_specification(
             {
-                "product_id": require_id(sample_product.product_id, "product_id"),
+                "project_id": require_id(sample_product.project_id, "project_id"),
                 "spec_source": "text",
                 "content": pasted_spec,
             }
@@ -183,9 +183,9 @@ class TestSaveProjectSpecification:
 
         assert "params" in compile_stub
 
-        # Check filename pattern (should contain product_id)
+        # Check filename pattern (should contain project_id)
         assert (
-            str(require_id(sample_product.product_id, "product_id"))
+            str(require_id(sample_product.project_id, "project_id"))
             in result["spec_path"]
         )
 
@@ -197,7 +197,7 @@ class TestSaveProjectSpecification:
         # Assert - Database
         db_session.expire_all()
         product = db_session.get(
-            Product, require_id(sample_product.product_id, "product_id")
+            Project, require_id(sample_product.project_id, "project_id")
         )
         assert product is not None
         assert product.technical_spec == pasted_spec
@@ -206,7 +206,7 @@ class TestSaveProjectSpecification:
         # Cleanup
         created_file.unlink()
 
-    def test_save_spec_file_not_found_error(self, sample_product: Product) -> None:
+    def test_save_spec_file_not_found_error(self, sample_product: Project) -> None:
         """
         GIVEN: User provides invalid/nonexistent file path.
 
@@ -219,7 +219,7 @@ class TestSaveProjectSpecification:
         # Act
         result = save_project_specification(
             {
-                "product_id": require_id(sample_product.product_id, "product_id"),
+                "project_id": require_id(sample_product.project_id, "project_id"),
                 "spec_source": "file",
                 "content": "nonexistent/path/spec.md",
             }
@@ -231,7 +231,7 @@ class TestSaveProjectSpecification:
         assert "nonexistent/path/spec.md" in result["error"]
 
     def test_save_spec_file_too_large_error(
-        self, tmp_path: Path, sample_product: Product
+        self, tmp_path: Path, sample_product: Project
     ) -> None:
         """
         GIVEN: Spec file exceeds size limit (100KB).
@@ -249,7 +249,7 @@ class TestSaveProjectSpecification:
         # Act
         result = save_project_specification(
             {
-                "product_id": require_id(sample_product.product_id, "product_id"),
+                "project_id": require_id(sample_product.project_id, "project_id"),
                 "spec_source": "file",
                 "content": str(large_file),
             }
@@ -261,7 +261,7 @@ class TestSaveProjectSpecification:
         assert "100" in result["error"]  # Mentions limit
 
     def test_save_spec_pasted_text_too_large_error(
-        self, sample_product: Product
+        self, sample_product: Project
     ) -> None:
         """
         GIVEN: Pasted text exceeds 100KB limit.
@@ -278,7 +278,7 @@ class TestSaveProjectSpecification:
         # Act
         result = save_project_specification(
             {
-                "product_id": require_id(sample_product.product_id, "product_id"),
+                "project_id": require_id(sample_product.project_id, "project_id"),
                 "spec_source": "text",
                 "content": huge_text,
             }
@@ -291,7 +291,7 @@ class TestSaveProjectSpecification:
     def test_update_existing_spec_replaces_old_spec(
         self,
         db_session: Session,
-        sample_product: Product,
+        sample_product: Project,
         compile_stub: dict[str, object],
     ) -> None:
         """
@@ -310,7 +310,7 @@ class TestSaveProjectSpecification:
         initial_spec = "# Initial Spec\n## Version 1"
         save_project_specification(
             {
-                "product_id": require_id(sample_product.product_id, "product_id"),
+                "project_id": require_id(sample_product.project_id, "project_id"),
                 "spec_source": "text",
                 "content": initial_spec,
             }
@@ -325,7 +325,7 @@ class TestSaveProjectSpecification:
         new_spec = "# Updated Spec\n## Version 2\n\nCompletely new content"
         result = save_project_specification(
             {
-                "product_id": require_id(sample_product.product_id, "product_id"),
+                "project_id": require_id(sample_product.project_id, "project_id"),
                 "spec_source": "text",
                 "content": new_spec,
             }
@@ -339,7 +339,7 @@ class TestSaveProjectSpecification:
         # Verify DB has new content (not old)
         db_session.expire_all()
         product = db_session.get(
-            Product, require_id(sample_product.product_id, "product_id")
+            Project, require_id(sample_product.project_id, "project_id")
         )
         assert product is not None
         assert product.technical_spec == new_spec
@@ -349,9 +349,9 @@ class TestSaveProjectSpecification:
         # Cleanup
         Path(result["spec_path"]).unlink(missing_ok=True)
 
-    def test_save_spec_invalid_product_id_error(self) -> None:
+    def test_save_spec_invalid_project_id_error(self) -> None:
         """
-        GIVEN: Invalid/nonexistent product_id.
+        GIVEN: Invalid/nonexistent project_id.
 
         WHEN: save_project_specification is called
         THEN: Returns error about product not found.
@@ -362,7 +362,7 @@ class TestSaveProjectSpecification:
         # Act
         result = save_project_specification(
             {
-                "product_id": 99999,
+                "project_id": 99999,
                 "spec_source": "text",
                 "content": "# Some Spec",
             }
@@ -386,7 +386,7 @@ class TestSaveProjectSpecification:
         # Act - Missing content
         result1 = save_project_specification(
             {
-                "product_id": 1,
+                "project_id": 1,
                 "spec_source": "file",
             }
         )
@@ -394,7 +394,7 @@ class TestSaveProjectSpecification:
         # Act - Missing spec_source
         result2 = save_project_specification(
             {
-                "product_id": 1,
+                "project_id": 1,
                 "content": "# Spec",
             }
         )
@@ -406,7 +406,7 @@ class TestSaveProjectSpecification:
         assert result2["success"] is False
         assert "missing" in result2["error"].lower()
 
-    def test_save_spec_invalid_spec_source_error(self, sample_product: Product) -> None:
+    def test_save_spec_invalid_spec_source_error(self, sample_product: Project) -> None:
         """
         GIVEN: spec_source is neither "file" nor "text".
 
@@ -419,7 +419,7 @@ class TestSaveProjectSpecification:
         # Act
         result = save_project_specification(
             {
-                "product_id": require_id(sample_product.product_id, "product_id"),
+                "project_id": require_id(sample_product.project_id, "project_id"),
                 "spec_source": "invalid_value",
                 "content": "# Spec",
             }
@@ -440,7 +440,7 @@ class TestReadProjectSpecification:
     """Test suite for read_project_specification tool."""
 
     def test_read_existing_spec_success(
-        self, db_session: Session, sample_product_with_spec: Product
+        self, db_session: Session, sample_product_with_spec: Project
     ) -> None:
         """
         GIVEN: Project has spec saved in DB.
@@ -459,8 +459,8 @@ class TestReadProjectSpecification:
         context = make_tool_context(
             state={
                 "active_project": {
-                    "product_id": require_id(
-                        sample_product_with_spec.product_id, "product_id"
+                    "project_id": require_id(
+                        sample_product_with_spec.project_id, "project_id"
                     ),
                     "name": sample_product_with_spec.name,
                 }
@@ -505,7 +505,7 @@ class TestReadProjectSpecification:
         error_msg = result["error"].lower()
         assert "no active project" in error_msg or "no context provided" in error_msg
 
-    def test_read_spec_project_has_no_spec_error(self, sample_product: Product) -> None:
+    def test_read_spec_project_has_no_spec_error(self, sample_product: Project) -> None:
         """
         GIVEN: Project exists but has no specification saved.
 
@@ -515,11 +515,11 @@ class TestReadProjectSpecification:
         if not read_project_specification:
             pytest.fail("Tool not implemented yet")
 
-        # Arrange: Product exists but technical_spec is None
+        # Arrange: Project exists but technical_spec is None
         context = make_tool_context(
             state={
                 "active_project": {
-                    "product_id": require_id(sample_product.product_id, "product_id"),
+                    "project_id": require_id(sample_product.project_id, "project_id"),
                     "name": sample_product.name,
                 }
             }
@@ -547,8 +547,8 @@ class TestReadProjectSpecification:
         spec_path = tmp_path / "backing_spec.md"
         spec_path.write_text("# File Spec\n\nFile body", encoding="utf-8")
 
-        product = Product(
-            name="Dual Source Product",
+        product = Project(
+            name="Dual Source Project",
             vision="Dual source vision",
             technical_spec="# DB Spec\n\nDatabase body",
             spec_file_path=str(spec_path),
@@ -561,7 +561,7 @@ class TestReadProjectSpecification:
         context = make_tool_context(
             state={
                 "active_project": {
-                    "product_id": product.product_id,
+                    "project_id": product.project_id,
                     "name": product.name,
                 }
             }
@@ -585,8 +585,8 @@ class TestReadProjectSpecification:
         spec_path = tmp_path / "fallback_spec.md"
         spec_path.write_text("# File Spec\n\nFile body", encoding="utf-8")
 
-        product = Product(
-            name="Fallback Source Product",
+        product = Project(
+            name="Fallback Source Project",
             vision="Fallback source vision",
             technical_spec="",
             spec_file_path=str(spec_path),
@@ -599,7 +599,7 @@ class TestReadProjectSpecification:
         context = make_tool_context(
             state={
                 "active_project": {
-                    "product_id": product.product_id,
+                    "project_id": product.project_id,
                     "name": product.name,
                 }
             }
@@ -633,7 +633,7 @@ class TestSpecWorkflowIntegration:
             pytest.fail("Tools not implemented yet")
 
         # Step 1: Create product
-        product = Product(name="Arena System", vision="Camera-based compliance system")
+        product = Project(name="Arena System", vision="Camera-based compliance system")
         db_session.add(product)
         db_session.commit()
         db_session.refresh(product)
@@ -650,7 +650,7 @@ class TestSpecWorkflowIntegration:
         # Step 2: Save spec from file
         save_result = save_project_specification(
             {
-                "product_id": product.product_id,
+                "project_id": product.project_id,
                 "spec_source": "file",
                 "content": str(spec_path),
             }
@@ -662,7 +662,7 @@ class TestSpecWorkflowIntegration:
         context = make_tool_context(
             state={
                 "active_project": {
-                    "product_id": product.product_id,
+                    "project_id": product.project_id,
                     "name": product.name,
                 }
             }
@@ -689,7 +689,7 @@ class TestSpecWorkflowIntegration:
             pytest.fail("Tools not implemented yet")
 
         # Step 1: Create product
-        product = Product(name="Pasted Project", vision="Test vision")
+        product = Project(name="Pasted Project", vision="Test vision")
         db_session.add(product)
         db_session.commit()
         db_session.refresh(product)
@@ -704,7 +704,7 @@ class TestSpecWorkflowIntegration:
         pending_spec_content for downstream phases (BACKLOG, ROADMAP, STORY).
         """
         del compile_stub
-        product = Product(name="Spec Pending Project", vision="Pending spec")
+        product = Project(name="Spec Pending Project", vision="Pending spec")
         db_session.add(product)
         db_session.commit()
         db_session.refresh(product)
@@ -721,7 +721,7 @@ class TestSpecWorkflowIntegration:
 
         result = save_project_specification(
             {
-                "product_id": product.product_id,
+                "project_id": product.project_id,
                 "spec_source": "file",
                 "content": str(spec_path),
             },
@@ -743,9 +743,9 @@ class TestSpecWorkflowIntegration:
 
 
 @pytest.fixture
-def sample_product(db_session: Session) -> Product:
+def sample_product(db_session: Session) -> Project:
     """Create a test product WITHOUT specification."""
-    product = Product(name="Test Product", vision="A test product for unit testing")
+    product = Project(name="Test Project", vision="A test product for unit testing")
     db_session.add(product)
     db_session.commit()
     db_session.refresh(product)
@@ -753,10 +753,10 @@ def sample_product(db_session: Session) -> Product:
 
 
 @pytest.fixture
-def sample_product_with_spec(db_session: Session) -> Product:
+def sample_product_with_spec(db_session: Session) -> Project:
     """Create a test product WITH specification already saved."""
-    product = Product(
-        name="Product With Spec",
+    product = Project(
+        name="Project With Spec",
         vision="Test vision for product with spec",
         technical_spec="""# Test Specification
 ## Section 1: Introduction

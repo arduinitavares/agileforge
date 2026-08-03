@@ -38,36 +38,36 @@ from utils.runtime_config import resolve_database_target
 _SQL_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _REFINED_STORY_COUNT_QUERIES: dict[tuple[bool, bool, bool], str] = {
     (True, True, True): (
-        "SELECT COUNT(*) FROM user_stories WHERE product_id = ? "
+        "SELECT COUNT(*) FROM user_stories WHERE project_id = ? "
         "AND is_refined = 1 AND COALESCE(is_superseded, 0) = 0 "
         "AND accepted_spec_version_id IS NOT NULL"
     ),
     (True, True, False): (
-        "SELECT COUNT(*) FROM user_stories WHERE product_id = ? "
+        "SELECT COUNT(*) FROM user_stories WHERE project_id = ? "
         "AND is_refined = 1 AND COALESCE(is_superseded, 0) = 0"
     ),
     (True, False, True): (
-        "SELECT COUNT(*) FROM user_stories WHERE product_id = ? "
+        "SELECT COUNT(*) FROM user_stories WHERE project_id = ? "
         "AND is_refined = 1 AND accepted_spec_version_id IS NOT NULL"
     ),
     (True, False, False): (
-        "SELECT COUNT(*) FROM user_stories WHERE product_id = ? AND is_refined = 1"
+        "SELECT COUNT(*) FROM user_stories WHERE project_id = ? AND is_refined = 1"
     ),
     (False, True, True): (
-        "SELECT COUNT(*) FROM user_stories WHERE product_id = ? "
+        "SELECT COUNT(*) FROM user_stories WHERE project_id = ? "
         "AND COALESCE(is_superseded, 0) = 0 "
         "AND accepted_spec_version_id IS NOT NULL"
     ),
     (False, True, False): (
-        "SELECT COUNT(*) FROM user_stories WHERE product_id = ? "
+        "SELECT COUNT(*) FROM user_stories WHERE project_id = ? "
         "AND COALESCE(is_superseded, 0) = 0"
     ),
     (False, False, True): (
-        "SELECT COUNT(*) FROM user_stories WHERE product_id = ? "
+        "SELECT COUNT(*) FROM user_stories WHERE project_id = ? "
         "AND accepted_spec_version_id IS NOT NULL"
     ),
     (False, False, False): (
-        "SELECT COUNT(*) FROM user_stories WHERE product_id = ?"
+        "SELECT COUNT(*) FROM user_stories WHERE project_id = ?"
     ),
 }
 
@@ -77,10 +77,10 @@ _REFINED_STORY_COUNT_QUERIES: dict[tuple[bool, bool, bool], str] = {
 
 
 @dataclass
-class ProductMetrics:
+class ProjectMetrics:
     """Metrics for a single product/project."""
 
-    product_id: int
+    project_id: int
     product_name: str
     created_at: str
 
@@ -159,7 +159,7 @@ class ExtractionResult:
     tables: list = field(default_factory=list)
 
     # Per-product metrics
-    products: list = field(default_factory=list)
+    projects: list = field(default_factory=list)
 
     # Smoke run metrics (if available)
     smoke_runs: SmokeRunMetrics | None = None
@@ -270,29 +270,29 @@ def get_schema_summary(cursor: sqlite3.Cursor) -> list[dict]:
     return tables
 
 
-def extract_product_metrics(cursor: sqlite3.Cursor) -> list[ProductMetrics]:  # noqa: C901, PLR0912, PLR0915
+def extract_product_metrics(cursor: sqlite3.Cursor) -> list[ProjectMetrics]:  # noqa: C901, PLR0912, PLR0915
     """Extract metrics for each product in the database."""
-    products = []
+    projects = []
 
-    # Get all products
+    # Get all projects
     cursor.execute("""
-        SELECT product_id, name, created_at
-        FROM products
-        ORDER BY product_id
+        SELECT project_id, name, created_at
+        FROM projects
+        ORDER BY project_id
     """)
     product_rows = cursor.fetchall()
 
-    for product_id, name, created_at in product_rows:
-        metrics = ProductMetrics(
-            product_id=product_id, product_name=name, created_at=str(created_at)
+    for project_id, name, created_at in product_rows:
+        metrics = ProjectMetrics(
+            project_id=project_id, product_name=name, created_at=str(created_at)
         )
 
         # Story counts
         cursor.execute(
             """
-            SELECT COUNT(*) FROM user_stories WHERE product_id = ?
+            SELECT COUNT(*) FROM user_stories WHERE project_id = ?
         """,
-            (product_id,),
+            (project_id,),
         )
         metrics.total_stories = cursor.fetchone()[0]
 
@@ -309,7 +309,7 @@ def extract_product_metrics(cursor: sqlite3.Cursor) -> list[ProductMetrics]:  # 
                 has_is_superseded=has_is_superseded,
                 require_spec_version=False,
             ),
-            (product_id,),
+            (project_id,),
         )
         metrics.stories_refined = cursor.fetchone()[0]
 
@@ -317,9 +317,9 @@ def extract_product_metrics(cursor: sqlite3.Cursor) -> list[ProductMetrics]:  # 
             cursor.execute(
                 """
                 SELECT COUNT(*) FROM user_stories
-                WHERE product_id = ? AND accepted_spec_version_id IS NOT NULL
+                WHERE project_id = ? AND accepted_spec_version_id IS NOT NULL
             """,
-                (product_id,),
+                (project_id,),
             )
             metrics.stories_with_spec_version_id = cursor.fetchone()[0]
 
@@ -328,25 +328,25 @@ def extract_product_metrics(cursor: sqlite3.Cursor) -> list[ProductMetrics]:  # 
                 has_is_superseded=has_is_superseded,
                 require_spec_version=True,
             )
-            cursor.execute(query, (product_id,))
+            cursor.execute(query, (project_id,))
             metrics.refined_stories_with_spec_version_id = cursor.fetchone()[0]
 
         if "validation_evidence" in columns:
             cursor.execute(
                 """
                 SELECT COUNT(*) FROM user_stories
-                WHERE product_id = ? AND validation_evidence IS NOT NULL
+                WHERE project_id = ? AND validation_evidence IS NOT NULL
             """,
-                (product_id,),
+                (project_id,),
             )
             metrics.stories_with_validation_evidence = cursor.fetchone()[0]
 
         # Sprint counts
         cursor.execute(
             """
-            SELECT COUNT(*) FROM sprints WHERE product_id = ?
+            SELECT COUNT(*) FROM sprints WHERE project_id = ?
         """,
-            (product_id,),
+            (project_id,),
         )
         metrics.sprint_count = cursor.fetchone()[0]
 
@@ -355,10 +355,10 @@ def extract_product_metrics(cursor: sqlite3.Cursor) -> list[ProductMetrics]:  # 
             """
             SELECT event_type, COUNT(*)
             FROM workflow_events
-            WHERE product_id = ?
+            WHERE project_id = ?
             GROUP BY event_type
         """,
-            (product_id,),
+            (project_id,),
         )
         for event_type, count in cursor.fetchall():
             if event_type == "VISION_SAVED":
@@ -381,9 +381,9 @@ def extract_product_metrics(cursor: sqlite3.Cursor) -> list[ProductMetrics]:  # 
             """
             SELECT SUM(duration_seconds), AVG(duration_seconds)
             FROM workflow_events
-            WHERE product_id = ? AND event_type = 'SPRINT_PLAN_SAVED' AND duration_seconds IS NOT NULL
+            WHERE project_id = ? AND event_type = 'SPRINT_PLAN_SAVED' AND duration_seconds IS NOT NULL
         """,
-            (product_id,),
+            (project_id,),
         )
         result = cursor.fetchone()
         if result[0]:
@@ -403,11 +403,11 @@ def extract_product_metrics(cursor: sqlite3.Cursor) -> list[ProductMetrics]:  # 
                 """
                 SELECT AVG(duration_seconds)
                 FROM workflow_events
-                WHERE product_id = ?
+                WHERE project_id = ?
                   AND event_type = ?
                   AND duration_seconds IS NOT NULL
                 """,
-                (product_id, event_name),
+                (project_id, event_name),
             )
             avg_val = cursor.fetchone()[0]
             if avg_val:
@@ -419,9 +419,9 @@ def extract_product_metrics(cursor: sqlite3.Cursor) -> list[ProductMetrics]:  # 
                 """
                 SELECT AVG((julianday(completed_at) - julianday(created_at)) * 24)
                 FROM user_stories
-                WHERE product_id = ? AND completed_at IS NOT NULL AND created_at IS NOT NULL
+                WHERE project_id = ? AND completed_at IS NOT NULL AND created_at IS NOT NULL
             """,
-                (product_id,),
+                (project_id,),
             )
             cycle_time = cursor.fetchone()[0]
             if cycle_time:
@@ -432,9 +432,9 @@ def extract_product_metrics(cursor: sqlite3.Cursor) -> list[ProductMetrics]:  # 
             cursor.execute(
                 """
                 SELECT COUNT(*) FROM user_stories
-                WHERE product_id = ? AND evidence_links IS NOT NULL AND evidence_links != '[]'
+                WHERE project_id = ? AND evidence_links IS NOT NULL AND evidence_links != '[]'
             """,
-                (product_id,),
+                (project_id,),
             )
             metrics.stories_with_evidence_links = cursor.fetchone()[0]
 
@@ -448,9 +448,9 @@ def extract_product_metrics(cursor: sqlite3.Cursor) -> list[ProductMetrics]:  # 
                 SELECT COUNT(*), SUM(CASE WHEN t.status = 'DONE' THEN 1 ELSE 0 END)
                 FROM tasks t
                 JOIN user_stories us ON t.story_id = us.story_id
-                WHERE us.product_id = ?
+                WHERE us.project_id = ?
             """,
-                (product_id,),
+                (project_id,),
             )
             task_res = cursor.fetchone()
             if task_res:
@@ -464,18 +464,18 @@ def extract_product_metrics(cursor: sqlite3.Cursor) -> list[ProductMetrics]:  # 
         if cursor.fetchone():
             cursor.execute(
                 """
-                SELECT COUNT(*) FROM spec_registry WHERE product_id = ?
+                SELECT COUNT(*) FROM spec_registry WHERE project_id = ?
             """,
-                (product_id,),
+                (project_id,),
             )
             metrics.spec_versions_count = cursor.fetchone()[0]
 
             cursor.execute(
                 """
                 SELECT COUNT(*) FROM spec_registry
-                WHERE product_id = ? AND status = 'approved'
+                WHERE project_id = ? AND status = 'approved'
             """,
-                (product_id,),
+                (project_id,),
             )
             metrics.spec_versions_approved = cursor.fetchone()[0]
 
@@ -487,9 +487,9 @@ def extract_product_metrics(cursor: sqlite3.Cursor) -> list[ProductMetrics]:  # 
                 """
                 SELECT COUNT(*) FROM compiled_spec_authority csa
                 JOIN spec_registry sr ON csa.spec_version_id = sr.spec_version_id
-                WHERE sr.product_id = ?
+                WHERE sr.project_id = ?
             """,
-                (product_id,),
+                (project_id,),
             )
             metrics.compiled_authorities_count = cursor.fetchone()[0]
 
@@ -501,10 +501,10 @@ def extract_product_metrics(cursor: sqlite3.Cursor) -> list[ProductMetrics]:  # 
                 """
                 SELECT status, COUNT(*)
                 FROM spec_authority_acceptance
-                WHERE product_id = ?
+                WHERE project_id = ?
                 GROUP BY status
             """,
-                (product_id,),
+                (project_id,),
             )
             for status, count in cursor.fetchall():
                 if status == "accepted":
@@ -512,9 +512,9 @@ def extract_product_metrics(cursor: sqlite3.Cursor) -> list[ProductMetrics]:  # 
                 elif status == "rejected":
                     metrics.spec_rejected_count = count
 
-        products.append(metrics)
+        projects.append(metrics)
 
-    return products
+    return projects
 
 
 def extract_workflow_events_summary(cursor: sqlite3.Cursor) -> dict:
@@ -653,8 +653,8 @@ The database does NOT encode T1-T5 directly. Proposed mapping:
 
 | Task | Description | DB Representation | Notes |
 |------|-------------|-------------------|-------|
-| T1 | Definição de Visão | products.vision, products.created_at | No explicit timing event |
-| T2 | Especificação Técnica | products.technical_spec, spec_registry | No explicit timing event |
+| T1 | Definição de Visão | projects.vision, projects.created_at | No explicit timing event |
+| T2 | Especificação Técnica | projects.technical_spec, spec_registry | No explicit timing event |
 | T3 | Compilação de Autoridade | compiled_spec_authority.compiled_at, spec_authority_acceptance | Timing available via compiled_at |
 | T4 | Geração de Backlog | user_stories.created_at, validation_evidence | Aggregate by product |
 | T5 | Planejamento de Sprint | WorkflowEvent.SPRINT_PLAN_SAVED.duration_seconds | Explicit timing available |
@@ -668,7 +668,7 @@ The database does NOT encode T1-T5 directly. Proposed mapping:
 **Recommended approach:**
 - Use WorkflowEvent timestamps for T5 (sprint planning) cycle time
 - Use WorkflowEvent.FSM_STATE_DWELL for true per-state platform dwell time
-- Use products.created_at and first story created_at for T4 rough estimate
+- Use projects.created_at and first story created_at for T4 rough estimate
 - Use spec_registry/compiled_spec_authority timestamps for T3
 - T1/T2 timing requires external baseline data or session logs
 """
@@ -684,14 +684,14 @@ def write_csv_results(output_dir: Path, result: ExtractionResult) -> None:
     query_dir = output_dir / "query_results"
     query_dir.mkdir(parents=True, exist_ok=True)
 
-    # Products summary
-    if result.products:
+    # Projects summary
+    if result.projects:
         with open(  # noqa: PTH123
             query_dir / "products_metrics.csv", "w", newline="", encoding="utf-8"
         ) as f:
-            writer = csv.DictWriter(f, fieldnames=asdict(result.products[0]).keys())
+            writer = csv.DictWriter(f, fieldnames=asdict(result.projects[0]).keys())
             writer.writeheader()
-            for p in result.products:
+            for p in result.projects:
                 writer.writerow(asdict(p))
 
     # Workflow events
@@ -765,10 +765,10 @@ def write_summary_csv(output_file: Path, result: ExtractionResult) -> None:
 
         # Per-product metrics
         writer.writerow(["=== PRODUCT METRICS ==="])
-        if result.products:
-            headers = list(asdict(result.products[0]).keys())
+        if result.projects:
+            headers = list(asdict(result.projects[0]).keys())
             writer.writerow(headers)
-            for p in result.products:
+            for p in result.projects:
                 writer.writerow(list(asdict(p).values()))
         writer.writerow([])
 
@@ -798,7 +798,7 @@ def write_summary_json(output_file: Path, result: ExtractionResult) -> None:
             "commit_hash": result.commit_hash,
         },
         "schema": {"tables": result.tables},
-        "products": [asdict(p) for p in result.products],
+        "projects": [asdict(p) for p in result.projects],
         "workflow_events": result.workflow_events_by_type,
         "state_dwell_by_state": result.state_dwell_by_state,
         "smoke_runs": asdict(result.smoke_runs) if result.smoke_runs else None,
@@ -820,21 +820,21 @@ def print_markdown_summary(result: ExtractionResult) -> None:  # noqa: PLR0915
     emit(f"**Commit Hash:** {result.commit_hash or 'N/A'}")
     emit()
 
-    # Products table
-    emit("## Products Summary")
+    # Projects table
+    emit("## Projects Summary")
     emit()
     emit(
-        "| Product ID | Name | Stories | Refined | Refined w/ Spec Version | Sprints | Sprint Plan Events |"
+        "| Project ID | Name | Stories | Refined | Refined w/ Spec Version | Sprints | Sprint Plan Events |"
     )
     emit(
         "|------------|------|---------|---------|--------------------------|---------|-------------------|"
     )
-    for p in result.products:
+    for p in result.projects:
         name_short = (
             p.product_name[:40] + "..." if len(p.product_name) > 40 else p.product_name  # noqa: PLR2004
         )
         emit(
-            f"| {p.product_id} | {name_short} | {p.total_stories} | {p.stories_refined} | "
+            f"| {p.project_id} | {name_short} | {p.total_stories} | {p.stories_refined} | "
             f"{p.refined_stories_with_spec_version_id} | {p.sprint_count} | {p.sprint_plan_saves} |"
         )
     emit()
@@ -864,9 +864,9 @@ def print_markdown_summary(result: ExtractionResult) -> None:  # noqa: PLR0915
     # Spec Authority Pinning Coverage
     emit("## Spec Authority Pinning Coverage")
     emit()
-    total_refined = sum(p.stories_refined for p in result.products)
+    total_refined = sum(p.stories_refined for p in result.projects)
     refined_with_spec = sum(
-        p.refined_stories_with_spec_version_id for p in result.products
+        p.refined_stories_with_spec_version_id for p in result.projects
     )
     pct = (refined_with_spec / total_refined * 100) if total_refined > 0 else 0
     emit(f"- Total canonical refined stories: {total_refined}")
@@ -880,12 +880,12 @@ def print_markdown_summary(result: ExtractionResult) -> None:  # noqa: PLR0915
     emit("## Flow Efficiency & Execution Metrics")
     emit()
     emit(
-        "| Product | Avg Story Cycle Time (h) | Stories w/ Evidence | Tasks (Done/Total) |"
+        "| Project | Avg Story Cycle Time (h) | Stories w/ Evidence | Tasks (Done/Total) |"
     )
     emit(
         "|---------|--------------------------|---------------------|--------------------|"
     )
-    for p in result.products:
+    for p in result.projects:
         name_short = p.product_name[:20]
         task_info = f"{p.completed_tasks}/{p.total_tasks}"
         emit(
@@ -938,18 +938,18 @@ def print_markdown_summary(result: ExtractionResult) -> None:  # noqa: PLR0915
     emit("## Artifact Timing (T1-T5)")
     emit()
     emit(
-        "| Product ID | T1 Vision (avg s) | T2 Spec/Compile (avg s) | T4 Backlog (avg s) | T4 Roadmap (avg s) | T4 Stories (avg s) | T5 Sprint (avg s) |"
+        "| Project ID | T1 Vision (avg s) | T2 Spec/Compile (avg s) | T4 Backlog (avg s) | T4 Roadmap (avg s) | T4 Stories (avg s) | T5 Sprint (avg s) |"
     )
     emit(
         "|------------|-------------------|--------------------------|--------------------|--------------------|--------------------|-------------------|"
     )
-    for p in result.products:
+    for p in result.projects:
 
         def _fmt(v: float) -> str:
             return str(v) if v and v > 0 else "N/A"
 
         emit(
-            f"| {p.product_id} | {_fmt(p.avg_vision_duration_sec)} | "
+            f"| {p.project_id} | {_fmt(p.avg_vision_duration_sec)} | "
             f"{_fmt(p.avg_spec_compile_duration_sec)} | {_fmt(p.avg_backlog_duration_sec)} | "
             f"{_fmt(p.avg_roadmap_duration_sec)} | {_fmt(p.avg_stories_duration_sec)} | "
             f"{_fmt(p.avg_sprint_planning_duration_sec)} |"
@@ -1019,7 +1019,7 @@ def main() -> None:
     result.tables = get_schema_summary(cursor)
 
     emit("Extracting product metrics...", file=sys.stderr)
-    result.products = extract_product_metrics(cursor)
+    result.projects = extract_product_metrics(cursor)
 
     emit("Extracting workflow events...", file=sys.stderr)
     result.workflow_events_by_type = extract_workflow_events_summary(cursor)

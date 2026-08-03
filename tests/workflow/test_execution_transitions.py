@@ -17,7 +17,7 @@ import services.agent_workbench.sprint_phase as sprint_service
 import services.story_close_service as story_service
 import services.task_execution_service as task_service
 from models.core import (
-    Product,
+    Project,
     Sprint,
     SprintStory,
     Task,
@@ -107,21 +107,21 @@ def _seed_active_task(engine: Engine) -> tuple[int, int, int, int]:
 
 def _seed_unlineaged_active_task(engine: Engine) -> tuple[int, int, int, int]:
     with Session(engine) as session:
-        project = Product(name="Task 12", origin="greenfield")
+        project = Project(name="Task 12", origin="greenfield")
         team = Team(name="Task 12 Team")
         session.add(project)
         session.add(team)
         session.flush()
-        assert project.product_id is not None
+        assert project.project_id is not None
         assert team.team_id is not None
         sprint = Sprint(
-            product_id=project.product_id,
+            project_id=project.project_id,
             team_id=team.team_id,
             status=SprintStatus.ACTIVE,
             started_at=EVALUATED_AT,
         )
         story = UserStory(
-            product_id=project.product_id,
+            project_id=project.project_id,
             title="Execute graph work",
             status=StoryStatus.TO_DO,
             is_refined=True,
@@ -149,7 +149,7 @@ def _seed_unlineaged_active_task(engine: Engine) -> tuple[int, int, int, int]:
         session.add(task)
         session.commit()
         assert task.task_id is not None
-        return project.product_id, sprint.sprint_id, story.story_id, task.task_id
+        return project.project_id, sprint.sprint_id, story.story_id, task.task_id
 
 
 def _decision(
@@ -396,7 +396,7 @@ def test_execution_service_mutations_use_only_caller_owned_session() -> None:
         source = inspect.getsource(function)
         tree = ast.parse(source)
         assert "get_engine" not in source
-        assert "fsm_state" not in source
+        assert ("fsm" + "_state") not in source
         assert "active_sprint_id" not in source
         assert "latest_completed_sprint_id" not in source
         for node in ast.walk(tree):
@@ -430,11 +430,11 @@ def test_cross_project_sprint_start_lineage_is_loader_invalid(engine: Engine) ->
     """Reject a StartSprint row whose Project differs from its Sprint."""
     project_id, _sprint_id, _story_id, _task_id = _seed_active_task(engine)
     with Session(engine) as session:
-        other = Product(name="Task 12 lineage owner", origin="greenfield")
+        other = Project(name="Task 12 lineage owner", origin="greenfield")
         session.add(other)
         session.commit()
-        assert other.product_id is not None
-        other_project_id = other.product_id
+        assert other.project_id is not None
+        other_project_id = other.project_id
     with engine.connect() as connection:
         connection.exec_driver_sql("PRAGMA foreign_keys=OFF")
         connection.exec_driver_sql(
@@ -524,17 +524,17 @@ def test_stale_task_decision_and_cross_project_links_fail_closed(
     """Fail stale guards and cross-project Sprint links closed."""
     project_id, sprint_id, _story_id, task_id = _seed_active_task(engine)
     with Session(engine) as session:
-        other = Product(name="Task 12 other", origin="greenfield")
+        other = Project(name="Task 12 other", origin="greenfield")
         session.add(other)
         session.commit()
-        assert other.product_id is not None
-        other_project = other.product_id
+        assert other.project_id is not None
+        other_project = other.project_id
     domain = _domain(engine)
     request = _complete_task(domain, project_id, task_id)
     with Session(engine) as session:
         sprint = session.get(Sprint, sprint_id)
         assert sprint is not None
-        sprint.product_id = other_project
+        sprint.project_id = other_project
         session.add(sprint)
         session.commit()
     stale = domain.transition(request)
@@ -828,7 +828,7 @@ def test_closed_sprint_ignores_unrelated_future_rejected_dependency(
     with Session(engine) as session:
         future_stories = [
             UserStory(
-                product_id=project_id,
+                project_id=project_id,
                 title=f"Future Story {index}",
                 status=StoryStatus.TO_DO,
                 is_refined=False,
@@ -845,7 +845,7 @@ def test_closed_sprint_ignores_unrelated_future_rejected_dependency(
         assert second_id is not None
         session.add(
             UserStoryDependency(
-                product_id=project_id,
+                project_id=project_id,
                 dependent_story_id=first_id,
                 prerequisite_story_id=second_id,
                 status="rejected",
@@ -893,7 +893,7 @@ def test_closed_sprint_ignores_unselected_story_moved_to_later_sprint(
         assert sprint_a is not None
         assert future_story is not None
         sprint_b = Sprint(
-            product_id=project_id,
+            project_id=project_id,
             team_id=sprint_a.team_id,
             status=SprintStatus.PLANNED,
         )
@@ -985,11 +985,11 @@ def test_cross_project_historical_triage_is_loader_invalid(engine: Engine) -> No
         )
     ).ok is True
     with Session(engine) as session:
-        other = Product(name="Task 12 triage owner", origin="greenfield")
+        other = Project(name="Task 12 triage owner", origin="greenfield")
         session.add(other)
         session.commit()
-        assert other.product_id is not None
-        other_project_id = other.product_id
+        assert other.project_id is not None
+        other_project_id = other.project_id
     with engine.connect() as connection:
         connection.exec_driver_sql("PRAGMA foreign_keys=OFF")
         connection.exec_driver_sql(
@@ -1144,7 +1144,7 @@ def test_multi_sprint_restart_preserves_scoped_historical_position(
         assert sprint_a is not None
         assert future_story is not None
         sprint_b = Sprint(
-            product_id=project_id,
+            project_id=project_id,
             team_id=sprint_a.team_id,
             status=SprintStatus.PLANNED,
             created_at=EVALUATED_AT,

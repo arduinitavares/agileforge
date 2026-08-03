@@ -20,7 +20,7 @@ from models.agent_workbench import (
     DiscoveryPrd,
     DiscoverySpecAmendmentDraft,
 )
-from models.core import Product
+from models.core import Project
 from services.agent_workbench.authority_projection import (
     _AUTHORITY_REQUIREMENTS,
     _iso_z,
@@ -133,8 +133,6 @@ class AuthorityReviewSnapshot:
     resolved_spec_path: str | None
     compiler_version: str
     prompt_hash: str
-    fsm_state: str
-    setup_status: str
     content_included: bool
     omission_assessment: str
     coverage_summary_fingerprint: str
@@ -250,8 +248,6 @@ class AuthorityReviewSnapshot:
             "expected_source_spec_hash": self.source_spec_hash,
             "expected_disk_spec_hash": self.disk_spec_hash,
             "expected_resolved_spec_path": self.resolved_spec_path,
-            "expected_state": "SETUP_REQUIRED",
-            "expected_setup_status": "authority_pending_review",
             "expected_content_included": self.content_included,
             "expected_omission_assessment": self.omission_assessment,
             "expected_coverage_summary_fingerprint": (
@@ -554,8 +550,8 @@ def build_authority_review_snapshot_in_session(
     repo_root: Path | None = None,
 ) -> AuthorityReviewSnapshot | JsonDict:
     """Build a review snapshot using only the caller-owned session."""
-    product = session.get(Product, project_id)
-    if product is None:
+    project = session.get(Project, project_id)
+    if project is None:
         return _project_not_found_error(AUTHORITY_REVIEW_COMMAND, project_id)
     selection = _load_authority_selection(session, project_id=project_id)
     spec = selection.latest_spec
@@ -571,7 +567,7 @@ def build_authority_review_snapshot_in_session(
         )
     return build_authority_review_snapshot(
         project_id=project_id,
-        product=product,
+        project=project,
         spec=spec,
         authority=authority,
         include_spec=include_spec,
@@ -584,7 +580,7 @@ def build_authority_review_snapshot_in_session(
 def build_authority_review_snapshot(  # noqa: PLR0913
     *,
     project_id: int,
-    product: Product | None = None,
+    project: Project | None = None,
     spec: SpecRegistry | None = None,
     authority: CompiledSpecAuthority | None = None,
     include_spec: str = "auto",
@@ -593,7 +589,7 @@ def build_authority_review_snapshot(  # noqa: PLR0913
     session: Session | None = None,
 ) -> AuthorityReviewSnapshot | JsonDict:
     """Build the canonical review snapshot without rendering a packet."""
-    if product is None or spec is None or authority is None:
+    if project is None or spec is None or authority is None:
         if session is not None:
             return build_authority_review_snapshot_in_session(
                 session,
@@ -695,8 +691,6 @@ def build_authority_review_snapshot(  # noqa: PLR0913
         project_id=project_id,
         amended_spec_hash=source_spec_hash,
     )
-    fsm_state = "SETUP_REQUIRED"
-    setup_status = "authority_pending_review"
     omission_assessment = coverage_summary["omission_assessment"]
 
     return AuthorityReviewSnapshot(
@@ -711,12 +705,10 @@ def build_authority_review_snapshot(  # noqa: PLR0913
         ),
         compiler_version=authority.compiler_version,
         prompt_hash=authority.prompt_hash,
-        fsm_state=fsm_state,
-        setup_status=setup_status,
         content_included=content_included,
         omission_assessment=omission_assessment,
         coverage_summary_fingerprint=coverage_fingerprint,
-        project_name=product.name,
+        project_name=project.name,
         spec_version_id=spec.spec_version_id,
         content_ref=spec.content_ref,
         disk_status="registry",
@@ -1321,8 +1313,6 @@ def _render_review_packet(snapshot: AuthorityReviewSnapshot) -> JsonDict:
         "project": {
             "project_id": snapshot.project_id,
             "name": snapshot.project_name,
-            "fsm_state": snapshot.fsm_state,
-            "setup_status": snapshot.setup_status,
         },
         "spec": spec_payload,
         "pending_authority": {
@@ -1500,8 +1490,6 @@ def _render_review_text(packet: JsonDict) -> str:
         f"Authority review for project {_mapping_value(project, 'project_id')}",
         f"Project: {_mapping_value(project, 'project_id')}",
         f"Project name: {_mapping_value(project, 'name')}",
-        f"FSM state: {_mapping_value(project, 'fsm_state')}",
-        f"Setup status: {_mapping_value(project, 'setup_status')}",
         f"Status: {acceptance_status}",
         f"Recommendation: {recommendation}",
         f"Spec version: {_mapping_value(spec, 'spec_version_id')}",

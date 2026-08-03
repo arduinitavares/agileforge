@@ -248,8 +248,7 @@ def record_backlog_refinement_approval(
     session.add(
         WorkflowEvent(
             event_type=WorkflowEventType.BACKLOG_REFINEMENT_APPROVED,
-            product_id=request.project_id,
-            session_id=str(request.project_id),
+            project_id=request.project_id,
             event_metadata=json.dumps(metadata, sort_keys=True),
         )
     )

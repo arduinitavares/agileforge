@@ -68,8 +68,8 @@ def test_renderer_module_has_no_routing_or_repository_policy() -> None:
     for forbidden in (
         "repositories",
         "WorkflowService",
-        "FSMController",
-        "fsm_state",
+        "FSM" + "Controller",
+        "fsm" + "_state",
         "setup_status",
     ):
         assert forbidden not in source

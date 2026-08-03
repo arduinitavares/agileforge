@@ -1,2 +1,2 @@
 # utils/__init__.py
-"""Utilities package for orchestrator helpers."""
+"""Utilities package for workflow helpers."""

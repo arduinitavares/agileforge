@@ -12,7 +12,7 @@ from utils.cli_output import emit
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from agile_sqlmodel import Product, StoryStatus, UserStory
+from agile_sqlmodel import Project, StoryStatus, UserStory
 from models.core import Epic, Feature, Theme
 from tools.db_tools import query_product_structure
 
@@ -48,19 +48,19 @@ def seed_database(
     """Return seed database."""
     with Session(engine) as session:
         for p in range(product_count):
-            product = Product(
-                name=f"Product {p}", vision="Vision", description="Description"
+            product = Project(
+                name=f"Project {p}", vision="Vision", description="Description"
             )
             session.add(product)
             session.commit()
             session.refresh(product)
-            product_id = _require_id(product.product_id, "Product ID")
+            project_id = _require_id(product.project_id, "Project ID")
 
             for t in range(themes_per_product):
                 theme = Theme(
                     title=f"Theme {t}",
                     description="Desc",
-                    product_id=product_id,
+                    project_id=project_id,
                 )
                 session.add(theme)
                 session.commit()
@@ -90,13 +90,13 @@ def seed_database(
                                 title=f"Story {s}",
                                 story_description="Desc",
                                 status=StoryStatus.TO_DO,
-                                product_id=product_id,
+                                project_id=project_id,
                                 feature_id=feature_id,
                             )
                             session.add(story)
         session.commit()
     emit(
-        f"Seeded DB with {product_count} products, {themes_per_product} themes/prod, {epics_per_theme} epics/theme, {features_per_epic} features/epic, {stories_per_feature} stories/feature."  # noqa: E501
+        f"Seeded DB with {product_count} projects, {themes_per_product} themes/prod, {epics_per_theme} epics/theme, {features_per_epic} features/epic, {stories_per_feature} stories/feature."  # noqa: E501
     )
 
 

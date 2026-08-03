@@ -8,12 +8,9 @@ from sqlmodel import Session, col, select
 
 from models.authority_curation import AuthorityFeedbackAttempt
 from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance, SpecRegistry
-from services.agent_workbench.authority_decision import (
-    AuthorityDecisionConflictError,
-    record_authority_decision_in_session,
-)
 from services.agent_workbench.authority_review import (
     AuthorityReviewSnapshot,
+    authority_review_fingerprint,
     build_authority_review_snapshot_in_session,
 )
 from services.specs.authority_selection import pending_authority_fingerprint
@@ -38,6 +35,76 @@ if TYPE_CHECKING:
         RecordAuthorityFeedback,
         RepairAuthority,
     )
+
+
+class AuthorityDecisionConflictError(RuntimeError):
+    """Raised when durable facts already contain a terminal authority decision."""
+
+
+def _terminal_decision_key(
+    *,
+    project_id: int,
+    spec_version_id: int,
+    pending_authority_id: int,
+) -> str:
+    return f"{project_id}:{spec_version_id}:{pending_authority_id}"
+
+
+def _record_authority_decision(
+    session: Session,
+    *,
+    snapshot: AuthorityReviewSnapshot,
+    request: DecideAuthority,
+    decided_at: datetime,
+) -> SpecAuthorityAcceptance:
+    """Append one exact terminal decision in the caller-owned transaction."""
+    authority_id = snapshot.pending_authority_id
+    authority_fingerprint = snapshot.authority_fingerprint
+    spec_version_id = snapshot.spec_version_id
+    if authority_id is None or authority_fingerprint is None or spec_version_id is None:
+        message = "The authority review snapshot is missing durable identity."
+        raise ValueError(message)
+    if request.review_fingerprint != authority_review_fingerprint(snapshot):
+        message = "The authority review fingerprint changed."
+        raise AuthorityDecisionConflictError(message)
+    key = _terminal_decision_key(
+        project_id=snapshot.project_id,
+        spec_version_id=spec_version_id,
+        pending_authority_id=authority_id,
+    )
+    existing = session.exec(
+        select(SpecAuthorityAcceptance).where(
+            SpecAuthorityAcceptance.terminal_decision_key == key
+        )
+    ).first()
+    if existing is not None:
+        message = "The exact authority already has a terminal decision."
+        raise AuthorityDecisionConflictError(message)
+    row = SpecAuthorityAcceptance(
+        project_id=snapshot.project_id,
+        spec_version_id=spec_version_id,
+        status=request.decision,
+        policy="manual",
+        decided_by=request.actor,
+        decided_at=decided_at,
+        rationale=request.rationale,
+        compiler_version=snapshot.compiler_version,
+        prompt_hash=snapshot.prompt_hash,
+        spec_hash=snapshot.source_spec_hash,
+        pending_authority_id=authority_id,
+        authority_fingerprint=authority_fingerprint,
+        review_token=snapshot.review_token,
+        review_fingerprint=request.review_fingerprint,
+        disk_spec_hash=snapshot.disk_spec_hash,
+        resolved_spec_path=snapshot.resolved_spec_path,
+        actor_mode="workflow_domain",
+        review_completeness=snapshot.omission_assessment,
+        terminal_decision_key=key,
+        provenance_source="workflow_domain",
+    )
+    session.add(row)
+    session.flush()
+    return row
 
 
 def _success(decision: NodeDecision, output: dict[str, object]) -> TransitionResult:
@@ -72,7 +139,7 @@ def _authority(
             == col(SpecRegistry.spec_version_id),
         )
         .where(
-            col(SpecRegistry.product_id) == project_id,
+            col(SpecRegistry.project_id) == project_id,
             col(CompiledSpecAuthority.authority_id) == authority_id,
         )
     ).one_or_none()
@@ -87,7 +154,7 @@ def _terminal_decision(
     rows = session.exec(
         select(SpecAuthorityAcceptance)
         .where(
-            col(SpecAuthorityAcceptance.product_id) == project_id,
+            col(SpecAuthorityAcceptance.project_id) == project_id,
             col(SpecAuthorityAcceptance.pending_authority_id) == authority_id,
         )
         .order_by(
@@ -164,7 +231,7 @@ def execute_compile_authority(
     spec = session.get(SpecRegistry, request.spec_version_id)
     if (
         spec is None
-        or spec.product_id != request.project_id
+        or spec.project_id != request.project_id
         or spec.status != "approved"
         or spec.spec_hash != request.expected_spec_hash
         or not _matches_reference(
@@ -212,14 +279,10 @@ def execute_decide_authority(
     ):
         return _conflict("DecideAuthority does not target the pending authority.")
     try:
-        row = record_authority_decision_in_session(
+        row = _record_authority_decision(
             session,
             snapshot=review,
-            decision=request.decision,
-            rationale=request.rationale,
-            actor=request.actor,
-            policy="manual",
-            review_fingerprint=request.review_fingerprint,
+            request=request,
             decided_at=evaluated_at,
         )
     except AuthorityDecisionConflictError as error:

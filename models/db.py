@@ -12,7 +12,6 @@ from sqlalchemy import event
 from sqlalchemy.engine import Engine
 from sqlmodel import SQLModel, create_engine
 
-from db.migrations import ensure_schema_current
 from models import agent_workbench as _agent_workbench_models  # noqa: F401
 from models import authority_curation as _authority_curation_models  # noqa: F401
 from models import brownfield as _brownfield_models  # noqa: F401
@@ -84,14 +83,13 @@ def set_sqlite_pragma(
 
 
 def create_db_and_tables() -> None:
-    """Create the database and all tables, then run migrations."""
+    """Create the current database schema."""
     logger.info("Creating tables.")
     ensure_business_db_ready()
     logger.info("Tables created successfully.")
 
 
 def ensure_business_db_ready(engine_override: Engine | None = None) -> None:
-    """Create core business tables and apply idempotent migrations."""
+    """Create all current business tables from SQLModel metadata."""
     target_engine = engine_override or engine
     SQLModel.metadata.create_all(target_engine)
-    ensure_schema_current(target_engine)

@@ -217,7 +217,7 @@ def _execute_start(
 ) -> TransitionResult:
     approved = session.exec(
         select(SpecRegistry).where(
-            col(SpecRegistry.product_id) == request.project_id,
+            col(SpecRegistry.project_id) == request.project_id,
             col(SpecRegistry.status) == "approved",
         )
     ).all()
@@ -579,7 +579,7 @@ def _registration_is_duplicate(
         return _conflict("The extension run is already registered.")
     if session.exec(
         select(SpecRegistry).where(
-            col(SpecRegistry.product_id) == project_id,
+            col(SpecRegistry.project_id) == project_id,
             col(SpecRegistry.spec_hash) == inputs.stored_hash,
         )
     ).all():
@@ -601,7 +601,7 @@ def _execute_registration(
         return duplicate
     base = session.exec(
         select(SpecRegistry).where(
-            col(SpecRegistry.product_id) == request.project_id,
+            col(SpecRegistry.project_id) == request.project_id,
             col(SpecRegistry.spec_version_id) == inputs.active.base_spec_version_id,
             col(SpecRegistry.spec_hash) == inputs.active.base_spec_hash,
             col(SpecRegistry.status) == "approved",
@@ -614,7 +614,7 @@ def _execute_registration(
     spec = register_approved_spec_from_canonical_json(
         session,
         ApprovedCanonicalSpec(
-            product_id=request.project_id,
+            project_id=request.project_id,
             canonical_content_json=inputs.active.canonical_content_json,
             content_ref=inputs.active.provenance_path,
             approved_at=evaluated_at,
@@ -658,7 +658,7 @@ def _authority_is_accepted(
     authority = session.get(CompiledSpecAuthority, authority_id)
     acceptance = session.exec(
         select(SpecAuthorityAcceptance).where(
-            col(SpecAuthorityAcceptance.product_id) == project_id,
+            col(SpecAuthorityAcceptance.project_id) == project_id,
             col(SpecAuthorityAcceptance.pending_authority_id) == authority_id,
             col(SpecAuthorityAcceptance.status) == "accepted",
         )
@@ -784,7 +784,7 @@ def _execute_abandonment(
     if registration is not None:
         accepted = session.exec(
             select(SpecAuthorityAcceptance).where(
-                col(SpecAuthorityAcceptance.product_id) == request.project_id,
+                col(SpecAuthorityAcceptance.project_id) == request.project_id,
                 col(SpecAuthorityAcceptance.status) == "accepted",
             )
         ).all()

@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 from sqlmodel import Session, col, select
 
-from models.core import Product
+from models.core import Project
 from models.workflow import DiscoveryRun, ProjectAbandonment
 from repositories.workflow import WorkflowFactRepository
 from workflow.contracts import (
@@ -31,7 +31,7 @@ def execute_open_project_shell(
 ) -> TransitionResult:
     """Insert one Project and exactly one initial DiscoveryRun."""
     existing = session.exec(
-        select(Product).where(col(Product.name) == request.name)
+        select(Project).where(col(Project.name) == request.name)
     ).first()
     if existing is not None:
         return TransitionResult(
@@ -42,7 +42,7 @@ def execute_open_project_shell(
             ),
         )
 
-    project = Product(
+    project = Project(
         name=request.name,
         origin=request.origin,
         created_at=evaluated_at,
@@ -50,12 +50,12 @@ def execute_open_project_shell(
     )
     session.add(project)
     session.flush()
-    if project.product_id is None:
+    if project.project_id is None:
         msg = "Project identity was not assigned after flush."
         raise RuntimeError(msg)
 
     discovery_run = DiscoveryRun(
-        project_id=project.product_id,
+        project_id=project.project_id,
         purpose="initial",
         ordinal=1,
         created_at=evaluated_at,
@@ -66,13 +66,13 @@ def execute_open_project_shell(
         msg = "Initial discovery-run identity was not assigned after flush."
         raise RuntimeError(msg)
 
-    snapshot = WorkflowFactRepository(session).load(project.product_id)
+    snapshot = WorkflowFactRepository(session).load(project.project_id)
     position = graph.evaluate(snapshot, evaluated_at)
     return TransitionResult(
         ok=True,
         applied_node_id="onboarding.open_project_shell",
         output={
-            "project_id": project.product_id,
+            "project_id": project.project_id,
             "discovery_run_id": discovery_run.discovery_run_id,
         },
         position=position,

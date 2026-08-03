@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import typing
-from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Final, cast
 
@@ -181,33 +180,6 @@ def build_triage_payload(  # noqa: PLR0913
     return payload
 
 
-def current_triage_for_latest_sprint(state: dict[str, Any]) -> dict[str, Any] | None:
-    """Return stored triage only when it belongs to the latest completed sprint."""
-    latest_completed_sprint_id = _positive_int_or_none(
-        state.get("latest_completed_sprint_id")
-    )
-    if latest_completed_sprint_id is None:
-        return None
-
-    triage = state.get("post_sprint_triage")
-    if not isinstance(triage, dict):
-        return None
-    if _positive_int_or_none(triage.get("sprint_id")) != latest_completed_sprint_id:
-        return None
-    if not _is_valid_stored_triage(triage):
-        return None
-    return deepcopy(triage)
-
-
-def post_sprint_triage_required(state: dict[str, Any]) -> bool:
-    """Return whether the latest completed sprint still needs triage."""
-    if state.get("fsm_state") != "SPRINT_COMPLETE":
-        return False
-    if _positive_int_or_none(state.get("latest_completed_sprint_id")) is None:
-        return False
-    return current_triage_for_latest_sprint(state) is None
-
-
 @dataclass(frozen=True)
 class PostSprintTriageInput:
     """Caller-owned inputs for one triage fact or correction."""
@@ -228,7 +200,7 @@ def record_post_sprint_triage_in_session(
     sprint = session.get(Sprint, command.sprint_id)
     if (
         sprint is None
-        or sprint.product_id != command.project_id
+        or sprint.project_id != command.project_id
         or sprint.status is not SprintStatus.COMPLETED
     ):
         message = "Post-sprint triage requires the exact completed Project Sprint."
@@ -282,7 +254,7 @@ def record_post_sprint_triage_in_session(
         WorkflowEvent(
             event_type=WorkflowEventType.POST_SPRINT_TRIAGE_RECORDED,
             timestamp=command.recorded_at,
-            product_id=command.project_id,
+            project_id=command.project_id,
             sprint_id=command.sprint_id,
             event_metadata=canonical_json(
                 {

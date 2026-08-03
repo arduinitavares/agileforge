@@ -22,14 +22,14 @@ if TYPE_CHECKING:
 
 def export_snapshot_command(
     *,
-    product_id: int,
+    project_id: int,
     output_dir: Path,
     engine_override: Engine | None = None,
 ) -> Path:
     """Generate a snapshot HTML file for a product.
 
     Args:
-        product_id: Product identifier.
+        project_id: Project identifier.
         output_dir: Destination folder for export.
         engine_override: Optional SQLAlchemy engine for testing.
 
@@ -37,7 +37,7 @@ def export_snapshot_command(
         Path to the generated HTML file.
     """
     return export_project_snapshot_html(
-        product_id=product_id,
+        project_id=project_id,
         output_dir=output_dir,
         engine_override=engine_override,
     )
@@ -46,7 +46,7 @@ def export_snapshot_command(
 def main(argv: list[str] | None = None) -> int:
     """Return main."""
     parser = argparse.ArgumentParser(description="Export project snapshot HTML")
-    parser.add_argument("--product-id", type=int, required=True, help="Product ID")
+    parser.add_argument("--product-id", type=int, required=True, help="Project ID")
     parser.add_argument(
         "--output-dir",
         type=str,
@@ -56,7 +56,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     output_path = export_snapshot_command(
-        product_id=args.product_id,
+        project_id=args.project_id,
         output_dir=Path(args.output_dir),
     )
     emit(f"Snapshot written: {output_path}")

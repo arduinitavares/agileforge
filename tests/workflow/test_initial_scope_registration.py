@@ -10,7 +10,7 @@ import pytest
 from sqlmodel import Session, col, select
 
 import workflow.handlers.onboarding as onboarding_handlers
-from models.core import Product
+from models.core import Project
 from models.specs import CompiledSpecAuthority, SpecRegistry
 from models.workflow import (
     ChallengeArtifact,
@@ -86,7 +86,7 @@ def _seed_accepted_initial_draft(
 ) -> _AcceptedDraft:
     canonical_content_json = canonical_json(canonical_content)
     with Session(engine) as session:
-        project = Product(
+        project = Project(
             name=name,
             origin="greenfield",
             created_at=EVALUATED_AT,
@@ -94,7 +94,7 @@ def _seed_accepted_initial_draft(
         )
         session.add(project)
         session.flush()
-        project_id = _required_id(project.product_id)
+        project_id = _required_id(project.project_id)
         run = DiscoveryRun(
             project_id=project_id,
             purpose="initial",
@@ -363,14 +363,14 @@ def test_low_level_registration_uses_caller_owned_session_without_commit(
 ) -> None:
     """Allow the domain transaction to own commit or rollback."""
     with Session(engine) as session:
-        project = Product(name="Caller Session", origin="greenfield")
+        project = Project(name="Caller Session", origin="greenfield")
         session.add(project)
         session.flush()
-        project_id = _required_id(project.product_id)
+        project_id = _required_id(project.project_id)
         spec = register_approved_spec_from_canonical_json(
             session,
             ApprovedCanonicalSpec(
-                product_id=project_id,
+                project_id=project_id,
                 canonical_content_json=canonical_json({"scope": ["caller-owned"]}),
                 content_ref=None,
                 approved_at=EVALUATED_AT,
@@ -383,7 +383,7 @@ def test_low_level_registration_uses_caller_owned_session_without_commit(
 
     with Session(engine) as session:
         assert session.get(SpecRegistry, spec_id) is None
-        assert session.get(Product, project_id) is None
+        assert session.get(Project, project_id) is None
 
 
 def test_registration_failure_rolls_back_spec_receipt_and_binding_atomically(

@@ -20,13 +20,13 @@ def resolve_db_target(explicit_db: str | None = None) -> DatabaseTarget:
 def _load_accepted_invariants(
     session: Session,
     *,
-    product_id: int,
+    project_id: int,
     spec_version_id: int,
 ) -> list[dict[str, Any]] | None:
     """Load invariants only from the exact accepted valid authority."""
     authority = accepted_compiled_authority(
         session,
-        product_id=product_id,
+        project_id=project_id,
         spec_version_id=spec_version_id,
     )
     if authority is None:
@@ -39,7 +39,7 @@ def _load_accepted_invariants(
     ]
 
 
-def dry_run_validation(product_id: int, db: str | None = None) -> None:  # noqa: C901, PLR0912
+def dry_run_validation(project_id: int, db: str | None = None) -> None:  # noqa: C901, PLR0912
     """Return dry run validation."""
     from agile_sqlmodel import (  # noqa: PLC0415
         SpecRegistry,
@@ -64,7 +64,7 @@ def dry_run_validation(product_id: int, db: str | None = None) -> None:  # noqa:
         statement = (
             select(SpecRegistry)
             .where(
-                SpecRegistry.product_id == product_id, SpecRegistry.status == "approved"
+                SpecRegistry.project_id == project_id, SpecRegistry.status == "approved"
             )
             .order_by(col(SpecRegistry.spec_version_id).desc())
         )
@@ -72,17 +72,17 @@ def dry_run_validation(product_id: int, db: str | None = None) -> None:  # noqa:
         spec = session.exec(statement).first()
 
         if not spec:
-            emit(f"ERROR: No approved spec found for product {product_id}")
+            emit(f"ERROR: No approved spec found for product {project_id}")
             return
         if spec.spec_version_id is None:
-            emit(f"ERROR: Approved spec for product {product_id} has no ID.")
+            emit(f"ERROR: Approved spec for product {project_id} has no ID.")
             return
 
         emit(f"Using Spec Version {spec.spec_version_id} (ID: {spec.spec_version_id})")
 
         # 2. Get all stories for product
         stories = session.exec(
-            select(UserStory).where(UserStory.product_id == product_id)
+            select(UserStory).where(UserStory.project_id == project_id)
         ).all()
 
         emit(f"Found {len(stories)} stories to validate.")
@@ -103,7 +103,7 @@ def dry_run_validation(product_id: int, db: str | None = None) -> None:  # noqa:
         # Fetch compiled authority content
         invariants = _load_accepted_invariants(
             session,
-            product_id=product_id,
+            project_id=project_id,
             spec_version_id=spec.spec_version_id,
         )
         if invariants is None:
@@ -161,10 +161,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Dry-run story validation against compiled spec authority.",
     )
-    parser.add_argument("product_id", type=int, help="Product ID to inspect.")
+    parser.add_argument("project_id", type=int, help="Project ID to inspect.")
     parser.add_argument(
         "--db",
         help="Optional SQLite database path or sqlite:/// URL. Defaults to AGILEFORGE_DB_URL.",  # noqa: E501
     )
     args = parser.parse_args()
-    dry_run_validation(args.product_id, db=args.db)
+    dry_run_validation(args.project_id, db=args.db)

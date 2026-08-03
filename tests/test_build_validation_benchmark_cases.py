@@ -8,7 +8,7 @@ import pytest  # noqa: TC002
 
 from agile_sqlmodel import (
     CompiledSpecAuthority,
-    Product,
+    Project,
     SpecAuthorityAcceptance,
     SpecRegistry,
     UserStory,
@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 
 def _story(title: str, description: str, acceptance_criteria: str) -> UserStory:
     return UserStory(
-        product_id=1,
+        project_id=1,
         title=title,
         story_description=description,
         acceptance_criteria=acceptance_criteria,
@@ -81,13 +81,13 @@ def test_strict_spec_resolution_requires_exact_accepted_valid_authority(
     session: Session,
 ) -> None:
     """Strict cases reject missing or malformed acceptance; permissive is explicit."""
-    product = Product(name="Benchmark Builder Product")
+    product = Project(name="Benchmark Builder Project")
     session.add(product)
     session.commit()
     session.refresh(product)
-    product_id = require_id(product.product_id, "product_id")
+    project_id = require_id(product.project_id, "project_id")
     spec = SpecRegistry(
-        product_id=product_id,
+        project_id=project_id,
         spec_hash="builder-spec",
         content="# Builder",
         status="approved",
@@ -97,7 +97,7 @@ def test_strict_spec_resolution_requires_exact_accepted_valid_authority(
     session.refresh(spec)
     spec_version_id = require_id(spec.spec_version_id, "spec_version_id")
     story = UserStory(
-        product_id=product_id,
+        project_id=project_id,
         accepted_spec_version_id=spec_version_id,
         title="Builder story",
     )
@@ -117,7 +117,7 @@ def test_strict_spec_resolution_requires_exact_accepted_valid_authority(
     session.flush()
     session.add(
         SpecAuthorityAcceptance(
-            product_id=product_id,
+            project_id=project_id,
             spec_version_id=spec_version_id,
             status="accepted",
             policy="test",
@@ -171,7 +171,7 @@ def test_strict_spec_resolution_requires_exact_accepted_valid_authority(
 
     session.add(
         SpecAuthorityAcceptance(
-            product_id=product_id,
+            project_id=project_id,
             spec_version_id=spec_version_id,
             status="accepted",
             policy="test",

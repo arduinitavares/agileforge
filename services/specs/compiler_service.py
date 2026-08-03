@@ -19,8 +19,7 @@ from pydantic import BaseModel, Field, ValidationError
 from sqlmodel import Session, select
 
 from adapters.adk.prompts import specification as instructions_source
-from db.migrations import ensure_schema_current
-from models.core import Product
+from models.core import Project
 from models.db import get_engine
 from models.enums import SpecAuthorityStatus
 from models.specs import (
@@ -143,39 +142,39 @@ class SpecAuthorityGateError(RuntimeError):
     """Raised when the story-generation authority gate cannot be satisfied."""
 
     @classmethod
-    def missing_source(cls, product_id: int) -> SpecAuthorityGateError:
+    def missing_source(cls, project_id: int) -> SpecAuthorityGateError:
         """Build the canonical missing-source error."""
         return cls(
-            f"No accepted spec authority exists for product {product_id}, and no "
+            f"No accepted spec authority exists for project {project_id}, and no "
             "spec_content or content_ref was provided. Please provide the "
             "specification content or a file path to create an authority."
         )
 
     @classmethod
     def update_failed(
-        cls, product_id: int, error_message: str
+        cls, project_id: int, error_message: str
     ) -> SpecAuthorityGateError:
         """Build the canonical compilation-failed error."""
         return cls(
-            f"Failed to create accepted spec authority for product {product_id}: "
+            f"Failed to create accepted spec authority for project {project_id}: "
             f"{error_message}"
         )
 
     @classmethod
-    def not_accepted(cls, product_id: int) -> SpecAuthorityGateError:
+    def not_accepted(cls, project_id: int) -> SpecAuthorityGateError:
         """Build the canonical not-accepted error."""
         return cls(
-            f"Spec authority for product {product_id} was compiled but not "
+            f"Spec authority for project {project_id} was compiled but not "
             "accepted. Authority acceptance is required before story generation "
             "can proceed."
         )
 
     @classmethod
-    def missing_spec_version_id(cls, product_id: int) -> SpecAuthorityGateError:
+    def missing_spec_version_id(cls, project_id: int) -> SpecAuthorityGateError:
         """Build the canonical missing-ID error."""
         return cls(
             "Spec authority creation succeeded but no spec_version_id was returned "
-            f"for product {product_id}."
+            f"for project {project_id}."
         )
 
 
@@ -270,7 +269,7 @@ class _AcceptedAuthorityLookup:
 class _CompilerFailureDetails:
     """Structured inputs for failure-artifact persistence."""
 
-    product_id: int | None
+    project_id: int | None
     spec_version_id: int | None
     content_ref: str | None
     failure_stage: str
@@ -287,7 +286,7 @@ class _CompilerVersionContext:
     """Resolved compilation inputs for one approved spec version."""
 
     spec_version: SpecRegistry
-    product: Product | None
+    project: Project | None
     existing_authority: CompiledSpecAuthority | None
 
 
@@ -369,7 +368,7 @@ class _ScopeExtensionCompileMarker:
 class _CompilerFailureOptions(TypedDict, total=False):
     """Keyword arguments accepted by `_compiler_failure_result`."""
 
-    product_id: int | None
+    project_id: int | None
     spec_version_id: int | None
     content_ref: str | None
     compiler_model: str | None
@@ -385,7 +384,7 @@ class _CompilerFailureOptions(TypedDict, total=False):
 class UpdateSpecAndCompileAuthorityInput(BaseModel):
     """Input schema for update+compile spec workflows."""
 
-    product_id: int = Field(description="Product ID for spec update")
+    project_id: int = Field(description="Project ID for spec update")
     spec_content: str | None = Field(
         default=None,
         description="Raw specification content to persist and compile",
@@ -425,13 +424,13 @@ class CompileSpecAuthorityInput(BaseModel):
 class CheckSpecAuthorityStatusInput(BaseModel):
     """Input schema for spec authority status checks."""
 
-    product_id: int = Field(description="Product ID to check status for")
+    project_id: int = Field(description="Project ID to check status for")
 
 
 class GetCompiledAuthorityInput(BaseModel):
     """Input schema for deterministic retrieval of compiled authority by version."""
 
-    product_id: int = Field(description="Product ID")
+    project_id: int = Field(description="Project ID")
     spec_version_id: int = Field(description="Spec version ID to retrieve")
 
 
@@ -715,13 +714,13 @@ def _compiled_authority_artifact_json(
 def _lookup_reusable_accepted_authority(
     session: Session,
     *,
-    product_id: int,
+    project_id: int,
 ) -> _AcceptedAuthorityLookup:
     """Inspect accepted authority rows and report whether one can be reused."""
     existing_acceptance = session.exec(
         select(SpecAuthorityAcceptance)
         .where(
-            SpecAuthorityAcceptance.product_id == product_id,
+            SpecAuthorityAcceptance.project_id == project_id,
             SpecAuthorityAcceptance.status == "accepted",
         )
         .order_by(
@@ -740,7 +739,7 @@ def _lookup_reusable_accepted_authority(
 
     compiled = accepted_compiled_authority(
         session,
-        product_id=product_id,
+        project_id=project_id,
         spec_version_id=existing_acceptance.spec_version_id,
     )
     if compiled is None:
@@ -796,14 +795,14 @@ def _resolve_gate_path_used(
 
 def _build_update_compile_params(
     *,
-    product_id: int,
+    project_id: int,
     spec_content: str | None,
     content_ref: str | None,
     recompile: bool,
 ) -> tuple[dict[str, Any], str]:
     """Build the update+compile parameter payload and describe its input source."""
     params: dict[str, Any] = {
-        "product_id": product_id,
+        "project_id": project_id,
         "recompile": recompile,
     }
     if spec_content is not None:
@@ -816,7 +815,7 @@ def _build_update_compile_params(
 
 def _validate_gate_compile_result(
     *,
-    product_id: int,
+    project_id: int,
     result: dict[str, Any],
     gate_logger: logging.Logger,
     session_id: str | None,
@@ -828,46 +827,46 @@ def _validate_gate_compile_result(
         gate_logger.error(
             "authority_gate.fail",
             extra={
-                "product_id": product_id,
+                "project_id": project_id,
                 "reason": "update_failed",
                 "success": result.get("success"),
                 "accepted": result.get("accepted"),
                 "spec_version_id": result.get("spec_version_id"),
             },
         )
-        raise SpecAuthorityGateError.update_failed(product_id, error_msg)
+        raise SpecAuthorityGateError.update_failed(project_id, error_msg)
 
     if not result.get("accepted"):
         gate_logger.error(
             "authority_gate.fail",
             extra={
-                "product_id": product_id,
+                "project_id": project_id,
                 "reason": "not_accepted",
                 "success": result.get("success"),
                 "accepted": result.get("accepted"),
                 "spec_version_id": result.get("spec_version_id"),
             },
         )
-        raise SpecAuthorityGateError.not_accepted(product_id)
+        raise SpecAuthorityGateError.not_accepted(project_id)
 
     spec_version_id = result.get("spec_version_id")
     if spec_version_id is None:
         gate_logger.error(
             "authority_gate.fail",
             extra={
-                "product_id": product_id,
+                "project_id": project_id,
                 "reason": "missing_spec_version_id",
                 "success": result.get("success"),
                 "accepted": result.get("accepted"),
                 "spec_version_id": result.get("spec_version_id"),
             },
         )
-        raise SpecAuthorityGateError.missing_spec_version_id(product_id)
+        raise SpecAuthorityGateError.missing_spec_version_id(project_id)
 
     gate_logger.info(
         "authority_gate.updated",
         extra={
-            "product_id": product_id,
+            "project_id": project_id,
             "session_id": session_id,
             "path_used": path_used,
             "spec_version_id": spec_version_id,
@@ -880,7 +879,7 @@ def _validate_gate_compile_result(
 
 
 def ensure_accepted_spec_authority(
-    product_id: int,
+    project_id: int,
     *,
     spec_content: str | None = None,
     content_ref: str | None = None,
@@ -889,7 +888,7 @@ def ensure_accepted_spec_authority(
     _update_spec_and_compile_authority: Callable[..., dict[str, Any]] | None = None,
     _logger: logging.Logger | None = None,
 ) -> int:
-    """Ensure an accepted spec authority exists for the product."""
+    """Ensure an accepted spec authority exists for the project."""
     gate_logger = _logger or logger
     update_and_compile = _update_spec_and_compile_authority
     if update_and_compile is None:
@@ -906,7 +905,7 @@ def ensure_accepted_spec_authority(
     gate_logger.info(
         "authority_gate.check",
         extra={
-            "product_id": product_id,
+            "project_id": project_id,
             "session_id": session_id,
             "recompile": recompile,
             "spec_input_provided": spec_input_provided,
@@ -917,19 +916,18 @@ def ensure_accepted_spec_authority(
     )
 
     engine = _resolve_engine()
-    ensure_schema_current(cast("Engine", engine))
 
     with Session(engine) as session:
         lookup = _lookup_reusable_accepted_authority(
             session,
-            product_id=product_id,
+            project_id=project_id,
         )
 
     if lookup.reusable_spec_version_id is not None:
         gate_logger.info(
             "authority_gate.pass",
             extra={
-                "product_id": product_id,
+                "project_id": project_id,
                 "session_id": session_id,
                 "spec_version_id": lookup.reusable_spec_version_id,
                 "path_used": "existing_authority",
@@ -945,7 +943,7 @@ def ensure_accepted_spec_authority(
         gate_logger.error(
             "authority_gate.fail_no_source",
             extra={
-                "product_id": product_id,
+                "project_id": project_id,
                 "session_id": session_id,
                 "path_used": "fail_no_source",
                 "accepted_decision_found": lookup.accepted_decision_found,
@@ -955,7 +953,7 @@ def ensure_accepted_spec_authority(
                 "reason": "missing_inputs",
             },
         )
-        raise SpecAuthorityGateError.missing_source(product_id)
+        raise SpecAuthorityGateError.missing_source(project_id)
 
     path_used = _resolve_gate_path_used(
         tool_context=tool_context,
@@ -963,7 +961,7 @@ def ensure_accepted_spec_authority(
         content_ref=content_ref,
     )
     params, input_source = _build_update_compile_params(
-        product_id=product_id,
+        project_id=project_id,
         spec_content=spec_content,
         content_ref=content_ref,
         recompile=recompile,
@@ -972,7 +970,7 @@ def ensure_accepted_spec_authority(
     gate_logger.info(
         "authority_gate.compile_start",
         extra={
-            "product_id": product_id,
+            "project_id": project_id,
             "session_id": session_id,
             "path_used": path_used,
             "input_source": input_source,
@@ -991,7 +989,7 @@ def ensure_accepted_spec_authority(
         gate_logger.exception(
             "authority_gate.compile_result",
             extra={
-                "product_id": product_id,
+                "project_id": project_id,
                 "session_id": session_id,
                 "path_used": path_used,
                 "reason": "update_failed",
@@ -1005,7 +1003,7 @@ def ensure_accepted_spec_authority(
         raise
 
     return _validate_gate_compile_result(
-        product_id=product_id,
+        project_id=project_id,
         result=result,
         gate_logger=gate_logger,
         session_id=session_id,
@@ -1053,7 +1051,7 @@ async def _invoke_spec_authority_compiler_async(
 def _default_invoke_spec_authority_compiler(  # noqa: PLR0913
     spec_content: str,
     content_ref: str | None,
-    product_id: int | None,
+    project_id: int | None,
     spec_version_id: int | None,
     domain_hint: str | None = None,
     compiler_model: str | None = None,
@@ -1065,7 +1063,7 @@ def _default_invoke_spec_authority_compiler(  # noqa: PLR0913
         spec_source=spec_content,
         spec_content_ref=None,
         domain_hint=domain_hint,
-        product_id=product_id,
+        project_id=project_id,
         spec_version_id=spec_version_id,
         spec_source_format=cast(
             "Literal['agileforge.spec.v1']",
@@ -1108,7 +1106,7 @@ def _resolve_compiler_invoker() -> Callable[..., str]:
 def _invoke_spec_authority_compiler(  # noqa: PLR0913
     spec_content: str,
     content_ref: str | None,
-    product_id: int | None,
+    project_id: int | None,
     spec_version_id: int | None,
     domain_hint: str | None = None,
     compiler_model: str | None = None,
@@ -1118,7 +1116,7 @@ def _invoke_spec_authority_compiler(  # noqa: PLR0913
     kwargs: dict[str, Any] = {
         "spec_content": spec_content,
         "content_ref": content_ref,
-        "product_id": product_id,
+        "project_id": project_id,
         "spec_version_id": spec_version_id,
         "domain_hint": domain_hint,
     }
@@ -1270,7 +1268,7 @@ def _coverage_repair_domain_hint(item_id: str) -> str:
             "You must either emit invariant with exact source_item_id "
             f"(source_item_id exactly {item_id}), or emit an explicit gap "
             f"mentioning item id {item_id} and explaining why no "
-            "runtime/product invariant maps."
+            "runtime/project invariant maps."
         ),
         "Do not cite source item IDs other than the repair target.",
         "Do not invent source references, source levels, or source excerpts.",
@@ -1281,7 +1279,7 @@ def _coverage_repair_domain_hint(item_id: str) -> str:
 
 def _source_metadata_retry_commands(spec_version: SpecRegistry) -> list[str]:
     """Return operator commands for retrying a source-metadata compiler failure."""
-    project_id = spec_version.product_id
+    project_id = spec_version.project_id
     spec_version_id = spec_version.spec_version_id
     spec_hash = spec_version.spec_hash
     compiler_model = _SOURCE_METADATA_RETRY_COMPILER_MODEL
@@ -1655,7 +1653,7 @@ def _invoke_focused_structured_item_authority(
     artifact: TechnicalSpecArtifact,
     *,
     item_id: str,
-    product_id: int | None,
+    project_id: int | None,
     spec_version_id: int | None,
     compiler_model: str | None = None,
 ) -> SpecAuthorityCompilationSuccess | _FocusedItemCompilationFailure:
@@ -1664,7 +1662,7 @@ def _invoke_focused_structured_item_authority(
     initial_invocation = _invoke_and_normalize_spec_authority(
         spec_content=focused_content,
         content_ref=None,
-        product_id=product_id,
+        project_id=project_id,
         spec_version_id=spec_version_id,
         compiler_model=compiler_model,
     )
@@ -1686,7 +1684,7 @@ def _invoke_focused_structured_item_authority(
     retry_invocation = _invoke_and_normalize_spec_authority(
         spec_content=focused_content,
         content_ref=None,
-        product_id=product_id,
+        project_id=project_id,
         spec_version_id=spec_version_id,
         domain_hint=_SCHEMA_RETRY_FEEDBACK,
         compiler_model=compiler_model,
@@ -1713,7 +1711,7 @@ def _invoke_coverage_repair_authority(
     artifact: TechnicalSpecArtifact,
     *,
     item_id: str,
-    product_id: int | None,
+    project_id: int | None,
     spec_version_id: int | None,
     compiler_model: str | None = None,
 ) -> SpecAuthorityCompilationSuccess | _FocusedItemCompilationFailure:
@@ -1722,7 +1720,7 @@ def _invoke_coverage_repair_authority(
     invocation = _invoke_and_normalize_spec_authority(
         spec_content=focused_content,
         content_ref=None,
-        product_id=product_id,
+        project_id=project_id,
         spec_version_id=spec_version_id,
         domain_hint=_coverage_repair_domain_hint(item_id),
         compiler_model=compiler_model,
@@ -1774,7 +1772,7 @@ def _repair_missing_iterative_authority(  # noqa: PLR0913
     artifact: TechnicalSpecArtifact,
     existing_successes: list[ScopedCompilationSuccess],
     missing_item_ids: list[str],
-    product_id: int | None,
+    project_id: int | None,
     spec_version_id: int | None,
     compiler_model: str | None,
 ) -> SpecAuthorityCompilerOutput:
@@ -1785,7 +1783,7 @@ def _repair_missing_iterative_authority(  # noqa: PLR0913
         repaired = _invoke_coverage_repair_authority(
             artifact,
             item_id=item_id,
-            product_id=product_id,
+            project_id=project_id,
             spec_version_id=spec_version_id,
             compiler_model=compiler_model,
         )
@@ -2151,7 +2149,7 @@ def _invoke_and_normalize_spec_authority(  # noqa: PLR0913
     *,
     spec_content: str,
     content_ref: str | None,
-    product_id: int | None,
+    project_id: int | None,
     spec_version_id: int | None,
     domain_hint: str | None = None,
     compiler_model: str | None = None,
@@ -2160,7 +2158,7 @@ def _invoke_and_normalize_spec_authority(  # noqa: PLR0913
     kwargs: dict[str, Any] = {
         "spec_content": spec_content,
         "content_ref": content_ref,
-        "product_id": product_id,
+        "project_id": project_id,
         "spec_version_id": spec_version_id,
         "domain_hint": domain_hint,
     }
@@ -2183,7 +2181,7 @@ def _compile_spec_authority_output(  # noqa: C901, PLR0911, PLR0913
     *,
     spec_content: str,
     content_ref: str | None,
-    product_id: int | None,
+    project_id: int | None,
     spec_version_id: int | None,
     domain_hint: str | None = None,
     compiler_model: str | None = None,
@@ -2198,7 +2196,7 @@ def _compile_spec_authority_output(  # noqa: C901, PLR0911, PLR0913
     full_invocation = _invoke_and_normalize_spec_authority(
         spec_content=spec_content,
         content_ref=content_ref,
-        product_id=product_id,
+        project_id=project_id,
         spec_version_id=spec_version_id,
         domain_hint=domain_hint,
         compiler_model=compiler_model,
@@ -2231,7 +2229,7 @@ def _compile_spec_authority_output(  # noqa: C901, PLR0911, PLR0913
         item_result = _invoke_focused_structured_item_authority(
             artifact,
             item_id=item_id,
-            product_id=product_id,
+            project_id=project_id,
             spec_version_id=spec_version_id,
             compiler_model=compiler_model,
         )
@@ -2301,7 +2299,7 @@ def _compile_spec_authority_output(  # noqa: C901, PLR0911, PLR0913
                 artifact=artifact,
                 existing_successes=successes,
                 missing_item_ids=missing_item_ids,
-                product_id=product_id,
+                project_id=project_id,
                 spec_version_id=spec_version_id,
                 compiler_model=compiler_model,
             )
@@ -2376,7 +2374,7 @@ def preview_spec_authority(
         compiled = _compile_spec_authority_output(
             spec_content=parsed.content,
             content_ref=None,
-            product_id=None,
+            project_id=None,
             spec_version_id=None,
         )
         normalized = compiled.output
@@ -2406,7 +2404,7 @@ def _compiler_failure_result(
 ) -> dict[str, Any]:
     compiler_model = kwargs.get("compiler_model")
     details = _CompilerFailureDetails(
-        product_id=kwargs.get("product_id"),
+        project_id=kwargs.get("project_id"),
         spec_version_id=kwargs.get("spec_version_id"),
         content_ref=kwargs.get("content_ref"),
         failure_stage=kwargs.get("failure_stage", "unknown"),
@@ -2421,12 +2419,12 @@ def _compiler_failure_result(
     agent = _spec_authority_compiler_agent(compiler_model=compiler_model)
     artifact_result = write_failure_artifact(
         phase="spec_authority",
-        project_id=details.product_id,
+        project_id=details.project_id,
         failure_stage=details.failure_stage,
         failure_summary=summary,
         raw_output=details.raw_output,
         context={
-            "product_id": details.product_id,
+            "project_id": details.project_id,
             "spec_version_id": details.spec_version_id,
             "content_ref": details.content_ref,
         },
@@ -2569,7 +2567,7 @@ def _normalized_failure_result(
         "invalid_json" if failure.reason == "INVALID_JSON" else "output_validation"
     )
     result = _compiler_failure_result(
-        product_id=spec_version.product_id,
+        project_id=spec_version.project_id,
         spec_version_id=spec_version.spec_version_id,
         content_ref=spec_version.content_ref,
         failure_stage=failure_stage,
@@ -2604,7 +2602,7 @@ def _run_compiler_attempt(  # noqa: PLR0913
             invoke=lambda: _compile_spec_authority_output(
                 spec_content=spec_content,
                 content_ref=spec_version.content_ref,
-                product_id=spec_version.product_id,
+                project_id=spec_version.project_id,
                 spec_version_id=spec_version.spec_version_id,
                 domain_hint=domain_hint,
                 compiler_model=compiler_model,
@@ -2614,7 +2612,7 @@ def _run_compiler_attempt(  # noqa: PLR0913
             heartbeat_interval_seconds=heartbeat_interval_seconds,
             timeout_seconds=timeout_seconds,
             timeout_result=lambda: _compiler_failure_result(
-                product_id=spec_version.product_id,
+                project_id=spec_version.project_id,
                 spec_version_id=spec_version.spec_version_id,
                 content_ref=spec_version.content_ref,
                 compiler_model=compiler_model,
@@ -2627,7 +2625,7 @@ def _run_compiler_attempt(  # noqa: PLR0913
         )
     except AgentInvocationError as exc:
         return _compiler_failure_result(
-            product_id=spec_version.product_id,
+            project_id=spec_version.project_id,
             spec_version_id=spec_version.spec_version_id,
             content_ref=spec_version.content_ref,
             compiler_model=compiler_model,
@@ -2639,7 +2637,7 @@ def _run_compiler_attempt(  # noqa: PLR0913
         )
     except (RuntimeError, TypeError, ValueError) as exc:
         return _compiler_failure_result(
-            product_id=spec_version.product_id,
+            project_id=spec_version.project_id,
             spec_version_id=spec_version.spec_version_id,
             content_ref=spec_version.content_ref,
             compiler_model=compiler_model,
@@ -2786,14 +2784,14 @@ def _extract_spec_authority_llm(
     *,
     spec_content: str,
     content_ref: str | None,
-    product_id: int,
+    project_id: int,
     spec_version_id: int,
 ) -> SpecAuthorityCompilationSuccess:
     """Extract spec authority using the compiler and normalize to success output."""
     compiled = _compile_spec_authority_output(
         spec_content=spec_content,
         content_ref=content_ref,
-        product_id=product_id,
+        project_id=project_id,
         spec_version_id=spec_version_id,
     )
 
@@ -2864,7 +2862,7 @@ def compile_spec_authority(
             success_artifact: SpecAuthorityCompilationSuccess = extractor(
                 spec_content=spec_version.content,
                 content_ref=spec_version.content_ref,
-                product_id=spec_version.product_id,
+                project_id=spec_version.project_id,
                 spec_version_id=spec_version_id,
             )
         except (SpecAuthorityCompilationError, ValueError) as exc:
@@ -2933,7 +2931,7 @@ def _load_compile_version_context(
     *,
     spec_version_id: int,
 ) -> _CompilerVersionContext | dict[str, Any]:
-    """Load the approved spec version, product, and any cached authority row."""
+    """Load the approved spec version, project, and any cached authority row."""
     spec_version = session.get(SpecRegistry, spec_version_id)
     if not spec_version:
         return {
@@ -2950,14 +2948,14 @@ def _load_compile_version_context(
             ),
         }
 
-    product = session.get(Product, spec_version.product_id)
+    project = session.get(Project, spec_version.project_id)
     existing_authority = latest_compiled_authority(
         session,
         spec_version_id=spec_version_id,
     )
     return _CompilerVersionContext(
         spec_version=spec_version,
-        product=product,
+        project=project,
         existing_authority=existing_authority,
     )
 
@@ -2965,19 +2963,19 @@ def _load_compile_version_context(
 def _update_product_compiled_authority_cache(
     session: Session,
     *,
-    product: Product | None,
+    project: Project | None,
     compiled_artifact_json: str,
     lease_guard: Callable[[str], bool] | None = None,
     record_progress: Callable[[str], bool] | None = None,
 ) -> dict[str, Any] | None:
-    """Backfill the product-level compiled authority cache when a product exists."""
-    if product is None:
+    """Backfill the project-level compiled authority cache when a project exists."""
+    if project is None:
         return None
     boundary = "product_authority_cache_persisted"
     if lease_guard is not None and not lease_guard(boundary):
         return _mutation_lease_lost_result()
-    product.compiled_authority_json = compiled_artifact_json
-    session.add(product)
+    project.compiled_authority_json = compiled_artifact_json
+    session.add(project)
     session.flush()
     return _record_mutation_progress(record_progress, boundary)
 
@@ -3095,7 +3093,7 @@ def _cached_compilation_result(
         return None
 
     load_result = load_compiled_artifact(existing_authority)
-    project_id = context.spec_version.product_id
+    project_id = context.spec_version.project_id
     spec_version_id = cast("int", context.spec_version.spec_version_id)
     read_failure = compiled_authority_read_failure(
         load_result,
@@ -3114,7 +3112,7 @@ def _cached_compilation_result(
 
     cache_error = _update_product_compiled_authority_cache(
         session,
-        product=context.product,
+        project=context.project,
         compiled_artifact_json=cast(
             "str",
             existing_authority.compiled_artifact_json,
@@ -3461,7 +3459,7 @@ def _scope_extension_compile_failure(
 ) -> _CompilerInvocationResult:
     """Return a fail-closed scope-extension compile failure."""
     failure = _compiler_failure_result(
-        product_id=spec_version.product_id,
+        project_id=spec_version.project_id,
         spec_version_id=spec_version.spec_version_id,
         content_ref=spec_version.content_ref,
         failure_stage="scope_extension_base_authority",
@@ -3488,7 +3486,7 @@ def _latest_matching_base_authority(
     """Return a base authority only when it still matches the accepted decision."""
     authority = accepted_compiled_authority(
         session,
-        product_id=acceptance.product_id,
+        project_id=acceptance.project_id,
         spec_version_id=acceptance.spec_version_id,
     )
     if (
@@ -3507,7 +3505,7 @@ def _accepted_base_authority_for_scope_extension(  # noqa: PLR0911
 ) -> SpecAuthorityCompilationSuccess | _CompilerInvocationResult:
     """Load the accepted base authority referenced by a scope-extension marker."""
     base_spec = session.get(SpecRegistry, marker.base_spec_version_id)
-    if base_spec is None or base_spec.product_id != spec_version.product_id:
+    if base_spec is None or base_spec.project_id != spec_version.project_id:
         return _scope_extension_compile_failure(
             spec_version,
             reason="SCOPE_EXTENSION_BASE_SPEC_NOT_FOUND",
@@ -3529,7 +3527,7 @@ def _accepted_base_authority_for_scope_extension(  # noqa: PLR0911
 
     acceptance = latest_accepted_authority_decision(
         session,
-        product_id=spec_version.product_id,
+        project_id=spec_version.project_id,
         spec_version_id=marker.base_spec_version_id,
     )
     if acceptance is None:
@@ -3732,7 +3730,7 @@ def _invoke_scope_extension_compiler_for_version(  # noqa: C901, PLR0911, PLR091
                 ),
             ],
             missing_item_ids=missing_item_ids,
-            product_id=spec_version.product_id,
+            project_id=spec_version.project_id,
             spec_version_id=spec_version.spec_version_id,
             compiler_model=compiler_model,
         )
@@ -3801,7 +3799,7 @@ def _persist_compiled_authority(  # noqa: PLR0913
 
     cache_error = _update_product_compiled_authority_cache(
         session,
-        product=context.product,
+        project=context.project,
         compiled_artifact_json=compiled_artifact_json,
         lease_guard=lease_guard,
         record_progress=record_progress,
@@ -4027,7 +4025,6 @@ def compile_spec_authority_for_version_with_engine(  # noqa: PLR0913
     record_progress: Callable[[str], bool] | None = None,
 ) -> dict[str, Any]:
     """Compile an approved spec version using the supplied business DB engine."""
-    ensure_schema_current(engine)
     parsed = _normalize_compile_version_input(
         None,
         spec_version_id=spec_version_id,
@@ -4108,16 +4105,16 @@ def _resolve_or_create_spec_version(
     spec_hash: str,
 ) -> int | dict[str, Any]:
     """Return the latest matching approved spec version, creating one if needed."""
-    product = session.get(Product, parsed.product_id)
-    if not product:
+    project = session.get(Project, parsed.project_id)
+    if not project:
         return {
             "success": False,
-            "error": f"Product ID {parsed.product_id} not found",
+            "error": f"Project ID {parsed.project_id} not found",
         }
 
     latest_spec = session.exec(
         select(SpecRegistry)
-        .where(SpecRegistry.product_id == parsed.product_id)
+        .where(SpecRegistry.project_id == parsed.project_id)
         .order_by(cast("Any", SpecRegistry.spec_version_id).desc())
     ).first()
     if latest_spec and latest_spec.spec_hash == spec_hash:
@@ -4130,7 +4127,7 @@ def _resolve_or_create_spec_version(
         return spec_version_id
 
     new_spec = SpecRegistry(
-        product_id=parsed.product_id,
+        project_id=parsed.project_id,
         spec_hash=spec_hash,
         content=spec_content,
         content_ref=parsed.content_ref,
@@ -4262,7 +4259,7 @@ def update_spec_and_compile_authority(  # noqa: PLR0911
 
     metrics = _compiled_authority_metrics(
         authority,
-        project_id=parsed.product_id,
+        project_id=parsed.project_id,
         spec_version_id=spec_version_id,
     )
     if isinstance(metrics, dict):
@@ -4271,7 +4268,7 @@ def update_spec_and_compile_authority(  # noqa: PLR0911
 
     return {
         "success": True,
-        "product_id": parsed.product_id,
+        "project_id": parsed.project_id,
         "spec_version_id": spec_version_id,
         "authority_id": authority.authority_id,
         "spec_hash": spec_hash,
@@ -4298,7 +4295,7 @@ def check_spec_authority_status(  # noqa: PLR0911
     *,
     tool_context: ToolContext | None = None,  # pylint: disable=unused-argument
 ) -> dict[str, Any]:
-    """Check whether compiled authority is current for a product."""
+    """Check whether compiled authority is current for a project."""
     del tool_context
     parsed = CheckSpecAuthorityStatusInput.model_validate(
         _normalize_input_params(params)
@@ -4307,7 +4304,7 @@ def check_spec_authority_status(  # noqa: PLR0911
     with Session(_resolve_engine()) as session:
         spec_versions = session.exec(
             select(SpecRegistry)
-            .where(SpecRegistry.product_id == parsed.product_id)
+            .where(SpecRegistry.project_id == parsed.project_id)
             .order_by(cast("Any", SpecRegistry.spec_version_id).desc())
         ).all()
 
@@ -4315,7 +4312,7 @@ def check_spec_authority_status(  # noqa: PLR0911
             return {
                 "success": True,
                 "status": SpecAuthorityStatus.NOT_COMPILED.value,
-                "status_details": "No spec versions exist for this product",
+                "status_details": "No spec versions exist for this project",
                 "message": "Status: NOT_COMPILED (no specs)",
             }
 
@@ -4341,7 +4338,7 @@ def check_spec_authority_status(  # noqa: PLR0911
             }
         latest_authority = latest_compiled_authority_for_product(
             session,
-            product_id=parsed.product_id,
+            project_id=parsed.project_id,
         )
 
         if not latest_authority:
@@ -4371,7 +4368,7 @@ def check_spec_authority_status(  # noqa: PLR0911
         latest_load_result = load_compiled_artifact(latest_authority)
         read_failure = compiled_authority_read_failure(
             latest_load_result,
-            project_id=parsed.product_id,
+            project_id=parsed.project_id,
             spec_version_id=latest_authority.spec_version_id,
             authority_id=latest_authority.authority_id,
         )
@@ -4411,12 +4408,12 @@ def get_compiled_authority_by_version(
                 "error": f"Spec version {parsed.spec_version_id} not found",
             }
 
-        if spec_version.product_id != parsed.product_id:
+        if spec_version.project_id != parsed.project_id:
             return {
                 "success": False,
                 "error": (
                     f"Spec version {parsed.spec_version_id} does not belong to "
-                    f"product {parsed.product_id} (mismatch)"
+                    f"project {parsed.project_id} (mismatch)"
                 ),
             }
 
@@ -4438,7 +4435,7 @@ def get_compiled_authority_by_version(
         load_result = load_compiled_artifact(authority)
         read_failure = compiled_authority_read_failure(
             load_result,
-            project_id=parsed.product_id,
+            project_id=parsed.project_id,
             spec_version_id=parsed.spec_version_id,
             authority_id=authority.authority_id,
         )

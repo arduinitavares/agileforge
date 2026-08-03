@@ -225,7 +225,7 @@ class RoadmapBuilderOutput(BaseModel):
 class SaveRoadmapToolInput(BaseModel):
     """Input schema for the temporary legacy Roadmap write entry point."""
 
-    product_id: Annotated[
+    project_id: Annotated[
         int,
         Field(description="The ID of the product to update."),
     ]

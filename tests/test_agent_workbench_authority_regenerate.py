@@ -11,7 +11,7 @@ from sqlmodel import Session, select
 
 import services.agent_workbench.authority_regenerate as authority_regenerate_mod
 from models.agent_workbench import CliMutationLedger
-from models.core import Product
+from models.core import Project
 from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance, SpecRegistry
 from services.agent_workbench.authority_regenerate import (
     AuthorityRegenerateRequest,
@@ -46,7 +46,7 @@ def _compiled_authority_json(prompt_hash: str) -> str:
 def _persist_compiled_authority(
     *,
     engine: Engine,
-    product_id: int,
+    project_id: int,
     prompt_hash: str,
     spec_version_id: int,
 ) -> dict[str, object]:
@@ -64,7 +64,7 @@ def _persist_compiled_authority(
             spec_gaps="[]",
         )
         compile_session.add(authority)
-        product = compile_session.get(Product, product_id)
+        product = compile_session.get(Project, project_id)
         assert product is not None
         product.compiled_authority_json = authority.compiled_artifact_json
         compile_session.add(product)
@@ -81,20 +81,20 @@ def _persist_compiled_authority(
 
 
 @pytest.fixture
-def product_id(session: Session) -> int:
+def project_id(session: Session) -> int:
     """Create a product for regeneration tests."""
-    product = Product(name="Authority Regenerate Product")
+    product = Project(name="Authority Regenerate Project")
     session.add(product)
     session.commit()
     session.refresh(product)
-    return require_id(product.product_id, "product_id")
+    return require_id(product.project_id, "project_id")
 
 
 @pytest.fixture
-def approved_spec_version_id(session: Session, product_id: int) -> int:
+def approved_spec_version_id(session: Session, project_id: int) -> int:
     """Create an approved spec version for the seeded product."""
     spec = SpecRegistry(
-        product_id=product_id,
+        project_id=project_id,
         spec_hash="sha256:approved-spec",
         content=_approved_spec_content(),
         content_ref=str(SPEC_CONTENT_REF),
@@ -117,12 +117,12 @@ def authority_regenerate_runner(engine: Engine) -> AuthorityRegenerateRunner:
 
 def test_regenerate_requires_approved_spec_version(
     authority_regenerate_runner: AuthorityRegenerateRunner,
-    product_id: int,
+    project_id: int,
 ) -> None:
     """Reject regeneration for a spec version that is missing or unapproved."""
     result = authority_regenerate_runner.regenerate(
         AuthorityRegenerateRequest(
-            project_id=product_id,
+            project_id=project_id,
             spec_version_id=100,
             idempotency_key="regen-unapproved-001",
             changed_by="test",
@@ -139,7 +139,7 @@ def test_regenerate_requires_approved_spec_version(
 def test_regenerate_dry_run_validates_guards_without_mutation(
     authority_regenerate_runner: AuthorityRegenerateRunner,
     session: Session,
-    product_id: int,
+    project_id: int,
     approved_spec_version_id: int,
 ) -> None:
     """Dry-run should validate guards without mutating authority or ledger rows."""
@@ -148,7 +148,7 @@ def test_regenerate_dry_run_validates_guards_without_mutation(
 
     result = authority_regenerate_runner.regenerate(
         AuthorityRegenerateRequest(
-            project_id=product_id,
+            project_id=project_id,
             spec_version_id=approved_spec_version_id,
             dry_run=True,
             changed_by="test",
@@ -170,7 +170,7 @@ def test_regenerate_persists_pending_v3_authority_and_does_not_accept(
     authority_regenerate_runner: AuthorityRegenerateRunner,
     session: Session,
     monkeypatch: pytest.MonkeyPatch,
-    product_id: int,
+    project_id: int,
     approved_spec_version_id: int,
 ) -> None:
     """Real regenerate should persist pending authority and stop before accept."""
@@ -188,7 +188,7 @@ def test_regenerate_persists_pending_v3_authority_and_does_not_accept(
         assert force_recompile is True
         return _persist_compiled_authority(
             engine=engine,
-            product_id=product_id,
+            project_id=project_id,
             prompt_hash="a" * 64,
             spec_version_id=spec_version_id,
         )
@@ -201,7 +201,7 @@ def test_regenerate_persists_pending_v3_authority_and_does_not_accept(
 
     result = authority_regenerate_runner.regenerate(
         AuthorityRegenerateRequest(
-            project_id=product_id,
+            project_id=project_id,
             spec_version_id=approved_spec_version_id,
             idempotency_key="regen-approved-001",
             changed_by="test",
@@ -231,7 +231,7 @@ def test_regenerate_rejected_authority_creates_new_pending_authority(
     authority_regenerate_runner: AuthorityRegenerateRunner,
     session: Session,
     monkeypatch: pytest.MonkeyPatch,
-    product_id: int,
+    project_id: int,
     approved_spec_version_id: int,
 ) -> None:
     """Regenerating rejected authority must not reuse the rejected authority id."""
@@ -252,7 +252,7 @@ def test_regenerate_rejected_authority_creates_new_pending_authority(
     session.refresh(old_authority)
     old_authority_id = require_id(old_authority.authority_id, "authority_id")
     rejected = SpecAuthorityAcceptance(
-        product_id=product_id,
+        project_id=project_id,
         spec_version_id=approved_spec_version_id,
         status="rejected",
         policy="human",
@@ -282,7 +282,7 @@ def test_regenerate_rejected_authority_creates_new_pending_authority(
         assert force_recompile is True
         return _persist_compiled_authority(
             engine=engine,
-            product_id=product_id,
+            project_id=project_id,
             prompt_hash="b" * 64,
             spec_version_id=spec_version_id,
         )
@@ -295,7 +295,7 @@ def test_regenerate_rejected_authority_creates_new_pending_authority(
 
     result = authority_regenerate_runner.regenerate(
         AuthorityRegenerateRequest(
-            project_id=product_id,
+            project_id=project_id,
             spec_version_id=approved_spec_version_id,
             idempotency_key="regen-rejected-001",
             changed_by="test",
@@ -325,7 +325,7 @@ def test_regenerate_uses_exact_compiler_id_without_post_compile_clone(
     authority_regenerate_runner: AuthorityRegenerateRunner,
     session: Session,
     monkeypatch: pytest.MonkeyPatch,
-    product_id: int,
+    project_id: int,
     approved_spec_version_id: int,
 ) -> None:
     """Regeneration binds to compiler output even if another row becomes newest."""
@@ -345,7 +345,7 @@ def test_regenerate_uses_exact_compiler_id_without_post_compile_clone(
         assert force_recompile is True
         compiled = _persist_compiled_authority(
             engine=engine,
-            product_id=product_id,
+            project_id=project_id,
             prompt_hash="c" * 64,
             spec_version_id=spec_version_id,
         )
@@ -368,7 +368,7 @@ def test_regenerate_uses_exact_compiler_id_without_post_compile_clone(
             unrelated_id = require_id(unrelated.authority_id, "authority_id")
             compile_session.add(
                 SpecAuthorityAcceptance(
-                    product_id=product_id,
+                    project_id=project_id,
                     spec_version_id=spec_version_id,
                     status="rejected",
                     policy="test",
@@ -390,7 +390,7 @@ def test_regenerate_uses_exact_compiler_id_without_post_compile_clone(
 
     result = authority_regenerate_runner.regenerate(
         AuthorityRegenerateRequest(
-            project_id=product_id,
+            project_id=project_id,
             spec_version_id=approved_spec_version_id,
             idempotency_key="regen-exact-compiler-id",
             changed_by="test",
@@ -412,7 +412,7 @@ def test_regenerate_idempotency_replays_completed_mutation(
     authority_regenerate_runner: AuthorityRegenerateRunner,
     session: Session,
     monkeypatch: pytest.MonkeyPatch,
-    product_id: int,
+    project_id: int,
     approved_spec_version_id: int,
 ) -> None:
     """Reusing the same idempotency key should replay the completed response."""
@@ -431,7 +431,7 @@ def test_regenerate_idempotency_replays_completed_mutation(
         compile_calls.append((spec_version_id, force_recompile))
         return _persist_compiled_authority(
             engine=engine,
-            product_id=product_id,
+            project_id=project_id,
             prompt_hash="b" * 64,
             spec_version_id=spec_version_id,
         )
@@ -443,7 +443,7 @@ def test_regenerate_idempotency_replays_completed_mutation(
     )
 
     request = AuthorityRegenerateRequest(
-        project_id=product_id,
+        project_id=project_id,
         spec_version_id=approved_spec_version_id,
         idempotency_key="regen-replay-001",
         changed_by="test",
@@ -464,7 +464,7 @@ def test_regenerate_idempotency_replays_completed_mutation(
 
 def test_authority_regenerate_ledger_hash_includes_compiler_model(
     authority_regenerate_runner: AuthorityRegenerateRunner,
-    product_id: int,
+    project_id: int,
     approved_spec_version_id: int,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -483,7 +483,7 @@ def test_authority_regenerate_ledger_hash_includes_compiler_model(
         del force_recompile, compiler_model, tool_context, lease_guard, record_progress
         return _persist_compiled_authority(
             engine=engine,
-            product_id=product_id,
+            project_id=project_id,
             prompt_hash="a" * 64,
             spec_version_id=spec_version_id,
         )
@@ -496,7 +496,7 @@ def test_authority_regenerate_ledger_hash_includes_compiler_model(
 
     first = authority_regenerate_runner.regenerate(
         AuthorityRegenerateRequest(
-            project_id=product_id,
+            project_id=project_id,
             spec_version_id=approved_spec_version_id,
             idempotency_key="regen-model-hash-001",
             compiler_model="openrouter/openai/gpt-5.2",
@@ -504,7 +504,7 @@ def test_authority_regenerate_ledger_hash_includes_compiler_model(
     )
     second = authority_regenerate_runner.regenerate(
         AuthorityRegenerateRequest(
-            project_id=product_id,
+            project_id=project_id,
             spec_version_id=approved_spec_version_id,
             idempotency_key="regen-model-hash-001",
             compiler_model="openrouter/openai/gpt-5.3",
@@ -518,7 +518,7 @@ def test_authority_regenerate_ledger_hash_includes_compiler_model(
 
 def test_authority_regenerate_passes_compiler_model_to_compile_service(
     authority_regenerate_runner: AuthorityRegenerateRunner,
-    product_id: int,
+    project_id: int,
     approved_spec_version_id: int,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -531,7 +531,7 @@ def test_authority_regenerate_passes_compiler_model_to_compile_service(
         captured.append(cast("str | None", kwargs.get("compiler_model")))
         return _persist_compiled_authority(
             engine=authority_regenerate_runner.engine,
-            product_id=product_id,
+            project_id=project_id,
             prompt_hash="b" * 64,
             spec_version_id=approved_spec_version_id,
         )
@@ -544,7 +544,7 @@ def test_authority_regenerate_passes_compiler_model_to_compile_service(
 
     result = authority_regenerate_runner.regenerate(
         AuthorityRegenerateRequest(
-            project_id=product_id,
+            project_id=project_id,
             spec_version_id=approved_spec_version_id,
             idempotency_key="regen-model-pass-001",
             compiler_model="openrouter/openai/gpt-5.2",
@@ -558,7 +558,7 @@ def test_authority_regenerate_passes_compiler_model_to_compile_service(
 def test_regenerate_passes_lease_callbacks_to_compile(
     authority_regenerate_runner: AuthorityRegenerateRunner,
     monkeypatch: pytest.MonkeyPatch,
-    product_id: int,
+    project_id: int,
     approved_spec_version_id: int,
 ) -> None:
     """Compiler invocation should receive callable lease and progress hooks."""
@@ -595,7 +595,7 @@ def test_regenerate_passes_lease_callbacks_to_compile(
         )
         return _persist_compiled_authority(
             engine=engine,
-            product_id=product_id,
+            project_id=project_id,
             prompt_hash="c" * 64,
             spec_version_id=spec_version_id,
         )
@@ -608,7 +608,7 @@ def test_regenerate_passes_lease_callbacks_to_compile(
 
     result = authority_regenerate_runner.regenerate(
         AuthorityRegenerateRequest(
-            project_id=product_id,
+            project_id=project_id,
             spec_version_id=approved_spec_version_id,
             idempotency_key="regen-lease-001",
             changed_by="test",
@@ -625,7 +625,7 @@ def test_regenerate_passes_lease_callbacks_to_compile(
 def test_regenerate_compile_failure_does_not_claim_terminal_error_if_finalize_fails(
     authority_regenerate_runner: AuthorityRegenerateRunner,
     monkeypatch: pytest.MonkeyPatch,
-    product_id: int,
+    project_id: int,
     approved_spec_version_id: int,
 ) -> None:
     """Compile failure should surface mutation conflict when terminal fencing fails."""
@@ -662,7 +662,7 @@ def test_regenerate_compile_failure_does_not_claim_terminal_error_if_finalize_fa
 
     result = authority_regenerate_runner.regenerate(
         AuthorityRegenerateRequest(
-            project_id=product_id,
+            project_id=project_id,
             spec_version_id=approved_spec_version_id,
             idempotency_key="regen-finalize-fail-001",
             changed_by="test",

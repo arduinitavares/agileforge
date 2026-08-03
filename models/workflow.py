@@ -50,7 +50,7 @@ class DiscoveryRun(SQLModel, table=True):
         ForeignKeyConstraint(
             ["project_id", "base_spec_version_id", "base_spec_hash"],
             [
-                "spec_registry.product_id",
+                "spec_registry.project_id",
                 "spec_registry.spec_version_id",
                 "spec_registry.spec_hash",
             ],
@@ -71,7 +71,7 @@ class DiscoveryRun(SQLModel, table=True):
     )
 
     discovery_run_id: int | None = Field(default=None, primary_key=True)
-    project_id: int = Field(foreign_key="products.product_id", index=True)
+    project_id: int = Field(foreign_key="projects.project_id", index=True)
     purpose: str = Field(index=True)
     ordinal: int
     base_spec_version_id: int | None = Field(default=None, index=True)
@@ -87,7 +87,7 @@ class ProjectAbandonment(SQLModel, table=True):
     __table_args__ = (UniqueConstraint("project_id", name="uq_project_abandonment"),)
 
     project_abandonment_id: int | None = Field(default=None, primary_key=True)
-    project_id: int = Field(foreign_key="products.product_id", index=True)
+    project_id: int = Field(foreign_key="projects.project_id", index=True)
     reason: str = Field(sa_type=Text)
     abandoned_by: str = Field(index=True)
     abandoned_at: datetime = Field(default_factory=utc_now, nullable=False)
@@ -320,7 +320,7 @@ class SpecDraft(SQLModel, table=True):
         ForeignKeyConstraint(
             ["project_id", "base_spec_version_id", "base_spec_hash"],
             [
-                "spec_registry.product_id",
+                "spec_registry.project_id",
                 "spec_registry.spec_version_id",
                 "spec_registry.spec_hash",
             ],
@@ -430,7 +430,7 @@ class InitialScopeRegistration(SQLModel, table=True):
         ForeignKeyConstraint(
             ["project_id", "spec_version_id", "spec_hash"],
             [
-                "spec_registry.product_id",
+                "spec_registry.project_id",
                 "spec_registry.spec_version_id",
                 "spec_registry.spec_hash",
             ],
@@ -485,7 +485,7 @@ class ScopeExtensionRegistration(SQLModel, table=True):
         ForeignKeyConstraint(
             ["project_id", "spec_version_id", "spec_hash"],
             [
-                "spec_registry.product_id",
+                "spec_registry.project_id",
                 "spec_registry.spec_version_id",
                 "spec_registry.spec_hash",
             ],
@@ -562,7 +562,7 @@ class RepositoryBaseline(SQLModel, table=True):
     )
 
     repository_baseline_id: int | None = Field(default=None, primary_key=True)
-    project_id: int = Field(foreign_key="products.product_id", index=True)
+    project_id: int = Field(foreign_key="projects.project_id", index=True)
     repository_path: str = Field(sa_type=Text)
     git_commit: str | None = Field(default=None, index=True)
     dirty: bool
@@ -642,7 +642,7 @@ class VisionArtifact(SQLModel, table=True):
     )
 
     vision_artifact_id: int | None = Field(default=None, primary_key=True)
-    project_id: int = Field(foreign_key="products.product_id", index=True)
+    project_id: int = Field(foreign_key="projects.project_id", index=True)
     authority_id: int = Field(
         foreign_key="compiled_spec_authority.authority_id",
         index=True,
@@ -729,7 +729,7 @@ class BacklogArtifact(SQLModel, table=True):
     )
 
     backlog_artifact_id: int | None = Field(default=None, primary_key=True)
-    project_id: int = Field(foreign_key="products.product_id", index=True)
+    project_id: int = Field(foreign_key="projects.project_id", index=True)
     authority_id: int = Field(
         foreign_key="compiled_spec_authority.authority_id",
         index=True,
@@ -800,7 +800,7 @@ class BacklogAuthorityReconciliation(SQLModel, table=True):
         default=None,
         primary_key=True,
     )
-    project_id: int = Field(foreign_key="products.product_id", index=True)
+    project_id: int = Field(foreign_key="projects.project_id", index=True)
     replacement_authority_id: int = Field(
         foreign_key="compiled_spec_authority.authority_id",
         index=True,
@@ -855,7 +855,7 @@ class RoadmapArtifact(SQLModel, table=True):
     )
 
     roadmap_artifact_id: int | None = Field(default=None, primary_key=True)
-    project_id: int = Field(foreign_key="products.product_id", index=True)
+    project_id: int = Field(foreign_key="projects.project_id", index=True)
     backlog_artifact_id: int = Field(index=True)
     backlog_artifact_fingerprint: str = Field(index=True)
     version_number: int
@@ -943,7 +943,7 @@ class StoryArtifact(SQLModel, table=True):
     )
 
     story_artifact_id: int | None = Field(default=None, primary_key=True)
-    project_id: int = Field(foreign_key="products.product_id", index=True)
+    project_id: int = Field(foreign_key="projects.project_id", index=True)
     requirement_id: str = Field(index=True)
     roadmap_artifact_id: int = Field(index=True)
     roadmap_artifact_fingerprint: str = Field(index=True)
@@ -1005,7 +1005,7 @@ class StoryDependencyReview(SQLModel, table=True):
     )
 
     story_dependency_review_id: int | None = Field(default=None, primary_key=True)
-    project_id: int = Field(foreign_key="products.product_id", index=True)
+    project_id: int = Field(foreign_key="projects.project_id", index=True)
     selected_story_ids_json: str = Field(sa_type=Text)
     reviewed_edges_json: str = Field(sa_type=Text)
     source_fingerprint: str = Field(index=True)
@@ -1051,7 +1051,7 @@ class SprintPlanArtifact(SQLModel, table=True):
     )
 
     sprint_plan_artifact_id: int | None = Field(default=None, primary_key=True)
-    project_id: int = Field(foreign_key="products.product_id", index=True)
+    project_id: int = Field(foreign_key="projects.project_id", index=True)
     sprint_id: int = Field(foreign_key="sprints.sprint_id", index=True)
     version_number: int
     selected_story_ids_json: str = Field(sa_type=Text)
@@ -1131,7 +1131,7 @@ class SprintStart(SQLModel, table=True):
     )
 
     sprint_start_id: int | None = Field(default=None, primary_key=True)
-    project_id: int = Field(foreign_key="products.product_id", index=True)
+    project_id: int = Field(foreign_key="projects.project_id", index=True)
     sprint_id: int = Field(foreign_key="sprints.sprint_id", index=True)
     sprint_plan_artifact_id: int = Field(index=True)
     sprint_plan_artifact_decision_id: int = Field(index=True)
@@ -1169,7 +1169,7 @@ class TaskCompletionEvidence(SQLModel, table=True):
     )
 
     task_completion_evidence_id: int | None = Field(default=None, primary_key=True)
-    project_id: int = Field(foreign_key="products.product_id", index=True)
+    project_id: int = Field(foreign_key="projects.project_id", index=True)
     sprint_id: int = Field(foreign_key="sprints.sprint_id", index=True)
     task_id: int = Field(foreign_key="tasks.task_id", index=True)
     outcome_summary: str = Field(sa_type=Text)
@@ -1190,7 +1190,7 @@ class StoryClosure(SQLModel, table=True):
     )
 
     story_closure_id: int | None = Field(default=None, primary_key=True)
-    project_id: int = Field(foreign_key="products.product_id", index=True)
+    project_id: int = Field(foreign_key="projects.project_id", index=True)
     sprint_id: int = Field(foreign_key="sprints.sprint_id", index=True)
     story_id: int = Field(foreign_key="user_stories.story_id", index=True)
     completion_fingerprint: str = Field(index=True)
@@ -1211,7 +1211,7 @@ class SprintReview(SQLModel, table=True):
     )
 
     sprint_review_id: int | None = Field(default=None, primary_key=True)
-    project_id: int = Field(foreign_key="products.product_id", index=True)
+    project_id: int = Field(foreign_key="projects.project_id", index=True)
     sprint_id: int = Field(foreign_key="sprints.sprint_id", index=True)
     review_fingerprint: str = Field(index=True)
     reviewed_by: str = Field(index=True)
@@ -1227,7 +1227,7 @@ class SprintClosure(SQLModel, table=True):
     )
 
     sprint_closure_id: int | None = Field(default=None, primary_key=True)
-    project_id: int = Field(foreign_key="products.product_id", index=True)
+    project_id: int = Field(foreign_key="projects.project_id", index=True)
     sprint_id: int = Field(foreign_key="sprints.sprint_id", index=True)
     review_fingerprint: str = Field(index=True)
     close_fingerprint: str = Field(index=True)
@@ -1253,7 +1253,7 @@ class PostSprintTriage(SQLModel, table=True):
     )
 
     triage_id: int | None = Field(default=None, primary_key=True)
-    project_id: int = Field(foreign_key="products.product_id", index=True)
+    project_id: int = Field(foreign_key="projects.project_id", index=True)
     sprint_id: int = Field(foreign_key="sprints.sprint_id", index=True)
     impact: str = Field(index=True)
     canonical_payload_json: str = Field(sa_type=Text)
@@ -1284,7 +1284,7 @@ class WorkflowNodeAttempt(SQLModel, table=True):
     )
 
     workflow_node_attempt_id: int | None = Field(default=None, primary_key=True)
-    project_id: int = Field(foreign_key="products.product_id", index=True)
+    project_id: int = Field(foreign_key="projects.project_id", index=True)
     node_id: str = Field(index=True)
     instance_key: str | None = Field(default=None, index=True)
     graph_version: str

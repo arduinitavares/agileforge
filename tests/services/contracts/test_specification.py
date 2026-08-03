@@ -4893,7 +4893,7 @@ def test_normalizer_preserves_real_product_forbidden_capability() -> None:
             {
                 "invariant_id": "INV-0000000000000000",
                 "excerpt": "The system must not include a web dashboard.",
-                "location": "Product Constraints",
+                "location": "Project Constraints",
             }
         ],
         "compiler_version": "3.0.0",

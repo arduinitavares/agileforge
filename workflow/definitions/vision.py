@@ -55,7 +55,7 @@ def authority_reference(authority: AuthorityFact) -> FactReference:
 def artifact_reference(artifact: PhaseArtifactFact) -> FactReference:
     """Return the canonical graph reference for one phase artifact."""
     if not isinstance(artifact.artifact_id, int):
-        message = "Product-definition artifacts require integer identities."
+        message = "Project-definition artifacts require integer identities."
         raise TypeError(message)
     return _reference(
         artifact.artifact_type,

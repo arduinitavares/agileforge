@@ -3,13 +3,12 @@
 from datetime import UTC, datetime
 
 import pytest
-from sqlalchemy import inspect, text
+from sqlalchemy import text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
-from sqlmodel import Session, create_engine, select
+from sqlmodel import Session, select
 
-from db.migrations import migrate_user_story_dependencies
-from models.core import Product, UserStory, UserStoryDependency
+from models.core import Project, UserStory, UserStoryDependency
 from models.events import WorkflowEvent
 from models.workflow import StoryDependencyReview
 from repositories.workflow import WorkflowFactRepository
@@ -33,15 +32,15 @@ REVIEWED_AT = datetime(2026, 8, 2, 12, tzinfo=UTC)
 
 
 def _story_pair(session: Session) -> tuple[int, int, int]:
-    product = Product(name="Dependency Test Product")
+    product = Project(name="Dependency Test Project")
     session.add(product)
     session.commit()
     session.refresh(product)
-    assert product.product_id is not None
+    assert product.project_id is not None
 
     prerequisite = UserStory(
         title="Capture market data",
-        product_id=product.product_id,
+        project_id=product.project_id,
         rank="101",
         source_requirement="REQ.live",
         refinement_slot=1,
@@ -51,7 +50,7 @@ def _story_pair(session: Session) -> tuple[int, int, int]:
     )
     dependent = UserStory(
         title="Generate recommendation",
-        product_id=product.product_id,
+        project_id=product.project_id,
         rank="102",
         source_requirement="REQ.live",
         refinement_slot=2,
@@ -66,19 +65,19 @@ def _story_pair(session: Session) -> tuple[int, int, int]:
     session.refresh(dependent)
     assert prerequisite.story_id is not None
     assert dependent.story_id is not None
-    return product.product_id, dependent.story_id, prerequisite.story_id
+    return product.project_id, dependent.story_id, prerequisite.story_id
 
 
 def _make_story(
     session: Session,
     *,
-    product_id: int,
+    project_id: int,
     title: str,
     slot: int,
 ) -> int:
     story = UserStory(
         title=title,
-        product_id=product_id,
+        project_id=project_id,
         rank=f"10{slot}",
         source_requirement="REQ.live",
         refinement_slot=slot,
@@ -142,7 +141,7 @@ def test_caller_session_writer_canonicalizes_reversed_edge_order(
     project_id, dependent_story_id, prerequisite_story_id = _story_pair(session)
     final_story_id = _make_story(
         session,
-        product_id=project_id,
+        project_id=project_id,
         title="Deliver recommendation",
         slot=3,
     )
@@ -189,7 +188,7 @@ def test_reversed_dependency_review_round_trips_repository(
     project_id, dependent_story_id, prerequisite_story_id = _story_pair(session)
     final_story_id = _make_story(
         session,
-        product_id=project_id,
+        project_id=project_id,
         title="Deliver recommendation",
         slot=3,
     )
@@ -254,10 +253,10 @@ def test_caller_session_writer_rejects_duplicate_edges_before_write(
 
 def test_dependency_table_accepts_proposed_edge(session: Session) -> None:
     """Persist a proposed dependency edge with review metadata."""
-    product_id, dependent_story_id, prerequisite_story_id = _story_pair(session)
+    project_id, dependent_story_id, prerequisite_story_id = _story_pair(session)
 
     edge = UserStoryDependency(
-        product_id=product_id,
+        project_id=project_id,
         dependent_story_id=dependent_story_id,
         prerequisite_story_id=prerequisite_story_id,
         status="proposed",
@@ -277,10 +276,10 @@ def test_dependency_table_accepts_proposed_edge(session: Session) -> None:
 
 def test_dependency_table_prevents_duplicate_edge(session: Session) -> None:
     """Reject duplicate dependency edges for one product and story pair."""
-    product_id, dependent_story_id, prerequisite_story_id = _story_pair(session)
+    project_id, dependent_story_id, prerequisite_story_id = _story_pair(session)
     session.add(
         UserStoryDependency(
-            product_id=product_id,
+            project_id=project_id,
             dependent_story_id=dependent_story_id,
             prerequisite_story_id=prerequisite_story_id,
         )
@@ -289,7 +288,7 @@ def test_dependency_table_prevents_duplicate_edge(session: Session) -> None:
 
     session.add(
         UserStoryDependency(
-            product_id=product_id,
+            project_id=project_id,
             dependent_story_id=dependent_story_id,
             prerequisite_story_id=prerequisite_story_id,
         )
@@ -300,11 +299,11 @@ def test_dependency_table_prevents_duplicate_edge(session: Session) -> None:
 
 def test_dependency_validation_rejects_self_edge(session: Session) -> None:
     """Reject dependency edges where a story blocks itself."""
-    product_id, dependent_story_id, _ = _story_pair(session)
+    project_id, dependent_story_id, _ = _story_pair(session)
 
     session.add(
         UserStoryDependency(
-            product_id=product_id,
+            project_id=project_id,
             dependent_story_id=dependent_story_id,
             prerequisite_story_id=dependent_story_id,
         )
@@ -319,66 +318,12 @@ def test_dependency_test_engine_enforces_sqlite_foreign_keys(engine: Engine) -> 
         assert conn.execute(text("PRAGMA foreign_keys")).scalar_one() == 1
 
 
-def test_story_dependency_migration_creates_table_and_indexes() -> None:
-    """Create dependency table and lookup indexes through migration."""
-    engine = create_engine("sqlite:///:memory:")
-    with engine.begin() as conn:
-        conn.execute(
-            text(
-                """
-                CREATE TABLE products (
-                    product_id INTEGER PRIMARY KEY,
-                    name VARCHAR NOT NULL
-                )
-                """
-            )
-        )
-        conn.execute(
-            text(
-                """
-                CREATE TABLE user_stories (
-                    story_id INTEGER PRIMARY KEY,
-                    product_id INTEGER NOT NULL REFERENCES products(product_id),
-                    title VARCHAR NOT NULL
-                )
-                """
-            )
-        )
-
-    actions = migrate_user_story_dependencies(engine)
-
-    assert "created table: user_story_dependencies" in actions
-    columns = {
-        column["name"]
-        for column in inspect(engine).get_columns("user_story_dependencies")
-    }
-    assert {
-        "dependency_id",
-        "product_id",
-        "dependent_story_id",
-        "prerequisite_story_id",
-        "status",
-        "source",
-        "confidence",
-        "reason",
-        "created_at",
-        "updated_at",
-    }.issubset(columns)
-    index_names = {
-        index["name"]
-        for index in inspect(engine).get_indexes("user_story_dependencies")
-    }
-    assert "ix_user_story_dependencies_product_status" in index_names
-    assert "ix_user_story_dependencies_dependent_story_id" in index_names
-    assert "ix_user_story_dependencies_prerequisite_story_id" in index_names
-
-
 def test_build_dependency_graph_reports_missing_story(
     engine: Engine,
     session: Session,
 ) -> None:
     """Report orphaned dependency edges without crashing graph load."""
-    product_id, dependent_story_id, _ = _story_pair(session)
+    project_id, dependent_story_id, _ = _story_pair(session)
     session.close()
     with engine.connect() as conn:
         conn.exec_driver_sql("PRAGMA foreign_keys=OFF")
@@ -387,7 +332,7 @@ def test_build_dependency_graph_reports_missing_story(
                 """
                 INSERT INTO user_story_dependencies
                     (
-                        product_id,
+                        project_id,
                         dependent_story_id,
                         prerequisite_story_id,
                         status,
@@ -396,7 +341,7 @@ def test_build_dependency_graph_reports_missing_story(
                     )
                 VALUES
                     (
-                        :product_id,
+                        :project_id,
                         :dependent_story_id,
                         999999,
                         'active',
@@ -406,7 +351,7 @@ def test_build_dependency_graph_reports_missing_story(
                 """
             ),
             {
-                "product_id": product_id,
+                "project_id": project_id,
                 "dependent_story_id": dependent_story_id,
             },
         )
@@ -414,7 +359,7 @@ def test_build_dependency_graph_reports_missing_story(
         conn.exec_driver_sql("PRAGMA foreign_keys=ON")
 
     with Session(engine) as fresh_session:
-        graph = load_story_dependency_graph(fresh_session, project_id=product_id)
+        graph = load_story_dependency_graph(fresh_session, project_id=project_id)
 
     assert graph.active_edges == {}
     assert [issue.code for issue in graph.issues] == ["STORY_DEPENDENCY_ORPHAN"]
@@ -423,14 +368,14 @@ def test_build_dependency_graph_reports_missing_story(
 
 def test_build_dependency_graph_reports_superseded_story(session: Session) -> None:
     """Report active edges pointing at superseded stories."""
-    product_id, dependent_story_id, prerequisite_story_id = _story_pair(session)
+    project_id, dependent_story_id, prerequisite_story_id = _story_pair(session)
     prerequisite = session.get(UserStory, prerequisite_story_id)
     assert prerequisite is not None
     prerequisite.is_superseded = True
     session.add(prerequisite)
     session.add(
         UserStoryDependency(
-            product_id=product_id,
+            project_id=project_id,
             dependent_story_id=dependent_story_id,
             prerequisite_story_id=prerequisite_story_id,
             status="active",
@@ -438,7 +383,7 @@ def test_build_dependency_graph_reports_superseded_story(session: Session) -> No
     )
     session.commit()
 
-    graph = load_story_dependency_graph(session, project_id=product_id)
+    graph = load_story_dependency_graph(session, project_id=project_id)
 
     assert graph.active_edges == {}
     assert [issue.code for issue in graph.issues] == [
@@ -454,17 +399,17 @@ def test_detect_cycle_returns_cycle_path() -> None:
 
 def test_inspect_payload_separates_active_and_proposed_edges(session: Session) -> None:
     """Expose active and proposed dependency edges in separate inspect buckets."""
-    product = Product(name="Dependency Inspect Product")
+    product = Project(name="Dependency Inspect Project")
     session.add(product)
     session.commit()
     session.refresh(product)
-    assert product.product_id is not None
-    story_a = _make_story(session, product_id=product.product_id, title="A", slot=1)
-    story_b = _make_story(session, product_id=product.product_id, title="B", slot=2)
-    story_c = _make_story(session, product_id=product.product_id, title="C", slot=3)
+    assert product.project_id is not None
+    story_a = _make_story(session, project_id=product.project_id, title="A", slot=1)
+    story_b = _make_story(session, project_id=product.project_id, title="B", slot=2)
+    story_c = _make_story(session, project_id=product.project_id, title="C", slot=3)
     session.add(
         UserStoryDependency(
-            product_id=product.product_id,
+            project_id=product.project_id,
             dependent_story_id=story_b,
             prerequisite_story_id=story_a,
             status="active",
@@ -474,7 +419,7 @@ def test_inspect_payload_separates_active_and_proposed_edges(session: Session) -
     )
     session.add(
         UserStoryDependency(
-            product_id=product.product_id,
+            project_id=product.project_id,
             dependent_story_id=story_c,
             prerequisite_story_id=story_b,
             status="proposed",
@@ -484,7 +429,7 @@ def test_inspect_payload_separates_active_and_proposed_edges(session: Session) -
     )
     session.commit()
 
-    payload = dependency_inspect_payload(session, project_id=product.product_id)
+    payload = dependency_inspect_payload(session, project_id=product.project_id)
 
     assert payload["active_edge_count"] == 1
     assert payload["proposed_edge_count"] == 1

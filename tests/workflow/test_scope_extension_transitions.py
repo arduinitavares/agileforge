@@ -235,14 +235,14 @@ def _seed_completed_project_history(engine: Engine, project_id: int) -> None:
     with Session(engine) as session:
         base = session.exec(
             select(SpecRegistry).where(
-                col(SpecRegistry.product_id) == project_id,
+                col(SpecRegistry.project_id) == project_id,
                 col(SpecRegistry.status) == "approved",
             )
         ).one()
         assert base.spec_version_id is not None
         acceptance = session.exec(
             select(SpecAuthorityAcceptance).where(
-                col(SpecAuthorityAcceptance.product_id) == project_id,
+                col(SpecAuthorityAcceptance.project_id) == project_id,
                 col(SpecAuthorityAcceptance.status) == "accepted",
             )
         ).one()
@@ -385,7 +385,7 @@ def _current_spec(engine: Engine, project_id: int) -> SpecRegistry:
     with Session(engine) as session:
         return session.exec(
             select(SpecRegistry).where(
-                col(SpecRegistry.product_id) == project_id,
+                col(SpecRegistry.project_id) == project_id,
                 col(SpecRegistry.status) == "approved",
             )
         ).one()

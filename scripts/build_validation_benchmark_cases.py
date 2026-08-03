@@ -117,7 +117,7 @@ def _resolve_spec_version_id(
         if require_compiled:
             authority = accepted_compiled_authority(
                 session,
-                product_id=story.product_id,
+                project_id=story.project_id,
                 spec_version_id=spec_id,
             )
             loaded = (
@@ -130,7 +130,7 @@ def _resolve_spec_version_id(
     spec = session.exec(
         select(SpecRegistry)
         .where(
-            SpecRegistry.product_id == story.product_id,
+            SpecRegistry.project_id == story.project_id,
             SpecRegistry.status == "approved",
         )
         .order_by(col(SpecRegistry.spec_version_id).desc())
@@ -144,7 +144,7 @@ def _resolve_spec_version_id(
     if require_compiled:
         authority = accepted_compiled_authority(
             session,
-            product_id=story.product_id,
+            project_id=story.project_id,
             spec_version_id=spec_id,
         )
         loaded = load_compiled_artifact(authority) if authority is not None else None
@@ -156,7 +156,7 @@ def _resolve_spec_version_id(
 
 def build_cases(
     *,
-    product_id: int | None,
+    project_id: int | None,
     limit: int,
     labeled_only: bool,
     require_compiled: bool,
@@ -167,8 +167,8 @@ def build_cases(
 
     with Session(get_engine()) as session:
         statement = select(UserStory).order_by(col(UserStory.story_id).asc())
-        if product_id is not None:
-            statement = statement.where(UserStory.product_id == product_id)
+        if project_id is not None:
+            statement = statement.where(UserStory.project_id == project_id)
 
         stories = session.exec(statement).all()
         for story in stories:
@@ -198,7 +198,7 @@ def build_cases(
 
             rows.append(
                 {
-                    "case_id": f"p{story.product_id}-s{story_id}-v{spec_id}",
+                    "case_id": f"p{story.project_id}-s{story_id}-v{spec_id}",
                     "story_id": story_id,
                     "spec_version_id": spec_id,
                     "expected_pass": expected_pass,
@@ -206,7 +206,7 @@ def build_cases(
                     "notes": None,
                     "tags": ["real-data"],
                     "enabled": True,
-                    "product_id": int(story.product_id),
+                    "project_id": int(story.project_id),
                     "story_title": story.title or "",
                     "spec_source": spec_source,
                     "label_source": label_source,
@@ -274,7 +274,7 @@ def main() -> None:
     args = parser.parse_args()
 
     cases = build_cases(
-        product_id=args.product_id,
+        project_id=args.project_id,
         limit=args.limit,
         labeled_only=args.labeled_only,
         require_compiled=not args.allow_uncompiled,

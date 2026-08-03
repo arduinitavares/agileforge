@@ -10,7 +10,7 @@ import pytest
 from pydantic import ValidationError
 from sqlmodel import Session, select
 
-from models.core import Product
+from models.core import Project
 from models.specs import SpecRegistry
 from models.workflow import RepositoryBaseline, RepositoryInventory, SpecDraft
 from repositories.workflow import WorkflowFactLoadError, WorkflowFactRepository
@@ -110,7 +110,7 @@ def _guards(
 def _open_brownfield(domain: WorkflowDomain) -> int:
     result = domain.transition(
         OpenProjectShell(
-            name="Existing Product",
+            name="Existing Project",
             origin="brownfield",
             idempotency_key="open-brownfield",
             actor=ACTOR,
@@ -337,10 +337,10 @@ def test_brownfield_transitions_persist_evidence_then_share_registration(
 
     assert registered.ok is True
     with Session(engine) as session:
-        assert len(session.exec(select(Product)).all()) == 1
-        project = session.get(Product, project_id)
+        assert len(session.exec(select(Project)).all()) == 1
+        project = session.get(Project, project_id)
         assert project is not None
-        assert project.name == "Existing Product"
+        assert project.name == "Existing Project"
         assert len(session.exec(select(RepositoryBaseline)).all()) == 1
         assert len(session.exec(select(RepositoryInventory)).all()) == 1
         assert len(session.exec(select(SpecDraft)).all()) == 1

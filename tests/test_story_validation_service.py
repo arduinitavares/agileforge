@@ -8,7 +8,7 @@ from sqlmodel import Session
 
 from agile_sqlmodel import (
     CompiledSpecAuthority,
-    Product,
+    Project,
     SpecAuthorityAcceptance,
     SpecRegistry,
     UserStory,
@@ -80,14 +80,14 @@ def test_story_validation_blocks_malformed_v3_before_checks_or_evidence(
         session.get_bind,
     )
 
-    product = Product(name="Validation Product", vision="Test")
+    product = Project(name="Validation Project", vision="Test")
     session.add(product)
     session.commit()
     session.refresh(product)
-    product_id = require_id(product.product_id, "product_id")
+    project_id = require_id(product.project_id, "project_id")
 
     story = UserStory(
-        product_id=product_id,
+        project_id=project_id,
         title="Story",
         story_description="Description",
         acceptance_criteria="Criteria",
@@ -97,7 +97,7 @@ def test_story_validation_blocks_malformed_v3_before_checks_or_evidence(
     session.refresh(story)
 
     spec_version = SpecRegistry(
-        product_id=product_id,
+        project_id=project_id,
         content="# Spec",
         content_ref=None,
         spec_hash="a" * 64,
@@ -128,7 +128,7 @@ def test_story_validation_blocks_malformed_v3_before_checks_or_evidence(
     session.refresh(authority)
     session.add(
         SpecAuthorityAcceptance(
-            product_id=product_id,
+            project_id=project_id,
             spec_version_id=spec_version_id,
             status="accepted",
             policy="test",
@@ -215,19 +215,19 @@ def test_story_validation_stays_on_exact_accepted_row_with_newer_pending_candida
     """A newer pending compile cannot replace the accepted execution authority."""
     from services.specs import story_validation_service  # noqa: PLC0415
 
-    product = Product(name="Pinned Validation", vision="Test")
+    product = Project(name="Pinned Validation", vision="Test")
     session.add(product)
     session.commit()
     session.refresh(product)
-    product_id = require_id(product.product_id, "product_id")
+    project_id = require_id(product.project_id, "project_id")
     story = UserStory(
-        product_id=product_id,
+        project_id=project_id,
         title="Pinned story",
         story_description="Description",
         acceptance_criteria="Criteria",
     )
     spec = SpecRegistry(
-        product_id=product_id,
+        project_id=project_id,
         content="# Spec",
         spec_hash="pinned",
         status="approved",
@@ -257,7 +257,7 @@ def test_story_validation_stays_on_exact_accepted_row_with_newer_pending_candida
         session.refresh(row)
     session.add(
         SpecAuthorityAcceptance(
-            product_id=product_id,
+            project_id=project_id,
             spec_version_id=spec_version_id,
             status="accepted",
             policy="test",
@@ -311,19 +311,19 @@ def test_story_validation_moves_only_to_exact_newly_accepted_row(
     """A terminal acceptance moves validation to the referenced v3 row."""
     from services.specs import story_validation_service  # noqa: PLC0415
 
-    product = Product(name="Accepted V3 Validation", vision="Test")
+    product = Project(name="Accepted V3 Validation", vision="Test")
     session.add(product)
     session.commit()
     session.refresh(product)
-    product_id = require_id(product.product_id, "product_id")
+    project_id = require_id(product.project_id, "project_id")
     story = UserStory(
-        product_id=product_id,
+        project_id=project_id,
         title="Accepted story",
         story_description="Description",
         acceptance_criteria="Criteria",
     )
     spec = SpecRegistry(
-        product_id=product_id,
+        project_id=project_id,
         content="# Spec",
         spec_hash="accepted-v3",
         status="approved",
@@ -354,7 +354,7 @@ def test_story_validation_moves_only_to_exact_newly_accepted_row(
     for index, row in enumerate(rows):
         session.add(
             SpecAuthorityAcceptance(
-                product_id=product_id,
+                project_id=project_id,
                 spec_version_id=spec_version_id,
                 status="accepted",
                 policy="test",
@@ -523,7 +523,7 @@ def test_run_llm_spec_validation_uses_injected_helpers() -> None:
         }
 
     story = UserStory(
-        product_id=1,
+        project_id=1,
         title="As a user, I want exports",
         story_description="Export data for audit.",
         acceptance_criteria="Given reports, when exported, then CSV is generated.",
@@ -579,14 +579,14 @@ def test_persist_validation_evidence_updates_story_and_acceptance(
         persist_validation_evidence,
     )
 
-    product = Product(name="Evidence Product", vision="Test")
+    product = Project(name="Evidence Project", vision="Test")
     session.add(product)
     session.commit()
     session.refresh(product)
-    product_id = require_id(product.product_id, "product_id")
+    project_id = require_id(product.project_id, "project_id")
 
     story = UserStory(
-        product_id=product_id,
+        project_id=project_id,
         title="Story",
         story_description="Description",
         acceptance_criteria="Criteria",
@@ -596,7 +596,7 @@ def test_persist_validation_evidence_updates_story_and_acceptance(
     session.refresh(story)
 
     spec_version = SpecRegistry(
-        product_id=product_id,
+        project_id=project_id,
         content="# Spec",
         content_ref=None,
         spec_hash="a" * 64,
@@ -636,14 +636,14 @@ def test_validate_story_with_spec_authority_uses_service_owned_defaults(
     """Verify validate story with spec authority uses service owned defaults."""
     from services.specs import story_validation_service  # noqa: PLC0415
 
-    product = Product(name="Validation Product", vision="Test")
+    product = Project(name="Validation Project", vision="Test")
     session.add(product)
     session.commit()
     session.refresh(product)
-    product_id = require_id(product.product_id, "product_id")
+    project_id = require_id(product.project_id, "project_id")
 
     story = UserStory(
-        product_id=product_id,
+        project_id=project_id,
         title="Story",
         story_description="Description",
         acceptance_criteria="Criteria",
@@ -653,7 +653,7 @@ def test_validate_story_with_spec_authority_uses_service_owned_defaults(
     session.refresh(story)
 
     spec_version = SpecRegistry(
-        product_id=product_id,
+        project_id=project_id,
         content="# Spec",
         content_ref=None,
         spec_hash="b" * 64,
@@ -701,7 +701,7 @@ def test_validate_story_with_spec_authority_uses_service_owned_defaults(
     session.refresh(authority)
     session.add(
         SpecAuthorityAcceptance(
-            product_id=product_id,
+            project_id=project_id,
             spec_version_id=spec_version_id,
             status="accepted",
             policy="test",
@@ -796,7 +796,7 @@ def test_run_deterministic_alignment_checks_unwraps_loader_result_success() -> N
     )
 
     story = UserStory(
-        product_id=1,
+        project_id=1,
         title="Avoid direct DOM access",
         story_description="Story must not use direct DOM access.",
         acceptance_criteria="No direct DOM access is allowed.",

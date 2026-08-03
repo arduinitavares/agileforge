@@ -8,7 +8,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine
 
-from agile_sqlmodel import Product, SpecRegistry
+from agile_sqlmodel import Project, SpecRegistry
 from tests.typing_helpers import make_tool_context
 
 
@@ -18,7 +18,7 @@ def test_link_spec_to_product_persists_link_and_delegates_compile(
     """Verify link spec to product persists link and delegates compile."""
     from services.specs import lifecycle_service  # noqa: PLC0415
 
-    product = Product(name="Lifecycle Product", vision="vision")
+    product = Project(name="Lifecycle Project", vision="vision")
     session.add(product)
     session.commit()
     session.refresh(product)
@@ -29,9 +29,9 @@ def test_link_spec_to_product_persists_link_and_delegates_compile(
     calls: dict[str, object] = {}
 
     def fake_compile(
-        *, product_id: int, spec_path: str, tool_context: object
+        *, project_id: int, spec_path: str, tool_context: object
     ) -> object:
-        calls["product_id"] = product_id
+        calls["project_id"] = project_id
         calls["spec_path"] = spec_path
         calls["tool_context"] = tool_context
         return {
@@ -49,7 +49,7 @@ def test_link_spec_to_product_persists_link_and_delegates_compile(
     ctx = make_tool_context(state={"spec_persisted": False})
     result = lifecycle_service.link_spec_to_product(
         {
-            "product_id": product.product_id,
+            "project_id": product.project_id,
             "spec_path": str(spec_path),
         },
         tool_context=ctx,
@@ -58,13 +58,13 @@ def test_link_spec_to_product_persists_link_and_delegates_compile(
     assert result["success"] is True
     assert result["compile_success"] is True
     assert result["authority_id"] == 34  # noqa: PLR2004
-    assert calls["product_id"] == product.product_id
+    assert calls["project_id"] == product.project_id
     assert calls["spec_path"] == str(spec_path)
     assert calls["tool_context"] is ctx
     assert ctx.state["spec_persisted"] is True
 
     session.expire_all()
-    stored = session.get(Product, product.product_id)
+    stored = session.get(Project, product.project_id)
     assert stored is not None
     assert stored.spec_file_path == str(spec_path)
     assert stored.spec_loaded_at is not None
@@ -77,7 +77,7 @@ def test_save_project_specification_from_file_persists_content(
     """Verify save project specification from file persists content."""
     from services.specs import lifecycle_service  # noqa: PLC0415
 
-    product = Product(name="Save File Product", vision="vision")
+    product = Project(name="Save File Project", vision="vision")
     session.add(product)
     session.commit()
     session.refresh(product)
@@ -88,9 +88,9 @@ def test_save_project_specification_from_file_persists_content(
     calls: dict[str, object] = {}
 
     def fake_compile(
-        *, product_id: int, spec_path: str, tool_context: object
+        *, project_id: int, spec_path: str, tool_context: object
     ) -> object:
-        calls["product_id"] = product_id
+        calls["project_id"] = project_id
         calls["spec_path"] = spec_path
         calls["tool_context"] = tool_context
         return {
@@ -109,7 +109,7 @@ def test_save_project_specification_from_file_persists_content(
     ctx = make_tool_context(state={"spec_persisted": False})
     result = lifecycle_service.save_project_specification(
         {
-            "product_id": product.product_id,
+            "project_id": product.project_id,
             "spec_source": "file",
             "content": str(spec_path),
         },
@@ -120,12 +120,12 @@ def test_save_project_specification_from_file_persists_content(
     assert result["file_created"] is False
     assert result["compile_success"] is True
     assert result["authority_id"] == 22  # noqa: PLR2004
-    assert calls["product_id"] == product.product_id
+    assert calls["project_id"] == product.project_id
     assert calls["spec_path"] == str(spec_path)
     assert ctx.state["spec_persisted"] is True
 
     session.expire_all()
-    stored = session.get(Product, product.product_id)
+    stored = session.get(Project, product.project_id)
     assert stored is not None
     assert stored.technical_spec == "# File Spec\n\nBody"
     assert stored.spec_file_path == str(spec_path)
@@ -138,7 +138,7 @@ def test_save_project_specification_from_text_creates_backup_file(
     """Verify save project specification from text creates backup file."""
     from services.specs import lifecycle_service  # noqa: PLC0415
 
-    product = Product(name="Save Text Product", vision="vision")
+    product = Project(name="Save Text Project", vision="vision")
     session.add(product)
     session.commit()
     session.refresh(product)
@@ -146,9 +146,9 @@ def test_save_project_specification_from_text_creates_backup_file(
     calls: dict[str, object] = {}
 
     def fake_compile(
-        *, product_id: int, spec_path: str, tool_context: object
+        *, project_id: int, spec_path: str, tool_context: object
     ) -> object:
-        calls["product_id"] = product_id
+        calls["project_id"] = project_id
         calls["spec_path"] = spec_path
         calls["tool_context"] = tool_context
         return {
@@ -170,7 +170,7 @@ def test_save_project_specification_from_text_creates_backup_file(
 
     result = lifecycle_service.save_project_specification(
         {
-            "product_id": product.product_id,
+            "project_id": product.project_id,
             "spec_source": "text",
             "content": pasted_spec,
         },
@@ -182,7 +182,7 @@ def test_save_project_specification_from_text_creates_backup_file(
     assert result["compile_success"] is True
     assert result["authority_id"] == 32  # noqa: PLR2004
     assert "specs" in result["spec_path"]
-    assert calls["product_id"] == product.product_id
+    assert calls["project_id"] == product.project_id
     assert calls["spec_path"] == result["spec_path"]
     assert ctx.state["spec_persisted"] is True
 
@@ -191,7 +191,7 @@ def test_save_project_specification_from_text_creates_backup_file(
     assert created_file.read_text(encoding="utf-8") == pasted_spec
 
     session.expire_all()
-    stored = session.get(Product, product.product_id)
+    stored = session.get(Project, product.project_id)
     assert stored is not None
     assert stored.technical_spec == pasted_spec
     assert stored.spec_file_path == result["spec_path"]
@@ -202,14 +202,14 @@ def test_link_spec_to_product_rejects_missing_file(session: Session) -> None:
     """Verify link spec to product rejects missing file."""
     from services.specs import lifecycle_service  # noqa: PLC0415
 
-    product = Product(name="Missing File Product", vision="vision")
+    product = Project(name="Missing File Project", vision="vision")
     session.add(product)
     session.commit()
     session.refresh(product)
 
     result = lifecycle_service.link_spec_to_product(
         {
-            "product_id": product.product_id,
+            "project_id": product.project_id,
             "spec_path": "missing/spec.md",
         }
     )
@@ -224,8 +224,8 @@ def test_link_spec_to_product_handles_compile_failure_after_link(
     """Verify link spec to product handles compile failure after link."""
     from services.specs import lifecycle_service  # noqa: PLC0415
 
-    product = Product(
-        name="Compile Failure Product",
+    product = Project(
+        name="Compile Failure Project",
         vision="vision",
         spec_file_path=None,
         spec_loaded_at=None,
@@ -238,9 +238,9 @@ def test_link_spec_to_product_handles_compile_failure_after_link(
     spec_path.write_text("# Linked spec\n", encoding="utf-8")
 
     def fake_compile(
-        *, product_id: int, spec_path: str, tool_context: object
+        *, project_id: int, spec_path: str, tool_context: object
     ) -> object:
-        del product_id, spec_path, tool_context
+        del project_id, spec_path, tool_context
         return {
             "success": False,
             "error": "Compilation error",
@@ -259,7 +259,7 @@ def test_link_spec_to_product_handles_compile_failure_after_link(
 
     result = lifecycle_service.link_spec_to_product(
         {
-            "product_id": product.product_id,
+            "project_id": product.project_id,
             "spec_path": str(spec_path),
         }
     )
@@ -271,7 +271,7 @@ def test_link_spec_to_product_handles_compile_failure_after_link(
     assert result["has_full_artifact"] is True
 
     session.expire_all()
-    stored = session.get(Product, product.product_id)
+    stored = session.get(Project, product.project_id)
     assert stored is not None
     assert stored.spec_file_path == str(spec_path)
     assert stored.spec_loaded_at is not None
@@ -286,8 +286,8 @@ def test_read_project_specification_prefers_db_blob_and_updates_context_state(
     spec_path = tmp_path / "backing_spec.md"
     spec_path.write_text("# File Spec\n\nFile body", encoding="utf-8")
 
-    product = Product(
-        name="Read Product",
+    product = Project(
+        name="Read Project",
         vision="vision",
         technical_spec="# DB Spec\n\nDatabase body",
         spec_file_path=str(spec_path),
@@ -299,7 +299,7 @@ def test_read_project_specification_prefers_db_blob_and_updates_context_state(
     ctx = make_tool_context(
         state={
             "active_project": {
-                "product_id": product.product_id,
+                "project_id": product.project_id,
                 "name": product.name,
             }
         }
@@ -324,8 +324,8 @@ def test_read_project_specification_falls_back_to_file_when_db_blob_is_empty(
     spec_path = tmp_path / "empty_db_fallback.md"
     spec_path.write_text("# File Spec\n\nFile body", encoding="utf-8")
 
-    product = Product(
-        name="Fallback Product",
+    product = Project(
+        name="Fallback Project",
         vision="vision",
         technical_spec="",
         spec_file_path=str(spec_path),
@@ -337,7 +337,7 @@ def test_read_project_specification_falls_back_to_file_when_db_blob_is_empty(
     ctx = make_tool_context(
         state={
             "active_project": {
-                "product_id": product.product_id,
+                "project_id": product.project_id,
                 "name": product.name,
             }
         }
@@ -370,7 +370,7 @@ def test_register_spec_version_creates_draft_from_service_boundary(
     """Verify register spec version creates draft from service boundary."""
     from services.specs import lifecycle_service  # noqa: PLC0415
 
-    product = Product(name="Service Register Product", vision="vision")
+    product = Project(name="Service Register Project", vision="vision")
     session.add(product)
     session.commit()
     session.refresh(product)
@@ -378,7 +378,7 @@ def test_register_spec_version_creates_draft_from_service_boundary(
     content = "# Service Spec\n\nBody"
     result = lifecycle_service.register_spec_version(
         {
-            "product_id": product.product_id,
+            "project_id": product.project_id,
             "content": content,
             "content_ref": "specs/service.md",
         },
@@ -393,7 +393,7 @@ def test_register_spec_version_creates_draft_from_service_boundary(
 
     spec = session.get(SpecRegistry, result["spec_version_id"])
     assert spec is not None
-    assert spec.product_id == product.product_id
+    assert spec.project_id == product.project_id
     assert spec.status == "draft"
     assert spec.spec_hash == hashlib.sha256(content.encode("utf-8")).hexdigest()
     assert spec.content_ref == "specs/service.md"
@@ -407,14 +407,14 @@ def test_approve_spec_version_updates_metadata_from_service_boundary(
     """Verify approve spec version updates metadata from service boundary."""
     from services.specs import lifecycle_service  # noqa: PLC0415
 
-    product = Product(name="Service Approve Product", vision="vision")
+    product = Project(name="Service Approve Project", vision="vision")
     session.add(product)
     session.commit()
     session.refresh(product)
 
     register_result = lifecycle_service.register_spec_version(
         {
-            "product_id": product.product_id,
+            "project_id": product.project_id,
             "content": "# Service Spec\n\nBody",
         },
         tool_context=None,
@@ -466,15 +466,15 @@ def test_register_spec_version_honors_legacy_spec_tools_engine_override(
     spec_tools.engine = isolated_engine
     try:
         with Session(isolated_engine) as isolated_session:
-            product = Product(name="Engine Seam Product", vision="vision")
+            product = Project(name="Engine Seam Project", vision="vision")
             isolated_session.add(product)
             isolated_session.commit()
             isolated_session.refresh(product)
-            product_id = product.product_id
+            project_id = product.project_id
 
         result = lifecycle_service.register_spec_version(
             {
-                "product_id": product_id,
+                "project_id": project_id,
                 "content": "# isolated",
             },
             tool_context=None,
@@ -484,7 +484,7 @@ def test_register_spec_version_honors_legacy_spec_tools_engine_override(
         with Session(isolated_engine) as isolated_session:
             spec = isolated_session.get(SpecRegistry, result["spec_version_id"])
             assert spec is not None
-            assert spec.product_id == product_id
+            assert spec.project_id == project_id
 
         with Session(engine) as default_session:
             assert default_session.get(SpecRegistry, result["spec_version_id"]) is None
@@ -548,15 +548,15 @@ def test_register_and_approve_prefer_spec_tools_get_engine_override_over_stale_e
     monkeypatch.setattr(spec_tools, "engine", stale_engine, raising=False)
 
     with Session(preferred_engine) as preferred_session:
-        product = Product(name="Preferred Engine Product", vision="vision")
+        product = Project(name="Preferred Engine Project", vision="vision")
         preferred_session.add(product)
         preferred_session.commit()
         preferred_session.refresh(product)
-        product_id = product.product_id
+        project_id = product.project_id
 
     register_result = lifecycle_service.register_spec_version(
         {
-            "product_id": product_id,
+            "project_id": project_id,
             "content": "# preferred",
         },
         tool_context=None,
@@ -644,15 +644,15 @@ def test_save_project_specification_honors_legacy_spec_tools_engine_override(
 
     try:
         with Session(isolated_engine) as isolated_session:
-            product = Product(name="Isolated Save Product", vision="vision")
+            product = Project(name="Isolated Save Project", vision="vision")
             isolated_session.add(product)
             isolated_session.commit()
             isolated_session.refresh(product)
-            product_id = product.product_id
+            project_id = product.project_id
 
         result = lifecycle_service.save_project_specification(
             {
-                "product_id": product_id,
+                "project_id": project_id,
                 "spec_source": "file",
                 "content": str(spec_path),
             },
@@ -661,7 +661,7 @@ def test_save_project_specification_honors_legacy_spec_tools_engine_override(
 
         assert result["success"] is True
         with Session(isolated_engine) as isolated_session:
-            product = isolated_session.get(Product, product_id)
+            product = isolated_session.get(Project, project_id)
             assert product is not None
             assert product.spec_file_path == str(spec_path)
             assert product.technical_spec == "# Save\n\nBody"
@@ -700,15 +700,15 @@ def test_link_and_read_specification_honor_legacy_spec_tools_engine_override(
 
     try:
         with Session(isolated_engine) as isolated_session:
-            product = Product(name="Isolated Link Product", vision="vision")
+            product = Project(name="Isolated Link Project", vision="vision")
             isolated_session.add(product)
             isolated_session.commit()
             isolated_session.refresh(product)
-            product_id = product.product_id
+            project_id = product.project_id
 
         link_result = lifecycle_service.link_spec_to_product(
             {
-                "product_id": product_id,
+                "project_id": project_id,
                 "spec_path": str(spec_path),
             },
             tool_context=None,
@@ -719,8 +719,8 @@ def test_link_and_read_specification_honor_legacy_spec_tools_engine_override(
         ctx = make_tool_context(
             state={
                 "active_project": {
-                    "product_id": product_id,
-                    "name": "Isolated Link Product",
+                    "project_id": project_id,
+                    "name": "Isolated Link Project",
                 }
             }
         )

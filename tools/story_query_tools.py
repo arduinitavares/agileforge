@@ -16,7 +16,7 @@ from sqlalchemy import func
 from sqlalchemy.exc import SQLAlchemyError
 from sqlmodel import Session, select
 
-from models.core import Epic, Feature, Product, Theme, UserStory
+from models.core import Epic, Feature, Project, Theme, UserStory
 from models.db import get_engine
 
 logger: logging.Logger = logging.getLogger(name=__name__)
@@ -110,8 +110,8 @@ class QueryFeaturesOutput(BaseModel):
     """Output schema for query_features_for_stories with validated structure."""
 
     success: Annotated[bool, Field(description="Whether query succeeded")]
-    product_id: Annotated[int, Field(description="Product ID")]
-    product_name: Annotated[str, Field(description="Product name")]
+    project_id: Annotated[int, Field(description="Project ID")]
+    product_name: Annotated[str, Field(description="Project name")]
     features_flat: Annotated[
         list[FeatureForStory],
         Field(description="Flat list of features with REQUIRED theme/epic metadata"),
@@ -127,7 +127,7 @@ class QueryFeaturesOutput(BaseModel):
 class QueryFeaturesInput(BaseModel):
     """Input schema for querying features."""
 
-    product_id: Annotated[int, Field(description="The product ID to query.")]
+    project_id: Annotated[int, Field(description="The project ID to query.")]
 
 
 @dataclass(frozen=True)
@@ -164,8 +164,8 @@ def _derive_time_frame_from_title(title: str) -> str | None:
     return value.capitalize()
 
 
-def _load_themes(session: Session, product_id: int) -> list[Theme]:
-    return list(session.exec(select(Theme).where(Theme.product_id == product_id)).all())
+def _load_themes(session: Session, project_id: int) -> list[Theme]:
+    return list(session.exec(select(Theme).where(Theme.project_id == project_id)).all())
 
 
 def _load_epics(session: Session, theme_ids: list[int]) -> list[Epic]:
@@ -349,7 +349,7 @@ def _build_theme_payload(
 
 def _build_query_output(
     query_input: QueryFeaturesInput,
-    product: Product,
+    project: Project,
     themes: list[Theme],
     graph: _QueryGraph,
 ) -> QueryFeaturesOutput:
@@ -365,12 +365,12 @@ def _build_query_output(
 
     return QueryFeaturesOutput(
         success=True,
-        product_id=query_input.product_id,
-        product_name=product.name,
+        project_id=query_input.project_id,
+        product_name=project.name,
         features_flat=features_list,
         structure=structure,
         total_features=len(features_list),
-        message=f"Found {len(features_list)} features for '{product.name}'",
+        message=f"Found {len(features_list)} features for '{project.name}'",
     )
 
 
@@ -378,28 +378,28 @@ def query_features_for_stories(
     query_input: QueryFeaturesInput,
 ) -> dict[str, Any]:
     """
-    Query all features for a product, organized by theme/epic.
+    Query all features for a project, organized by theme/epic.
 
-    Used by the orchestrator to provide context to the user story agent.
+    Used by the workflow adapter to provide context to the user story agent.
 
     Returns a JSON-serializable `QueryFeaturesOutput` payload whose
     `features_flat` entries always include validated theme and epic metadata.
     """
     logger.debug(
-        "Querying features for story generation with product_id=%s.",
-        query_input.product_id,
+        "Querying features for story generation with project_id=%s.",
+        query_input.project_id,
     )
 
     try:
         with Session(get_engine()) as session:
-            product = session.get(Product, query_input.product_id)
-            if not product:
+            project = session.get(Project, query_input.project_id)
+            if not project:
                 return {
                     "success": False,
-                    "error": f"Product {query_input.product_id} not found",
+                    "error": f"Project {query_input.project_id} not found",
                 }
 
-            themes = _load_themes(session, query_input.product_id)
+            themes = _load_themes(session, query_input.project_id)
             theme_ids = [t.theme_id for t in themes if t.theme_id is not None]
             epics = _load_epics(session, theme_ids)
             epics_by_theme, epic_to_theme, epic_ids = _index_epics(theme_ids, epics)
@@ -419,7 +419,7 @@ def query_features_for_stories(
             )
             validated_output = _build_query_output(
                 query_input,
-                product,
+                project,
                 themes,
                 graph,
             )
@@ -427,7 +427,7 @@ def query_features_for_stories(
 
     except SQLAlchemyError:
         logger.exception(
-            "Failed querying features for story generation with product_id=%s.",
-            query_input.product_id,
+            "Failed querying features for story generation with project_id=%s.",
+            query_input.project_id,
         )
         raise

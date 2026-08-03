@@ -31,7 +31,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from sqlmodel import Session, select  # noqa: E402
 
-from agile_sqlmodel import Product, UserStory, get_engine  # noqa: E402
+from agile_sqlmodel import Project, UserStory, get_engine  # noqa: E402
 from models.core import Feature  # noqa: E402
 
 _MODEL_IMPORT_BOUNDARY = (Feature,)
@@ -96,24 +96,24 @@ def suggest_persona_replacement(current_persona: str, feature_title: str) -> str
     return "automation engineer"
 
 
-def analyze_product_personas(product_id: int) -> dict:
+def analyze_product_personas(project_id: int) -> dict:
     """
     Analyze persona distribution in a product's stories.
 
     Args:
-        product_id: Product ID to analyze
+        project_id: Project ID to analyze
 
     Returns:
         Dict with persona statistics
     """
     with Session(get_engine()) as session:
-        product = session.get(Product, product_id)
+        product = session.get(Project, project_id)
         if not product:
-            msg = f"Product {product_id} not found"
+            msg = f"Project {project_id} not found"
             raise ValueError(msg)
 
         stories = session.exec(
-            select(UserStory).where(UserStory.product_id == product_id)
+            select(UserStory).where(UserStory.project_id == project_id)
         ).all()
 
         persona_counts = {}
@@ -142,7 +142,7 @@ def analyze_product_personas(product_id: int) -> dict:
 
 
 def fix_story_personas(  # noqa: C901, PLR0912
-    product_id: int,
+    project_id: int,
     target_persona: str = "automation engineer",
     dry_run: bool = True,
     verbose: bool = True,
@@ -151,7 +151,7 @@ def fix_story_personas(  # noqa: C901, PLR0912
     Fix personas in all stories for a product.
 
     Args:
-        product_id: Product ID to fix
+        project_id: Project ID to fix
         target_persona: Default persona to use for generic replacements
         dry_run: If True, preview changes without saving
         verbose: Print detailed output
@@ -160,13 +160,13 @@ def fix_story_personas(  # noqa: C901, PLR0912
         Dict with fix statistics
     """
     with Session(get_engine()) as session:
-        product = session.get(Product, product_id)
+        product = session.get(Project, project_id)
         if not product:
-            msg = f"Product {product_id} not found"
+            msg = f"Project {project_id} not found"
             raise ValueError(msg)
 
         stories = session.exec(
-            select(UserStory).where(UserStory.product_id == product_id)
+            select(UserStory).where(UserStory.project_id == project_id)
         ).all()
 
         fixed_count = 0
@@ -253,23 +253,23 @@ def fix_story_personas(  # noqa: C901, PLR0912
 
 
 def generate_review_report(
-    product_id: int, output_file: str = "persona_review.csv"
+    project_id: int, output_file: str = "persona_review.csv"
 ) -> None:
     """
     Generate CSV report for manual persona review.
 
     Args:
-        product_id: Product ID to report on
+        project_id: Project ID to report on
         output_file: Output CSV filename
     """
     with Session(get_engine()) as session:
-        product = session.get(Product, product_id)
+        product = session.get(Project, project_id)
         if not product:
-            msg = f"Product {product_id} not found"
+            msg = f"Project {project_id} not found"
             raise ValueError(msg)
 
         stories = session.exec(
-            select(UserStory).where(UserStory.product_id == product_id)
+            select(UserStory).where(UserStory.project_id == project_id)
         ).all()
 
         with open(output_file, "w", newline="", encoding="utf-8") as f:  # noqa: PTH123
@@ -343,7 +343,7 @@ Examples:
     )
 
     parser.add_argument(
-        "--product-id", type=int, required=True, help="Product ID to process"
+        "--product-id", type=int, required=True, help="Project ID to process"
     )
     parser.add_argument(
         "--persona",
@@ -363,15 +363,15 @@ Examples:
 
     try:
         if args.report_only:
-            emit(f"Generating persona review report for product {args.product_id}...")
-            generate_review_report(args.product_id)
+            emit(f"Generating persona review report for product {args.project_id}...")
+            generate_review_report(args.project_id)
 
         else:
             # Analyze first
-            emit(f"Analyzing product {args.product_id}...\n")
-            analysis = analyze_product_personas(args.product_id)
+            emit(f"Analyzing product {args.project_id}...\n")
+            analysis = analyze_product_personas(args.project_id)
 
-            emit(f"Product: {analysis['product_name']}")
+            emit(f"Project: {analysis['product_name']}")
             emit(f"Total Stories: {analysis['total_stories']}")
             emit(f"Generic Personas: {analysis['generic_persona_count']}")
             emit(f"Missing Personas: {analysis['no_persona_count']}")
@@ -390,7 +390,7 @@ Examples:
 
             # Fix personas
             stats = fix_story_personas(
-                args.product_id,
+                args.project_id,
                 target_persona=args.persona,
                 dry_run=args.dry_run,
                 verbose=not args.quiet,

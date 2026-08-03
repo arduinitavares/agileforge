@@ -97,7 +97,7 @@ class _SprintLike(Protocol):
     def sprint_id(self) -> int | None: ...
 
     @property
-    def product_id(self) -> int | None: ...
+    def project_id(self) -> int | None: ...
 
 
 class _TaskExecutionLogLike(Protocol):
@@ -188,7 +188,7 @@ def _load_task_execution_subject(
         raise TaskExecutionServiceError.task_not_found()
 
     sprint = load_sprint()
-    if not sprint or getattr(sprint, "product_id", None) != project_id:
+    if not sprint or getattr(sprint, "project_id", None) != project_id:
         raise TaskExecutionServiceError.sprint_not_in_project()
 
     sprint_story: object = load_sprint_story(task)
@@ -343,7 +343,7 @@ def complete_task_in_session(
     """Complete one exact Sprint Task inside the caller's transaction."""
     sprint = session.get(Sprint, command.sprint_id)
     task = session.get(Task, command.task_id)
-    if sprint is None or sprint.product_id != command.project_id:
+    if sprint is None or sprint.project_id != command.project_id:
         raise TaskExecutionServiceError.sprint_not_in_project()
     if task is None:
         raise TaskExecutionServiceError.task_not_found()
@@ -354,7 +354,7 @@ def complete_task_in_session(
             col(SprintStory.story_id) == task.story_id,
         )
     ).one_or_none()
-    if story is None or story.product_id != command.project_id or membership is None:
+    if story is None or story.project_id != command.project_id or membership is None:
         raise TaskExecutionServiceError.task_not_in_sprint()
     if sprint.status.value != "Active" or task.status in {
         TaskStatus.DONE,

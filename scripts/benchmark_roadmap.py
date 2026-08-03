@@ -15,7 +15,7 @@ from utils.cli_output import emit
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from agile_sqlmodel import Product
+from agile_sqlmodel import Project
 from tools import db_tools
 
 # Setup in-memory DB
@@ -83,11 +83,11 @@ def run_benchmark() -> float:
     # create product
     """Return run benchmark."""
     with Session(engine) as session:
-        product = Product(name="Benchmark Product", vision="Speed")
+        product = Project(name="Benchmark Project", vision="Speed")
         session.add(product)
         session.commit()
         session.refresh(product)
-        product_id = _require_id(product.product_id, "Product ID")
+        project_id = _require_id(product.project_id, "Project ID")
 
     # generate data
     # Increase load to make the difference obvious
@@ -101,7 +101,7 @@ def run_benchmark() -> float:
     )
 
     start_time = time.time()
-    result = db_tools.persist_roadmap(product_id, data)
+    result = db_tools.persist_roadmap(project_id, data)
     end_time = time.time()
 
     duration = end_time - start_time

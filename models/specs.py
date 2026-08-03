@@ -11,7 +11,7 @@ from sqlalchemy.types import Text
 from sqlmodel import Field, Relationship, SQLModel
 
 if TYPE_CHECKING:
-    from models.core import Product
+    from models.core import Project
 
 
 class SpecRegistry(SQLModel, table=True):
@@ -20,20 +20,20 @@ class SpecRegistry(SQLModel, table=True):
     __tablename__ = "spec_registry"  # type: ignore[assignment]
     __table_args__ = (
         UniqueConstraint(
-            "product_id",
+            "project_id",
             "spec_version_id",
-            name="uq_spec_registry_product_id",
+            name="uq_spec_registry_project_id",
         ),
         UniqueConstraint(
-            "product_id",
+            "project_id",
             "spec_version_id",
             "spec_hash",
-            name="uq_spec_registry_product_id_hash",
+            name="uq_spec_registry_project_id_hash",
         ),
     )
 
     spec_version_id: int | None = Field(default=None, primary_key=True)
-    product_id: int = Field(foreign_key="products.product_id", index=True)
+    project_id: int = Field(foreign_key="projects.project_id", index=True)
     spec_hash: str = Field(
         description="SHA-256 hash of spec content for change detection"
     )
@@ -66,7 +66,7 @@ class SpecRegistry(SQLModel, table=True):
         description="Review notes or justification for approval",
     )
 
-    product: Product = Relationship(back_populates="spec_versions")
+    project: Project = Relationship(back_populates="spec_versions")
     compiled_authority: list[CompiledSpecAuthority] = Relationship(
         sa_relationship=relationship(
             "CompiledSpecAuthority",
@@ -137,8 +137,8 @@ class SpecAuthorityAcceptance(SQLModel, table=True):
 
     __tablename__ = "spec_authority_acceptance"  # type: ignore[assignment]
     id: int | None = Field(default=None, primary_key=True)
-    product_id: int = Field(
-        foreign_key="products.product_id",
+    project_id: int = Field(
+        foreign_key="projects.project_id",
         index=True,
     )
     spec_version_id: int = Field(

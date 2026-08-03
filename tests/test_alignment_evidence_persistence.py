@@ -12,7 +12,7 @@ from sqlmodel import Session
 
 from agile_sqlmodel import (
     CompiledSpecAuthority,
-    Product,
+    Project,
     SpecAuthorityAcceptance,
     SpecRegistry,
     UserStory,
@@ -36,22 +36,22 @@ from utils.spec_schemas import (
 
 
 @pytest.fixture
-def product_with_spec(session: Session, engine: Engine) -> tuple[Product, int]:
+def product_with_spec(session: Session, engine: Engine) -> tuple[Project, int]:
     """Create product with a pre-compiled spec authority."""
     spec_tools.engine = engine
 
-    product = Product(name="Alignment Product", vision="Test")
+    product = Project(name="Alignment Project", vision="Test")
     session.add(product)
     session.commit()
     session.refresh(product)
-    product_id = _require_id(product.product_id, "product.product_id")
+    project_id = _require_id(product.project_id, "product.project_id")
 
     spec_content = "# Spec\n\n## Invariants\n- Stories MUST NOT include web features."
     spec_hash = hashlib.sha256(spec_content.encode()).hexdigest()
 
     # Create spec registry entry
     spec_version = SpecRegistry(
-        product_id=product_id,
+        project_id=project_id,
         content=spec_content,
         spec_hash=spec_hash,
         status="approved",
@@ -109,7 +109,7 @@ def product_with_spec(session: Session, engine: Engine) -> tuple[Product, int]:
     session.refresh(authority)
     session.add(
         SpecAuthorityAcceptance(
-            product_id=product_id,
+            project_id=project_id,
             spec_version_id=spec_version_id,
             status="accepted",
             policy="test",
@@ -139,8 +139,8 @@ def _load_validation_evidence(story: UserStory) -> dict[str, Any]:
     return json.loads(evidence_json)
 
 
-def _create_story(session: Session, product_id: int, title: str) -> UserStory:
-    theme = Theme(product_id=product_id, title="Theme", description="")
+def _create_story(session: Session, project_id: int, title: str) -> UserStory:
+    theme = Theme(project_id=project_id, title="Theme", description="")
     session.add(theme)
     session.commit()
     session.refresh(theme)
@@ -164,7 +164,7 @@ def _create_story(session: Session, product_id: int, title: str) -> UserStory:
     session.refresh(feature)
 
     story = UserStory(
-        product_id=product_id,
+        project_id=project_id,
         feature_id=_require_id(feature.feature_id, "feature.feature_id"),
         title=title,
         story_description="As a user, I want a feature.",
@@ -179,7 +179,7 @@ def _create_story(session: Session, product_id: int, title: str) -> UserStory:
 def test_alignment_failure_persisted(
     engine: Engine,
     session: Session,
-    product_with_spec: tuple[Product, int],
+    product_with_spec: tuple[Project, int],
 ) -> None:
     """Alignment rejection persists alignment_failures in evidence."""
     spec_tools.engine: Engine = engine
@@ -187,7 +187,7 @@ def test_alignment_failure_persisted(
 
     story: UserStory = _create_story(
         session,
-        _require_id(product.product_id, "product.product_id"),
+        _require_id(product.project_id, "product.project_id"),
         title="Web dashboard",
     )
     result: dict[str, Any] = validate_story_with_spec_authority(
@@ -210,7 +210,7 @@ def test_alignment_warning_persisted(engine: Engine, session: Session) -> None:
     """Alignment warning persists alignment_warnings in evidence."""
     spec_tools.engine = engine
 
-    product = Product(name="Warn Product", vision="Test")
+    product = Project(name="Warn Project", vision="Test")
     session.add(product)
     session.commit()
     session.refresh(product)
@@ -218,7 +218,7 @@ def test_alignment_warning_persisted(engine: Engine, session: Session) -> None:
     # Create an approved spec + precompiled authority with zero invariants.
     reg: dict[str, Any] = register_spec_version(
         {
-            "product_id": product.product_id,
+            "project_id": product.project_id,
             "content": "# Spec\n\n## Notes\n- No requirements here",
         },
         tool_context=None,
@@ -259,7 +259,7 @@ def test_alignment_warning_persisted(engine: Engine, session: Session) -> None:
     assert accepted_spec is not None
     session.add(
         SpecAuthorityAcceptance(
-            product_id=_require_id(product.product_id, "product.product_id"),
+            project_id=_require_id(product.project_id, "product.project_id"),
             spec_version_id=spec_version_id,
             status="accepted",
             policy="test",
@@ -275,7 +275,7 @@ def test_alignment_warning_persisted(engine: Engine, session: Session) -> None:
 
     story: UserStory = _create_story(
         session,
-        _require_id(product.product_id, "product.product_id"),
+        _require_id(product.project_id, "product.project_id"),
         title="Normal story",
     )
     result: dict[str, Any] = validate_story_with_spec_authority(
@@ -294,7 +294,7 @@ def test_alignment_warning_persisted(engine: Engine, session: Session) -> None:
 def test_alignment_evidence_includes_spec_and_hash(
     engine: Engine,
     session: Session,
-    product_with_spec: tuple[Product, int],
+    product_with_spec: tuple[Project, int],
 ) -> None:
     """Evidence includes spec_version_id and input_hash without vision access."""
     spec_tools.engine = engine
@@ -302,7 +302,7 @@ def test_alignment_evidence_includes_spec_and_hash(
 
     story: UserStory = _create_story(
         session,
-        _require_id(product.product_id, "product.product_id"),
+        _require_id(product.project_id, "product.project_id"),
         title="Web dashboard",
     )
     validate_story_with_spec_authority(

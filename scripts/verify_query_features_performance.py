@@ -12,7 +12,7 @@ from utils.cli_output import emit
 # Ensure we can import from root
 sys.path.append(os.getcwd())  # noqa: PTH109
 
-from agile_sqlmodel import Product, UserStory
+from agile_sqlmodel import Project, UserStory
 from models.core import Epic, Feature, Theme
 from tools.story_query_tools import QueryFeaturesInput, query_features_for_stories
 
@@ -54,14 +54,14 @@ def setup_data(
     SQLModel.metadata.create_all(test_engine)
 
     with Session(test_engine) as session:
-        product = Product(name="Benchmark Product")
+        product = Project(name="Benchmark Project")
         session.add(product)
         session.commit()
         session.refresh(product)
-        product_id = _require_id(product.product_id, "Product ID")
+        project_id = _require_id(product.project_id, "Project ID")
 
         for t in range(num_themes):
-            theme = Theme(title=f"Theme {t}", product_id=product_id)
+            theme = Theme(title=f"Theme {t}", project_id=project_id)
             session.add(theme)
             session.commit()
             session.refresh(theme)
@@ -87,19 +87,19 @@ def setup_data(
                     for s in range(stories_per_feature):
                         story = UserStory(
                             title=f"Story {feature_id}-{s}",
-                            product_id=product_id,
+                            project_id=project_id,
                             feature_id=feature_id,
                         )
                         stories.append(story)
                     session.add_all(stories)
                 session.commit()
 
-        return product_id
+        return project_id
 
 
 def run_benchmark() -> None:
     """Return run benchmark."""
-    product_id = setup_data(
+    project_id = setup_data(
         num_themes=5, epics_per_theme=5, features_per_epic=20, stories_per_feature=2
     )
     # Total features: 5 * 5 * 20 = 500 features.
@@ -107,7 +107,7 @@ def run_benchmark() -> None:
     emit("Starting Benchmark...")
     start_time = time.time()
 
-    result = query_features_for_stories(QueryFeaturesInput(product_id=product_id))
+    result = query_features_for_stories(QueryFeaturesInput(project_id=project_id))
 
     end_time = time.time()
     duration = end_time - start_time

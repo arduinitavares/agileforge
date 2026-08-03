@@ -10,7 +10,7 @@ from sqlalchemy.engine import Engine
 from sqlmodel import Session, SQLModel, create_engine, select
 
 from models.agent_workbench import CliMutationLedger
-from models.core import Product
+from models.core import Project
 from models.enums import WorkflowEventType
 from models.events import WorkflowEvent
 from services.agent_workbench.backlog_refinement_events import (
@@ -136,11 +136,11 @@ def _approval_request(**overrides: object) -> BacklogRefinementApprovalRequest:
 
 
 def _approval_event_engine() -> Engine:
-    assert Product.__tablename__ == "products"
+    assert Project.__tablename__ == "projects"
     engine = create_engine("sqlite://")
     SQLModel.metadata.create_all(engine)
     with Session(engine) as session:
-        session.add(Product(product_id=7, name="Backlog refinement test"))
+        session.add(Project(project_id=7, name="Backlog refinement test"))
         session.commit()
     return engine
 
@@ -705,7 +705,7 @@ def test_record_backlog_refinement_approval_writes_append_only_event() -> None:
     assert result["idempotent_replay"] is False
     assert result["approval_id"] == metadata["approval_id"]
     assert events[0].event_type == WorkflowEventType.BACKLOG_REFINEMENT_APPROVED
-    assert events[0].product_id == request.project_id
+    assert events[0].project_id == request.project_id
     assert metadata["command"] == "agileforge backlog approve"
     assert metadata["source_attempt_id"] == "backlog-attempt-1"
     assert metadata["approved_operation_ids"] == ["op-1"]
@@ -795,7 +795,7 @@ def test_record_approval_does_not_replay_from_workflow_events_without_ledger() -
         session.add(
             WorkflowEvent(
                 event_type=WorkflowEventType.BACKLOG_REFINEMENT_APPROVED,
-                product_id=request.project_id,
+                project_id=request.project_id,
                 session_id=str(request.project_id),
                 event_metadata=json.dumps(orphan_metadata, sort_keys=True),
             )

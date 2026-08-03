@@ -11,7 +11,7 @@ from sqlmodel import Session
 
 from agile_sqlmodel import (
     CompiledSpecAuthority,
-    Product,
+    Project,
     SpecAuthorityAcceptance,
     SpecRegistry,
     Sprint,
@@ -41,9 +41,9 @@ if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
 
 
-def _insert_basic_project(session: Session) -> Product:
-    product = Product(
-        name="Test Product",
+def _insert_basic_project(session: Session) -> Project:
+    product = Project(
+        name="Test Project",
         description="Demo",
         vision="Vision **bold**",
         roadmap="Roadmap text",
@@ -55,9 +55,9 @@ def _insert_basic_project(session: Session) -> Product:
     return product
 
 
-def _insert_story_structure(session: Session, product_id: int) -> UserStory:
+def _insert_story_structure(session: Session, project_id: int) -> UserStory:
     theme = Theme(
-        product_id=product_id,
+        project_id=project_id,
         title="Payments",
         description="Payment flows",
         time_frame=TimeFrame.NOW,
@@ -85,7 +85,7 @@ def _insert_story_structure(session: Session, product_id: int) -> UserStory:
     session.refresh(feature)
 
     story = UserStory(
-        product_id=product_id,
+        project_id=project_id,
         feature_id=feature.feature_id,
         title="Pay with card",
         story_description="As a buyer, I want to pay with card",
@@ -103,16 +103,16 @@ def _insert_story_structure(session: Session, product_id: int) -> UserStory:
 def _insert_current_sprint(
     session: Session,
     *,
-    product_id: int,
+    project_id: int,
     story_ids: list[int],
 ) -> Sprint:
-    team = Team(name=f"Team-{product_id}")
+    team = Team(name=f"Team-{project_id}")
     session.add(team)
     session.commit()
     session.refresh(team)
 
     sprint = Sprint(
-        product_id=product_id,
+        project_id=project_id,
         team_id=require_id(team.team_id, "team_id"),
         goal="Current Sprint Goal",
         start_date=date.today() - timedelta(days=3),  # noqa: DTZ011
@@ -134,10 +134,10 @@ def _insert_current_sprint(
 
 
 def _insert_approved_spec_with_authority(
-    session: Session, product_id: int
+    session: Session, project_id: int
 ) -> SpecRegistry:
     spec = SpecRegistry(
-        product_id=product_id,
+        project_id=project_id,
         spec_hash="hash123",
         content="# Spec\n## Section",
         content_ref="specs/test.md",
@@ -234,9 +234,9 @@ def test_snapshot_loader_uses_exact_acceptance_bound_row(
     from tools.export_snapshot import _load_compiled_authority  # noqa: PLC0415
 
     product = _insert_basic_project(session)
-    product_id = require_id(product.product_id, "product_id")
+    project_id = require_id(product.project_id, "project_id")
     spec = SpecRegistry(
-        product_id=product_id,
+        project_id=project_id,
         spec_hash="snapshot-accepted",
         content="# Spec",
         status="approved",
@@ -265,7 +265,7 @@ def test_snapshot_loader_uses_exact_acceptance_bound_row(
     )
     session.add(
         SpecAuthorityAcceptance(
-            product_id=product_id,
+            project_id=project_id,
             spec_version_id=spec_version_id,
             status="accepted",
             policy="test",
@@ -292,9 +292,9 @@ def test_snapshot_loader_rejects_post_acceptance_valid_artifact_mutation(
     from tools.export_snapshot import _load_compiled_authority  # noqa: PLC0415
 
     product = _insert_basic_project(session)
-    product_id = require_id(product.product_id, "product_id")
+    project_id = require_id(product.project_id, "project_id")
     spec = SpecRegistry(
-        product_id=product_id,
+        project_id=project_id,
         spec_hash="snapshot-mutated",
         content="# Spec",
         status="approved",
@@ -310,7 +310,7 @@ def test_snapshot_loader_rejects_post_acceptance_valid_artifact_mutation(
     )
     session.add(
         SpecAuthorityAcceptance(
-            product_id=product_id,
+            project_id=project_id,
             spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
             status="accepted",
             policy="test",
@@ -350,9 +350,9 @@ def test_snapshot_loader_without_acceptance_uses_newest_row(
     from tools.export_snapshot import _load_compiled_authority  # noqa: PLC0415
 
     product = _insert_basic_project(session)
-    product_id = require_id(product.product_id, "product_id")
+    project_id = require_id(product.project_id, "project_id")
     spec = SpecRegistry(
-        product_id=product_id,
+        project_id=project_id,
         spec_hash="snapshot-pending",
         content="# Spec",
         status="approved",
@@ -387,9 +387,9 @@ def test_snapshot_loader_missing_exact_accepted_row_fails_closed(
     from tools.export_snapshot import _load_compiled_authority  # noqa: PLC0415
 
     product = _insert_basic_project(session)
-    product_id = require_id(product.product_id, "product_id")
+    project_id = require_id(product.project_id, "project_id")
     spec = SpecRegistry(
-        product_id=product_id,
+        project_id=project_id,
         spec_hash="snapshot-missing-accepted",
         content="# Spec",
         status="approved",
@@ -406,7 +406,7 @@ def test_snapshot_loader_missing_exact_accepted_row_fails_closed(
     )
     session.add(
         SpecAuthorityAcceptance(
-            product_id=product_id,
+            project_id=project_id,
             spec_version_id=spec_version_id,
             status="accepted",
             policy="test",
@@ -430,9 +430,9 @@ def test_export_snapshot_dangling_acceptance_writes_no_file(
     """A dangling accepted authority id must block before export writes."""
     with Session(engine) as session:
         product = _insert_basic_project(session)
-        product_id = require_id(product.product_id, "product_id")
+        project_id = require_id(product.project_id, "project_id")
         spec = SpecRegistry(
-            product_id=product_id,
+            project_id=project_id,
             spec_hash="snapshot-dangling",
             content="# Spec",
             status="approved",
@@ -448,7 +448,7 @@ def test_export_snapshot_dangling_acceptance_writes_no_file(
         )
         session.add(
             SpecAuthorityAcceptance(
-                product_id=product_id,
+                project_id=project_id,
                 spec_version_id=require_id(
                     spec.spec_version_id,
                     "spec_version_id",
@@ -466,7 +466,7 @@ def test_export_snapshot_dangling_acceptance_writes_no_file(
 
     with pytest.raises(ValueError, match="AUTHORITY_NOT_COMPILED"):
         export_project_snapshot_html(
-            product_id=product_id,
+            project_id=project_id,
             output_dir=tmp_path,
             engine_override=engine,
         )
@@ -478,27 +478,27 @@ def test_export_snapshot_html_basic(engine: Engine, tmp_path: Path) -> None:
     """Verify export snapshot html basic."""
     with Session(engine) as session:
         product = _insert_basic_project(session)
-        product_id = require_id(
-            product.product_id, "product_id"
+        project_id = require_id(
+            product.project_id, "project_id"
         )  # Capture before session closes
-        story = _insert_story_structure(session, product_id)
+        story = _insert_story_structure(session, project_id)
         _insert_current_sprint(
             session,
-            product_id=product_id,
+            project_id=project_id,
             story_ids=[require_id(story.story_id, "story_id")],
         )
-        _insert_approved_spec_with_authority(session, product_id)
+        _insert_approved_spec_with_authority(session, project_id)
 
     output_path = export_project_snapshot_html(
-        product_id=product_id,
+        project_id=project_id,
         output_dir=tmp_path,
         engine_override=engine,
     )
 
     html = output_path.read_text(encoding="utf-8")
     assert output_path.exists()
-    assert "Test Product" in html
-    assert "Product Vision" in html
+    assert "Test Project" in html
+    assert "product vision" in html
     assert "Vision" in html
     # Spec content renders as markdown <h1> or falls back to <pre> with raw text
     assert "<h1>Spec</h1>" in html or "# Spec" in html
@@ -515,11 +515,11 @@ def test_export_snapshot_only_refined_current_sprint_stories(
     """Verify export snapshot only refined current sprint stories."""
     with Session(engine) as session:
         product = _insert_basic_project(session)
-        product_id = require_id(product.product_id, "product_id")
-        in_scope_story = _insert_story_structure(session, product_id)
+        project_id = require_id(product.project_id, "project_id")
+        in_scope_story = _insert_story_structure(session, project_id)
 
         non_refined_in_sprint = UserStory(
-            product_id=product_id,
+            project_id=project_id,
             title="Seed backlog story",
             story_description="As a user, I want a seed story",
             acceptance_criteria="Placeholder",
@@ -527,7 +527,7 @@ def test_export_snapshot_only_refined_current_sprint_stories(
             story_origin="backlog_seed",
         )
         refined_not_in_sprint = UserStory(
-            product_id=product_id,
+            project_id=project_id,
             title="Refined outside sprint",
             story_description="As a user, I want a refined backlog story",
             acceptance_criteria="Done when approved",
@@ -542,7 +542,7 @@ def test_export_snapshot_only_refined_current_sprint_stories(
 
         _insert_current_sprint(
             session,
-            product_id=product_id,
+            project_id=project_id,
             story_ids=[
                 require_id(in_scope_story.story_id, "story_id"),
                 require_id(non_refined_in_sprint.story_id, "story_id"),
@@ -550,7 +550,7 @@ def test_export_snapshot_only_refined_current_sprint_stories(
         )
 
     output_path = export_project_snapshot_html(
-        product_id=product_id,
+        project_id=project_id,
         output_dir=tmp_path,
         engine_override=engine,
     )
@@ -570,7 +570,7 @@ def test_export_snapshot_falls_back_to_product_spec(
         product = _insert_basic_project(session)
 
     output_path = export_project_snapshot_html(
-        product_id=require_id(product.product_id, "product_id"),
+        project_id=require_id(product.project_id, "project_id"),
         output_dir=tmp_path,
         engine_override=engine,
     )
@@ -585,7 +585,7 @@ def test_export_snapshot_command_writes_file(engine: Engine, tmp_path: Path) -> 
         product = _insert_basic_project(session)
 
     output_path = export_snapshot_command(
-        product_id=require_id(product.product_id, "product_id"),
+        project_id=require_id(product.project_id, "project_id"),
         output_dir=tmp_path,
         engine_override=engine,
     )
@@ -600,9 +600,9 @@ def test_export_snapshot_rejects_malformed_v3_before_writing(
     """A selected invalid authority must abort before creating any export file."""
     with Session(engine) as session:
         product = _insert_basic_project(session)
-        product_id = require_id(product.product_id, "product_id")
+        project_id = require_id(product.project_id, "project_id")
         spec = SpecRegistry(
-            product_id=product_id,
+            project_id=project_id,
             spec_hash="snapshot-invalid",
             content="# Approved spec",
             status="approved",
@@ -632,7 +632,7 @@ def test_export_snapshot_rejects_malformed_v3_before_writing(
 
     with pytest.raises(ValueError, match="COMPILED_AUTHORITY_INVALID"):
         export_project_snapshot_html(
-            product_id=product_id,
+            project_id=project_id,
             output_dir=tmp_path,
             engine_override=engine,
         )

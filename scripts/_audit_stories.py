@@ -17,7 +17,7 @@ PRODUCT_ID = 8
 with Session(get_engine()) as s:
     stories = s.exec(
         select(UserStory)
-        .where(UserStory.product_id == PRODUCT_ID)
+        .where(UserStory.project_id == PRODUCT_ID)
         .order_by(col(UserStory.story_id))
     ).all()
     has_ac = 0

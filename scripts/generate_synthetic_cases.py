@@ -137,7 +137,7 @@ def generate_synthetic_cases(
 
         syn_data = mutate_case(source, m_type, m_payload)
         syn_id = 9100 + i  # Changed from 7000 to be safe
-        prod_id = source.get("product_id", 7)
+        prod_id = source.get("project_id", 7)
 
         syn_case_record = {
             "case_id": f"p7-syn-{i}",
@@ -148,7 +148,7 @@ def generate_synthetic_cases(
             "notes": f"Mutation: {m_type}",
             "tags": ["synthetic", m_type],
             "enabled": True,
-            "product_id": prod_id,
+            "project_id": prod_id,
             "story_title": syn_data["story_title"],
             "spec_source": "synthetic",
             "label_source": "synthetic",
@@ -156,7 +156,7 @@ def generate_synthetic_cases(
 
         syn_story_record = {
             "story_id": syn_id,
-            "product_id": prod_id,
+            "project_id": prod_id,
             "title": syn_data["story_title"],
             "description": syn_data.get("story_description", ""),
             "acceptance_criteria": syn_data.get("acceptance_criteria", ""),
@@ -167,7 +167,7 @@ def generate_synthetic_cases(
 
     # P9/P10 Setup
     p9_base = {
-        "product_id": 9,
+        "project_id": 9,
         "spec_version_id": 901,
         "story_title": "Add item to cart",
         "story_description": "As a user I want to add items.",
@@ -176,7 +176,7 @@ def generate_synthetic_cases(
     }
 
     p10_base = {
-        "product_id": 10,
+        "project_id": 10,
         "spec_version_id": 1001,
         "story_title": "Turn on light",
         "story_description": "As a user I want to turn on lights.",
@@ -200,14 +200,14 @@ def generate_synthetic_cases(
             "notes": f"Mutation: {m_type}",
             "tags": ["synthetic", m_type],
             "enabled": True,
-            "product_id": 9,
+            "project_id": 9,
             "story_title": syn_data["story_title"],
             "spec_source": "synthetic",
             "label_source": "synthetic",
         }
         syn_story_record = {
             "story_id": syn_id,
-            "product_id": 9,
+            "project_id": 9,
             "title": syn_data["story_title"],
             "description": syn_data.get("story_description", ""),
             "acceptance_criteria": syn_data.get("acceptance_criteria", ""),
@@ -231,14 +231,14 @@ def generate_synthetic_cases(
             "notes": f"Mutation: {m_type}",
             "tags": ["synthetic", m_type],
             "enabled": True,
-            "product_id": 10,
+            "project_id": 10,
             "story_title": syn_data["story_title"],
             "spec_source": "synthetic",
             "label_source": "synthetic",
         }
         syn_story_record = {
             "story_id": syn_id,
-            "product_id": 10,
+            "project_id": 10,
             "title": syn_data["story_title"],
             "description": syn_data.get("story_description", ""),
             "acceptance_criteria": syn_data.get("acceptance_criteria", ""),
@@ -286,12 +286,12 @@ def main() -> None:
         if isinstance(fail_reasons, str):
             fail_reasons = [r.strip() for r in fail_reasons.split(",") if r.strip()]
 
-        # FIX: Ensure product_id is correctly mapped for P8 cases
-        # cases_for_labeling doesn't have product_id, so we usually default to 7 (Quadra).  # noqa: E501
-        # But if case_id starts with 'p8', it's Product 8.
-        product_id = sc.get("product_id", 7)
+        # FIX: Ensure project_id is correctly mapped for P8 cases
+        # cases_for_labeling doesn't have project_id, so we usually default to 7 (Quadra).  # noqa: E501
+        # But if case_id starts with 'p8', it's Project 8.
+        project_id = sc.get("project_id", 7)
         if str(sc.get("case_id", "")).startswith("p8-"):
-            product_id = 8
+            project_id = 8
 
         final_cases.append(
             {
@@ -303,7 +303,7 @@ def main() -> None:
                 "notes": sc.get("rater_notes"),
                 "tags": ["real-data"],
                 "enabled": True,
-                "product_id": product_id,
+                "project_id": project_id,
                 "story_title": sc["story_title"],
                 "spec_source": "real",
                 "label_source": "human_review",
@@ -313,7 +313,7 @@ def main() -> None:
         source_story_records.append(
             {
                 "story_id": sc["story_id"],
-                "product_id": product_id,
+                "project_id": project_id,
                 "title": sc["story_title"],
                 "description": sc.get("story_description", ""),
                 "acceptance_criteria": sc.get("acceptance_criteria", ""),
@@ -330,7 +330,7 @@ def main() -> None:
             "story_id": 9001,
             "spec_version_id": 901,
             EXPECTED_OUTCOME_FIELD: True,
-            "product_id": 9,
+            "project_id": 9,
             "story_title": "Base P9",
             "expected_fail_reasons": [],
             "tags": ["synthetic-base"],
@@ -342,7 +342,7 @@ def main() -> None:
     final_story_records.append(
         {
             "story_id": 9001,
-            "product_id": 9,
+            "project_id": 9,
             "title": "Base P9",
             "description": "As a user I want to add items.",
             "acceptance_criteria": "Given item, When add, Then in cart.",
@@ -355,7 +355,7 @@ def main() -> None:
             "story_id": 10001,
             "spec_version_id": 1001,
             EXPECTED_OUTCOME_FIELD: True,
-            "product_id": 10,
+            "project_id": 10,
             "story_title": "Base P10",
             "expected_fail_reasons": [],
             "tags": ["synthetic-base"],
@@ -367,7 +367,7 @@ def main() -> None:
     final_story_records.append(
         {
             "story_id": 10001,
-            "product_id": 10,
+            "project_id": 10,
             "title": "Base P10",
             "description": "As a user I want to turn on lights.",
             "acceptance_criteria": "Given light off, When toggle, Then on.",

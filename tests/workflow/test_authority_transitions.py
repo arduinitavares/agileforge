@@ -16,18 +16,14 @@ from models.agent_workbench import (
     DiscoverySpecAmendmentDraft,
 )
 from models.authority_curation import AuthorityFeedbackAttempt
-from models.core import Product
+from models.core import Project
 from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance, SpecRegistry
 from models.workflow import (
     WorkflowNodeAttempt,
     WorkflowNodeAttemptOutcome,
     WorkflowTransitionReceipt,
 )
-from services.agent_workbench import authority_decision as authority_decision_service
 from services.agent_workbench import authority_review as authority_review_service
-from services.agent_workbench.authority_decision import (
-    record_authority_decision_in_session,
-)
 from services.agent_workbench.authority_review import (
     AuthorityReviewSnapshot,
     build_authority_review_snapshot_in_session,
@@ -146,12 +142,12 @@ def _seed_current_spec(engine: Engine, spec_path: Path) -> tuple[int, int, str]:
     content = normalized.content
     spec_path.write_text(content, encoding="utf-8")
     with Session(engine) as session:
-        project = Product(name=f"Authority {spec_path.stem}", origin="greenfield")
+        project = Project(name=f"Authority {spec_path.stem}", origin="greenfield")
         session.add(project)
         session.flush()
-        assert project.product_id is not None
+        assert project.project_id is not None
         spec = SpecRegistry(
-            product_id=project.product_id,
+            project_id=project.project_id,
             spec_hash=normalized.spec_hash,
             content=content,
             content_ref=str(spec_path),
@@ -162,7 +158,7 @@ def _seed_current_spec(engine: Engine, spec_path: Path) -> tuple[int, int, str]:
         session.add(spec)
         session.commit()
         assert spec.spec_version_id is not None
-        return project.product_id, spec.spec_version_id, spec.spec_hash
+        return project.project_id, spec.spec_version_id, spec.spec_hash
 
 
 def _decision(position: WorkflowPosition, node_id: str) -> NodeDecision:
@@ -271,7 +267,7 @@ def _approve_replacement_spec(
         json.dumps(payload)
     )
     replacement = SpecRegistry(
-        product_id=project_id,
+        project_id=project_id,
         spec_hash=normalized.spec_hash,
         content=normalized.content,
         content_ref=None,
@@ -387,7 +383,7 @@ def _tamper_review_input(
         challenge.content_json = json.dumps(payload)
         session.add(challenge)
     elif target == "project_review_context":
-        project = session.get(Product, project_id)
+        project = session.get(Project, project_id)
         assert project is not None
         project.name = f"{project.name} changed"
         session.add(project)
@@ -630,17 +626,6 @@ def test_decision_binds_exact_pending_authority_and_review_fingerprint(
             project_id=project_id,
         )
         assert isinstance(review, AuthorityReviewSnapshot)
-        decision = record_authority_decision_in_session(
-            session,
-            snapshot=review,
-            decision="rejected",
-            rationale="Needs factual repair.",
-            actor="test-actor",
-            policy="test",
-            review_fingerprint=review.review_fingerprint,
-            decided_at=EVALUATED_AT,
-        )
-        assert decision.id is not None
         assert review.pending_authority_id is not None
         assert review.authority_fingerprint is not None
 
@@ -848,7 +833,7 @@ def test_low_level_authority_services_keep_exact_caller_session_open(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Compiler, review, and decision use one open caller-owned session."""
+    """Compiler and review use one open caller-owned session."""
     project_id, spec_version_id, _spec_hash = _seed_current_spec(
         engine, tmp_path / "spec.md"
     )
@@ -873,11 +858,6 @@ def test_low_level_authority_services_keep_exact_caller_session_open(
                 "Session",
                 reject_replacement_session,
             )
-            lifecycle.setattr(
-                authority_decision_service,
-                "Session",
-                reject_replacement_session,
-            )
             result = compile_spec_authority_for_version_in_session(
                 session,
                 spec_version_id=spec_version_id,
@@ -890,18 +870,7 @@ def test_low_level_authority_services_keep_exact_caller_session_open(
                 project_id=project_id,
             )
             assert isinstance(review, AuthorityReviewSnapshot)
-            decision = record_authority_decision_in_session(
-                session,
-                snapshot=review,
-                decision="rejected",
-                rationale="Caller owns this transaction.",
-                actor="test-actor",
-                policy="test",
-                review_fingerprint=review.review_fingerprint,
-                decided_at=EVALUATED_AT,
-            )
-            assert decision.id is not None
-            assert session.get(SpecAuthorityAcceptance, decision.id) is decision
+            assert review.pending_authority_id is not None
     finally:
         original_close()
 
@@ -931,7 +900,7 @@ def test_post_flush_compile_failure_rolls_back_and_identical_retry_replays(
         _evaluated_at: datetime,
     ) -> None:
         assert session.exec(select(CompiledSpecAuthority)).one()
-        project = session.get(Product, project_id)
+        project = session.get(Project, project_id)
         assert project is not None
         assert project.compiled_authority_json is not None
         assert receipt.workflow_transition_receipt_id is not None
@@ -946,7 +915,7 @@ def test_post_flush_compile_failure_rolls_back_and_identical_retry_replays(
 
     with Session(engine) as session:
         assert session.exec(select(CompiledSpecAuthority)).all() == []
-        project = session.get(Product, project_id)
+        project = session.get(Project, project_id)
         assert project is not None
         assert project.compiled_authority_json is None
         assert session.exec(select(WorkflowTransitionReceipt)).all() == []

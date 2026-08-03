@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 import pytest
 from sqlmodel import Session, select
 
-from models.core import Product
+from models.core import Project
 from models.workflow import WorkflowNodeAttempt, WorkflowNodeAttemptOutcome
 from workflow.contracts import (
     GRAPH_VERSION,
@@ -71,11 +71,11 @@ class CatalogRecipeRegistry:
 
 def _seed_project(engine: Engine) -> int:
     with Session(engine) as session:
-        project = Product(name="Agentic lifecycle", origin="greenfield")
+        project = Project(name="Agentic lifecycle", origin="greenfield")
         session.add(project)
         session.commit()
-        assert project.product_id is not None
-        return project.product_id
+        assert project.project_id is not None
+        return project.project_id
 
 
 def _available_rule(node_id: str) -> NodeRule:

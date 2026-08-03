@@ -14,7 +14,7 @@ from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, col, create_engine, select
 
 import repositories.workflow as workflow_repository_module
-from models.core import Product, Sprint, SprintStory, Task, Team, UserStory
+from models.core import Project, Sprint, SprintStory, Task, Team, UserStory
 from models.db import set_sqlite_pragma
 from models.enums import SprintStatus, StoryStatus, TaskStatus
 from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance, SpecRegistry
@@ -217,7 +217,7 @@ def _seed_additional_ordering_rows(
     session.flush()
     session.add(
         SpecAuthorityAcceptance(
-            product_id=seed.project_id,
+            project_id=seed.project_id,
             spec_version_id=seed.spec_id,
             status="accepted",
             policy="test",
@@ -231,7 +231,7 @@ def _seed_additional_ordering_rows(
         )
     )
     story = UserStory(
-        product_id=seed.project_id,
+        project_id=seed.project_id,
         title="Second accepted story",
         status=StoryStatus.ACCEPTED,
         rank="A",
@@ -240,7 +240,7 @@ def _seed_additional_ordering_rows(
     session.add(story)
     session.flush()
     sprint = Sprint(
-        product_id=seed.project_id,
+        project_id=seed.project_id,
         team_id=seed.team_id,
         status=SprintStatus.COMPLETED,
         completed_at=seed.recorded_at - timedelta(minutes=1),
@@ -299,11 +299,11 @@ def seed_complete_project(engine: Engine, *, name: str = "Repository Test") -> i
     """Persist a complete canonical fact set for one Project."""
     recorded_at = datetime(2026, 8, 2, 12, tzinfo=UTC)
     with Session(engine) as session:
-        project = Product(name=name, origin="brownfield", vision="legacy vision")
+        project = Project(name=name, origin="brownfield", vision="legacy vision")
         team = Team(name=f"{name} team")
         session.add_all([project, team])
         session.flush()
-        project_id = _id(project.product_id)
+        project_id = _id(project.project_id)
 
         initial_run = DiscoveryRun(
             project_id=project_id,
@@ -357,7 +357,7 @@ def seed_complete_project(engine: Engine, *, name: str = "Repository Test") -> i
             provenance_path="/missing/spec.md",
         )
         spec = SpecRegistry(
-            product_id=project_id,
+            project_id=project_id,
             spec_hash="sha256:spec",
             content="# Canonical spec",
             status="approved",
@@ -433,7 +433,7 @@ def seed_complete_project(engine: Engine, *, name: str = "Repository Test") -> i
         session.flush()
         session.add(
             SpecAuthorityAcceptance(
-                product_id=project_id,
+                project_id=project_id,
                 spec_version_id=spec_id,
                 status="accepted",
                 policy="test",
@@ -447,7 +447,7 @@ def seed_complete_project(engine: Engine, *, name: str = "Repository Test") -> i
             )
         )
         story = UserStory(
-            product_id=project_id,
+            project_id=project_id,
             title="Accepted backlog story",
             status=StoryStatus.ACCEPTED,
             rank="B",
@@ -457,7 +457,7 @@ def seed_complete_project(engine: Engine, *, name: str = "Repository Test") -> i
         session.flush()
         story_id = _id(story.story_id)
         sprint = Sprint(
-            product_id=project_id,
+            project_id=project_id,
             team_id=_id(team.team_id),
             status=SprintStatus.COMPLETED,
             completed_at=recorded_at,
@@ -631,9 +631,9 @@ _FORCED_CORRUPTIONS: tuple[_ForcedCorruption, ...] = (
         (
             "UPDATE spec_drafts SET kind = 'amendment', "
             "base_spec_version_id = (SELECT spec_version_id FROM spec_registry "
-            "WHERE product_id = :foreign_id ORDER BY spec_version_id LIMIT 1), "
+            "WHERE project_id = :foreign_id ORDER BY spec_version_id LIMIT 1), "
             "base_spec_hash = (SELECT spec_hash FROM spec_registry "
-            "WHERE product_id = :foreign_id ORDER BY spec_version_id LIMIT 1) "
+            "WHERE project_id = :foreign_id ORDER BY spec_version_id LIMIT 1) "
             "WHERE project_id = :target_id",
         ),
     ),
@@ -642,7 +642,7 @@ _FORCED_CORRUPTIONS: tuple[_ForcedCorruption, ...] = (
         (
             "UPDATE spec_drafts SET kind = 'amendment', "
             "base_spec_version_id = (SELECT spec_version_id FROM spec_registry "
-            "WHERE product_id = :target_id ORDER BY spec_version_id LIMIT 1), "
+            "WHERE project_id = :target_id ORDER BY spec_version_id LIMIT 1), "
             "base_spec_hash = 'sha256:corrupt' WHERE project_id = :target_id",
         ),
     ),
@@ -709,9 +709,9 @@ _FORCED_CORRUPTIONS: tuple[_ForcedCorruption, ...] = (
             "DELETE FROM initial_scope_registrations WHERE project_id = :foreign_id",
             "UPDATE initial_scope_registrations SET "
             "spec_version_id = (SELECT spec_version_id FROM spec_registry "
-            "WHERE product_id = :foreign_id ORDER BY spec_version_id LIMIT 1), "
+            "WHERE project_id = :foreign_id ORDER BY spec_version_id LIMIT 1), "
             "spec_hash = (SELECT spec_hash FROM spec_registry "
-            "WHERE product_id = :foreign_id ORDER BY spec_version_id LIMIT 1) "
+            "WHERE project_id = :foreign_id ORDER BY spec_version_id LIMIT 1) "
             "WHERE project_id = :target_id",
         ),
     ),
@@ -727,9 +727,9 @@ _FORCED_CORRUPTIONS: tuple[_ForcedCorruption, ...] = (
         (
             "UPDATE compiled_spec_authority SET spec_version_id = "
             "(SELECT spec_version_id FROM spec_registry "
-            "WHERE product_id = :foreign_id ORDER BY spec_version_id LIMIT 1) "
+            "WHERE project_id = :foreign_id ORDER BY spec_version_id LIMIT 1) "
             "WHERE authority_id = (SELECT pending_authority_id "
-            "FROM spec_authority_acceptance WHERE product_id = :target_id)",
+            "FROM spec_authority_acceptance WHERE project_id = :target_id)",
         ),
     ),
     _ForcedCorruption(
@@ -737,10 +737,10 @@ _FORCED_CORRUPTIONS: tuple[_ForcedCorruption, ...] = (
         (
             "UPDATE spec_authority_acceptance SET "
             "spec_version_id = (SELECT spec_version_id FROM spec_registry "
-            "WHERE product_id = :foreign_id ORDER BY spec_version_id LIMIT 1), "
+            "WHERE project_id = :foreign_id ORDER BY spec_version_id LIMIT 1), "
             "spec_hash = (SELECT spec_hash FROM spec_registry "
-            "WHERE product_id = :foreign_id ORDER BY spec_version_id LIMIT 1) "
-            "WHERE product_id = :target_id",
+            "WHERE project_id = :foreign_id ORDER BY spec_version_id LIMIT 1) "
+            "WHERE project_id = :target_id",
         ),
     ),
     _ForcedCorruption(
@@ -749,36 +749,36 @@ _FORCED_CORRUPTIONS: tuple[_ForcedCorruption, ...] = (
             "UPDATE spec_authority_acceptance SET pending_authority_id = "
             "(SELECT authority_id FROM compiled_spec_authority "
             "WHERE spec_version_id = (SELECT spec_version_id FROM spec_registry "
-            "WHERE product_id = :foreign_id ORDER BY spec_version_id LIMIT 1)) "
-            "WHERE product_id = :target_id",
+            "WHERE project_id = :foreign_id ORDER BY spec_version_id LIMIT 1)) "
+            "WHERE project_id = :target_id",
         ),
     ),
     _ForcedCorruption(
         "acceptance_missing_authority",
         (
             "UPDATE spec_authority_acceptance SET pending_authority_id = NULL "
-            "WHERE product_id = :target_id",
+            "WHERE project_id = :target_id",
         ),
     ),
     _ForcedCorruption(
         "acceptance_compiler",
         (
             "UPDATE spec_authority_acceptance SET compiler_version = 'corrupt' "
-            "WHERE product_id = :target_id",
+            "WHERE project_id = :target_id",
         ),
     ),
     _ForcedCorruption(
         "acceptance_prompt_hash",
         (
             "UPDATE spec_authority_acceptance SET prompt_hash = 'corrupt' "
-            "WHERE product_id = :target_id",
+            "WHERE project_id = :target_id",
         ),
     ),
     _ForcedCorruption(
         "acceptance_spec_hash",
         (
             "UPDATE spec_authority_acceptance SET spec_hash = 'sha256:corrupt' "
-            "WHERE product_id = :target_id",
+            "WHERE project_id = :target_id",
         ),
     ),
     _ForcedCorruption(
@@ -786,7 +786,7 @@ _FORCED_CORRUPTIONS: tuple[_ForcedCorruption, ...] = (
         (
             "UPDATE spec_authority_acceptance "
             "SET authority_fingerprint = 'sha256:corrupt' "
-            "WHERE product_id = :target_id",
+            "WHERE project_id = :target_id",
         ),
     ),
     _ForcedCorruption(
@@ -794,8 +794,8 @@ _FORCED_CORRUPTIONS: tuple[_ForcedCorruption, ...] = (
         (
             "UPDATE user_stories SET accepted_spec_version_id = "
             "(SELECT spec_version_id FROM spec_registry "
-            "WHERE product_id = :foreign_id ORDER BY spec_version_id LIMIT 1) "
-            "WHERE product_id = :target_id",
+            "WHERE project_id = :foreign_id ORDER BY spec_version_id LIMIT 1) "
+            "WHERE project_id = :target_id",
         ),
     ),
     _ForcedCorruption(
@@ -803,36 +803,36 @@ _FORCED_CORRUPTIONS: tuple[_ForcedCorruption, ...] = (
         (
             "UPDATE user_stories SET is_superseded = 1, "
             "superseded_by_story_id = (SELECT story_id FROM user_stories "
-            "WHERE product_id = :foreign_id ORDER BY story_id LIMIT 1) "
-            "WHERE product_id = :target_id",
+            "WHERE project_id = :foreign_id ORDER BY story_id LIMIT 1) "
+            "WHERE project_id = :target_id",
         ),
     ),
     _ForcedCorruption(
         "dependency_dependent_story",
         (
             "INSERT INTO user_story_dependencies "
-            "(product_id, dependent_story_id, prerequisite_story_id, "
+            "(project_id, dependent_story_id, prerequisite_story_id, "
             "status, source, confidence, created_at, updated_at) SELECT "
             ":target_id, foreign_story.story_id, target_story.story_id, "
             "'active', 'manual_review', 'reviewed', "
             "'2026-08-02 12:00:00', '2026-08-02 12:00:00' "
             "FROM user_stories AS foreign_story, user_stories AS target_story "
-            "WHERE foreign_story.product_id = :foreign_id "
-            "AND target_story.product_id = :target_id LIMIT 1",
+            "WHERE foreign_story.project_id = :foreign_id "
+            "AND target_story.project_id = :target_id LIMIT 1",
         ),
     ),
     _ForcedCorruption(
         "dependency_prerequisite_story",
         (
             "INSERT INTO user_story_dependencies "
-            "(product_id, dependent_story_id, prerequisite_story_id, "
+            "(project_id, dependent_story_id, prerequisite_story_id, "
             "status, source, confidence, created_at, updated_at) SELECT "
             ":target_id, target_story.story_id, foreign_story.story_id, "
             "'active', 'manual_review', 'reviewed', "
             "'2026-08-02 12:00:00', '2026-08-02 12:00:00' "
             "FROM user_stories AS foreign_story, user_stories AS target_story "
-            "WHERE foreign_story.product_id = :foreign_id "
-            "AND target_story.product_id = :target_id LIMIT 1",
+            "WHERE foreign_story.project_id = :foreign_id "
+            "AND target_story.project_id = :target_id LIMIT 1",
         ),
     ),
     _ForcedCorruption(
@@ -1129,12 +1129,12 @@ def test_load_populates_abandonment_collections_in_deterministic_order(
     recorded_at = datetime(2026, 8, 2, 12, tzinfo=UTC)
     persisted_at = recorded_at.replace(tzinfo=None)
     with Session(engine) as session:
-        project = Product(name="Abandoned", origin="greenfield")
+        project = Project(name="Abandoned", origin="greenfield")
         session.add(project)
         session.flush()
-        project_id = _id(project.product_id)
+        project_id = _id(project.project_id)
         base_spec = SpecRegistry(
-            product_id=project_id,
+            project_id=project_id,
             spec_hash="sha256:abandoned-base",
             content="# Abandoned base",
             status="approved",
@@ -1223,17 +1223,17 @@ def test_load_does_not_commit_or_rollback_the_caller_transaction(
     """Keep transaction ownership with the caller-owned session."""
     engine = sqlite_engine(tmp_path / "workflow.db")
     with Session(engine) as session:
-        project = Product(name="Uncommitted", origin="greenfield")
+        project = Project(name="Uncommitted", origin="greenfield")
         session.add(project)
         session.flush()
-        project_id = _id(project.product_id)
+        project_id = _id(project.project_id)
 
         snapshot = WorkflowFactRepository(session).load(project_id)
         assert snapshot.project.name == "Uncommitted"
         session.rollback()
 
     with Session(engine) as session:
-        assert session.get(Product, project_id) is None
+        assert session.get(Project, project_id) is None
 
 
 def test_load_never_owns_or_flushes_the_caller_session(tmp_path: Path) -> None:
@@ -1241,10 +1241,10 @@ def test_load_never_owns_or_flushes_the_caller_session(tmp_path: Path) -> None:
     engine = sqlite_engine(tmp_path / "workflow.db")
     project_id = seed_complete_project(engine)
     with Session(engine) as setup_session:
-        unrelated = Product(name="Persisted unrelated", origin="greenfield")
+        unrelated = Project(name="Persisted unrelated", origin="greenfield")
         setup_session.add(unrelated)
         setup_session.commit()
-        unrelated_id = _id(unrelated.product_id)
+        unrelated_id = _id(unrelated.project_id)
 
     dml_statements: list[str] = []
     flush_events: list[str] = []
@@ -1260,13 +1260,13 @@ def test_load_never_owns_or_flushes_the_caller_session(tmp_path: Path) -> None:
         flush_events.append("flush")
 
     with Session(engine) as session:
-        project = session.get(Product, project_id)
-        unrelated = session.get(Product, unrelated_id)
+        project = session.get(Project, project_id)
+        unrelated = session.get(Project, unrelated_id)
         assert project is not None
         assert unrelated is not None
         project.name = "Pending rename"
         session.delete(unrelated)
-        pending = Product(name="Pending insert", origin="greenfield")
+        pending = Project(name="Pending insert", origin="greenfield")
         session.add(pending)
         event.listen(engine, "before_cursor_execute", capture_dml)
         event.listen(session, "before_flush", capture_flush)
@@ -1349,7 +1349,7 @@ def test_load_rejects_authority_without_valid_canonical_artifact(
         if remove_acceptance:
             acceptances = session.exec(
                 select(SpecAuthorityAcceptance).where(
-                    col(SpecAuthorityAcceptance.product_id) == project_id
+                    col(SpecAuthorityAcceptance.project_id) == project_id
                 )
             ).all()
             for acceptance in acceptances:
@@ -1441,7 +1441,7 @@ def test_load_rejects_invalid_task_sprint_relationship(
                 text(
                     "DELETE FROM sprint_stories WHERE story_id IN "
                     "(SELECT story_id FROM user_stories "
-                    "WHERE product_id = :target_id)"
+                    "WHERE project_id = :target_id)"
                 ),
                 {"target_id": target_id},
             )
@@ -1450,9 +1450,9 @@ def test_load_rejects_invalid_task_sprint_relationship(
                 text(
                     "UPDATE sprint_stories SET sprint_id = "
                     "(SELECT sprint_id FROM sprints "
-                    "WHERE product_id = :foreign_id ORDER BY sprint_id LIMIT 1) "
+                    "WHERE project_id = :foreign_id ORDER BY sprint_id LIMIT 1) "
                     "WHERE story_id IN (SELECT story_id FROM user_stories "
-                    "WHERE product_id = :target_id)"
+                    "WHERE project_id = :target_id)"
                 ),
                 {"target_id": target_id, "foreign_id": foreign_id},
             )

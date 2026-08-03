@@ -99,8 +99,8 @@ def test_db_tools_import_boundary() -> None:
     assert core_imports == {
         "Epic",
         "Feature",
-        "Product",
-        "ProductPersona",
+        "Project",
+        "ProjectPersona",
         "Task",
         "Theme",
         "UserStory",
@@ -127,8 +127,8 @@ def test_story_query_tools_import_boundary() -> None:
         module_path, {"agile_sqlmodel", *agile_aliases}, {"get_engine"}
     )
 
-    assert core_imports == {"Epic", "Feature", "Product", "Theme", "UserStory"}
-    assert core_bound_imports == {"Epic", "Feature", "Product", "Theme", "UserStory"}
+    assert core_imports == {"Epic", "Feature", "Project", "Theme", "UserStory"}
+    assert core_bound_imports == {"Epic", "Feature", "Project", "Theme", "UserStory"}
     assert db_imports == {"get_engine"}
     assert db_bound_imports == {"get_engine"}
     assert agile_imports == set()
@@ -156,7 +156,7 @@ def test_export_snapshot_import_boundary() -> None:
     assert core_imports == {
         "Epic",
         "Feature",
-        "Product",
+        "Project",
         "Sprint",
         "SprintStory",
         "Theme",

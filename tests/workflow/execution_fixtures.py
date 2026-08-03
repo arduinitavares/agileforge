@@ -136,7 +136,7 @@ def seed_started_execution_with_unselected_story(
     )
     with Session(engine) as session:
         dependency = UserStoryDependency(
-            product_id=project_id,
+            project_id=project_id,
             dependent_story_id=selected_story_id,
             prerequisite_story_id=future_story_id,
             status="rejected",

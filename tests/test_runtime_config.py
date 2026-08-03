@@ -14,7 +14,6 @@ from utils.runtime_config import (
     get_as_built_assessor_timeout_seconds,
     get_business_db_target,
     get_database_echo,
-    get_session_db_target,
     is_spec_compiler_schema_disabled,
     resolve_database_target,
 )
@@ -43,15 +42,6 @@ def test_business_db_url_is_required(monkeypatch: pytest.MonkeyPatch) -> None:
         get_business_db_target()
 
 
-def test_session_db_url_is_required(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify session db url is required."""
-    monkeypatch.setenv("AGILEFORGE_DB_URL", "sqlite:///./db/spec_authority_dev.db")
-    monkeypatch.delenv("AGILEFORGE_SESSION_DB_URL", raising=False)
-
-    with pytest.raises(RuntimeConfigError, match="AGILEFORGE_SESSION_DB_URL"):
-        get_session_db_target()
-
-
 def test_legacy_business_db_filename_is_rejected(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -62,36 +52,16 @@ def test_legacy_business_db_filename_is_rejected(
         get_business_db_target()
 
 
-def test_legacy_session_db_filename_is_rejected(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Verify legacy session db filename is rejected."""
-    monkeypatch.setenv("AGILEFORGE_DB_URL", "sqlite:///./db/spec_authority_dev.db")
-    monkeypatch.setenv("AGILEFORGE_SESSION_DB_URL", "sqlite:///./agile_sqlmodel.db")
-
-    with pytest.raises(RuntimeConfigError, match="agile_sqlmodel.db"):  # noqa: RUF043
-        get_session_db_target()
-
-
 def test_sqlite_targets_are_normalized_to_absolute_paths(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Verify sqlite targets are normalized to absolute paths."""
     monkeypatch.setenv("AGILEFORGE_DB_URL", "sqlite:///./db/spec_authority_dev.db")
-    monkeypatch.setenv(
-        "AGILEFORGE_SESSION_DB_URL",
-        "sqlite:///./db/spec_authority_session_dev.db",
-    )
-
     business = get_business_db_target()
-    session = get_session_db_target()
 
     assert business.sqlite_path is not None
-    assert session.sqlite_path is not None
     assert business.sqlite_path.is_absolute()
-    assert session.sqlite_path.is_absolute()
     assert business.sqlite_url.endswith("db/spec_authority_dev.db")
-    assert session.sqlite_url.endswith("db/spec_authority_session_dev.db")
 
 
 def test_config_root_resolves_relative_sqlite_targets(
@@ -131,18 +101,6 @@ def test_runtime_env_loads_from_config_root(
     assert runtime_config_module.get_optional_env("AGILEFORGE_DB_URL") == (
         "sqlite:///./db/from-config-root.db"
     )
-
-
-def test_session_db_must_be_distinct_from_business_db(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Verify session db must be distinct from business db."""
-    shared_path = "sqlite:///./db/shared.sqlite3"
-    monkeypatch.setenv("AGILEFORGE_DB_URL", shared_path)
-    monkeypatch.setenv("AGILEFORGE_SESSION_DB_URL", shared_path)
-
-    with pytest.raises(RuntimeConfigError, match="different SQLite file"):
-        get_session_db_target()
 
 
 def test_explicit_database_target_overrides_environment(

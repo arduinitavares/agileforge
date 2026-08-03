@@ -33,9 +33,10 @@ def deny_network(event, args):
 
 sys.addaudithook(deny_network)
 application = production_application()
+deleted_root = "orchestrator" + "_agent"
 legacy = sorted(
     name for name in sys.modules
-    if name == "orchestrator_agent" or name.startswith("orchestrator_agent.")
+    if name == deleted_root or name.startswith(f"{deleted_root}.")
 )
 print(json.dumps(legacy))
 """

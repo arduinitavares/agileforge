@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, cast
 from pydantic import BaseModel, Field
 from sqlmodel import Session
 
-from models.core import Product
+from models.core import Project
 from models.db import get_engine
 from models.specs import SpecRegistry
 from services.specs._engine_resolution import resolve_spec_engine
@@ -35,9 +35,9 @@ _DEFAULT_GET_ENGINE = get_engine
 
 
 class LinkSpecToProductInput(BaseModel):
-    """Input schema for linking an on-disk specification to a product."""
+    """Input schema for linking an on-disk specification to a project."""
 
-    product_id: int = Field(
+    project_id: int = Field(
         description="ID of the project to link the specification to"
     )
     spec_path: str = Field(description="Path to on-disk specification file (.md, .txt)")
@@ -50,7 +50,7 @@ class ReadProjectSpecificationInput(BaseModel):
 class SaveProjectSpecificationInput(BaseModel):
     """Input schema for saving project specifications."""
 
-    product_id: int = Field(description="ID of project to attach specification to")
+    project_id: int = Field(description="ID of project to attach specification to")
     spec_source: str = Field(
         description=(
             'Source type: "file" (load from file path) or "text" (pasted content)'
@@ -67,7 +67,7 @@ class SaveProjectSpecificationInput(BaseModel):
 class RegisterSpecVersionInput(BaseModel):
     """Input schema for register_spec_version lifecycle entrypoint."""
 
-    product_id: int = Field(description="Product ID to attach spec version to")
+    project_id: int = Field(description="Project ID to attach spec version to")
     content: str = Field(description="Full specification content (markdown or text)")
     content_ref: str | None = Field(
         default=None,
@@ -90,7 +90,7 @@ class ApproveSpecVersionInput(BaseModel):
 class ApprovedCanonicalSpec:
     """Inputs for an approved canonical spec inserted by a domain transaction."""
 
-    product_id: int
+    project_id: int
     canonical_content_json: str
     content_ref: str | None
     approved_at: datetime
@@ -121,7 +121,7 @@ def _resolve_engine() -> Engine | Connection | None:
 
 def _compile_spec_authority_from_path(
     *,
-    product_id: int,
+    project_id: int,
     spec_path: str,
     tool_context: ToolContext | None,
 ) -> dict[str, Any]:
@@ -130,7 +130,7 @@ def _compile_spec_authority_from_path(
         or update_spec_and_compile_authority
     )
     compile_input = UpdateSpecAndCompileAuthorityInput(
-        product_id=product_id,
+        project_id=project_id,
         content_ref=spec_path,
     )
     return compile_spec(
@@ -141,13 +141,13 @@ def _compile_spec_authority_from_path(
 
 def _compile_linked_spec_authority(
     *,
-    product_id: int,
+    project_id: int,
     spec_path: str,
     tool_context: ToolContext | None,
 ) -> dict[str, Any]:
     """Backwards-compatible compile seam for link-side tests and callers."""
     return _compile_spec_authority_from_path(
-        product_id=product_id,
+        project_id=project_id,
         spec_path=spec_path,
         tool_context=tool_context,
     )
@@ -232,7 +232,7 @@ def _load_spec_text_from_file(path_str: str) -> tuple[str, float] | dict[str, An
 
 
 def _write_backup_spec_file(
-    *, product_name: str, product_id: int, spec_text: str
+    *, product_name: str, project_id: int, spec_text: str
 ) -> tuple[str, float] | dict[str, Any]:
     file_size_kb = len(spec_text) / 1024
     if file_size_kb > _MAX_SPEC_SIZE_KB:
@@ -249,7 +249,7 @@ def _write_backup_spec_file(
 
     safe_name = re.sub(r"[^\w\s-]", "", product_name.lower())
     safe_name = re.sub(r"[-\s]+", "_", safe_name)
-    spec_filename = f"{safe_name}_{product_id}_spec.md"
+    spec_filename = f"{safe_name}_{project_id}_spec.md"
     spec_path_obj = specs_dir / spec_filename
 
     try:
@@ -265,7 +265,7 @@ def _write_backup_spec_file(
 
 def _resolve_spec_storage(
     *,
-    product: Product,
+    project: Project,
     parsed: SaveProjectSpecificationInput,
 ) -> tuple[str, str, float, bool] | dict[str, Any]:
     """Resolve the persisted spec text/path pair from file or pasted content."""
@@ -277,8 +277,8 @@ def _resolve_spec_storage(
         return spec_text, parsed.content, file_size_kb, False
 
     saved = _write_backup_spec_file(
-        product_name=product.name,
-        product_id=parsed.product_id,
+        product_name=project.name,
+        project_id=parsed.project_id,
         spec_text=parsed.content,
     )
     if isinstance(saved, dict):
@@ -293,7 +293,7 @@ def register_approved_spec_from_canonical_json(
 ) -> SpecRegistry:
     """Insert an approved spec from canonical JSON in a caller-owned transaction."""
     spec = SpecRegistry(
-        product_id=approved.product_id,
+        project_id=approved.project_id,
         spec_hash=canonical_stored_json_hash(approved.canonical_content_json),
         content=approved.canonical_content_json,
         content_ref=approved.content_ref,
@@ -319,15 +319,15 @@ def register_spec_version(
     spec_hash = hashlib.sha256(parsed.content.encode("utf-8")).hexdigest()
 
     with Session(_resolve_engine()) as session:
-        product = session.get(Product, parsed.product_id)
-        if not product:
+        project = session.get(Project, parsed.project_id)
+        if not project:
             return {
                 "success": False,
-                "error": f"Product ID {parsed.product_id} not found",
+                "error": f"Project ID {parsed.project_id} not found",
             }
 
         spec_version = SpecRegistry(
-            product_id=parsed.product_id,
+            project_id=parsed.project_id,
             spec_hash=spec_hash,
             content=parsed.content,
             content_ref=parsed.content_ref,
@@ -390,7 +390,7 @@ def link_spec_to_product(
     params: dict[str, Any],
     tool_context: ToolContext | None = None,
 ) -> dict[str, Any]:
-    """Link an on-disk specification file to a product and compile authority."""
+    """Link an on-disk specification file to a project and compile authority."""
     try:
         parsed = LinkSpecToProductInput.model_validate(_normalize_input_params(params))
     except ValueError as exc:
@@ -414,23 +414,23 @@ def link_spec_to_product(
         }
 
     with Session(_resolve_engine()) as session:
-        product = session.get(Product, parsed.product_id)
-        if not product:
+        project = session.get(Project, parsed.project_id)
+        if not project:
             return {
                 "success": False,
-                "error": f"Product {parsed.product_id} not found",
+                "error": f"Project {parsed.project_id} not found",
             }
 
-        is_update = product.spec_file_path is not None
-        product.spec_file_path = parsed.spec_path
-        product.spec_loaded_at = datetime.now(UTC)
-        # NOTE: product.technical_spec is intentionally NOT written.
+        is_update = project.spec_file_path is not None
+        project.spec_file_path = parsed.spec_path
+        project.spec_loaded_at = datetime.now(UTC)
+        # NOTE: project.technical_spec is intentionally NOT written.
         # The file on disk + SpecRegistry are the sources of truth.
 
-        session.add(product)
+        session.add(project)
         session.commit()
 
-        product_name = product.name
+        product_name = project.name
 
     action = "updated" if is_update else "linked"
     logger.info(
@@ -445,7 +445,7 @@ def link_spec_to_product(
         tool_context.state["spec_persisted"] = True
 
     compile_result = _compile_linked_spec_authority(
-        product_id=parsed.product_id,
+        project_id=parsed.project_id,
         spec_path=parsed.spec_path,
         tool_context=tool_context,
     )
@@ -453,7 +453,7 @@ def link_spec_to_product(
     if not compile_result.get("success"):
         return {
             "success": True,
-            "product_id": parsed.product_id,
+            "project_id": parsed.project_id,
             "spec_path": parsed.spec_path,
             "file_created": False,
             "spec_size_kb": round(file_size_kb, 2),
@@ -472,7 +472,7 @@ def link_spec_to_product(
 
     return {
         "success": True,
-        "product_id": parsed.product_id,
+        "project_id": parsed.project_id,
         "spec_path": parsed.spec_path,
         "file_created": False,
         "spec_size_kb": round(file_size_kb, 2),
@@ -509,24 +509,24 @@ def save_project_specification(
         }
 
     with Session(_resolve_engine()) as session:
-        product = session.get(Product, parsed.product_id)
-        if not product:
+        project = session.get(Project, parsed.project_id)
+        if not project:
             return {
                 "success": False,
-                "error": f"Product {parsed.product_id} not found",
+                "error": f"Project {parsed.project_id} not found",
             }
 
-        storage = _resolve_spec_storage(product=product, parsed=parsed)
+        storage = _resolve_spec_storage(project=project, parsed=parsed)
         if isinstance(storage, dict):
             return storage
         spec_text, spec_path, file_size_kb, file_created = storage
 
-        is_update = product.technical_spec is not None
-        product.technical_spec = spec_text
-        product.spec_file_path = spec_path
-        product.spec_loaded_at = datetime.now(UTC)
+        is_update = project.technical_spec is not None
+        project.technical_spec = spec_text
+        project.spec_file_path = spec_path
+        project.spec_loaded_at = datetime.now(UTC)
 
-        session.add(product)
+        session.add(project)
         session.commit()
 
         action = "updated" if is_update else "saved"
@@ -535,7 +535,7 @@ def save_project_specification(
         tool_context.state["spec_persisted"] = True
 
     compile_result = _compile_spec_authority_from_path(
-        product_id=parsed.product_id,
+        project_id=parsed.project_id,
         spec_path=spec_path,
         tool_context=tool_context,
     )
@@ -543,7 +543,7 @@ def save_project_specification(
     if not compile_result.get("success"):
         return {
             "success": True,
-            "product_id": parsed.product_id,
+            "project_id": parsed.project_id,
             "spec_saved": True,
             "spec_path": spec_path,
             "spec_size_kb": round(file_size_kb, 2),
@@ -558,7 +558,7 @@ def save_project_specification(
 
     return {
         "success": True,
-        "product_id": parsed.product_id,
+        "project_id": parsed.project_id,
         "spec_saved": True,
         "spec_path": spec_path,
         "spec_size_kb": round(file_size_kb, 2),
@@ -596,10 +596,10 @@ def read_project_specification(
             "spec_content": None,
         }
 
-    product_id = active_project.get("product_id")
+    project_id = active_project.get("project_id")
     with Session(_resolve_engine()) as session:
-        product = session.get(Product, product_id)
-        if not product:
+        project = session.get(Project, project_id)
+        if not project:
             project_name = active_project.get("name")
             return {
                 "success": False,
@@ -612,8 +612,8 @@ def read_project_specification(
             }
 
         spec_content, spec_path = resolve_spec_content(
-            technical_spec=product.technical_spec,
-            spec_file_path=product.spec_file_path,
+            technical_spec=project.technical_spec,
+            spec_file_path=project.spec_file_path,
         )
         if not spec_content:
             project_name = active_project.get("name")
@@ -629,8 +629,8 @@ def read_project_specification(
 
         hydrate_spec_state(
             state,
-            technical_spec=product.technical_spec,
-            spec_file_path=product.spec_file_path,
+            technical_spec=project.technical_spec,
+            spec_file_path=project.spec_file_path,
         )
 
         sections = extract_markdown_sections(spec_content)
@@ -638,7 +638,7 @@ def read_project_specification(
 
         logger.info(
             "Loaded spec for %r (~%s tokens)",
-            product.name,
+            project.name,
             token_estimate,
         )
 

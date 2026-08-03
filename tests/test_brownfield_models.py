@@ -8,7 +8,7 @@ import pytest
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session
 
-from agile_sqlmodel import BrownfieldSourceArtifact, Product
+from agile_sqlmodel import BrownfieldSourceArtifact, Project
 
 if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
@@ -17,13 +17,13 @@ if TYPE_CHECKING:
 def test_source_attempt_is_unique_per_project(engine: Engine) -> None:
     """Verify source artifact attempt IDs are unique per project."""
     with Session(engine) as session:
-        product = Product(name="Brownfield Product")
+        product = Project(name="Brownfield Project")
         session.add(product)
         session.commit()
         session.refresh(product)
 
         first_artifact = BrownfieldSourceArtifact(
-            project_id=product.product_id,
+            project_id=product.project_id,
             attempt_id="source-attempt-1",
             artifact_fingerprint="artifact-fingerprint-1",
             request_hash="request-hash-1",
@@ -32,7 +32,7 @@ def test_source_attempt_is_unique_per_project(engine: Engine) -> None:
         session.commit()
 
         duplicate_artifact = BrownfieldSourceArtifact(
-            project_id=product.product_id,
+            project_id=product.project_id,
             attempt_id="source-attempt-1",
             artifact_fingerprint="artifact-fingerprint-2",
             request_hash="request-hash-2",

@@ -30,7 +30,7 @@ class SaveStoriesInput(BaseModel):
             description="Stable key used to safely replay the same persistence call."
         ),
     ]
-    product_id: Annotated[
+    project_id: Annotated[
         int,
         Field(description="The product ID to attach stories to."),
     ]
@@ -84,7 +84,7 @@ class SaveStoryPatchInput(BaseModel):
             description="Stable key used to safely replay the same persistence call."
         ),
     ]
-    product_id: Annotated[
+    project_id: Annotated[
         int,
         Field(description="The product ID that owns the target story."),
     ]

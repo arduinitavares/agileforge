@@ -430,7 +430,7 @@ def _render_story_human_brief(packet: dict[str, Any]) -> str:
         parts.append(f"**Sprint Goal**: {_escape_md(sprint.get('goal'))}")
     if product.get("vision_excerpt"):
         vision_excerpt = _escape_md(product.get("vision_excerpt"))
-        parts.append(f"**Product Vision**: {vision_excerpt}\n")
+        parts.append(f"**product vision**: {vision_excerpt}\n")
 
     parts.append("## Story Acceptance Criteria")
     if ac_items:
@@ -526,7 +526,7 @@ def _parent_story_orientation_lines(
         lines.append(f"**Sprint Goal**: {_escape_md(sprint.get('goal'))}\n")
     if product.get("vision_excerpt"):
         vision_excerpt = _escape_md(product.get("vision_excerpt"))
-        lines.append(f"**Product Vision**: {vision_excerpt}\n")
+        lines.append(f"**product vision**: {vision_excerpt}\n")
     return lines
 
 

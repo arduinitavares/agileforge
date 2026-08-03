@@ -14,7 +14,7 @@ from sqlmodel import Session, select
 
 from models import db as model_db
 from models.authority_curation import AuthorityCurationAttempt, AuthorityFeedbackAttempt
-from models.core import Product
+from models.core import Project
 from models.specs import (
     CompiledSpecAuthority,
     SpecAuthorityAcceptance,
@@ -63,14 +63,14 @@ AUTHORITY_INVARIANTS_COMMAND: Final[str] = "agileforge authority invariants"
 
 _AUTHORITY_REQUIREMENTS: Final[tuple[SchemaRequirement, ...]] = (
     SchemaRequirement(
-        "products",
-        ("product_id", "name", "spec_file_path", "updated_at"),
+        "projects",
+        ("project_id", "name", "spec_file_path", "updated_at"),
     ),
     SchemaRequirement(
         "spec_registry",
         (
             "spec_version_id",
-            "product_id",
+            "project_id",
             "spec_hash",
             "content",
             "content_ref",
@@ -99,7 +99,7 @@ _AUTHORITY_REQUIREMENTS: Final[tuple[SchemaRequirement, ...]] = (
         "spec_authority_acceptance",
         (
             "id",
-            "product_id",
+            "project_id",
             "spec_version_id",
             "status",
             "policy",
@@ -141,7 +141,7 @@ class _StatusContext:
     """Stable inputs used to render and fingerprint authority status."""
 
     project_id: int
-    product: Product
+    project: Project
     selection: _AuthoritySelection
     disk_spec: JsonDict
     classification: _StatusClassification
@@ -375,7 +375,7 @@ def _accepted_fingerprint_payload(accepted: SpecAuthorityAcceptance) -> JsonDict
     """Return deterministic acceptance fields for fingerprinting."""
     return {
         "id": accepted.id,
-        "product_id": accepted.product_id,
+        "project_id": accepted.project_id,
         "spec_version_id": accepted.spec_version_id,
         "status": accepted.status,
         "policy": accepted.policy,
@@ -400,9 +400,9 @@ def _authority_status_fingerprint(
         {
             "command": AUTHORITY_STATUS_COMMAND,
             "project_id": context.project_id,
-            "product": {
-                "product_id": context.product.product_id,
-                "updated_at": context.product.updated_at,
+            "project": {
+                "project_id": context.project.project_id,
+                "updated_at": context.project.updated_at,
             },
             "status": context.classification.status,
             "reason": context.classification.reason,
@@ -436,7 +436,7 @@ def _spec_fingerprint_payload(spec: SpecRegistry | None) -> JsonDict | None:
         return None
     return {
         "spec_version_id": spec.spec_version_id,
-        "product_id": spec.product_id,
+        "project_id": spec.project_id,
         "spec_hash": spec.spec_hash,
         "status": spec.status,
         "content_ref": spec.content_ref,
@@ -449,7 +449,7 @@ def _resolve_status(
     *,
     session: Session,
     project_id: int,
-    product: Product,
+    project: Project,
     selection: _AuthoritySelection,
     disk_spec: JsonDict,
 ) -> JsonDict:
@@ -457,7 +457,7 @@ def _resolve_status(
     data, warnings = _build_status_data(
         session=session,
         project_id=project_id,
-        product=product,
+        project=project,
         selection=selection,
         disk_spec=disk_spec,
     )
@@ -468,7 +468,7 @@ def _build_status_data(
     *,
     session: Session,
     project_id: int,
-    product: Product,
+    project: Project,
     selection: _AuthoritySelection,
     disk_spec: JsonDict,
 ) -> tuple[JsonDict, list[WorkbenchWarning]]:
@@ -486,7 +486,7 @@ def _build_status_data(
     )
     context = _StatusContext(
         project_id=project_id,
-        product=product,
+        project=project,
         selection=selection,
         disk_spec=disk_spec,
         classification=classification,
@@ -875,7 +875,7 @@ def _project_specs(session: Session, project_id: int) -> list[SpecRegistry]:
     return list(
         session.exec(
             select(SpecRegistry)
-            .where(SpecRegistry.product_id == project_id)
+            .where(SpecRegistry.project_id == project_id)
             .order_by(cast("Any", SpecRegistry.spec_version_id).desc())
         ).all()
     )
@@ -889,7 +889,7 @@ def _latest_accepted(
     return session.exec(
         select(SpecAuthorityAcceptance)
         .where(
-            SpecAuthorityAcceptance.product_id == project_id,
+            SpecAuthorityAcceptance.project_id == project_id,
             SpecAuthorityAcceptance.status == "accepted",
         )
         .order_by(
@@ -907,7 +907,7 @@ def _latest_rejected(
     return session.exec(
         select(SpecAuthorityAcceptance)
         .where(
-            SpecAuthorityAcceptance.product_id == project_id,
+            SpecAuthorityAcceptance.project_id == project_id,
             SpecAuthorityAcceptance.status == "rejected",
         )
         .order_by(
@@ -942,7 +942,7 @@ def _load_authority_selection(
     trusted_authority = (
         accepted_compiled_authority(
             session,
-            product_id=project_id,
+            project_id=project_id,
             spec_version_id=accepted.spec_version_id,
         )
         if accepted is not None
@@ -1022,13 +1022,13 @@ class AuthorityProjectionService:
             return schema_error
 
         with Session(self._engine) as session:
-            product = session.get(Product, project_id)
-            if product is None:
+            project = session.get(Project, project_id)
+            if project is None:
                 return _project_not_found_error(AUTHORITY_STATUS_COMMAND, project_id)
 
             selection = _load_authority_selection(session, project_id=project_id)
             disk_spec = self._resolve_spec_path(
-                _status_spec_path(product=product, selection=selection),
+                _status_spec_path(project=project, selection=selection),
                 accepted_hash=(
                     selection.accepted.spec_hash
                     if selection.accepted is not None
@@ -1038,7 +1038,7 @@ class AuthorityProjectionService:
             data, warnings = _build_status_data(
                 session=session,
                 project_id=project_id,
-                product=product,
+                project=project,
                 selection=selection,
                 disk_spec=disk_spec,
             )
@@ -1200,8 +1200,8 @@ class AuthorityProjectionService:
         spec_version_id: int | None,
     ) -> JsonDict:
         """Return invariants using an already opened read-only session."""
-        product = session.get(Product, project_id)
-        if product is None:
+        project = session.get(Project, project_id)
+        if project is None:
             return _project_not_found_error(
                 AUTHORITY_INVARIANTS_COMMAND,
                 project_id,
@@ -1218,7 +1218,7 @@ class AuthorityProjectionService:
             return selection
 
         spec_version = session.get(SpecRegistry, selected_id)
-        if spec_version is None or spec_version.product_id != project_id:
+        if spec_version is None or spec_version.project_id != project_id:
             return _spec_version_not_found_error(project_id, selected_id)
 
         authority = (
@@ -1238,7 +1238,7 @@ class AuthorityProjectionService:
             selection.accepted is not None
             and accepted_compiled_authority(
                 session,
-                product_id=project_id,
+                project_id=project_id,
                 spec_version_id=selected_id,
             )
             is None
@@ -1286,12 +1286,12 @@ class AuthorityProjectionService:
 
 def _status_spec_path(
     *,
-    product: Product,
+    project: Project,
     selection: _AuthoritySelection,
 ) -> str | None:
     """Return the disk path to inspect for status drift."""
-    if product.spec_file_path:
-        return product.spec_file_path
+    if project.spec_file_path:
+        return project.spec_file_path
     if selection.accepted_spec is not None and selection.accepted_spec.content_ref:
         return selection.accepted_spec.content_ref
     if selection.latest_spec is not None:

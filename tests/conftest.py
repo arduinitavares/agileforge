@@ -2,7 +2,6 @@
 
 import importlib
 import os
-import tempfile
 from collections.abc import Iterator
 from pathlib import Path
 from sqlite3 import Connection
@@ -19,12 +18,6 @@ _TEST_MODEL_CONFIG_PATH = (
 os.environ.setdefault("MODEL_CONFIG_PATH", str(_TEST_MODEL_CONFIG_PATH))
 os.environ.setdefault("RELAX_ZDR_FOR_TESTS", "true")
 os.environ.setdefault("AGILEFORGE_DB_URL", "sqlite:///:memory:")
-_TEST_SESSION_DB_PATH = Path(tempfile.gettempdir()) / "agileforge_test_sessions.db"
-os.environ.setdefault(
-    "AGILEFORGE_SESSION_DB_URL",
-    f"sqlite:///{_TEST_SESSION_DB_PATH.as_posix()}",
-)
-
 from models.core import Team, TeamMember  # noqa: E402
 
 model_config = importlib.import_module("utils.model_config")
@@ -117,19 +110,12 @@ def patch_get_engine_globally(
     # These need explicit patching because they import at module load time
     modules_to_patch = [
         "api",
-        "tests.legacy_api",
-        "repositories.product",
+        "repositories.project",
         "repositories.story",
-        "orchestrator_agent.agent_tools.product_vision_tool.tools",
-        "orchestrator_agent.agent_tools.product_roadmap_agent.tools",
-        "orchestrator_agent.agent_tools.sprint_planner_tool.tools",
-        "orchestrator_agent.agent_tools.user_story_writer_tool.tools",
         "tools.story_query_tools",
-        "tools.orchestrator_tools",
         "tools.db_tools",
         "tools.spec_tools",
-        "services.orchestrator_context_service",
-        "services.orchestrator_query_service",
+        "services.read_projections",
     ]
 
     for module_path in modules_to_patch:

@@ -17,7 +17,7 @@ class BrownfieldSourceArtifact(SQLModel, table=True):
     __tablename__ = "brownfield_source_artifacts"  # type: ignore[assignment]
 
     pk: int | None = Field(default=None, primary_key=True)
-    project_id: int = Field(foreign_key="products.product_id")
+    project_id: int = Field(foreign_key="projects.project_id")
     attempt_id: str
     artifact_fingerprint: str = Field(index=True)
     source_kind: str = Field(default="source_file")
@@ -49,7 +49,7 @@ class BrownfieldScanAttempt(SQLModel, table=True):
     __tablename__ = "brownfield_scan_attempts"  # type: ignore[assignment]
 
     pk: int | None = Field(default=None, primary_key=True)
-    project_id: int = Field(foreign_key="products.product_id")
+    project_id: int = Field(foreign_key="projects.project_id")
     attempt_id: str
     artifact_fingerprint: str
     source_attempt_id: str | None = Field(default=None, index=True)
@@ -84,7 +84,7 @@ class BrownfieldSpecDraftAttempt(SQLModel, table=True):
     __tablename__ = "brownfield_spec_draft_attempts"  # type: ignore[assignment]
 
     pk: int | None = Field(default=None, primary_key=True)
-    project_id: int = Field(foreign_key="products.product_id")
+    project_id: int = Field(foreign_key="projects.project_id")
     attempt_id: str
     artifact_fingerprint: str
     origin: str = Field(index=True)
@@ -121,7 +121,7 @@ class BrownfieldSpecApproval(SQLModel, table=True):
     __tablename__ = "brownfield_spec_approvals"  # type: ignore[assignment]
 
     pk: int | None = Field(default=None, primary_key=True)
-    project_id: int = Field(foreign_key="products.product_id")
+    project_id: int = Field(foreign_key="projects.project_id")
     approval_attempt_id: str = Field(index=True)
     approval_fingerprint: str = Field(index=True, unique=True)
     draft_attempt_id: str = Field(index=True)

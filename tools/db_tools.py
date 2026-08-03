@@ -12,14 +12,14 @@ from typing import Any, TypedDict, cast
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
-from models.core import Epic, Feature, Product, ProductPersona, Task, Theme, UserStory
+from models.core import Epic, Feature, Project, ProjectPersona, Task, Theme, UserStory
 from models.db import get_engine
 
 
-class SeedProductPersonasInput(BaseModel):
-    """Input schema for seed_product_personas tool."""
+class SeedProjectPersonasInput(BaseModel):
+    """Input schema for seed_project_personas tool."""
 
-    product_id: int
+    project_id: int
 
 
 class _DefaultPersona(TypedDict):
@@ -46,28 +46,28 @@ class _PersistRoadmapError(RuntimeError):
         return cls(message)
 
 
-def seed_product_personas(params: SeedProductPersonasInput) -> dict[str, Any]:
+def seed_project_personas(params: SeedProjectPersonasInput) -> dict[str, Any]:
     """
-    Agent tool: Seed default personas for the Review-First product.
+    Agent tool: Seed default personas for the Review-First project.
 
-    Call this after product creation.
+    Call this after project creation.
     """
     with Session(get_engine()) as session:
-        product = session.get(Product, params.product_id)
-        if not product:
+        project = session.get(Project, params.project_id)
+        if not project:
             return {
                 "success": False,
-                "error": f"Product {params.product_id} not found",
+                "error": f"Project {params.project_id} not found",
             }
 
         # Check if personas already exist
         existing = session.exec(
-            select(ProductPersona).where(ProductPersona.product_id == params.product_id)
+            select(ProjectPersona).where(ProjectPersona.project_id == params.project_id)
         ).all()
         if existing:
             return {
                 "success": True,
-                "message": f"Personas already exist for product {params.product_id}",
+                "message": f"Personas already exist for project {params.project_id}",
                 "count": len(existing),
             }
 
@@ -109,8 +109,8 @@ def seed_product_personas(params: SeedProductPersonasInput) -> dict[str, Any]:
 
         created_count = 0
         for p_data in default_personas:
-            persona = ProductPersona(
-                product_id=params.product_id,
+            persona = ProjectPersona(
+                project_id=params.project_id,
                 persona_name=p_data["name"],
                 is_default=p_data["is_default"],
                 category=p_data["category"],
@@ -121,12 +121,12 @@ def seed_product_personas(params: SeedProductPersonasInput) -> dict[str, Any]:
 
         session.commit()
         message = (
-            f"Seeded {created_count} default personas for product "
-            f"'{product.name}'"
+            f"Seeded {created_count} default personas for project "
+            f"'{project.name}'"
         )
         return {
             "success": True,
-            "product_id": params.product_id,
+            "project_id": params.project_id,
             "message": message,
             "count": created_count,
         }
@@ -142,75 +142,75 @@ class CreateOrGetProductInput(BaseModel):
 
 def create_or_get_product(params: CreateOrGetProductInput) -> dict[str, Any]:
     """
-    Agent tool: Create a product or update its vision.
+    Agent tool: Create a project or update its vision.
 
     Args:
-        params: Input data for creating or getting a product.
+        params: Input data for creating or getting a project.
 
     Returns:
-        Dict with product_id and status
+        Dict with project_id and status
     """
     with Session(get_engine()) as session:
-        # Try to find existing product
-        product = session.exec(
-            select(Product).where(Product.name == params.product_name)
+        # Try to find existing project
+        project = session.exec(
+            select(Project).where(Project.name == params.product_name)
         ).first()
 
-        if not product:
-            product = Product(
+        if not project:
+            project = Project(
                 name=params.product_name,
                 vision=params.vision,
                 description=params.description,
             )
-            session.add(product)
+            session.add(project)
             session.commit()
-            session.refresh(product)
+            session.refresh(project)
             return {
                 "success": True,
-                "product_id": product.product_id,
+                "project_id": project.project_id,
                 "action": "created",
                 "message": (
-                    f"Created product '{params.product_name}' "
-                    f"with ID {product.product_id}"
+                    f"Created project '{params.product_name}' "
+                    f"with ID {project.project_id}"
                 ),
             }
 
         if params.vision is not None:
-            product.vision = params.vision
+            project.vision = params.vision
         if params.description is not None:
-            product.description = params.description
-        session.add(product)
+            project.description = params.description
+        session.add(project)
         session.commit()
-        session.refresh(product)
+        session.refresh(project)
         return {
             "success": True,
-            "product_id": product.product_id,
+            "project_id": project.project_id,
             "action": "updated",
             "message": (
-                f"Updated product '{params.product_name}' (ID {product.product_id})"
+                f"Updated project '{params.product_name}' (ID {project.project_id})"
             ),
         }
 
 
 def persist_roadmap(
-    product_id: int, roadmap_items: list[dict[str, Any]]
+    project_id: int, roadmap_items: list[dict[str, Any]]
 ) -> dict[str, Any]:
     """
     Agent tool: Parse roadmap and create Theme/Epic/Feature hierarchy.
 
     Args:
-        product_id: The product to attach roadmap to
+        project_id: The project to attach roadmap to
         roadmap_items: List of dicts with structure. (See docstring in editor)
 
     Returns:
         Dict with created IDs and status
     """
     with Session(get_engine()) as session:
-        product = session.get(Product, product_id)
-        if not product:
+        project = session.get(Project, project_id)
+        if not project:
             return {
                 "success": False,
-                "error": f"Product {product_id} not found",
+                "error": f"Project {project_id} not found",
             }
 
         created: dict[str, list[dict[str, Any]]] = {
@@ -226,7 +226,7 @@ def persist_roadmap(
                     f"{item.get('quarter', '')} - {item.get('theme_title', 'Unnamed')}"
                 ),
                 description=item.get("theme_description", ""),
-                product_id=product_id,
+                project_id=project_id,
             )
             session.add(theme)
             session.flush()
@@ -272,7 +272,7 @@ def persist_roadmap(
 
         return {
             "success": True,
-            "product_id": product_id,
+            "project_id": project_id,
             "created": created,
             "message": (
                 f"Created {len(created['themes'])} themes, "
@@ -285,7 +285,7 @@ def persist_roadmap(
 class CreateUserStoryInput(BaseModel):
     """Input schema for create_user_story tool."""
 
-    product_id: int
+    project_id: int
     feature_id: int
     title: str
     description: str
@@ -317,7 +317,7 @@ def create_user_story(params: CreateUserStoryInput) -> dict[str, Any]:
             acceptance_criteria=params.acceptance_criteria,
             story_points=params.story_points,
             feature_id=params.feature_id,
-            product_id=params.product_id,
+            project_id=params.project_id,
         )
         session.add(story)
         session.commit()
@@ -327,7 +327,7 @@ def create_user_story(params: CreateUserStoryInput) -> dict[str, Any]:
             "success": True,
             "story_id": story.story_id,
             "feature_id": params.feature_id,
-            "product_id": params.product_id,
+            "project_id": params.project_id,
             "message": (
                 f"Created user story '{params.title}' with ID {story.story_id}"
             ),
@@ -381,20 +381,20 @@ def create_task(params: CreateTaskInput) -> dict[str, Any]:
         }
 
 
-def query_product_structure(product_id: int) -> dict[str, Any]:
+def query_product_structure(project_id: int) -> dict[str, Any]:
     """
-    Agent tool: Query the full hierarchy of a product (for verification).
+    Agent tool: Query the full hierarchy of a project (for verification).
 
     Returns the entire Theme -> Epic -> Feature -> Story structure.
     """
     with Session(get_engine()) as session:
-        product = session.get(Product, product_id)
-        if not product:
+        project = session.get(Project, project_id)
+        if not project:
             return {
                 "success": False,
-                "error": f"Product {product_id} not found",
+                "error": f"Project {project_id} not found",
             }
-        themes = _load_product_themes(session, product_id)
+        themes = _load_product_themes(session, project_id)
         theme_ids = [theme.theme_id for theme in themes if theme.theme_id is not None]
         epics = _load_epics_for_theme_ids(session, theme_ids)
         epic_ids = [epic.epic_id for epic in epics if epic.epic_id is not None]
@@ -404,7 +404,7 @@ def query_product_structure(product_id: int) -> dict[str, Any]:
         ]
         stories = _load_stories_for_feature_ids(session, feature_ids)
         structure = _build_product_structure(
-            product=product,
+            project=project,
             themes=themes,
             epics=epics,
             features=features,
@@ -414,8 +414,8 @@ def query_product_structure(product_id: int) -> dict[str, Any]:
         return {"success": True, "structure": structure}
 
 
-def _load_product_themes(session: Session, product_id: int) -> list[Theme]:
-    return list(session.exec(select(Theme).where(Theme.product_id == product_id)).all())
+def _load_product_themes(session: Session, project_id: int) -> list[Theme]:
+    return list(session.exec(select(Theme).where(Theme.project_id == project_id)).all())
 
 
 def _load_epics_for_theme_ids(session: Session, theme_ids: list[int]) -> list[Epic]:
@@ -489,7 +489,7 @@ def _group_stories_by_feature(
 
 def _build_product_structure(
     *,
-    product: Product,
+    project: Project,
     themes: list[Theme],
     epics: list[Epic],
     features: list[Feature],
@@ -506,10 +506,10 @@ def _build_product_structure(
     stories_by_feature = _group_stories_by_feature(stories, feature_ids)
 
     structure: dict[str, Any] = {
-        "product": {
-            "id": product.product_id,
-            "name": product.name,
-            "vision": product.vision,
+        "project": {
+            "id": project.project_id,
+            "name": project.name,
+            "vision": project.vision,
         },
         "themes": [],
     }
@@ -619,7 +619,7 @@ def get_story_details(story_id: int) -> dict[str, Any]:
             "story_points": story.story_points,
             "rank": story.rank,
             "feature_id": story.feature_id,
-            "product_id": story.product_id,
+            "project_id": story.project_id,
             "created_at": str(story.created_at),
             "updated_at": str(story.updated_at),
         }

@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from sqlmodel import Session, select
 
 from agile_sqlmodel import engine
-from models.core import ProductPersona
+from models.core import ProjectPersona
 
 
 def seed_arena_persona() -> None:
@@ -18,9 +18,9 @@ def seed_arena_persona() -> None:
     with Session(engine) as session:
         # Check if persona already exists
         existing = session.exec(
-            select(ProductPersona).where(
-                ProductPersona.product_id == 4,  # noqa: PLR2004
-                ProductPersona.persona_name == "gestor da arena",
+            select(ProjectPersona).where(
+                ProjectPersona.project_id == 4,  # noqa: PLR2004
+                ProjectPersona.persona_name == "gestor da arena",
             )
         ).first()
 
@@ -29,8 +29,8 @@ def seed_arena_persona() -> None:
             return
 
         # Create new persona
-        persona = ProductPersona(
-            product_id=4,
+        persona = ProjectPersona(
+            project_id=4,
             persona_name="gestor da arena",
             is_default=True,
             category="primary_user",

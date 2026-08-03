@@ -22,7 +22,7 @@ class BacklogItem(BaseModel):
         Field(
             min_length=3,
             description=(
-                "action-oriented Product Backlog Item title describing remaining work. "
+                "action-oriented Project Backlog Item title describing remaining work. "
                 "In brownfield contexts this is not the capability name."
             ),
         ),
@@ -84,7 +84,7 @@ class SaveBacklogInput(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    product_id: Annotated[int, Field(description="The product ID.")]
+    project_id: Annotated[int, Field(description="The product ID.")]
     idempotency_key: Annotated[
         str | None,
         Field(

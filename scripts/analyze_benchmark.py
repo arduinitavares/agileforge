@@ -26,7 +26,7 @@ def analyze_benchmark(cases_path: str | Path) -> None:  # noqa: C901
 
     product_spec_counts = collections.defaultdict(int)
     for c in cases:
-        key = f"p{c.get('product_id')}-v{c.get('spec_version_id')}"
+        key = f"p{c.get('project_id')}-v{c.get('spec_version_id')}"
         product_spec_counts[key] += 1
 
     content_hashes = collections.defaultdict(list)

@@ -551,12 +551,12 @@ def _resolve_questions_operation_for_diff(
             ResolvedClarifyingQuestion(
                 question_fingerprint=fingerprint,
                 question_text=source_question_map[fingerprint],
-                po_answer="Resolved by Product Owner refinement artifact.",
+                po_answer="Resolved by Project Owner refinement artifact.",
             )
             for fingerprint in resolved_fingerprints
         ],
         remaining_questions=edited_questions,
-        rationale="Product Owner resolved backlog clarifying questions.",
+        rationale="Project Owner resolved backlog clarifying questions.",
         requested_by="po",
     )
 

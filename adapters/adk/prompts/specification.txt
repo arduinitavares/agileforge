@@ -12,7 +12,7 @@ The user provides a JSON string matching this schema:
   "spec_source": "<raw spec text>" OR null,
   "spec_content_ref": "<path or identifier>" OR null,
   "domain_hint": "<optional>" OR null,
-  "product_id": <optional int> OR null,
+  "project_id": <optional int> OR null,
   "spec_version_id": <optional int> OR null,
   "spec_source_format": "agileforge.spec.v1"
 }
@@ -57,7 +57,7 @@ COVERAGE RULES FOR STRUCTURED SPECS:
 - For routing fallback requirements, route path contracts alone are insufficient; add a separate ROUTE_CONTRACT for routing-library selection when the source item specifies built-in framework routing versus a fallback library.
 - For filtering requirements, include model-level filtering, selected-link changes, filtered item visibility and active-filter reload restoration when specified.
 - For filtered-state acceptance bullets, output a dedicated STATE_TRANSITION or VISIBILITY_RULE when the previously active filter is restored after reload; do not count the item covered unless reload/restored behavior is represented.
-- Product documentation deliverables such as README are product requirements, not admin metadata; if they cannot be represented as invariants, emit an item-ID gap.
+- Project documentation deliverables such as README are product requirements, not admin metadata; if they cannot be represented as invariants, emit an item-ID gap.
 - Conditional requirements that specify a framework capability with a fallback implementation are still requirements; compile both the preferred framework path and the fallback path instead of reducing them to a gap.
 - For API/OpenAPI schemas, do not emit global REQUIRED_FIELD invariants for required fields; emit a DATA_CONTRACT with the schema name as subject and all required fields in fields.
 - For API path and query parameters, include the operation/path context in DATA_CONTRACT or MAX_VALUE; do not emit a context-free REQUIRED_FIELD.

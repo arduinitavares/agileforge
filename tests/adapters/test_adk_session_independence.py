@@ -10,7 +10,7 @@ from google.adk.sessions import DatabaseSessionService
 from sqlmodel import Session
 
 from adapters.adk.recipes import AdkRecipeRegistry
-from models.core import Product
+from models.core import Project
 from utils.runtime_config import (
     ADK_EXECUTION_TRACE_IDENTITY,
     clear_runtime_config_cache,
@@ -55,11 +55,11 @@ def test_deleting_adk_trace_database_does_not_change_domain_position(
     )
     clear_runtime_config_cache()
     with Session(engine) as session:
-        project = Product(name="Trace independent", origin="greenfield")
+        project = Project(name="Trace independent", origin="greenfield")
         session.add(project)
         session.commit()
-        assert project.product_id is not None
-        project_id = project.product_id
+        assert project.project_id is not None
+        project_id = project.project_id
     domain = WorkflowDomain(
         engine=engine,
         graph=ROOT_GRAPH,

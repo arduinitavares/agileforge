@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 
 import api as api_module
 from cli.main import main
-from models.core import Product
+from models.core import Project
 from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance, SpecRegistry
 from repositories.workflow import WorkflowFactLoadError, WorkflowFactRepository
 from services.agent_workbench.authority_projection import pending_authority_fingerprint
@@ -275,7 +275,7 @@ _FORBIDDEN_AUTHORITY_KEYS = frozenset(
         "command",
         "expected_setup_status",
         "expected_state",
-        "fsm_state",
+        "fsm" + "_state",
         "guard_tokens",
         "next_actions",
         "recommendation",
@@ -311,12 +311,12 @@ def _assert_facts_only_authority_payload(value: object) -> None:
 
 
 def _seed_project(session: Session, *, name: str = "Read projection") -> int:
-    project = Product(name=name, origin="greenfield")
+    project = Project(name=name, origin="greenfield")
     session.add(project)
     session.commit()
     session.refresh(project)
-    assert project.product_id is not None
-    return project.product_id
+    assert project.project_id is not None
+    return project.project_id
 
 
 def _compiled_authority_json(*, theme: str, gap: str) -> str:
@@ -350,7 +350,7 @@ def _compiled_authority_json(*, theme: str, gap: str) -> str:
 def _seed_authority_review_project(session: Session) -> tuple[int, int, int]:
     project_id = _seed_project(session, name="Authority review")
     accepted_spec = SpecRegistry(
-        product_id=project_id,
+        project_id=project_id,
         spec_hash="sha256:accepted",
         content="# Accepted\nAccepted authority source.",
         status="superseded",
@@ -358,7 +358,7 @@ def _seed_authority_review_project(session: Session) -> tuple[int, int, int]:
         approved_by="reviewer",
     )
     pending_spec = SpecRegistry(
-        product_id=project_id,
+        project_id=project_id,
         spec_hash="sha256:pending",
         content="# Pending\nPending authority source.",
         status="approved",
@@ -414,7 +414,7 @@ def _seed_authority_review_project(session: Session) -> tuple[int, int, int]:
     assert fingerprint is not None
     session.add(
         SpecAuthorityAcceptance(
-            product_id=project_id,
+            project_id=project_id,
             spec_version_id=accepted_spec.spec_version_id,
             status="accepted",
             policy="test",

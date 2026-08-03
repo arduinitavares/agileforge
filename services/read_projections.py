@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Protocol
 from pydantic import TypeAdapter
 from sqlmodel import Session, col, select
 
-from models.core import Product, Sprint, UserStory
+from models.core import Project, Sprint, UserStory
 from models.events import TaskExecutionLog
 from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance, SpecRegistry
 from models.workflow import WorkflowNodeAttempt, WorkflowNodeAttemptOutcome
@@ -73,7 +73,7 @@ class _ProjectReadContext:
     """One confirmed durable Project identity for a scoped read."""
 
     project_id: int
-    product: Product
+    project: Project
 
 
 @dataclass(frozen=True)
@@ -89,7 +89,7 @@ class _AuthorityReviewProjection(Protocol):
     def project(
         self,
         *,
-        project: Product,
+        project: Project,
         include_spec: str,
     ) -> JsonObject: ...
 
@@ -104,7 +104,7 @@ class DurableAuthorityReviewProjection:
     def project(
         self,
         *,
-        project: Product,
+        project: Project,
         include_spec: str,
     ) -> JsonObject:
         """Return accepted and pending authority facts for operator review."""
@@ -116,7 +116,7 @@ class DurableAuthorityReviewProjection:
                 value=include_spec,
                 allowed=["auto", "full", "summary"],
             )
-        project_id = project.product_id
+        project_id = project.project_id
         if project_id is None:
             return _error(
                 "PROJECT_NOT_FOUND",
@@ -126,7 +126,7 @@ class DurableAuthorityReviewProjection:
             specifications = list(
                 session.exec(
                     select(SpecRegistry)
-                    .where(col(SpecRegistry.product_id) == project_id)
+                    .where(col(SpecRegistry.project_id) == project_id)
                     .order_by(col(SpecRegistry.spec_version_id))
                 ).all()
             )
@@ -138,14 +138,14 @@ class DurableAuthorityReviewProjection:
                         col(CompiledSpecAuthority.spec_version_id)
                         == col(SpecRegistry.spec_version_id),
                     )
-                    .where(col(SpecRegistry.product_id) == project_id)
+                    .where(col(SpecRegistry.project_id) == project_id)
                     .order_by(col(CompiledSpecAuthority.authority_id))
                 ).all()
             )
             decisions = list(
                 session.exec(
                     select(SpecAuthorityAcceptance)
-                    .where(col(SpecAuthorityAcceptance.product_id) == project_id)
+                    .where(col(SpecAuthorityAcceptance.project_id) == project_id)
                     .order_by(
                         col(SpecAuthorityAcceptance.decided_at),
                         col(SpecAuthorityAcceptance.id),
@@ -344,32 +344,32 @@ class DurableReadProjectionService:
     def project_list(self) -> JsonObject:
         """Return durable Project identities and aggregate counts."""
         with Session(self._engine) as session:
-            products = session.exec(
-                select(Product).order_by(col(Product.product_id))
+            projects = session.exec(
+                select(Project).order_by(col(Project.project_id))
             ).all()
             stories = session.exec(select(UserStory)).all()
             sprints = session.exec(select(Sprint)).all()
         items: list[JsonValue] = []
-        for product in products:
-            project_id = product.product_id
+        for project in projects:
+            project_id = project.project_id
             if project_id is None:
                 continue
             items.append(
                 {
                     "id": project_id,
-                    "product_id": project_id,
-                    "name": product.name,
-                    "origin": product.origin,
-                    "description": product.description,
+                    "project_id": project_id,
+                    "name": project.name,
+                    "origin": project.origin,
+                    "description": project.description,
                     "user_stories_count": sum(
                         1
                         for story in stories
-                        if story.product_id == project_id and not story.is_superseded
+                        if story.project_id == project_id and not story.is_superseded
                     ),
                     "sprint_count": sum(
-                        1 for sprint in sprints if sprint.product_id == project_id
+                        1 for sprint in sprints if sprint.project_id == project_id
                     ),
-                    "updated_at": _iso(product.updated_at),
+                    "updated_at": _iso(project.updated_at),
                 }
             )
         return _success({"items": items, "count": len(items)})
@@ -379,31 +379,31 @@ class DurableReadProjectionService:
         context = self._project(project_id)
         if isinstance(context, _ProjectReadFailure):
             return context.error
-        product = context.product
+        project = context.project
         with Session(self._engine) as session:
             stories = session.exec(
-                select(UserStory).where(col(UserStory.product_id) == project_id)
+                select(UserStory).where(col(UserStory.project_id) == project_id)
             ).all()
             sprints = session.exec(
-                select(Sprint).where(col(Sprint.product_id) == project_id)
+                select(Sprint).where(col(Sprint.project_id) == project_id)
             ).all()
         return _success(
             {
                 "id": project_id,
-                "product_id": project_id,
-                "name": product.name,
-                "origin": product.origin,
-                "description": product.description,
-                "vision_present": bool(product.vision),
-                "roadmap_present": bool(product.roadmap),
-                "spec_file_path": product.spec_file_path,
+                "project_id": project_id,
+                "name": project.name,
+                "origin": project.origin,
+                "description": project.description,
+                "vision_present": bool(project.vision),
+                "roadmap_present": bool(project.roadmap),
+                "spec_file_path": project.spec_file_path,
                 "structure_counts": {
                     "user_stories": sum(
                         1 for story in stories if not story.is_superseded
                     ),
                     "sprints": len(sprints),
                 },
-                "updated_at": _iso(product.updated_at),
+                "updated_at": _iso(project.updated_at),
             }
         )
 
@@ -442,7 +442,7 @@ class DurableReadProjectionService:
         if isinstance(project_or_error, _ProjectReadFailure):
             return project_or_error.error
         return self._authority_review.project(
-            project=project_or_error.product,
+            project=project_or_error.project,
             include_spec=include_spec,
         )
 
@@ -534,7 +534,7 @@ class DurableReadProjectionService:
         return _success(
             {
                 "story_id": story_id,
-                "project_id": story.product_id,
+                "project_id": story.project_id,
                 "title": story.title,
                 "description": story.story_description,
                 "acceptance_criteria": story.acceptance_criteria,
@@ -996,8 +996,8 @@ class DurableReadProjectionService:
     def _project(self, project_id: int) -> _ProjectReadContext | _ProjectReadFailure:
         """Establish one Project identity before any project-scoped read."""
         with Session(self._engine) as session:
-            product = session.get(Product, project_id)
-        if product is None:
+            project = session.get(Project, project_id)
+        if project is None:
             return _ProjectReadFailure(
                 error=_error(
                     "PROJECT_NOT_FOUND",
@@ -1005,7 +1005,7 @@ class DurableReadProjectionService:
                     project_id=project_id,
                 )
             )
-        return _ProjectReadContext(project_id=project_id, product=product)
+        return _ProjectReadContext(project_id=project_id, project=project)
 
     @staticmethod
     def _select_sprint(
@@ -1029,7 +1029,7 @@ class DurableReadProjectionService:
             return None
         return {
             "story_id": story_id,
-            "project_id": story.product_id,
+            "project_id": story.project_id,
             "title": story.title,
             "description": story.story_description,
             "acceptance_criteria": story.acceptance_criteria,

@@ -15,7 +15,7 @@ from sqlmodel import Session, select
 
 from agile_sqlmodel import (
     CompiledSpecAuthority,
-    Product,
+    Project,
     SpecAuthorityAcceptance,
     SpecRegistry,
 )
@@ -33,8 +33,8 @@ def _pending_service() -> ModuleType:
     return pending_authority_service
 
 
-def _create_product(session: Session, *, name: str = "Pending Product") -> Product:
-    product = Product(name=name, vision="vision")
+def _create_product(session: Session, *, name: str = "Pending Project") -> Project:
+    product = Project(name=name, vision="vision")
     session.add(product)
     session.commit()
     session.refresh(product)
@@ -134,13 +134,13 @@ def test_ensure_pending_spec_version_links_product_without_compiling(
     """Spec registration should persist project/spec metadata only."""
     service = _pending_service()
     product = _create_product(session)
-    product_id = require_id(product.product_id, "product_id")
+    project_id = require_id(product.project_id, "project_id")
     spec_path = _write_spec(tmp_path)
     compile_calls: list[dict[str, object]] = []
 
     result = service.ensure_pending_spec_version_for_project(
         session=session,
-        product_id=product_id,
+        project_id=project_id,
         spec_path=spec_path,
         approved_by="cli-project-create",
         lease_guard=lambda boundary: boundary != "never-called",
@@ -154,13 +154,13 @@ def test_ensure_pending_spec_version_links_product_without_compiling(
     assert compile_calls == []
 
     session.expire_all()
-    saved_product = session.get(Product, product_id)
+    saved_product = session.get(Project, project_id)
     assert saved_product is not None
     assert saved_product.spec_file_path == str(spec_path.resolve())
     assert saved_product.spec_loaded_at is not None
 
     specs = session.exec(
-        select(SpecRegistry).where(SpecRegistry.product_id == product_id)
+        select(SpecRegistry).where(SpecRegistry.project_id == project_id)
     ).all()
     assert len(specs) == 1
     assert specs[0].status == "approved"
@@ -179,12 +179,12 @@ def test_ensure_pending_spec_version_reuses_same_hash_registry_row(
     """Re-registering the same spec hash should reuse the latest registry row."""
     service = _pending_service()
     product = _create_product(session)
-    product_id = require_id(product.product_id, "product_id")
+    project_id = require_id(product.project_id, "project_id")
     spec_path = _write_spec(tmp_path)
 
     first = service.ensure_pending_spec_version_for_project(
         session=session,
-        product_id=product_id,
+        project_id=project_id,
         spec_path=spec_path,
         approved_by="cli-project-create",
         lease_guard=lambda _boundary: True,
@@ -192,7 +192,7 @@ def test_ensure_pending_spec_version_reuses_same_hash_registry_row(
     )
     second = service.ensure_pending_spec_version_for_project(
         session=session,
-        product_id=product_id,
+        project_id=project_id,
         spec_path=spec_path,
         approved_by="cli-project-create",
         lease_guard=lambda _boundary: True,
@@ -203,7 +203,7 @@ def test_ensure_pending_spec_version_reuses_same_hash_registry_row(
     assert second.ok is True
     assert second.spec_version_id == first.spec_version_id
     specs = session.exec(
-        select(SpecRegistry).where(SpecRegistry.product_id == product_id)
+        select(SpecRegistry).where(SpecRegistry.project_id == project_id)
     ).all()
     assert len(specs) == 1
 
@@ -214,7 +214,7 @@ def test_compile_pending_authority_creates_artifact_without_acceptance(
     """Pending setup should compile authority without accepting it."""
     service = _pending_service()
     product = _create_product(session)
-    product_id = require_id(product.product_id, "product_id")
+    project_id = require_id(product.project_id, "project_id")
     spec_path = _write_spec(tmp_path)
 
     def compile_authority(
@@ -241,7 +241,7 @@ def test_compile_pending_authority_creates_artifact_without_acceptance(
 
     result = service.compile_pending_authority_for_project(
         session=session,
-        product_id=product_id,
+        project_id=project_id,
         spec_path=spec_path,
         approved_by="cli-project-create",
         compile_authority=compile_authority,
@@ -254,13 +254,13 @@ def test_compile_pending_authority_creates_artifact_without_acceptance(
     assert result.authority_id is not None
 
     session.expire_all()
-    saved_product = session.get(Product, product_id)
+    saved_product = session.get(Project, project_id)
     assert saved_product is not None
     assert saved_product.spec_file_path == str(spec_path.resolve())
     assert saved_product.spec_loaded_at is not None
 
     specs = session.exec(
-        select(SpecRegistry).where(SpecRegistry.product_id == product_id)
+        select(SpecRegistry).where(SpecRegistry.project_id == project_id)
     ).all()
     assert len(specs) == 1
     assert specs[0].status == "approved"
@@ -278,7 +278,7 @@ def test_pending_authority_returns_exact_compiler_provided_id(
     """Pending compilation never replaces the compiler id with a version query."""
     service = _pending_service()
     product = _create_product(session)
-    product_id = require_id(product.product_id, "product_id")
+    project_id = require_id(product.project_id, "project_id")
     spec_path = _write_spec(tmp_path)
     expected_authority_id: int | None = None
 
@@ -300,7 +300,7 @@ def test_pending_authority_returns_exact_compiler_provided_id(
 
     result = service.compile_pending_authority_for_project(
         session=session,
-        product_id=product_id,
+        project_id=project_id,
         spec_path=spec_path,
         approved_by="cli-project-create",
         compile_authority=compile_authority,
@@ -321,7 +321,7 @@ def test_compile_pending_authority_for_project_rejects_missing_spec_file(
 
     result = service.compile_pending_authority_for_project(
         session=session,
-        product_id=require_id(product.product_id, "product_id"),
+        project_id=require_id(product.project_id, "project_id"),
         spec_path=tmp_path / "missing.md",
         approved_by="cli-project-create",
         compile_authority=lambda **_: {"success": True},
@@ -344,7 +344,7 @@ def test_compile_pending_authority_for_project_rejects_non_utf8_spec_file(
 
     result = service.compile_pending_authority_for_project(
         session=session,
-        product_id=require_id(product.product_id, "product_id"),
+        project_id=require_id(product.project_id, "project_id"),
         spec_path=spec_path,
         approved_by="cli-project-create",
         compile_authority=lambda **_: {"success": True},
@@ -366,7 +366,7 @@ def test_compile_pending_authority_for_project_maps_compiler_failure(
 
     result = service.compile_pending_authority_for_project(
         session=session,
-        product_id=require_id(product.product_id, "product_id"),
+        project_id=require_id(product.project_id, "project_id"),
         spec_path=spec_path,
         approved_by="cli-project-create",
         compile_authority=lambda **_: {"success": False, "error": "boom"},
@@ -389,14 +389,14 @@ def test_compile_pending_authority_preserves_invalid_cached_artifact_failure(
 
     service = _pending_service()
     product = _create_product(session)
-    product_id = require_id(product.product_id, "product_id")
+    project_id = require_id(product.project_id, "project_id")
     product.compiled_authority_json = '{"preserved":true}'
     session.add(product)
     spec_path = _write_spec(tmp_path)
     normalized_content = spec_path.read_text(encoding="utf-8")
     spec_hash = hashlib.sha256(normalized_content.encode("utf-8")).hexdigest()
     spec = SpecRegistry(
-        product_id=product_id,
+        project_id=project_id,
         spec_hash=spec_hash,
         content=normalized_content,
         content_ref=str(spec_path.resolve()),
@@ -427,7 +427,7 @@ def test_compile_pending_authority_preserves_invalid_cached_artifact_failure(
 
     result = service.compile_pending_authority_for_project(
         session=session,
-        product_id=product_id,
+        project_id=project_id,
         spec_path=spec_path,
         approved_by="cli-project-create",
         compile_authority=lambda **kwargs: (
@@ -445,7 +445,7 @@ def test_compile_pending_authority_preserves_invalid_cached_artifact_failure(
     assert result.ok is False
     assert result.error_code == "COMPILED_AUTHORITY_INVALID"
     assert result.details == {
-        "project_id": product_id,
+        "project_id": project_id,
         "spec_version_id": spec_version_id,
         "authority_id": authority_id,
         "load_status": "invalid_json",
@@ -454,7 +454,7 @@ def test_compile_pending_authority_preserves_invalid_cached_artifact_failure(
     }
     assert result.remediation == [
         "Run agileforge authority regenerate "
-        f"--project-id {product_id} "
+        f"--project-id {project_id} "
         f"--spec-version-id {spec_version_id} "
         "--idempotency-key <new-key>."
     ]
@@ -474,7 +474,7 @@ def test_compile_pending_authority_preserves_compiler_recovery_boundary(
 
     result = service.compile_pending_authority_for_project(
         session=session,
-        product_id=require_id(product.product_id, "product_id"),
+        project_id=require_id(product.project_id, "project_id"),
         spec_path=spec_path,
         approved_by="cli-project-create",
         compile_authority=lambda **_: {
@@ -499,13 +499,13 @@ def test_compile_pending_authority_for_project_removes_bad_acceptance_write(
     """A compiler seam must not be able to leave accepted authority behind."""
     service = _pending_service()
     product = _create_product(session)
-    product_id = require_id(product.product_id, "product_id")
+    project_id = require_id(product.project_id, "project_id")
     spec_path = _write_spec(tmp_path)
 
     def bad_compiler(spec_version_id: int, **_: object) -> dict[str, object]:
         authority = _persist_authority(session, spec_version_id=spec_version_id)
         acceptance = SpecAuthorityAcceptance(
-            product_id=product_id,
+            project_id=project_id,
             spec_version_id=spec_version_id,
             status="accepted",
             policy="manual",
@@ -527,7 +527,7 @@ def test_compile_pending_authority_for_project_removes_bad_acceptance_write(
 
     result = service.compile_pending_authority_for_project(
         session=session,
-        product_id=product_id,
+        project_id=project_id,
         spec_path=spec_path,
         approved_by="cli-project-create",
         compile_authority=bad_compiler,
@@ -542,7 +542,7 @@ def test_compile_pending_authority_for_project_removes_bad_acceptance_write(
     with Session(engine) as fresh_session:
         remaining = fresh_session.exec(
             select(SpecAuthorityAcceptance).where(
-                SpecAuthorityAcceptance.product_id == product_id,
+                SpecAuthorityAcceptance.project_id == project_id,
                 SpecAuthorityAcceptance.spec_version_id == result.spec_version_id,
             )
         ).all()
@@ -555,12 +555,12 @@ def test_compile_pending_authority_preserves_existing_acceptance_on_reused_spec(
     """Cleanup must not delete acceptances that existed before compilation."""
     service = _pending_service()
     product = _create_product(session)
-    product_id = require_id(product.product_id, "product_id")
+    project_id = require_id(product.project_id, "project_id")
     spec_path = _write_spec(tmp_path)
     spec_content = spec_path.read_text(encoding="utf-8")
 
     spec = SpecRegistry(
-        product_id=product_id,
+        project_id=project_id,
         spec_hash=hashlib.sha256(spec_content.encode("utf-8")).hexdigest(),
         content=spec_content,
         content_ref=str(spec_path.resolve()),
@@ -575,7 +575,7 @@ def test_compile_pending_authority_preserves_existing_acceptance_on_reused_spec(
     spec_version_id = require_id(spec.spec_version_id, "spec_version_id")
     existing_authority = _persist_authority(session, spec_version_id=spec_version_id)
     existing_acceptance = SpecAuthorityAcceptance(
-        product_id=product_id,
+        project_id=project_id,
         spec_version_id=spec_version_id,
         status="accepted",
         policy="manual",
@@ -596,7 +596,7 @@ def test_compile_pending_authority_preserves_existing_acceptance_on_reused_spec(
 
     result = service.compile_pending_authority_for_project(
         session=session,
-        product_id=product_id,
+        project_id=project_id,
         spec_path=spec_path,
         approved_by="cli-project-create",
         compile_authority=lambda **_: {
@@ -621,7 +621,7 @@ def test_compile_pending_authority_rejects_uncommitted_bad_acceptance(
     """Bad acceptance writes in the active transaction should still fail setup."""
     service = _pending_service()
     product = _create_product(session)
-    product_id = require_id(product.product_id, "product_id")
+    project_id = require_id(product.project_id, "project_id")
     spec_path = _write_spec(tmp_path)
 
     def bad_compiler(spec_version_id: int, **_: object) -> dict[str, object]:
@@ -640,7 +640,7 @@ def test_compile_pending_authority_rejects_uncommitted_bad_acceptance(
         session.add(authority)
         session.flush()
         acceptance = SpecAuthorityAcceptance(
-            product_id=product_id,
+            project_id=project_id,
             spec_version_id=spec_version_id,
             status="accepted",
             policy="manual",
@@ -662,7 +662,7 @@ def test_compile_pending_authority_rejects_uncommitted_bad_acceptance(
 
     result = service.compile_pending_authority_for_project(
         session=session,
-        product_id=product_id,
+        project_id=project_id,
         spec_path=spec_path,
         approved_by="cli-project-create",
         compile_authority=bad_compiler,
@@ -677,7 +677,7 @@ def test_compile_pending_authority_rejects_uncommitted_bad_acceptance(
     with Session(engine) as fresh_session:
         remaining = fresh_session.exec(
             select(SpecAuthorityAcceptance).where(
-                SpecAuthorityAcceptance.product_id == product_id,
+                SpecAuthorityAcceptance.project_id == project_id,
                 SpecAuthorityAcceptance.spec_version_id == result.spec_version_id,
             )
         ).all()
@@ -690,13 +690,13 @@ def test_compile_pending_authority_cleans_bad_acceptance_on_compiler_failure(
     """Compiler failures must not leave canonical acceptance rows behind."""
     service = _pending_service()
     product = _create_product(session)
-    product_id = require_id(product.product_id, "product_id")
+    project_id = require_id(product.project_id, "project_id")
     spec_path = _write_spec(tmp_path)
 
     def bad_compiler(spec_version_id: int, **_: object) -> dict[str, object]:
         authority = _persist_authority(session, spec_version_id=spec_version_id)
         acceptance = SpecAuthorityAcceptance(
-            product_id=product_id,
+            project_id=project_id,
             spec_version_id=spec_version_id,
             status="accepted",
             policy="manual",
@@ -713,7 +713,7 @@ def test_compile_pending_authority_cleans_bad_acceptance_on_compiler_failure(
 
     result = service.compile_pending_authority_for_project(
         session=session,
-        product_id=product_id,
+        project_id=project_id,
         spec_path=spec_path,
         approved_by="cli-project-create",
         compile_authority=bad_compiler,
@@ -728,7 +728,7 @@ def test_compile_pending_authority_cleans_bad_acceptance_on_compiler_failure(
     with Session(engine) as fresh_session:
         remaining = fresh_session.exec(
             select(SpecAuthorityAcceptance).where(
-                SpecAuthorityAcceptance.product_id == product_id,
+                SpecAuthorityAcceptance.project_id == project_id,
                 SpecAuthorityAcceptance.spec_version_id == result.spec_version_id,
             )
         ).all()
@@ -741,13 +741,13 @@ def test_compile_pending_authority_cleans_bad_acceptance_on_compiler_exception(
     """Compiler exceptions must not leave canonical acceptance rows behind."""
     service = _pending_service()
     product = _create_product(session)
-    product_id = require_id(product.product_id, "product_id")
+    project_id = require_id(product.project_id, "project_id")
     spec_path = _write_spec(tmp_path)
 
     def bad_compiler(spec_version_id: int, **_: object) -> dict[str, object]:
         authority = _persist_authority(session, spec_version_id=spec_version_id)
         acceptance = SpecAuthorityAcceptance(
-            product_id=product_id,
+            project_id=project_id,
             spec_version_id=spec_version_id,
             status="accepted",
             policy="manual",
@@ -765,7 +765,7 @@ def test_compile_pending_authority_cleans_bad_acceptance_on_compiler_exception(
 
     result = service.compile_pending_authority_for_project(
         session=session,
-        product_id=product_id,
+        project_id=project_id,
         spec_path=spec_path,
         approved_by="cli-project-create",
         compile_authority=bad_compiler,
@@ -782,7 +782,7 @@ def test_compile_pending_authority_cleans_bad_acceptance_on_compiler_exception(
     with Session(engine) as fresh_session:
         remaining = fresh_session.exec(
             select(SpecAuthorityAcceptance).where(
-                SpecAuthorityAcceptance.product_id == product_id,
+                SpecAuthorityAcceptance.project_id == project_id,
                 SpecAuthorityAcceptance.spec_version_id == result.spec_version_id,
             )
         ).all()
@@ -808,12 +808,12 @@ def test_compile_pending_authority_lease_loss_prevents_durable_write(  # noqa: P
     """A lost lease should stop the guarded durable write."""
     service = _pending_service()
     product = _create_product(session)
-    product_id = require_id(product.product_id, "product_id")
+    project_id = require_id(product.project_id, "project_id")
     spec_path = _write_spec(tmp_path)
 
     result = service.compile_pending_authority_for_project(
         session=session,
-        product_id=product_id,
+        project_id=project_id,
         spec_path=spec_path,
         approved_by="cli-project-create",
         compile_authority=lambda **_: {"success": True},
@@ -825,12 +825,12 @@ def test_compile_pending_authority_lease_loss_prevents_durable_write(  # noqa: P
     assert result.error_code == "MUTATION_IN_PROGRESS"
 
     session.expire_all()
-    saved_product = session.get(Product, product_id)
+    saved_product = session.get(Project, project_id)
     assert saved_product is not None
     assert (saved_product.spec_file_path is not None) is expect_product_link
 
     specs = session.exec(
-        select(SpecRegistry).where(SpecRegistry.product_id == product_id)
+        select(SpecRegistry).where(SpecRegistry.project_id == project_id)
     ).all()
     assert bool(specs) is expect_spec
     assert any(spec.status == "approved" for spec in specs) is expect_approved
@@ -850,7 +850,7 @@ def test_compile_pending_authority_for_project_record_progress_failure_after_wri
     """Progress-record failures should report recovery with the boundary name."""
     service = _pending_service()
     product = _create_product(session)
-    product_id = require_id(product.product_id, "product_id")
+    project_id = require_id(product.project_id, "project_id")
     spec_path = _write_spec(tmp_path)
 
     def record_progress(boundary: str) -> bool:
@@ -863,7 +863,7 @@ def test_compile_pending_authority_for_project_record_progress_failure_after_wri
 
     result = service.compile_pending_authority_for_project(
         session=session,
-        product_id=product_id,
+        project_id=project_id,
         spec_path=spec_path,
         approved_by="cli-project-create",
         compile_authority=lambda **_: {"success": True},
@@ -877,6 +877,6 @@ def test_compile_pending_authority_for_project_record_progress_failure_after_wri
     assert failed_boundary in result.error
 
     session.expire_all()
-    saved_product = session.get(Product, product_id)
+    saved_product = session.get(Project, project_id)
     assert saved_product is not None
     assert saved_product.spec_file_path == str(spec_path.resolve())

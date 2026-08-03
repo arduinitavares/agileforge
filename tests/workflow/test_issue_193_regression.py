@@ -225,7 +225,7 @@ def _accepted_replacement(
     with Session(engine) as session:
         old_acceptance = session.exec(
             select(SpecAuthorityAcceptance).where(
-                col(SpecAuthorityAcceptance.product_id) == project_id,
+                col(SpecAuthorityAcceptance.project_id) == project_id,
                 col(SpecAuthorityAcceptance.status) == "accepted",
             )
         ).one()
@@ -832,7 +832,7 @@ def test_unresolved_dependency_or_readiness_blocks_scope_reconciliation(
                 session.add(story)
             session.add(
                 UserStoryDependency(
-                    product_id=context.project_id,
+                    project_id=context.project_id,
                     dependent_story_id=dependent_story_id,
                     prerequisite_story_id=prerequisite_story_id,
                     status="proposed",
@@ -843,7 +843,7 @@ def test_unresolved_dependency_or_readiness_blocks_scope_reconciliation(
             )
         else:
             story = session.exec(
-                select(UserStory).where(col(UserStory.product_id) == context.project_id)
+                select(UserStory).where(col(UserStory.project_id) == context.project_id)
             ).one()
             story.story_points = None
             session.add(story)
@@ -890,7 +890,7 @@ def test_new_unresolved_readiness_after_reconciliation_remains_visible(
 
     with Session(engine) as session:
         story = session.exec(
-            select(UserStory).where(col(UserStory.product_id) == context.project_id)
+            select(UserStory).where(col(UserStory.project_id) == context.project_id)
         ).one()
         story.story_points = None
         session.add(story)
@@ -1091,7 +1091,7 @@ def test_unresolved_readiness_suppresses_scope_start_until_repaired(
 
     with Session(engine) as session:
         story = session.exec(
-            select(UserStory).where(col(UserStory.product_id) == context.project_id)
+            select(UserStory).where(col(UserStory.project_id) == context.project_id)
         ).one()
         assert story.story_id is not None
         story_id = story.story_id
@@ -1291,7 +1291,7 @@ def test_issue_193_old_extension_actions_are_stale_after_completed_run(
     with Session(engine) as session:
         before_specs = len(
             session.exec(
-                select(SpecRegistry).where(col(SpecRegistry.product_id) == project_id)
+                select(SpecRegistry).where(col(SpecRegistry.project_id) == project_id)
             ).all()
         )
         before_runs = len(
@@ -1341,7 +1341,7 @@ def test_issue_193_old_extension_actions_are_stale_after_completed_run(
             len(
                 session.exec(
                     select(SpecRegistry).where(
-                        col(SpecRegistry.product_id) == project_id
+                        col(SpecRegistry.project_id) == project_id
                     )
                 ).all()
             )

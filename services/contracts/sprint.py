@@ -13,7 +13,7 @@ class SaveSprintPlanInput(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    product_id: int = Field(description="Product ID for the sprint.")
+    project_id: int = Field(description="Project ID for the sprint.")
     team_id: int | None = Field(
         default=None,
         description="Team ID owning the sprint. Required if team_name is not provided.",

@@ -132,7 +132,7 @@ def test_compiler_instructions_require_accepted_must_coverage() -> None:
         instructions
     )
     assert "previously active filter is restored after reload" in instructions
-    assert "Product documentation deliverables such as README" in instructions
+    assert "Project documentation deliverables such as README" in instructions
     assert "framework capability with a fallback implementation" in instructions
     assert "Run a final accepted MUST/MUST_NOT coverage audit" in instructions
     assert "Do not leave gaps empty" in instructions
@@ -180,7 +180,7 @@ class TestSpecAuthorityCompilerInput:
                 spec_source="raw text",
                 spec_content_ref="specs/spec.md",
                 domain_hint=None,
-                product_id=None,
+                project_id=None,
                 spec_version_id=None,
             )
 
@@ -189,7 +189,7 @@ class TestSpecAuthorityCompilerInput:
                 spec_source=None,
                 spec_content_ref=None,
                 domain_hint=None,
-                product_id=None,
+                project_id=None,
                 spec_version_id=None,
             )
 
@@ -199,7 +199,7 @@ class TestSpecAuthorityCompilerInput:
             spec_source="Raw spec text",
             spec_content_ref=None,
             domain_hint=None,
-            product_id=None,
+            project_id=None,
             spec_version_id=None,
         )
         assert payload.spec_source == "Raw spec text"
@@ -211,7 +211,7 @@ class TestSpecAuthorityCompilerInput:
             spec_source="The payload must include user_id.",
             spec_content_ref=None,
             domain_hint=None,
-            product_id=None,
+            project_id=None,
             spec_version_id=None,
             spec_source_format="agileforge.spec.v1",
         )
@@ -227,7 +227,7 @@ class TestSpecAuthorityCompilerInput:
                     "spec_source": "Raw spec text",
                     "spec_content_ref": None,
                     "domain_hint": None,
-                    "product_id": None,
+                    "project_id": None,
                     "spec_version_id": None,
                     "spec_source_format": "not-a-real-format",
                 }
@@ -239,7 +239,7 @@ class TestSpecAuthorityCompilerInput:
                     "spec_source": "Raw spec text",
                     "spec_content_ref": None,
                     "domain_hint": None,
-                    "product_id": None,
+                    "project_id": None,
                     "spec_version_id": None,
                     "spec_source_format": "agileforge.spec_legacy_markdown.v1",
                 }
@@ -253,7 +253,7 @@ class TestSpecAuthorityCompilerInput:
                     "spec_source": "Raw spec text",
                     "spec_content_ref": None,
                     "domain_hint": None,
-                    "product_id": None,
+                    "project_id": None,
                     "spec_version_id": None,
                     "candidate_manifest": [],
                 }
@@ -265,7 +265,7 @@ class TestSpecAuthorityCompilerInput:
             spec_source=None,
             spec_content_ref="specs/spec.md",
             domain_hint="payments",
-            product_id=1,
+            project_id=1,
             spec_version_id=10,
         )
         assert payload.spec_content_ref == "specs/spec.md"
@@ -599,7 +599,7 @@ class TestSpecAuthorityCompilerAgentIntegration:
             spec_source=input_sentence,
             spec_content_ref=None,
             domain_hint=None,
-            product_id=None,
+            project_id=None,
             spec_version_id=None,
         )
 

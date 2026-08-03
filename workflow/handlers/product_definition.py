@@ -74,7 +74,7 @@ def _accepted_authority(
             == col(SpecRegistry.spec_version_id),
         )
         .where(
-            col(SpecRegistry.product_id) == project_id,
+            col(SpecRegistry.project_id) == project_id,
             col(SpecRegistry.status) == "approved",
             col(CompiledSpecAuthority.authority_id) == authority_id,
         )
@@ -86,7 +86,7 @@ def _accepted_authority(
         return None
     acceptance = session.exec(
         select(SpecAuthorityAcceptance).where(
-            col(SpecAuthorityAcceptance.product_id) == project_id,
+            col(SpecAuthorityAcceptance.project_id) == project_id,
             col(SpecAuthorityAcceptance.pending_authority_id) == authority_id,
             col(SpecAuthorityAcceptance.authority_fingerprint) == authority_fingerprint,
             col(SpecAuthorityAcceptance.status) == "accepted",

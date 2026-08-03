@@ -183,7 +183,7 @@ PreviewSpecAuthorityInput = _service_PreviewSpecAuthorityInput
 class UpdateSpecAndCompileAuthorityToolInput(BaseModel):
     """ADK-safe wrapper schema for update+compile tool calls."""
 
-    product_id: int = Field(description="Product ID that owns the specification.")
+    project_id: int = Field(description="Project ID that owns the specification.")
     spec_content: Optional[str] = Field(  # noqa: UP045
         default=None,
         description="Raw specification content to persist and compile.",
@@ -274,21 +274,21 @@ async def _invoke_spec_authority_compiler_async(
 def _invoke_spec_authority_compiler(
     spec_content: str,
     content_ref: str | None,
-    product_id: int | None,
+    project_id: int | None,
     spec_version_id: int | None,
 ) -> str:
     """Compatibility shim over the compiler-service runtime invoker."""
     return _service_invoke_spec_authority_compiler(
         spec_content=spec_content,
         content_ref=content_ref,
-        product_id=product_id,
+        project_id=project_id,
         spec_version_id=spec_version_id,
     )
 
 
 def _compiler_failure_result(  # noqa: PLR0913
     *,
-    product_id: int | None,
+    project_id: int | None,
     spec_version_id: int | None,
     content_ref: str | None,
     failure_stage: str,
@@ -300,7 +300,7 @@ def _compiler_failure_result(  # noqa: PLR0913
 ) -> dict[str, Any]:
     """Compatibility shim over the compiler-service failure result helper."""
     return _service_compiler_failure_result(
-        product_id=product_id,
+        project_id=project_id,
         spec_version_id=spec_version_id,
         content_ref=content_ref,
         failure_stage=failure_stage,
@@ -445,7 +445,7 @@ else:
 
 
 def ensure_accepted_spec_authority(
-    product_id: int,
+    project_id: int,
     *,
     spec_content: str | None = None,
     content_ref: str | None = None,
@@ -453,13 +453,13 @@ def ensure_accepted_spec_authority(
     tool_context: ToolContext | None = None,
 ) -> int:
     """
-    Ensure an accepted spec authority exists for the product.
+    Ensure an accepted spec authority exists for the project.
 
-    This is the orchestrator-level gate that ensures story generation has a valid,
+    This is the workflow-level gate that ensures story generation has a valid,
     accepted spec authority to validate against.
 
     Behavior:
-    1. If an accepted spec authority already exists for the product, return
+    1. If an accepted spec authority already exists for the project, return
        its `spec_version_id`.
     2. Otherwise, call `update_spec_and_compile_authority()` to create a pending
        exact candidate for explicit review.
@@ -467,7 +467,7 @@ def ensure_accepted_spec_authority(
        the caller stops for review and records a guarded decision.
 
     Args:
-        product_id: The product ID to check/create authority for.
+        project_id: The project ID to check/create authority for.
         spec_content: Raw specification content (text or markdown).
         content_ref: Path or reference to specification content.
         recompile: Force recompile even if authority cache exists.
@@ -482,7 +482,7 @@ def ensure_accepted_spec_authority(
             not accepted.
     """
     return _service_ensure_accepted_spec_authority(
-        product_id=product_id,
+        project_id=project_id,
         spec_content=spec_content,
         content_ref=content_ref,
         recompile=recompile,
@@ -620,13 +620,13 @@ def validate_story_with_spec_authority(
 def _extract_spec_authority_llm(
     spec_content: str,
     content_ref: str | None,
-    product_id: int,
+    project_id: int,
     spec_version_id: int,
 ) -> SpecAuthorityCompilationSuccess:
     """Compatibility shim over the compiler-service extraction helper."""
     return _service_extract_spec_authority_llm(
         spec_content=spec_content,
         content_ref=content_ref,
-        product_id=product_id,
+        project_id=project_id,
         spec_version_id=spec_version_id,
     )

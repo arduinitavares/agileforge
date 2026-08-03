@@ -14,7 +14,7 @@ from typing import Any, Protocol
 
 from sqlmodel import Session, select
 
-from models.core import Product
+from models.core import Project
 from models.specs import SpecAuthorityAcceptance, SpecRegistry
 from services.specs.authority_selection import compiled_authority_by_id
 from services.specs.profile_content import (
@@ -27,7 +27,7 @@ _MAX_SPEC_SIZE_BYTES = _MAX_SPEC_SIZE_KB * 1024
 _PENDING_APPROVAL_NOTES = (
     "Required compiler precondition for pending authority generation"
 )
-_SPEC_PRODUCT_ID: Any = SpecRegistry.product_id
+_SPEC_PRODUCT_ID: Any = SpecRegistry.project_id
 _SPEC_VERSION_ID: Any = SpecRegistry.spec_version_id
 
 
@@ -51,7 +51,7 @@ class PendingAuthorityResult:
     """Result for pending authority compilation."""
 
     ok: bool
-    product_id: int
+    project_id: int
     spec_path: str
     error_code: str | None = None
     spec_hash: str | None = None
@@ -74,7 +74,7 @@ class PendingAuthorityResult:
 def _result(  # noqa: PLR0913
     *,
     ok: bool,
-    product_id: int,
+    project_id: int,
     spec_path: Path | str,
     error_code: str | None = None,
     spec_hash: str | None = None,
@@ -96,7 +96,7 @@ def _result(  # noqa: PLR0913
     """Build a pending authority result."""
     return PendingAuthorityResult(
         ok=ok,
-        product_id=product_id,
+        project_id=project_id,
         spec_path=str(spec_path),
         error_code=error_code,
         spec_hash=spec_hash,
@@ -118,12 +118,12 @@ def _result(  # noqa: PLR0913
 
 
 def _lease_lost(
-    *, product_id: int, spec_path: Path, spec_hash: str | None, boundary: str
+    *, project_id: int, spec_path: Path, spec_hash: str | None, boundary: str
 ) -> PendingAuthorityResult:
     """Return the canonical pending-authority lease-loss result."""
     return _result(
         ok=False,
-        product_id=product_id,
+        project_id=project_id,
         spec_path=spec_path,
         error_code="MUTATION_IN_PROGRESS",
         spec_hash=spec_hash,
@@ -134,7 +134,7 @@ def _lease_lost(
 def _record_progress_or_error(  # noqa: PLR0913
     *,
     record_progress: Callable[[str], bool],
-    product_id: int,
+    project_id: int,
     spec_path: Path,
     spec_hash: str,
     spec_version_id: int | None,
@@ -146,7 +146,7 @@ def _record_progress_or_error(  # noqa: PLR0913
     except Exception as exc:  # noqa: BLE001
         return _result(
             ok=False,
-            product_id=product_id,
+            project_id=project_id,
             spec_path=spec_path,
             error_code="MUTATION_RECOVERY_REQUIRED",
             spec_hash=spec_hash,
@@ -156,7 +156,7 @@ def _record_progress_or_error(  # noqa: PLR0913
     if progress_recorded is False:
         return _result(
             ok=False,
-            product_id=product_id,
+            project_id=project_id,
             spec_path=spec_path,
             error_code="MUTATION_RECOVERY_REQUIRED",
             spec_hash=spec_hash,
@@ -174,7 +174,7 @@ def _load_spec_file(
     if not resolved_path.exists():
         return _result(
             ok=False,
-            product_id=0,
+            project_id=0,
             spec_path=resolved_path,
             error_code="SPEC_FILE_NOT_FOUND",
             error=f"Specification file not found: {resolved_path}",
@@ -182,7 +182,7 @@ def _load_spec_file(
     if resolved_path.stat().st_size > _MAX_SPEC_SIZE_BYTES:
         return _result(
             ok=False,
-            product_id=0,
+            project_id=0,
             spec_path=resolved_path,
             error_code="SPEC_FILE_INVALID",
             error=f"Specification file exceeds {_MAX_SPEC_SIZE_KB}KB",
@@ -192,7 +192,7 @@ def _load_spec_file(
     except (OSError, UnicodeDecodeError) as exc:
         return _result(
             ok=False,
-            product_id=0,
+            project_id=0,
             spec_path=resolved_path,
             error_code="SPEC_FILE_INVALID",
             error=f"Failed to read specification file: {exc}",
@@ -202,12 +202,12 @@ def _load_spec_file(
 
 
 def _latest_spec_for_product(
-    session: Session, *, product_id: int
+    session: Session, *, project_id: int
 ) -> SpecRegistry | None:
-    """Return the latest spec registry row for the product."""
+    """Return the latest spec registry row for the project."""
     return session.exec(
         select(SpecRegistry)
-        .where(_SPEC_PRODUCT_ID == product_id)
+        .where(_SPEC_PRODUCT_ID == project_id)
         .order_by(_SPEC_VERSION_ID.desc())
     ).first()
 
@@ -215,17 +215,17 @@ def _latest_spec_for_product(
 def _guarded_spec_version_for_product(
     session: Session,
     *,
-    product_id: int,
+    project_id: int,
     spec_path: Path,
     expected_spec_version_id: int,
     expected_spec_hash: str,
 ) -> PendingAuthorityResult:
     """Return the exact spec version guarded by the compile command."""
     spec_version = session.get(SpecRegistry, expected_spec_version_id)
-    if spec_version is None or spec_version.product_id != product_id:
+    if spec_version is None or spec_version.project_id != project_id:
         return _result(
             ok=False,
-            product_id=product_id,
+            project_id=project_id,
             spec_path=spec_path,
             error_code="STALE_SPEC_VERSION",
             spec_hash=expected_spec_hash,
@@ -235,7 +235,7 @@ def _guarded_spec_version_for_product(
     if spec_version.spec_hash != expected_spec_hash:
         return _result(
             ok=False,
-            product_id=product_id,
+            project_id=project_id,
             spec_path=spec_path,
             error_code="STALE_SPEC_HASH",
             spec_hash=spec_version.spec_hash,
@@ -244,7 +244,7 @@ def _guarded_spec_version_for_product(
         )
     return _result(
         ok=True,
-        product_id=product_id,
+        project_id=project_id,
         spec_path=spec_version.content_ref or spec_path,
         spec_hash=spec_version.spec_hash,
         spec_version_id=expected_spec_version_id,
@@ -254,7 +254,7 @@ def _guarded_spec_version_for_product(
 
 def _normalize_compiler_failure(
     *,
-    product_id: int,
+    project_id: int,
     spec_path: Path,
     spec_hash: str,
     spec_version_id: int,
@@ -268,7 +268,7 @@ def _normalize_compiler_failure(
     }:
         return _result(
             ok=False,
-            product_id=product_id,
+            project_id=project_id,
             spec_path=spec_path,
             error_code=str(error_code),
             spec_hash=spec_hash,
@@ -284,7 +284,7 @@ def _normalize_compiler_failure(
             error = f"{error}:{boundary}"
         return _result(
             ok=False,
-            product_id=product_id,
+            project_id=project_id,
             spec_path=spec_path,
             error_code=str(error_code),
             spec_hash=spec_hash,
@@ -293,7 +293,7 @@ def _normalize_compiler_failure(
         )
     return _result(
         ok=False,
-        product_id=product_id,
+        project_id=project_id,
         spec_path=spec_path,
         error_code="SPEC_COMPILE_FAILED",
         spec_hash=spec_hash,
@@ -312,14 +312,14 @@ def _normalize_compiler_failure(
 def _cleanup_bad_acceptance(
     session: Session,
     *,
-    product_id: int,
+    project_id: int,
     spec_version_id: int,
     existing_acceptance_ids: set[int],
 ) -> bool:
     """Delete matching acceptance rows left by an invalid compiler seam."""
     rows_before_rollback = session.exec(
         select(SpecAuthorityAcceptance).where(
-            SpecAuthorityAcceptance.product_id == product_id,
+            SpecAuthorityAcceptance.project_id == project_id,
             SpecAuthorityAcceptance.spec_version_id == spec_version_id,
         )
     ).all()
@@ -330,7 +330,7 @@ def _cleanup_bad_acceptance(
     session.expire_all()
     rows_after_rollback = session.exec(
         select(SpecAuthorityAcceptance).where(
-            SpecAuthorityAcceptance.product_id == product_id,
+            SpecAuthorityAcceptance.project_id == project_id,
             SpecAuthorityAcceptance.spec_version_id == spec_version_id,
         )
     ).all()
@@ -347,15 +347,15 @@ def _cleanup_bad_acceptance(
 def _matching_acceptance_ids(
     session: Session,
     *,
-    product_id: int,
+    project_id: int,
     spec_version_id: int,
 ) -> set[int]:
-    """Return IDs of existing acceptance rows for this product/spec pair."""
+    """Return IDs of existing acceptance rows for this project/spec pair."""
     return {
         row_id
         for row_id in session.exec(
             select(SpecAuthorityAcceptance.id).where(
-                SpecAuthorityAcceptance.product_id == product_id,
+                SpecAuthorityAcceptance.project_id == project_id,
                 SpecAuthorityAcceptance.spec_version_id == spec_version_id,
             )
         ).all()
@@ -366,7 +366,7 @@ def _matching_acceptance_ids(
 def ensure_pending_spec_version_for_project(  # noqa: C901, PLR0911, PLR0913
     *,
     session: Session,
-    product_id: int,
+    project_id: int,
     spec_path: Path,
     approved_by: str,
     lease_guard: Callable[[str], bool],
@@ -377,7 +377,7 @@ def ensure_pending_spec_version_for_project(  # noqa: C901, PLR0911, PLR0913
     if isinstance(loaded, PendingAuthorityResult):
         return _result(
             ok=False,
-            product_id=product_id,
+            project_id=project_id,
             spec_path=loaded.spec_path,
             error_code=loaded.error_code,
             error=loaded.error,
@@ -388,7 +388,7 @@ def ensure_pending_spec_version_for_project(  # noqa: C901, PLR0911, PLR0913
     except SpecContentNormalizationError as exc:
         return _result(
             ok=False,
-            product_id=product_id,
+            project_id=project_id,
             spec_path=resolved_path,
             error_code=exc.error_code,
             spec_hash=spec_hash,
@@ -397,32 +397,32 @@ def ensure_pending_spec_version_for_project(  # noqa: C901, PLR0911, PLR0913
     spec_content = normalized_spec.content
     spec_hash = normalized_spec.spec_hash
 
-    product = session.get(Product, product_id)
-    if product is None:
+    project = session.get(Project, project_id)
+    if project is None:
         return _result(
             ok=False,
-            product_id=product_id,
+            project_id=project_id,
             spec_path=resolved_path,
             error_code="PRODUCT_NOT_FOUND",
             spec_hash=spec_hash,
-            error=f"Product {product_id} not found",
+            error=f"Project {project_id} not found",
         )
 
-    product.spec_file_path = str(resolved_path)
-    product.spec_loaded_at = datetime.now(UTC)
+    project.spec_file_path = str(resolved_path)
+    project.spec_loaded_at = datetime.now(UTC)
     if not lease_guard("product_spec_linked"):
         session.rollback()
         return _lease_lost(
-            product_id=product_id,
+            project_id=project_id,
             spec_path=resolved_path,
             spec_hash=spec_hash,
             boundary="product_spec_linked",
         )
-    session.add(product)
+    session.add(project)
     session.commit()
     progress_error = _record_progress_or_error(
         record_progress=record_progress,
-        product_id=product_id,
+        project_id=project_id,
         spec_path=resolved_path,
         spec_hash=spec_hash,
         spec_version_id=None,
@@ -431,12 +431,12 @@ def ensure_pending_spec_version_for_project(  # noqa: C901, PLR0911, PLR0913
     if progress_error is not None:
         return progress_error
 
-    latest_spec = _latest_spec_for_product(session, product_id=product_id)
+    latest_spec = _latest_spec_for_product(session, project_id=project_id)
     if latest_spec and latest_spec.spec_hash == spec_hash:
         spec_version = latest_spec
     else:
         spec_version = SpecRegistry(
-            product_id=product_id,
+            project_id=project_id,
             spec_hash=spec_hash,
             content=spec_content,
             content_ref=str(resolved_path),
@@ -445,7 +445,7 @@ def ensure_pending_spec_version_for_project(  # noqa: C901, PLR0911, PLR0913
     if not lease_guard("spec_registry_written"):
         session.rollback()
         return _lease_lost(
-            product_id=product_id,
+            project_id=project_id,
             spec_path=resolved_path,
             spec_hash=spec_hash,
             boundary="spec_registry_written",
@@ -457,7 +457,7 @@ def ensure_pending_spec_version_for_project(  # noqa: C901, PLR0911, PLR0913
     if spec_version_id is None:
         return _result(
             ok=False,
-            product_id=product_id,
+            project_id=project_id,
             spec_path=resolved_path,
             error_code="MUTATION_FAILED",
             spec_hash=spec_hash,
@@ -465,7 +465,7 @@ def ensure_pending_spec_version_for_project(  # noqa: C901, PLR0911, PLR0913
         )
     progress_error = _record_progress_or_error(
         record_progress=record_progress,
-        product_id=product_id,
+        project_id=project_id,
         spec_path=resolved_path,
         spec_hash=spec_hash,
         spec_version_id=spec_version_id,
@@ -481,7 +481,7 @@ def ensure_pending_spec_version_for_project(  # noqa: C901, PLR0911, PLR0913
     if not lease_guard("spec_marked_approved"):
         session.rollback()
         return _lease_lost(
-            product_id=product_id,
+            project_id=project_id,
             spec_path=resolved_path,
             spec_hash=spec_hash,
             boundary="spec_marked_approved",
@@ -490,7 +490,7 @@ def ensure_pending_spec_version_for_project(  # noqa: C901, PLR0911, PLR0913
     session.commit()
     progress_error = _record_progress_or_error(
         record_progress=record_progress,
-        product_id=product_id,
+        project_id=project_id,
         spec_path=resolved_path,
         spec_hash=spec_hash,
         spec_version_id=spec_version_id,
@@ -501,7 +501,7 @@ def ensure_pending_spec_version_for_project(  # noqa: C901, PLR0911, PLR0913
 
     return _result(
         ok=True,
-        product_id=product_id,
+        project_id=project_id,
         spec_path=resolved_path,
         spec_hash=spec_hash,
         spec_version_id=spec_version_id,
@@ -512,7 +512,7 @@ def ensure_pending_spec_version_for_project(  # noqa: C901, PLR0911, PLR0913
 def compile_pending_authority_for_project(  # noqa: PLR0911, PLR0913
     *,
     session: Session,
-    product_id: int,
+    project_id: int,
     spec_path: Path,
     approved_by: str,
     compile_authority: PendingAuthorityCompiler,
@@ -525,7 +525,7 @@ def compile_pending_authority_for_project(  # noqa: PLR0911, PLR0913
     if expected_spec_version_id is not None and expected_spec_hash is not None:
         registered = _guarded_spec_version_for_product(
             session,
-            product_id=product_id,
+            project_id=project_id,
             spec_path=spec_path,
             expected_spec_version_id=expected_spec_version_id,
             expected_spec_hash=expected_spec_hash,
@@ -533,7 +533,7 @@ def compile_pending_authority_for_project(  # noqa: PLR0911, PLR0913
     elif expected_spec_version_id is None and expected_spec_hash is None:
         registered = ensure_pending_spec_version_for_project(
             session=session,
-            product_id=product_id,
+            project_id=project_id,
             spec_path=spec_path,
             approved_by=approved_by,
             lease_guard=lease_guard,
@@ -542,7 +542,7 @@ def compile_pending_authority_for_project(  # noqa: PLR0911, PLR0913
     else:
         registered = _result(
             ok=False,
-            product_id=product_id,
+            project_id=project_id,
             spec_path=spec_path,
             error_code="MUTATION_FAILED",
             spec_hash=expected_spec_hash,
@@ -559,7 +559,7 @@ def compile_pending_authority_for_project(  # noqa: PLR0911, PLR0913
         missing_field = "content hash" if spec_hash is None else "primary key"
         return _result(
             ok=False,
-            product_id=product_id,
+            project_id=project_id,
             spec_path=resolved_path,
             error_code="MUTATION_FAILED",
             spec_hash=spec_hash,
@@ -568,7 +568,7 @@ def compile_pending_authority_for_project(  # noqa: PLR0911, PLR0913
 
     existing_acceptance_ids = _matching_acceptance_ids(
         session,
-        product_id=product_id,
+        project_id=project_id,
         spec_version_id=spec_version_id,
     )
     try:
@@ -582,13 +582,13 @@ def compile_pending_authority_for_project(  # noqa: PLR0911, PLR0913
     except Exception as exc:  # noqa: BLE001
         _cleanup_bad_acceptance(
             session,
-            product_id=product_id,
+            project_id=project_id,
             spec_version_id=spec_version_id,
             existing_acceptance_ids=existing_acceptance_ids,
         )
         return _result(
             ok=False,
-            product_id=product_id,
+            project_id=project_id,
             spec_path=resolved_path,
             error_code="MUTATION_FAILED",
             spec_hash=spec_hash,
@@ -597,13 +597,13 @@ def compile_pending_authority_for_project(  # noqa: PLR0911, PLR0913
         )
     if _cleanup_bad_acceptance(
         session,
-        product_id=product_id,
+        project_id=project_id,
         spec_version_id=spec_version_id,
         existing_acceptance_ids=existing_acceptance_ids,
     ):
         return _result(
             ok=False,
-            product_id=product_id,
+            project_id=project_id,
             spec_path=resolved_path,
             error_code="MUTATION_FAILED",
             spec_hash=spec_hash,
@@ -612,7 +612,7 @@ def compile_pending_authority_for_project(  # noqa: PLR0911, PLR0913
         )
     if not compile_result.get("success"):
         return _normalize_compiler_failure(
-            product_id=product_id,
+            project_id=project_id,
             spec_path=resolved_path,
             spec_hash=spec_hash,
             spec_version_id=spec_version_id,
@@ -632,7 +632,7 @@ def compile_pending_authority_for_project(  # noqa: PLR0911, PLR0913
     if authority is None or authority.authority_id is None:
         return _result(
             ok=False,
-            product_id=product_id,
+            project_id=project_id,
             spec_path=resolved_path,
             error_code="MUTATION_FAILED",
             spec_hash=spec_hash,
@@ -647,14 +647,14 @@ def compile_pending_authority_for_project(  # noqa: PLR0911, PLR0913
 
     read_failure = compiled_authority_read_failure(
         load_compiled_artifact(authority),
-        project_id=product_id,
+        project_id=project_id,
         spec_version_id=spec_version_id,
         authority_id=authority.authority_id,
     )
     if read_failure is not None:
         return _result(
             ok=False,
-            product_id=product_id,
+            project_id=project_id,
             spec_path=resolved_path,
             error_code=read_failure.error_code,
             spec_hash=spec_hash,
@@ -667,7 +667,7 @@ def compile_pending_authority_for_project(  # noqa: PLR0911, PLR0913
 
     return _result(
         ok=True,
-        product_id=product_id,
+        project_id=project_id,
         spec_path=resolved_path,
         spec_hash=spec_hash,
         spec_version_id=spec_version_id,

@@ -141,14 +141,13 @@ AGILEFORGE_CONFIG_ROOT=/Users/aaat/projects/agileforge \
 When `AGILEFORGE_CONFIG_ROOT` is set, the branch runtime loads
 `$AGILEFORGE_CONFIG_ROOT/.env` and resolves relative SQLite database URLs
 against that directory. This keeps a worktree branch on its own code while
-using the same local business/session databases as the central checkout.
+using the same local business database as the central checkout.
 
 If the root `.env` is not available, export absolute database URLs before
 running the worktree CLI instead:
 
 ```sh
 export AGILEFORGE_DB_URL="sqlite:////absolute/path/to/agileforge.db"
-export AGILEFORGE_SESSION_DB_URL="sqlite:////absolute/path/to/agileforge_session.db"
 ```
 
 Do not copy `.env` into temporary worktrees or source relative SQLite URLs from
@@ -170,7 +169,6 @@ CALLER_REPO="$SCRATCH_ROOT/caller"
 mkdir -p "$CALLER_REPO/specs" "$SCRATCH_ROOT/db"
 
 export AGILEFORGE_DB_URL="sqlite:///$SCRATCH_ROOT/db/business.sqlite3"
-export AGILEFORGE_SESSION_DB_URL="sqlite:///$SCRATCH_ROOT/db/sessions.sqlite3"
 
 cd "$CALLER_REPO"
 ```
@@ -231,7 +229,7 @@ PY
 ```
 
 Expected success is `ok True` with a `project_id`. Then run bounded
-`authority status` and `workflow next` summaries. A new project should stop at
+`authority status` and `workflow position` summaries. A new project should stop at
 authority review/accept; it should not automatically continue to Vision,
 Backlog, Roadmap, Story, or Sprint.
 
@@ -244,7 +242,6 @@ environment variables are:
   `.env` and stateful SQLite files)
 - `OPEN_ROUTER_API_KEY`
 - `AGILEFORGE_DB_URL`
-- `AGILEFORGE_SESSION_DB_URL`
 
 Run diagnostics before mutation-heavy work:
 
@@ -279,7 +276,7 @@ Bootstrap precondition:
 - After project creation, stop at authority review/accept unless the user
   clearly authorizes continuing into Vision, Backlog, Roadmap, Story, or Sprint.
 
-### Brownfield Product-Spec Curation
+### Brownfield Project-Spec Curation
 
 Use brownfield setup only when the available input is raw source, repository
 facts, notes, route dumps, or another non-authoritative artifact that must be
@@ -371,7 +368,7 @@ PY
 Ask AgileForge for the next installed command:
 
 ```sh
-agileforge workflow next --project-id "$PROJECT_ID" > workflow-next.json
+agileforge workflow position --project-id "$PROJECT_ID" > workflow-next.json
 uv run --frozen python - workflow-next.json <<'PY'
 import json
 import sys
@@ -429,7 +426,7 @@ print("authority_id", data.get("authority_id"))
 print("pending_authority_id", data.get("pending_authority_id"))
 PY
 
-agileforge workflow next --project-id "$PROJECT_ID" > workflow-next.json
+agileforge workflow position --project-id "$PROJECT_ID" > workflow-next.json
 ```
 
 After authority acceptance, the next installed command should be Vision
@@ -468,7 +465,7 @@ agents can confirm exactly what became canonical.
 Then ask for the next installed command again:
 
 ```sh
-agileforge workflow next --project-id "$PROJECT_ID" > workflow-next.json
+agileforge workflow position --project-id "$PROJECT_ID" > workflow-next.json
 ```
 
 Use history only for inspection/debugging:
@@ -666,7 +663,7 @@ moved out of `To Do`.
 Then ask for the next installed command again:
 
 ```sh
-agileforge workflow next --project-id "$PROJECT_ID" > workflow-next.json
+agileforge workflow position --project-id "$PROJECT_ID" > workflow-next.json
 ```
 
 After Backlog save, the next installed command should be Roadmap generation:
@@ -751,7 +748,7 @@ fields are clean.
 Then ask for the next installed command again:
 
 ```sh
-agileforge workflow next --project-id "$PROJECT_ID" > workflow-next.json
+agileforge workflow position --project-id "$PROJECT_ID" > workflow-next.json
 ```
 
 Use history only for inspection/debugging:
@@ -899,7 +896,7 @@ candidates and Sprint generation are filtered to stories whose
 On success, Story complete moves the workflow to Sprint setup:
 
 ```sh
-agileforge workflow next --project-id "$PROJECT_ID" > workflow-next.json
+agileforge workflow position --project-id "$PROJECT_ID" > workflow-next.json
 agileforge sprint candidates --project-id "$PROJECT_ID" > sprint-candidates.json
 ```
 
@@ -1112,7 +1109,7 @@ Story is saved/reopened or dependency edges are applied, AgileForge clears the
 unsaved Sprint draft and returns to Sprint setup. If Sprint regeneration fails,
 older complete attempts remain visible in history for audit but cannot be saved.
 
-Use `agileforge workflow next --project-id "$PROJECT_ID"` before saving. If it
+Use `agileforge workflow position --project-id "$PROJECT_ID"` before saving. If it
 does not advertise `agileforge sprint save`, regenerate Sprint first:
 
 ```sh
@@ -1218,7 +1215,7 @@ dependencies contain a cycle after the sprint has started, `sprint tasks` still
 returns `ok: true`, emits `SPRINT_TASK_DEPENDENCY_CYCLE_FALLBACK` in warnings,
 and uses rank fallback order so execution views remain recoverable.
 
-`workflow next` in `SPRINT_VIEW` should advertise `sprint task next`,
+`workflow position` in `SPRINT_VIEW` should advertise `sprint task next`,
 `sprint status`, `sprint tasks`, `sprint task show`, `sprint task update`,
 `sprint story readiness`, `sprint story close`, `sprint close-readiness`,
 `sprint close`, and `sprint history`.
@@ -1479,11 +1476,11 @@ When a project reaches `SPRINT_COMPLETE`, do not assume another normal Sprint is
 available. Ask AgileForge first:
 
 ```sh
-agileforge workflow next --project-id "$PROJECT_ID"
+agileforge workflow position --project-id "$PROJECT_ID"
 agileforge sprint candidates --project-id "$PROJECT_ID"
 ```
 
-If `workflow next` returns `status: project_scope_extension_available` and
+If `workflow position` returns `status: project_scope_extension_available` and
 Sprint candidates are empty, the next step is a scope/spec amendment, not
 `sprint generate`.
 
@@ -1521,7 +1518,7 @@ agileforge scope extension start \
   --changed-by codex
 ```
 
-After `scope extension start`, inspect `workflow next` and stop at the next
+After `scope extension start`, inspect `workflow position` and stop at the next
 manual checkpoint. If a pending amended authority is produced, review and accept
 or reject it explicitly before generating Backlog, Roadmap, Story, or Sprint
 work for the extension.
@@ -1554,7 +1551,7 @@ guarded flows. Capture a small feedback packet and report it to the user:
 - project id and caller repository path;
 - exact command attempted;
 - command `ok` value and first error code;
-- relevant scalar state from `workflow next`, `status`, or `command schema`;
+- relevant scalar state from `workflow position`, `status`, or `command schema`;
 - expected next action;
 - actual next action or blocker;
 - missing command, confusing field, unclear remediation, or docs gap;
@@ -1729,10 +1726,10 @@ agileforge project setup retry --project-id 1 --spec-file specs/spec.json --expe
 
 ```sh
 agileforge workflow state --project-id 1
-agileforge workflow next --project-id 1
+agileforge workflow position --project-id 1
 ```
 
-Use `workflow state` for current FSM/session state and `workflow next` for
+Use `workflow state` for current FSM/session state and `workflow position` for
 installed next commands.
 
 ### Authority Commands
@@ -2078,7 +2075,7 @@ It does all of the following:
 
 1. Resolves the spec file relative to the caller current working directory.
 2. Validates the spec file exists and is readable.
-3. Creates a `Product`.
+3. Creates a `Project`.
 4. Persists a `SpecRegistry` version.
 5. Compiles a pending `CompiledSpecAuthority`.
 6. Initializes or reconciles workflow session setup state.
@@ -2202,10 +2199,10 @@ Detect pending review with all three projections:
 ```sh
 agileforge status --project-id "$PROJECT_ID"
 agileforge authority status --project-id "$PROJECT_ID"
-agileforge workflow next --project-id "$PROJECT_ID"
+agileforge workflow position --project-id "$PROJECT_ID"
 ```
 
-`workflow next` should advertise:
+`workflow position` should advertise:
 
 ```text
 agileforge authority review --project-id <id> --open
@@ -2364,7 +2361,7 @@ review from a readable source before deciding.
 Expected outcomes:
 
 - After accept, `authority status` returns `ok: true`, `status: current`,
-  non-null `authority_id`, and `pending_authority_id: null`. `workflow next`
+  non-null `authority_id`, and `pending_authority_id: null`. `workflow position`
   should no longer advertise `agileforge authority review --project-id` for the
   same project.
 - After reject, authority remains non-canonical. Vision remains locked and the
@@ -2599,7 +2596,7 @@ Registered CLI error codes include:
 | `AUTHORITY_REVIEW_REQUIRED` | An authority decision was attempted before review evidence was available. | Run `authority review`, then retry the decision from current project state. |
 | `AUTHORITY_NOT_ACCEPTED` | No accepted authority exists. | Stop or request manual authority review. |
 | `AUTHORITY_NOT_COMPILED` | Selected spec has no compiled authority. | Re-read authority status. |
-| `AUTHORITY_NOT_PENDING` | There is no pending authority decision for this project. | Re-read `authority status` and `workflow next`. |
+| `AUTHORITY_NOT_PENDING` | There is no pending authority decision for this project. | Re-read `authority status` and `workflow position`. |
 | `AUTHORITY_ALREADY_DECIDED` | The pending authority already has a terminal decision. | Replay the same idempotency key or refresh status. |
 | `AUTHORITY_SOURCE_CHANGED` | The source spec or authority snapshot changed after review. | Rerun `authority review` and decide from the new packet. |
 | `AUTHORITY_SOURCE_UNAVAILABLE` | The source spec cannot be read at decision time. | Restore the readable source file, then rerun `authority review`. |
@@ -2690,7 +2687,7 @@ print({
 })
 PY
 
-agileforge workflow next --project-id "$PROJECT_ID" > workflow-next.json
+agileforge workflow position --project-id "$PROJECT_ID" > workflow-next.json
 uv run --frozen python - workflow-next.json <<'PY'
 import json
 import sys

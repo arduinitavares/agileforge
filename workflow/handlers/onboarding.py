@@ -760,7 +760,7 @@ def execute_register_initial_scope(
         )
     ).all()
     existing_specs = session.exec(
-        select(SpecRegistry).where(col(SpecRegistry.product_id) == request.project_id)
+        select(SpecRegistry).where(col(SpecRegistry.project_id) == request.project_id)
     ).all()
     if existing_registrations or existing_specs:
         return _conflict("Initial scope has already been registered.")
@@ -768,7 +768,7 @@ def execute_register_initial_scope(
     spec = register_approved_spec_from_canonical_json(
         session,
         ApprovedCanonicalSpec(
-            product_id=request.project_id,
+            project_id=request.project_id,
             canonical_content_json=active.canonical_content_json,
             content_ref=active.provenance_path,
             approved_at=evaluated_at,

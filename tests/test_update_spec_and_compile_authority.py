@@ -12,7 +12,7 @@ from sqlmodel import Session, select
 
 from agile_sqlmodel import (
     CompiledSpecAuthority,
-    Product,
+    Project,
     SpecAuthorityAcceptance,
     SpecRegistry,
 )
@@ -36,13 +36,13 @@ if TYPE_CHECKING:
 
 
 @pytest.fixture
-def sample_product(session: Session, engine: Engine) -> Product:
+def sample_product(session: Session, engine: Engine) -> Project:
     """Create a product without spec."""
     spec_tools.engine = engine
 
-    product = Product(
-        name="Implicit Spec Product",
-        description="Product for implicit spec updates",
+    product = Project(
+        name="Implicit Spec Project",
+        description="Project for implicit spec updates",
         vision="Keep updates explicit",
     )
     session.add(product)
@@ -135,13 +135,13 @@ def compiler_stub(monkeypatch: pytest.MonkeyPatch) -> object:
 
 
 def test_creates_new_version_on_content_change(
-    session: Session, sample_product: Product, compiler_stub: object
+    session: Session, sample_product: Project, compiler_stub: object
 ) -> None:
     """Tool should create approved spec and compiled authority."""
     del compiler_stub
     result = update_spec_and_compile_authority(
         {
-            "product_id": sample_product.product_id,
+            "project_id": sample_product.project_id,
             "spec_content": _structured_spec_content("Spec A"),
         },
         tool_context=None,
@@ -165,13 +165,13 @@ def test_creates_new_version_on_content_change(
 
 
 def test_noop_on_unchanged_content(
-    session: Session, sample_product: Product, compiler_stub: object
+    session: Session, sample_product: Project, compiler_stub: object
 ) -> None:
     """Second call with unchanged content should reuse version and authority."""
     del compiler_stub
     first = update_spec_and_compile_authority(
         {
-            "product_id": sample_product.product_id,
+            "project_id": sample_product.project_id,
             "spec_content": _structured_spec_content("Spec A"),
         },
         tool_context=None,
@@ -179,7 +179,7 @@ def test_noop_on_unchanged_content(
 
     second = update_spec_and_compile_authority(
         {
-            "product_id": sample_product.product_id,
+            "project_id": sample_product.project_id,
             "spec_content": _structured_spec_content("Spec A"),
         },
         tool_context=None,
@@ -189,13 +189,13 @@ def test_noop_on_unchanged_content(
     assert second["cache_hit"] is True
 
     versions = session.exec(
-        select(SpecRegistry).where(SpecRegistry.product_id == sample_product.product_id)
+        select(SpecRegistry).where(SpecRegistry.project_id == sample_product.project_id)
     ).all()
     assert len(versions) == 1
 
 
 def test_content_ref_path(
-    session: Session, sample_product: Product, tmp_path: Path, compiler_stub: object
+    session: Session, sample_product: Project, tmp_path: Path, compiler_stub: object
 ) -> None:
     """Tool should load content from content_ref path."""
     del compiler_stub
@@ -205,7 +205,7 @@ def test_content_ref_path(
 
     result = update_spec_and_compile_authority(
         {
-            "product_id": sample_product.product_id,
+            "project_id": sample_product.project_id,
             "content_ref": str(spec_path),
         },
         tool_context=None,
@@ -219,13 +219,13 @@ def test_content_ref_path(
 
 
 def test_recompile_behavior(
-    session: Session, sample_product: Product, compiler_stub: object
+    session: Session, sample_product: Project, compiler_stub: object
 ) -> None:
     """Recompile should append a newer authority row when requested."""
     del compiler_stub
     first = update_spec_and_compile_authority(
         {
-            "product_id": sample_product.product_id,
+            "project_id": sample_product.project_id,
             "spec_content": _structured_spec_content("Spec A"),
         },
         tool_context=None,
@@ -243,7 +243,7 @@ def test_recompile_behavior(
 
     second = update_spec_and_compile_authority(
         {
-            "product_id": sample_product.product_id,
+            "project_id": sample_product.project_id,
             "spec_content": _structured_spec_content("Spec A"),
             "recompile": True,
         },
@@ -268,7 +268,7 @@ def test_recompile_behavior(
 
 def test_recompile_returns_exact_candidate_without_transferring_acceptance(
     session: Session,
-    sample_product: Product,
+    sample_product: Project,
     compiler_stub: object,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -278,7 +278,7 @@ def test_recompile_returns_exact_candidate_without_transferring_acceptance(
         _structured_spec_content("Spec A")
     )
     spec = SpecRegistry(
-        product_id=sample_product.product_id,
+        project_id=sample_product.project_id,
         spec_hash=normalized.spec_hash,
         content=normalized.content,
         status="approved",
@@ -298,7 +298,7 @@ def test_recompile_returns_exact_candidate_without_transferring_acceptance(
     assert first_authority is not None
     session.add(
         SpecAuthorityAcceptance(
-            product_id=sample_product.product_id,
+            project_id=sample_product.project_id,
             spec_version_id=spec.spec_version_id,
             status="accepted",
             policy="manual",
@@ -309,7 +309,7 @@ def test_recompile_returns_exact_candidate_without_transferring_acceptance(
             spec_hash=spec.spec_hash,
             pending_authority_id=first_authority_id,
             terminal_decision_key=(
-                f"{sample_product.product_id}:{spec.spec_version_id}:"
+                f"{sample_product.project_id}:{spec.spec_version_id}:"
                 f"{first_authority_id}"
             ),
         )
@@ -355,7 +355,7 @@ def test_recompile_returns_exact_candidate_without_transferring_acceptance(
 
     result = update_spec_and_compile_authority(
         {
-            "product_id": sample_product.product_id,
+            "project_id": sample_product.project_id,
             "spec_content": _structured_spec_content("Spec A"),
             "recompile": True,
         },
@@ -368,7 +368,7 @@ def test_recompile_returns_exact_candidate_without_transferring_acceptance(
     assert result["authority_status"] == "pending_acceptance"
     acceptances = session.exec(
         select(SpecAuthorityAcceptance).where(
-            SpecAuthorityAcceptance.product_id == sample_product.product_id
+            SpecAuthorityAcceptance.project_id == sample_product.project_id
         )
     ).all()
     assert len(acceptances) == 1
@@ -379,19 +379,19 @@ def test_input_validation() -> None:
     """Providing both or neither content inputs should raise ValueError."""
     with pytest.raises(ValueError):  # noqa: PT011
         update_spec_and_compile_authority(
-            {"product_id": 1, "spec_content": "A", "content_ref": "x"},
+            {"project_id": 1, "spec_content": "A", "content_ref": "x"},
             tool_context=None,
         )
 
     with pytest.raises(ValueError):  # noqa: PT011
         update_spec_and_compile_authority(
-            {"product_id": 1},
+            {"project_id": 1},
             tool_context=None,
         )
 
 
 def test_compiler_hashing_failure_is_rejected(
-    session: Session, sample_product: Product, monkeypatch: pytest.MonkeyPatch
+    session: Session, sample_product: Project, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Compiler hashing-related failures should be rejected at the boundary."""
     del session
@@ -408,7 +408,7 @@ def test_compiler_hashing_failure_is_rejected(
 
     result = update_spec_and_compile_authority(
         {
-            "product_id": sample_product.product_id,
+            "project_id": sample_product.project_id,
             "spec_content": _structured_spec_content("Spec A"),
         },
         tool_context=None,

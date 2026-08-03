@@ -22,7 +22,7 @@ def test_get_story_close_readiness_marks_done_story_ineligible() -> None:
         evidence_links='["pr-123"]',
         completed_at="2026-04-04T12:00:00Z",
     )
-    sprint = SimpleNamespace(sprint_id=3, product_id=2)
+    sprint = SimpleNamespace(sprint_id=3, project_id=2)
 
     payload = get_story_close_readiness(
         project_id=2,
@@ -50,7 +50,7 @@ def test_get_story_close_readiness_reports_no_executable_tasks() -> None:
         evidence_links=None,
         completed_at=None,
     )
-    sprint = SimpleNamespace(sprint_id=3, product_id=2)
+    sprint = SimpleNamespace(sprint_id=3, project_id=2)
 
     payload = get_story_close_readiness(
         project_id=2,
@@ -78,7 +78,7 @@ def test_close_story_rejects_incomplete_actionable_tasks() -> None:
         evidence_links=None,
         completed_at=None,
     )
-    sprint = SimpleNamespace(sprint_id=3, product_id=2)
+    sprint = SimpleNamespace(sprint_id=3, project_id=2)
 
     with pytest.raises(StoryCloseServiceError) as exc_info:
         close_story(
@@ -116,7 +116,7 @@ def test_close_story_marks_story_done_and_returns_payload() -> None:
         evidence_links=None,
         completed_at=None,
     )
-    sprint = SimpleNamespace(sprint_id=3, product_id=2)
+    sprint = SimpleNamespace(sprint_id=3, project_id=2)
     persisted: dict[str, object] = {}
 
     payload = close_story(

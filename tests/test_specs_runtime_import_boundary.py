@@ -87,8 +87,8 @@ def test_specs_compiler_service_import_boundary() -> None:
         {"agile_sqlmodel", *agile_aliases},
     )
 
-    assert core_imports == {"Product"}
-    assert core_bound_imports == {"Product"}
+    assert core_imports == {"Project"}
+    assert core_bound_imports == {"Project"}
     assert db_imports == {"get_engine"}
     assert db_bound_imports == {"get_engine"}
     assert enum_imports == {"SpecAuthorityStatus"}
@@ -132,8 +132,8 @@ def test_specs_lifecycle_service_import_boundary() -> None:
         {"agile_sqlmodel", *agile_aliases},
     )
 
-    assert core_imports == {"Product"}
-    assert core_bound_imports == {"Product"}
+    assert core_imports == {"Project"}
+    assert core_bound_imports == {"Project"}
     assert db_imports == {"get_engine"}
     assert db_bound_imports == {"get_engine"}
     assert specs_imports == {"SpecRegistry"}

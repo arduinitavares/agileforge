@@ -1,7 +1,9 @@
-"""Core SQLModel classes extracted from the legacy shim."""
+"""Core SQLModel classes for AgileForge projects and delivery work."""
 
 from datetime import UTC, date, datetime
-from typing import TYPE_CHECKING
+from importlib import import_module
+from types import ModuleType
+from typing import TYPE_CHECKING, ClassVar
 
 from sqlalchemy import func
 from sqlalchemy.schema import CheckConstraint, UniqueConstraint
@@ -31,26 +33,26 @@ class TeamMembership(SQLModel, table=True):
     role: TeamRole = Field(default=TeamRole.DEVELOPER, nullable=False)
 
 
-class ProductTeam(SQLModel, table=True):
-    """Link table for Product <-> Team."""
+class ProjectTeam(SQLModel, table=True):
+    """Link table for Project <-> Team."""
 
-    __tablename__ = "product_teams"  # type: ignore[assignment]
-    product_id: int = Field(foreign_key="products.product_id", primary_key=True)
+    __tablename__: ClassVar[str] = "project_teams"
+    project_id: int = Field(foreign_key="projects.project_id", primary_key=True)
     team_id: int = Field(foreign_key="teams.team_id", primary_key=True)
 
 
-class Product(SQLModel, table=True):
-    """A top-level product container."""
+class Project(SQLModel, table=True):
+    """A top-level AgileForge project."""
 
-    __tablename__ = "products"  # type: ignore[assignment]
+    __tablename__: ClassVar[str] = "projects"
     __table_args__ = (
         CheckConstraint(
             "origin IN ('greenfield', 'brownfield')",
-            name="ck_product_origin",
+            name="ck_project_origin",
         ),
     )
 
-    product_id: int | None = Field(default=None, primary_key=True)
+    project_id: int | None = Field(default=None, primary_key=True)
     name: str = Field(index=True, unique=True)
     origin: str = Field(default="greenfield", index=True)
     description: str | None = Field(default=None, sa_type=Text)
@@ -72,7 +74,7 @@ class Product(SQLModel, table=True):
     )
     spec_loaded_at: datetime | None = Field(
         default=None,
-        description="When the specification was saved to this product",
+        description="When the specification was saved to this project",
     )
 
     created_at: datetime = Field(
@@ -90,13 +92,13 @@ class Product(SQLModel, table=True):
     )
 
     teams: list["Team"] = Relationship(
-        back_populates="products", link_model=ProductTeam
+        back_populates="projects", link_model=ProjectTeam
     )
-    themes: list["Theme"] = Relationship(back_populates="product")
-    stories: list["UserStory"] = Relationship(back_populates="product")
-    sprints: list["Sprint"] = Relationship(back_populates="product")
-    personas: list["ProductPersona"] = Relationship(back_populates="product")
-    spec_versions: list["SpecRegistry"] = Relationship(back_populates="product")
+    themes: list["Theme"] = Relationship(back_populates="project")
+    stories: list["UserStory"] = Relationship(back_populates="project")
+    sprints: list["Sprint"] = Relationship(back_populates="project")
+    personas: list["ProjectPersona"] = Relationship(back_populates="project")
+    spec_versions: list["SpecRegistry"] = Relationship(back_populates="project")
 
 
 class Team(SQLModel, table=True):
@@ -119,8 +121,8 @@ class Team(SQLModel, table=True):
         nullable=False,
     )
 
-    products: list["Product"] = Relationship(
-        back_populates="teams", link_model=ProductTeam
+    projects: list["Project"] = Relationship(
+        back_populates="teams", link_model=ProjectTeam
     )
     members: list["TeamMember"] = Relationship(
         back_populates="teams", link_model=TeamMembership
@@ -194,10 +196,10 @@ class Sprint(SQLModel, table=True):
         nullable=False,
     )
 
-    product_id: int = Field(foreign_key="products.product_id")
+    project_id: int = Field(foreign_key="projects.project_id")
     team_id: int = Field(foreign_key="teams.team_id")
 
-    product: "Product" = Relationship(back_populates="sprints")
+    project: "Project" = Relationship(back_populates="sprints")
     team: "Team" = Relationship(back_populates="sprints")
     stories: list["UserStory"] = Relationship(
         back_populates="sprints", link_model=SprintStory
@@ -208,7 +210,7 @@ class Theme(SQLModel, table=True):
     """A high-level strategic goal."""
 
     __tablename__ = "themes"  # type: ignore[assignment]
-    __table_args__ = (UniqueConstraint("product_id", "title"),)
+    __table_args__ = (UniqueConstraint("project_id", "title"),)
 
     theme_id: int | None = Field(default=None, primary_key=True)
     title: str
@@ -228,9 +230,9 @@ class Theme(SQLModel, table=True):
         nullable=False,
     )
 
-    product_id: int = Field(foreign_key="products.product_id")
+    project_id: int = Field(foreign_key="projects.project_id")
 
-    product: "Product" = Relationship(back_populates="themes")
+    project: "Project" = Relationship(back_populates="themes")
     epics: list["Epic"] = Relationship(back_populates="theme")
 
 
@@ -389,10 +391,10 @@ class UserStory(SQLModel, table=True):
         nullable=False,
     )
 
-    product_id: int = Field(foreign_key="products.product_id", index=True)
+    project_id: int = Field(foreign_key="projects.project_id", index=True)
     feature_id: int | None = Field(default=None, foreign_key="features.feature_id")
 
-    product: "Product" = Relationship(back_populates="stories")
+    project: "Project" = Relationship(back_populates="stories")
     feature: Feature | None = Relationship(back_populates="stories")
     sprints: list["Sprint"] = Relationship(
         back_populates="stories", link_model=SprintStory
@@ -409,7 +411,7 @@ class UserStoryDependency(SQLModel, table=True):
     __tablename__ = "user_story_dependencies"  # type: ignore[assignment]
     __table_args__ = (
         UniqueConstraint(
-            "product_id",
+            "project_id",
             "dependent_story_id",
             "prerequisite_story_id",
             name="unique_user_story_dependency_edge",
@@ -433,7 +435,7 @@ class UserStoryDependency(SQLModel, table=True):
     )
 
     dependency_id: int | None = Field(default=None, primary_key=True)
-    product_id: int = Field(foreign_key="products.product_id", index=True)
+    project_id: int = Field(foreign_key="projects.project_id", index=True)
     dependent_story_id: int = Field(foreign_key="user_stories.story_id", index=True)
     prerequisite_story_id: int = Field(foreign_key="user_stories.story_id", index=True)
     status: str = Field(default="proposed", index=True, nullable=False)
@@ -489,13 +491,13 @@ class Task(SQLModel, table=True):
     assignee: TeamMember | None = Relationship(back_populates="tasks")
 
 
-class ProductPersona(SQLModel, table=True):
-    """Approved personas for a product."""
+class ProjectPersona(SQLModel, table=True):
+    """Approved personas for a Project."""
 
-    __tablename__ = "product_personas"  # type: ignore[assignment]
+    __tablename__: ClassVar[str] = "project_personas"
 
     persona_id: int | None = Field(default=None, primary_key=True)
-    product_id: int = Field(foreign_key="products.product_id")
+    project_id: int = Field(foreign_key="projects.project_id")
     persona_name: str = Field(max_length=100, nullable=False)
     is_default: bool = Field(default=False)
     category: str = Field(max_length=50, default="primary_user")
@@ -506,13 +508,11 @@ class ProductPersona(SQLModel, table=True):
         nullable=False,
     )
 
-    product: "Product" = Relationship(back_populates="personas")
+    project: "Project" = Relationship(back_populates="personas")
 
     __table_args__ = (
-        UniqueConstraint("product_id", "persona_name", name="unique_product_persona"),
+        UniqueConstraint("project_id", "persona_name", name="unique_project_persona"),
     )
 
 
-# Import the compatibility shim after defining core models so direct
-# `import models.core` remains safe and legacy re-exports stay wired up.
-import agile_sqlmodel  # noqa: E402,F401  pylint: disable=wrong-import-position,unused-import
+_SPEC_MODELS: ModuleType = import_module("models.specs")

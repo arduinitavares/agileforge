@@ -15,12 +15,10 @@ from typing import TYPE_CHECKING, Any, Literal, TypedDict, Unpack, cast
 from pydantic import BaseModel, Field, ValidationError
 from sqlmodel import Session
 
+from adapters.adk.agents.spec_validator import root_agent as spec_validator_agent
 from models.core import Feature, UserStory
 from models.db import get_engine
 from models.specs import CompiledSpecAuthority, SpecRegistry
-from orchestrator_agent.agent_tools.spec_validator_agent.agent import (
-    root_agent as spec_validator_agent,
-)
 from services.contracts.specification_validation import (
     SpecValidationResult,
 )
@@ -1097,36 +1095,36 @@ def validate_story_with_spec_authority(
                 ),
             )
 
-        if spec_version.product_id != story.product_id:
+        if spec_version.project_id != story.project_id:
             product_match_message = (
                 "Spec version belongs to a different product "
-                f"(expected {story.product_id}, got {spec_version.product_id})"
+                f"(expected {story.project_id}, got {spec_version.project_id})"
             )
             return _build_failed_validation_result(
                 failure_context,
                 _FailedValidationDetails(
                     rule="SPEC_PRODUCT_MATCH",
-                    expected=f"Product {story.product_id}",
-                    actual=f"Product {spec_version.product_id}",
+                    expected=f"Project {story.project_id}",
+                    actual=f"Project {spec_version.project_id}",
                     message=product_match_message,
                     error=(
-                        "Product mismatch: story belongs to product "
-                        f"{story.product_id}, "
+                        "Project mismatch: story belongs to product "
+                        f"{story.project_id}, "
                         f"but spec version {parsed.spec_version_id} belongs to "
-                        f"product {spec_version.product_id}"
+                        f"product {spec_version.project_id}"
                     ),
                 ),
             )
 
         acceptance = latest_accepted_authority_decision(
             session,
-            product_id=story.product_id,
+            project_id=story.project_id,
             spec_version_id=parsed.spec_version_id,
         )
         authority = (
             accepted_compiled_authority(
                 session,
-                product_id=story.product_id,
+                project_id=story.project_id,
                 spec_version_id=parsed.spec_version_id,
             )
             if acceptance is not None
@@ -1151,7 +1149,7 @@ def validate_story_with_spec_authority(
         loaded_artifact = dependencies["load_artifact"](authority)
         read_failure = compiled_authority_read_failure(
             cast("CompiledArtifactLoadResult", loaded_artifact),
-            project_id=story.product_id,
+            project_id=story.project_id,
             spec_version_id=parsed.spec_version_id,
             authority_id=authority.authority_id,
         )

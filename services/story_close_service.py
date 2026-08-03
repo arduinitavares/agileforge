@@ -113,7 +113,7 @@ class _SprintLike(Protocol):
     def sprint_id(self) -> int | None: ...
 
     @property
-    def product_id(self) -> int | None: ...
+    def project_id(self) -> int | None: ...
 
 
 class _StoryClosePersistOptions(TypedDict):
@@ -163,7 +163,7 @@ def _load_story_close_subject(
         raise StoryCloseServiceError.story_not_found()
 
     sprint = load_sprint()
-    if not sprint or getattr(sprint, "product_id", None) != project_id:
+    if not sprint or getattr(sprint, "project_id", None) != project_id:
         raise StoryCloseServiceError.sprint_not_in_project()
 
     sprint_story = load_sprint_story(story)
@@ -310,7 +310,7 @@ def _story_close_subject(
     story = session.get(UserStory, command.story_id)
     if story is None:
         raise StoryCloseServiceError.story_not_found()
-    if sprint is None or sprint.product_id != command.project_id:
+    if sprint is None or sprint.project_id != command.project_id:
         raise StoryCloseServiceError.sprint_not_in_project()
     membership = session.exec(
         select(SprintStory).where(
@@ -318,7 +318,7 @@ def _story_close_subject(
             col(SprintStory.story_id) == command.story_id,
         )
     ).one_or_none()
-    if story.product_id != command.project_id or membership is None:
+    if story.project_id != command.project_id or membership is None:
         raise StoryCloseServiceError.story_not_in_sprint()
     return sprint, story
 

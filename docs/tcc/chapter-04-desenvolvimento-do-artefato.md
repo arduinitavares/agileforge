@@ -56,13 +56,11 @@ No estado atual do repositório, o arquivo `pyproject.toml` define `requires-pyt
 
 Esta seção descreve os principais componentes que materializam a arquitetura.
 
-### 4.3.1 Agente orquestrador e máquina de estados finita (FSM)
+### 4.3.1 Domínio de workflow e grafo de decisões
 
-O `orchestrator_agent` é o ponto de entrada do sistema. Seu papel é rotear intenções do usuário para ferramentas específicas e manter o progresso do pipeline. Diferentemente de um agente “gerador” genérico, o orquestrador é explicitamente configurado como **roteador**: ele delega a criação de conteúdo (visão, backlog, roadmap, histórias e sprint) para subagentes especializados.
+O `WorkflowDomain` é a autoridade de roteamento. Ele deriva a posição atual a partir de fatos duráveis do projeto, avalia o grafo de decisões e aceita somente transições compatíveis com a versão e os fingerprints apresentados pelo operador.
 
-O fluxo é governado por uma FSM definida no módulo de orquestração. No estado atual do repositório, a FSM organiza o trabalho em **sete fases** (`VISION`, `BACKLOG`, `ROADMAP`, `STORY`, `SPRINT`, `SPEC` e `ROUTING`) e explicita **estados** que seguem, para cada artefato, um padrão de entrevista → revisão → persistência. Esse padrão reduz ambiguidade sobre “quando” um artefato é considerado completo e “quando” a persistência em banco deve ocorrer.
-
-Uma característica essencial desse desenho é a **restrição de ferramentas por estado**. Por exemplo, na etapa de visão, apenas ferramentas relacionadas à visão e à persistência desse artefato são habilitadas. Essa medida atua como um mecanismo de segurança e previsibilidade: o agente não consegue, por exemplo, “pular” diretamente para planejamento de sprint sem antes ter produzido e persistido artefatos pré-requisitos.
+As integrações com modelos são receitas de execução associadas a nós específicos do grafo. Elas produzem saídas estruturadas, mas não escolhem a próxima etapa nem persistem decisões fora da transação controlada pelo domínio.
 
 ### 4.3.2 Especificação versionada, autoridade compilada e aceitação
 
@@ -76,7 +74,7 @@ Esse desenho separa três momentos: (i) registrar uma especificação, (ii) comp
 
 ### 4.3.3 Agentes especializados e contratos de entrada/saída
 
-Os agentes especializados residem em `orchestrator_agent/agent_tools/` e são invocados pelo orquestrador como ferramentas. Cada agente implementa uma responsabilidade específica do pipeline e opera com contratos estruturados (esquemas de entrada/saída).
+Os agentes especializados residem em `adapters/adk/agents/` e são invocados por receitas associadas ao grafo. Cada agente implementa uma responsabilidade específica e opera com contratos estruturados de entrada e saída.
 
 Os especialistas principais são:
 

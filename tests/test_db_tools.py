@@ -12,7 +12,7 @@ from pathlib import Path
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, select
 
-from agile_sqlmodel import Product, Task, UserStory
+from agile_sqlmodel import Project, Task, UserStory
 from models.core import Epic, Feature, Theme
 from tools.db_tools import (
     CreateOrGetProductInput,
@@ -42,7 +42,7 @@ def test_create_product_new(engine: Engine) -> None:
 
     assert result["success"] is True
     assert result["action"] == "created"
-    assert result["product_id"] == 1
+    assert result["project_id"] == 1
     assert "Test Project" in result["message"]
 
 
@@ -63,12 +63,12 @@ def test_create_product_existing(engine: Engine) -> None:
         )
     )
     assert result2["action"] == "updated"
-    assert result2["product_id"] == result1["product_id"]
+    assert result2["project_id"] == result1["project_id"]
 
     # Verify only one product exists
     with Session(engine) as session:
-        products = session.exec(select(Product)).all()
-        assert len(products) == 1
+        projects = session.exec(select(Project)).all()
+        assert len(projects) == 1
 
 
 def test_persist_roadmap(engine: Engine) -> None:
@@ -79,7 +79,7 @@ def test_persist_roadmap(engine: Engine) -> None:
             product_name="Roadmap Project", vision=None, description=None
         )
     )
-    product_id = prod_result["product_id"]
+    project_id = prod_result["project_id"]
 
     # Define roadmap
     roadmap = [
@@ -101,7 +101,7 @@ def test_persist_roadmap(engine: Engine) -> None:
     ]
 
     # Persist roadmap
-    result = persist_roadmap(product_id, roadmap)
+    result = persist_roadmap(project_id, roadmap)
 
     assert result["success"] is True
     assert result["created"]["themes"][0]["id"] == 1
@@ -112,7 +112,7 @@ def test_persist_roadmap(engine: Engine) -> None:
     with Session(engine) as session:
         themes = session.exec(select(Theme)).all()
         assert len(themes) == 1
-        assert themes[0].product_id == product_id
+        assert themes[0].project_id == project_id
 
         epics = session.exec(select(Epic)).all()
         assert len(epics) == 1
@@ -130,7 +130,7 @@ def test_create_user_story(engine: Engine) -> None:
             product_name="Story Project", vision=None, description=None
         )
     )
-    product_id = prod_result["product_id"]
+    project_id = prod_result["project_id"]
 
     roadmap = [
         {
@@ -149,13 +149,13 @@ def test_create_user_story(engine: Engine) -> None:
         }
     ]
 
-    roadmap_result = persist_roadmap(product_id, roadmap)
+    roadmap_result = persist_roadmap(project_id, roadmap)
     feature_id = roadmap_result["created"]["features"][0]["id"]
 
     # Create user story
     story_result = create_user_story(
         CreateUserStoryInput(
-            product_id=product_id,
+            project_id=project_id,
             feature_id=feature_id,
             title="Login with email",
             description="As a user, I want to log in with email and password.",
@@ -183,7 +183,7 @@ def test_create_task(engine: Engine) -> None:
             product_name="Task Project", vision=None, description=None
         )
     )
-    product_id = prod_result["product_id"]
+    project_id = prod_result["project_id"]
 
     roadmap = [
         {
@@ -202,12 +202,12 @@ def test_create_task(engine: Engine) -> None:
         }
     ]
 
-    roadmap_result = persist_roadmap(product_id, roadmap)
+    roadmap_result = persist_roadmap(project_id, roadmap)
     feature_id = roadmap_result["created"]["features"][0]["id"]
 
     story_result = create_user_story(
         CreateUserStoryInput(
-            product_id=product_id,
+            project_id=project_id,
             feature_id=feature_id,
             title="Login with email",
             description="As a user, I want to log in.",
@@ -256,7 +256,7 @@ def test_query_product_structure(engine: Engine) -> None:
             description=None,
         )
     )
-    product_id = prod_result["product_id"]
+    project_id = prod_result["project_id"]
 
     roadmap = [
         {
@@ -275,12 +275,12 @@ def test_query_product_structure(engine: Engine) -> None:
         }
     ]
 
-    roadmap_result = persist_roadmap(product_id, roadmap)
+    roadmap_result = persist_roadmap(project_id, roadmap)
     feature_id = roadmap_result["created"]["features"][0]["id"]
 
     create_user_story(
         CreateUserStoryInput(
-            product_id=product_id,
+            project_id=project_id,
             feature_id=feature_id,
             title="User can login",
             description="As a user...",
@@ -290,11 +290,11 @@ def test_query_product_structure(engine: Engine) -> None:
     )
 
     # Query structure
-    result = query_product_structure(product_id)
+    result = query_product_structure(project_id)
 
     assert result["success"] is True
-    assert result["structure"]["product"]["name"] == "Query Project"
-    assert result["structure"]["product"]["vision"] == "Test vision statement"
+    assert result["structure"]["project"]["name"] == "Query Project"
+    assert result["structure"]["project"]["vision"] == "Test vision statement"
     assert len(result["structure"]["themes"]) == 1
     assert len(result["structure"]["themes"][0]["epics"]) == 1
     assert len(result["structure"]["themes"][0]["epics"][0]["features"]) == 1
@@ -315,7 +315,7 @@ def test_get_story_details(engine: Engine) -> None:
             description=None,
         )
     )
-    product_id = product_result["product_id"]
+    project_id = product_result["project_id"]
 
     # Create roadmap structure
     roadmap = [
@@ -337,13 +337,13 @@ def test_get_story_details(engine: Engine) -> None:
         }
     ]
 
-    roadmap_result = persist_roadmap(product_id, roadmap)
+    roadmap_result = persist_roadmap(project_id, roadmap)
     feature_id = roadmap_result["created"]["features"][0]["id"]
 
     # Create a test story
     story_result = create_user_story(
         CreateUserStoryInput(
-            product_id=product_id,
+            project_id=project_id,
             feature_id=feature_id,
             title="Test Story for Details",
             description="As a tester, I want to retrieve story details so that I can verify the functionality.",  # noqa: E501
@@ -373,7 +373,7 @@ def test_get_story_details(engine: Engine) -> None:
     assert result["status"] == "To Do"  # StoryStatus enum value
     assert result["story_points"] == 3  # noqa: PLR2004
     assert result["feature_id"] == feature_id
-    assert result["product_id"] == product_id
+    assert result["project_id"] == project_id
     assert "created_at" in result
     assert "updated_at" in result
 

@@ -10,7 +10,7 @@ from sqlmodel import Session, col, select
 
 from models.authority_curation import AuthorityFeedbackAttempt
 from models.core import (
-    Product,
+    Project,
     Sprint,
     SprintStory,
     Task,
@@ -205,7 +205,7 @@ class _AuthorityLoad:
 
 @dataclass(frozen=True)
 class _PhaseArtifactLoad:
-    """Product-definition artifact facts and exact review facts."""
+    """Project-definition artifact facts and exact review facts."""
 
     facts: tuple[PhaseArtifactFact, ...]
     reviews: tuple[ReviewDecisionFact, ...]
@@ -481,22 +481,22 @@ class WorkflowFactRepository:
 
     def _project(self, project_id: int) -> ProjectFact:
         row = self._session.exec(
-            select(Product)
-            .where(col(Product.product_id) == project_id)
-            .order_by(col(Product.product_id)),
+            select(Project)
+            .where(col(Project.project_id) == project_id)
+            .order_by(col(Project.project_id)),
             execution_options=self._query_options(),
         ).one_or_none()
         if row is None:
             message = f"Project {project_id} does not exist."
             raise self._error(message)
-        if row.product_id is None:
-            message = "Project row has no product_id."
+        if row.project_id is None:
+            message = "Project row has no project_id."
             raise self._error(message)
         if row.origin not in {"greenfield", "brownfield"}:
             message = f"Project {project_id} has invalid origin {row.origin!r}."
             raise self._error(message)
         return ProjectFact(
-            project_id=row.product_id,
+            project_id=row.project_id,
             name=row.name,
             origin=self._project_origin(row.origin),
             created_at=row.created_at,
@@ -771,7 +771,7 @@ class WorkflowFactRepository:
     def _spec_versions(self, project_id: int) -> tuple[SpecVersionFact, ...]:
         rows = self._session.exec(
             select(SpecRegistry)
-            .where(col(SpecRegistry.product_id) == project_id)
+            .where(col(SpecRegistry.project_id) == project_id)
             .order_by(col(SpecRegistry.spec_version_id)),
             execution_options=self._query_options(),
         ).all()
@@ -1033,7 +1033,7 @@ class WorkflowFactRepository:
         }
         audit_events = self._session.exec(
             select(WorkflowEvent)
-            .where(col(WorkflowEvent.product_id) == project_id)
+            .where(col(WorkflowEvent.project_id) == project_id)
             .where(col(WorkflowEvent.event_type) == WorkflowEventType.BACKLOG_SAVED)
             .order_by(col(WorkflowEvent.event_id)),
             execution_options=self._query_options(),
@@ -2187,7 +2187,7 @@ class WorkflowFactRepository:
             raise self._error(message)
         acceptances = self._session.exec(
             select(SpecAuthorityAcceptance).where(
-                col(SpecAuthorityAcceptance.product_id) == project_id,
+                col(SpecAuthorityAcceptance.project_id) == project_id,
                 col(SpecAuthorityAcceptance.spec_version_id)
                 == registration.spec_version_id,
                 col(SpecAuthorityAcceptance.pending_authority_id)
@@ -2319,7 +2319,7 @@ class WorkflowFactRepository:
                 col(CompiledSpecAuthority.spec_version_id)
                 == col(SpecRegistry.spec_version_id),
             )
-            .where(col(SpecRegistry.product_id) == project_id)
+            .where(col(SpecRegistry.project_id) == project_id)
             .order_by(col(CompiledSpecAuthority.authority_id)),
             execution_options=self._query_options(),
         ).all()
@@ -2357,7 +2357,7 @@ class WorkflowFactRepository:
 
         acceptance_rows = self._session.exec(
             select(SpecAuthorityAcceptance)
-            .where(col(SpecAuthorityAcceptance.product_id) == project_id)
+            .where(col(SpecAuthorityAcceptance.project_id) == project_id)
             .order_by(
                 col(SpecAuthorityAcceptance.decided_at),
                 col(SpecAuthorityAcceptance.id),
@@ -2406,7 +2406,7 @@ class WorkflowFactRepository:
     def _sprints(self, project_id: int) -> tuple[SprintFact, ...]:
         rows = self._session.exec(
             select(Sprint)
-            .where(col(Sprint.product_id) == project_id)
+            .where(col(Sprint.project_id) == project_id)
             .order_by(col(Sprint.completed_at), col(Sprint.sprint_id)),
             execution_options=self._query_options(),
         ).all()
@@ -2489,7 +2489,7 @@ class WorkflowFactRepository:
                 raise self._error(message)
             if (
                 sprint is None
-                or sprint.product_id != project_id
+                or sprint.project_id != project_id
                 or sprint.status not in {SprintStatus.ACTIVE, SprintStatus.COMPLETED}
                 or sprint.started_at != row.started_at
                 or plan is None
@@ -2513,10 +2513,9 @@ class WorkflowFactRepository:
                 != row.dependency_fingerprint
                 or event is None
                 or event.event_type is not WorkflowEventType.SPRINT_STARTED
-                or event.product_id != project_id
+                or event.project_id != project_id
                 or event.sprint_id != row.sprint_id
                 or event.timestamp != row.started_at
-                or event.session_id is not None
                 or event.duration_seconds != 0.0
                 or event.event_metadata is None
             ):
@@ -2674,7 +2673,7 @@ class WorkflowFactRepository:
         rows = tuple(
             self._session.exec(
                 select(UserStory)
-                .where(col(UserStory.product_id) == project_id)
+                .where(col(UserStory.project_id) == project_id)
                 .order_by(col(UserStory.rank), col(UserStory.story_id)),
                 execution_options=self._query_options(),
             ).all()
@@ -2682,7 +2681,7 @@ class WorkflowFactRepository:
         dependencies = tuple(
             self._session.exec(
                 select(UserStoryDependency)
-                .where(col(UserStoryDependency.product_id) == project_id)
+                .where(col(UserStoryDependency.project_id) == project_id)
                 .order_by(
                     col(UserStoryDependency.dependent_story_id),
                     col(UserStoryDependency.prerequisite_story_id),
@@ -2738,7 +2737,7 @@ class WorkflowFactRepository:
     ) -> tuple[StoryDependencyFact, ...]:
         rows = self._session.exec(
             select(UserStoryDependency)
-            .where(col(UserStoryDependency.product_id) == project_id)
+            .where(col(UserStoryDependency.project_id) == project_id)
             .order_by(
                 col(UserStoryDependency.dependent_story_id),
                 col(UserStoryDependency.prerequisite_story_id),
@@ -2861,7 +2860,7 @@ class WorkflowFactRepository:
         rows = self._session.exec(
             select(Task, UserStory)
             .join(UserStory, col(Task.story_id) == col(UserStory.story_id))
-            .where(col(UserStory.product_id) == project_id)
+            .where(col(UserStory.project_id) == project_id)
             .order_by(col(Task.task_id)),
             execution_options=self._query_options(),
         ).all()

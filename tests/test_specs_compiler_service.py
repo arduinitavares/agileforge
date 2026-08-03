@@ -15,12 +15,11 @@ from sqlmodel import Session, SQLModel, create_engine, select
 
 from agile_sqlmodel import (
     CompiledSpecAuthority,
-    Product,
+    Project,
     SpecAuthorityAcceptance,
     SpecAuthorityStatus,
     SpecRegistry,
 )
-from db.migrations import ensure_schema_current
 from services.agent_workbench.authority_projection import (
     pending_authority_fingerprint,
 )
@@ -622,14 +621,14 @@ def test_normalize_arbitrary_json_rejects_authority_input() -> None:
 
 
 def test_update_spec_and_compile_authority_returns_error_for_invalid_structured_spec(
-    sample_product: Product,
+    sample_product: Project,
 ) -> None:
     """Invalid structured spec JSON returns a structured compile/update error."""
     from services.specs import compiler_service  # noqa: PLC0415
 
     result = compiler_service.update_spec_and_compile_authority(
         {
-            "product_id": require_id(sample_product.product_id, "product_id"),
+            "project_id": require_id(sample_product.project_id, "project_id"),
             "spec_content": json.dumps(
                 {
                     "schema_version": "agileforge.spec.v1",
@@ -661,14 +660,14 @@ def _raw_compiler_failure_json() -> str:
 def _create_spec_version(
     session: Session,
     *,
-    product_id: int,
+    project_id: int,
     content: str | None = None,
 ) -> SpecRegistry:
     if content is None:
         content = _canonical_agileforge_spec_profile_json()
     spec_row = SpecRegistry(
-        product_id=product_id,
-        spec_hash=f"{product_id:064d}"[-64:],
+        project_id=project_id,
+        spec_hash=f"{project_id:064d}"[-64:],
         content=content,
         content_ref=None,
         status="approved",
@@ -1039,7 +1038,7 @@ def test_services_package_exports_ensure_accepted_spec_authority() -> None:
 
 
 def test_ensure_accepted_spec_authority_reuses_existing_accepted_version(
-    session: Session, sample_product: Product, monkeypatch: pytest.MonkeyPatch
+    session: Session, sample_product: Project, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Verify ensure accepted spec authority reuses existing accepted version."""
     from services.specs import compiler_service  # noqa: PLC0415
@@ -1048,7 +1047,7 @@ def test_ensure_accepted_spec_authority_reuses_existing_accepted_version(
     monkeypatch.setattr(spec_tools, "engine", session.get_bind(), raising=False)
 
     spec_row = _create_spec_version(
-        session, product_id=require_id(sample_product.product_id, "product_id")
+        session, project_id=require_id(sample_product.project_id, "project_id")
     )
     authority = _create_compiled_authority(
         session,
@@ -1056,7 +1055,7 @@ def test_ensure_accepted_spec_authority_reuses_existing_accepted_version(
         artifact_json=_stored_compiled_success_json(),
     )
     acceptance = SpecAuthorityAcceptance(
-        product_id=require_id(sample_product.product_id, "product_id"),
+        project_id=require_id(sample_product.project_id, "project_id"),
         spec_version_id=require_id(spec_row.spec_version_id, "spec_version_id"),
         status="accepted",
         policy="manual",
@@ -1073,7 +1072,7 @@ def test_ensure_accepted_spec_authority_reuses_existing_accepted_version(
     session.commit()
 
     result = compiler_service.ensure_accepted_spec_authority(
-        product_id=require_id(sample_product.product_id, "product_id"),
+        project_id=require_id(sample_product.project_id, "project_id"),
     )
 
     assert result == require_id(spec_row.spec_version_id, "spec_version_id")
@@ -1081,14 +1080,14 @@ def test_ensure_accepted_spec_authority_reuses_existing_accepted_version(
 
 def test_accepted_authority_reuse_breaks_decision_time_ties_by_id(
     session: Session,
-    sample_product: Product,
+    sample_product: Project,
 ) -> None:
     """Equal timestamps select the newest inserted accepted decision."""
     from services.specs import compiler_service  # noqa: PLC0415
 
-    product_id = require_id(sample_product.product_id, "product_id")
+    project_id = require_id(sample_product.project_id, "project_id")
     decided_at = datetime(2026, 7, 27, tzinfo=UTC)
-    first_spec = _create_spec_version(session, product_id=product_id)
+    first_spec = _create_spec_version(session, project_id=project_id)
     first_authority = _create_compiled_authority(
         session,
         spec_version_id=require_id(first_spec.spec_version_id, "spec_version_id"),
@@ -1096,7 +1095,7 @@ def test_accepted_authority_reuse_breaks_decision_time_ties_by_id(
     )
     session.add(
         SpecAuthorityAcceptance(
-            product_id=product_id,
+            project_id=project_id,
             spec_version_id=require_id(first_spec.spec_version_id, "spec_version_id"),
             status="accepted",
             policy="manual",
@@ -1110,7 +1109,7 @@ def test_accepted_authority_reuse_breaks_decision_time_ties_by_id(
         )
     )
     session.commit()
-    second_spec = _create_spec_version(session, product_id=product_id)
+    second_spec = _create_spec_version(session, project_id=project_id)
     second_authority = _create_compiled_authority(
         session,
         spec_version_id=require_id(second_spec.spec_version_id, "spec_version_id"),
@@ -1118,7 +1117,7 @@ def test_accepted_authority_reuse_breaks_decision_time_ties_by_id(
     )
     session.add(
         SpecAuthorityAcceptance(
-            product_id=product_id,
+            project_id=project_id,
             spec_version_id=require_id(second_spec.spec_version_id, "spec_version_id"),
             status="accepted",
             policy="manual",
@@ -1135,14 +1134,14 @@ def test_accepted_authority_reuse_breaks_decision_time_ties_by_id(
 
     lookup = compiler_service._lookup_reusable_accepted_authority(
         session,
-        product_id=product_id,
+        project_id=project_id,
     )
 
     assert lookup.reusable_spec_version_id == second_spec.spec_version_id
 
 
 def test_ensure_accepted_spec_authority_honors_legacy_tool_update_monkeypatch(
-    session: Session, sample_product: Product, monkeypatch: pytest.MonkeyPatch
+    session: Session, sample_product: Project, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Verify ensure accepted spec authority honors legacy tool update monkeypatch."""
     from services.specs import compiler_service  # noqa: PLC0415
@@ -1159,7 +1158,7 @@ def test_ensure_accepted_spec_authority_honors_legacy_tool_update_monkeypatch(
             "success": True,
             "accepted": True,
             "spec_version_id": 777,
-            "product_id": require_id(sample_product.product_id, "product_id"),
+            "project_id": require_id(sample_product.project_id, "project_id"),
         }
 
     monkeypatch.setattr(
@@ -1170,14 +1169,14 @@ def test_ensure_accepted_spec_authority_honors_legacy_tool_update_monkeypatch(
     )
 
     result = compiler_service.ensure_accepted_spec_authority(
-        product_id=require_id(sample_product.product_id, "product_id"),
+        project_id=require_id(sample_product.project_id, "project_id"),
         spec_content="# Spec",
         recompile=True,
     )
 
     assert result == 777  # noqa: PLR2004
     assert captured["params"] == {
-        "product_id": require_id(sample_product.product_id, "product_id"),
+        "project_id": require_id(sample_product.project_id, "project_id"),
         "recompile": True,
         "spec_content": "# Spec",
     }
@@ -1988,7 +1987,7 @@ def test_default_compiler_invocation_rejects_unstructured_spec_source(
         compiler_service._default_invoke_spec_authority_compiler(
             spec_content="# Spec\n\nThe system must record audit evidence.",
             content_ref=None,
-            product_id=4,
+            project_id=4,
             spec_version_id=9,
         )
 
@@ -2021,7 +2020,7 @@ def test_default_compiler_invocation_marks_structured_spec_source_format(
     compiler_service._default_invoke_spec_authority_compiler(
         spec_content=json.dumps(_agileforge_spec_profile_payload()),
         content_ref=None,
-        product_id=4,
+        project_id=4,
         spec_version_id=9,
     )
 
@@ -2054,7 +2053,7 @@ def test_default_compiler_invocation_passes_compiler_model_to_async_invoker(
     compiler_service._default_invoke_spec_authority_compiler(
         spec_content=json.dumps(_agileforge_spec_profile_payload()),
         content_ref=None,
-        product_id=4,
+        project_id=4,
         spec_version_id=9,
         compiler_model="openrouter/openai/gpt-5.2",
     )
@@ -2078,7 +2077,7 @@ def test_compiler_agent_override_rechecks_schema_disable(
 
 
 def test_compile_spec_authority_for_version_persists_authority(
-    session: Session, sample_product: Product, monkeypatch: pytest.MonkeyPatch
+    session: Session, sample_product: Project, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Verify compile spec authority for version persists authority."""
     from services.specs import compiler_service  # noqa: PLC0415
@@ -2095,7 +2094,7 @@ def test_compile_spec_authority_for_version_persists_authority(
     )
 
     spec_row = _create_spec_version(
-        session, product_id=require_id(sample_product.product_id, "product_id")
+        session, project_id=require_id(sample_product.project_id, "project_id")
     )
     tool_context = make_tool_context()
 
@@ -2141,14 +2140,13 @@ def test_compile_spec_authority_for_version_persists_quality_report(
         poolclass=StaticPool,
     )
     SQLModel.metadata.create_all(engine)
-    ensure_schema_current(engine)
     with Session(engine) as session:
-        product = Product(name="Quality Gate Project")
+        product = Project(name="Quality Gate Project")
         session.add(product)
         session.commit()
         session.refresh(product)
         spec = SpecRegistry(
-            product_id=require_id(product.product_id, "product_id"),
+            project_id=require_id(product.project_id, "project_id"),
             spec_hash="sha256:" + "1" * 64,
             content=_agileforge_spec_profile_json(),
             content_ref="specs/spec.json",
@@ -2222,7 +2220,7 @@ def test_compile_spec_authority_for_version_persists_quality_report(
 
 def test_compile_spec_authority_for_version_reports_normalized_duplicate_merges(
     session: Session,
-    sample_product: Product,
+    sample_product: Project,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Normalizer duplicate cleanup is carried into persisted quality report."""
@@ -2236,7 +2234,7 @@ def test_compile_spec_authority_for_version_reports_normalized_duplicate_merges(
     )
     spec_row = _create_spec_version(
         session,
-        product_id=require_id(sample_product.product_id, "product_id"),
+        project_id=require_id(sample_product.project_id, "project_id"),
     )
 
     result = compiler_service.compile_spec_authority_for_version(
@@ -2492,7 +2490,7 @@ def test_iterative_compilation_converts_scope_error_to_failure_envelope(
     result = compiler_service._compile_spec_authority_output(
         spec_content=artifact.model_dump_json(by_alias=True),
         content_ref=None,
-        product_id=None,
+        project_id=None,
         spec_version_id=None,
     )
 
@@ -2595,7 +2593,7 @@ def test_merge_compilation_successes_reports_cross_success_duplicate_merges() ->
 
 def test_compile_spec_authority_repairs_one_behavioral_source_item(
     session: Session,
-    sample_product: Product,
+    sample_product: Project,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A repairable source metadata failure should retry only the failing item."""
@@ -2603,7 +2601,7 @@ def test_compile_spec_authority_repairs_one_behavioral_source_item(
 
     spec_row = _create_spec_version(
         session,
-        product_id=require_id(sample_product.product_id, "product_id"),
+        project_id=require_id(sample_product.project_id, "project_id"),
         content=json.dumps(_focused_repair_spec_profile_payload()),
     )
     spec_version_id = require_id(spec_row.spec_version_id, "spec_version_id")
@@ -2613,12 +2611,12 @@ def test_compile_spec_authority_repairs_one_behavioral_source_item(
         *,
         spec_content: str,
         content_ref: str | None,
-        product_id: int | None,
+        project_id: int | None,
         spec_version_id: int | None,
         domain_hint: str | None = None,
         compiler_model: str | None = None,
     ) -> str:
-        del content_ref, product_id, spec_version_id
+        del content_ref, project_id, spec_version_id
         calls.append(
             {
                 "spec_content": spec_content,
@@ -2657,7 +2655,7 @@ def test_compile_spec_authority_repairs_one_behavioral_source_item(
 
 def test_compile_spec_authority_does_not_repair_mixed_source_metadata_issues(
     session: Session,
-    sample_product: Product,
+    sample_product: Project,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Mixed source metadata failures must fail closed without focused repair."""
@@ -2665,7 +2663,7 @@ def test_compile_spec_authority_does_not_repair_mixed_source_metadata_issues(
 
     spec_row = _create_spec_version(
         session,
-        product_id=require_id(sample_product.product_id, "product_id"),
+        project_id=require_id(sample_product.project_id, "project_id"),
         content=json.dumps(_focused_repair_spec_profile_payload()),
     )
     spec_version_id = require_id(spec_row.spec_version_id, "spec_version_id")
@@ -2735,7 +2733,7 @@ def test_compile_spec_authority_does_not_repair_mixed_source_metadata_issues(
 
 def test_compile_spec_authority_repaired_item_cannot_skip_required_coverage(
     session: Session,
-    sample_product: Product,
+    sample_product: Project,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Repair success must still cover every accepted MUST/MUST_NOT item."""
@@ -2743,7 +2741,7 @@ def test_compile_spec_authority_repaired_item_cannot_skip_required_coverage(
 
     spec_row = _create_spec_version(
         session,
-        product_id=require_id(sample_product.product_id, "product_id"),
+        project_id=require_id(sample_product.project_id, "project_id"),
         content=_accepted_multi_item_spec_profile_json(),
     )
     spec_version_id = require_id(spec_row.spec_version_id, "spec_version_id")
@@ -2788,7 +2786,7 @@ def test_compile_spec_authority_repaired_item_cannot_skip_required_coverage(
 
 def test_compile_spec_authority_coverage_repair_does_not_chain_metadata_repair(
     session: Session,
-    sample_product: Product,
+    sample_product: Project,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Coverage repair failure is terminal and cannot start metadata repair."""
@@ -2796,7 +2794,7 @@ def test_compile_spec_authority_coverage_repair_does_not_chain_metadata_repair(
 
     spec_row = _create_spec_version(
         session,
-        product_id=require_id(sample_product.product_id, "product_id"),
+        project_id=require_id(sample_product.project_id, "project_id"),
         content=_accepted_multi_item_spec_profile_json(),
     )
     spec_version_id = require_id(spec_row.spec_version_id, "spec_version_id")
@@ -2852,7 +2850,7 @@ def test_compile_spec_authority_coverage_repair_does_not_chain_metadata_repair(
 
 def test_compile_spec_authority_repairs_missing_coverage_and_persists(
     session: Session,
-    sample_product: Product,
+    sample_product: Project,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Coverage repair can produce persisted authority when feedback succeeds."""
@@ -2860,7 +2858,7 @@ def test_compile_spec_authority_repairs_missing_coverage_and_persists(
 
     spec_row = _create_spec_version(
         session,
-        product_id=require_id(sample_product.product_id, "product_id"),
+        project_id=require_id(sample_product.project_id, "project_id"),
         content=_accepted_multi_item_spec_profile_json(),
     )
     spec_version_id = require_id(spec_row.spec_version_id, "spec_version_id")
@@ -2898,19 +2896,19 @@ def test_compile_spec_authority_repairs_missing_coverage_and_persists(
 
 def test_compile_spec_authority_scope_extension_reuses_base_authority(
     session: Session,
-    sample_product: Product,
+    sample_product: Project,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Scope extensions compile only added items and merge accepted base authority."""
     from services.specs import compiler_service  # noqa: PLC0415
 
-    product_id = require_id(sample_product.product_id, "product_id")
+    project_id = require_id(sample_product.project_id, "project_id")
     base_payload = _accepted_multi_item_spec_profile_payload()
     base_payload["items"] = [cast("list[dict[str, object]]", base_payload["items"])[0]]
     base_normalized = normalize_spec_content_for_registry(json.dumps(base_payload))
     base_spec = _create_spec_version(
         session,
-        product_id=product_id,
+        project_id=project_id,
         content=base_normalized.content,
     )
     base_spec.spec_hash = base_normalized.spec_hash
@@ -2939,7 +2937,7 @@ def test_compile_spec_authority_scope_extension_reuses_base_authority(
     )
     session.add(
         SpecAuthorityAcceptance(
-            product_id=product_id,
+            project_id=project_id,
             spec_version_id=require_id(base_spec.spec_version_id, "spec_version_id"),
             status="accepted",
             policy="manual",
@@ -2968,7 +2966,7 @@ def test_compile_spec_authority_scope_extension_reuses_base_authority(
     }
     amended_spec = _create_spec_version(
         session,
-        product_id=product_id,
+        project_id=project_id,
         content=amended_normalized.content,
     )
     amended_spec.spec_hash = amended_normalized.spec_hash
@@ -3031,19 +3029,19 @@ def test_compile_spec_authority_scope_extension_reuses_base_authority(
 
 def test_compile_spec_authority_scope_extension_rejects_stale_base_authority(
     session: Session,
-    sample_product: Product,
+    sample_product: Project,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Scope extension base reuse fails closed on accepted artifact mismatch."""
     from services.specs import compiler_service  # noqa: PLC0415
 
-    product_id = require_id(sample_product.product_id, "product_id")
+    project_id = require_id(sample_product.project_id, "project_id")
     base_normalized = normalize_spec_content_for_registry(
         _canonical_agileforge_spec_profile_json()
     )
     base_spec = _create_spec_version(
         session,
-        product_id=product_id,
+        project_id=project_id,
         content=base_normalized.content,
     )
     base_spec.spec_hash = base_normalized.spec_hash
@@ -3057,7 +3055,7 @@ def test_compile_spec_authority_scope_extension_rejects_stale_base_authority(
     )
     session.add(
         SpecAuthorityAcceptance(
-            product_id=product_id,
+            project_id=project_id,
             spec_version_id=require_id(base_spec.spec_version_id, "spec_version_id"),
             status="accepted",
             policy="manual",
@@ -3078,7 +3076,7 @@ def test_compile_spec_authority_scope_extension_rejects_stale_base_authority(
     )
     amended_spec = _create_spec_version(
         session,
-        product_id=product_id,
+        project_id=project_id,
         content=amended_normalized.content,
     )
     amended_spec.spec_hash = amended_normalized.spec_hash
@@ -3124,7 +3122,7 @@ def test_compile_spec_authority_scope_extension_rejects_stale_base_authority(
 
 def test_compile_spec_authority_does_not_repair_over_promotion(
     session: Session,
-    sample_product: Product,
+    sample_product: Project,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Non-repairable source metadata failures should not trigger focused retry."""
@@ -3132,7 +3130,7 @@ def test_compile_spec_authority_does_not_repair_over_promotion(
 
     spec_row = _create_spec_version(
         session,
-        product_id=require_id(sample_product.product_id, "product_id"),
+        project_id=require_id(sample_product.project_id, "project_id"),
         content=json.dumps(_focused_repair_spec_profile_payload()),
     )
     spec_version_id = require_id(spec_row.spec_version_id, "spec_version_id")
@@ -3183,7 +3181,7 @@ def test_compile_spec_authority_does_not_repair_over_promotion(
 
 def test_compile_spec_authority_failed_repair_leaves_no_compiled_authority_rows(
     session: Session,
-    sample_product: Product,
+    sample_product: Project,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Failed source metadata repair must not persist partial authority."""
@@ -3191,7 +3189,7 @@ def test_compile_spec_authority_failed_repair_leaves_no_compiled_authority_rows(
 
     spec_row = _create_spec_version(
         session,
-        product_id=require_id(sample_product.product_id, "product_id"),
+        project_id=require_id(sample_product.project_id, "project_id"),
         content=json.dumps(_focused_repair_spec_profile_payload()),
     )
     spec_version_id = require_id(spec_row.spec_version_id, "spec_version_id")
@@ -3231,7 +3229,7 @@ def test_compile_spec_authority_failed_repair_leaves_no_compiled_authority_rows(
 
 def test_source_metadata_failure_details_include_repair_guidance(
     session: Session,
-    sample_product: Product,
+    sample_product: Project,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Unrepaired source metadata failures should include actionable guidance."""
@@ -3239,7 +3237,7 @@ def test_source_metadata_failure_details_include_repair_guidance(
 
     spec_row = _create_spec_version(
         session,
-        product_id=require_id(sample_product.product_id, "product_id"),
+        project_id=require_id(sample_product.project_id, "project_id"),
         content=json.dumps(_focused_repair_spec_profile_payload()),
     )
     spec_version_id = require_id(spec_row.spec_version_id, "spec_version_id")
@@ -3307,7 +3305,7 @@ def test_source_metadata_failure_details_include_repair_guidance(
 
 
 def test_compile_spec_authority_for_version_iteratively_persists_must_coverage(
-    session: Session, sample_product: Product, monkeypatch: pytest.MonkeyPatch
+    session: Session, sample_product: Project, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Persisted structured compilation merges focused MUST/MUST_NOT item outputs."""
     from services.specs import compiler_service  # noqa: PLC0415
@@ -3341,7 +3339,7 @@ def test_compile_spec_authority_for_version_iteratively_persists_must_coverage(
     )
     spec_row = _create_spec_version(
         session,
-        product_id=require_id(sample_product.product_id, "product_id"),
+        project_id=require_id(sample_product.project_id, "project_id"),
         content=_accepted_multi_item_spec_profile_json(),
     )
 
@@ -3370,7 +3368,7 @@ def test_compile_spec_authority_for_version_iteratively_persists_must_coverage(
 
 
 def test_update_spec_and_compile_authority_suppresses_auto_accept_for_vacant_authority(
-    session: Session, sample_product: Product, monkeypatch: pytest.MonkeyPatch
+    session: Session, sample_product: Project, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Vacant authority blocks update+compile before persistence."""
     from services.specs import compiler_service  # noqa: PLC0415
@@ -3384,7 +3382,7 @@ def test_update_spec_and_compile_authority_suppresses_auto_accept_for_vacant_aut
 
     result = compiler_service.update_spec_and_compile_authority(
         {
-            "product_id": require_id(sample_product.product_id, "product_id"),
+            "project_id": require_id(sample_product.project_id, "project_id"),
             "spec_content": _agileforge_spec_profile_json(),
         },
         tool_context=None,
@@ -3404,14 +3402,12 @@ def test_compile_spec_authority_for_version_with_engine_uses_supplied_engine(
     """Verify engine-aware compile path never falls back to module get_engine."""
     from services.specs import compiler_service  # noqa: PLC0415
 
-    ensure_schema_current(engine)
     other_engine = create_engine(
         "sqlite:///:memory:",
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
     SQLModel.metadata.create_all(other_engine)
-    ensure_schema_current(other_engine)
 
     monkeypatch.setattr(compiler_service, "get_engine", lambda: other_engine)
     monkeypatch.setattr(
@@ -3421,13 +3417,13 @@ def test_compile_spec_authority_for_version_with_engine_uses_supplied_engine(
     )
 
     with Session(engine) as supplied_session:
-        product = Product(name="Supplied Engine Product", vision="vision")
+        product = Project(name="Supplied Engine Project", vision="vision")
         supplied_session.add(product)
         supplied_session.commit()
         supplied_session.refresh(product)
         spec = _create_spec_version(
             supplied_session,
-            product_id=require_id(product.product_id, "product_id"),
+            project_id=require_id(product.project_id, "project_id"),
         )
         spec_version_id = require_id(spec.spec_version_id, "spec_version_id")
 
@@ -3536,7 +3532,7 @@ def test_compiler_invocation_guard_returns_lease_loss_when_heartbeat_fails() -> 
 def test_compile_spec_authority_for_version_with_engine_runs_lease_guard_before_persist(
     engine: Engine,
     session: Session,
-    sample_product: Product,
+    sample_product: Project,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Verify engine-aware compile path guards both durable writes."""
@@ -3549,7 +3545,7 @@ def test_compile_spec_authority_for_version_with_engine_runs_lease_guard_before_
     )
     spec = _create_spec_version(
         session,
-        product_id=require_id(sample_product.product_id, "product_id"),
+        project_id=require_id(sample_product.project_id, "project_id"),
     )
     boundaries: list[str] = []
 
@@ -3586,7 +3582,7 @@ def test_compile_spec_authority_for_version_with_engine_runs_lease_guard_before_
 def test_compile_spec_authority_for_version_with_engine_lease_loss_blocks_write(  # noqa: PLR0913
     engine: Engine,
     session: Session,
-    sample_product: Product,
+    sample_product: Project,
     monkeypatch: pytest.MonkeyPatch,
     blocked_boundary: str,
     expect_authority: bool,
@@ -3602,7 +3598,7 @@ def test_compile_spec_authority_for_version_with_engine_lease_loss_blocks_write(
     )
     spec = _create_spec_version(
         session,
-        product_id=require_id(sample_product.product_id, "product_id"),
+        project_id=require_id(sample_product.project_id, "project_id"),
     )
     spec_version_id = require_id(spec.spec_version_id, "spec_version_id")
 
@@ -3637,7 +3633,7 @@ def test_compile_spec_authority_for_version_with_engine_lease_loss_blocks_write(
 def test_compile_spec_authority_for_version_with_engine_progress_failure_recovers(  # noqa: PLR0913
     engine: Engine,
     session: Session,
-    sample_product: Product,
+    sample_product: Project,
     monkeypatch: pytest.MonkeyPatch,
     failed_boundary: str,
     mode: str,
@@ -3652,7 +3648,7 @@ def test_compile_spec_authority_for_version_with_engine_progress_failure_recover
     )
     spec = _create_spec_version(
         session,
-        product_id=require_id(sample_product.product_id, "product_id"),
+        project_id=require_id(sample_product.project_id, "project_id"),
     )
 
     def record_progress(boundary: str) -> bool:
@@ -3677,7 +3673,7 @@ def test_compile_spec_authority_for_version_with_engine_progress_failure_recover
 
 
 def test_compile_spec_authority_persists_authority_with_legacy_envelope(
-    session: Session, sample_product: Product, monkeypatch: pytest.MonkeyPatch
+    session: Session, sample_product: Project, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Verify compile spec authority persists authority with legacy envelope."""
     from services.specs import compiler_service  # noqa: PLC0415
@@ -3694,7 +3690,7 @@ def test_compile_spec_authority_persists_authority_with_legacy_envelope(
     )
 
     spec_row = _create_spec_version(
-        session, product_id=require_id(sample_product.product_id, "product_id")
+        session, project_id=require_id(sample_product.project_id, "project_id")
     )
     tool_context = make_tool_context()
 
@@ -3733,7 +3729,7 @@ def test_compile_spec_authority_persists_authority_with_legacy_envelope(
 
 
 def test_compile_spec_authority_returns_error_when_already_compiled(
-    session: Session, sample_product: Product, monkeypatch: pytest.MonkeyPatch
+    session: Session, sample_product: Project, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Verify compile spec authority returns error when already compiled."""
     from services.specs import compiler_service  # noqa: PLC0415
@@ -3752,7 +3748,7 @@ def test_compile_spec_authority_returns_error_when_already_compiled(
     )
 
     spec_row = _create_spec_version(
-        session, product_id=require_id(sample_product.product_id, "product_id")
+        session, project_id=require_id(sample_product.project_id, "project_id")
     )
     authority = _create_compiled_authority(
         session,
@@ -3775,7 +3771,7 @@ def test_compile_spec_authority_returns_error_when_already_compiled(
 
 
 def test_compile_spec_authority_for_version_returns_cached_authority(
-    session: Session, sample_product: Product, monkeypatch: pytest.MonkeyPatch
+    session: Session, sample_product: Project, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Verify compile spec authority for version returns cached authority."""
     from services.specs import compiler_service  # noqa: PLC0415
@@ -3792,7 +3788,7 @@ def test_compile_spec_authority_for_version_returns_cached_authority(
     )
 
     spec_row = _create_spec_version(
-        session, product_id=require_id(sample_product.product_id, "product_id")
+        session, project_id=require_id(sample_product.project_id, "project_id")
     )
     existing = _create_compiled_authority(
         session,
@@ -3822,7 +3818,7 @@ def test_compile_spec_authority_for_version_returns_cached_authority(
 def test_force_recompile_inserts_without_mutating_existing_history(
     engine: Engine,
     session: Session,
-    sample_product: Product,
+    sample_product: Project,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Forced recompilation appends a candidate and preserves accepted v2 history."""
@@ -3835,7 +3831,7 @@ def test_force_recompile_inserts_without_mutating_existing_history(
     )
     spec = _create_spec_version(
         session,
-        product_id=require_id(sample_product.product_id, "product_id"),
+        project_id=require_id(sample_product.project_id, "project_id"),
     )
     spec_version_id = require_id(spec.spec_version_id, "spec_version_id")
     existing = _create_compiled_authority(
@@ -3847,7 +3843,7 @@ def test_force_recompile_inserts_without_mutating_existing_history(
     )
     existing_id = require_id(existing.authority_id, "authority_id")
     acceptance = SpecAuthorityAcceptance(
-        product_id=require_id(sample_product.product_id, "product_id"),
+        project_id=require_id(sample_product.project_id, "project_id"),
         spec_version_id=spec_version_id,
         status="accepted",
         policy="test",
@@ -3859,7 +3855,7 @@ def test_force_recompile_inserts_without_mutating_existing_history(
         pending_authority_id=existing_id,
         authority_fingerprint="immutable-history",
         terminal_decision_key=(
-            f"{require_id(sample_product.product_id, 'product_id')}:"
+            f"{require_id(sample_product.project_id, 'project_id')}:"
             f"{spec_version_id}:{existing_id}"
         ),
         provenance_source="legacy_backfill",
@@ -3901,7 +3897,7 @@ def test_force_recompile_inserts_without_mutating_existing_history(
 def test_force_recompile_inserts_when_existing_row_has_no_terminal_decision(
     engine: Engine,
     session: Session,
-    sample_product: Product,
+    sample_product: Project,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Forced recompilation appends even when the existing candidate is pending."""
@@ -3914,7 +3910,7 @@ def test_force_recompile_inserts_when_existing_row_has_no_terminal_decision(
     )
     spec = _create_spec_version(
         session,
-        product_id=require_id(sample_product.product_id, "product_id"),
+        project_id=require_id(sample_product.project_id, "project_id"),
     )
     spec_version_id = require_id(spec.spec_version_id, "spec_version_id")
     existing = _create_compiled_authority(
@@ -3943,7 +3939,7 @@ def test_force_recompile_inserts_when_existing_row_has_no_terminal_decision(
 def test_compile_spec_authority_for_version_rejects_unsupported_cached_authority(
     engine: Engine,
     session: Session,
-    sample_product: Product,
+    sample_product: Project,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Unsupported cached authority artifacts fail closed without cache updates."""
@@ -3956,7 +3952,7 @@ def test_compile_spec_authority_for_version_rejects_unsupported_cached_authority
     )
 
     spec_row = _create_spec_version(
-        session, product_id=require_id(sample_product.product_id, "product_id")
+        session, project_id=require_id(sample_product.project_id, "project_id")
     )
     authority = _create_compiled_authority(
         session,
@@ -3975,7 +3971,7 @@ def test_compile_spec_authority_for_version_rejects_unsupported_cached_authority
     )
 
     spec_version_id = require_id(spec_row.spec_version_id, "spec_version_id")
-    project_id = require_id(sample_product.product_id, "product_id")
+    project_id = require_id(sample_product.project_id, "project_id")
     assert result["success"] is False
     assert result["error_code"] == "COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED"
     assert result["details"] == {
@@ -4007,7 +4003,7 @@ def test_compile_spec_authority_for_version_rejects_unsupported_cached_authority
 def test_compile_spec_authority_for_version_rejects_invalid_cached_authority(  # noqa: PLR0913
     engine: Engine,
     session: Session,
-    sample_product: Product,
+    sample_product: Project,
     monkeypatch: pytest.MonkeyPatch,
     artifact_json: str | None,
     load_status: str,
@@ -4022,7 +4018,7 @@ def test_compile_spec_authority_for_version_rejects_invalid_cached_authority(  #
     )
     spec_row = _create_spec_version(
         session,
-        product_id=require_id(sample_product.product_id, "product_id"),
+        project_id=require_id(sample_product.project_id, "project_id"),
     )
     authority = CompiledSpecAuthority(
         spec_version_id=require_id(spec_row.spec_version_id, "spec_version_id"),
@@ -4065,7 +4061,7 @@ def test_compile_spec_authority_for_version_rejects_invalid_cached_authority(  #
 
 def test_compile_spec_authority_for_version_uses_content_ref_when_content_empty(
     session: Session,
-    sample_product: Product,
+    sample_product: Project,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4087,7 +4083,7 @@ def test_compile_spec_authority_for_version_uses_content_ref_when_content_empty(
     spec_path.write_text(_agileforge_spec_profile_json(), encoding="utf-8")
     spec_row = _create_spec_version(
         session,
-        product_id=require_id(sample_product.product_id, "product_id"),
+        project_id=require_id(sample_product.project_id, "project_id"),
         content="",
     )
     spec_row.content_ref = str(spec_path)
@@ -4106,7 +4102,7 @@ def test_compile_spec_authority_for_version_uses_content_ref_when_content_empty(
 
 def test_compile_spec_authority_for_version_persists_invocation_failure_artifact(
     session: Session,
-    sample_product: Product,
+    sample_product: Project,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4137,7 +4133,7 @@ def test_compile_spec_authority_for_version_persists_invocation_failure_artifact
     )
 
     spec_row = _create_spec_version(
-        session, product_id=require_id(sample_product.product_id, "product_id")
+        session, project_id=require_id(sample_product.project_id, "project_id")
     )
 
     result = compiler_service.compile_spec_authority_for_version(
@@ -4156,7 +4152,7 @@ def test_compile_spec_authority_for_version_persists_invocation_failure_artifact
 
 def test_invalid_json_gets_one_schema_retry(
     session: Session,
-    sample_product: Product,
+    sample_product: Project,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Invalid JSON should trigger exactly one schema-feedback retry."""
@@ -4183,7 +4179,7 @@ def test_invalid_json_gets_one_schema_retry(
     )
 
     spec_row = _create_spec_version(
-        session, product_id=require_id(sample_product.product_id, "product_id")
+        session, project_id=require_id(sample_product.project_id, "project_id")
     )
 
     result = compiler_service.compile_spec_authority_for_version(
@@ -4205,7 +4201,7 @@ def test_invalid_json_gets_one_schema_retry(
 
 def test_json_validation_failed_gets_one_schema_retry(
     session: Session,
-    sample_product: Product,
+    sample_product: Project,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Schema-shaped output drift should get one bounded retry."""
@@ -4234,7 +4230,7 @@ def test_json_validation_failed_gets_one_schema_retry(
     )
 
     spec_row = _create_spec_version(
-        session, product_id=require_id(sample_product.product_id, "product_id")
+        session, project_id=require_id(sample_product.project_id, "project_id")
     )
 
     result = compiler_service.compile_spec_authority_for_version(
@@ -4251,7 +4247,7 @@ def test_json_validation_failed_gets_one_schema_retry(
 
 def test_claim_like_assumption_gets_one_schema_retry(
     session: Session,
-    sample_product: Product,
+    sample_product: Project,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The dedicated typed-claim contract failure gets one retry only."""
@@ -4276,7 +4272,7 @@ def test_claim_like_assumption_gets_one_schema_retry(
         fake_invoke_agent_to_text,
     )
     spec_row = _create_spec_version(
-        session, product_id=require_id(sample_product.product_id, "product_id")
+        session, project_id=require_id(sample_product.project_id, "project_id")
     )
 
     result = compiler_service.compile_spec_authority_for_version(
@@ -4292,7 +4288,7 @@ def test_claim_like_assumption_gets_one_schema_retry(
 
 def test_schema_retry_stops_after_one_retry(
     session: Session,
-    sample_product: Product,
+    sample_product: Project,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Schema retry should stop after one additional attempt."""
@@ -4317,7 +4313,7 @@ def test_schema_retry_stops_after_one_retry(
     )
 
     spec_row = _create_spec_version(
-        session, product_id=require_id(sample_product.product_id, "product_id")
+        session, project_id=require_id(sample_product.project_id, "project_id")
     )
 
     result = compiler_service.compile_spec_authority_for_version(
@@ -4347,7 +4343,7 @@ def test_schema_retry_stops_after_one_retry(
 
 def test_false_structured_claim_does_not_retry_or_persist(
     session: Session,
-    sample_product: Product,
+    sample_product: Project,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A false structured claim fails closed without retry or persistence."""
@@ -4413,7 +4409,7 @@ def test_false_structured_claim_does_not_retry_or_persist(
     )
 
     spec_row = _create_spec_version(
-        session, product_id=require_id(sample_product.product_id, "product_id")
+        session, project_id=require_id(sample_product.project_id, "project_id")
     )
 
     result = compiler_service.compile_spec_authority_for_version(
@@ -4441,7 +4437,7 @@ def test_false_structured_claim_does_not_retry_or_persist(
 )
 def test_unavailable_structured_claim_source_does_not_retry_or_persist(
     session: Session,
-    sample_product: Product,
+    sample_product: Project,
     monkeypatch: pytest.MonkeyPatch,
     source_text: str,
 ) -> None:
@@ -4480,7 +4476,7 @@ def test_unavailable_structured_claim_source_does_not_retry_or_persist(
         fake_compiler,
     )
     spec_row = _create_spec_version(
-        session, product_id=require_id(sample_product.product_id, "product_id")
+        session, project_id=require_id(sample_product.project_id, "project_id")
     )
 
     result = compiler_service.compile_spec_authority_for_version(
@@ -4498,7 +4494,7 @@ def test_unavailable_structured_claim_source_does_not_retry_or_persist(
 
 
 def test_check_spec_authority_status_returns_not_compiled_when_no_spec_versions(
-    session: Session, sample_product: Product, monkeypatch: pytest.MonkeyPatch
+    session: Session, sample_product: Project, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Verify check spec authority status returns not compiled when no spec versions."""
     from services.specs import compiler_service  # noqa: PLC0415
@@ -4510,20 +4506,20 @@ def test_check_spec_authority_status_returns_not_compiled_when_no_spec_versions(
     )
 
     result = compiler_service.check_spec_authority_status(
-        {"product_id": require_id(sample_product.product_id, "product_id")},
+        {"project_id": require_id(sample_product.project_id, "project_id")},
         tool_context=None,
     )
 
     assert result == {
         "success": True,
         "status": SpecAuthorityStatus.NOT_COMPILED.value,
-        "status_details": "No spec versions exist for this product",
+        "status_details": "No spec versions exist for this project",
         "message": "Status: NOT_COMPILED (no specs)",
     }
 
 
 def test_check_spec_authority_status_prefers_pending_review_over_stale(
-    session: Session, sample_product: Product, monkeypatch: pytest.MonkeyPatch
+    session: Session, sample_product: Project, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Verify check spec authority status prefers pending review over stale."""
     from services.specs import compiler_service  # noqa: PLC0415
@@ -4536,7 +4532,7 @@ def test_check_spec_authority_status_prefers_pending_review_over_stale(
 
     approved_spec = _create_spec_version(
         session,
-        product_id=require_id(sample_product.product_id, "product_id"),
+        project_id=require_id(sample_product.project_id, "project_id"),
         content="Approved Spec",
     )
     _create_compiled_authority(
@@ -4546,7 +4542,7 @@ def test_check_spec_authority_status_prefers_pending_review_over_stale(
     )
 
     draft_spec = SpecRegistry(
-        product_id=require_id(sample_product.product_id, "product_id"),
+        project_id=require_id(sample_product.project_id, "project_id"),
         spec_hash="d" * 64,
         content="Draft Spec",
         content_ref=None,
@@ -4560,7 +4556,7 @@ def test_check_spec_authority_status_prefers_pending_review_over_stale(
     session.refresh(draft_spec)
 
     result = compiler_service.check_spec_authority_status(
-        {"product_id": require_id(sample_product.product_id, "product_id")},
+        {"project_id": require_id(sample_product.project_id, "project_id")},
         tool_context=None,
     )
 
@@ -4577,7 +4573,7 @@ def test_check_spec_authority_status_prefers_pending_review_over_stale(
 
 
 def test_check_spec_authority_status_does_not_report_historical_v2_artifact_current(
-    session: Session, sample_product: Product, monkeypatch: pytest.MonkeyPatch
+    session: Session, sample_product: Project, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Historical v2 stored artifacts are not CURRENT."""
     from services.specs import compiler_service  # noqa: PLC0415
@@ -4590,7 +4586,7 @@ def test_check_spec_authority_status_does_not_report_historical_v2_artifact_curr
 
     spec_row = _create_spec_version(
         session,
-        product_id=require_id(sample_product.product_id, "product_id"),
+        project_id=require_id(sample_product.project_id, "project_id"),
     )
     authority = _create_compiled_authority(
         session,
@@ -4601,13 +4597,13 @@ def test_check_spec_authority_status_does_not_report_historical_v2_artifact_curr
     )
 
     result = compiler_service.check_spec_authority_status(
-        {"product_id": require_id(sample_product.product_id, "product_id")},
+        {"project_id": require_id(sample_product.project_id, "project_id")},
         tool_context=None,
     )
 
     spec_version_id = require_id(spec_row.spec_version_id, "spec_version_id")
     authority_id = require_id(authority.authority_id, "authority_id")
-    project_id = require_id(sample_product.product_id, "product_id")
+    project_id = require_id(sample_product.project_id, "project_id")
     assert result["success"] is False
     assert result["error_code"] == "COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED"
     assert result["details"] == {
@@ -4628,7 +4624,7 @@ def test_check_spec_authority_status_does_not_report_historical_v2_artifact_curr
 
 def test_check_spec_authority_status_rejects_invalid_artifact(
     session: Session,
-    sample_product: Product,
+    sample_product: Project,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Malformed latest rows return the central invalid-artifact failure."""
@@ -4637,7 +4633,7 @@ def test_check_spec_authority_status_rejects_invalid_artifact(
     monkeypatch.setattr(compiler_service, "get_engine", session.get_bind)
     spec_row = _create_spec_version(
         session,
-        product_id=require_id(sample_product.product_id, "product_id"),
+        project_id=require_id(sample_product.project_id, "project_id"),
     )
     authority = CompiledSpecAuthority(
         spec_version_id=require_id(spec_row.spec_version_id, "spec_version_id"),
@@ -4656,7 +4652,7 @@ def test_check_spec_authority_status_rejects_invalid_artifact(
     session.refresh(authority)
 
     result = compiler_service.check_spec_authority_status(
-        {"product_id": require_id(sample_product.product_id, "product_id")}
+        {"project_id": require_id(sample_product.project_id, "project_id")}
     )
 
     assert result["success"] is False
@@ -4668,7 +4664,7 @@ def test_check_spec_authority_status_rejects_invalid_artifact(
 
 
 def test_get_compiled_authority_by_version_returns_expected_envelope(
-    session: Session, sample_product: Product, monkeypatch: pytest.MonkeyPatch
+    session: Session, sample_product: Project, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Verify get compiled authority by version returns expected envelope."""
     from services.specs import compiler_service  # noqa: PLC0415
@@ -4680,7 +4676,7 @@ def test_get_compiled_authority_by_version_returns_expected_envelope(
     )
 
     spec_row = _create_spec_version(
-        session, product_id=require_id(sample_product.product_id, "product_id")
+        session, project_id=require_id(sample_product.project_id, "project_id")
     )
     authority = _create_compiled_authority(
         session,
@@ -4690,7 +4686,7 @@ def test_get_compiled_authority_by_version_returns_expected_envelope(
 
     result = compiler_service.get_compiled_authority_by_version(
         {
-            "product_id": require_id(sample_product.product_id, "product_id"),
+            "project_id": require_id(sample_product.project_id, "project_id"),
             "spec_version_id": require_id(spec_row.spec_version_id, "spec_version_id"),
         },
         tool_context=None,
@@ -4716,7 +4712,7 @@ def test_get_compiled_authority_by_version_returns_expected_envelope(
 
 
 def test_get_compiled_authority_by_version_rejects_invalid_artifact(
-    session: Session, sample_product: Product, monkeypatch: pytest.MonkeyPatch
+    session: Session, sample_product: Project, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Malformed stored JSON must not fall back to denormalized columns."""
     from services.specs import compiler_service  # noqa: PLC0415
@@ -4728,7 +4724,7 @@ def test_get_compiled_authority_by_version_rejects_invalid_artifact(
     )
 
     spec_row = _create_spec_version(
-        session, product_id=require_id(sample_product.product_id, "product_id")
+        session, project_id=require_id(sample_product.project_id, "project_id")
     )
     authority = CompiledSpecAuthority(
         spec_version_id=require_id(spec_row.spec_version_id, "spec_version_id"),
@@ -4748,7 +4744,7 @@ def test_get_compiled_authority_by_version_rejects_invalid_artifact(
 
     result = compiler_service.get_compiled_authority_by_version(
         {
-            "product_id": require_id(sample_product.product_id, "product_id"),
+            "project_id": require_id(sample_product.project_id, "project_id"),
             "spec_version_id": require_id(spec_row.spec_version_id, "spec_version_id"),
         },
         tool_context=None,
@@ -4765,7 +4761,7 @@ def test_get_compiled_authority_by_version_rejects_invalid_artifact(
 
 
 def test_get_compiled_authority_by_version_returns_existing_error_messages(
-    session: Session, sample_product: Product, monkeypatch: pytest.MonkeyPatch
+    session: Session, sample_product: Project, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Verify get compiled authority by version returns existing error messages."""
     from services.specs import compiler_service  # noqa: PLC0415
@@ -4778,7 +4774,7 @@ def test_get_compiled_authority_by_version_returns_existing_error_messages(
 
     not_found = compiler_service.get_compiled_authority_by_version(
         {
-            "product_id": require_id(sample_product.product_id, "product_id"),
+            "project_id": require_id(sample_product.project_id, "project_id"),
             "spec_version_id": 999999,
         },
         tool_context=None,
@@ -4786,10 +4782,10 @@ def test_get_compiled_authority_by_version_returns_existing_error_messages(
     assert not_found == {"success": False, "error": "Spec version 999999 not found"}
 
     spec_row = _create_spec_version(
-        session, product_id=require_id(sample_product.product_id, "product_id")
+        session, project_id=require_id(sample_product.project_id, "project_id")
     )
-    other_product = Product(
-        name="Other Product",
+    other_product = Project(
+        name="Other Project",
         description="Other",
         vision="Other vision",
     )
@@ -4799,24 +4795,24 @@ def test_get_compiled_authority_by_version_returns_existing_error_messages(
 
     mismatch = compiler_service.get_compiled_authority_by_version(
         {
-            "product_id": require_id(other_product.product_id, "product_id"),
+            "project_id": require_id(other_product.project_id, "project_id"),
             "spec_version_id": require_id(spec_row.spec_version_id, "spec_version_id"),
         },
         tool_context=None,
     )
     spec_version_id = require_id(spec_row.spec_version_id, "spec_version_id")
-    other_product_id = require_id(other_product.product_id, "product_id")
+    other_project_id = require_id(other_product.project_id, "project_id")
     assert mismatch == {
         "success": False,
         "error": (
             f"Spec version {spec_version_id} does not belong to "
-            f"product {other_product_id} (mismatch)"
+                f"project {other_project_id} (mismatch)"
         ),
     }
 
     not_compiled = compiler_service.get_compiled_authority_by_version(
         {
-            "product_id": require_id(sample_product.product_id, "product_id"),
+            "project_id": require_id(sample_product.project_id, "project_id"),
             "spec_version_id": require_id(spec_row.spec_version_id, "spec_version_id"),
         },
         tool_context=None,
@@ -4832,11 +4828,11 @@ def test_get_compiled_authority_by_version_returns_existing_error_messages(
 
 
 @pytest.fixture
-def sample_product(session: Session) -> Product:
+def sample_product(session: Session) -> Project:
     """Return product."""
-    product = Product(
-        name="Compiler Service Product",
-        description="Product for compiler service tests",
+    product = Project(
+        name="Compiler Service Project",
+        description="Project for compiler service tests",
         vision="Keep compiler orchestration outside tool modules",
     )
     session.add(product)
@@ -4846,7 +4842,7 @@ def sample_product(session: Session) -> Product:
 
 
 def test_update_spec_and_compile_authority_creates_spec_and_delegates_compile(
-    session: Session, sample_product: Product, monkeypatch: pytest.MonkeyPatch
+    session: Session, sample_product: Project, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Verify update spec and compile authority creates spec and delegates compile."""
     from services.specs import compiler_service  # noqa: PLC0415
@@ -4902,14 +4898,14 @@ def test_update_spec_and_compile_authority_creates_spec_and_delegates_compile(
     spec_content = _agileforge_spec_profile_json()
     result = compiler_service.update_spec_and_compile_authority(
         {
-            "product_id": require_id(sample_product.product_id, "product_id"),
+            "project_id": require_id(sample_product.project_id, "project_id"),
             "spec_content": spec_content,
         },
         tool_context=None,
     )
 
     assert result["success"] is True
-    assert result["product_id"] == require_id(sample_product.product_id, "product_id")
+    assert result["project_id"] == require_id(sample_product.project_id, "project_id")
     assert result["cache_hit"] is False
     assert result["accepted"] is False
     assert result["authority_status"] == "pending_acceptance"
@@ -4924,7 +4920,7 @@ def test_update_spec_and_compile_authority_creates_spec_and_delegates_compile(
 
 
 def test_update_spec_and_compile_authority_honors_tool_compile_override(
-    session: Session, sample_product: Product, monkeypatch: pytest.MonkeyPatch
+    session: Session, sample_product: Project, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Verify update spec and compile authority honors tool compile override."""
     from services.specs import compiler_service  # noqa: PLC0415
@@ -4981,7 +4977,7 @@ def test_update_spec_and_compile_authority_honors_tool_compile_override(
     spec_content = _agileforge_spec_profile_json()
     result = compiler_service.update_spec_and_compile_authority(
         {
-            "product_id": require_id(sample_product.product_id, "product_id"),
+            "project_id": require_id(sample_product.project_id, "project_id"),
             "spec_content": spec_content,
         },
         tool_context=None,
@@ -4993,7 +4989,7 @@ def test_update_spec_and_compile_authority_honors_tool_compile_override(
 
 
 def test_update_spec_and_compile_authority_never_persists_acceptance(
-    session: Session, sample_product: Product, monkeypatch: pytest.MonkeyPatch
+    session: Session, sample_product: Project, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Update+compile returns a pending candidate without an acceptance row."""
     from services.specs import compiler_service  # noqa: PLC0415
@@ -5042,7 +5038,7 @@ def test_update_spec_and_compile_authority_never_persists_acceptance(
     spec_content = _agileforge_spec_profile_json()
     result = compiler_service.update_spec_and_compile_authority(
         {
-            "product_id": require_id(sample_product.product_id, "product_id"),
+            "project_id": require_id(sample_product.project_id, "project_id"),
             "spec_content": spec_content,
         },
         tool_context=None,
@@ -5056,7 +5052,7 @@ def test_update_spec_and_compile_authority_never_persists_acceptance(
 
 def test_update_spec_and_compile_authority_rejects_malformed_postcompile_row(
     session: Session,
-    sample_product: Product,
+    sample_product: Project,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Post-compile metrics require the exact persisted row to parse as v3."""
@@ -5098,7 +5094,7 @@ def test_update_spec_and_compile_authority_rejects_malformed_postcompile_row(
 
     result = compiler_service.update_spec_and_compile_authority(
         {
-            "product_id": require_id(sample_product.product_id, "product_id"),
+            "project_id": require_id(sample_product.project_id, "project_id"),
             "spec_content": _agileforge_spec_profile_json(),
         }
     )
@@ -5111,7 +5107,7 @@ def test_update_spec_and_compile_authority_rejects_malformed_postcompile_row(
 
 def test_update_spec_and_compile_authority_loads_content_ref(
     session: Session,
-    sample_product: Product,
+    sample_product: Project,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -5165,7 +5161,7 @@ def test_update_spec_and_compile_authority_loads_content_ref(
     )
     result = compiler_service.update_spec_and_compile_authority(
         {
-            "product_id": require_id(sample_product.product_id, "product_id"),
+            "project_id": require_id(sample_product.project_id, "project_id"),
             "content_ref": str(spec_path),
         },
         tool_context=None,
@@ -5180,7 +5176,7 @@ def test_update_spec_and_compile_authority_loads_content_ref(
 
 
 def test_update_spec_and_compile_authority_reuses_existing_version_for_same_hash(
-    session: Session, sample_product: Product, monkeypatch: pytest.MonkeyPatch
+    session: Session, sample_product: Project, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Verify update spec and compile authority reuses existing version for same hash."""  # noqa: E501
     from services.specs import compiler_service  # noqa: PLC0415
@@ -5248,14 +5244,14 @@ def test_update_spec_and_compile_authority_reuses_existing_version_for_same_hash
     spec_content = _agileforge_spec_profile_json()
     first = compiler_service.update_spec_and_compile_authority(
         {
-            "product_id": require_id(sample_product.product_id, "product_id"),
+            "project_id": require_id(sample_product.project_id, "project_id"),
             "spec_content": spec_content,
         },
         tool_context=None,
     )
     second = compiler_service.update_spec_and_compile_authority(
         {
-            "product_id": require_id(sample_product.product_id, "product_id"),
+            "project_id": require_id(sample_product.project_id, "project_id"),
             "spec_content": spec_content,
         },
         tool_context=None,
@@ -5270,8 +5266,8 @@ def test_update_spec_and_compile_authority_reuses_existing_version_for_same_hash
         len(
             session.exec(
                 select(SpecRegistry).where(
-                    SpecRegistry.product_id
-                    == require_id(sample_product.product_id, "product_id")
+                    SpecRegistry.project_id
+                    == require_id(sample_product.project_id, "project_id")
                 )
             ).all()
         )
@@ -5280,7 +5276,7 @@ def test_update_spec_and_compile_authority_reuses_existing_version_for_same_hash
 
 
 def test_update_spec_and_compile_authority_treats_recompile_none_as_false(
-    session: Session, sample_product: Product, monkeypatch: pytest.MonkeyPatch
+    session: Session, sample_product: Project, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Verify update spec and compile authority treats recompile none as false."""
     from services.specs import compiler_service  # noqa: PLC0415
@@ -5332,7 +5328,7 @@ def test_update_spec_and_compile_authority_treats_recompile_none_as_false(
     spec_content = _agileforge_spec_profile_json()
     result = compiler_service.update_spec_and_compile_authority(
         {
-            "product_id": require_id(sample_product.product_id, "product_id"),
+            "project_id": require_id(sample_product.project_id, "project_id"),
             "spec_content": spec_content,
             "recompile": None,
         },

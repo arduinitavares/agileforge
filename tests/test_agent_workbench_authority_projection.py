@@ -14,7 +14,7 @@ from sqlmodel import select
 
 import utils.authority_curation_trace as trace_mod
 from models.authority_curation import AuthorityCurationAttempt, AuthorityFeedbackAttempt
-from models.core import Product
+from models.core import Project
 from models.specs import (
     CompiledSpecAuthority,
     SpecAuthorityAcceptance,
@@ -123,11 +123,11 @@ def _seed_product(
     session: Session,
     *,
     spec_file_path: str | None = None,
-) -> Product:
+) -> Project:
     """Persist a product used by authority projection tests."""
-    product = Product(
-        name="Authority Product",
-        description="Product for authority projection tests",
+    product = Project(
+        name="Authority Project",
+        description="Project for authority projection tests",
         spec_file_path=spec_file_path,
     )
     session.add(product)
@@ -139,13 +139,13 @@ def _seed_product(
 def _seed_spec(
     session: Session,
     *,
-    product_id: int,
+    project_id: int,
     content: str,
     content_ref: str | None = None,
 ) -> SpecRegistry:
     """Persist an approved spec version."""
     spec = SpecRegistry(
-        product_id=product_id,
+        project_id=project_id,
         spec_hash=_spec_hash(content),
         content=content,
         content_ref=content_ref,
@@ -233,7 +233,7 @@ def _compiled_authority_json(
 def _accept_spec(
     session: Session,
     *,
-    product_id: int,
+    project_id: int,
     spec: SpecRegistry,
     decided_at: datetime | None = None,
 ) -> SpecAuthorityAcceptance:
@@ -250,7 +250,7 @@ def _accept_spec(
         else spec_version_id
     )
     acceptance = SpecAuthorityAcceptance(
-        product_id=product_id,
+        project_id=project_id,
         spec_version_id=spec_version_id,
         status="accepted",
         policy="manual",
@@ -265,7 +265,7 @@ def _accept_spec(
         actor_mode="human_review_token",
         review_completeness="complete",
         terminal_decision_key=(
-            f"{product_id}:{spec_version_id}:{pending_authority_id}"
+            f"{project_id}:{spec_version_id}:{pending_authority_id}"
         ),
         provenance_source="test",
     )
@@ -278,7 +278,7 @@ def _accept_spec(
 def _reject_spec(
     session: Session,
     *,
-    product_id: int,
+    project_id: int,
     spec: SpecRegistry,
     authority: CompiledSpecAuthority,
 ) -> SpecAuthorityAcceptance:
@@ -286,7 +286,7 @@ def _reject_spec(
     spec_version_id = require_id(spec.spec_version_id, "spec_version_id")
     authority_id = require_id(authority.authority_id, "authority_id")
     rejection = SpecAuthorityAcceptance(
-        product_id=product_id,
+        project_id=project_id,
         spec_version_id=spec_version_id,
         status="rejected",
         policy="manual",
@@ -299,7 +299,7 @@ def _reject_spec(
         pending_authority_id=authority_id,
         actor_mode="human_review_token",
         review_completeness="complete",
-        terminal_decision_key=f"{product_id}:{spec_version_id}:{authority_id}",
+        terminal_decision_key=f"{project_id}:{spec_version_id}:{authority_id}",
         provenance_source="test",
     )
     session.add(rejection)
@@ -315,13 +315,13 @@ def test_authority_selection_never_falls_forward_from_missing_accepted_id(
     from services.agent_workbench import authority_projection  # noqa: PLC0415
 
     product = _seed_product(session)
-    product_id = require_id(product.product_id, "product_id")
-    spec = _seed_spec(session, product_id=product_id, content="accepted-id")
+    project_id = require_id(product.project_id, "project_id")
+    spec = _seed_spec(session, project_id=project_id, content="accepted-id")
     spec_version_id = require_id(spec.spec_version_id, "spec_version_id")
     pending = _seed_authority(session, spec_version_id=spec_version_id)
     session.add(
         SpecAuthorityAcceptance(
-            product_id=product_id,
+            project_id=project_id,
             spec_version_id=spec_version_id,
             status="accepted",
             policy="test",
@@ -336,7 +336,7 @@ def test_authority_selection_never_falls_forward_from_missing_accepted_id(
 
     selection = authority_projection._load_authority_selection(
         session,
-        project_id=product_id,
+        project_id=project_id,
     )
 
     assert selection.authority is None
@@ -428,7 +428,7 @@ def test_authority_status_reports_schema_not_ready_without_creating_database(
     assert result["errors"][0]["code"] == "SCHEMA_NOT_READY"
     assert result["errors"][0]["exit_code"] == SCHEMA_NOT_READY_EXIT_CODE
     assert result["errors"][0]["retryable"] is True
-    assert "products" in result["errors"][0]["details"]["missing"]
+    assert "projects" in result["errors"][0]["details"]["missing"]
     assert not db_path.exists()
 
 
@@ -454,10 +454,10 @@ def test_authority_status_distinguishes_missing_authority_without_specs(
 ) -> None:
     """Report missing authority when the project has no spec versions."""
     product = _seed_product(session)
-    product_id = require_id(product.product_id, "product_id")
+    project_id = require_id(product.project_id, "project_id")
     service = AuthorityProjectionService(engine=_engine(session), repo_root=tmp_path)
 
-    result = service.status(project_id=product_id)
+    result = service.status(project_id=project_id)
 
     assert result["ok"] is True
     assert result["data"]["status"] == "missing"
@@ -480,13 +480,13 @@ def test_authority_status_defaults_when_curation_tables_are_missing(
 ) -> None:
     """Authority status remains available without optional curation tables."""
     product = _seed_product(session)
-    product_id = require_id(product.product_id, "product_id")
+    project_id = require_id(product.project_id, "project_id")
     session.connection().execute(text("DROP TABLE authority_curation_attempts"))
     session.connection().execute(text("DROP TABLE authority_feedback_attempts"))
     session.commit()
     service = AuthorityProjectionService(engine=_engine(session), repo_root=tmp_path)
 
-    result = service.status(project_id=product_id)
+    result = service.status(project_id=project_id)
 
     assert result["ok"] is True
     data = result["data"]
@@ -506,15 +506,15 @@ def test_authority_status_keeps_compiled_but_unaccepted_authority_pending(
 ) -> None:
     """Do not treat compilation alone as an accepted authority decision."""
     product = _seed_product(session)
-    product_id = require_id(product.product_id, "product_id")
-    spec = _seed_spec(session, product_id=product_id, content="# Spec\n")
+    project_id = require_id(product.project_id, "project_id")
+    spec = _seed_spec(session, project_id=project_id, content="# Spec\n")
     authority = _seed_authority(
         session,
         spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
     )
     service = AuthorityProjectionService(engine=_engine(session), repo_root=tmp_path)
 
-    result = service.status(project_id=product_id)
+    result = service.status(project_id=project_id)
 
     assert result["ok"] is True
     assert result["data"]["status"] == "pending_acceptance"
@@ -537,26 +537,26 @@ def test_authority_status_includes_curation_flags_for_rejected_authority(
 ) -> None:
     """Status projection exposes feedback and curation state."""
     product = _seed_product(session)
-    product_id = require_id(product.product_id, "product_id")
-    spec = _seed_spec(session, product_id=product_id, content="# Spec\n")
+    project_id = require_id(product.project_id, "project_id")
+    spec = _seed_spec(session, project_id=project_id, content="# Spec\n")
     authority = _seed_authority(
         session,
         spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
     )
     feedback = _seed_feedback_attempt(
         session,
-        project_id=product_id,
+        project_id=project_id,
         authority=authority,
     )
     _reject_spec(
         session,
-        product_id=product_id,
+        project_id=project_id,
         spec=spec,
         authority=authority,
     )
     service = AuthorityProjectionService(engine=_engine(session), repo_root=tmp_path)
 
-    result = service.status(project_id=product_id)
+    result = service.status(project_id=project_id)
 
     assert result["ok"] is True
     data = result["data"]
@@ -576,22 +576,22 @@ def test_authority_status_scopes_curation_to_latest_feedback(
 ) -> None:
     """Old successful curation must not suppress newer blocking feedback."""
     product = _seed_product(session)
-    product_id = require_id(product.product_id, "product_id")
-    spec = _seed_spec(session, product_id=product_id, content="# Spec\n")
+    project_id = require_id(product.project_id, "project_id")
+    spec = _seed_spec(session, project_id=project_id, content="# Spec\n")
     authority = _seed_authority(
         session,
         spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
     )
     old_feedback = _seed_feedback_attempt(
         session,
-        project_id=product_id,
+        project_id=project_id,
         authority=authority,
         feedback_attempt_id="feedback-old",
         created_at=datetime(2026, 5, 14, 14, tzinfo=UTC),
     )
     _seed_curation_attempt(
         session,
-        project_id=product_id,
+        project_id=project_id,
         authority=authority,
         feedback_attempt_id=old_feedback.feedback_attempt_id,
         curation_attempt_id="curation-old",
@@ -600,20 +600,20 @@ def test_authority_status_scopes_curation_to_latest_feedback(
     )
     _seed_feedback_attempt(
         session,
-        project_id=product_id,
+        project_id=project_id,
         authority=authority,
         feedback_attempt_id="feedback-new",
         created_at=datetime(2026, 5, 14, 16, tzinfo=UTC),
     )
     _reject_spec(
         session,
-        product_id=product_id,
+        project_id=project_id,
         spec=spec,
         authority=authority,
     )
     service = AuthorityProjectionService(engine=_engine(session), repo_root=tmp_path)
 
-    result = service.status(project_id=product_id)
+    result = service.status(project_id=project_id)
 
     assert result["ok"] is True
     data = result["data"]
@@ -632,8 +632,8 @@ def test_authority_status_reports_latest_curation_trace_metadata(
     """Authority status links latest curation attempt to trace summary."""
     monkeypatch.setattr(trace_mod, "TRACE_DIR", tmp_path / "traces")
     product = _seed_product(session)
-    project_id = require_id(product.product_id, "product_id")
-    spec = _seed_spec(session, product_id=project_id, content="# Spec\n")
+    project_id = require_id(product.project_id, "project_id")
+    spec = _seed_spec(session, project_id=project_id, content="# Spec\n")
     authority = _seed_authority(
         session,
         spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
@@ -672,7 +672,7 @@ def test_authority_status_reports_latest_curation_trace_metadata(
     )
     _reject_spec(
         session,
-        product_id=project_id,
+        project_id=project_id,
         spec=spec,
         authority=authority,
     )
@@ -701,8 +701,8 @@ def test_authority_status_keeps_curation_metadata_with_published_candidate(
 ) -> None:
     """A pending curated candidate must not hide rejected-source curation state."""
     product = _seed_product(session)
-    project_id = require_id(product.product_id, "product_id")
-    spec = _seed_spec(session, product_id=project_id, content="# Spec\n")
+    project_id = require_id(product.project_id, "project_id")
+    spec = _seed_spec(session, project_id=project_id, content="# Spec\n")
     source_authority = _seed_authority(
         session,
         spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
@@ -718,7 +718,7 @@ def test_authority_status_keeps_curation_metadata_with_published_candidate(
     )
     _reject_spec(
         session,
-        product_id=project_id,
+        project_id=project_id,
         spec=spec,
         authority=source_authority,
     )
@@ -770,8 +770,8 @@ def test_authority_status_ignores_old_rejection_curation_for_new_pending_spec(
 ) -> None:
     """Old rejected-spec curation metadata must not leak into newer pending spec."""
     product = _seed_product(session)
-    project_id = require_id(product.product_id, "product_id")
-    rejected_spec = _seed_spec(session, product_id=project_id, content="old")
+    project_id = require_id(product.project_id, "project_id")
+    rejected_spec = _seed_spec(session, project_id=project_id, content="old")
     rejected_authority = _seed_authority(
         session,
         spec_version_id=require_id(
@@ -797,11 +797,11 @@ def test_authority_status_ignores_old_rejection_curation_for_new_pending_spec(
     )
     _reject_spec(
         session,
-        product_id=project_id,
+        project_id=project_id,
         spec=rejected_spec,
         authority=rejected_authority,
     )
-    latest_spec = _seed_spec(session, product_id=project_id, content="new")
+    latest_spec = _seed_spec(session, project_id=project_id, content="new")
     pending_authority = _seed_authority(
         session,
         spec_version_id=require_id(
@@ -830,8 +830,8 @@ def test_authority_status_ignores_same_spec_rejection_without_curation_link(
 ) -> None:
     """Same-spec rejected feedback must not leak into unrelated pending candidate."""
     product = _seed_product(session)
-    project_id = require_id(product.product_id, "product_id")
-    spec = _seed_spec(session, product_id=project_id, content="# Spec\n")
+    project_id = require_id(product.project_id, "project_id")
+    spec = _seed_spec(session, project_id=project_id, content="# Spec\n")
     rejected_authority = _seed_authority(
         session,
         spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
@@ -858,7 +858,7 @@ def test_authority_status_ignores_same_spec_rejection_without_curation_link(
     )
     _reject_spec(
         session,
-        product_id=project_id,
+        project_id=project_id,
         spec=spec,
         authority=rejected_authority,
     )
@@ -900,8 +900,8 @@ def test_authority_status_trace_summary_failure_is_fail_open(
 
     monkeypatch.setattr(trace_mod, "summarize_trace", fail_summary)
     product = _seed_product(session)
-    project_id = require_id(product.product_id, "product_id")
-    spec = _seed_spec(session, product_id=project_id, content="# Spec\n")
+    project_id = require_id(product.project_id, "project_id")
+    spec = _seed_spec(session, project_id=project_id, content="# Spec\n")
     authority = _seed_authority(
         session,
         spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
@@ -924,7 +924,7 @@ def test_authority_status_trace_summary_failure_is_fail_open(
     )
     _reject_spec(
         session,
-        product_id=project_id,
+        project_id=project_id,
         spec=spec,
         authority=authority,
     )
@@ -958,8 +958,8 @@ def test_authority_status_trace_programmer_error_is_not_swallowed(
 
     monkeypatch.setattr(trace_mod, "summarize_trace", broken_summary)
     product = _seed_product(session)
-    project_id = require_id(product.product_id, "product_id")
-    spec = _seed_spec(session, product_id=project_id, content="# Spec\n")
+    project_id = require_id(product.project_id, "project_id")
+    spec = _seed_spec(session, project_id=project_id, content="# Spec\n")
     authority = _seed_authority(
         session,
         spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
@@ -982,7 +982,7 @@ def test_authority_status_trace_programmer_error_is_not_swallowed(
     )
     _reject_spec(
         session,
-        product_id=project_id,
+        project_id=project_id,
         spec=spec,
         authority=authority,
     )
@@ -1000,8 +1000,8 @@ def test_authority_status_treats_new_candidate_after_rejection_as_pending(
 ) -> None:
     """A rejected candidate must not reject a newer same-spec regeneration."""
     product = _seed_product(session)
-    product_id = require_id(product.product_id, "product_id")
-    spec = _seed_spec(session, product_id=product_id, content="# Spec\n")
+    project_id = require_id(product.project_id, "project_id")
+    spec = _seed_spec(session, project_id=project_id, content="# Spec\n")
     spec_version_id = require_id(spec.spec_version_id, "spec_version_id")
     old_authority = _seed_authority(
         session,
@@ -1010,7 +1010,7 @@ def test_authority_status_treats_new_candidate_after_rejection_as_pending(
     )
     old_authority_id = require_id(old_authority.authority_id, "authority_id")
     rejection = SpecAuthorityAcceptance(
-        product_id=product_id,
+        project_id=project_id,
         spec_version_id=spec_version_id,
         status="rejected",
         policy="manual",
@@ -1021,7 +1021,7 @@ def test_authority_status_treats_new_candidate_after_rejection_as_pending(
         prompt_hash=old_authority.prompt_hash,
         spec_hash=spec.spec_hash,
         pending_authority_id=old_authority_id,
-        terminal_decision_key=f"{product_id}:{spec_version_id}:{old_authority_id}",
+        terminal_decision_key=f"{project_id}:{spec_version_id}:{old_authority_id}",
     )
     session.add(rejection)
     session.commit()
@@ -1032,7 +1032,7 @@ def test_authority_status_treats_new_candidate_after_rejection_as_pending(
     )
     service = AuthorityProjectionService(engine=_engine(session), repo_root=tmp_path)
 
-    result = service.status(project_id=product_id)
+    result = service.status(project_id=project_id)
 
     assert result["ok"] is True
     assert result["data"]["status"] == "pending_acceptance"
@@ -1049,14 +1049,14 @@ def test_pending_authority_does_not_treat_unbound_acceptance_as_terminal(
     from services.agent_workbench import authority_projection  # noqa: PLC0415
 
     product = _seed_product(session)
-    product_id = require_id(product.product_id, "product_id")
-    spec = _seed_spec(session, product_id=product_id, content="# Spec\n")
+    project_id = require_id(product.project_id, "project_id")
+    spec = _seed_spec(session, project_id=project_id, content="# Spec\n")
     authority = _seed_authority(
         session,
         spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
     )
     acceptance = SpecAuthorityAcceptance(
-        product_id=product_id,
+        project_id=project_id,
         spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
         status="accepted",
         policy="legacy",
@@ -1087,8 +1087,8 @@ def test_authority_status_treats_newer_acceptance_after_rejection_as_current(
 ) -> None:
     """A newer accepted same-spec regeneration supersedes the rejected candidate."""
     product = _seed_product(session)
-    product_id = require_id(product.product_id, "product_id")
-    spec = _seed_spec(session, product_id=product_id, content="# Spec\n")
+    project_id = require_id(product.project_id, "project_id")
+    spec = _seed_spec(session, project_id=project_id, content="# Spec\n")
     spec_version_id = require_id(spec.spec_version_id, "spec_version_id")
     rejected_authority = _seed_authority(
         session,
@@ -1100,7 +1100,7 @@ def test_authority_status_treats_newer_acceptance_after_rejection_as_current(
         "authority_id",
     )
     rejection = SpecAuthorityAcceptance(
-        product_id=product_id,
+        project_id=project_id,
         spec_version_id=spec_version_id,
         status="rejected",
         policy="manual",
@@ -1112,7 +1112,7 @@ def test_authority_status_treats_newer_acceptance_after_rejection_as_current(
         spec_hash=spec.spec_hash,
         pending_authority_id=rejected_authority_id,
         terminal_decision_key=(
-            f"{product_id}:{spec_version_id}:{rejected_authority_id}"
+            f"{project_id}:{spec_version_id}:{rejected_authority_id}"
         ),
     )
     session.add(rejection)
@@ -1127,7 +1127,7 @@ def test_authority_status_treats_newer_acceptance_after_rejection_as_current(
         "authority_id",
     )
     acceptance = SpecAuthorityAcceptance(
-        product_id=product_id,
+        project_id=project_id,
         spec_version_id=spec_version_id,
         status="accepted",
         policy="manual",
@@ -1140,14 +1140,14 @@ def test_authority_status_treats_newer_acceptance_after_rejection_as_current(
         pending_authority_id=accepted_authority_id,
         authority_fingerprint=pending_authority_fingerprint(accepted_authority),
         terminal_decision_key=(
-            f"{product_id}:{spec_version_id}:{accepted_authority_id}"
+            f"{project_id}:{spec_version_id}:{accepted_authority_id}"
         ),
     )
     session.add(acceptance)
     session.commit()
     service = AuthorityProjectionService(engine=_engine(session), repo_root=tmp_path)
 
-    result = service.status(project_id=product_id)
+    result = service.status(project_id=project_id)
 
     assert result["ok"] is True
     assert result["data"]["status"] == "current"
@@ -1173,10 +1173,10 @@ def test_authority_status_reports_current_accepted_authority_from_repo_root(
     spec_path.parent.mkdir()
     spec_path.write_text(spec_content, encoding="utf-8")
     product = _seed_product(session, spec_file_path="specs/app.json")
-    product_id = require_id(product.product_id, "product_id")
+    project_id = require_id(product.project_id, "project_id")
     spec = _seed_spec(
         session,
-        product_id=product_id,
+        project_id=project_id,
         content=spec_content,
         content_ref="specs/app.json",
     )
@@ -1184,10 +1184,10 @@ def test_authority_status_reports_current_accepted_authority_from_repo_root(
         session,
         spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
     )
-    acceptance = _accept_spec(session, product_id=product_id, spec=spec)
+    acceptance = _accept_spec(session, project_id=project_id, spec=spec)
     service = AuthorityProjectionService(engine=_engine(session), repo_root=tmp_path)
 
-    result = service.status(project_id=product_id)
+    result = service.status(project_id=project_id)
 
     assert result["ok"] is True
     assert result["data"]["status"] == "current"
@@ -1223,10 +1223,10 @@ def test_authority_status_canonicalizes_structured_spec_disk_hash(
     spec_path.parent.mkdir()
     spec_path.write_text(pretty_content, encoding="utf-8")
     product = _seed_product(session, spec_file_path="specs/app.json")
-    product_id = require_id(product.product_id, "product_id")
+    project_id = require_id(product.project_id, "project_id")
     spec = _seed_spec(
         session,
-        product_id=product_id,
+        project_id=project_id,
         content=spec_content,
         content_ref="specs/app.json",
     )
@@ -1237,10 +1237,10 @@ def test_authority_status_canonicalizes_structured_spec_disk_hash(
         session,
         spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
     )
-    _accept_spec(session, product_id=product_id, spec=spec)
+    _accept_spec(session, project_id=project_id, spec=spec)
     service = AuthorityProjectionService(engine=_engine(session), repo_root=tmp_path)
 
-    result = service.status(project_id=product_id)
+    result = service.status(project_id=project_id)
 
     assert result["ok"] is True
     assert result["data"]["status"] == "current"
@@ -1255,9 +1255,9 @@ def test_authority_status_uses_latest_accepted_decision(
 ) -> None:
     """Select the latest accepted decision, not an older accepted version."""
     product = _seed_product(session)
-    product_id = require_id(product.product_id, "product_id")
-    older_spec = _seed_spec(session, product_id=product_id, content="older")
-    newer_spec = _seed_spec(session, product_id=product_id, content="newer")
+    project_id = require_id(product.project_id, "project_id")
+    older_spec = _seed_spec(session, project_id=project_id, content="older")
+    newer_spec = _seed_spec(session, project_id=project_id, content="newer")
     _seed_authority(
         session,
         spec_version_id=require_id(older_spec.spec_version_id, "spec_version_id"),
@@ -1268,19 +1268,19 @@ def test_authority_status_uses_latest_accepted_decision(
     )
     _accept_spec(
         session,
-        product_id=product_id,
+        project_id=project_id,
         spec=older_spec,
         decided_at=datetime(2026, 5, 14, 12, tzinfo=UTC),
     )
     newer_acceptance = _accept_spec(
         session,
-        product_id=product_id,
+        project_id=project_id,
         spec=newer_spec,
         decided_at=datetime(2026, 5, 14, 12, tzinfo=UTC) + timedelta(minutes=1),
     )
     service = AuthorityProjectionService(engine=_engine(session), repo_root=tmp_path)
 
-    result = service.status(project_id=product_id)
+    result = service.status(project_id=project_id)
 
     assert result["ok"] is True
     assert result["data"]["status"] == "current"
@@ -1295,8 +1295,8 @@ def test_authority_status_marks_compiler_prompt_mismatch_stale(
 ) -> None:
     """Reject compiled rows whose provenance differs from acceptance."""
     product = _seed_product(session)
-    product_id = require_id(product.product_id, "product_id")
-    spec = _seed_spec(session, product_id=product_id, content="# Spec\n")
+    project_id = require_id(product.project_id, "project_id")
+    spec = _seed_spec(session, project_id=project_id, content="# Spec\n")
     _seed_authority(
         session,
         spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
@@ -1305,12 +1305,12 @@ def test_authority_status_marks_compiler_prompt_mismatch_stale(
     )
     _accept_spec(
         session,
-        product_id=product_id,
+        project_id=project_id,
         spec=spec,
     )
     service = AuthorityProjectionService(engine=_engine(session), repo_root=tmp_path)
 
-    result = service.status(project_id=product_id)
+    result = service.status(project_id=project_id)
 
     assert result["ok"] is True
     assert result["data"]["status"] == "stale"
@@ -1324,8 +1324,8 @@ def test_authority_status_reports_regenerate_for_unsupported_schema(
 ) -> None:
     """Accepted legacy artifacts should not appear current or available."""
     product = _seed_product(session)
-    product_id = require_id(product.product_id, "product_id")
-    spec = _seed_spec(session, product_id=product_id, content="# Spec\n")
+    project_id = require_id(product.project_id, "project_id")
+    spec = _seed_spec(session, project_id=project_id, content="# Spec\n")
     _seed_authority(
         session,
         spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
@@ -1333,10 +1333,10 @@ def test_authority_status_reports_regenerate_for_unsupported_schema(
             historical_v2_compiled_authority(prompt_hash="a" * 64)
         ),
     )
-    _accept_spec(session, product_id=product_id, spec=spec)
+    _accept_spec(session, project_id=project_id, spec=spec)
     service = AuthorityProjectionService(engine=_engine(session), repo_root=tmp_path)
 
-    result = service.status(project_id=product_id)
+    result = service.status(project_id=project_id)
 
     assert result["ok"] is False
     assert result["errors"][0]["code"] == "COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED"
@@ -1354,9 +1354,9 @@ def test_authority_status_prefers_pending_unsupported_over_supported_accepted(
 ) -> None:
     """A newer pending unsupported artifact must not be masked by accepted authority."""
     product = _seed_product(session)
-    product_id = require_id(product.product_id, "product_id")
-    accepted_spec = _seed_spec(session, product_id=product_id, content="accepted")
-    pending_spec = _seed_spec(session, product_id=product_id, content="pending")
+    project_id = require_id(product.project_id, "project_id")
+    accepted_spec = _seed_spec(session, project_id=project_id, content="accepted")
+    pending_spec = _seed_spec(session, project_id=project_id, content="pending")
     _seed_authority(
         session,
         spec_version_id=require_id(accepted_spec.spec_version_id, "spec_version_id"),
@@ -1368,10 +1368,10 @@ def test_authority_status_prefers_pending_unsupported_over_supported_accepted(
             historical_v2_compiled_authority(prompt_hash="a" * 64)
         ),
     )
-    _accept_spec(session, product_id=product_id, spec=accepted_spec)
+    _accept_spec(session, project_id=project_id, spec=accepted_spec)
     service = AuthorityProjectionService(engine=_engine(session), repo_root=tmp_path)
 
-    result = service.status(project_id=product_id)
+    result = service.status(project_id=project_id)
 
     assert result["ok"] is False
     assert result["errors"][0]["code"] == "COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED"
@@ -1392,9 +1392,9 @@ def test_authority_status_unsupported_schema_preserves_status_payload_shape(
 ) -> None:
     """Unsupported status responses should keep the normal status payload fields."""
     product = _seed_product(session)
-    product_id = require_id(product.product_id, "product_id")
-    accepted_spec = _seed_spec(session, product_id=product_id, content="accepted")
-    pending_spec = _seed_spec(session, product_id=product_id, content="pending")
+    project_id = require_id(product.project_id, "project_id")
+    accepted_spec = _seed_spec(session, project_id=project_id, content="accepted")
+    pending_spec = _seed_spec(session, project_id=project_id, content="pending")
     accepted_authority = _seed_authority(
         session,
         spec_version_id=require_id(accepted_spec.spec_version_id, "spec_version_id"),
@@ -1406,10 +1406,10 @@ def test_authority_status_unsupported_schema_preserves_status_payload_shape(
             historical_v2_compiled_authority(prompt_hash="a" * 64)
         ),
     )
-    _accept_spec(session, product_id=product_id, spec=accepted_spec)
+    _accept_spec(session, project_id=project_id, spec=accepted_spec)
     service = AuthorityProjectionService(engine=_engine(session), repo_root=tmp_path)
 
-    result = service.status(project_id=product_id)
+    result = service.status(project_id=project_id)
 
     data = result["data"]
     assert result["ok"] is False
@@ -1431,17 +1431,17 @@ def test_authority_status_marks_latest_spec_hash_drift_stale(
 ) -> None:
     """Mark accepted authority stale when a newer spec hash exists."""
     product = _seed_product(session)
-    product_id = require_id(product.product_id, "product_id")
-    accepted_spec = _seed_spec(session, product_id=product_id, content="accepted")
-    latest_spec = _seed_spec(session, product_id=product_id, content="latest")
+    project_id = require_id(product.project_id, "project_id")
+    accepted_spec = _seed_spec(session, project_id=project_id, content="accepted")
+    latest_spec = _seed_spec(session, project_id=project_id, content="latest")
     _seed_authority(
         session,
         spec_version_id=require_id(accepted_spec.spec_version_id, "spec_version_id"),
     )
-    _accept_spec(session, product_id=product_id, spec=accepted_spec)
+    _accept_spec(session, project_id=project_id, spec=accepted_spec)
     service = AuthorityProjectionService(engine=_engine(session), repo_root=tmp_path)
 
-    result = service.status(project_id=product_id)
+    result = service.status(project_id=project_id)
 
     assert result["ok"] is True
     assert result["data"]["status"] == "stale"
@@ -1459,15 +1459,15 @@ def test_authority_status_marks_missing_accepted_spec_stale_before_latest_drift(
 ) -> None:
     """Classify a dangling accepted spec reference before latest spec drift."""
     product = _seed_product(session)
-    product_id = require_id(product.product_id, "product_id")
-    accepted_spec = _seed_spec(session, product_id=product_id, content="accepted")
-    latest_spec = _seed_spec(session, product_id=product_id, content="latest")
+    project_id = require_id(product.project_id, "project_id")
+    accepted_spec = _seed_spec(session, project_id=project_id, content="accepted")
+    latest_spec = _seed_spec(session, project_id=project_id, content="latest")
     accepted_spec_id = require_id(
         accepted_spec.spec_version_id,
         "spec_version_id",
     )
     _seed_authority(session, spec_version_id=accepted_spec_id)
-    _accept_spec(session, product_id=product_id, spec=accepted_spec)
+    _accept_spec(session, project_id=project_id, spec=accepted_spec)
     session.exec(cast("Any", text("PRAGMA foreign_keys=OFF")))
     session.exec(
         cast(
@@ -1479,7 +1479,7 @@ def test_authority_status_marks_missing_accepted_spec_stale_before_latest_drift(
     session.commit()
     service = AuthorityProjectionService(engine=_engine(session), repo_root=tmp_path)
 
-    result = service.status(project_id=product_id)
+    result = service.status(project_id=project_id)
 
     assert result["ok"] is True
     assert result["data"]["status"] == "stale"
@@ -1494,14 +1494,14 @@ def test_authority_status_marks_missing_accepted_spec_stale_without_authority(
 ) -> None:
     """Classify missing accepted spec before missing compiled authority."""
     product = _seed_product(session)
-    product_id = require_id(product.product_id, "product_id")
-    accepted_spec = _seed_spec(session, product_id=product_id, content="accepted")
-    latest_spec = _seed_spec(session, product_id=product_id, content="latest")
+    project_id = require_id(product.project_id, "project_id")
+    accepted_spec = _seed_spec(session, project_id=project_id, content="accepted")
+    latest_spec = _seed_spec(session, project_id=project_id, content="latest")
     accepted_spec_id = require_id(
         accepted_spec.spec_version_id,
         "spec_version_id",
     )
-    _accept_spec(session, product_id=product_id, spec=accepted_spec)
+    _accept_spec(session, project_id=project_id, spec=accepted_spec)
     session.exec(cast("Any", text("PRAGMA foreign_keys=OFF")))
     session.exec(
         cast(
@@ -1513,7 +1513,7 @@ def test_authority_status_marks_missing_accepted_spec_stale_without_authority(
     session.commit()
     service = AuthorityProjectionService(engine=_engine(session), repo_root=tmp_path)
 
-    result = service.status(project_id=product_id)
+    result = service.status(project_id=project_id)
 
     assert result["ok"] is True
     assert result["data"]["status"] == "stale"
@@ -1541,16 +1541,16 @@ def test_authority_status_marks_disk_spec_hash_drift_stale(
     spec_path.parent.mkdir()
     spec_path.write_text(changed_content, encoding="utf-8")
     product = _seed_product(session, spec_file_path="specs/app.json")
-    product_id = require_id(product.product_id, "product_id")
-    spec = _seed_spec(session, product_id=product_id, content=accepted_content)
+    project_id = require_id(product.project_id, "project_id")
+    spec = _seed_spec(session, project_id=project_id, content=accepted_content)
     _seed_authority(
         session,
         spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
     )
-    _accept_spec(session, product_id=product_id, spec=spec)
+    _accept_spec(session, project_id=project_id, spec=spec)
     service = AuthorityProjectionService(engine=_engine(session), repo_root=tmp_path)
 
-    result = service.status(project_id=product_id)
+    result = service.status(project_id=project_id)
 
     assert result["ok"] is True
     assert result["data"]["status"] == "stale"
@@ -1567,18 +1567,18 @@ def test_authority_status_fingerprint_changes_on_latest_spec_drift(
 ) -> None:
     """Include latest spec status inputs in the authority fingerprint."""
     product = _seed_product(session)
-    product_id = require_id(product.product_id, "product_id")
-    accepted_spec = _seed_spec(session, product_id=product_id, content="accepted")
+    project_id = require_id(product.project_id, "project_id")
+    accepted_spec = _seed_spec(session, project_id=project_id, content="accepted")
     _seed_authority(
         session,
         spec_version_id=require_id(accepted_spec.spec_version_id, "spec_version_id"),
     )
-    _accept_spec(session, product_id=product_id, spec=accepted_spec)
+    _accept_spec(session, project_id=project_id, spec=accepted_spec)
     service = AuthorityProjectionService(engine=_engine(session), repo_root=tmp_path)
-    current_result = service.status(project_id=product_id)
+    current_result = service.status(project_id=project_id)
 
-    _seed_spec(session, product_id=product_id, content="latest")
-    drift_result = service.status(project_id=product_id)
+    _seed_spec(session, project_id=project_id, content="latest")
+    drift_result = service.status(project_id=project_id)
 
     assert current_result["data"]["status"] == "current"
     assert drift_result["data"]["status"] == "stale"
@@ -1608,18 +1608,18 @@ def test_authority_status_fingerprint_changes_on_disk_spec_drift(
     spec_path.parent.mkdir()
     spec_path.write_text(accepted_content, encoding="utf-8")
     product = _seed_product(session, spec_file_path="specs/app.json")
-    product_id = require_id(product.product_id, "product_id")
-    spec = _seed_spec(session, product_id=product_id, content=accepted_content)
+    project_id = require_id(product.project_id, "project_id")
+    spec = _seed_spec(session, project_id=project_id, content=accepted_content)
     _seed_authority(
         session,
         spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
     )
-    _accept_spec(session, product_id=product_id, spec=spec)
+    _accept_spec(session, project_id=project_id, spec=spec)
     service = AuthorityProjectionService(engine=_engine(session), repo_root=tmp_path)
-    current_result = service.status(project_id=product_id)
+    current_result = service.status(project_id=project_id)
 
     spec_path.write_text(changed_content, encoding="utf-8")
-    drift_result = service.status(project_id=product_id)
+    drift_result = service.status(project_id=project_id)
 
     assert current_result["data"]["status"] == "current"
     assert drift_result["data"]["status"] == "stale"
@@ -1636,16 +1636,16 @@ def test_authority_status_marks_missing_disk_spec_stale_with_warning(
 ) -> None:
     """Do not report current when the stored disk spec path is missing."""
     product = _seed_product(session, spec_file_path="specs/missing.md")
-    product_id = require_id(product.product_id, "product_id")
-    spec = _seed_spec(session, product_id=product_id, content="# Spec\n")
+    project_id = require_id(product.project_id, "project_id")
+    spec = _seed_spec(session, project_id=project_id, content="# Spec\n")
     _seed_authority(
         session,
         spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
     )
-    _accept_spec(session, product_id=product_id, spec=spec)
+    _accept_spec(session, project_id=project_id, spec=spec)
     service = AuthorityProjectionService(engine=_engine(session), repo_root=tmp_path)
 
-    result = service.status(project_id=product_id)
+    result = service.status(project_id=project_id)
 
     assert result["ok"] is True
     assert result["data"]["status"] == "stale"
@@ -1670,13 +1670,13 @@ def test_authority_status_marks_unreadable_disk_spec_existing_with_warning(
     spec_path.write_text(spec_content, encoding="utf-8")
     resolved_spec_path = spec_path.resolve()
     product = _seed_product(session, spec_file_path="specs/app.md")
-    product_id = require_id(product.product_id, "product_id")
-    spec = _seed_spec(session, product_id=product_id, content=spec_content)
+    project_id = require_id(product.project_id, "project_id")
+    spec = _seed_spec(session, project_id=project_id, content=spec_content)
     _seed_authority(
         session,
         spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
     )
-    _accept_spec(session, product_id=product_id, spec=spec)
+    _accept_spec(session, project_id=project_id, spec=spec)
     original_read_bytes = Path.read_bytes
 
     def fake_read_bytes(path: Path) -> bytes:
@@ -1688,7 +1688,7 @@ def test_authority_status_marks_unreadable_disk_spec_existing_with_warning(
     monkeypatch.setattr(Path, "read_bytes", fake_read_bytes)
     service = AuthorityProjectionService(engine=_engine(session), repo_root=tmp_path)
 
-    result = service.status(project_id=product_id)
+    result = service.status(project_id=project_id)
 
     assert result["ok"] is True
     assert result["data"]["status"] == "stale"
@@ -1706,15 +1706,15 @@ def test_invariants_requires_accepted_authority_by_default(
 ) -> None:
     """Do not choose arbitrary compiled authority without acceptance."""
     product = _seed_product(session)
-    product_id = require_id(product.product_id, "product_id")
-    spec = _seed_spec(session, product_id=product_id, content="# Spec\n")
+    project_id = require_id(product.project_id, "project_id")
+    spec = _seed_spec(session, project_id=project_id, content="# Spec\n")
     _seed_authority(
         session,
         spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
     )
     service = AuthorityProjectionService(engine=_engine(session), repo_root=tmp_path)
 
-    result = service.invariants(project_id=product_id)
+    result = service.invariants(project_id=project_id)
 
     assert result["ok"] is False
     assert result["errors"][0]["code"] == "AUTHORITY_NOT_ACCEPTED"
@@ -1726,24 +1726,24 @@ def test_invariants_default_rejects_unaccepted_recompile(
 ) -> None:
     """Do not expose mismatched recompile output as accepted invariants."""
     product = _seed_product(session)
-    product_id = require_id(product.product_id, "product_id")
-    spec = _seed_spec(session, product_id=product_id, content="# Spec\n")
+    project_id = require_id(product.project_id, "project_id")
+    spec = _seed_spec(session, project_id=project_id, content="# Spec\n")
     _seed_authority(
         session,
         spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
         compiler_version="3.0.0",
         prompt_hash="b" * 64,
     )
-    _accept_spec(session, product_id=product_id, spec=spec)
+    _accept_spec(session, project_id=project_id, spec=spec)
     service = AuthorityProjectionService(engine=_engine(session), repo_root=tmp_path)
 
-    result = service.invariants(project_id=product_id)
+    result = service.invariants(project_id=project_id)
 
     assert result["ok"] is False
     assert result["errors"][0]["code"] == "AUTHORITY_ACCEPTANCE_MISMATCH"
     assert result["errors"][0]["exit_code"] == AUTHORITY_ERROR_EXIT_CODE
     assert result["errors"][0]["details"] == {
-        "project_id": product_id,
+        "project_id": project_id,
         "spec_version_id": spec.spec_version_id,
         "accepted_compiler_version": "3.0.0",
         "accepted_prompt_hash": "a" * 64,
@@ -1758,8 +1758,8 @@ def test_invariants_default_keeps_pending_recompile_out_of_accepted_projection(
 ) -> None:
     """Default invariants stay bound to accepted A while B remains pending."""
     product = _seed_product(session)
-    product_id = require_id(product.product_id, "product_id")
-    spec = _seed_spec(session, product_id=product_id, content="# Spec\n")
+    project_id = require_id(product.project_id, "project_id")
+    spec = _seed_spec(session, project_id=project_id, content="# Spec\n")
     spec_version_id = require_id(spec.spec_version_id, "spec_version_id")
     accepted_authority = _seed_authority(
         session,
@@ -1767,7 +1767,7 @@ def test_invariants_default_keeps_pending_recompile_out_of_accepted_projection(
         compiler_version="3.0.0",
         prompt_hash="a" * 64,
     )
-    _accept_spec(session, product_id=product_id, spec=spec)
+    _accept_spec(session, project_id=project_id, spec=spec)
     pending_authority = _seed_authority(
         session,
         spec_version_id=spec_version_id,
@@ -1778,7 +1778,7 @@ def test_invariants_default_keeps_pending_recompile_out_of_accepted_projection(
     result = AuthorityProjectionService(
         engine=_engine(session),
         repo_root=tmp_path,
-    ).invariants(project_id=product_id)
+    ).invariants(project_id=project_id)
 
     assert result["ok"] is True
     assert result["data"]["authority_id"] == accepted_authority.authority_id
@@ -1791,8 +1791,8 @@ def test_invariants_default_uses_exact_newest_accepted_authority(
 ) -> None:
     """Default invariants load exact B after an explicit decision accepts B."""
     product = _seed_product(session)
-    product_id = require_id(product.product_id, "product_id")
-    spec = _seed_spec(session, product_id=product_id, content="# Spec\n")
+    project_id = require_id(product.project_id, "project_id")
+    spec = _seed_spec(session, project_id=project_id, content="# Spec\n")
     spec_version_id = require_id(spec.spec_version_id, "spec_version_id")
     authority_a = _seed_authority(
         session,
@@ -1800,7 +1800,7 @@ def test_invariants_default_uses_exact_newest_accepted_authority(
         compiler_version="3.0.0",
         prompt_hash="a" * 64,
     )
-    _accept_spec(session, product_id=product_id, spec=spec)
+    _accept_spec(session, project_id=project_id, spec=spec)
     authority_b = _seed_authority(
         session,
         spec_version_id=spec_version_id,
@@ -1810,7 +1810,7 @@ def test_invariants_default_uses_exact_newest_accepted_authority(
     authority_b_id = require_id(authority_b.authority_id, "authority_id")
     session.add(
         SpecAuthorityAcceptance(
-            product_id=product_id,
+            project_id=project_id,
             spec_version_id=spec_version_id,
             status="accepted",
             policy="manual",
@@ -1821,7 +1821,7 @@ def test_invariants_default_uses_exact_newest_accepted_authority(
             spec_hash=spec.spec_hash,
             pending_authority_id=authority_b_id,
             authority_fingerprint=pending_authority_fingerprint(authority_b),
-            terminal_decision_key=f"{product_id}:{spec_version_id}:{authority_b_id}",
+            terminal_decision_key=f"{project_id}:{spec_version_id}:{authority_b_id}",
         )
     )
     session.commit()
@@ -1829,7 +1829,7 @@ def test_invariants_default_uses_exact_newest_accepted_authority(
     result = AuthorityProjectionService(
         engine=_engine(session),
         repo_root=tmp_path,
-    ).invariants(project_id=product_id)
+    ).invariants(project_id=project_id)
 
     assert result["ok"] is True
     assert result["data"]["authority_id"] == authority_b_id
@@ -1842,8 +1842,8 @@ def test_invariants_reports_regenerate_for_unsupported_schema(
 ) -> None:
     """Legacy stored artifacts should block default invariants reads."""
     product = _seed_product(session)
-    product_id = require_id(product.product_id, "product_id")
-    spec = _seed_spec(session, product_id=product_id, content="# Spec\n")
+    project_id = require_id(product.project_id, "project_id")
+    spec = _seed_spec(session, project_id=project_id, content="# Spec\n")
     _seed_authority(
         session,
         spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
@@ -1851,10 +1851,10 @@ def test_invariants_reports_regenerate_for_unsupported_schema(
             historical_v2_compiled_authority(prompt_hash="a" * 64)
         ),
     )
-    _accept_spec(session, product_id=product_id, spec=spec)
+    _accept_spec(session, project_id=project_id, spec=spec)
     service = AuthorityProjectionService(engine=_engine(session), repo_root=tmp_path)
 
-    result = service.invariants(project_id=product_id)
+    result = service.invariants(project_id=project_id)
 
     assert result["ok"] is False
     assert result["errors"][0]["code"] == "COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED"
@@ -1869,8 +1869,8 @@ def test_status_and_invariants_reject_malformed_v3_authority(
 ) -> None:
     """Current-schema malformed rows must never project denormalized success."""
     product = _seed_product(session)
-    product_id = require_id(product.product_id, "product_id")
-    spec = _seed_spec(session, product_id=product_id, content="# Spec\n")
+    project_id = require_id(product.project_id, "project_id")
+    spec = _seed_spec(session, project_id=project_id, content="# Spec\n")
     authority = _seed_authority(
         session,
         spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
@@ -1878,11 +1878,11 @@ def test_status_and_invariants_reject_malformed_v3_authority(
             {"schema_version": "agileforge.compiled_authority.v3"}
         ),
     )
-    _accept_spec(session, product_id=product_id, spec=spec)
+    _accept_spec(session, project_id=project_id, spec=spec)
     service = AuthorityProjectionService(engine=_engine(session), repo_root=tmp_path)
 
-    status_result = service.status(project_id=product_id)
-    invariants_result = service.invariants(project_id=product_id)
+    status_result = service.status(project_id=project_id)
+    invariants_result = service.invariants(project_id=project_id)
 
     for result in (status_result, invariants_result):
         assert result["ok"] is False
@@ -1902,8 +1902,8 @@ def test_invariants_returns_explicit_compiled_authority_without_acceptance(
 ) -> None:
     """Return explicit compiled invariants even when no accepted decision exists."""
     product = _seed_product(session)
-    product_id = require_id(product.product_id, "product_id")
-    spec = _seed_spec(session, product_id=product_id, content="# Spec\n")
+    project_id = require_id(product.project_id, "project_id")
+    spec = _seed_spec(session, project_id=project_id, content="# Spec\n")
     authority = _seed_authority(
         session,
         spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
@@ -1911,7 +1911,7 @@ def test_invariants_returns_explicit_compiled_authority_without_acceptance(
     service = AuthorityProjectionService(engine=_engine(session), repo_root=tmp_path)
 
     result = service.invariants(
-        project_id=product_id,
+        project_id=project_id,
         spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
     )
 
@@ -1934,19 +1934,19 @@ def test_invariants_reports_missing_compiled_authority(
 ) -> None:
     """Return a structured error when the selected authority was not compiled."""
     product = _seed_product(session)
-    product_id = require_id(product.product_id, "product_id")
-    spec = _seed_spec(session, product_id=product_id, content="# Spec\n")
+    project_id = require_id(product.project_id, "project_id")
+    spec = _seed_spec(session, project_id=project_id, content="# Spec\n")
     service = AuthorityProjectionService(engine=_engine(session), repo_root=tmp_path)
 
     result = service.invariants(
-        project_id=product_id,
+        project_id=project_id,
         spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
     )
 
     assert result["ok"] is False
     assert result["errors"][0]["code"] == "AUTHORITY_NOT_COMPILED"
     assert result["errors"][0]["details"] == {
-        "project_id": product_id,
+        "project_id": project_id,
         "spec_version_id": spec.spec_version_id,
     }
 
@@ -1957,13 +1957,13 @@ def test_invariants_reports_missing_spec_version_with_registry_metadata(
 ) -> None:
     """Use registry defaults when an explicit spec version is unknown."""
     product = _seed_product(session)
-    product_id = require_id(product.product_id, "product_id")
+    project_id = require_id(product.project_id, "project_id")
     missing_spec_version_id = 999_999
     metadata = error_metadata(ErrorCode.SPEC_VERSION_NOT_FOUND)
     service = AuthorityProjectionService(engine=_engine(session), repo_root=tmp_path)
 
     result = service.invariants(
-        project_id=product_id,
+        project_id=project_id,
         spec_version_id=missing_spec_version_id,
     )
 
@@ -1973,7 +1973,7 @@ def test_invariants_reports_missing_spec_version_with_registry_metadata(
     assert error["exit_code"] == metadata.default_exit_code
     assert error["retryable"] is metadata.retryable
     assert error["details"] == {
-        "project_id": product_id,
+        "project_id": project_id,
         "spec_version_id": missing_spec_version_id,
     }
 
@@ -1984,22 +1984,22 @@ def test_denormalized_invariants_do_not_override_typed_artifact(
 ) -> None:
     """Legacy denormalized JSON cannot override the typed v3 artifact."""
     product = _seed_product(session)
-    product_id = require_id(product.product_id, "product_id")
-    spec = _seed_spec(session, product_id=product_id, content="# Spec\n")
+    project_id = require_id(product.project_id, "project_id")
+    spec = _seed_spec(session, project_id=project_id, content="# Spec\n")
     authority = _seed_authority(
         session,
         spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
     )
-    _accept_spec(session, product_id=product_id, spec=spec)
+    _accept_spec(session, project_id=project_id, spec=spec)
     service = AuthorityProjectionService(engine=_engine(session), repo_root=tmp_path)
-    baseline_status = service.status(project_id=product_id)
-    baseline_invariants = service.invariants(project_id=product_id)
+    baseline_status = service.status(project_id=project_id)
+    baseline_invariants = service.invariants(project_id=project_id)
     authority.invariants = "{bad json"
     session.add(authority)
     session.commit()
 
-    status_result = service.status(project_id=product_id)
-    invariants_result = service.invariants(project_id=product_id)
+    status_result = service.status(project_id=project_id)
+    invariants_result = service.invariants(project_id=project_id)
 
     assert status_result["ok"] is True
     assert status_result["data"]["invariant_count"] == 1

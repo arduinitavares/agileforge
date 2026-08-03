@@ -46,7 +46,7 @@ def _minimal_packet(  # noqa: PLR0913
                 "goal": sprint_goal,
             },
             "product": {
-                "name": "Test Product",
+                "name": "Test Project",
             },
         },
         "constraints": {

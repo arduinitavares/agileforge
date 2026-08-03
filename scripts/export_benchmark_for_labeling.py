@@ -78,7 +78,7 @@ def build_labeling_rows(cases: list[dict[str, Any]]) -> list[dict[str, Any]]:
             compiled = (
                 accepted_compiled_authority(
                     session,
-                    product_id=story.product_id,
+                    project_id=story.project_id,
                     spec_version_id=case["spec_version_id"],
                 )
                 if story is not None

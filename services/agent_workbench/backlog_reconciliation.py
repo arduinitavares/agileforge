@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from sqlmodel import Session, select
 
-from models.core import Product, SprintStory, UserStory
+from models.core import Project, SprintStory, UserStory
 from models.enums import StoryStatus, WorkflowEventType
 from models.events import WorkflowEvent
 from models.workflow import (
@@ -53,7 +53,7 @@ def reconcile_active_backlog(
             details={"missing": ["idempotency_key"]},
         )
 
-    if session.get(Product, project_id) is None:
+    if session.get(Project, project_id) is None:
         message = f"Project {project_id} not found."
         raise BacklogReconciliationError(
             message,
@@ -124,7 +124,7 @@ def reconcile_active_backlog(
     session.add(
         WorkflowEvent(
             event_type=WorkflowEventType.BACKLOG_SAVED,
-            product_id=project_id,
+            project_id=project_id,
             timestamp=reconciled_at,
             event_metadata=json.dumps(
                 {
@@ -151,7 +151,7 @@ def reconcile_stale_backlog_in_session(  # noqa: PLR0913
     reconciled_at: datetime,
 ) -> BacklogAuthorityReconciliation:
     """Archive stale active rows and record exact authority reconciliation."""
-    if session.get(Product, project_id) is None:
+    if session.get(Project, project_id) is None:
         message = f"Project {project_id} not found."
         raise BacklogReconciliationError(message, details={"project_id": project_id})
     if not affected_artifact_ids or affected_artifact_ids != tuple(
@@ -234,7 +234,7 @@ def reconcile_stale_backlog_in_session(  # noqa: PLR0913
     )
     event = WorkflowEvent(
         event_type=WorkflowEventType.BACKLOG_SAVED,
-        product_id=project_id,
+        project_id=project_id,
         timestamp=reconciled_at,
         event_metadata=canonical_json(metadata),
     )
@@ -259,7 +259,7 @@ def reconcile_stale_backlog_in_session(  # noqa: PLR0913
 def _active_stories(session: Session, project_id: int) -> list[UserStory]:
     rows = session.exec(
         select(UserStory)
-        .where(UserStory.product_id == project_id)
+        .where(UserStory.project_id == project_id)
         .where(UserStory.is_superseded == False)  # noqa: E712
     ).all()
     return sorted(rows, key=_created_story_key)
@@ -277,7 +277,7 @@ def _idempotent_replay(
 ) -> JsonDict | None:
     events = session.exec(
         select(WorkflowEvent)
-        .where(WorkflowEvent.product_id == project_id)
+        .where(WorkflowEvent.project_id == project_id)
         .where(WorkflowEvent.event_type == WorkflowEventType.BACKLOG_SAVED)
     ).all()
     for event in events:
@@ -362,12 +362,12 @@ def _latest_saved_count(
     session: Session,
     active_seed_rows: list[UserStory],
 ) -> int | None:
-    project_id = active_seed_rows[0].product_id if active_seed_rows else None
+    project_id = active_seed_rows[0].project_id if active_seed_rows else None
     if project_id is None:
         return None
     events = session.exec(
         select(WorkflowEvent)
-        .where(WorkflowEvent.product_id == project_id)
+        .where(WorkflowEvent.project_id == project_id)
         .where(WorkflowEvent.event_type == WorkflowEventType.BACKLOG_SAVED)
     ).all()
     events = sorted(

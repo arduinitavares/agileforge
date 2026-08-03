@@ -14,14 +14,14 @@ def main() -> None:
     Note: this script performs database access and must not execute during pytest collection.
     """
     # Test with product ID 3 (from the logs)
-    result = query_features_for_stories(QueryFeaturesInput(product_id=3))
+    result = query_features_for_stories(QueryFeaturesInput(project_id=3))
 
     emit("Query Result Type:", type(result))
     emit("Result is dict:", isinstance(result, dict))
 
     if result["success"]:
         emit(f"\n✅ Success: {result['message']}")
-        emit(f"Product: {result['product_name']} (ID: {result['product_id']})")
+        emit(f"Project: {result['product_name']} (ID: {result['project_id']})")
         emit(f"Total Features: {result['total_features']}")
 
         emit(f"\n{'=' * 60}")

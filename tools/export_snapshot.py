@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any, cast
 from markdown import markdown as _md
 from sqlmodel import Session, select
 
-from models.core import Epic, Feature, Product, Sprint, SprintStory, Theme, UserStory
+from models.core import Epic, Feature, Project, Sprint, SprintStory, Theme, UserStory
 from models.db import engine as default_engine
 from models.enums import StoryStatus
 from models.specs import SpecRegistry
@@ -39,8 +39,8 @@ if TYPE_CHECKING:
 
 class _ExportSnapshotError(ValueError):
     @classmethod
-    def product_not_found(cls, product_id: int) -> _ExportSnapshotError:
-        message = f"Product {product_id} not found"
+    def product_not_found(cls, project_id: int) -> _ExportSnapshotError:
+        message = f"Project {project_id} not found"
         return cls(message)
 
     @classmethod
@@ -72,7 +72,7 @@ class _ExportSnapshotError(ValueError):
 
 @dataclass(frozen=True)
 class _SnapshotRenderContext:
-    product: Product
+    project: Project
     themes: list[Theme]
     epics: list[Epic]
     features: list[Feature]
@@ -91,14 +91,14 @@ def _markdown(text: str, extensions: list[str] | None = None) -> str:
 
 def export_project_snapshot_html(
     *,
-    product_id: int,
+    project_id: int,
     output_dir: Path,
     engine_override: Engine | None = None,
 ) -> Path:
     """Export a project snapshot as a single HTML file.
 
     Args:
-        product_id: Product identifier.
+        project_id: Project identifier.
         output_dir: Destination folder.
         engine_override: Optional SQLAlchemy engine for testing.
 
@@ -109,12 +109,12 @@ def export_project_snapshot_html(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     with Session(engine_to_use) as session:
-        product = session.get(Product, product_id)
-        if not product:
-            raise _ExportSnapshotError.product_not_found(product_id)
+        project = session.get(Project, project_id)
+        if not project:
+            raise _ExportSnapshotError.product_not_found(project_id)
 
         themes = list(
-            session.exec(select(Theme).where(Theme.product_id == product_id)).all()
+            session.exec(select(Theme).where(Theme.project_id == project_id)).all()
         )
         theme_ids = [theme.theme_id for theme in themes if theme.theme_id is not None]
         epics = list(session.exec(select(Epic)).all())
@@ -125,11 +125,11 @@ def export_project_snapshot_html(
         features = [feature for feature in features if feature.epic_id in epic_ids]
         all_stories = list(
             session.exec(
-                select(UserStory).where(UserStory.product_id == product_id)
+                select(UserStory).where(UserStory.project_id == project_id)
             ).all()
         )
         sprints = list(
-            session.exec(select(Sprint).where(Sprint.product_id == product_id)).all()
+            session.exec(select(Sprint).where(Sprint.project_id == project_id)).all()
         )
         sprint_story_map = _load_sprint_story_map(
             session, [s.sprint_id for s in sprints]
@@ -140,12 +140,12 @@ def export_project_snapshot_html(
             sprint_story_map,
         )
 
-        approved_spec = _get_latest_approved_spec(session, product_id)
-        spec_content, spec_meta = _resolve_spec_content(product, approved_spec)
+        approved_spec = _get_latest_approved_spec(session, project_id)
+        spec_content, spec_meta = _resolve_spec_content(project, approved_spec)
         authority = _load_compiled_authority(session, approved_spec)
 
     render_context = _SnapshotRenderContext(
-        product=product,
+        project=project,
         themes=themes,
         epics=epics,
         features=features,
@@ -159,7 +159,7 @@ def export_project_snapshot_html(
     )
     html_output = _render_snapshot_html(render_context)
 
-    filename = f"snapshot_product_{product.product_id}.html"
+    filename = f"snapshot_project_{project.project_id}.html"
     output_path = output_dir / filename
     output_path.write_text(html_output, encoding="utf-8")
     return output_path
@@ -167,12 +167,12 @@ def export_project_snapshot_html(
 
 def _get_latest_approved_spec(
     session: Session,
-    product_id: int,
+    project_id: int,
 ) -> SpecRegistry | None:
     specs = list(
         session.exec(
             select(SpecRegistry).where(
-                SpecRegistry.product_id == product_id,
+                SpecRegistry.project_id == project_id,
                 SpecRegistry.status == "approved",
             )
         ).all()
@@ -187,7 +187,7 @@ def _get_latest_approved_spec(
 
 
 def _resolve_spec_content(
-    product: Product,
+    product: Project,
     approved_spec: SpecRegistry | None,
 ) -> tuple[str, dict[str, Any]]:
     if approved_spec:
@@ -221,13 +221,13 @@ def _load_compiled_authority(
 
     acceptance = latest_accepted_authority_decision(
         session,
-        product_id=approved_spec.product_id,
+        project_id=approved_spec.project_id,
         spec_version_id=approved_spec.spec_version_id,
     )
     authority = (
         accepted_compiled_authority(
             session,
-            product_id=approved_spec.product_id,
+            project_id=approved_spec.project_id,
             spec_version_id=approved_spec.spec_version_id,
         )
         if acceptance is not None
@@ -238,7 +238,7 @@ def _load_compiled_authority(
     )
     if authority is None and acceptance is not None:
         raise _ExportSnapshotError.authority_not_compiled(
-            project_id=approved_spec.product_id,
+            project_id=approved_spec.project_id,
             spec_version_id=approved_spec.spec_version_id,
         )
     if authority is None:
@@ -247,7 +247,7 @@ def _load_compiled_authority(
     loaded = load_compiled_artifact(authority)
     failure = compiled_authority_read_failure(
         loaded,
-        project_id=approved_spec.product_id,
+        project_id=approved_spec.project_id,
         spec_version_id=approved_spec.spec_version_id,
         authority_id=authority.authority_id,
     )
@@ -318,7 +318,7 @@ def _render_snapshot_html(context: _SnapshotRenderContext) -> str:
   </div>
 
   <div class="section">
-    <h2>Product Vision</h2>
+    <h2>product vision</h2>
     <div class="card">{vision_html}</div>
   </div>
 
@@ -362,8 +362,8 @@ def _render_snapshot_html(context: _SnapshotRenderContext) -> str:
 """.format(
         generated_at=generated_at,
         styles=styles,
-        product_name=html.escape(context.product.name or "(Unnamed Product)"),
-        product_description=html.escape(context.product.description or ""),
+        product_name=html.escape(context.project.name or "(Unnamed Project)"),
+        product_description=html.escape(context.project.description or ""),
         story_summary=_format_story_summary(context.stories),
         all_story_summary=_format_all_story_summary(context.all_stories),
         sprint_summary=_format_sprint_summary_line(
@@ -371,7 +371,7 @@ def _render_snapshot_html(context: _SnapshotRenderContext) -> str:
             context.stories,
             context.sprint_story_map,
         ),
-        vision_html=_markdown(context.product.vision or "(No vision set)"),
+        vision_html=_markdown(context.project.vision or "(No vision set)"),
         roadmap_html=roadmap_html,
         spec_status_badge=_render_spec_status_badge(context.spec_meta),
         spec_meta_html=_render_spec_metadata(context.spec_meta),

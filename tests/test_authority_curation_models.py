@@ -9,12 +9,11 @@ from sqlalchemy import inspect
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, SQLModel
 
-from db.migrations import ensure_schema_current
 from models.authority_curation import (
     AuthorityCurationAttempt,
     AuthorityFeedbackAttempt,
 )
-from models.core import Product
+from models.core import Project
 from services.agent_workbench.schema_readiness import (
     check_authority_curation_readiness,
 )
@@ -26,32 +25,27 @@ if TYPE_CHECKING:
 
 def test_authority_curation_tables_are_created(engine: Engine) -> None:
     """Authority curation attempts must have dedicated tables."""
-    ensure_schema_current(engine)
-
     table_names = set(inspect(engine).get_table_names())
 
     assert "authority_feedback_attempts" in table_names
     assert "authority_curation_attempts" in table_names
 
 
-def test_authority_curation_schema_readiness_passes_after_migration(
+def test_authority_curation_schema_readiness_passes_for_fresh_schema(
     engine: Engine,
 ) -> None:
-    """Readiness check must accept migrated curation storage."""
-    ensure_schema_current(engine)
-
+    """Readiness check must accept metadata-created curation storage."""
     result = check_authority_curation_readiness(engine)
 
     assert result.ok is True
     assert result.missing == {}
 
 
-def test_authority_curation_create_all_defaults_match_migration(
+def test_authority_curation_create_all_defaults_match_models(
     engine: Engine,
 ) -> None:
-    """Metadata-created curation tables must retain migration-level defaults."""
+    """Metadata-created curation tables must retain canonical defaults."""
     SQLModel.metadata.create_all(engine)
-    ensure_schema_current(engine)
 
     feedback_defaults = _column_defaults(engine, "authority_feedback_attempts")
     assert feedback_defaults["status"] == "'recorded'"
@@ -94,7 +88,6 @@ def test_authority_feedback_idempotency_key_is_unique_per_project(
     engine: Engine,
 ) -> None:
     """Feedback attempts must durably guard idempotency replay keys."""
-    ensure_schema_current(engine)
     project_id = _seed_product(engine)
 
     with Session(engine) as session:
@@ -121,7 +114,6 @@ def test_authority_curation_idempotency_key_is_unique_per_project(
     engine: Engine,
 ) -> None:
     """Curation attempts must durably guard idempotency replay keys."""
-    ensure_schema_current(engine)
     project_id = _seed_product(engine)
 
     with Session(engine) as session:
@@ -148,7 +140,6 @@ def test_authority_curation_allows_one_running_attempt_per_authority(
     engine: Engine,
 ) -> None:
     """Only one running curation may exist for one project/source authority."""
-    ensure_schema_current(engine)
     project_id = _seed_product(engine)
 
     with Session(engine) as session:
@@ -198,11 +189,11 @@ def _column_defaults(engine: Engine, table_name: str) -> dict[str, str | None]:
 def _seed_product(engine: Engine) -> int:
     """Create a product for curation persistence tests."""
     with Session(engine) as session:
-        product = Product(name="Authority Curation Persistence Product")
+        product = Project(name="Authority Curation Persistence Project")
         session.add(product)
         session.commit()
         session.refresh(product)
-        return require_id(product.product_id, "product_id")
+        return require_id(product.project_id, "project_id")
 
 
 def _feedback_attempt(

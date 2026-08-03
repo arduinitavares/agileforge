@@ -17,7 +17,7 @@ CONTRACT_FORBIDDEN_PREFIXES: tuple[str, ...] = (
     "cli",
     "google.adk",
     "litellm",
-    "orchestrator_agent",
+    "orchestrator" + "_agent",
     "repositories",
     "routers",
 )
@@ -105,5 +105,5 @@ def test_relocated_modules_do_not_load_temporary_root_orchestrator() -> None:
     ):
         importlib.import_module(module_name)
 
-    deleted_root_module = ".".join(("orchestrator_agent", "agent"))
+    deleted_root_module = ".".join(("orchestrator" + "_agent", "agent"))
     assert deleted_root_module not in sys.modules

@@ -20,7 +20,7 @@ from sqlmodel import Session, select
 
 from agile_sqlmodel import (
     CompiledSpecAuthority,
-    Product,
+    Project,
     SpecAuthorityStatus,
     SpecRegistry,
     UserStory,
@@ -45,14 +45,14 @@ from utils.spec_schemas import (
 
 
 @pytest.fixture
-def sample_product(session: Session, engine: Engine) -> Product:
+def sample_product(session: Session, engine: Engine) -> Project:
     """Create a product without spec."""
     # Monkey-patch the engine for tools to use test database
     spec_tools.engine = engine
 
-    product = Product(
-        name="Test Product",
-        description="Product for spec authority tests",
+    product = Project(
+        name="Test Project",
+        description="Project for spec authority tests",
         vision="Build amazing things",
     )
     session.add(product)
@@ -123,12 +123,12 @@ class TestSpecRegistryVersioning:
     """AC1 — Spec Registry (Versioning)."""
 
     def test_register_spec_version_creates_draft(
-        self, session: Session, sample_product: Product, sample_spec_content: str
+        self, session: Session, sample_product: Project, sample_spec_content: str
     ) -> None:
         """Test creating a new spec version in draft status."""
         result = register_spec_version(
             {
-                "product_id": sample_product.product_id,
+                "project_id": sample_product.project_id,
                 "content": sample_spec_content,
                 "content_ref": "specs/test_spec.md",
             },
@@ -142,7 +142,7 @@ class TestSpecRegistryVersioning:
         # Verify in database
         spec = session.get(SpecRegistry, spec_version_id)
         assert spec is not None
-        assert spec.product_id == sample_product.product_id
+        assert spec.project_id == sample_product.project_id
         assert spec.status == "draft"
         assert (
             spec.spec_hash == hashlib.sha256(sample_spec_content.encode()).hexdigest()
@@ -153,12 +153,12 @@ class TestSpecRegistryVersioning:
         assert spec.approved_by is None
 
     def test_register_spec_version_computes_correct_hash(
-        self, session: Session, sample_product: Product
+        self, session: Session, sample_product: Project
     ) -> None:
         """Test that spec_hash is correctly computed."""
         content_v1 = "Version 1 content"
         result_v1 = register_spec_version(
-            {"product_id": sample_product.product_id, "content": content_v1},
+            {"project_id": sample_product.project_id, "content": content_v1},
             tool_context=None,
         )
 
@@ -168,15 +168,15 @@ class TestSpecRegistryVersioning:
         assert spec_v1.spec_hash == expected_hash
 
     def test_register_multiple_versions_for_same_product(
-        self, session: Session, sample_product: Product
+        self, session: Session, sample_product: Project
     ) -> None:
         """Test creating multiple spec versions for the same product."""
         v1_result = register_spec_version(
-            {"product_id": sample_product.product_id, "content": "Version 1"},
+            {"project_id": sample_product.project_id, "content": "Version 1"},
             tool_context=None,
         )
         v2_result = register_spec_version(
-            {"product_id": sample_product.product_id, "content": "Version 2 (changed)"},
+            {"project_id": sample_product.project_id, "content": "Version 2 (changed)"},
             tool_context=None,
         )
 
@@ -192,12 +192,12 @@ class TestSpecRegistryVersioning:
         assert v1.spec_hash != v2.spec_hash
 
     def test_approved_spec_cannot_be_modified(
-        self, session: Session, sample_product: Product, sample_spec_content: str
+        self, session: Session, sample_product: Project, sample_spec_content: str
     ) -> None:
         """AC1 — Approved specs are immutable."""
         # Create and approve a spec
         reg_result = register_spec_version(
-            {"product_id": sample_product.product_id, "content": sample_spec_content},
+            {"project_id": sample_product.project_id, "content": sample_spec_content},
             tool_context=None,
         )
         spec_version_id = reg_result["spec_version_id"]
@@ -245,7 +245,7 @@ class TestExplicitApprovalGate:
         )
 
         sentinel_context = make_tool_context()
-        params = {"product_id": 3, "content": "spec-content"}
+        params = {"project_id": 3, "content": "spec-content"}
         result = register_spec_version(
             params,
             tool_context=sentinel_context,
@@ -286,11 +286,11 @@ class TestExplicitApprovalGate:
         assert captured["tool_context"] is sentinel_context
 
     def test_approve_spec_version_records_metadata(
-        self, session: Session, sample_product: Product, sample_spec_content: str
+        self, session: Session, sample_product: Project, sample_spec_content: str
     ) -> None:
         """Test that approval records timestamp, approver, and notes."""
         reg_result = register_spec_version(
-            {"product_id": sample_product.product_id, "content": sample_spec_content},
+            {"project_id": sample_product.project_id, "content": sample_spec_content},
             tool_context=None,
         )
         spec_version_id = reg_result["spec_version_id"]
@@ -380,12 +380,12 @@ class TestExplicitCompilation:
         assert captured["extract_authority"] is legacy_extractor
 
     def test_compile_fails_for_unapproved_spec(
-        self, session: Session, sample_product: Product, sample_spec_content: str
+        self, session: Session, sample_product: Project, sample_spec_content: str
     ) -> None:
         """Test that compilation is blocked for unapproved specs."""
         del session
         reg_result = register_spec_version(
-            {"product_id": sample_product.product_id, "content": sample_spec_content},
+            {"project_id": sample_product.project_id, "content": sample_spec_content},
             tool_context=None,
         )
         spec_version_id = reg_result["spec_version_id"]
@@ -401,7 +401,7 @@ class TestExplicitCompilation:
     def test_compile_creates_cached_authority_for_approved_spec(
         self,
         session: Session,
-        sample_product: Product,
+        sample_product: Project,
         sample_spec_content: str,
         compiler_stub: object,
     ) -> None:
@@ -409,7 +409,7 @@ class TestExplicitCompilation:
         # Register and approve
         del compiler_stub
         reg_result = register_spec_version(
-            {"product_id": sample_product.product_id, "content": sample_spec_content},
+            {"project_id": sample_product.project_id, "content": sample_spec_content},
             tool_context=None,
         )
         spec_version_id = reg_result["spec_version_id"]
@@ -458,14 +458,14 @@ class TestExplicitCompilation:
     def test_compile_stores_compiler_version_and_prompt_hash(
         self,
         session: Session,
-        sample_product: Product,
+        sample_product: Project,
         sample_spec_content: str,
         compiler_stub: object,
     ) -> None:
         """Test that compilation stores reproducibility metadata."""
         del compiler_stub
         reg_result = register_spec_version(
-            {"product_id": sample_product.product_id, "content": sample_spec_content},
+            {"project_id": sample_product.project_id, "content": sample_spec_content},
             tool_context=None,
         )
         spec_version_id = reg_result["spec_version_id"]
@@ -495,7 +495,7 @@ class TestAuthorityStatusCheck:
     """AC4 — Authority Status Check (Staleness)."""
 
     def test_status_tool_delegates_to_compiler_service(
-        self, sample_product: Product, monkeypatch: pytest.MonkeyPatch
+        self, sample_product: Project, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Tool entrypoint should remain a thin compatibility adapter."""
         expected = {
@@ -519,49 +519,49 @@ class TestAuthorityStatusCheck:
         )
 
         result = check_spec_authority_status(
-            {"product_id": sample_product.product_id},
+            {"project_id": sample_product.project_id},
             tool_context=None,
         )
 
         assert result is expected
-        assert captured["params"] == {"product_id": sample_product.product_id}
+        assert captured["params"] == {"project_id": sample_product.project_id}
         assert captured["tool_context"] is None
 
     def test_status_not_compiled_when_no_spec_exists(
-        self, sample_product: Product
+        self, sample_product: Project
     ) -> None:
         """Test status when no spec version exists."""
         result = check_spec_authority_status(
-            {"product_id": sample_product.product_id}, tool_context=None
+            {"project_id": sample_product.project_id}, tool_context=None
         )
 
         assert result["success"] is True
         assert result["status"] == SpecAuthorityStatus.NOT_COMPILED.value
 
     def test_status_pending_review_when_latest_is_draft(
-        self, session: Session, sample_product: Product, sample_spec_content: str
+        self, session: Session, sample_product: Project, sample_spec_content: str
     ) -> None:
         """Test status when latest spec is draft."""
         del session
         register_spec_version(
-            {"product_id": sample_product.product_id, "content": sample_spec_content},
+            {"project_id": sample_product.project_id, "content": sample_spec_content},
             tool_context=None,
         )
 
         result = check_spec_authority_status(
-            {"product_id": sample_product.product_id}, tool_context=None
+            {"project_id": sample_product.project_id}, tool_context=None
         )
 
         assert result["success"] is True
         assert result["status"] == SpecAuthorityStatus.PENDING_REVIEW.value
 
     def test_status_not_compiled_when_approved_but_not_compiled(
-        self, session: Session, sample_product: Product, sample_spec_content: str
+        self, session: Session, sample_product: Project, sample_spec_content: str
     ) -> None:
         """Test status when spec is approved but not compiled."""
         del session
         reg_result = register_spec_version(
-            {"product_id": sample_product.product_id, "content": sample_spec_content},
+            {"project_id": sample_product.project_id, "content": sample_spec_content},
             tool_context=None,
         )
         spec_version_id = reg_result["spec_version_id"]
@@ -572,7 +572,7 @@ class TestAuthorityStatusCheck:
         )
 
         result = check_spec_authority_status(
-            {"product_id": sample_product.product_id}, tool_context=None
+            {"project_id": sample_product.project_id}, tool_context=None
         )
 
         assert result["success"] is True
@@ -581,14 +581,14 @@ class TestAuthorityStatusCheck:
     def test_status_current_when_compiled_matches_latest_approved(
         self,
         session: Session,
-        sample_product: Product,
+        sample_product: Project,
         sample_spec_content: str,
         compiler_stub: object,
     ) -> None:
         """Test status when compiled authority matches latest approved spec."""
         del session, compiler_stub
         reg_result = register_spec_version(
-            {"product_id": sample_product.product_id, "content": sample_spec_content},
+            {"project_id": sample_product.project_id, "content": sample_spec_content},
             tool_context=None,
         )
         spec_version_id = reg_result["spec_version_id"]
@@ -601,20 +601,20 @@ class TestAuthorityStatusCheck:
         compile_spec_authority({"spec_version_id": spec_version_id}, tool_context=None)
 
         result = check_spec_authority_status(
-            {"product_id": sample_product.product_id}, tool_context=None
+            {"project_id": sample_product.project_id}, tool_context=None
         )
 
         assert result["success"] is True
         assert result["status"] == SpecAuthorityStatus.CURRENT.value
 
     def test_status_stale_when_new_approved_spec_after_compilation(
-        self, session: Session, sample_product: Product, compiler_stub: object
+        self, session: Session, sample_product: Project, compiler_stub: object
     ) -> None:
         """Test status transitions to STALE when spec changes after compilation."""
         # Version 1: register, approve, compile
         del session, compiler_stub
         v1_result = register_spec_version(
-            {"product_id": sample_product.product_id, "content": "Version 1 content"},
+            {"project_id": sample_product.project_id, "content": "Version 1 content"},
             tool_context=None,
         )
         v1_id = v1_result["spec_version_id"]
@@ -628,14 +628,14 @@ class TestAuthorityStatusCheck:
 
         # Verify CURRENT status
         status_after_v1 = check_spec_authority_status(
-            {"product_id": sample_product.product_id}, tool_context=None
+            {"project_id": sample_product.project_id}, tool_context=None
         )
         assert status_after_v1["status"] == SpecAuthorityStatus.CURRENT.value
 
         # Version 2: register and approve (but don't compile)
         v2_result = register_spec_version(
             {
-                "product_id": sample_product.product_id,
+                "project_id": sample_product.project_id,
                 "content": "Version 2 content (changed)",
             },
             tool_context=None,
@@ -649,7 +649,7 @@ class TestAuthorityStatusCheck:
 
         # Status should now be STALE (compiled authority is for v1, latest approved is v2)  # noqa: E501
         status_after_v2 = check_spec_authority_status(
-            {"product_id": sample_product.product_id}, tool_context=None
+            {"project_id": sample_product.project_id}, tool_context=None
         )
         assert status_after_v2["status"] == SpecAuthorityStatus.STALE.value
 
@@ -660,14 +660,14 @@ class TestDeterministicRetrieval:
     def test_get_compiled_authority_by_version_success(
         self,
         session: Session,
-        sample_product: Product,
+        sample_product: Project,
         sample_spec_content: str,
         compiler_stub: object,
     ) -> None:
         """Test successful retrieval of compiled authority."""
         del session, compiler_stub
         reg_result = register_spec_version(
-            {"product_id": sample_product.product_id, "content": sample_spec_content},
+            {"project_id": sample_product.project_id, "content": sample_spec_content},
             tool_context=None,
         )
         spec_version_id = reg_result["spec_version_id"]
@@ -682,7 +682,7 @@ class TestDeterministicRetrieval:
         # Retrieve by version
         result = get_compiled_authority_by_version(
             {
-                "product_id": sample_product.product_id,
+                "project_id": sample_product.project_id,
                 "spec_version_id": spec_version_id,
             },
             tool_context=None,
@@ -696,12 +696,12 @@ class TestDeterministicRetrieval:
         assert isinstance(result["invariants"], list)
 
     def test_get_compiled_authority_fails_if_not_compiled(
-        self, session: Session, sample_product: Product, sample_spec_content: str
+        self, session: Session, sample_product: Project, sample_spec_content: str
     ) -> None:
         """Test clear error when compiled authority doesn't exist."""
         del session
         reg_result = register_spec_version(
-            {"product_id": sample_product.product_id, "content": sample_spec_content},
+            {"project_id": sample_product.project_id, "content": sample_spec_content},
             tool_context=None,
         )
         spec_version_id = reg_result["spec_version_id"]
@@ -714,7 +714,7 @@ class TestDeterministicRetrieval:
 
         result = get_compiled_authority_by_version(
             {
-                "product_id": sample_product.product_id,
+                "project_id": sample_product.project_id,
                 "spec_version_id": spec_version_id,
             },
             tool_context=None,
@@ -726,14 +726,14 @@ class TestDeterministicRetrieval:
     def test_get_compiled_authority_fails_for_wrong_product(
         self,
         session: Session,
-        sample_product: Product,
+        sample_product: Project,
         sample_spec_content: str,
         compiler_stub: object,
     ) -> None:
-        """Test that retrieval validates product_id matches spec_version_id."""
+        """Test that retrieval validates project_id matches spec_version_id."""
         del compiler_stub
         reg_result = register_spec_version(
-            {"product_id": sample_product.product_id, "content": sample_spec_content},
+            {"project_id": sample_product.project_id, "content": sample_spec_content},
             tool_context=None,
         )
         spec_version_id = reg_result["spec_version_id"]
@@ -746,15 +746,15 @@ class TestDeterministicRetrieval:
         compile_spec_authority({"spec_version_id": spec_version_id}, tool_context=None)
 
         # Create another product
-        other_product = Product(name="Other Product", description="Test")
+        other_product = Project(name="Other Project", description="Test")
         session.add(other_product)
         session.commit()
         session.refresh(other_product)
 
-        # Try to retrieve with wrong product_id
+        # Try to retrieve with wrong project_id
         result = get_compiled_authority_by_version(
             {
-                "product_id": other_product.product_id,
+                "project_id": other_product.project_id,
                 "spec_version_id": spec_version_id,
             },
             tool_context=None,
@@ -789,7 +789,7 @@ class TestDeterministicRetrieval:
             raising=False,
         )
 
-        params = {"product_id": 9, "spec_version_id": 12}
+        params = {"project_id": 9, "spec_version_id": 12}
         tool_context = make_tool_context()
 
         result = spec_tools.get_compiled_authority_by_version(
@@ -806,12 +806,12 @@ class TestValidationRequiresSpecVersion:
     """AC5 — Story Validation Requires Explicit Spec Version (Contract)."""
 
     def test_user_story_can_store_accepted_spec_version_id(
-        self, session: Session, sample_product: Product, sample_spec_content: str
+        self, session: Session, sample_product: Project, sample_spec_content: str
     ) -> None:
         """Test that UserStory model can store accepted_spec_version_id."""
         # Create spec version
         reg_result = register_spec_version(
-            {"product_id": sample_product.product_id, "content": sample_spec_content},
+            {"project_id": sample_product.project_id, "content": sample_spec_content},
             tool_context=None,
         )
         spec_version_id = reg_result["spec_version_id"]
@@ -820,7 +820,7 @@ class TestValidationRequiresSpecVersion:
         story = UserStory(
             title="Test Story",
             story_description="As a user, I want to test",
-            product_id=require_id(sample_product.product_id, "product_id"),
+            project_id=require_id(sample_product.project_id, "project_id"),
             accepted_spec_version_id=spec_version_id,
             validation_evidence=json.dumps(
                 {

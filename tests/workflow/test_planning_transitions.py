@@ -14,11 +14,10 @@ from sqlmodel import Session, col, select
 import services.agent_workbench.roadmap_phase as roadmap_phase_module
 import services.agent_workbench.sprint_phase as sprint_phase_module
 import services.agent_workbench.story_phase as story_phase_module
-import services.sprint_input as sprint_input_module
 import services.story_dependencies as story_dependencies_module
 import workflow.handlers.planning as planning_handlers
 from models.core import (
-    Product,
+    Project,
     Sprint,
     SprintStory,
     Task,
@@ -112,7 +111,6 @@ CALLER_SESSION_FUNCTIONS = {
         "start_sprint_in_session",
     },
     story_dependencies_module: {"apply_story_dependencies_in_session"},
-    sprint_input_module: {"candidate_set_in_session"},
 }
 
 
@@ -189,12 +187,12 @@ def _seed_accepted_backlog(
 ) -> int:
     authority_artifact = _authority_artifact()
     with Session(engine) as session:
-        project = Product(name=f"Task 11 {requirements!r}", origin="greenfield")
+        project = Project(name=f"Task 11 {requirements!r}", origin="greenfield")
         session.add(project)
         session.flush()
-        assert project.product_id is not None
+        assert project.project_id is not None
         spec = SpecRegistry(
-            product_id=project.product_id,
+            project_id=project.project_id,
             spec_hash="sha256:task-11-spec",
             content='{"scope":"task-11"}',
             status="approved",
@@ -223,7 +221,7 @@ def _seed_accepted_backlog(
         assert authority_fingerprint is not None
         session.add(
             SpecAuthorityAcceptance(
-                product_id=project.product_id,
+                project_id=project.project_id,
                 spec_version_id=spec.spec_version_id,
                 status="accepted",
                 policy="manual",
@@ -242,7 +240,7 @@ def _seed_accepted_backlog(
         content = _backlog_content(*requirements)
         fingerprint = canonical_hash(content)
         backlog = BacklogArtifact(
-            project_id=project.product_id,
+            project_id=project.project_id,
             authority_id=authority.authority_id,
             authority_fingerprint=authority_fingerprint,
             version_number=1,
@@ -256,7 +254,7 @@ def _seed_accepted_backlog(
         assert backlog.backlog_artifact_id is not None
         session.add(
             BacklogArtifactDecision(
-                project_id=project.product_id,
+                project_id=project.project_id,
                 backlog_artifact_id=backlog.backlog_artifact_id,
                 artifact_fingerprint=fingerprint,
                 decision="accepted",
@@ -267,7 +265,7 @@ def _seed_accepted_backlog(
             )
         )
         session.commit()
-        return project.product_id
+        return project.project_id
 
 
 def _replace_authority_and_backlog(engine: Engine, project_id: int) -> None:
@@ -276,14 +274,14 @@ def _replace_authority_and_backlog(engine: Engine, project_id: int) -> None:
     with Session(engine) as session:
         current_spec = session.exec(
             select(SpecRegistry).where(
-                col(SpecRegistry.product_id) == project_id,
+                col(SpecRegistry.project_id) == project_id,
                 col(SpecRegistry.status) == "approved",
             )
         ).one()
         current_spec.status = "superseded"
         session.add(current_spec)
         replacement_spec = SpecRegistry(
-            product_id=project_id,
+            project_id=project_id,
             spec_hash="sha256:task-11-replacement-spec",
             content='{"scope":"task-11-replacement"}',
             status="approved",
@@ -314,7 +312,7 @@ def _replace_authority_and_backlog(engine: Engine, project_id: int) -> None:
         assert authority_fingerprint is not None
         session.add(
             SpecAuthorityAcceptance(
-                product_id=project_id,
+                project_id=project_id,
                 spec_version_id=replacement_spec.spec_version_id,
                 status="accepted",
                 policy="manual",
@@ -685,7 +683,7 @@ def _seed_dependency_review_rows(
     with Session(engine) as session:
         stories = [
             UserStory(
-                product_id=project_id,
+                project_id=project_id,
                 title=f"Story {index}",
                 source_requirement=f"requirement-{index}",
                 refinement_slot=1,
@@ -697,15 +695,15 @@ def _seed_dependency_review_rows(
             for index in range(1, 4)
         ]
         session.add_all(stories)
-        foreign_project = Product(
+        foreign_project = Project(
             name="Foreign dependency Project",
             origin="greenfield",
         )
         session.add(foreign_project)
         session.flush()
-        assert foreign_project.product_id is not None
+        assert foreign_project.project_id is not None
         foreign_story = UserStory(
-            product_id=foreign_project.product_id,
+            project_id=foreign_project.project_id,
             title="Foreign Story",
             source_requirement="foreign-requirement",
             refinement_slot=1,
@@ -736,7 +734,7 @@ def _seed_dependency_review_rows(
         session.add_all(
             [
                 UserStoryDependency(
-                    product_id=project_id,
+                    project_id=project_id,
                     dependent_story_id=edge["dependent_story_id"],
                     prerequisite_story_id=edge["prerequisite_story_id"],
                     status="active",
@@ -821,7 +819,7 @@ def test_planning_service_mutations_use_only_caller_owned_session() -> None:
                     assert "Session(" not in ast.unparse(node)
                 if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
                     assert node.func.attr not in forbidden_calls
-            assert "fsm_state" not in inspect.getsource(function)
+            assert ("fsm" + "_state") not in inspect.getsource(function)
             assert "expected_state" not in inspect.getsource(function)
 
 

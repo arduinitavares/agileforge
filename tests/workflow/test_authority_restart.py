@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 from sqlmodel import Session
 
-from models.core import Product
+from models.core import Project
 from models.specs import CompiledSpecAuthority, SpecRegistry
 from tests.workflow.test_workflow_repository import sqlite_engine
 from utils.spec_schemas import (
@@ -57,12 +57,12 @@ def test_pending_review_survives_restart_without_adk_or_workflow_session(
     session_path.write_text("disposable session state", encoding="utf-8")
     engine = sqlite_engine(database_path)
     with Session(engine) as session:
-        project = Product(name="Restart authority", origin="greenfield")
+        project = Project(name="Restart authority", origin="greenfield")
         session.add(project)
         session.flush()
-        assert project.product_id is not None
+        assert project.project_id is not None
         spec = SpecRegistry(
-            product_id=project.product_id,
+            project_id=project.project_id,
             spec_hash="sha256:restart-spec",
             content="# Restart scope",
             status="approved",
@@ -85,7 +85,7 @@ def test_pending_review_survives_restart_without_adk_or_workflow_session(
             )
         )
         session.commit()
-        project_id = project.product_id
+        project_id = project.project_id
 
     first_domain = WorkflowDomain(
         engine=engine,

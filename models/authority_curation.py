@@ -35,7 +35,7 @@ class AuthorityFeedbackAttempt(SQLModel, table=True):
     )
 
     feedback_row_id: int | None = Field(default=None, primary_key=True)
-    project_id: int = Field(foreign_key="products.product_id")
+    project_id: int = Field(foreign_key="projects.project_id")
     feedback_attempt_id: str
     source_authority_id: int
     source_authority_fingerprint: str
@@ -87,7 +87,7 @@ class AuthorityCurationAttempt(SQLModel, table=True):
     )
 
     curation_row_id: int | None = Field(default=None, primary_key=True)
-    project_id: int = Field(foreign_key="products.product_id")
+    project_id: int = Field(foreign_key="projects.project_id")
     mutation_event_id: int | None = Field(default=None)
     curation_attempt_id: str
     source_authority_id: int

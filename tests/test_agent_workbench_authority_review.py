@@ -11,7 +11,7 @@ from models.agent_workbench import (
     DiscoveryPrd,
     DiscoverySpecAmendmentDraft,
 )
-from models.core import Product
+from models.core import Project
 from models.specs import CompiledSpecAuthority, SpecRegistry
 from services.agent_workbench.authority_projection import pending_authority_fingerprint
 from services.agent_workbench.authority_review import (
@@ -134,7 +134,7 @@ def _seed_pending_review_project(  # noqa: PLR0913
     spec_path.write_bytes(raw_bytes)
     spec_hash = sha256_prefixed(raw_bytes)
 
-    product = Product(
+    product = Project(
         name=f"Authority Review {spec_filename}",
         description="Seeded authority review project",
         spec_file_path=str(spec_path),
@@ -142,10 +142,10 @@ def _seed_pending_review_project(  # noqa: PLR0913
     session.add(product)
     session.commit()
     session.refresh(product)
-    project_id = require_id(product.product_id, "product_id")
+    project_id = require_id(product.project_id, "project_id")
 
     spec = SpecRegistry(
-        product_id=project_id,
+        project_id=project_id,
         spec_hash=spec_hash,
         content=spec_content,
         content_ref=str(spec_path),
@@ -349,8 +349,7 @@ def test_review_returns_pending_authority_packet_with_guard_tokens(
     assert result["ok"] is True
     data = result["data"]
     guard_tokens = data["guard_tokens"]
-    assert data["project"]["fsm_state"] == "SETUP_REQUIRED"
-    assert data["project"]["setup_status"] == "authority_pending_review"
+    assert data["project"]["project_id"] == project_id
     assert data["spec"]["spec_version_id"] == spec_version_id
     assert data["spec"]["resolved_path"] == str(spec_path.resolve())
     assert data["pending_authority"]["authority_id"] == authority_id
@@ -367,8 +366,6 @@ def test_review_returns_pending_authority_packet_with_guard_tokens(
         "expected_source_spec_hash": data["spec"]["spec_hash"],
         "expected_disk_spec_hash": data["spec"]["disk_sha256"],
         "expected_resolved_spec_path": str(spec_path.resolve()),
-        "expected_state": "SETUP_REQUIRED",
-        "expected_setup_status": "authority_pending_review",
         "expected_content_included": True,
         "expected_omission_assessment": "complete",
         "expected_coverage_summary_fingerprint": data["spec"][
@@ -425,7 +422,7 @@ def test_review_project_without_pending_authority_returns_not_pending(
     spec_content = _base_spec()
     spec_path = tmp_path / "approved-spec.json"
     spec_path.write_text(spec_content, encoding="utf-8")
-    product = Product(
+    product = Project(
         name="Authority Review Without Pending Authority",
         description="Seeded project without compiled authority",
         spec_file_path=str(spec_path),
@@ -433,10 +430,10 @@ def test_review_project_without_pending_authority_returns_not_pending(
     session.add(product)
     session.commit()
     session.refresh(product)
-    project_id = require_id(product.product_id, "product_id")
+    project_id = require_id(product.project_id, "project_id")
     session.add(
         SpecRegistry(
-            product_id=project_id,
+            project_id=project_id,
             spec_hash=sha256_prefixed(spec_content.encode("utf-8")),
             content=spec_content,
             content_ref=str(spec_path),
@@ -929,8 +926,8 @@ def test_review_uses_registered_content_not_product_or_provenance_file(
     """Review uses stored content while retaining paths as metadata only."""
     spec_a = _base_spec()
     spec_b = _agileforge_spec_profile_payload(
-        artifact_id="SPEC.product-path",
-        title="Product Path Spec",
+        artifact_id="SPEC.project-path",
+        title="Project Path Spec",
         summary="This product path must not be read.",
         requirement_statement="This product path must not be read.",
         acceptance=["The registry content_ref remains authoritative."],
@@ -945,7 +942,7 @@ def test_review_uses_registered_content_not_product_or_provenance_file(
     )
     spec_path_b = tmp_path / "spec-b.json"
     spec_path_b.write_text(spec_b, encoding="utf-8")
-    product = session.get(Product, project_id)
+    product = session.get(Project, project_id)
     assert product is not None
     product.spec_file_path = str(spec_path_b)
     session.add(product)

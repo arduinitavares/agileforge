@@ -9,7 +9,7 @@ import pytest
 from sqlmodel import Session, col, select
 
 import workflow.domain as workflow_domain_module
-from models.core import Product
+from models.core import Project
 from models.workflow import ChallengeArtifact, DiscoveryRun, PrdVersion
 from workflow import (
     OpenProjectShell,
@@ -67,7 +67,7 @@ def test_open_project_shell_replay_never_duplicates_project_or_initial_run(
     assert first.ok is True
     assert replay == first.model_copy(update={"replayed": True})
     with Session(engine) as session:
-        assert len(session.exec(select(Product)).all()) == 1
+        assert len(session.exec(select(Project)).all()) == 1
         assert len(session.exec(select(DiscoveryRun)).all()) == 1
 
 
@@ -141,7 +141,7 @@ def test_failed_downstream_transition_preserves_project_owned_provenance(
     assert shell_replay.replayed is True
     assert _output_id(shell_replay, "project_id") == project_id
     with Session(engine) as session:
-        project = session.get(Product, project_id)
+        project = session.get(Project, project_id)
         challenge = session.get(ChallengeArtifact, challenge_id)
         assert project is not None
         assert challenge is not None

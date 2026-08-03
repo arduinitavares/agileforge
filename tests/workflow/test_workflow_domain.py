@@ -13,7 +13,7 @@ from sqlmodel import Session, col, select
 
 import workflow
 import workflow.domain as workflow_domain_module
-from models.core import Product
+from models.core import Project
 from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance, SpecRegistry
 from models.workflow import (
     ChallengeArtifact,
@@ -143,7 +143,7 @@ def seed_historical_authority_acceptance(engine: Engine, project_id: int) -> Non
     """Persist one accepted authority whose spec is now superseded."""
     with Session(engine) as session:
         spec = SpecRegistry(
-            product_id=project_id,
+            project_id=project_id,
             spec_hash="sha256:historical-spec",
             content="# Historical accepted specification",
             status="superseded",
@@ -168,7 +168,7 @@ def seed_historical_authority_acceptance(engine: Engine, project_id: int) -> Non
         assert authority_fingerprint is not None
         session.add(
             SpecAuthorityAcceptance(
-                product_id=project_id,
+                project_id=project_id,
                 spec_version_id=spec.spec_version_id,
                 status="accepted",
                 policy="test",
@@ -283,9 +283,9 @@ def test_open_project_shell_writes_only_project_and_initial_discovery(
     project_id = require_project_id(result)
     assert result.position == domain.position(project_id)
     with Session(engine) as session:
-        projects = session.exec(select(Product)).all()
+        projects = session.exec(select(Project)).all()
         runs = session.exec(select(DiscoveryRun)).all()
-        assert [(item.product_id, item.name, item.origin) for item in projects] == [
+        assert [(item.project_id, item.name, item.origin) for item in projects] == [
             (project_id, "Task 6 Project", "greenfield")
         ]
         assert [
@@ -311,7 +311,7 @@ def test_open_project_shell_name_conflict_has_no_fact_mutation(
     assert second.error is not None
     assert second.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
     with Session(engine) as session:
-        assert len(session.exec(select(Product)).all()) == 1
+        assert len(session.exec(select(Project)).all()) == 1
         assert len(session.exec(select(DiscoveryRun)).all()) == 1
 
 
@@ -357,7 +357,7 @@ def test_stale_fact_fingerprint_returns_new_position_without_mutation(
     offered = domain.position(project_id)
     with Session(engine) as session:
         project = session.exec(
-            select(Product).where(col(Product.product_id) == project_id)
+            select(Project).where(col(Project.project_id) == project_id)
         ).one()
         project.name = "Facts Changed Outside Domain"
         session.add(project)
@@ -590,7 +590,7 @@ def test_handler_exception_rolls_back_facts_and_receipt(
     ) -> TransitionResult:
         nonlocal failed_handler_calls
         failed_handler_calls += 1
-        project = Product(
+        project = Project(
             name=request.name,
             origin=request.origin,
             created_at=evaluated_at,
@@ -598,10 +598,10 @@ def test_handler_exception_rolls_back_facts_and_receipt(
         )
         session.add(project)
         session.flush()
-        assert project.product_id is not None
+        assert project.project_id is not None
         session.add(
             DiscoveryRun(
-                project_id=project.product_id,
+                project_id=project.project_id,
                 purpose="initial",
                 ordinal=1,
                 created_at=evaluated_at,
@@ -621,7 +621,7 @@ def test_handler_exception_rolls_back_facts_and_receipt(
         domain.transition(transition_request)
 
     with Session(engine) as session:
-        assert session.exec(select(Product)).all() == []
+        assert session.exec(select(Project)).all() == []
         assert session.exec(select(DiscoveryRun)).all() == []
         assert session.exec(select(WorkflowTransitionReceipt)).all() == []
 
@@ -650,7 +650,7 @@ def test_handler_exception_rolls_back_facts_and_receipt(
     assert retry.ok is True
     assert replay == retry.model_copy(update={"replayed": True})
     with Session(engine) as session:
-        assert len(session.exec(select(Product)).all()) == 1
+        assert len(session.exec(select(Project)).all()) == 1
         assert len(session.exec(select(DiscoveryRun)).all()) == 1
         receipts = session.exec(select(WorkflowTransitionReceipt)).all()
         assert len(receipts) == 1

@@ -10,7 +10,7 @@ from sqlmodel import Session
 
 from agile_sqlmodel import (
     CompiledSpecAuthority,
-    Product,
+    Project,
     SpecAuthorityAcceptance,
     SpecRegistry,
     UserStory,
@@ -31,9 +31,9 @@ from utils.spec_schemas import (
 )
 
 
-def _create_compiled_spec(session: Session, product_id: int) -> int:
+def _create_compiled_spec(session: Session, project_id: int) -> int:
     spec = SpecRegistry(
-        product_id=product_id,
+        project_id=project_id,
         content="# Spec",
         content_ref=None,
         spec_hash="a" * 64,
@@ -87,7 +87,7 @@ def _create_compiled_spec(session: Session, product_id: int) -> int:
     session.refresh(compiled)
     session.add(
         SpecAuthorityAcceptance(
-            product_id=product_id,
+            project_id=project_id,
             spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
             status="accepted",
             policy="test",
@@ -104,8 +104,8 @@ def _create_compiled_spec(session: Session, product_id: int) -> int:
     return require_id(spec.spec_version_id, "spec_version_id")
 
 
-def _create_story(session: Session, product_id: int) -> UserStory:
-    theme = Theme(product_id=product_id, title="Theme", description="")
+def _create_story(session: Session, project_id: int) -> UserStory:
+    theme = Theme(project_id=project_id, title="Theme", description="")
     session.add(theme)
     session.commit()
     session.refresh(theme)
@@ -125,7 +125,7 @@ def _create_story(session: Session, product_id: int) -> UserStory:
     session.refresh(feature)
 
     story = UserStory(
-        product_id=product_id,
+        project_id=project_id,
         feature_id=require_id(feature.feature_id, "feature_id"),
         title="As a user, I want to export reports",
         story_description="As a user, I want to export reports for audit.",
@@ -137,9 +137,9 @@ def _create_story(session: Session, product_id: int) -> UserStory:
     return story
 
 
-def _create_orphan_story(session: Session, product_id: int) -> UserStory:
+def _create_orphan_story(session: Session, project_id: int) -> UserStory:
     story = UserStory(
-        product_id=product_id,
+        project_id=project_id,
         feature_id=None,
         title="As a reviewer, I want attestation visibility",
         story_description="As a reviewer, I want to confirm attestation state.",
@@ -186,15 +186,15 @@ def _build_authority_for_alignment(
 def setup_validation_case(session: Session, engine: Engine) -> tuple[UserStory, int]:
     """Create one product/spec/story tuple for mode tests."""
     spec_tools.engine = engine
-    product = Product(name="Validation Modes", vision="Test")
+    product = Project(name="Validation Modes", vision="Test")
     session.add(product)
     session.commit()
     session.refresh(product)
 
     spec_version_id = _create_compiled_spec(
-        session, require_id(product.product_id, "product_id")
+        session, require_id(product.project_id, "project_id")
     )
-    story = _create_story(session, require_id(product.product_id, "product_id"))
+    story = _create_story(session, require_id(product.project_id, "project_id"))
     return story, spec_version_id
 
 
@@ -275,7 +275,7 @@ def test_llm_payload_includes_feature_context_orphan_story(
     """Verify llm payload includes feature context orphan story."""
     base_story, spec_version_id = setup_validation_case
     orphan_story = _create_orphan_story(
-        session, require_id(base_story.product_id, "product_id")
+        session, require_id(base_story.project_id, "project_id")
     )
     captured_payload: dict = {}
 
@@ -522,7 +522,7 @@ def test_env_default_mode_invalid_falls_back_to_deterministic(
 def test_deterministic_forbidden_capability_keyword_match() -> None:
     """Verify deterministic forbidden capability keyword match."""
     story = UserStory(
-        product_id=1,
+        project_id=1,
         feature_id=None,
         title="Web dashboard",
         story_description="Build dashboard UI for reviews.",
@@ -559,7 +559,7 @@ def test_deterministic_forbidden_capability_ignores_policy_boilerplate_context()
 ):
     """Verify deterministic forbidden capability ignores policy boilerplate context."""
     story = UserStory(
-        product_id=1,
+        project_id=1,
         feature_id=None,
         title="Risk-focused codebase assessment",
         story_description="Review the current codebase and identify architectural risks.",  # noqa: E501
@@ -602,7 +602,7 @@ def test_deterministic_forbidden_capability_still_fails_for_integrity_enforcemen
 ):
     """Verify deterministic forbidden capability still fails for integrity enforcement feature."""  # noqa: E501
     story = UserStory(
-        product_id=1,
+        project_id=1,
         feature_id=None,
         title="Plagiarism detection workflow",
         story_description="Add automated plagiarism detection during submission review.",  # noqa: E501
@@ -622,7 +622,7 @@ def test_deterministic_forbidden_capability_still_fails_for_integrity_enforcemen
             SourceMapEntry(
                 invariant_id=invariant.id,
                 excerpt="The product must not implement plagiarism detection.",
-                location="Product Constraints",
+                location="Project Constraints",
             )
         ],
     )
@@ -642,7 +642,7 @@ def test_deterministic_forbidden_capability_not_suppressed_by_generic_references
 ):
     """Verify deterministic forbidden capability not suppressed by generic references word."""  # noqa: E501
     story = UserStory(
-        product_id=1,
+        project_id=1,
         feature_id=None,
         title="Web dashboard references",
         story_description="Create a report that references web dashboard metrics.",
@@ -662,7 +662,7 @@ def test_deterministic_forbidden_capability_not_suppressed_by_generic_references
             SourceMapEntry(
                 invariant_id=invariant.id,
                 excerpt="The product must not include a web dashboard.",
-                location="Product Constraints",
+                location="Project Constraints",
             )
         ],
     )
@@ -680,7 +680,7 @@ def test_deterministic_forbidden_capability_not_suppressed_by_generic_references
 def test_deterministic_required_field_no_false_positive() -> None:
     """Verify deterministic required field no false positive."""
     story = UserStory(
-        product_id=1,
+        project_id=1,
         feature_id=None,
         title="Form validations",
         story_description="Collect user contact data.",
@@ -715,7 +715,7 @@ def test_deterministic_required_field_no_false_positive() -> None:
 def test_deterministic_alignment_no_invariants() -> None:
     """Verify deterministic alignment no invariants."""
     story = UserStory(
-        product_id=1,
+        project_id=1,
         feature_id=None,
         title="Any story",
         story_description="No special constraints",
@@ -741,13 +741,13 @@ def test_hybrid_mode_ignores_policy_boilerplate_when_llm_passes(
 ) -> None:
     """Verify hybrid mode ignores policy boilerplate when llm passes."""
     spec_tools.engine = engine
-    product = Product(name="Policy Context", vision="Test")
+    product = Project(name="Policy Context", vision="Test")
     session.add(product)
     session.commit()
     session.refresh(product)
 
     spec = SpecRegistry(
-        product_id=require_id(product.product_id, "product_id"),
+        project_id=require_id(product.project_id, "project_id"),
         content="# Spec",
         content_ref=None,
         spec_hash="b" * 64,
@@ -760,7 +760,7 @@ def test_hybrid_mode_ignores_policy_boilerplate_when_llm_passes(
     session.commit()
     session.refresh(spec)
 
-    story = _create_orphan_story(session, require_id(product.product_id, "product_id"))
+    story = _create_orphan_story(session, require_id(product.project_id, "project_id"))
     story.acceptance_criteria = (
         "Given the final report, when external references are used, "
         "then they are appropriately cited to comply with the plagiarism policy."
@@ -813,7 +813,7 @@ def test_hybrid_mode_ignores_policy_boilerplate_when_llm_passes(
     session.refresh(compiled)
     session.add(
         SpecAuthorityAcceptance(
-            product_id=require_id(product.product_id, "product_id"),
+            project_id=require_id(product.project_id, "project_id"),
             spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
             status="accepted",
             policy="test",
@@ -859,7 +859,7 @@ def test_hybrid_mode_ignores_policy_boilerplate_when_llm_passes(
 def test_structural_rule_detects_offline_cloud_connectivity_contradiction() -> None:
     """Verify structural rule detects offline cloud connectivity contradiction."""
     story = UserStory(
-        product_id=1,
+        project_id=1,
         feature_id=None,
         title="Connectivity constraints",
         story_description="Must run fully offline in all environments.",
@@ -879,7 +879,7 @@ def test_structural_rule_detects_offline_cloud_connectivity_contradiction() -> N
 def test_structural_rule_detects_impossible_latency_requirement() -> None:
     """Verify structural rule detects impossible latency requirement."""
     story = UserStory(
-        product_id=1,
+        project_id=1,
         feature_id=None,
         title="Latency target",
         story_description="As a user, I want immediate response.",
@@ -900,7 +900,7 @@ def test_structural_rule_detects_scope_mismatch_placeholder_acceptance_criteria(
 ):
     """Verify structural rule detects scope mismatch placeholder acceptance criteria."""
     story = UserStory(
-        product_id=1,
+        project_id=1,
         feature_id=None,
         title="As a user, I want to stream video from my security cameras.",
         story_description="Out of scope feature request.",

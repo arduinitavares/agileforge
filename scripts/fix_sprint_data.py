@@ -85,11 +85,11 @@ def main() -> None:  # noqa: C901
 
         # Verify
         emit("\n=== VERIFICATION ===")
-        stories = s.exec(select(UserStory).where(UserStory.product_id == 2)).all()  # noqa: PLR2004
+        stories = s.exec(select(UserStory).where(UserStory.project_id == 2)).all()  # noqa: PLR2004
         for st in stories:
             emit(f"Story {st.story_id}: status={st.status.value}")
 
-        sprints = s.exec(select(Sprint).where(Sprint.product_id == 2)).all()  # noqa: PLR2004
+        sprints = s.exec(select(Sprint).where(Sprint.project_id == 2)).all()  # noqa: PLR2004
         emit(f"Sprints for product 2: {len(sprints)}")
 
 

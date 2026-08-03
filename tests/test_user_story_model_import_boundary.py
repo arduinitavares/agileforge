@@ -41,35 +41,16 @@ def test_task3_user_story_consumers_import_user_story_from_models_core_only() ->
 
     # Intentionally scoped to the Task 3 runtime consumers from
     # 2026-04-06-user-story-model-extraction.md. Later Phase 6 cleanup slices
-    # also moved some adjacent Product/Sprint imports onto models.core, so this
+    # also moved some adjacent Project/Sprint imports onto models.core, so this
     # contract reflects the current runtime boundary rather than the earlier
     # intermediate shim state.
     module_specs = {
-        "services.orchestrator_query_service": {
-            "models.core": {"Product", "Sprint", "SprintStory", "UserStory"},
-            "agile_sqlmodel": set(),
-        },
-        "services.orchestrator_context_service": {
-            "models.core": {
-                "Epic",
-                "Feature",
-                "Product",
-                "Sprint",
-                "Theme",
-                "UserStory",
-            },
-            "agile_sqlmodel": set(),
-        },
         "services.specs.story_validation_service": {
             "models.core": {"Feature", "UserStory"},
             "agile_sqlmodel": set(),
         },
         "tools.story_query_tools": {
-            "models.core": {"Epic", "Feature", "Product", "Theme", "UserStory"},
-            "agile_sqlmodel": set(),
-        },
-        "tools.orchestrator_tools": {
-            "models.core": {"Product", "UserStory"},
+            "models.core": {"Epic", "Feature", "Project", "Theme", "UserStory"},
             "agile_sqlmodel": set(),
         },
     }

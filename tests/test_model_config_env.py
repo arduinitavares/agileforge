@@ -41,7 +41,6 @@ def temp_model_config(tmp_path: Path) -> Path:
     config_path.write_text(
         """
 models:
-  orchestrator: "openrouter/openai/gpt-5-mini"
   spec_authority_compiler: "openrouter/openai/gpt-5-mini"
   product_vision: "openrouter/openai/gpt-5-mini"
   product_roadmap: "openrouter/openai/gpt-5-mini"
@@ -68,7 +67,7 @@ def test_model_config_path_env_overrides(
     model_config.clear_config_cache()
 
     try:
-        assert get_model_id("orchestrator") == "openrouter/openai/gpt-5-mini"
+        assert get_model_id("spec_authority_compiler") == "openrouter/openai/gpt-5-mini"
         assert get_story_pipeline_mode() == "single"
     finally:
         model_config.clear_config_cache()

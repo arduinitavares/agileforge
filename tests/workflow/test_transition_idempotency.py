@@ -10,7 +10,7 @@ from sqlalchemy import event
 from sqlmodel import Session, SQLModel, create_engine, select
 
 import workflow.domain as workflow_domain_module
-from models.core import Product
+from models.core import Project
 from models.db import set_sqlite_pragma
 from models.workflow import DiscoveryRun, WorkflowTransitionReceipt
 from workflow import OpenProjectShell, WorkflowDomain
@@ -77,7 +77,7 @@ def test_canonical_replay_returns_persisted_result_without_handler(
         receipts = session.exec(select(WorkflowTransitionReceipt)).all()
         assert len(receipts) == 1
         assert receipts[0].completed_at == EVALUATED_AT.replace(tzinfo=None)
-        assert len(session.exec(select(Product)).all()) == 1
+        assert len(session.exec(select(Project)).all()) == 1
         assert len(session.exec(select(DiscoveryRun)).all()) == 1
 
 
@@ -111,7 +111,7 @@ def test_same_key_with_changed_canonical_request_conflicts_without_mutation(
     assert handler_calls == 0
     with Session(engine) as session:
         assert len(session.exec(select(WorkflowTransitionReceipt)).all()) == 1
-        assert len(session.exec(select(Product)).all()) == 1
+        assert len(session.exec(select(Project)).all()) == 1
         assert len(session.exec(select(DiscoveryRun)).all()) == 1
 
 
@@ -170,7 +170,7 @@ def test_busy_timeout_exhaustion_maps_to_workflow_fact_conflict(
         assert result.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
         assert elapsed < _MAX_BUSY_WAIT_SECONDS
         with Session(engine) as session:
-            assert session.exec(select(Product)).all() == []
+            assert session.exec(select(Project)).all() == []
             assert session.exec(select(WorkflowTransitionReceipt)).all() == []
     finally:
         engine.dispose()
@@ -209,7 +209,7 @@ def test_commit_time_lock_exhaustion_maps_to_workflow_fact_conflict(
     try:
         with engine.connect() as reader:
             reader.exec_driver_sql("BEGIN")
-            reader.exec_driver_sql("SELECT product_id FROM products").all()
+            reader.exec_driver_sql("SELECT project_id FROM projects").all()
             started = monotonic()
             result = domain.transition(request(name="Commit Locked"))
             elapsed = monotonic() - started
@@ -221,7 +221,7 @@ def test_commit_time_lock_exhaustion_maps_to_workflow_fact_conflict(
         assert handler_calls == 1
         assert elapsed < _MAX_BUSY_WAIT_SECONDS
         with Session(engine) as session:
-            assert session.exec(select(Product)).all() == []
+            assert session.exec(select(Project)).all() == []
             assert session.exec(select(DiscoveryRun)).all() == []
             assert session.exec(select(WorkflowTransitionReceipt)).all() == []
     finally:
