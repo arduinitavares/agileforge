@@ -64,7 +64,6 @@ from orchestrator_agent.agent_tools.roadmap_builder.tools import (
 from orchestrator_agent.agent_tools.sprint_planner_tool.tools import (
     save_sprint_plan_tool,
 )
-from orchestrator_agent.agent_tools.story_linkage import normalize_requirement_key
 from orchestrator_agent.agent_tools.user_story_writer_tool.tools import (
     save_stories_tool,
     save_story_patch_tool,
@@ -244,6 +243,7 @@ from services.story_close_service import (
 from services.story_close_service import (
     get_story_close_readiness as get_story_close_readiness_service,
 )
+from services.story_linkage import normalize_requirement_key
 from services.story_runtime import (
     run_story_agent_from_state,
     run_story_agent_request,

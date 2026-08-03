@@ -10,7 +10,7 @@ import pytest
 from services import story_runtime
 
 if TYPE_CHECKING:
-    from orchestrator_agent.agent_tools.user_story_writer_tool.schemes import (
+    from services.contracts.story import (
         UserStoryWriterInput,
     )
 

@@ -2,11 +2,11 @@
 
 from pathlib import Path
 
-from orchestrator_agent.agent_tools.spec_validator_agent.schemes import (
-    SpecValidationResult,
-)
 from orchestrator_agent.agent_tools.spec_validator_agent.tools import (
     _DEFAULT_MAX_TOKENS,
+)
+from services.contracts.specification_validation import (
+    SpecValidationResult,
 )
 
 

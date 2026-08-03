@@ -22,18 +22,6 @@ from models.specs import (
     SpecAuthorityAcceptance,
     SpecRegistry,
 )
-from orchestrator_agent.agent_tools.as_built_assessor.schemes import (
-    AGENT_VERSION,
-    ASSESSMENT_SCHEMA_VERSION,
-    EVIDENCE_PACK_BUILDER_VERSION,
-    AsBuiltAssessment,
-    AsBuiltAssessorInput,
-    CapabilityAssessment,
-    EvidencePack,
-    OpenSpecContext,
-    OriginalSpecContext,
-    RepoSnapshot,
-)
 from services.agent_workbench import as_built_assessment as as_built_module
 from services.agent_workbench.as_built_assessment import (
     AS_BUILT_ASSESSMENT_META_STATE_KEY,
@@ -47,6 +35,18 @@ from services.agent_workbench.as_built_assessment import (
     split_evidence_pack_for_assessment,
 )
 from services.agent_workbench.authority_projection import pending_authority_fingerprint
+from services.contracts.as_built import (
+    AGENT_VERSION,
+    ASSESSMENT_SCHEMA_VERSION,
+    EVIDENCE_PACK_BUILDER_VERSION,
+    AsBuiltAssessment,
+    AsBuiltAssessorInput,
+    CapabilityAssessment,
+    EvidencePack,
+    OpenSpecContext,
+    OriginalSpecContext,
+    RepoSnapshot,
+)
 from utils.failure_artifacts import AgentInvocationError
 
 if TYPE_CHECKING:

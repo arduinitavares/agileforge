@@ -21,7 +21,7 @@ from tests.authority_assumption_fixtures import current_v3_compiled_authority_js
 if TYPE_CHECKING:
     import pytest
 
-    from orchestrator_agent.agent_tools.user_story_writer_tool.tools import (
+    from services.contracts.story import (
         SaveStoryPatchInput,
     )
 

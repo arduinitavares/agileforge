@@ -21,7 +21,7 @@ from models.specs import CompiledSpecAuthority, SpecRegistry
 from orchestrator_agent.agent_tools.spec_validator_agent.agent import (
     root_agent as spec_validator_agent,
 )
-from orchestrator_agent.agent_tools.spec_validator_agent.schemes import (
+from services.contracts.specification_validation import (
     SpecValidationResult,
 )
 from services.specs._engine_resolution import resolve_spec_engine

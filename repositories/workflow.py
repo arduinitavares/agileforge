@@ -55,7 +55,7 @@ from models.workflow import (
     WorkflowNodeAttempt,
     WorkflowNodeAttemptOutcome,
 )
-from orchestrator_agent.agent_tools.sprint_planner_tool.schemes import (
+from services.contracts.sprint import (
     SprintPlannerOutput,
 )
 from services.specs.authority_selection import pending_authority_fingerprint

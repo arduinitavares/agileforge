@@ -7,29 +7,29 @@ from google.adk.agents import Agent
 from google.adk.models.lite_llm import LiteLlm
 from google.adk.tools.agent_tool import AgentTool
 
-from orchestrator_agent.agent_tools.backlog_primer.agent import (
+from adapters.adk.agents.backlog import (
     root_agent as backlog_agent,
+)
+from adapters.adk.agents.roadmap import (
+    root_agent as roadmap_agent,
+)
+from adapters.adk.agents.sprint import (
+    root_agent as sprint_planner_agent,
+)
+from adapters.adk.agents.story import (
+    root_agent as story_writer_agent,
+)
+from adapters.adk.agents.vision import (
+    root_agent as vision_agent,
 )
 from orchestrator_agent.agent_tools.backlog_primer.tools import (
     save_backlog_tool,
 )
-from orchestrator_agent.agent_tools.product_vision_tool.agent import (
-    root_agent as vision_agent,
-)
 from orchestrator_agent.agent_tools.product_vision_tool.tools import (
     save_vision_tool,
 )
-from orchestrator_agent.agent_tools.roadmap_builder.agent import (
-    root_agent as roadmap_agent,
-)
 from orchestrator_agent.agent_tools.roadmap_builder.tools import (
     save_roadmap_tool,
-)
-from orchestrator_agent.agent_tools.sprint_planner_tool.agent import (
-    root_agent as sprint_planner_agent,
-)
-from orchestrator_agent.agent_tools.user_story_writer_tool.agent import (
-    root_agent as story_writer_agent,
 )
 from orchestrator_agent.agent_tools.user_story_writer_tool.tools import (
     save_stories_tool,

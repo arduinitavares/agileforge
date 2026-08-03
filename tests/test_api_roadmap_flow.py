@@ -14,7 +14,7 @@ from agile_sqlmodel import (
     SpecAuthorityAcceptance,
     SpecRegistry,
 )
-from orchestrator_agent.agent_tools.roadmap_builder.tools import SaveRoadmapToolInput
+from services.contracts.roadmap import SaveRoadmapToolInput
 from services.specs.authority_selection import pending_authority_fingerprint
 from tests.authority_assumption_fixtures import current_v3_compiled_authority_json
 

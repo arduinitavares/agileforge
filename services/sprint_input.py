@@ -8,7 +8,6 @@ import json
 import typing
 from typing import Any, NotRequired, Protocol, TypedDict, Unpack, cast
 
-from orchestrator_agent.agent_tools.story_linkage import normalize_requirement_key
 from repositories.workflow import WorkflowFactRepository
 from services.agent_workbench.fingerprints import canonical_hash
 from services.orchestrator_query_service import fetch_sprint_candidates
@@ -19,6 +18,7 @@ from services.sprint_selection import (
     derive_parent_group,
     select_sprint_story_rows,
 )
+from services.story_linkage import normalize_requirement_key
 
 if typing.TYPE_CHECKING:
     from sqlmodel import Session

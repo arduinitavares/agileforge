@@ -10,10 +10,10 @@ from typing import TYPE_CHECKING, Any, TypedDict, Unpack
 
 from pydantic import ValidationError
 
-from orchestrator_agent.agent_tools.sprint_planner_tool.agent import (
+from adapters.adk.agents.sprint import (
     root_agent as sprint_agent,
 )
-from orchestrator_agent.agent_tools.sprint_planner_tool.schemes import (
+from services.contracts.sprint import (
     SprintPlannerInput,
     SprintPlannerOutput,
     validate_task_decomposition_quality,

@@ -7,10 +7,9 @@ import json
 import time
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated, Any, Optional
+from typing import Any, Optional
 
 from google.adk.tools import ToolContext
-from pydantic import BaseModel, Field
 from sqlalchemy.exc import SQLAlchemyError
 from sqlmodel import Session, select
 
@@ -18,27 +17,13 @@ from models.core import Product
 from models.db import get_engine
 from models.enums import WorkflowEventType
 from models.events import WorkflowEvent
+from services.contracts.vision import SaveVisionInput
 from tools.spec_tools import (
     UpdateSpecAndCompileAuthorityInput,
     update_spec_and_compile_authority,
 )
 
 # --- Tool for SAVING the vision ---
-
-
-class SaveVisionInput(BaseModel):
-    """Schema for the 'save_vision' tool."""
-
-    product_id: Annotated[
-        Optional[int],
-        Field(
-            description="ID of the project to update. If None, creates a NEW project."
-        ),
-    ] = None
-    project_name: Annotated[str, Field(description="Unique name of the project.")]
-    product_vision_statement: Annotated[
-        str, Field(description="Finalized vision text.")
-    ]
 
 
 def save_vision_tool(

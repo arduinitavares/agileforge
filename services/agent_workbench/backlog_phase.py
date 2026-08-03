@@ -19,10 +19,6 @@ from models.events import WorkflowEvent
 from models.specs import CompiledSpecAuthority
 from models.workflow import BacklogArtifact, BacklogArtifactDecision
 from orchestrator_agent.agent_tools.backlog_primer import tools as backlog_primer_tools
-from orchestrator_agent.agent_tools.backlog_primer.schemes import (
-    BacklogItem,
-    OutputSchema,
-)
 from orchestrator_agent.agent_tools.backlog_primer.tools import save_backlog_tool
 from repositories.product import ProductRepository
 from services.agent_workbench.backlog_active_reset import (
@@ -47,6 +43,10 @@ from services.agent_workbench.schema_readiness import (
     check_schema_readiness,
 )
 from services.backlog_runtime import run_backlog_agent_from_state
+from services.contracts.backlog import (
+    BacklogItem,
+    OutputSchema,
+)
 from services.phases.backlog_service import (
     BacklogPhaseError,
     generate_backlog_draft,

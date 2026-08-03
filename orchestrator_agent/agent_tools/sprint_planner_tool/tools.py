@@ -3,10 +3,10 @@
 import json
 import re
 import time
-from typing import Any, Optional, cast
+from typing import Any, cast
 
 from google.adk.tools import ToolContext
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import ValidationError
 from sqlalchemy import delete
 from sqlmodel import Session, col, select
 
@@ -14,30 +14,14 @@ from models.core import Product, Sprint, SprintStory, Task, Team, UserStory
 from models.db import get_engine
 from models.enums import SprintStatus, WorkflowEventType
 from models.events import WorkflowEvent
-from utils.spec_schemas import ValidationEvidence
-from utils.task_metadata import metadata_from_structured_task, serialize_task_metadata
-
-from .schemes import (
+from services.contracts.sprint import (
+    SaveSprintPlanInput,
     SprintPlannerOutput,
     validate_task_decomposition_quality,
     validate_task_invariant_bindings,
 )
-
-
-class SaveSprintPlanInput(BaseModel):
-    """Input schema for save_sprint_plan_tool."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    product_id: int = Field(description="Product ID for the sprint.")
-    team_id: Optional[int] = Field(  # noqa: UP045
-        default=None,
-        description="Team ID owning the sprint. Required if team_name is not provided.",
-    )
-    team_name: Optional[str] = Field(  # noqa: UP045
-        default=None,
-        description="Team name to lookup or create. Used if team_id is not provided.",
-    )
+from utils.spec_schemas import ValidationEvidence
+from utils.task_metadata import metadata_from_structured_task, serialize_task_metadata
 
 
 def _get_story_conflicts(
@@ -430,4 +414,4 @@ def save_sprint_plan_tool(
         }
 
 
-__all__ = ["SaveSprintPlanInput", "save_sprint_plan_tool"]
+__all__ = ["save_sprint_plan_tool"]

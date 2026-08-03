@@ -14,7 +14,7 @@ from workflow.fingerprints import canonical_hash
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
-    from orchestrator_agent.agent_tools.sprint_planner_tool.schemes import (
+    from services.contracts.sprint import (
         SprintPlannerOutput,
     )
     from workflow.contracts import JsonObject

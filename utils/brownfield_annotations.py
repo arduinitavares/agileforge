@@ -6,7 +6,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from orchestrator_agent.agent_tools.as_built_assessor.schemes import (
+from services.contracts.as_built import (
     AssessmentConfidence,  # noqa: TC001 - Pydantic resolves these at runtime.
     AssessmentStatus,  # noqa: TC001 - Pydantic resolves these at runtime.
     BacklogTreatment,  # noqa: TC001 - Pydantic resolves these at runtime.

@@ -6,159 +6,28 @@ import logging
 import re
 import time
 from datetime import UTC, datetime
-from typing import Annotated, Any, cast
+from typing import Any, cast
 
 from google.adk.tools import ToolContext
-from pydantic import BaseModel, Field, ValidationError, model_validator
+from pydantic import ValidationError
 from sqlmodel import Session, select
 
 from models.core import Product, UserStory, UserStoryDependency
 from models.db import get_engine
 from models.enums import StoryStatus, WorkflowEventType
 from models.events import WorkflowEvent
-from orchestrator_agent.agent_tools.story_linkage import (
+from services.contracts.story import (
+    SaveStoriesInput,
+    SaveStoryPatchInput,
+    StoryDependencyCandidate,
+    UserStoryItem,
+)
+from services.story_linkage import (
     normalize_requirement_key,
     title_changed_significantly,
 )
 
-from .schemes import StoryDependencyCandidate, UserStoryItem
-
 logger = logging.getLogger(__name__)
-
-
-class SaveStoriesInput(BaseModel):
-    """Input schema for save_stories_tool."""
-
-    idempotency_key: Annotated[
-        str,
-        Field(
-            description="Stable key used to safely replay the same persistence call."
-        ),
-    ]
-    product_id: Annotated[
-        int,
-        Field(description="The product ID to attach stories to."),
-    ]
-    parent_requirement: Annotated[
-        str,
-        Field(description="The roadmap requirement these stories decompose."),
-    ]
-    parent_rank: Annotated[
-        int | None,
-        Field(
-            default=None,
-            ge=1,
-            description=(
-                "1-based Roadmap parent order used to derive deterministic child story rank."
-            ),
-        ),
-    ] = None
-    story_origin: Annotated[
-        str | None,
-        Field(
-            default=None,
-            description="Optional persistence origin override for extension scope.",
-        ),
-    ] = None
-    accepted_spec_version_id: Annotated[
-        int | None,
-        Field(
-            default=None,
-            description="Accepted amended spec version that produced these stories.",
-        ),
-    ] = None
-    stories: Annotated[
-        list[dict[str, Any]],
-        Field(
-            description=(
-                "List of approved story dicts from user_story_writer_tool output. "
-                "Each must have: story_title, statement, acceptance_criteria, invest_score."
-            ),
-        ),
-    ]
-
-
-class SaveStoryPatchInput(BaseModel):
-    """Input schema for saving one targeted story refinement patch."""
-
-    idempotency_key: Annotated[
-        str,
-        Field(
-            description="Stable key used to safely replay the same persistence call."
-        ),
-    ]
-    product_id: Annotated[
-        int,
-        Field(description="The product ID that owns the target story."),
-    ]
-    parent_requirement: Annotated[
-        str,
-        Field(description="The roadmap requirement that owns the target story."),
-    ]
-    parent_rank: Annotated[
-        int | None,
-        Field(
-            default=None,
-            ge=1,
-            description=(
-                "1-based Roadmap parent order used to derive deterministic child story rank."
-            ),
-        ),
-    ] = None
-    target_story_id: Annotated[
-        int | None,
-        Field(
-            default=None,
-            description=(
-                "Existing story ID to update. Mutually exclusive with "
-                "target_refinement_slot."
-            ),
-        ),
-    ] = None
-    target_refinement_slot: Annotated[
-        int | None,
-        Field(
-            default=None,
-            ge=1,
-            description=(
-                "Existing refinement slot to update. Mutually exclusive with "
-                "target_story_id."
-            ),
-        ),
-    ] = None
-    story_origin: Annotated[
-        str | None,
-        Field(
-            default=None,
-            description="Optional persistence origin override for extension scope.",
-        ),
-    ] = None
-    accepted_spec_version_id: Annotated[
-        int | None,
-        Field(
-            default=None,
-            description="Accepted amended spec version that produced the story.",
-        ),
-    ] = None
-    story: Annotated[
-        dict[str, Any],
-        Field(
-            description=(
-                "Single approved story dict from user_story_writer_tool output. "
-                "Must have: story_title, statement, acceptance_criteria, invest_score."
-            ),
-        ),
-    ]
-
-    @model_validator(mode="after")
-    def _validate_exactly_one_target(self) -> "SaveStoryPatchInput":
-        has_story_id = self.target_story_id is not None
-        has_slot = self.target_refinement_slot is not None
-        if has_story_id == has_slot:
-            raise ValueError(
-                "Exactly one of target_story_id or target_refinement_slot is required."
-            )
-        return self
 
 
 def _extract_persona(statement: str) -> str | None:
@@ -1665,8 +1534,6 @@ def save_story_patch_tool(  # noqa: PLR0911
 
 
 __all__ = [
-    "SaveStoriesInput",
-    "SaveStoryPatchInput",
     "save_stories_tool",
     "save_story_patch_tool",
 ]

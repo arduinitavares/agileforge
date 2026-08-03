@@ -10,13 +10,13 @@ from typing import Any, TypedDict
 
 from pydantic import ValidationError
 
-from orchestrator_agent.agent_tools.user_story_writer_tool.agent import (
+from adapters.adk.agents.story import (
     create_user_story_patch_agent,
 )
-from orchestrator_agent.agent_tools.user_story_writer_tool.agent import (
+from adapters.adk.agents.story import (
     root_agent as story_agent,
 )
-from orchestrator_agent.agent_tools.user_story_writer_tool.schemes import (
+from services.contracts.story import (
     STORY_QUALITY_SCHEMA_VERSION,
     UserStoryPatchOutput,
     UserStoryWriterInput,

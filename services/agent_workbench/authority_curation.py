@@ -39,9 +39,6 @@ from models.specs import (
     SpecAuthorityAcceptance,
     SpecRegistry,
 )
-from orchestrator_agent.agent_tools.spec_authority_compiler_agent import (
-    compiler_contract,
-)
 from services.agent_workbench.authority_projection import pending_authority_fingerprint
 from services.agent_workbench.envelope import (
     WorkbenchError,
@@ -59,6 +56,7 @@ from services.agent_workbench.mutation_ledger import (
     MutationStatus,
     RecoveryAction,
 )
+from services.contracts import specification as compiler_contract
 from services.specs.authority_curation_diff import (
     AuthorityDiffValidationError,
     build_authority_diff,
@@ -5164,9 +5162,7 @@ async def _invoke_authority_curation_workflow_async(
     model_id: str,
 ) -> dict[str, Any]:
     """Invoke the ADK authority curation workflow and return final state."""
-    curation_module = importlib.import_module(
-        "orchestrator_agent.agent_tools.authority_curation"
-    )
+    curation_module = importlib.import_module("adapters.adk.agents.authority")
     runners_module = importlib.import_module("google.adk.runners")
     sessions_module = importlib.import_module("google.adk.sessions")
     genai_types_module = importlib.import_module("google.genai.types")

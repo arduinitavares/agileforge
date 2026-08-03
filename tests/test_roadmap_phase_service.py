@@ -9,9 +9,8 @@ from typing import Any, Never, cast
 
 import pytest
 
-from orchestrator_agent.agent_tools.roadmap_builder.schemes import RoadmapBuilderInput
-from orchestrator_agent.agent_tools.roadmap_builder.tools import SaveRoadmapToolInput
 from services.agent_workbench.fingerprints import canonical_hash
+from services.contracts.roadmap import RoadmapBuilderInput, SaveRoadmapToolInput
 from services.phases import workflow_state
 from services.phases.roadmap_service import (
     RoadmapPhaseError,
@@ -403,7 +402,7 @@ def test_roadmap_builder_scope_extension_instruction_contract() -> None:
         }
     )
     instructions = Path(
-        "orchestrator_agent/agent_tools/roadmap_builder/instructions.txt"
+        "adapters/adk/prompts/roadmap.txt"
     ).read_text(encoding="utf-8")
 
     assert payload.generation_mode == "scope_extension"
@@ -438,7 +437,7 @@ def test_roadmap_builder_reconciliation_instruction_contract() -> None:
         }
     )
     instructions = Path(
-        "orchestrator_agent/agent_tools/roadmap_builder/instructions.txt"
+        "adapters/adk/prompts/roadmap.txt"
     ).read_text(encoding="utf-8")
 
     assert payload.generation_mode == "roadmap_reconciliation"

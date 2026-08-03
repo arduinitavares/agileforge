@@ -8,14 +8,14 @@ import pytest
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, select
 
-from agile_sqlmodel import CompiledSpecAuthority, Product
-from orchestrator_agent.agent_tools.spec_authority_compiler_agent.compiler_contract import (  # noqa: E501
-    compute_invariant_id_from_payload,
-    compute_prompt_hash,
-)
-from orchestrator_agent.agent_tools.spec_authority_compiler_agent.instructions_source import (  # noqa: E501
+from adapters.adk.prompts.specification import (
     SPEC_AUTHORITY_COMPILER_INSTRUCTIONS,
     SPEC_AUTHORITY_COMPILER_VERSION,
+)
+from agile_sqlmodel import CompiledSpecAuthority, Product
+from services.contracts.specification import (
+    compute_invariant_id_from_payload,
+    compute_prompt_hash,
 )
 from services.specs.compiler_service import (
     CheckSpecAuthorityStatusInput as ServiceCheckSpecAuthorityStatusInput,

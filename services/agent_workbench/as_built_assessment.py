@@ -23,7 +23,15 @@ from sqlmodel import Session, select
 from models.enums import WorkflowEventType
 from models.events import WorkflowEvent
 from models.specs import SpecAuthorityAcceptance
-from orchestrator_agent.agent_tools.as_built_assessor.schemes import (
+from services.agent_workbench.envelope import (
+    WorkbenchError,
+    WorkbenchWarning,
+    error_envelope,
+    success_envelope,
+)
+from services.agent_workbench.error_codes import ErrorCode, workbench_error
+from services.agent_workbench.fingerprints import canonical_hash, canonical_json
+from services.contracts.as_built import (
     AGENT_VERSION,
     ASSESSMENT_SCHEMA_VERSION,
     EVIDENCE_PACK_BUILDER_VERSION,
@@ -43,14 +51,6 @@ from orchestrator_agent.agent_tools.as_built_assessor.schemes import (
     SearchObservation,
     SpecMode,
 )
-from services.agent_workbench.envelope import (
-    WorkbenchError,
-    WorkbenchWarning,
-    error_envelope,
-    success_envelope,
-)
-from services.agent_workbench.error_codes import ErrorCode, workbench_error
-from services.agent_workbench.fingerprints import canonical_hash, canonical_json
 from services.specs.authority_selection import (
     accepted_compiled_authority,
     compiled_authority_for_acceptance,
@@ -969,7 +969,7 @@ def _default_invoke_agent(payload: AsBuiltAssessorInput) -> AsBuiltAssessment:
 
 
 async def _invoke_agent_async(payload: AsBuiltAssessorInput) -> AsBuiltAssessment:
-    from orchestrator_agent.agent_tools.as_built_assessor.agent import (  # noqa: PLC0415
+    from adapters.adk.agents.as_built import (  # noqa: PLC0415
         root_agent,
     )
 

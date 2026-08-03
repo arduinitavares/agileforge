@@ -13,20 +13,20 @@ from typing import Any, Optional, cast
 
 from google.adk.tools import AgentTool, ToolContext
 
-from orchestrator_agent.agent_tools.backlog_primer.agent import (
+from adapters.adk.agents.backlog import (
     root_agent as backlog_agent,
 )
-from orchestrator_agent.agent_tools.product_vision_tool.agent import (
-    root_agent as vision_agent,
-)
-from orchestrator_agent.agent_tools.roadmap_builder.agent import (
+from adapters.adk.agents.roadmap import (
     root_agent as roadmap_agent,
 )
-from orchestrator_agent.agent_tools.sprint_planner_tool.agent import (
+from adapters.adk.agents.sprint import (
     root_agent as sprint_planner_agent,
 )
-from orchestrator_agent.agent_tools.user_story_writer_tool.agent import (
+from adapters.adk.agents.story import (
     root_agent as story_writer_agent,
+)
+from adapters.adk.agents.vision import (
+    root_agent as vision_agent,
 )
 from services.sprint_input import prepare_sprint_input_context
 from tools.orchestrator_tools import fetch_sprint_candidates

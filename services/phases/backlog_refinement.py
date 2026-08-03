@@ -8,8 +8,8 @@ from typing import Annotated, Any, Literal, Never, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from orchestrator_agent.agent_tools.backlog_primer.schemes import BacklogItem
 from services.agent_workbench.fingerprints import canonical_hash
+from services.contracts.backlog import BacklogItem
 
 type BacklogClassification = Literal[
     "verification",

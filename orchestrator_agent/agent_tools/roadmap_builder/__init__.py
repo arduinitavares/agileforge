@@ -1,5 +1,1 @@
-"""Roadmap Builder Agent Package."""
-
-from .agent import root_agent
-
-__all__ = ["root_agent"]
+"""Temporary legacy Roadmap write-tool package."""

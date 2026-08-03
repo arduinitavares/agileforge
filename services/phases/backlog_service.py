@@ -11,14 +11,9 @@ from typing import TYPE_CHECKING, Any, cast
 
 from pydantic import ValidationError
 
-from orchestrator_agent.agent_tools.backlog_primer.schemes import (
-    BacklogItem,
-    OutputSchema,
-)
 from orchestrator_agent.agent_tools.backlog_primer.tools import (
     INTERNAL_BACKLOG_SAVE_OPTIONS_AUTHORITY,
     INTERNAL_BACKLOG_SAVE_OPTIONS_KEY,
-    SaveBacklogInput,
 )
 from orchestrator_agent.fsm.states import OrchestratorState
 from services.agent_workbench.backlog_active_reset import (
@@ -29,6 +24,11 @@ from services.agent_workbench.fingerprints import canonical_hash
 from services.backlog_runtime import (
     build_backlog_input_context,
     derive_brownfield_annotations,
+)
+from services.contracts.backlog import (
+    BacklogItem,
+    OutputSchema,
+    SaveBacklogInput,
 )
 from services.phases import workflow_state
 from services.phases.backlog_refinement import (

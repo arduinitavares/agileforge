@@ -14,7 +14,7 @@ from agile_sqlmodel import (
     SpecAuthorityAcceptance,
     SpecRegistry,
 )
-from orchestrator_agent.agent_tools.backlog_primer.tools import SaveBacklogInput
+from services.contracts.backlog import SaveBacklogInput
 from services.specs.authority_selection import pending_authority_fingerprint
 from tests.authority_assumption_fixtures import current_v3_compiled_authority_json
 

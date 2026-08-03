@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, cast
 
-from orchestrator_agent.agent_tools.story_linkage import normalize_requirement_key
+from services.story_linkage import normalize_requirement_key
 
 
 def _coerce_int(value: object) -> int | None:

@@ -26,15 +26,14 @@ from agile_sqlmodel import (
     WorkflowEventType,
 )
 from models.core import UserStoryDependency
-from orchestrator_agent.agent_tools.story_linkage import normalize_requirement_key
 from orchestrator_agent.agent_tools.user_story_writer_tool import tools as story_tools
 from orchestrator_agent.agent_tools.user_story_writer_tool.tools import (
-    SaveStoriesInput,
-    SaveStoryPatchInput,
     evaluate_dependency_candidates,
     save_stories_tool,
     save_story_patch_tool,
 )
+from services.contracts.story import SaveStoriesInput, SaveStoryPatchInput
+from services.story_linkage import normalize_requirement_key
 
 # ---------------------------------------------------------------------------
 # Helpers

@@ -2066,9 +2066,7 @@ def test_compiler_agent_override_rechecks_schema_disable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Override agent construction should observe the current schema-disable flag."""
-    from orchestrator_agent.agent_tools.spec_authority_compiler_agent import (  # noqa: PLC0415
-        agent,
-    )
+    from adapters.adk.agents import specification as agent  # noqa: PLC0415
 
     monkeypatch.setattr(agent, "is_spec_compiler_schema_disabled", lambda: True)
 

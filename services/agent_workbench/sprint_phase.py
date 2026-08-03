@@ -34,11 +34,6 @@ from models.workflow import (
     SprintStart,
     StoryDependencyReview,
 )
-from orchestrator_agent.agent_tools.sprint_planner_tool.schemes import (
-    SprintPlannerOutput,
-    validate_task_decomposition_quality,
-    validate_task_invariant_bindings,
-)
 from orchestrator_agent.agent_tools.sprint_planner_tool.tools import (
     save_sprint_plan_tool,
 )
@@ -57,6 +52,11 @@ from services.agent_workbench.post_sprint_triage import (
     build_triage_payload,
     current_triage_for_latest_sprint,
     post_sprint_triage_required,
+)
+from services.contracts.sprint import (
+    SprintPlannerOutput,
+    validate_task_decomposition_quality,
+    validate_task_invariant_bindings,
 )
 from services.phases import workflow_state
 from services.phases.sprint_metrics import build_sprint_metrics

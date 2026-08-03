@@ -21,7 +21,7 @@ from db.migrations import (  # noqa: E402
     migrate_performance_indexes,
     migrate_user_story_refinement_linkage,
 )
-from orchestrator_agent.agent_tools.story_linkage import (  # noqa: E402
+from services.story_linkage import (  # noqa: E402
     normalize_requirement_key,
 )
 

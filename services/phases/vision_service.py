@@ -6,10 +6,10 @@ import hashlib
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from orchestrator_agent.agent_tools.product_vision_tool.tools import (
+from orchestrator_agent.fsm.states import OrchestratorState
+from services.contracts.vision import (
     SaveVisionInput,
 )
-from orchestrator_agent.fsm.states import OrchestratorState
 from services.phases import workflow_state
 
 

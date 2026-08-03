@@ -25,7 +25,7 @@ from agile_sqlmodel import (
     UserStory,
 )
 from models.core import Team
-from orchestrator_agent.agent_tools.story_linkage import normalize_requirement_key
+from services.story_linkage import normalize_requirement_key
 
 HTTP_OK = 200
 SPRINT_COUNT = 2

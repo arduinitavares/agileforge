@@ -10,13 +10,13 @@ from typing import Any, cast
 
 from pydantic import ValidationError
 
-from orchestrator_agent.agent_tools.roadmap_builder.agent import (
+from adapters.adk.agents.roadmap import (
     root_agent as roadmap_agent,
 )
-from orchestrator_agent.agent_tools.roadmap_builder.schemes import (
+from services.contracts.roadmap import (
     BacklogItem as RoadmapBacklogItem,
 )
-from orchestrator_agent.agent_tools.roadmap_builder.schemes import (
+from services.contracts.roadmap import (
     RoadmapBuilderInput,
     RoadmapBuilderOutput,
 )

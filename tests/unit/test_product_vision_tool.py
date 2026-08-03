@@ -8,9 +8,9 @@ from sqlmodel import Session, select
 
 from agile_sqlmodel import Product
 from orchestrator_agent.agent_tools.product_vision_tool.tools import (
-    SaveVisionInput,
     save_vision_tool,
 )
+from services.contracts.vision import SaveVisionInput
 
 
 def test_save_vision_tool_creates_project_and_returns_dict(engine: Engine) -> None:

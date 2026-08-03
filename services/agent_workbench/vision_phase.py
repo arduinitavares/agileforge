@@ -14,10 +14,10 @@ from models.core import Product
 from models.enums import WorkflowEventType
 from models.events import WorkflowEvent
 from models.workflow import VisionArtifact, VisionArtifactDecision
-from orchestrator_agent.agent_tools.product_vision_tool.schemes import OutputSchema
 from orchestrator_agent.agent_tools.product_vision_tool.tools import save_vision_tool
 from repositories.product import ProductRepository
 from services.agent_workbench.error_codes import ErrorCode, workbench_error
+from services.contracts.vision import OutputSchema
 from services.phases.vision_service import (
     VisionPhaseError,
     generate_vision_draft,

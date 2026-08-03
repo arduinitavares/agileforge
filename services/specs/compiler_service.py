@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any, Literal, TypedDict, Unpack, cast
 from pydantic import BaseModel, Field, ValidationError
 from sqlmodel import Session, select
 
+from adapters.adk.prompts import specification as instructions_source
 from db.migrations import ensure_schema_current
 from models.core import Product
 from models.db import get_engine
@@ -27,14 +28,9 @@ from models.specs import (
     SpecAuthorityAcceptance,
     SpecRegistry,
 )
-from orchestrator_agent.agent_tools.spec_authority_compiler_agent import (
-    compiler_contract,
-    instructions_source,
-)
-from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (
-    normalize_compiler_output,
-)
 from services.agent_workbench.error_codes import ErrorCode
+from services.contracts import specification as compiler_contract
+from services.contracts.specification_normalizer import normalize_compiler_output
 from services.specs._engine_resolution import resolve_spec_engine
 from services.specs.authority_quality import apply_authority_quality_gate
 from services.specs.authority_selection import (
@@ -477,7 +473,7 @@ def _spec_authority_compiler_agent(
     compiler_model: str | None = None,
 ) -> object:
     """Load or build the ADK compiler agent only for compile-time execution paths."""
-    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.agent import (  # noqa: PLC0415
+    from adapters.adk.agents.specification import (  # noqa: PLC0415
         build_spec_authority_compiler_agent,
         root_agent,
     )

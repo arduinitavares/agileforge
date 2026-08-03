@@ -6,7 +6,7 @@ from typing import Any, Never
 
 import pytest
 
-from orchestrator_agent.agent_tools.product_vision_tool.tools import SaveVisionInput
+from services.contracts.vision import SaveVisionInput
 from services.phases.vision_service import (
     VisionPhaseError,
     ensure_vision_attempts,

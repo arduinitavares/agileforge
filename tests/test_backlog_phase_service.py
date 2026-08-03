@@ -14,7 +14,6 @@ from models.enums import StoryStatus
 from orchestrator_agent.agent_tools.backlog_primer.tools import (
     INTERNAL_BACKLOG_SAVE_OPTIONS_AUTHORITY,
     INTERNAL_BACKLOG_SAVE_OPTIONS_KEY,
-    SaveBacklogInput,
 )
 from orchestrator_agent.agent_tools.backlog_primer.tools import (
     save_backlog_tool as real_save_backlog_tool,
@@ -26,6 +25,7 @@ from services.agent_workbench.backlog_active_reset import (
 from services.agent_workbench.backlog_refinement_events import (
     BacklogRefinementApprovalRequest,
 )
+from services.contracts.backlog import SaveBacklogInput
 from services.phases.backlog_service import (
     BacklogPhaseError,
     _backlog_artifact_fingerprint,

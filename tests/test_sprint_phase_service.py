@@ -7,7 +7,7 @@ from typing import Any, Never
 
 import pytest
 
-from orchestrator_agent.agent_tools.sprint_planner_tool.tools import SaveSprintPlanInput
+from services.contracts.sprint import SaveSprintPlanInput
 from services.phases import sprint_service
 from services.phases.sprint_service import (
     SprintPhaseError,

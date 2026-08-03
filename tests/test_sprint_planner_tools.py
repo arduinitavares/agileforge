@@ -21,9 +21,9 @@ from agile_sqlmodel import (
 )
 from models.core import Team
 from orchestrator_agent.agent_tools.sprint_planner_tool.tools import (
-    SaveSprintPlanInput,
     save_sprint_plan_tool,
 )
+from services.contracts.sprint import SaveSprintPlanInput
 from services.sprint_input import load_sprint_candidates
 from tests.typing_helpers import require_id
 from tools.orchestrator_tools import fetch_sprint_candidates

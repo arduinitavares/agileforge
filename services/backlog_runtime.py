@@ -11,19 +11,19 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from orchestrator_agent.agent_tools.as_built_assessor.schemes import (
+from adapters.adk.agents.backlog import (
+    root_agent as backlog_agent,
+)
+from services.agent_workbench.as_built_assessment import cached_assessment_for_backlog
+from services.contracts.as_built import (
     AsBuiltAssessment,
     CapabilityAssessment,
 )
-from orchestrator_agent.agent_tools.backlog_primer.agent import (
-    root_agent as backlog_agent,
-)
-from orchestrator_agent.agent_tools.backlog_primer.schemes import (
+from services.contracts.backlog import (
     BacklogItem,
     InputSchema,
     OutputSchema,
 )
-from services.agent_workbench.as_built_assessment import cached_assessment_for_backlog
 from utils.adk_runner import (
     get_agent_model_info,
     invoke_agent_to_text,

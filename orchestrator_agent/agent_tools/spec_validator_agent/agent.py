@@ -2,9 +2,9 @@ from pathlib import Path
 
 from google.adk.agents import LlmAgent
 
+from services.contracts.specification_validation import SpecValidationResult
 from utils.helper import load_instruction
 
-from .schemes import SpecValidationResult
 from .tools import model
 
 # --- Agent Definition ---

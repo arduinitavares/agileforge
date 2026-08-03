@@ -27,7 +27,11 @@ def _python_files_importing_compat_schemes() -> list[str]:
     )
     for relative_path in sorted(tracked.stdout.splitlines()):
         path = root / relative_path
-        if path == root / "utils" / "schemes.py" or path.resolve() == current_file:
+        if (
+            not path.is_file()
+            or path == root / "utils" / "schemes.py"
+            or path.resolve() == current_file
+        ):
             continue
         text = path.read_text(encoding="utf-8", errors="ignore")
         if compat_import in text:
@@ -85,9 +89,7 @@ def test_spec_schema_module_exports_validation_and_compiler_models() -> None:
 
 def test_services_and_agents_import_spec_schema_module_boundary() -> None:
     """Verify services and agents import spec schema module boundary."""
-    from orchestrator_agent.agent_tools.spec_authority_compiler_agent import (  # noqa: PLC0415
-        agent,
-    )
+    from adapters.adk.agents import specification as agent  # noqa: PLC0415
     from services import orchestrator_query_service  # noqa: PLC0415
     from services.specs import (  # noqa: PLC0415
         compiler_service,

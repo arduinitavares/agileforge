@@ -3,19 +3,18 @@
 import json
 import time
 from dataclasses import dataclass
-from typing import Annotated, Any
+from typing import Any
 
 from google.adk.tools import ToolContext
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import ValidationError
 from sqlmodel import Session, select
 
 from models.core import SprintStory, UserStory
 from models.db import get_engine
 from models.enums import StoryStatus, WorkflowEventType
 from models.events import WorkflowEvent
-from orchestrator_agent.agent_tools.story_linkage import normalize_requirement_key
-
-from .schemes import BacklogItem
+from services.contracts.backlog import BacklogItem, SaveBacklogInput
+from services.story_linkage import normalize_requirement_key
 
 INTERNAL_BACKLOG_SAVE_OPTIONS_KEY = "_agileforge_internal_backlog_save_options"
 INTERNAL_BACKLOG_SAVE_OPTIONS_AUTHORITY = "services.phases.backlog_service"
@@ -28,31 +27,6 @@ class _BacklogSaveOptions:
     append_only: bool = False
     story_origin: str = "backlog_seed"
     accepted_spec_version_id: int | None = None
-
-
-class SaveBacklogInput(BaseModel):
-    """Input schema for save_backlog_tool."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    product_id: Annotated[int, Field(description="The product ID.")]
-    idempotency_key: Annotated[
-        str | None,
-        Field(
-            default=None,
-            description="Optional save idempotency key supplied by guarded callers.",
-        ),
-    ] = None
-    backlog_items: Annotated[
-        list[dict[str, Any]],
-        Field(
-            default_factory=list,
-            description=(
-                "List of approved backlog items from backlog_primer_tool output. "
-                "Each must have: priority, requirement, value_driver, justification, estimated_effort."
-            ),
-        ),
-    ]
 
 
 def _resolve_backlog_items_from_state(
@@ -366,6 +340,5 @@ def _blocks_backlog_replacement(session: Session, story: UserStory) -> bool:
 __all__ = [
     "INTERNAL_BACKLOG_SAVE_OPTIONS_AUTHORITY",
     "INTERNAL_BACKLOG_SAVE_OPTIONS_KEY",
-    "SaveBacklogInput",
     "save_backlog_tool",
 ]

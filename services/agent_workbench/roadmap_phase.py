@@ -16,11 +16,11 @@ from models.db import get_engine
 from models.enums import WorkflowEventType
 from models.events import WorkflowEvent
 from models.workflow import RoadmapArtifact, RoadmapArtifactDecision
-from orchestrator_agent.agent_tools.roadmap_builder.schemes import RoadmapBuilderOutput
 from orchestrator_agent.agent_tools.roadmap_builder.tools import save_roadmap_tool
 from repositories.product import ProductRepository
 from services.agent_workbench.error_codes import ErrorCode, workbench_error
 from services.agent_workbench.execution_guard import AcceptedAuthorityExecutionGuard
+from services.contracts.roadmap import RoadmapBuilderOutput
 from services.phases.roadmap_service import (
     RoadmapPhaseError,
     generate_roadmap_draft,

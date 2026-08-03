@@ -21,11 +21,6 @@ from models.enums import StoryStatus, TaskStatus, WorkflowEventType
 from models.events import WorkflowEvent
 from models.specs import SpecRegistry
 from models.workflow import StoryArtifact, StoryArtifactDecision
-from orchestrator_agent.agent_tools.story_linkage import normalize_requirement_key
-from orchestrator_agent.agent_tools.user_story_writer_tool.schemes import (
-    UserStoryItem,
-    UserStoryWriterOutput,
-)
 from orchestrator_agent.agent_tools.user_story_writer_tool.tools import (
     evaluate_dependency_candidates,
     save_stories_tool,
@@ -36,6 +31,10 @@ from repositories.product import ProductRepository
 from services.agent_workbench.error_codes import ErrorCode, workbench_error
 from services.agent_workbench.execution_guard import AcceptedAuthorityExecutionGuard
 from services.agent_workbench.fingerprints import canonical_hash
+from services.contracts.story import (
+    UserStoryItem,
+    UserStoryWriterOutput,
+)
 from services.interview_runtime import (
     append_attempt,
     append_feedback_entry,
@@ -69,6 +68,7 @@ from services.story_dependencies import (
     dependency_inspect_payload,
     load_story_dependency_graph,
 )
+from services.story_linkage import normalize_requirement_key
 from services.story_runtime import (
     run_story_agent_from_state,
     run_story_agent_request,

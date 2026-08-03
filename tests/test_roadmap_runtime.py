@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import cast
 
-from orchestrator_agent.agent_tools.roadmap_builder.schemes import (
+from services.contracts.roadmap import (
     RoadmapBuilderInput,
 )
 from services.roadmap_runtime import build_roadmap_input_context

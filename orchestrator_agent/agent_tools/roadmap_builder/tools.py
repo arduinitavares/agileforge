@@ -2,37 +2,16 @@
 
 import json
 import time
-from typing import Annotated, Any
+from typing import Any
 
 from google.adk.tools import ToolContext
-from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 
 from models.core import Product
 from models.db import get_engine
 from models.enums import WorkflowEventType
 from models.events import WorkflowEvent
-from orchestrator_agent.agent_tools.roadmap_builder.schemes import RoadmapBuilderOutput
-
-
-class SaveRoadmapToolInput(BaseModel):
-    """Input schema for the save_roadmap_tool."""
-
-    product_id: Annotated[
-        int,
-        Field(description="The ID of the product to update."),
-    ]
-    roadmap_data: Annotated[
-        RoadmapBuilderOutput,
-        Field(description="The comprehensive roadmap data to save."),
-    ]
-    idempotency_key: Annotated[
-        str | None,
-        Field(
-            default=None,
-            description="Optional save idempotency key supplied by guarded callers.",
-        ),
-    ]
+from services.contracts.roadmap import SaveRoadmapToolInput
 
 
 def save_roadmap_tool(

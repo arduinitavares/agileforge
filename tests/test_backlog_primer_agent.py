@@ -12,16 +12,16 @@ from sqlmodel import SQLModel, create_engine, select
 from agile_sqlmodel import Product, UserStory
 from models.enums import StoryStatus, WorkflowEventType
 from models.events import WorkflowEvent
-from orchestrator_agent.agent_tools.backlog_primer.schemes import (
+from orchestrator_agent.agent_tools.backlog_primer.tools import (
+    save_backlog_tool,
+)
+from services.contracts.backlog import (
     BacklogItem,
     InputSchema,
     OutputSchema,
-)
-from orchestrator_agent.agent_tools.backlog_primer.tools import (
     SaveBacklogInput,
-    save_backlog_tool,
 )
-from orchestrator_agent.agent_tools.story_linkage import normalize_requirement_key
+from services.story_linkage import normalize_requirement_key
 
 
 class TestBacklogPrimerSchemas:

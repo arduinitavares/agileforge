@@ -21,19 +21,19 @@ import pytest
 from sqlalchemy.engine import Engine
 from sqlmodel import Session
 
+from adapters.adk.prompts.specification import (
+    SPEC_AUTHORITY_COMPILER_INSTRUCTIONS,
+    SPEC_AUTHORITY_COMPILER_VERSION,
+)
 from agile_sqlmodel import (
     CompiledSpecAuthority,
     Product,
     SpecAuthorityAcceptance,
     SpecRegistry,
 )
-from orchestrator_agent.agent_tools.spec_authority_compiler_agent.compiler_contract import (
+from services.contracts.specification import (
     compute_invariant_id,
     compute_prompt_hash,
-)
-from orchestrator_agent.agent_tools.spec_authority_compiler_agent.instructions_source import (
-    SPEC_AUTHORITY_COMPILER_INSTRUCTIONS,
-    SPEC_AUTHORITY_COMPILER_VERSION,
 )
 from services.specs.authority_selection import pending_authority_fingerprint
 from tests.typing_helpers import require_id

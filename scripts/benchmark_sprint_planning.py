@@ -17,9 +17,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from agile_sqlmodel import Product, StoryStatus, UserStory
 from models.core import Epic, Feature, ProductTeam, Team, Theme
 from orchestrator_agent.agent_tools.sprint_planner_tool.tools import (
-    SaveSprintPlanInput,
     save_sprint_plan_tool,
 )
+from services.contracts.sprint import SaveSprintPlanInput
 
 # Boundary contract: from models.core import ProductTeam
 

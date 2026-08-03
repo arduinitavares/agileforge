@@ -10,10 +10,10 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from orchestrator_agent.agent_tools.product_vision_tool.agent import (
+from adapters.adk.agents.vision import (
     root_agent as vision_agent,
 )
-from orchestrator_agent.agent_tools.product_vision_tool.schemes import (
+from services.contracts.vision import (
     InputSchema,
     OutputSchema,
 )

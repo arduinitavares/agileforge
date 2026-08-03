@@ -18,7 +18,7 @@ from google.adk.runners import Runner
 from google.adk.sessions.database_session_service import DatabaseSessionService
 from google.genai import types
 
-from orchestrator_agent.agent_tools.product_vision_tool.agent import root_agent
+from adapters.adk.agents.vision import root_agent
 
 JsonDict = dict[str, Any]
 

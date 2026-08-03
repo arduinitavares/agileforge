@@ -15,10 +15,10 @@ from agile_sqlmodel import (
     SpecAuthorityAcceptance,
     SpecRegistry,
 )
-from orchestrator_agent.agent_tools.product_vision_tool.tools import SaveVisionInput
 from services.agent_workbench.authority_projection import (
     pending_authority_fingerprint,
 )
+from services.contracts.vision import SaveVisionInput
 from tests.authority_assumption_fixtures import current_v3_compiled_authority_json
 from utils import failure_artifacts
 

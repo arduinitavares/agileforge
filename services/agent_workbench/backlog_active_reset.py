@@ -12,10 +12,10 @@ from sqlmodel import Session, col, select
 from models.core import Sprint, SprintStory, Task, UserStory
 from models.enums import StoryStatus, WorkflowEventType
 from models.events import StoryCompletionLog, TaskExecutionLog, WorkflowEvent
-from orchestrator_agent.agent_tools.backlog_primer.schemes import BacklogItem
-from orchestrator_agent.agent_tools.story_linkage import normalize_requirement_key
 from services.agent_workbench.fingerprints import canonical_hash
+from services.contracts.backlog import BacklogItem
 from services.phases.backlog_refinement import project_savable_backlog_items
+from services.story_linkage import normalize_requirement_key
 
 _RESET_NOT_REQUIRED = "RESET_NOT_REQUIRED"
 _RESET_IDEMPOTENCY_CONFLICT = "RESET_IDEMPOTENCY_CONFLICT"

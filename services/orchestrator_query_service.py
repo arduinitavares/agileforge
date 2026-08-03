@@ -13,11 +13,11 @@ from sqlmodel import Session, select
 from models.core import Product, Sprint, SprintStory, UserStory
 from models.db import get_engine
 from models.enums import SprintStatus, StoryStatus
-from orchestrator_agent.agent_tools.story_linkage import normalize_requirement_key
 from services.story_dependencies import (
     DependencyGraphIssue,
     load_story_dependency_graph,
 )
+from services.story_linkage import normalize_requirement_key
 from utils.spec_schemas import ValidationEvidence
 
 CACHE_TTL_MINUTES: int = 5
