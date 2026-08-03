@@ -13,9 +13,11 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from git import Git
+from git.exc import GitCommandError
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
 from adapters.adk.model_roles import AGENTIC_MODEL_ROLES
+from services.agent_workbench.version import agileforge_version
 from services.application import (
     AgenticActionRequest,
     AgileForgeApplication,
@@ -290,6 +292,21 @@ def _checkout_commit(checkout_root: Path) -> str:
     return cast("str", output).strip()
 
 
+def _runtime_provenance(checkout_root: Path) -> str:
+    try:
+        top_level = Git().execute(
+            command=["git", "-C", str(checkout_root), "rev-parse", "--show-toplevel"]
+        )
+    except GitCommandError:
+        top_level = None
+    if (
+        top_level is not None
+        and Path(cast("str", top_level)).resolve() == checkout_root
+    ):
+        return _checkout_commit(checkout_root)
+    return f"installed:agileforge@{agileforge_version()}"
+
+
 @app.get("/")
 def root() -> RedirectResponse:
     """Redirect to the workflow dashboard."""
@@ -303,7 +320,7 @@ def get_dashboard_config() -> DashboardConfig:
     return DashboardConfig(
         process_id=os.getpid(),
         checkout_root=checkout_root,
-        commit=_checkout_commit(checkout_root),
+        commit=_runtime_provenance(checkout_root),
         business_database=_database_path("AGILEFORGE_DB_URL"),
         trace_database=_database_path("AGILEFORGE_ADK_EXECUTION_TRACE_DB_URL"),
     )

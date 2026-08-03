@@ -41,12 +41,6 @@ _PASSTHROUGH_ENVIRONMENT = (
     "PATH",
     "SSL_CERT_FILE",
     "SSL_CERT_DIR",
-    "HTTPS_PROXY",
-    "HTTP_PROXY",
-    "NO_PROXY",
-    "https_proxy",
-    "http_proxy",
-    "no_proxy",
 )
 _API_READY_TIMEOUT_SECONDS = 30.0
 _API_STOP_TIMEOUT_SECONDS = 5.0
@@ -63,10 +57,35 @@ frontend = files("frontend")
 for name in ("index.html", "project.html", "app.js", "project.js"):
     assert frontend.joinpath(name).is_file(), name
 assert get_story_pipeline_mode() in {"batch", "single"}
-args = build_parser().parse_args(
+parser = build_parser()
+next_args = parser.parse_args(
+    ["workflow", "next", "--project-id", "1"]
+)
+assert next_args.group == "workflow"
+assert next_args.workflow_action == "next"
+assert next_args.project_id == 1
+assert next_args.command_handler.__name__ == "_workflow_next"
+position_args = parser.parse_args(
     ["workflow", "position", "--project-id", "1"]
 )
-assert args.workflow_action == "position"
+assert position_args.group == "workflow"
+assert position_args.workflow_action == "position"
+assert position_args.project_id == 1
+assert position_args.include_optional is False
+assert position_args.command_handler.__name__ == "_workflow_position"
+transition_args = parser.parse_args(
+    ["project", "abandon", "--project-id", "1", "--graph-version", "graph-v1",
+     "--expected-fact-fingerprint", "f" * 64,
+     "--expected-decision-fingerprint", "d" * 64,
+     "--idempotency-key", "distribution-probe", "--changed-by", "quality-gate",
+     "--request-file", "request.json"]
+)
+assert transition_args.group == "project"
+assert transition_args.project_action == "abandon"
+assert transition_args.request_kind == "abandon_project_shell"
+assert transition_args.instance_key is None
+assert transition_args.correlation_id is None
+assert transition_args.command_handler.__name__ == "_run_transition"
 """
 
 
@@ -293,12 +312,12 @@ def _require_nonempty_resource(content: bytes, *, name: str) -> None:
         raise DistributionVerificationError(message)
 
 
-def _wait_for_openapi(
+def _wait_for_dashboard_config(
     process: subprocess.Popen[str],
     *,
     port: int,
 ) -> dict[str, object]:
-    url = f"http://127.0.0.1:{port}/openapi.json"
+    url = f"http://127.0.0.1:{port}/api/dashboard/config"
     deadline = time.monotonic() + _API_READY_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
         return_code = process.poll()
@@ -309,7 +328,7 @@ def _wait_for_openapi(
             return _read_json(url)
         except (OSError, URLError, json.JSONDecodeError):
             time.sleep(_POLL_INTERVAL_SECONDS)
-    message = f"installed API readiness timed out: {url}"
+    message = f"installed API dashboard readiness timed out: {url}"
     raise DistributionVerificationError(message)
 
 
@@ -338,6 +357,28 @@ def _verify_openapi(openapi: dict[str, object]) -> None:
     if state_path in paths:
         message = f"installed API retains removed route: {state_path}"
         raise DistributionVerificationError(message)
+
+
+def _verify_dashboard_config(
+    config: dict[str, object],
+    *,
+    expected_process_id: int,
+    layout: IsolationLayout,
+) -> None:
+    expected: dict[str, object] = {
+        "status": "ready",
+        "process_id": expected_process_id,
+        "business_database": str(layout.business_database),
+        "trace_database": str(layout.trace_database),
+    }
+    for field, expected_value in expected.items():
+        actual = config.get(field)
+        if actual != expected_value:
+            message = (
+                f"installed API dashboard config {field} mismatch: "
+                f"expected {expected_value!r}, got {actual!r}"
+            )
+            raise DistributionVerificationError(message)
 
 
 def _verify_schema(database: Path) -> None:
@@ -389,9 +430,15 @@ def _verify_installed_api(
         )
         try:
             try:
-                openapi = _wait_for_openapi(process, port=port)
-                _verify_openapi(openapi)
+                dashboard_config = _wait_for_dashboard_config(process, port=port)
+                _verify_dashboard_config(
+                    dashboard_config,
+                    expected_process_id=process.pid,
+                    layout=layout,
+                )
                 root = f"http://127.0.0.1:{port}"
+                openapi = _read_json(f"{root}/openapi.json")
+                _verify_openapi(openapi)
                 _require_nonempty_resource(
                     _read_bytes(f"{root}/dashboard/"),
                     name="frontend/index.html",
