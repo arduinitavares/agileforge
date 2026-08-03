@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
+import pytest
 from google.adk.agents import BaseAgent, InvocationContext
 from google.adk.events import Event
 from google.adk.sessions import InMemorySessionService
@@ -17,8 +18,10 @@ from sqlmodel import Session, col, select
 from adapters.adk.recipes import (
     AdkRecipe,
     AdkRecipeRegistry,
+    AgenticRecipeNodes,
     AttemptCompletionContext,
     RecipeOutput,
+    build_agentic_recipe_registry,
     build_backlog_generation_workflow,
 )
 from adapters.adk.runner import AdkExecutionConfig, AdkWorkflowRunner
@@ -28,22 +31,29 @@ from models.workflow import (
     BacklogArtifact,
     WorkflowNodeAttempt,
     WorkflowNodeAttemptOutcome,
+    WorkflowTransitionReceipt,
 )
+from services.specs import compiler_service
 from services.specs.authority_selection import pending_authority_fingerprint
 from utils.runtime_config import ADK_EXECUTION_TRACE_IDENTITY
-from utils.spec_schemas import SpecAuthorityCompilationSuccess
+from utils.spec_schemas import (
+    SpecAuthorityCompilationSuccess,
+    SpecAuthorityCompilerEnvelope,
+)
 from workflow.clock import FixedClock
 from workflow.contracts import (
     JsonObject,
     NodeCategory,
     NodeDecision,
     RecommendationKind,
+    TransitionResult,
     WorkflowErrorCode,
 )
+from workflow.definitions.authority import authority_graph
 from workflow.definitions.product_definition import product_definition_graph
 from workflow.domain import WorkflowDomain
 from workflow.fingerprints import canonical_hash
-from workflow.requests import RecordBacklogDraft, StartNodeAttempt
+from workflow.requests import RecordBacklogDraft, StartNodeAttempt, TransitionRequest
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -81,6 +91,42 @@ class FakeLeafAgent(BaseAgent):
         del ctx
         if self.failure_message is not None:
             raise RuntimeError(self.failure_message)
+        yield Event(author=self.name, output=self.response)
+
+
+class ReceiptObserver:
+    """Record durable transition receipts visible at provider-call time."""
+
+    def __init__(self, engine: Engine, calls: list[tuple[str, ...]]) -> None:
+        """Retain the database and external observation sink."""
+        self._engine = engine
+        self._calls = calls
+        self.events: list[str] = []
+
+    def record(self) -> None:
+        """Capture committed receipt kinds using an independent session."""
+        self.events.append("provider")
+        with Session(self._engine) as session:
+            receipts = session.exec(
+                select(WorkflowTransitionReceipt).order_by(
+                    col(WorkflowTransitionReceipt.workflow_transition_receipt_id)
+                )
+            ).all()
+        self._calls.append(tuple(receipt.request_kind for receipt in receipts))
+
+
+class TransactionObservingLeafAgent(BaseAgent):
+    """Fake compiler recording durable state visible during external work."""
+
+    response: object
+    observer: ReceiptObserver
+
+    async def _run_async_impl(
+        self,
+        ctx: InvocationContext,
+    ) -> AsyncGenerator[Event, None]:
+        del ctx
+        self.observer.record()
         yield Event(author=self.name, output=self.response)
 
 
@@ -194,6 +240,45 @@ def _backlog_payload() -> JsonObject:
         "is_complete": True,
         "clarifying_questions": [],
     }
+
+
+def _authority_artifact() -> SpecAuthorityCompilationSuccess:
+    return SpecAuthorityCompilationSuccess(
+        scope_themes=["Runner authority"],
+        invariants=[],
+        eligible_feature_rules=[],
+        gaps=[],
+        assumptions=[],
+        source_map=[],
+        compiler_version=compiler_service.SPEC_AUTHORITY_COMPILER_VERSION,
+        prompt_hash=compiler_service.compute_prompt_hash(
+            compiler_service.SPEC_AUTHORITY_COMPILER_INSTRUCTIONS
+        ),
+    )
+
+
+def _seed_authority_compile_target(engine: Engine) -> tuple[int, int, str]:
+    with Session(engine) as session:
+        project = Product(name="Runner compile", origin="greenfield")
+        session.add(project)
+        session.flush()
+        assert project.product_id is not None
+        spec = SpecRegistry(
+            product_id=project.product_id,
+            spec_hash="sha256:runner-compile-spec",
+            content='{"scope":"runner compile"}',
+            status="approved",
+            approved_at=EVALUATED_AT,
+            approved_by="operator@example.com",
+        )
+        session.add(spec)
+        session.commit()
+        assert spec.spec_version_id is not None
+        return project.product_id, spec.spec_version_id, spec.spec_hash
+
+
+def _unused_leaf(name: str) -> FakeLeafAgent:
+    return FakeLeafAgent(name=name, response={})
 
 
 def _adapter(
@@ -454,3 +539,112 @@ def test_runner_replaces_expired_crash_attempt_after_old_trace_deletion(
             replacement_id: "success",
         }
         assert session.exec(select(BacklogArtifact)).one() is not None
+
+
+def test_authority_runner_executes_provider_once_before_completion_transaction(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Persist precomputed authority after one provider-free external call."""
+    project_id, spec_version_id, spec_hash = _seed_authority_compile_target(engine)
+    calls: list[tuple[str, ...]] = []
+    observer = ReceiptObserver(engine=engine, calls=calls)
+    compiler_leaf = TransactionObservingLeafAgent(
+        name="observing_authority_compiler",
+        response=SpecAuthorityCompilerEnvelope(
+            result=_authority_artifact()
+        ).model_dump(mode="json"),
+        observer=observer,
+    )
+    registry = build_agentic_recipe_registry(
+        nodes=AgenticRecipeNodes(
+            as_built=_unused_leaf("unused_as_built"),
+            authority_compile=compiler_leaf,
+            authority_repair=_unused_leaf("unused_authority_repair"),
+            vision_generation=_unused_leaf("unused_vision"),
+            backlog_generation=_unused_leaf("unused_backlog"),
+            roadmap_generation=_unused_leaf("unused_roadmap"),
+            story_generation=_unused_leaf("unused_story"),
+            sprint_planning=_unused_leaf("unused_sprint"),
+        ),
+        execution_settings=EXECUTION_SETTINGS,
+    )
+    domain = WorkflowDomain(
+        engine=engine,
+        graph=authority_graph(),
+        clock=FixedClock(now_value=EVALUATED_AT),
+        adk_recipe_registry=registry,
+    )
+    runner = AdkWorkflowRunner(
+        domain=domain,
+        registry=registry,
+        session_service=TrackingSessionService(),
+        config=AdkExecutionConfig(
+            project_id=project_id,
+            model_id="fake/compiler",
+            execution_settings=EXECUTION_SETTINGS,
+            lease_seconds=LEASE_SECONDS,
+            actor="operator@example.com",
+        ),
+    )
+    transition = domain.transition
+
+    def observe_transition(request: TransitionRequest) -> TransitionResult:
+        observer.events.append(f"enter:{request.kind}")
+        try:
+            return transition(request)
+        finally:
+            observer.events.append(f"exit:{request.kind}")
+
+    monkeypatch.setattr(domain, "transition", observe_transition)
+
+    def provider_must_not_run(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("completion transaction invoked the legacy compiler provider")
+
+    monkeypatch.setattr(
+        compiler_service,
+        "_invoke_compiler_for_version",
+        provider_must_not_run,
+    )
+    decision = next(
+        item
+        for item in domain.position(project_id).decisions
+        if item.node_id == "authority.compile"
+    )
+    normalized_input: JsonObject = {
+        "spec_version_id": spec_version_id,
+        "expected_spec_hash": spec_hash,
+        "compiler_model": "fake/compiler",
+        "compiler_input": {
+            "spec_source": '{"scope":"runner compile"}',
+            "spec_content_ref": None,
+            "domain_hint": None,
+            "product_id": project_id,
+            "spec_version_id": spec_version_id,
+            "spec_source_format": "agileforge.spec.v1",
+        },
+    }
+
+    result = runner.run(decision, normalized_input)
+
+    assert result.ok is True
+    assert calls == [("start_node_attempt",)]
+    assert observer.events == [
+        "enter:start_node_attempt",
+        "exit:start_node_attempt",
+        "provider",
+        "enter:compile_authority",
+        "exit:compile_authority",
+    ]
+    with Session(engine) as session:
+        authority = session.exec(select(CompiledSpecAuthority)).one()
+        attempt = session.exec(select(WorkflowNodeAttempt)).one()
+        outcome = session.exec(select(WorkflowNodeAttemptOutcome)).one()
+        receipts = session.exec(select(WorkflowTransitionReceipt)).all()
+        assert authority.spec_version_id == spec_version_id
+        assert outcome.workflow_node_attempt_id == attempt.workflow_node_attempt_id
+        assert outcome.status == "success"
+        assert {receipt.request_kind for receipt in receipts} == {
+            "start_node_attempt",
+            "compile_authority",
+        }

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import StrEnum
 
@@ -47,6 +47,15 @@ NodeRule = Callable[[WorkflowFactSnapshot, datetime], tuple[RuleEvaluation, ...]
 
 
 @dataclass(frozen=True)
+class AgenticExecutionSpec:
+    """Domain-owned lease reason codes for one externally executed node."""
+
+    active_reason: str
+    failure_reason: str
+    recovery_reason: str
+
+
+@dataclass(frozen=True)
 class NodeSpec:
     """Static node identity, request contract, and pure evaluation rule."""
 
@@ -56,6 +65,57 @@ class NodeSpec:
     recommendation_kind: RecommendationKind
     required_inputs: tuple[InputField, ...]
     evaluate_rule: NodeRule
+    agentic_execution: AgenticExecutionSpec | None = None
+
+
+def _overlay_agentic_attempt(
+    node: NodeSpec,
+    evaluation: RuleEvaluation,
+    snapshot: WorkflowFactSnapshot,
+    evaluated_at: datetime,
+) -> RuleEvaluation:
+    """Overlay one exact-instance durable attempt on an available node rule."""
+    execution = node.agentic_execution
+    if execution is None or evaluation.category is not RuleCategory.AVAILABLE:
+        return evaluation
+    attempts = tuple(
+        attempt
+        for attempt in snapshot.node_attempts
+        if attempt.node_id == node.node_id
+        and attempt.instance_key == evaluation.instance_key
+    )
+    if not attempts:
+        return evaluation
+    latest = max(attempts, key=lambda item: item.attempt_id)
+    if latest.outcome == "success":
+        return replace(
+            evaluation,
+            category=RuleCategory.INVALID,
+            reason_code="WORKFLOW_FACT_CONFLICT",
+            valid_until=None,
+            recommendation_kind=None,
+        )
+    if latest.outcome == "failure":
+        return replace(
+            evaluation,
+            reason_code=execution.failure_reason,
+            valid_until=None,
+            recommendation_kind=RecommendationKind.RECOVERY,
+        )
+    if latest.outcome == "obsolete" or evaluated_at >= latest.lease_expires_at:
+        return replace(
+            evaluation,
+            reason_code=execution.recovery_reason,
+            valid_until=None,
+            recommendation_kind=RecommendationKind.RECOVERY,
+        )
+    return replace(
+        evaluation,
+        category=RuleCategory.WAITING,
+        reason_code=execution.active_reason,
+        valid_until=latest.lease_expires_at,
+        recommendation_kind=None,
+    )
 
 
 @dataclass(frozen=True)
@@ -101,6 +161,19 @@ class WorkflowGraph:
 
             pending.extend(reversed(child_graph.children))
 
+    @property
+    def agentic_node_ids(self) -> tuple[str, ...]:
+        """Return the stable nodes classified for external agent execution."""
+        return tuple(
+            node.node_id
+            for node in self.root.iter_nodes()
+            if node.agentic_execution is not None
+        )
+
+    def is_agentic_node(self, node_id: str) -> bool:
+        """Return whether this graph classifies a stable node as agentic."""
+        return node_id in self.agentic_node_ids
+
     def evaluate(
         self,
         snapshot: WorkflowFactSnapshot,
@@ -111,7 +184,10 @@ class WorkflowGraph:
         decisions: list[NodeDecision] = []
 
         for node in self.root.iter_nodes():
-            evaluations = node.evaluate_rule(snapshot, evaluated_at)
+            evaluations = tuple(
+                _overlay_agentic_attempt(node, item, snapshot, evaluated_at)
+                for item in node.evaluate_rule(snapshot, evaluated_at)
+            )
             instance_keys: set[str | None] = set()
             for evaluation in evaluations:
                 if evaluation.instance_key in instance_keys:

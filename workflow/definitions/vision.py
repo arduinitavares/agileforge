@@ -7,7 +7,12 @@ from typing import TYPE_CHECKING
 
 from workflow.contracts import Blocker, FactReference, InputField, RecommendationKind
 from workflow.definitions.authority import accepted_current_authority
-from workflow.graph import NodeSpec, RuleCategory, RuleEvaluation
+from workflow.graph import (
+    AgenticExecutionSpec,
+    NodeSpec,
+    RuleCategory,
+    RuleEvaluation,
+)
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -191,51 +196,9 @@ def accepted_current_artifact(
     return artifact
 
 
-def generation_attempt_evaluation(  # noqa: PLR0913
+def _vision_generate_rule(  # noqa: PLR0911
     snapshot: WorkflowFactSnapshot,
-    evaluated_at: datetime,
-    *,
-    node_id: str,
-    active_reason: str,
-    failure_reason: str,
-    recovery_reason: str,
-) -> RuleEvaluation | None:
-    """Derive generation routing from the latest durable node attempt."""
-    attempts = tuple(
-        item
-        for item in snapshot.node_attempts
-        if item.node_id == node_id and item.instance_key is None
-    )
-    if not attempts:
-        return None
-    latest = max(attempts, key=lambda item: item.attempt_id)
-    if latest.outcome == "success":
-        return RuleEvaluation(
-            category=RuleCategory.INVALID,
-            reason_code="WORKFLOW_FACT_CONFLICT",
-        )
-    if latest.outcome == "failure":
-        return RuleEvaluation(
-            category=RuleCategory.AVAILABLE,
-            reason_code=failure_reason,
-            recommendation_kind=RecommendationKind.RECOVERY,
-        )
-    if latest.outcome == "obsolete" or evaluated_at >= latest.lease_expires_at:
-        return RuleEvaluation(
-            category=RuleCategory.AVAILABLE,
-            reason_code=recovery_reason,
-            recommendation_kind=RecommendationKind.RECOVERY,
-        )
-    return RuleEvaluation(
-        category=RuleCategory.WAITING,
-        reason_code=active_reason,
-        valid_until=latest.lease_expires_at,
-    )
-
-
-def _vision_generate_rule(  # noqa: C901, PLR0911
-    snapshot: WorkflowFactSnapshot,
-    evaluated_at: datetime,
+    _evaluated_at: datetime,
 ) -> tuple[RuleEvaluation, ...]:
     if snapshot.project_abandonments:
         return (RuleEvaluation(RuleCategory.SATISFIED, "PROJECT_ABANDONED"),)
@@ -304,24 +267,6 @@ def _vision_generate_rule(  # noqa: C901, PLR0911
                     recommendation_kind=RecommendationKind.OPTIONAL_REENTRY,
                 ),
             )
-    attempt = generation_attempt_evaluation(
-        snapshot,
-        evaluated_at,
-        node_id="vision.generate",
-        active_reason="VISION_GENERATION_ACTIVE",
-        failure_reason="VISION_GENERATION_FAILED",
-        recovery_reason="VISION_GENERATION_RECOVERY_REQUIRED",
-    )
-    if attempt is not None:
-        return (
-            RuleEvaluation(
-                attempt.category,
-                attempt.reason_code,
-                fact_references=(authority_fact,),
-                valid_until=attempt.valid_until,
-                recommendation_kind=attempt.recommendation_kind,
-            ),
-        )
     return (
         RuleEvaluation(
             RuleCategory.AVAILABLE,
@@ -370,6 +315,11 @@ VISION_NODES: tuple[NodeSpec, ...] = (
             InputField(name="supersedes_vision_artifact_id", value_type="integer"),
         ),
         evaluate_rule=_vision_generate_rule,
+        agentic_execution=AgenticExecutionSpec(
+            active_reason="VISION_GENERATION_ACTIVE",
+            failure_reason="VISION_GENERATION_FAILED",
+            recovery_reason="VISION_GENERATION_RECOVERY_REQUIRED",
+        ),
     ),
     NodeSpec(
         node_id="vision.review",
@@ -393,6 +343,5 @@ __all__ = [
     "accepted_current_artifact",
     "artifact_reference",
     "authority_reference",
-    "generation_attempt_evaluation",
     "phase_artifact_state",
 ]

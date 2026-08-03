@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from sqlmodel import Session, col, select
 
@@ -18,7 +18,8 @@ from services.agent_workbench.authority_review import (
 )
 from services.specs.authority_selection import pending_authority_fingerprint
 from services.specs.compiler_service import (
-    compile_spec_authority_for_version_in_session,
+    AuthorityPersistenceError,
+    persist_compiled_authority_for_version_in_session,
 )
 from workflow.contracts import (
     NodeDecision,
@@ -52,16 +53,6 @@ def _conflict(message: str) -> TransitionResult:
         ok=False,
         error=WorkflowError(
             code=WorkflowErrorCode.WORKFLOW_FACT_CONFLICT,
-            message=message,
-        ),
-    )
-
-
-def _external_failure(message: str) -> TransitionResult:
-    return TransitionResult(
-        ok=False,
-        error=WorkflowError(
-            code=WorkflowErrorCode.EXTERNAL_EXECUTION_FAILED,
             message=message,
         ),
     )
@@ -169,7 +160,7 @@ def execute_compile_authority(
     decision: NodeDecision,
     evaluated_at: datetime,
 ) -> TransitionResult:
-    """Compile the exact registered spec selected by the graph."""
+    """Persist precomputed authority for the exact graph-selected spec."""
     spec = session.get(SpecRegistry, request.spec_version_id)
     if (
         spec is None
@@ -184,22 +175,15 @@ def execute_compile_authority(
         )
     ):
         return _conflict("CompileAuthority does not target the graph-selected spec.")
-    result = cast(
-        "dict[str, object]",
-        compile_spec_authority_for_version_in_session(
+    try:
+        authority_id = persist_compiled_authority_for_version_in_session(
             session,
             spec_version_id=request.spec_version_id,
+            compiled_authority=request.compiled_authority,
             compiled_at=evaluated_at,
-            compiler_model=request.compiler_model,
-        ),
-    )
-    if result.get("success") is not True:
-        return _external_failure(
-            str(result.get("error") or "Authority compile failed.")
         )
-    authority_id = result.get("authority_id")
-    if not isinstance(authority_id, int):
-        return _conflict("Authority compilation did not return a durable identity.")
+    except AuthorityPersistenceError as error:
+        return _conflict(str(error))
     return _success(
         decision,
         {
@@ -320,7 +304,7 @@ def execute_repair_authority(
     decision: NodeDecision,
     evaluated_at: datetime,
 ) -> TransitionResult:
-    """Compile a replacement candidate from exact rejected authority facts."""
+    """Persist a precomputed replacement from exact rejected authority facts."""
     authority = _authority(
         session,
         project_id=request.project_id,
@@ -357,21 +341,16 @@ def execute_repair_authority(
         )
     ):
         return _conflict("Repair requires exact rejected authority feedback facts.")
-    result = cast(
-        "dict[str, object]",
-        compile_spec_authority_for_version_in_session(
+    try:
+        authority_id = persist_compiled_authority_for_version_in_session(
             session,
             spec_version_id=authority.spec_version_id,
+            compiled_authority=request.compiled_authority,
             compiled_at=evaluated_at,
             force_recompile=True,
-            compiler_model="openrouter/openai/gpt-5.6-luna",
-        ),
-    )
-    if result.get("success") is not True:
-        return _external_failure(str(result.get("error") or "Authority repair failed."))
-    authority_id = result.get("authority_id")
-    if not isinstance(authority_id, int):
-        return _conflict("Authority repair did not return a durable identity.")
+        )
+    except AuthorityPersistenceError as error:
+        return _conflict(str(error))
     return _success(
         decision,
         {

@@ -10,10 +10,19 @@ from google.adk import Context, Workflow
 from google.adk.workflow import START, JoinNode, RetryConfig, node
 from pydantic import BaseModel, ConfigDict, TypeAdapter
 
+from services.contracts.as_built import AsBuiltAssessment, AsBuiltAssessorInput
+from utils.spec_schemas import (
+    SpecAuthorityCompilationFailure,
+    SpecAuthorityCompilationSuccess,
+    SpecAuthorityCompilerEnvelope,
+    SpecAuthorityCompilerInput,
+)
 from workflow.contracts import JsonObject
+from workflow.definitions.root import ROOT_GRAPH
 from workflow.requests import (
     CompileAuthority,
     RecordBacklogDraft,
+    RecordBrownfieldSpecDraft,
     RecordRoadmapDraft,
     RecordSprintPlan,
     RecordStoryDraft,
@@ -26,15 +35,6 @@ if TYPE_CHECKING:
     from google.adk.agents import BaseAgent
 
 _JSON_OBJECT = TypeAdapter(JsonObject)
-AGENTIC_NODE_IDS = (
-    "authority.compile",
-    "authority.repair",
-    "vision.generate",
-    "backlog.generate",
-    "planning.roadmap.generate",
-    "planning.story.generate",
-    "planning.sprint.plan",
-)
 
 
 class RecipeInput(BaseModel):
@@ -60,6 +60,40 @@ class _JoinedBacklogValidations(BaseModel):
     model_config = ConfigDict(extra="forbid")
     validate_structure: RecipeOutput
     validate_round_trip: RecipeOutput
+
+
+class _BrownfieldRecipePayload(BaseModel):
+    """Normalized host input kept separate from the retained leaf contract."""
+
+    model_config = ConfigDict(extra="forbid")
+    repository_inventory_id: int
+    leaf_input: AsBuiltAssessorInput
+    supersedes_spec_draft_id: int | None = None
+    provenance_path: str | None = None
+
+
+class _CompileAuthorityRecipePayload(BaseModel):
+    """Normalized host guards and retained compiler input."""
+
+    model_config = ConfigDict(extra="forbid")
+    spec_version_id: int
+    expected_spec_hash: str
+    compiler_model: str = "openrouter/openai/gpt-5.6-luna"
+    compiler_input: SpecAuthorityCompilerInput
+
+
+class _RepairAuthorityRecipePayload(BaseModel):
+    """Normalized rejected-authority guards and retained compiler input."""
+
+    model_config = ConfigDict(extra="forbid")
+    source_authority_id: int
+    source_authority_fingerprint: str
+    compiler_input: SpecAuthorityCompilerInput
+
+
+type _AuthorityRecipePayload = (
+    _CompileAuthorityRecipePayload | _RepairAuthorityRecipePayload
+)
 
 
 @dataclass(frozen=True)
@@ -97,6 +131,7 @@ class AdkRecipe:
 class AgenticRecipeNodes:
     """Injected retained execution nodes used to compose the complete registry."""
 
+    as_built: BaseAgent | Workflow
     authority_compile: BaseAgent | Workflow
     authority_repair: BaseAgent | Workflow
     vision_generation: BaseAgent | Workflow
@@ -114,14 +149,29 @@ class UnknownAdkRecipeError(LookupError):
         super().__init__(f"No ADK recipe is registered for node {node_id!r}.")
 
 
+class _AuthorityCompilerFailureError(RuntimeError):
+    """Raised when a retained compiler returns its typed failure variant."""
+
+
 class AdkRecipeRegistry:
     """Map stable domain node IDs to execution-only ADK recipes."""
 
-    def __init__(self, recipes: tuple[AdkRecipe, ...]) -> None:
+    def __init__(
+        self,
+        recipes: tuple[AdkRecipe, ...],
+        *,
+        required_node_ids: tuple[str, ...] | None = None,
+    ) -> None:
         """Index recipes while rejecting ambiguous duplicate node IDs."""
         self._recipes = {recipe.node_id: recipe for recipe in recipes}
         if len(self._recipes) != len(recipes):
             message = "ADK recipe node IDs must be unique"
+            raise ValueError(message)
+        if (
+            required_node_ids is not None
+            and tuple(self._recipes) != required_node_ids
+        ):
+            message = "ADK recipes must exactly match the domain agentic catalog"
             raise ValueError(message)
 
     @property
@@ -228,6 +278,124 @@ def _build_single_leaf_workflow(
     )
 
 
+def _build_brownfield_curation_workflow(
+    *,
+    leaf_agent: BaseAgent | Workflow,
+    execution_settings: JsonObject,
+) -> Workflow:
+    """Run retained As-Built assessment and emit one typed draft payload."""
+    timeout_seconds, max_attempts = _execution_limits(execution_settings)
+    retry_config = RetryConfig(max_attempts=max_attempts)
+
+    @node(
+        name="execute_as_built_assessor",
+        rerun_on_resume=True,
+        retry_config=retry_config,
+        timeout=timeout_seconds,
+    )
+    async def execute_as_built_assessor(
+        context: Context,
+        node_input: RecipeInput,
+    ) -> RecipeOutput:
+        payload = _BrownfieldRecipePayload.model_validate(node_input.payload)
+        generated = await context.run_node(
+            leaf_agent,
+            node_input=payload.leaf_input.model_dump(mode="json"),
+        )
+        assessment = AsBuiltAssessment.model_validate(generated)
+        return RecipeOutput(
+            payload={
+                "repository_inventory_id": payload.repository_inventory_id,
+                "canonical_content": assessment.model_dump(mode="json"),
+                "supersedes_spec_draft_id": payload.supersedes_spec_draft_id,
+                "provenance_path": payload.provenance_path,
+            }
+        )
+
+    return Workflow(
+        name="brownfield_curation",
+        retry_config=retry_config,
+        timeout=timeout_seconds,
+        input_schema=RecipeInput,
+        output_schema=RecipeOutput,
+        edges=[(START, execute_as_built_assessor)],
+    )
+
+
+def _authority_completion_payload(
+    payload: _AuthorityRecipePayload,
+    compiled_authority: SpecAuthorityCompilationSuccess,
+) -> JsonObject:
+    if isinstance(payload, _CompileAuthorityRecipePayload):
+        return {
+            "spec_version_id": payload.spec_version_id,
+            "expected_spec_hash": payload.expected_spec_hash,
+            "compiler_model": payload.compiler_model,
+            "compiled_authority": compiled_authority.model_dump(mode="json"),
+        }
+    return {
+        "source_authority_id": payload.source_authority_id,
+        "source_authority_fingerprint": payload.source_authority_fingerprint,
+        "compiled_authority": compiled_authority.model_dump(mode="json"),
+    }
+
+
+def _build_authority_workflow(
+    *,
+    workflow_name: str,
+    execution_node_name: str,
+    leaf_agent: BaseAgent | Workflow,
+    execution_settings: JsonObject,
+    repair: bool,
+) -> Workflow:
+    """Invoke one retained compiler and emit strict precomputed authority."""
+    timeout_seconds, max_attempts = _execution_limits(execution_settings)
+    retry_config = RetryConfig(max_attempts=max_attempts)
+
+    @node(
+        name=execution_node_name,
+        rerun_on_resume=True,
+        retry_config=retry_config,
+        timeout=timeout_seconds,
+    )
+    async def execute_authority_leaf(
+        context: Context,
+        node_input: RecipeInput,
+    ) -> RecipeOutput:
+        payload: _AuthorityRecipePayload
+        if repair:
+            payload = _RepairAuthorityRecipePayload.model_validate(
+                node_input.payload
+            )
+        else:
+            payload = _CompileAuthorityRecipePayload.model_validate(
+                node_input.payload
+            )
+        generated = await context.run_node(
+            leaf_agent,
+            node_input=payload.compiler_input.model_dump(mode="json"),
+        )
+        envelope = SpecAuthorityCompilerEnvelope.model_validate(generated)
+        if isinstance(envelope.result, SpecAuthorityCompilationFailure):
+            message = (
+                f"Authority compiler failed: {envelope.result.error}: "
+                f"{envelope.result.reason}"
+            )
+            raise _AuthorityCompilerFailureError(message)
+        return RecipeOutput(
+            payload=_authority_completion_payload(payload, envelope.result)
+        )
+
+    return Workflow(
+        name=workflow_name,
+        retry_config=retry_config,
+        timeout=timeout_seconds,
+        input_schema=RecipeInput,
+        output_schema=RecipeOutput,
+        edges=[(START, execute_authority_leaf)],
+    )
+
+
 def build_backlog_generation_workflow(
     *,
     leaf_agent: BaseAgent | Workflow,
@@ -327,22 +495,32 @@ def build_agentic_recipe_registry(
     return AdkRecipeRegistry(
         (
             AdkRecipe(
+                node_id="onboarding.brownfield.curation",
+                workflow=_build_brownfield_curation_workflow(
+                    leaf_agent=nodes.as_built,
+                    execution_settings=execution_settings,
+                ),
+                output_adapter=_request_output_adapter(RecordBrownfieldSpecDraft),
+            ),
+            AdkRecipe(
                 node_id="authority.compile",
-                workflow=_build_single_leaf_workflow(
+                workflow=_build_authority_workflow(
                     workflow_name="authority_compilation",
                     execution_node_name="execute_authority_compiler",
                     leaf_agent=nodes.authority_compile,
                     execution_settings=execution_settings,
+                    repair=False,
                 ),
                 output_adapter=_request_output_adapter(CompileAuthority),
             ),
             AdkRecipe(
                 node_id="authority.repair",
-                workflow=_build_single_leaf_workflow(
+                workflow=_build_authority_workflow(
                     workflow_name="authority_repair",
                     execution_node_name="execute_authority_repair",
                     leaf_agent=nodes.authority_repair,
                     execution_settings=execution_settings,
+                    repair=True,
                 ),
                 output_adapter=_request_output_adapter(RepairAuthority),
             ),
@@ -394,12 +572,12 @@ def build_agentic_recipe_registry(
                 ),
                 output_adapter=_request_output_adapter(RecordSprintPlan),
             ),
-        )
+        ),
+        required_node_ids=ROOT_GRAPH.agentic_node_ids,
     )
 
 
 __all__ = [
-    "AGENTIC_NODE_IDS",
     "AdkRecipe",
     "AdkRecipeRegistry",
     "AgenticRecipeNodes",

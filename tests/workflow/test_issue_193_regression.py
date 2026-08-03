@@ -35,7 +35,6 @@ from services.agent_workbench.authority_review import (
     AuthorityReviewSnapshot,
     build_authority_review_snapshot_in_session,
 )
-from services.specs import compiler_service
 from tests.workflow.execution_fixtures import _accept_and_start_sprint
 from tests.workflow.test_authority_transitions import _success_artifact
 from tests.workflow.test_planning_transitions import (
@@ -107,16 +106,6 @@ class _AcceptedReplacement:
     advertised_start: NodeDecision
     old_start_request: StartScopeExtension
     old_registration_request: RegisterScopeExtension
-
-
-def _install_fake_compiler(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        compiler_service,
-        "_invoke_compiler_for_version",
-        lambda *_args, **_kwargs: compiler_service._CompilerInvocationResult(
-            success=_success_artifact()
-        ),
-    )
 
 
 def _seed_terminal_project_with_future_stories(
@@ -222,7 +211,7 @@ def _artifact_reference(reference: FactReference) -> ScopeExtensionArtifactRefer
 
 def _accepted_replacement(
     engine: Engine,
-    monkeypatch: pytest.MonkeyPatch,
+    _monkeypatch: pytest.MonkeyPatch,
     *,
     provenance_path: Path | None,
     delete_provenance: bool = False,
@@ -262,7 +251,6 @@ def _accepted_replacement(
     if delete_provenance and provenance_path is not None:
         provenance_path.unlink()
 
-    _install_fake_compiler(monkeypatch)
     replacement = _current_spec(engine, project_id)
     assert replacement.spec_version_id is not None
     compiled = domain.transition(
@@ -276,6 +264,7 @@ def _accepted_replacement(
             idempotency_key="task-13-compile-replacement",
             spec_version_id=replacement.spec_version_id,
             expected_spec_hash=replacement.spec_hash,
+            compiled_authority=_success_artifact(),
         )
     )
     assert compiled.ok is True

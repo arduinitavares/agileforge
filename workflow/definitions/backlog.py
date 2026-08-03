@@ -10,10 +10,14 @@ from workflow.definitions.vision import (
     accepted_current_artifact,
     artifact_reference,
     authority_reference,
-    generation_attempt_evaluation,
     phase_artifact_state,
 )
-from workflow.graph import NodeSpec, RuleCategory, RuleEvaluation
+from workflow.graph import (
+    AgenticExecutionSpec,
+    NodeSpec,
+    RuleCategory,
+    RuleEvaluation,
+)
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -31,9 +35,9 @@ def _blocked(reason_code: str, message: str) -> tuple[RuleEvaluation, ...]:
     )
 
 
-def _backlog_generate_rule(  # noqa: C901, PLR0911
+def _backlog_generate_rule(  # noqa: PLR0911
     snapshot: WorkflowFactSnapshot,
-    evaluated_at: datetime,
+    _evaluated_at: datetime,
 ) -> tuple[RuleEvaluation, ...]:
     if snapshot.project_abandonments:
         return (RuleEvaluation(RuleCategory.SATISFIED, "PROJECT_ABANDONED"),)
@@ -90,24 +94,6 @@ def _backlog_generate_rule(  # noqa: C901, PLR0911
                     recommendation_kind=RecommendationKind.OPTIONAL_REENTRY,
                 ),
             )
-    attempt = generation_attempt_evaluation(
-        snapshot,
-        evaluated_at,
-        node_id="backlog.generate",
-        active_reason="BACKLOG_GENERATION_ACTIVE",
-        failure_reason="BACKLOG_GENERATION_FAILED",
-        recovery_reason="BACKLOG_GENERATION_RECOVERY_REQUIRED",
-    )
-    if attempt is not None:
-        return (
-            RuleEvaluation(
-                attempt.category,
-                attempt.reason_code,
-                fact_references=references,
-                valid_until=attempt.valid_until,
-                recommendation_kind=attempt.recommendation_kind,
-            ),
-        )
     return (
         RuleEvaluation(
             RuleCategory.AVAILABLE,
@@ -288,6 +274,11 @@ BACKLOG_NODES: tuple[NodeSpec, ...] = (
             InputField(name="supersedes_backlog_artifact_id", value_type="integer"),
         ),
         evaluate_rule=_backlog_generate_rule,
+        agentic_execution=AgenticExecutionSpec(
+            active_reason="BACKLOG_GENERATION_ACTIVE",
+            failure_reason="BACKLOG_GENERATION_FAILED",
+            recovery_reason="BACKLOG_GENERATION_RECOVERY_REQUIRED",
+        ),
     ),
     NodeSpec(
         node_id="backlog.review",

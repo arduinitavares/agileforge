@@ -12,6 +12,7 @@ from workflow.contracts import (
     RecommendationKind,
 )
 from workflow.graph import (
+    AgenticExecutionSpec,
     ChildGraphSpec,
     NodeSpec,
     RuleCategory,
@@ -158,54 +159,9 @@ def accepted_current_authority(
     return state.candidate, False
 
 
-def _compile_attempt_result(
-    snapshot: WorkflowFactSnapshot,
-    evaluated_at: datetime,
-    *,
-    instance_key: str,
-) -> tuple[RuleEvaluation, ...] | None:
-    attempts = tuple(
-        attempt
-        for attempt in snapshot.node_attempts
-        if attempt.node_id == "authority.compile"
-        and attempt.instance_key == instance_key
-    )
-    if not attempts:
-        return None
-    latest = max(attempts, key=lambda item: item.attempt_id)
-    if latest.outcome == "success":
-        return _for_instance(_invalid(), instance_key)
-    if latest.outcome == "failure":
-        return _for_instance(
-            _evaluation(
-                RuleCategory.AVAILABLE,
-                "AUTHORITY_COMPILE_FAILED",
-                recommendation_kind=RecommendationKind.RECOVERY,
-            ),
-            instance_key,
-        )
-    if latest.outcome == "obsolete" or evaluated_at >= latest.lease_expires_at:
-        return _for_instance(
-            _evaluation(
-                RuleCategory.AVAILABLE,
-                "AUTHORITY_COMPILE_RECOVERY_REQUIRED",
-                recommendation_kind=RecommendationKind.RECOVERY,
-            ),
-            instance_key,
-        )
-    return _for_instance(
-        _evaluation(
-            RuleCategory.WAITING,
-            "AUTHORITY_COMPILE_ACTIVE",
-            valid_until=latest.lease_expires_at,
-        ),
-        instance_key,
-    )
-
-
 def _compile_rule(
     snapshot: WorkflowFactSnapshot,
-    evaluated_at: datetime,
+    _evaluated_at: datetime,
 ) -> tuple[RuleEvaluation, ...]:
     if snapshot.project_abandonments:
         return _evaluation(RuleCategory.SATISFIED, "PROJECT_ABANDONED")
@@ -221,23 +177,6 @@ def _compile_rule(
     if state.candidate is not None:
         return _for_instance(
             _evaluation(RuleCategory.SATISFIED, "AUTHORITY_COMPILED"),
-            instance_key,
-        )
-    attempt_result = _compile_attempt_result(
-        snapshot,
-        evaluated_at,
-        instance_key=instance_key,
-    )
-    if attempt_result is not None:
-        evaluation = attempt_result[0]
-        return _for_instance(
-            _evaluation(
-                evaluation.category,
-                evaluation.reason_code,
-                fact_references=spec_reference,
-                valid_until=evaluation.valid_until,
-                recommendation_kind=evaluation.recommendation_kind,
-            ),
             instance_key,
         )
     return _for_instance(
@@ -385,6 +324,11 @@ AUTHORITY_NODES: tuple[NodeSpec, ...] = (
             InputField(name="compiler_model", value_type="string"),
         ),
         evaluate_rule=_compile_rule,
+        agentic_execution=AgenticExecutionSpec(
+            active_reason="AUTHORITY_COMPILE_ACTIVE",
+            failure_reason="AUTHORITY_COMPILE_FAILED",
+            recovery_reason="AUTHORITY_COMPILE_RECOVERY_REQUIRED",
+        ),
     ),
     NodeSpec(
         node_id="authority.review",
@@ -422,6 +366,11 @@ AUTHORITY_NODES: tuple[NodeSpec, ...] = (
             InputField(name="source_authority_fingerprint", value_type="string"),
         ),
         evaluate_rule=_repair_rule,
+        agentic_execution=AgenticExecutionSpec(
+            active_reason="AUTHORITY_REPAIR_ACTIVE",
+            failure_reason="AUTHORITY_REPAIR_FAILED",
+            recovery_reason="AUTHORITY_REPAIR_RECOVERY_REQUIRED",
+        ),
     ),
 )
 
@@ -432,6 +381,11 @@ VISION_BOUNDARY_NODE = NodeSpec(
     recommendation_kind=RecommendationKind.REQUIRED,
     required_inputs=(),
     evaluate_rule=_vision_boundary_rule,
+    agentic_execution=AgenticExecutionSpec(
+        active_reason="VISION_GENERATION_ACTIVE",
+        failure_reason="VISION_GENERATION_FAILED",
+        recovery_reason="VISION_GENERATION_RECOVERY_REQUIRED",
+    ),
 )
 
 

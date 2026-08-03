@@ -437,6 +437,15 @@ class WorkflowDomain:
         if isinstance(decision_or_failure, TransitionResult):
             return decision_or_failure
         decision = decision_or_failure
+        if not self._graph.is_agentic_node(request.target_node_id):
+            return TransitionResult(
+                ok=False,
+                position=position,
+                error=WorkflowError(
+                    code=WorkflowErrorCode.TRANSITION_NOT_AVAILABLE,
+                    message="The requested node is not classified for agent execution.",
+                ),
+            )
         if not self._has_registered_recipe(request.target_node_id):
             return TransitionResult(
                 ok=False,

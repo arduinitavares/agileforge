@@ -21,6 +21,7 @@ from workflow.definitions.vision import (
 )
 from workflow.fingerprints import canonical_hash
 from workflow.graph import (
+    AgenticExecutionSpec,
     ChildGraphSpec,
     NodeSpec,
     RuleCategory,
@@ -1096,6 +1097,11 @@ PLANNING_NODES: tuple[NodeSpec, ...] = (
             InputField(name="content_fingerprint", value_type="string"),
         ),
         evaluate_rule=_roadmap_generate_rule,
+        agentic_execution=AgenticExecutionSpec(
+            active_reason="ROADMAP_GENERATION_ACTIVE",
+            failure_reason="ROADMAP_GENERATION_FAILED",
+            recovery_reason="ROADMAP_GENERATION_RECOVERY_REQUIRED",
+        ),
     ),
     NodeSpec(
         node_id="planning.roadmap.review",
@@ -1122,6 +1128,11 @@ PLANNING_NODES: tuple[NodeSpec, ...] = (
             InputField(name="content_fingerprint", value_type="string"),
         ),
         evaluate_rule=_story_generate_rule,
+        agentic_execution=AgenticExecutionSpec(
+            active_reason="STORY_GENERATION_ACTIVE",
+            failure_reason="STORY_GENERATION_FAILED",
+            recovery_reason="STORY_GENERATION_RECOVERY_REQUIRED",
+        ),
     ),
     NodeSpec(
         node_id="planning.story.review",
@@ -1175,6 +1186,11 @@ PLANNING_NODES: tuple[NodeSpec, ...] = (
             InputField(name="candidate_set_fingerprint", value_type="string"),
         ),
         evaluate_rule=_sprint_plan_rule,
+        agentic_execution=AgenticExecutionSpec(
+            active_reason="SPRINT_PLANNING_ACTIVE",
+            failure_reason="SPRINT_PLANNING_FAILED",
+            recovery_reason="SPRINT_PLANNING_RECOVERY_REQUIRED",
+        ),
     ),
     NodeSpec(
         node_id="planning.sprint.review",

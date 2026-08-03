@@ -9,8 +9,11 @@ from google.adk.agents import BaseAgent, InvocationContext
 from google.adk.events import Event
 from google.adk.workflow import START
 
+from adapters.adk.prompts.specification import (
+    SPEC_AUTHORITY_COMPILER_PROMPT_HASH,
+    SPEC_AUTHORITY_COMPILER_VERSION,
+)
 from adapters.adk.recipes import (
-    AGENTIC_NODE_IDS,
     AdkRecipe,
     AdkRecipeRegistry,
     AgenticRecipeNodes,
@@ -20,10 +23,12 @@ from adapters.adk.recipes import (
     build_agentic_recipe_registry,
     build_backlog_generation_workflow,
 )
+from utils.spec_schemas import SpecAuthorityCompilationSuccess
 from workflow.definitions.root import ROOT_GRAPH
 from workflow.requests import (
     CompileAuthority,
     RecordBacklogDraft,
+    RecordBrownfieldSpecDraft,
     RecordRoadmapDraft,
     RecordSprintPlan,
     RecordStoryDraft,
@@ -39,15 +44,6 @@ if TYPE_CHECKING:
 
 RECIPE_TIMEOUT_SECONDS = 7.0
 RECIPE_MAX_ATTEMPTS = 2
-EXPECTED_AGENTIC_NODE_IDS = (
-    "authority.compile",
-    "authority.repair",
-    "vision.generate",
-    "backlog.generate",
-    "planning.roadmap.generate",
-    "planning.story.generate",
-    "planning.sprint.plan",
-)
 COMPLETION_CONTEXT = AttemptCompletionContext(
     project_id=17,
     graph_version="agileforge.workflow.v1",
@@ -60,10 +56,35 @@ COMPLETION_CONTEXT = AttemptCompletionContext(
     actor="operator@example.com",
     correlation_id="task-15-review",
 )
+
+
+def _compiled_authority_payload() -> JsonObject:
+    return SpecAuthorityCompilationSuccess(
+        scope_themes=["Task 15"],
+        invariants=[],
+        eligible_feature_rules=[],
+        gaps=[],
+        assumptions=[],
+        source_map=[],
+        compiler_version=SPEC_AUTHORITY_COMPILER_VERSION,
+        prompt_hash=SPEC_AUTHORITY_COMPILER_PROMPT_HASH,
+    ).model_dump(mode="json")
+
+
 REQUEST_CASES: tuple[
     tuple[str, type[PositionedRequest], JsonObject],
     ...,
 ] = (
+    (
+        "onboarding.brownfield.curation",
+        RecordBrownfieldSpecDraft,
+        {
+            "repository_inventory_id": 2,
+            "canonical_content": {"assessment_summary": "Observed repository"},
+            "supersedes_spec_draft_id": None,
+            "provenance_path": "reports/as-built.json",
+        },
+    ),
     (
         "authority.compile",
         CompileAuthority,
@@ -71,6 +92,7 @@ REQUEST_CASES: tuple[
             "spec_version_id": 3,
             "expected_spec_hash": "sha256:spec",
             "compiler_model": "fake/compiler",
+            "compiled_authority": _compiled_authority_payload(),
         },
     ),
     (
@@ -79,6 +101,7 @@ REQUEST_CASES: tuple[
         {
             "source_authority_id": 5,
             "source_authority_fingerprint": "sha256:authority",
+            "compiled_authority": _compiled_authority_payload(),
         },
     ),
     (
@@ -157,6 +180,7 @@ class FakeLeafAgent(BaseAgent):
 def _agentic_nodes() -> AgenticRecipeNodes:
     """Build a complete provider-free retained-node replacement set."""
     return AgenticRecipeNodes(
+        as_built=FakeLeafAgent(name="fake_as_built", response={}),
         authority_compile=FakeLeafAgent(name="fake_authority_compile", response={}),
         authority_repair=FakeLeafAgent(name="fake_authority_repair", response={}),
         vision_generation=FakeLeafAgent(name="fake_vision", response={}),
@@ -214,14 +238,18 @@ def test_recipe_registry_covers_each_stable_agentic_domain_node_once() -> None:
     graph_node_ids = {node.node_id for node in ROOT_GRAPH.root.iter_nodes()}
     registry = _complete_registry()
 
-    assert AGENTIC_NODE_IDS == EXPECTED_AGENTIC_NODE_IDS
-    assert set(AGENTIC_NODE_IDS) <= graph_node_ids
-    assert registry.node_ids == EXPECTED_AGENTIC_NODE_IDS
+    assert set(ROOT_GRAPH.agentic_node_ids) <= graph_node_ids
+    assert registry.node_ids == ROOT_GRAPH.agentic_node_ids
     assert len(registry.node_ids) == len(set(registry.node_ids))
     registered_recipe_ids = tuple(
         registry.require(node_id).node_id for node_id in registry.node_ids
     )
-    assert registered_recipe_ids == EXPECTED_AGENTIC_NODE_IDS
+    assert registered_recipe_ids == ROOT_GRAPH.agentic_node_ids
+    brownfield_graph = registry.require("onboarding.brownfield.curation").workflow.graph
+    assert brownfield_graph is not None
+    assert "execute_as_built_assessor" in {
+        node.name for node in brownfield_graph.nodes
+    }
     for node_id in registry.node_ids:
         recipe = registry.require(node_id)
         assert recipe.workflow.timeout == RECIPE_TIMEOUT_SECONDS
@@ -229,6 +257,25 @@ def test_recipe_registry_covers_each_stable_agentic_domain_node_once() -> None:
         assert recipe.workflow.retry_config.max_attempts == RECIPE_MAX_ATTEMPTS
         assert not hasattr(recipe, "prerequisites")
         assert not hasattr(recipe, "next_command")
+
+
+def test_recipe_registry_rejects_any_domain_catalog_gap() -> None:
+    """Fail construction when a graph-marked agentic node lacks a recipe."""
+    workflow = build_backlog_generation_workflow(
+        leaf_agent=FakeLeafAgent(name="fake", response={"ok": True}),
+        execution_settings={"timeout_seconds": 5.0, "max_attempts": 1},
+    )
+    recipe = AdkRecipe(
+        node_id="backlog.generate",
+        workflow=workflow,
+        output_adapter=_adapter,
+    )
+
+    with pytest.raises(ValueError, match="domain agentic catalog"):
+        AdkRecipeRegistry(
+            (recipe,),
+            required_node_ids=ROOT_GRAPH.agentic_node_ids,
+        )
 
 
 @pytest.mark.parametrize(("node_id", "request_type", "payload"), REQUEST_CASES)

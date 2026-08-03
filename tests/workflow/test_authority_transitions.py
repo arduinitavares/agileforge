@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, TypedDict
 
 import pytest
-from pydantic import TypeAdapter
+from pydantic import TypeAdapter, ValidationError
 from sqlmodel import Session, select
 
 from models.agent_workbench import (
@@ -194,6 +194,7 @@ def _compile_request(
         idempotency_key=idempotency_key,
         spec_version_id=spec_version_id,
         expected_spec_hash=spec_hash,
+        compiled_authority=_success_artifact(),
     )
 
 
@@ -411,6 +412,7 @@ def test_closed_request_union_adds_exact_authority_variants() -> None:
             "kind": "compile_authority",
             "spec_version_id": 1,
             "expected_spec_hash": "sha256:spec",
+            "compiled_authority": _success_artifact().model_dump(mode="json"),
         },
         {
             **common,
@@ -433,6 +435,7 @@ def test_closed_request_union_adds_exact_authority_variants() -> None:
             "kind": "repair_authority",
             "source_authority_id": 2,
             "source_authority_fingerprint": "sha256:authority",
+            "compiled_authority": _success_artifact().model_dump(mode="json"),
         },
     )
     variants = {
@@ -510,13 +513,11 @@ def test_persisted_old_compile_attempt_does_not_scope_replacement_spec(
 def test_compile_rejects_spec_identity_not_selected_by_graph(
     engine: Engine,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Compile rejects a spec ID not selected by the guarded node decision."""
     project_id, spec_version_id, spec_hash = _seed_current_spec(
         engine, tmp_path / "spec.md"
     )
-    _install_fake_compiler(monkeypatch)
     domain = _domain(engine)
     before = domain.position(project_id)
 
@@ -544,7 +545,15 @@ def test_compile_persists_pending_authority_in_domain_transaction(
     project_id, spec_version_id, spec_hash = _seed_current_spec(
         engine, tmp_path / "spec.md"
     )
-    _install_fake_compiler(monkeypatch)
+
+    def provider_must_not_run(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("authority completion invoked the provider inside transition")
+
+    monkeypatch.setattr(
+        compiler_service,
+        "_invoke_compiler_for_version",
+        provider_must_not_run,
+    )
     domain = _domain(engine)
     result = domain.transition(
         _compile_request(
@@ -566,37 +575,31 @@ def test_compile_persists_pending_authority_in_domain_transaction(
         assert receipt.completed_at.replace(tzinfo=UTC) == EVALUATED_AT
 
 
-def test_compiler_failure_is_atomic_and_offers_compile_again(
+def test_compile_completion_rejects_non_success_artifact_before_transition(
     engine: Engine,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Compiler failure leaves no partial authority and remains retryable."""
+    """Accept only the closed validated compiler-success artifact contract."""
     project_id, spec_version_id, spec_hash = _seed_current_spec(
         engine, tmp_path / "spec.md"
     )
-    monkeypatch.setattr(
-        compiler_service,
-        "_invoke_compiler_for_version",
-        lambda *_args, **_kwargs: compiler_service._CompilerInvocationResult(
-            failure={"success": False, "error": "provider unavailable"}
-        ),
-    )
     domain = _domain(engine)
+    position = domain.position(project_id)
 
-    result = domain.transition(
-        _compile_request(
-            domain.position(project_id),
-            spec_version_id=spec_version_id,
-            spec_hash=spec_hash,
-        )
-    )
+    invalid_payload: object = {
+        **_guards(position, "authority.compile"),
+        "idempotency_key": "invalid-compiler-failure",
+        "spec_version_id": spec_version_id,
+        "expected_spec_hash": spec_hash,
+        "compiled_authority": {
+            "error": "COMPILATION_FAILED",
+            "reason": "provider unavailable",
+            "blocking_gaps": ["No provider result."],
+        },
+    }
+    with pytest.raises(ValidationError):
+        CompileAuthority.model_validate(invalid_payload)
 
-    assert result.ok is False
-    assert result.error is not None
-    assert result.error.code is WorkflowErrorCode.EXTERNAL_EXECUTION_FAILED
-    assert result.position is not None
-    assert result.position.available_nodes == ("authority.compile",)
     with Session(engine) as session:
         assert session.exec(select(CompiledSpecAuthority)).all() == []
 
@@ -604,13 +607,11 @@ def test_compiler_failure_is_atomic_and_offers_compile_again(
 def test_decision_binds_exact_pending_authority_and_review_fingerprint(
     engine: Engine,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Decision requires the exact pending authority and review fingerprint."""
     project_id, spec_version_id, spec_hash = _seed_current_spec(
         engine, tmp_path / "spec.md"
     )
-    _install_fake_compiler(monkeypatch)
     domain = _domain(engine)
     compiled = domain.transition(
         _compile_request(
@@ -691,13 +692,11 @@ def test_decision_binds_exact_pending_authority_and_review_fingerprint(
 def test_decide_rejects_every_persisted_review_fingerprint_tamper(
     engine: Engine,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     tamper_target: str,
 ) -> None:
     """Every persisted review input is bound before a decision receipt exists."""
     spec_path = tmp_path / f"{tamper_target}.md"
     project_id, spec_version_id, spec_hash = _seed_current_spec(engine, spec_path)
-    _install_fake_compiler(monkeypatch)
     domain = _domain(engine)
     compiled = domain.transition(
         _compile_request(
@@ -769,7 +768,15 @@ def test_rejection_feedback_and_repair_are_durable_factual_transitions(
     project_id, spec_version_id, spec_hash = _seed_current_spec(
         engine, tmp_path / "spec.md"
     )
-    _install_fake_compiler(monkeypatch)
+
+    def provider_must_not_run(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("authority completion invoked the provider inside transition")
+
+    monkeypatch.setattr(
+        compiler_service,
+        "_invoke_compiler_for_version",
+        provider_must_not_run,
+    )
     domain = _domain(engine)
     assert domain.transition(
         _compile_request(
@@ -822,6 +829,7 @@ def test_rejection_feedback_and_repair_are_durable_factual_transitions(
             idempotency_key="repair-authority",
             source_authority_id=review.pending_authority_id,
             source_authority_fingerprint=review.authority_fingerprint,
+            compiled_authority=_success_artifact(),
         )
     )
     assert repair.ok is True
@@ -907,7 +915,6 @@ def test_post_flush_compile_failure_rolls_back_and_identical_retry_replays(
     project_id, spec_version_id, spec_hash = _seed_current_spec(
         engine, tmp_path / "compile-rollback.md"
     )
-    _install_fake_compiler(monkeypatch)
     domain = _domain(engine)
     request = _compile_request(
         domain.position(project_id),
@@ -965,7 +972,6 @@ def test_post_flush_decision_failure_rolls_back_and_identical_retry_replays(
     project_id, spec_version_id, spec_hash = _seed_current_spec(
         engine, tmp_path / "decision-rollback.md"
     )
-    _install_fake_compiler(monkeypatch)
     domain = _domain(engine)
     assert domain.transition(
         _compile_request(

@@ -2,6 +2,7 @@
 
 from typing import ClassVar, Literal
 
+from utils.spec_schemas import SpecAuthorityCompilationSuccess
 from workflow.contracts import JsonObject
 from workflow.requests.base import PositionedRequest
 
@@ -14,6 +15,7 @@ class CompileAuthority(PositionedRequest):
     spec_version_id: int
     expected_spec_hash: str
     compiler_model: str = "openrouter/openai/gpt-5.6-luna"
+    compiled_authority: SpecAuthorityCompilationSuccess
 
 
 class DecideAuthority(PositionedRequest):
@@ -45,6 +47,7 @@ class RepairAuthority(PositionedRequest):
     node_id: ClassVar[str] = "authority.repair"
     source_authority_id: int
     source_authority_fingerprint: str
+    compiled_authority: SpecAuthorityCompilationSuccess
 
 
 __all__ = [

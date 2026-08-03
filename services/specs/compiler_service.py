@@ -188,6 +188,10 @@ class SpecAuthorityCompilationError(TypeError):
         return cls(f"Spec authority compilation failed: {error} - {reason}")
 
 
+class AuthorityPersistenceError(ValueError):
+    """Raised when a precomputed authority cannot be persisted safely."""
+
+
 class UpdateSpecAuthorityInputError(ValueError):
     """Raised when update+compile input sources are ambiguous."""
 
@@ -3943,6 +3947,45 @@ def compile_spec_authority_for_version_in_session(
     )
 
 
+def persist_compiled_authority_for_version_in_session(
+    session: Session,
+    *,
+    spec_version_id: int,
+    compiled_authority: SpecAuthorityCompilationSuccess,
+    compiled_at: datetime,
+    force_recompile: bool = False,
+) -> int:
+    """Persist one validated, precomputed authority in the caller transaction."""
+    context = _load_compile_version_context(
+        session,
+        spec_version_id=spec_version_id,
+    )
+    if not isinstance(context, _CompilerVersionContext):
+        message = str(context.get("error") or "Authority context is unavailable.")
+        raise AuthorityPersistenceError(message)
+
+    expected_prompt_hash = compute_prompt_hash(SPEC_AUTHORITY_COMPILER_INSTRUCTIONS)
+    if (
+        compiled_authority.compiler_version != SPEC_AUTHORITY_COMPILER_VERSION
+        or compiled_authority.prompt_hash != expected_prompt_hash
+    ):
+        message = "Compiled authority metadata does not match the pinned compiler."
+        raise AuthorityPersistenceError(message)
+
+    persisted = _persist_compiled_authority(
+        session,
+        context=context,
+        spec_version_id=spec_version_id,
+        force_recompile=force_recompile,
+        success=compiled_authority,
+        compiled_at=compiled_at,
+    )
+    if isinstance(persisted, dict):
+        message = "Authority persistence failed."
+        raise AuthorityPersistenceError(message)
+    return persisted.authority_id
+
+
 def compile_spec_authority_for_version(
     params: dict[str, Any] | CompileSpecAuthorityForVersionInput | None = None,
     *,
@@ -4433,6 +4476,7 @@ def get_compiled_authority_by_version(
 
 
 __all__ = [
+    "AuthorityPersistenceError",
     "CheckSpecAuthorityStatusInput",
     "CompileSpecAuthorityForVersionInput",
     "GetCompiledAuthorityInput",
@@ -4445,6 +4489,7 @@ __all__ = [
     "ensure_accepted_spec_authority",
     "get_compiled_authority_by_version",
     "load_compiled_artifact",
+    "persist_compiled_authority_for_version_in_session",
     "preview_spec_authority",
     "update_spec_and_compile_authority",
 ]

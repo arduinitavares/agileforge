@@ -12,6 +12,7 @@ from workflow.contracts import (
     RecommendationKind,
 )
 from workflow.graph import (
+    AgenticExecutionSpec,
     ChildGraphSpec,
     NodeSpec,
     RuleCategory,
@@ -944,6 +945,11 @@ BROWNFIELD_ONBOARDING_NODES: tuple[NodeSpec, ...] = (
             ),
         ),
         evaluate_rule=_brownfield_curation_rule,
+        agentic_execution=AgenticExecutionSpec(
+            active_reason="BROWNFIELD_CURATION_ACTIVE",
+            failure_reason="BROWNFIELD_CURATION_FAILED",
+            recovery_reason="BROWNFIELD_CURATION_RECOVERY_REQUIRED",
+        ),
     ),
     NodeSpec(
         node_id="onboarding.brownfield.initial_spec_review",
