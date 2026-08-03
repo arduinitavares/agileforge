@@ -62,6 +62,10 @@ class _FakeReadApplication:
         self.calls.append(("project_show", {"project_id": project_id}))
         return _read_result("project-show")
 
+    def project_initial_spec(self, *, project_id: int) -> JsonObject:
+        self.calls.append(("project_initial_spec", {"project_id": project_id}))
+        return _read_result("project-initial-spec")
+
     def authority_status(self, *, project_id: int) -> JsonObject:
         self.calls.append(("authority_status", {"project_id": project_id}))
         return _read_result("authority-status")
@@ -528,6 +532,10 @@ def test_production_api_read_handlers_use_injected_non_routing_projection(
     [
         (["project", "list"], "project_list"),
         (["project", "show", "--project-id", "41"], "project_show"),
+        (
+            ["project", "initial-spec", "--project-id", "41"],
+            "project_initial_spec",
+        ),
         (["authority", "status", "--project-id", "41"], "authority_status"),
         (["authority", "review", "--project-id", "41"], "authority_review"),
         (["vision", "history", "--project-id", "41"], "artifact_history"),

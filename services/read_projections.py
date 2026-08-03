@@ -3,15 +3,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC
 from typing import TYPE_CHECKING, Protocol
 
-from pydantic import TypeAdapter
+from pydantic import TypeAdapter, ValidationError
 from sqlmodel import Session, col, select
 
 from models.core import Project, Sprint, UserStory
 from models.events import TaskExecutionLog
 from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance, SpecRegistry
-from models.workflow import WorkflowNodeAttempt, WorkflowNodeAttemptOutcome
+from models.workflow import (
+    DiscoveryRun,
+    SpecDraft,
+    WorkflowNodeAttempt,
+    WorkflowNodeAttemptOutcome,
+)
 from repositories.workflow import WorkflowFactLoadError, WorkflowFactRepository
 from services.agent_workbench.authority_projection import (
     AuthorityProjectionService,
@@ -25,6 +31,7 @@ from services.packets.canonical import (
 )
 from services.specs.compiler_service import load_compiled_artifact
 from workflow.contracts import JsonObject, JsonValue
+from workflow.fingerprints import canonical_hash
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -74,6 +81,44 @@ def _result_data(result: JsonObject) -> JsonObject:
     return data if isinstance(data, dict) else {}
 
 
+def _active_initial_spec_draft(drafts: list[SpecDraft]) -> SpecDraft | None:
+    """Return the sole leaf of one complete valid initial-draft chain."""
+    if any(
+        draft.spec_draft_id is None
+        or draft.kind != "initial"
+        or draft.base_spec_version_id is not None
+        or draft.base_spec_hash is not None
+        for draft in drafts
+    ):
+        return None
+    by_id = {
+        draft.spec_draft_id: draft
+        for draft in drafts
+        if draft.spec_draft_id is not None
+    }
+    if len(by_id) != len(drafts):
+        return None
+    referenced = {
+        draft.supersedes_spec_draft_id
+        for draft in drafts
+        if draft.supersedes_spec_draft_id is not None
+    }
+    leaves = [draft for draft in drafts if draft.spec_draft_id not in referenced]
+    if not referenced <= by_id.keys() or len(leaves) != 1:
+        return None
+    active = leaves[0]
+    visited: set[int] = set()
+    current: SpecDraft | None = active
+    while current is not None:
+        current_id = current.spec_draft_id
+        if current_id is None or current_id in visited:
+            return None
+        visited.add(current_id)
+        parent_id = current.supersedes_spec_draft_id
+        current = by_id.get(parent_id) if parent_id is not None else None
+    return active if len(visited) == len(drafts) else None
+
+
 @dataclass(frozen=True)
 class _ProjectReadContext:
     """One confirmed durable Project identity for a scoped read."""
@@ -87,6 +132,89 @@ class _ProjectReadFailure:
     """Typed missing-Project result shared by scoped projections."""
 
     error: JsonObject
+
+
+@dataclass(frozen=True)
+class _InitialSpecReadContext:
+    """The sole active initial draft and its discovery identity."""
+
+    discovery_run_id: int
+    draft: SpecDraft
+
+
+@dataclass(frozen=True)
+class _InitialSpecReadFailure:
+    """Typed initial-spec selection failure."""
+
+    error: JsonObject
+
+
+def _load_active_initial_spec(
+    engine: Engine,
+    *,
+    project_id: int,
+) -> _InitialSpecReadContext | _InitialSpecReadFailure:
+    """Load one unambiguous initial draft chain from durable records."""
+    with Session(engine) as session:
+        runs = list(
+            session.exec(
+                select(DiscoveryRun).where(
+                    col(DiscoveryRun.project_id) == project_id,
+                    col(DiscoveryRun.purpose) == "initial",
+                )
+            ).all()
+        )
+        if len(runs) > 1:
+            return _InitialSpecReadFailure(
+                _error(
+                    "INITIAL_SPEC_DRAFT_AMBIGUOUS",
+                    "The Project has an ambiguous initial discovery run.",
+                    project_id=project_id,
+                )
+            )
+        if not runs or runs[0].discovery_run_id is None:
+            return _InitialSpecReadFailure(
+                _error(
+                    "INITIAL_SPEC_DRAFT_NOT_FOUND",
+                    "The Project has no active initial specification draft.",
+                    project_id=project_id,
+                )
+            )
+        run_id = runs[0].discovery_run_id
+        drafts = list(
+            session.exec(
+                select(SpecDraft)
+                .where(
+                    col(SpecDraft.project_id) == project_id,
+                    col(SpecDraft.discovery_run_id) == run_id,
+                )
+                .order_by(
+                    col(SpecDraft.version_number),
+                    col(SpecDraft.spec_draft_id),
+                )
+            ).all()
+        )
+    if not drafts:
+        return _InitialSpecReadFailure(
+            _error(
+                "INITIAL_SPEC_DRAFT_NOT_FOUND",
+                "The Project has no active initial specification draft.",
+                project_id=project_id,
+                discovery_run_id=run_id,
+            )
+        )
+    active = _active_initial_spec_draft(drafts)
+    if active is None:
+        return _InitialSpecReadFailure(
+            _error(
+                "INITIAL_SPEC_DRAFT_AMBIGUOUS",
+                "The Project's initial specification draft chain is ambiguous.",
+                project_id=project_id,
+                discovery_run_id=run_id,
+                draft_count=len(drafts),
+            )
+        )
+    return _InitialSpecReadContext(discovery_run_id=run_id, draft=active)
 
 
 class _AuthorityReviewProjection(Protocol):
@@ -410,6 +538,58 @@ class DurableReadProjectionService:
                     "sprints": len(sprints),
                 },
                 "updated_at": _iso(project.updated_at),
+            }
+        )
+
+    def project_initial_spec(self, *, project_id: int) -> JsonObject:
+        """Return the sole active immutable initial draft for human review."""
+        context = self._project(project_id)
+        if isinstance(context, _ProjectReadFailure):
+            return context.error
+        active_context = _load_active_initial_spec(self._engine, project_id=project_id)
+        if isinstance(active_context, _InitialSpecReadFailure):
+            return active_context.error
+        active = active_context.draft
+        try:
+            canonical_content = _JSON_OBJECT.validate_json(
+                active.canonical_content_json
+            )
+        except ValidationError:
+            return _error(
+                "INITIAL_SPEC_DRAFT_INVALID",
+                "The active initial specification content is not canonical JSON.",
+                project_id=project_id,
+                spec_draft_id=active.spec_draft_id,
+            )
+        if canonical_hash(canonical_content) != active.content_fingerprint:
+            return _error(
+                "INITIAL_SPEC_DRAFT_INVALID",
+                "The active initial specification fingerprint does not match content.",
+                project_id=project_id,
+                spec_draft_id=active.spec_draft_id,
+            )
+        created_at = active.created_at
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=UTC)
+        timestamp = created_at.isoformat()
+        return _success(
+            {
+                "schema_version": "agileforge.initial_spec_projection.v1",
+                "project": {
+                    "project_id": project_id,
+                    "name": context.project.name,
+                },
+                "active_draft": {
+                    "spec_draft_id": active.spec_draft_id,
+                    "discovery_run_id": active_context.discovery_run_id,
+                    "kind": active.kind,
+                    "version_number": active.version_number,
+                    "canonical_content": canonical_content,
+                    "content_fingerprint": active.content_fingerprint,
+                    "provenance_path": active.provenance_path,
+                    "created_at": timestamp,
+                    "updated_at": timestamp,
+                },
             }
         )
 

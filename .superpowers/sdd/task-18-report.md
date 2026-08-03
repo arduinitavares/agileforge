@@ -2,99 +2,193 @@
 
 ## Verdict
 
-PASS. The Operator-run acceptance package is implemented. Acceptance execution
-has not started: caRtola, ASA, and MyFinance remain `not_run`.
+PASS for the Task 18 review fix loop. The Operator-run package is prepared, but
+acceptance execution has not started: caRtola, ASA, and MyFinance remain
+`not_run`. This report makes no external-repository pass claim.
 
 ## Scope
 
-Starting HEAD:
+Original Task 18 base:
 `cb3e32c4144866e81bf367f073984905abce77e9`
 
-Task 18 changed only:
+Review-fix starting HEAD:
+`6031483e4aa3c419bf213b57804d869d0b6511f4`
 
+All four Important findings and the Minor finding in
+`.superpowers/sdd/task-18-review.md` were treated as valid. The fix loop changes:
+
+- `services/read_projections.py`
+- `services/application.py`
+- `cli/main.py`
+- `docs/agent-cli-manual.md`
 - `docs/testing/workflow-graph-acceptance-checklist.md`
+- `tests/adapters/test_initial_spec_read.py`
+- `tests/adapters/test_production_read_surfaces.py`
 - `tests/test_workflow_acceptance_document.py`
-- `README.md`
 - `.superpowers/sdd/task-18-report.md`
 
-No command inspected deeply, edited, branched, created a worktree in, or mutated
-caRtola, ASA, MyFinance, or another external repository. No AgileForge
-acceptance command or provider-backed action ran.
+The existing `README.md` checklist link remains present and contract-tested.
+
+No command accessed, inspected deeply, edited, branched, created a worktree in,
+or otherwise mutated caRtola, ASA, MyFinance, or another external repository.
+No provider, network workflow, persistent database, acceptance command, or Task
+19 work ran. Tests used only temporary or in-memory databases.
+
+## Review Fixes
+
+### Initial-Spec Read
+
+`agileforge project initial-spec --project-id <id>` is now a supported
+facts-only read across the durable projection, production application port, and
+CLI parser/handler. It returns the exact active initial-draft ID, canonical
+content, content fingerprint, discovery provenance, and immutable
+created/updated timestamp. It authors no routing decision or command.
+
+The projection uses the graph's complete-chain selection rules and verifies the
+persisted content hash. Typed failures cover missing Project, missing active
+draft, ambiguous draft chain, malformed content, and hash mismatch. Tests prove
+the returned ID/hash/content are the values referenced by the available human
+decision and accepted by its guarded request payload.
+
+### Pinned Operator Procedure
+
+Every schema, read, and mutation instruction now starts from the literal
+reviewed worktree and uses `uv run --frozen`. The checklist requires a recorded
+SHA equality check before every CLI invocation and restart boundary. It pins the
+business DB, separate ADK trace DB, model config, actor, and all run values.
+
+Restart means two independent one-shot CLI processes with identical pins and
+recorded timestamps. The trace reset can delete only a separately configured
+disposable trace file inside the acceptance temp root after path inequality and
+inactive-process checks. The durable DB remains untouched and no session command
+is invented.
+
+### Correlated Evidence And Command Safety
+
+The Task 18 top-level YAML keys remain exact. `steps` is now authoritative, with
+one complete record for repository, phase/status/timestamps, graph command
+metadata, substitutions, exact argv/result, before/after positions and guards,
+authority/model identity, verification, artifacts, and structured failure.
+Statuses are `not_run`, `passed`, `failed`, and `blocked`; the prepared overall
+status remains `not_run`.
+
+The Operator records the returned template, substitutes only declared values,
+and records the executed argv. A new idempotency key is required for each
+distinct request. The stale probe reruns the successful original template with
+only a new key while preserving old guards and requires rejection with no second
+mutation.
+
+### Structural Documentation Contract
+
+The validator requires exact section headings/order and section-scoped
+preflight, caRtola, ASA, MyFinance, stale-probe, restart, trace-reset, evidence,
+and stop-boundary contracts. It parses YAML and validates the complete nested
+step schema and status enum. The adversarial keyword-only document is rejected.
+All literal wrapped AgileForge examples parse through the live parser.
 
 ## TDD Evidence
 
 ### RED
 
-The documentation-contract test was created before the checklist or README
-update.
+The initial-spec tests were written before the production read surface:
+
+```text
+uv run --frozen pytest tests/adapters/test_initial_spec_read.py -q
+5 failed, 4 warnings in 1.19s
+```
+
+All failures were caused by the missing projection/parser contract.
+
+The strengthened checklist validator was run against the reviewed document
+before its rewrite:
 
 ```text
 uv run --frozen pytest tests/test_workflow_acceptance_document.py -q
-7 failed, 5 warnings in 0.99s
+2 failed, 2 passed, 5 warnings in 0.85s
 ```
 
-Six failures were the expected missing-checklist `FileNotFoundError`. The seventh
-was the expected missing README link assertion.
+The real checklist failed exact structure and pinned-command requirements; the
+adversarial document was already rejected.
+
+A final structural assertion for explicit repository-level result handling was
+also added before its prose:
+
+```text
+uv run --frozen pytest tests/test_workflow_acceptance_document.py -q
+1 failed, 3 passed, 5 warnings in 0.92s
+```
+
+It passed 4/4 after defining that only complete returned evidence can establish
+`passed`, a concrete required-step failure establishes `failed`, and incomplete
+evidence remains `not_run`.
+
+The CLI-manual contract was then added before its documentation update:
+
+```text
+uv run --frozen pytest \
+  tests/adapters/test_initial_spec_read.py::test_agent_cli_manual_names_initial_spec_read -q
+1 failed, 4 warnings in 0.77s
+```
 
 ### GREEN
 
-The first checklist implementation produced `5 passed, 2 failed`; both remaining
-failures were required literal phrase wrapping/case mismatches. After correcting
-the document, the focused contract passed. The final focused run was:
+Read, production transport, command renderer, CLI, durable replay, and complete
+checklist/adversarial contracts:
+
+```text
+uv run --frozen pytest \
+  tests/adapters/test_initial_spec_read.py \
+  tests/adapters/test_production_read_surfaces.py \
+  tests/adapters/test_command_renderer.py \
+  tests/adapters/test_cli_workflow_domain.py \
+  tests/adapters/test_adk_workflow_runner.py \
+  tests/workflow/test_transition_idempotency.py \
+  tests/test_workflow_acceptance_document.py -q
+65 passed, 16 warnings in 6.07s
+```
+
+The exact required document command passes independently:
 
 ```text
 uv run --frozen pytest tests/test_workflow_acceptance_document.py -q
-7 passed, 5 warnings in 0.92s
+4 passed, 5 warnings
 ```
 
-The seven tests cover:
-
-- exactly the three selected repository roots;
-- the verbatim MyFinance feature statement, synthetic-only evidence, isolated
-  test environment, and Operator ownership;
-- exact base evidence keys plus parseable per-step command/result/guard/failure
-  YAML;
-- `not_run` and the Task 19 stop boundary, with no per-repository pass claim;
-- current WorkflowDomain/guard/facts-only-read wording and forbidden command
-  absence;
-- every literal checklist `agileforge` example parsed through the live parser;
-- the README checklist link.
-
-## CLI And Runtime Evidence
-
-Live help was checked successfully for:
+Live parser help succeeds:
 
 ```text
-uv run --frozen agileforge --help
-uv run --frozen agileforge project create --help
-uv run --frozen agileforge workflow position --help
-uv run --frozen agileforge workflow next --help
-uv run --frozen agileforge authority review --help
+uv run --frozen agileforge project initial-spec --help
+usage: agileforge project initial-spec [-h] --project-id PROJECT_ID
 ```
 
-The checklist uses the current Project Shell contract, WorkflowDomain
-`position`/`next`, graph/fact/decision/instance guards, graph-returned commands,
-and facts-only reads. It does not author task-specific mutation commands.
+Node tests were not run because no frontend or Node source/test changed.
 
-The fresh-schema instruction is backed by the current `agile_sqlmodel.py`
-entrypoint and separate `AGILEFORGE_DB_URL` configuration. The test-only ADK
-trace reset is bounded to the separately configured
-`AGILEFORGE_ADK_EXECUTION_TRACE_DB_URL`; no session deletion command was
-invented.
+## Hard-Break Evidence
+
+Targeted Task 17 routing/review-residue and forbidden legacy-command scans
+returned zero matches. The Task 16 command-renderer, CLI graph, ADK replay, and
+transition-idempotency tests are included in the 65-test focused gate and the
+full suite.
+
+Static checks before the full gate:
+
+```text
+uv run --frozen ruff check <touched-python-files>
+All checks passed!
+
+uv run --frozen ty check
+All checks passed!
+```
 
 ## Full Verification
-
-The first full gate found seven Ruff D103 errors in the new public test functions.
-All 1,804 selected tests passed during that run, but the gate correctly returned
-failure. Test docstrings were added and the complete gate was rerun.
 
 ```text
 uv run --frozen pyrepo-check --all
 Ruff: pass
 annotation checks: pass
 ty: pass
-Bandit: 0 issues across 121,395 lines of code
-pytest: 1,804 passed, 2 skipped, 2 deselected, 17 warnings in 107.91s
+Bandit: 0 issues across 122,154 lines of code
+pytest: 1,808 passed, 2 skipped, 2 deselected, 17 warnings
 ```
 
 ```text
@@ -102,15 +196,14 @@ git diff --check
 clean
 ```
 
-Warnings are the existing ADK/Pydantic, Starlette/httpx, resumability, and
-network-guard warnings. They caused no failures.
+Warnings are existing Pydantic/ADK, Starlette/httpx, resumability, and guarded
+network-test warnings. They caused no failures.
 
-## Stop Boundary And Concern
+## Stop Boundary And Concerns
 
-Checklist preparation is not acceptance execution. No evidence supports a pass
-claim for caRtola, ASA, or MyFinance. Task 19 must not start until the Operator
-returns completed evidence or a concrete acceptance failure.
+Checklist preparation is not acceptance execution. The package still requires
+independent review, then Operator execution and returned evidence. Task 19 must
+not start before that evidence or one concrete acceptance failure is returned.
 
-An independent Task 18 review is still the next gate. This implementation worker
-did not represent self-review as independent review. After that review accepts
-the package, hand the checklist to the Operator and stop at the plan boundary.
+No implementation blocker remains. External acceptance status is deliberately
+`not_run` for all three repositories.

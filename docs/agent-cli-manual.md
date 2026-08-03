@@ -133,12 +133,20 @@ Read commands do not advance the workflow. Useful current projections include:
 ```sh
 agileforge project list
 agileforge project show --project-id 41
+agileforge project initial-spec --project-id 41
 agileforge authority status --project-id 41
 agileforge authority invariants --project-id 41
 agileforge authority review --project-id 41
 agileforge workflow position --project-id 41
 agileforge workflow next --project-id 41
 ```
+
+`project initial-spec` returns the exact active curated initial-spec draft ID,
+its canonical content and `content_fingerprint`, discovery provenance, and
+created/updated timestamps. It fails with a typed validation error when the
+Project is absent, no active draft exists, or the active draft is ambiguous.
+This is a facts-only, non-routing read: it returns no commands,
+recommendations, decision authorship, or process/session state.
 
 Artifact history and Project-specific reads remain available through
 `agileforge --help` and nested `--help` output. A read result is evidence, not a

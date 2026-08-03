@@ -48,6 +48,8 @@ class _ReadProjection(Protocol):
 
     def project_show(self, *, project_id: int) -> JsonObject: ...
 
+    def project_initial_spec(self, *, project_id: int) -> JsonObject: ...
+
     def authority_status(self, *, project_id: int) -> JsonObject: ...
 
     def authority_invariants(
@@ -379,6 +381,9 @@ def build_parser() -> argparse.ArgumentParser:
     project_show = project_sub.add_parser("show")
     project_show.add_argument("--project-id", type=int, required=True)
     project_show.set_defaults(command_handler=_project_show)
+    project_initial_spec = project_sub.add_parser("initial-spec")
+    project_initial_spec.add_argument("--project-id", type=int, required=True)
+    project_initial_spec.set_defaults(command_handler=_project_initial_spec)
     create = project_sub.add_parser("create")
     create.add_argument("--name", required=True)
     create.add_argument("--origin", choices=("greenfield", "brownfield"), required=True)
@@ -424,6 +429,15 @@ def _project_list(_args: argparse.Namespace, application: _Application) -> int:
 
 def _project_show(args: argparse.Namespace, application: _Application) -> int:
     return _emit_read(application.reads.project_show(project_id=args.project_id))
+
+
+def _project_initial_spec(
+    args: argparse.Namespace,
+    application: _Application,
+) -> int:
+    return _emit_read(
+        application.reads.project_initial_spec(project_id=args.project_id)
+    )
 
 
 def _authority_status(args: argparse.Namespace, application: _Application) -> int:
