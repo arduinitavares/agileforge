@@ -624,7 +624,11 @@ class AuthorityDecisionRunner:
             ),
         )
         for field_name, expected, actual in comparisons:
-            if expected is not None and expected != actual:
+            compare_optional_path = (
+                request.review_token is None
+                and field_name == "expected_resolved_spec_path"
+            )
+            if (expected is not None or compare_optional_path) and expected != actual:
                 return _stale_guard_error(
                     command=command,
                     field_name=field_name,
@@ -1317,7 +1321,6 @@ def _missing_explicit_guards(
         "expected_authority_fingerprint",
         "expected_source_spec_hash",
         "expected_disk_spec_hash",
-        "expected_resolved_spec_path",
         "expected_state",
         "expected_setup_status",
     ]

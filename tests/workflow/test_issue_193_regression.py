@@ -19,6 +19,7 @@ from models.specs import (
 from models.workflow import (
     BacklogArtifactDecision,
     DiscoveryRun,
+    PostSprintTriage,
     RoadmapArtifactDecision,
     ScopeExtensionReconciliation,
     ScopeExtensionRegistration,
@@ -59,20 +60,25 @@ from tests.workflow.test_scope_extension_transitions import (
     seed_terminal_project,
     start_extension,
 )
+from tests.workflow.test_vision_backlog_transitions import _vision_content
 from workflow.contracts import (
     FactReference,
     NodeCategory,
     NodeDecision,
     RecommendationKind,
     WorkflowErrorCode,
+    WorkflowPosition,
 )
 from workflow.definitions.root import project_graph
 from workflow.fingerprints import canonical_hash, canonical_json
 from workflow.requests import (
     CompileAuthority,
     DecideAuthority,
+    DecideVision,
     ReconcileScopeExtension,
+    RecordPostSprintTriage,
     ScopeExtensionArtifactReference,
+    StartScopeExtension,
 )
 
 if TYPE_CHECKING:
@@ -81,7 +87,7 @@ if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
 
     from workflow.domain import WorkflowDomain
-    from workflow.requests import RegisterScopeExtension, StartScopeExtension
+    from workflow.requests import RegisterScopeExtension
 
 
 @dataclass(frozen=True)
@@ -343,6 +349,63 @@ def _reconcile_request(
     )
 
 
+def _start_request_for_position(
+    context: _AcceptedReplacement,
+    position: WorkflowPosition,
+    *,
+    fallback: NodeDecision,
+    idempotency_key: str,
+) -> StartScopeExtension:
+    """Build a direct start attempt even when the current node is suppressed."""
+    current = next(
+        (
+            item
+            for item in position.decisions
+            if item.node_id == "scope_extension.start" and item.instance_key is None
+        ),
+        None,
+    )
+    assert context.replacement.spec_version_id is not None
+    return StartScopeExtension(
+        project_id=context.project_id,
+        graph_version=position.graph_version,
+        fact_fingerprint=position.fact_fingerprint,
+        decision_fingerprint=(
+            current.decision_fingerprint
+            if current is not None
+            else fallback.decision_fingerprint
+        ),
+        instance_key=None,
+        idempotency_key=idempotency_key,
+        actor="operator@example.com",
+        correlation_id="task-13-second-review",
+        base_spec_version_id=context.replacement.spec_version_id,
+        base_spec_hash=context.replacement.spec_hash,
+    )
+
+
+def _discovery_run_count(engine: Engine, project_id: int) -> int:
+    with Session(engine) as session:
+        return len(
+            session.exec(
+                select(DiscoveryRun).where(col(DiscoveryRun.project_id) == project_id)
+            ).all()
+        )
+
+
+def _assert_fresh_optional_start(
+    context: _AcceptedReplacement,
+    previous: NodeDecision,
+) -> NodeDecision:
+    position = context.domain.position(context.project_id)
+    start = _decision(position, "scope_extension.start")
+    assert position.terminal is True
+    assert start.category is NodeCategory.AVAILABLE
+    assert start.recommendation_kind is RecommendationKind.OPTIONAL_REENTRY
+    assert start.decision_fingerprint != previous.decision_fingerprint
+    return start
+
+
 def _set_artifact_review_state(
     session: Session,
     *,
@@ -514,9 +577,7 @@ def _append_vision_review_state(
         )
     ).one()
     assert current.vision_artifact_id is not None
-    payload = json.loads(current.canonical_content_json)
-    assert isinstance(payload, dict)
-    payload["review_scope"] = "Review newly added replacement scope."
+    payload = _vision_content("Review newly added replacement scope.")
     fingerprint = canonical_hash(payload)
     replacement = VisionArtifact(
         project_id=context.project_id,
@@ -930,6 +991,259 @@ def test_newer_vision_work_after_reconciliation_is_not_masked(
         RecommendationKind.RECOVERY,
     }
     assert position.terminal is False
+
+
+def test_pending_vision_suppresses_scope_start_until_reviewed(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Permit optional scope re-entry only after current Vision work resolves."""
+    context = _accepted_replacement(
+        engine,
+        monkeypatch,
+        provenance_path=tmp_path / "terminal-only-vision.json",
+    )
+    reconciled = context.domain.transition(
+        _reconcile_request(
+            context,
+            authority_id=context.replacement_authority_id,
+            authority_fingerprint=context.replacement_authority_fingerprint,
+            idempotency_key="task-13-terminal-only-reconcile-vision",
+        )
+    )
+    assert reconciled.ok is True
+    terminal_start = _decision(
+        context.domain.position(context.project_id),
+        "scope_extension.start",
+    )
+
+    with Session(engine) as session:
+        vision_id = _append_vision_review_state(
+            session,
+            context=context,
+            decision="pending",
+        )
+        session.commit()
+
+    pending = context.domain.position(context.project_id)
+    visible = _decision(pending, "vision.review")
+    current_attempt = _start_request_for_position(
+        context,
+        pending,
+        fallback=terminal_start,
+        idempotency_key="task-13-start-during-pending-vision",
+    )
+    before_runs = _discovery_run_count(engine, context.project_id)
+    rejected_current = context.domain.transition(current_attempt)
+    assert rejected_current.ok is False
+    assert rejected_current.error is not None
+    assert rejected_current.error.code in {
+        WorkflowErrorCode.STALE_POSITION,
+        WorkflowErrorCode.TRANSITION_NOT_AVAILABLE,
+    }
+    rejected_old = context.domain.transition(
+        context.old_start_request.model_copy(
+            update={"idempotency_key": "task-13-old-start-during-pending-vision"}
+        )
+    )
+    assert rejected_old.ok is False
+    assert rejected_old.error is not None
+    assert rejected_old.error.code is WorkflowErrorCode.STALE_POSITION
+    assert _discovery_run_count(engine, context.project_id) == before_runs
+    assert visible.category is NodeCategory.WAITING
+    assert pending.terminal is False
+    assert not any(
+        item.node_id == "scope_extension.start" for item in pending.decisions
+    )
+
+    with Session(engine) as session:
+        vision = session.get(VisionArtifact, vision_id)
+        assert vision is not None
+        accepted_fingerprint = vision.content_fingerprint
+    accepted = context.domain.transition(
+        DecideVision(
+            **_guards(context.domain, context.project_id, "vision.review"),
+            idempotency_key="task-13-accept-current-vision",
+            vision_artifact_id=vision_id,
+            artifact_fingerprint=accepted_fingerprint,
+            decision="accepted",
+            rationale="Current replacement-scope Vision is accepted.",
+        )
+    )
+    assert accepted.ok is True, accepted.error
+    _assert_fresh_optional_start(context, terminal_start)
+
+
+def test_unresolved_readiness_suppresses_scope_start_until_repaired(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Restore optional scope re-entry only after current Story readiness."""
+    context = _accepted_replacement(
+        engine,
+        monkeypatch,
+        provenance_path=tmp_path / "terminal-only-readiness.json",
+    )
+    reconciled = context.domain.transition(
+        _reconcile_request(
+            context,
+            authority_id=context.replacement_authority_id,
+            authority_fingerprint=context.replacement_authority_fingerprint,
+            idempotency_key="task-13-terminal-only-reconcile-readiness",
+        )
+    )
+    assert reconciled.ok is True
+    terminal_start = _decision(
+        context.domain.position(context.project_id),
+        "scope_extension.start",
+    )
+
+    with Session(engine) as session:
+        story = session.exec(
+            select(UserStory).where(col(UserStory.product_id) == context.project_id)
+        ).one()
+        assert story.story_id is not None
+        story_id = story.story_id
+        assert story.story_points is not None
+        original_story_points = story.story_points
+        story.story_points = None
+        session.add(story)
+        session.commit()
+    pending = context.domain.position(context.project_id)
+    current_attempt = _start_request_for_position(
+        context,
+        pending,
+        fallback=terminal_start,
+        idempotency_key="task-13-start-during-readiness-repair",
+    )
+    before_runs = _discovery_run_count(engine, context.project_id)
+    rejected = context.domain.transition(current_attempt)
+    assert rejected.ok is False
+    assert rejected.error is not None
+    assert rejected.error.code in {
+        WorkflowErrorCode.STALE_POSITION,
+        WorkflowErrorCode.TRANSITION_NOT_AVAILABLE,
+    }
+    assert _discovery_run_count(engine, context.project_id) == before_runs
+    assert pending.terminal is False
+    assert _decision(pending, "planning.story_readiness").category is (
+        NodeCategory.AVAILABLE
+    )
+    assert not any(
+        item.node_id == "scope_extension.start" for item in pending.decisions
+    )
+
+    with Session(engine) as session:
+        story = session.get(UserStory, story_id)
+        assert story is not None
+        story.story_points = original_story_points
+        session.add(story)
+        session.commit()
+    with Session(engine) as session:
+        triage = session.exec(
+            select(PostSprintTriage).where(
+                col(PostSprintTriage.project_id) == context.project_id
+            )
+        ).one()
+        sprint_id = triage.sprint_id
+    correction = context.domain.transition(
+        RecordPostSprintTriage(
+            **_guards(
+                context.domain,
+                context.project_id,
+                "execution.post_sprint_triage",
+                f"sprint:{sprint_id}",
+            ),
+            idempotency_key="task-13-readiness-triage-correction",
+            sprint_id=sprint_id,
+            impact="none",
+            canonical_payload={
+                "summary": "Story readiness repair restored accepted planning facts."
+            },
+        )
+    )
+    assert correction.ok is True
+    _assert_fresh_optional_start(context, terminal_start)
+
+
+def test_pending_triage_suppresses_scope_start_until_recorded(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Compose execution triage into terminal-only optional re-entry."""
+    context = _accepted_replacement(
+        engine,
+        monkeypatch,
+        provenance_path=tmp_path / "terminal-only-triage.json",
+    )
+    reconciled = context.domain.transition(
+        _reconcile_request(
+            context,
+            authority_id=context.replacement_authority_id,
+            authority_fingerprint=context.replacement_authority_fingerprint,
+            idempotency_key="task-13-terminal-only-reconcile-triage",
+        )
+    )
+    assert reconciled.ok is True
+    terminal_start = _decision(
+        context.domain.position(context.project_id),
+        "scope_extension.start",
+    )
+
+    with Session(engine) as session:
+        triage = session.exec(
+            select(PostSprintTriage).where(
+                col(PostSprintTriage.project_id) == context.project_id
+            )
+        ).one()
+        sprint_id = triage.sprint_id
+        session.delete(triage)
+        session.commit()
+
+    pending = context.domain.position(context.project_id)
+    triage_decision = _decision(
+        pending,
+        "execution.post_sprint_triage",
+        f"sprint:{sprint_id}",
+    )
+    current_attempt = _start_request_for_position(
+        context,
+        pending,
+        fallback=terminal_start,
+        idempotency_key="task-13-start-during-pending-triage",
+    )
+    before_runs = _discovery_run_count(engine, context.project_id)
+    rejected = context.domain.transition(current_attempt)
+    assert rejected.ok is False
+    assert rejected.error is not None
+    assert rejected.error.code in {
+        WorkflowErrorCode.STALE_POSITION,
+        WorkflowErrorCode.TRANSITION_NOT_AVAILABLE,
+    }
+    assert _discovery_run_count(engine, context.project_id) == before_runs
+    assert triage_decision.category is NodeCategory.AVAILABLE
+    assert pending.terminal is False
+    assert "scope_extension.start" not in pending.available_nodes
+
+    triaged = context.domain.transition(
+        RecordPostSprintTriage(
+            **_guards(
+                context.domain,
+                context.project_id,
+                "execution.post_sprint_triage",
+                f"sprint:{sprint_id}",
+            ),
+            idempotency_key="task-13-record-current-triage",
+            sprint_id=sprint_id,
+            impact="none",
+            canonical_payload={"summary": "Current execution is triaged."},
+        )
+    )
+    assert triaged.ok is True
+    _assert_fresh_optional_start(context, terminal_start)
 
 
 def test_issue_193_old_extension_actions_are_stale_after_completed_run(

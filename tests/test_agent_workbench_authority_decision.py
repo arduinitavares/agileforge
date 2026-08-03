@@ -1267,6 +1267,78 @@ def test_explicit_reject_allows_missing_completeness_guards(
     assert result["ok"] is True
 
 
+@pytest.mark.parametrize("decision", ["accept", "reject"])
+def test_explicit_decision_allows_missing_provenance_path(
+    session: Session,
+    tmp_path: Path,
+    decision: str,
+) -> None:
+    """Treat a stored-content snapshot with no provenance as fully guarded."""
+    _make_schema_v3_ready(_engine(session))
+    project_id, spec_version_id, _authority_id, _path = _seed_pending_review_project(
+        session,
+        tmp_path=tmp_path,
+        spec_filename=f"explicit-none-{decision}.json",
+    )
+    spec = session.get(SpecRegistry, spec_version_id)
+    assert spec is not None
+    spec.content_ref = None
+    session.add(spec)
+    session.commit()
+    snapshot = _snapshot(session, project_id)
+    assert snapshot.resolved_spec_path is None
+
+    runner = _runner(session, _workflow_for(project_id))
+    result = (
+        runner.accept(
+            _explicit_accept_request(
+                snapshot,
+                idempotency_key="explicit-none-accept",
+            )
+        )
+        if decision == "accept"
+        else runner.reject(
+            _explicit_reject_request(
+                snapshot,
+                idempotency_key="explicit-none-reject",
+            )
+        )
+    )
+
+    assert result["ok"] is True
+    assert [item.status for item in _terminal_rows(session)] == [
+        "accepted" if decision == "accept" else "rejected"
+    ]
+
+
+def test_explicit_none_provenance_rejects_stored_path_mismatch(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """Compare an explicit None path against non-None stored provenance."""
+    _make_schema_v3_ready(_engine(session))
+    project_id, _spec_version_id, _authority_id, _path = _seed_pending_review_project(
+        session,
+        tmp_path=tmp_path,
+        spec_filename="explicit-none-mismatch.json",
+    )
+    snapshot = _snapshot(session, project_id)
+    assert snapshot.resolved_spec_path is not None
+
+    result = _runner(session, _workflow_for(project_id)).reject(
+        _explicit_reject_request(
+            snapshot,
+            idempotency_key="explicit-none-mismatch",
+            expected_resolved_spec_path=None,
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "AUTHORITY_SOURCE_CHANGED"
+    assert result["errors"][0]["details"]["field"] == ("expected_resolved_spec_path")
+    assert _terminal_rows(session) == []
+
+
 def test_accept_after_reject_fails_authority_already_decided(
     session: Session,
     tmp_path: Path,

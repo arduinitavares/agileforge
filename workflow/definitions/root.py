@@ -163,6 +163,68 @@ _ROOT_BACKLOG_NODES: tuple[NodeSpec, ...] = tuple(
 _ROOT_PLANNING_NODES: tuple[NodeSpec, ...] = tuple(
     _scope_aware_lifecycle_node(node) for node in PLANNING_NODES
 )
+_ROOT_ONBOARDING_NODES: tuple[NodeSpec, ...] = (
+    *GREENFIELD_ONBOARDING_NODES[:-1],
+    *BROWNFIELD_ONBOARDING_NODES,
+    GREENFIELD_ONBOARDING_NODES[-1],
+    _ABANDON_SHELL_NODE,
+)
+_ROOT_NON_SCOPE_NODES: tuple[NodeSpec, ...] = (
+    *_ROOT_ONBOARDING_NODES,
+    *AUTHORITY_NODES,
+    *_ROOT_VISION_NODES,
+    *_ROOT_BACKLOG_NODES,
+    *_ROOT_PLANNING_NODES,
+    *EXECUTION_NODES,
+)
+
+
+def _project_is_otherwise_terminal(
+    snapshot: WorkflowFactSnapshot,
+    evaluated_at: datetime,
+) -> bool:
+    """Return whether every non-scope required or recovery rule is satisfied."""
+    for node in _ROOT_NON_SCOPE_NODES:
+        for evaluation in node.evaluate_rule(snapshot, evaluated_at):
+            recommendation = evaluation.recommendation_kind or node.recommendation_kind
+            if evaluation.category is not RuleCategory.SATISFIED and recommendation in {
+                RecommendationKind.REQUIRED,
+                RecommendationKind.RECOVERY,
+            }:
+                return False
+    return True
+
+
+def _terminal_only_scope_start_node(node: NodeSpec) -> NodeSpec:
+    """Expose optional scope re-entry only at the root terminal boundary."""
+
+    def evaluate_rule(
+        snapshot: WorkflowFactSnapshot,
+        evaluated_at: datetime,
+    ) -> tuple[RuleEvaluation, ...]:
+        evaluations = node.evaluate_rule(snapshot, evaluated_at)
+        if not any(
+            evaluation.category is RuleCategory.AVAILABLE for evaluation in evaluations
+        ):
+            return evaluations
+        if _project_is_otherwise_terminal(snapshot, evaluated_at):
+            return evaluations
+        return (
+            RuleEvaluation(
+                category=RuleCategory.SATISFIED,
+                reason_code="PROJECT_NOT_TERMINAL",
+            ),
+        )
+
+    return replace(node, evaluate_rule=evaluate_rule)
+
+
+_ROOT_SCOPE_EXTENSION_NODES: tuple[NodeSpec, ...] = tuple(
+    _terminal_only_scope_start_node(node)
+    if node.node_id == "scope_extension.start"
+    else node
+    for node in SCOPE_EXTENSION_NODES
+)
 
 ROOT_GRAPH: WorkflowGraph = WorkflowGraph(
     graph_version=GRAPH_VERSION,
@@ -172,12 +234,7 @@ ROOT_GRAPH: WorkflowGraph = WorkflowGraph(
         children=(
             ChildGraphSpec(
                 child_graph_id="onboarding",
-                nodes=(
-                    *GREENFIELD_ONBOARDING_NODES[:-1],
-                    *BROWNFIELD_ONBOARDING_NODES,
-                    GREENFIELD_ONBOARDING_NODES[-1],
-                    _ABANDON_SHELL_NODE,
-                ),
+                nodes=_ROOT_ONBOARDING_NODES,
             ),
             ChildGraphSpec(child_graph_id="authority", nodes=AUTHORITY_NODES),
             ChildGraphSpec(child_graph_id="vision", nodes=_ROOT_VISION_NODES),
@@ -189,7 +246,7 @@ ROOT_GRAPH: WorkflowGraph = WorkflowGraph(
             ChildGraphSpec(child_graph_id="execution", nodes=EXECUTION_NODES),
             ChildGraphSpec(
                 child_graph_id="scope_extension",
-                nodes=SCOPE_EXTENSION_NODES,
+                nodes=_ROOT_SCOPE_EXTENSION_NODES,
             ),
         ),
     ),
