@@ -38,6 +38,7 @@ from cli.dev_profiles import (
 )
 from cli.dev_server import (
     LOOPBACK_HOST,
+    ExpectedUIRuntime,
     UIChild,
     UIReadinessError,
     select_loopback_port,
@@ -70,6 +71,7 @@ _JSON_OBJECT = TypeAdapter(JsonObject)
 _INVALID_PRODUCTION_OUTPUT = "invalid_production_cli_output"
 _CREDENTIAL_ARGUMENT_ERROR = "forwarded CLI arguments contain provider credential"
 _AUTO_UI_ATTEMPTS = 3
+_JSON_RELOAD_ERROR = "--json cannot be combined with --reload"
 
 
 class ExitCode(IntEnum):
@@ -734,13 +736,27 @@ def _ephemeral_profile_name(parent_name: str) -> str:
     return f"{parent_name[: 64 - len(suffix)]}{suffix}"
 
 
-def _ui_profile(
+def _profile_handoff(_profile: RuntimeProfile) -> None:
+    """Injection boundary after profile acquisition and before publication."""
+
+
+def _reset_profile_if_present(checkout_root: Path, profile_name: str) -> None:
+    paths = profile_paths(checkout_root, profile_name)
+    try:
+        paths.root.lstat()
+    except FileNotFoundError:
+        return
+    reset_profile(checkout_root, profile_name, profile_name)
+
+
+@contextmanager
+def _managed_ui_profile(
     *,
     checkout_root: Path,
     request: UiRequest,
     runner: CommandRunner,
     clock: Clock,
-) -> tuple[RuntimeProfile, str, str | None]:
+) -> Iterator[tuple[RuntimeProfile, str]]:
     parent = load_profile(checkout_root, request.profile_name)
     _verify_business_schema(parent.business_database)
     current_commit = _current_commit(runner, checkout_root)
@@ -750,20 +766,33 @@ def _ui_profile(
             request.profile_name,
             now=clock.now(),
         )
-        return profile, current_commit, None
+        yield profile, current_commit
+        return
 
     child_name = _ephemeral_profile_name(request.profile_name)
-    result = _initialize_profile(
-        checkout_root=checkout_root,
-        request=InitRequest(
-            profile_name=child_name,
-            mode=ProfileMode.ACCEPTANCE,
-            expected_commit=current_commit,
-        ),
-        runner=runner,
-        clock=clock,
-    )
-    return result.profile, current_commit, child_name
+    child_paths = profile_paths(checkout_root, child_name)
+    try:
+        child_paths.root.lstat()
+    except FileNotFoundError:
+        pass
+    else:
+        message = f"ephemeral profile root already exists: {child_paths.root}"
+        raise DeveloperCommandError(message)
+    try:
+        result = _initialize_profile(
+            checkout_root=checkout_root,
+            request=InitRequest(
+                profile_name=child_name,
+                mode=ProfileMode.ACCEPTANCE,
+                expected_commit=current_commit,
+            ),
+            runner=runner,
+            clock=clock,
+        )
+        _profile_handoff(result.profile)
+        yield result.profile, current_commit
+    finally:
+        _reset_profile_if_present(checkout_root, child_name)
 
 
 def _emit_ui_ready(
@@ -810,36 +839,71 @@ def _sigterm_as_interrupt() -> Iterator[None]:
         signal.signal(signal.SIGTERM, previous)
 
 
-def _start_ready_ui(
+def _ui_child_handoff(_child: UIChild) -> None:
+    """Injection boundary after child acquisition and before publication."""
+
+
+@contextmanager
+def _managed_ui_child(
     *,
     checkout_root: Path,
     environment: Mapping[str, str],
-    requested_port: str,
+    port: int,
     reload: bool,
-    ready_timeout: float,
-) -> UIChild:
-    attempts = _AUTO_UI_ATTEMPTS if requested_port == "auto" else 1
-    for attempt in range(attempts):
-        selected_port = (
-            select_loopback_port() if requested_port == "auto" else int(requested_port)
-        )
+) -> Iterator[UIChild]:
+    child: UIChild | None = None
+    try:
         child = start_ui(
             checkout_root=checkout_root,
             environment=environment,
-            port=selected_port,
+            port=port,
             reload=reload,
         )
-        try:
-            wait_for_readiness(child, timeout=ready_timeout)
-        except KeyboardInterrupt:
+        _ui_child_handoff(child)
+        yield child
+    finally:
+        if child is not None:
             stop_ui(child)
-            raise
-        except UIReadinessError:
-            stop_ui(child)
-            if attempt == attempts - 1:
-                raise
-        else:
-            return child
+
+
+@contextmanager
+def _ready_ui_lifecycle(
+    *,
+    profile: RuntimeProfile,
+    current_commit: str,
+    environment: Mapping[str, str],
+    request: UiRequest,
+) -> Iterator[UIChild]:
+    attempts = _AUTO_UI_ATTEMPTS if request.port == "auto" else 1
+    for attempt in range(attempts):
+        selected_port = (
+            select_loopback_port() if request.port == "auto" else int(request.port)
+        )
+        with _managed_ui_child(
+            checkout_root=profile.checkout.root,
+            environment=environment,
+            port=selected_port,
+            reload=request.reload,
+        ) as child:
+            expected = ExpectedUIRuntime(
+                checkout_root=profile.checkout.root,
+                commit=current_commit,
+                business_database=profile.business_database,
+                trace_database=profile.trace_database,
+                process_id=None if request.reload else child.process.pid,
+            )
+            try:
+                wait_for_readiness(
+                    child,
+                    expected=expected,
+                    timeout=request.ready_timeout,
+                )
+            except UIReadinessError:
+                if attempt == attempts - 1:
+                    raise
+                continue
+            yield child
+            return
     message = "dashboard startup retry invariant failed"
     raise RuntimeError(message)
 
@@ -851,40 +915,32 @@ def _run_ui(
     runner: CommandRunner,
     clock: Clock,
 ) -> int:
-    child: UIChild | None = None
-    ephemeral_name: str | None = None
     with _sigterm_as_interrupt():
         try:
-            profile, current_commit, ephemeral_name = _ui_profile(
+            with _managed_ui_profile(
                 checkout_root=checkout_root,
                 request=request,
                 runner=runner,
                 clock=clock,
-            )
-            environment = profile_environment(profile)
-            environment.update(_provider_environment(request.secrets_file))
-            child = _start_ready_ui(
-                checkout_root=profile.checkout.root,
-                environment=environment,
-                requested_port=request.port,
-                reload=request.reload,
-                ready_timeout=request.ready_timeout,
-            )
-            _emit_ui_ready(
-                profile,
-                current_commit=current_commit,
-                child=child,
-                ephemeral=request.ephemeral,
-                json_output=request.json_output,
-            )
-            return child.process.wait()
+            ) as (profile, current_commit):
+                environment = profile_environment(profile)
+                environment.update(_provider_environment(request.secrets_file))
+                with _ready_ui_lifecycle(
+                    profile=profile,
+                    current_commit=current_commit,
+                    environment=environment,
+                    request=request,
+                ) as child:
+                    _emit_ui_ready(
+                        profile,
+                        current_commit=current_commit,
+                        child=child,
+                        ephemeral=request.ephemeral,
+                        json_output=request.json_output,
+                    )
+                    return child.process.wait()
         except KeyboardInterrupt:
             return ExitCode.SUCCESS
-        finally:
-            if child is not None:
-                stop_ui(child)
-            if ephemeral_name is not None:
-                reset_profile(checkout_root, ephemeral_name, ephemeral_name)
 
 
 def _print_json(payload: BaseModel) -> None:
@@ -924,6 +980,11 @@ def _unsupported_command(command: str) -> NoReturn:
     raise DeveloperCommandError(message)
 
 
+def _validate_ui_option_combination(arguments: argparse.Namespace) -> None:
+    if arguments.command == "ui" and arguments.reload and arguments.json:
+        raise DeveloperCommandError(_JSON_RELOAD_ERROR)
+
+
 def main(
     argv: Sequence[str] | None = None,
     *,
@@ -937,6 +998,7 @@ def main(
     command_clock = clock or SystemClock()
     json_output = bool(getattr(arguments, "json", False))
     try:
+        _validate_ui_option_combination(arguments)
         root = resolve_checkout_root(checkout_root or Path(__file__).parent)
         if arguments.command == "init":
             result = _initialize_profile(

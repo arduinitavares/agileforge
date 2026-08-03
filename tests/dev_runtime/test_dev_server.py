@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import signal
 import socket
 import sqlite3
 import subprocess
@@ -12,6 +13,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
+from urllib.parse import urlsplit
 
 import pytest
 from git import Git
@@ -31,6 +33,11 @@ _EXPECTED_POLL_ATTEMPTS = 2
 _MAX_PORT_ATTEMPTS = 3
 _SELECTED_PORT = 43210
 _UI_PORT = 8123
+_SECOND_UI_PORT = 8124
+
+
+class HandoffFault(BaseException):
+    """Deterministic non-Exception fault injected at an ownership handoff."""
 
 
 def _module() -> ModuleType:
@@ -195,6 +202,47 @@ def _create_profile(checkout: Path, name: str = "local") -> None:
             connection.execute(f'CREATE TABLE "{table}" (id INTEGER)')
 
 
+def _runtime_identity(
+    checkout: Path,
+    *,
+    process_id: int | None,
+) -> object:
+    paths = profile_paths(checkout, "local")
+    return _module().ExpectedUIRuntime(
+        checkout_root=checkout.resolve(),
+        commit=_git(checkout, "rev-parse", "HEAD"),
+        business_database=paths.business_database,
+        trace_database=paths.trace_database,
+        process_id=process_id,
+    )
+
+
+def _ready_payload(
+    checkout: Path,
+    *,
+    process_id: int,
+) -> dict[str, object]:
+    paths = profile_paths(checkout, "local")
+    return {
+        "status": "ready",
+        "process_id": process_id,
+        "checkout_root": str(checkout.resolve()),
+        "commit": _git(checkout, "rev-parse", "HEAD"),
+        "business_database": str(paths.business_database),
+        "trace_database": str(paths.trace_database),
+    }
+
+
+def _inject_handoff(fault_kind: str) -> None:
+    if fault_kind == "sigint":
+        signal.raise_signal(signal.SIGINT)
+        return
+    if fault_kind == "sigterm":
+        signal.raise_signal(signal.SIGTERM)
+        return
+    raise HandoffFault
+
+
 def test_select_loopback_port_binds_only_ipv4_loopback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -331,16 +379,12 @@ def test_start_ui_adds_reload_only_for_foreground_mode(
 
 def test_wait_for_readiness_returns_valid_dashboard_config(
     monkeypatch: pytest.MonkeyPatch,
+    checkout: Path,
 ) -> None:
     """Return only a valid ready payload from the fixed local endpoint."""
-    child = _module().UIChild(process=FakeProcess(), port=_UI_PORT)
-    payload = {
-        "status": "ready",
-        "checkout_root": "/workspace/checkout",
-        "commit": "a" * 40,
-        "business_database": "/workspace/business.sqlite3",
-        "trace_database": "/workspace/trace.sqlite3",
-    }
+    process = FakeProcess()
+    child = _module().UIChild(process=process, port=_UI_PORT)
+    payload = _ready_payload(checkout, process_id=process.pid)
     urls: list[str] = []
 
     def fake_urlopen(url: str, *, timeout: float) -> FakeResponse:
@@ -350,12 +394,22 @@ def test_wait_for_readiness_returns_valid_dashboard_config(
 
     monkeypatch.setattr(_module(), "urlopen", fake_urlopen)
 
-    assert _module().wait_for_readiness(child, timeout=1) == payload
+    config = _module().wait_for_readiness(
+        child,
+        expected=_runtime_identity(checkout, process_id=process.pid),
+        timeout=1,
+    )
+
+    assert config.process_id == process.pid
+    assert (
+        config.business_database == profile_paths(checkout, "local").business_database
+    )
     assert urls == [f"http://127.0.0.1:{_UI_PORT}/api/dashboard/config"]
 
 
 def test_wait_for_readiness_times_out_deterministically(
     monkeypatch: pytest.MonkeyPatch,
+    checkout: Path,
 ) -> None:
     """Stop polling at the caller's finite deadline."""
     child = _module().UIChild(process=FakeProcess(), port=_UI_PORT)
@@ -374,9 +428,45 @@ def test_wait_for_readiness_times_out_deterministically(
     monkeypatch.setattr(_module().time, "sleep", lambda _seconds: None)
 
     with pytest.raises(_module().UIReadinessError, match="timed out"):
-        _module().wait_for_readiness(child, timeout=1, poll_interval=0.01)
+        _module().wait_for_readiness(
+            child,
+            expected=_runtime_identity(checkout, process_id=child.process.pid),
+            timeout=1,
+            poll_interval=0.01,
+        )
 
     assert attempts == _EXPECTED_POLL_ATTEMPTS
+
+
+def test_wait_for_readiness_rejects_runtime_mismatch_without_repolling(
+    monkeypatch: pytest.MonkeyPatch,
+    checkout: Path,
+    tmp_path: Path,
+) -> None:
+    """Treat a ready response from another runtime as a terminal attempt failure."""
+    child = _module().UIChild(process=FakeProcess(), port=_UI_PORT)
+    foreign_root = tmp_path / "foreign-checkout"
+    foreign_root.mkdir()
+    payload = _ready_payload(checkout, process_id=child.process.pid)
+    payload["checkout_root"] = str(foreign_root.resolve())
+    attempts = 0
+
+    def fake_urlopen(_url: str, *, timeout: float) -> FakeResponse:
+        nonlocal attempts
+        assert timeout > 0
+        attempts += 1
+        return FakeResponse(json.dumps(payload).encode())
+
+    monkeypatch.setattr(_module(), "urlopen", fake_urlopen)
+
+    with pytest.raises(_module().UIRuntimeMismatchError, match="identity mismatch"):
+        _module().wait_for_readiness(
+            child,
+            expected=_runtime_identity(checkout, process_id=child.process.pid),
+            timeout=10,
+        )
+
+    assert attempts == 1
 
 
 def test_stop_ui_terminates_then_kills_only_after_timeout() -> None:
@@ -449,6 +539,35 @@ def test_ui_json_readiness_preserves_normal_profile_across_restarts(
     assert profile.root.exists()
 
 
+def test_json_reload_is_rejected_before_any_process_spawn(
+    monkeypatch: pytest.MonkeyPatch,
+    checkout: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Reject unstable JSON/reload process identity before profile or child setup."""
+    process_calls: list[object] = []
+
+    def fail_start(**options: object) -> object:
+        process_calls.append(options)
+        raise AssertionError
+
+    monkeypatch.setattr(_main_module(), "start_ui", fail_start)
+
+    status = _main_module().main(
+        ["ui", "--profile", "missing", "--reload", "--json"],
+        checkout_root=checkout,
+        runner=BootstrapRunner(checkout),
+    )
+
+    assert status == 1
+    assert json.loads(capsys.readouterr().out) == {
+        "status": "error",
+        "exit_code": 1,
+        "error": "--json cannot be combined with --reload",
+    }
+    assert process_calls == []
+
+
 def test_auto_port_retries_failed_child_startup_with_a_fixed_bound(
     monkeypatch: pytest.MonkeyPatch,
     checkout: Path,
@@ -471,7 +590,13 @@ def test_auto_port_retries_failed_child_startup_with_a_fixed_bound(
         started.append(port)
         return FakeUIChild(process=FakeProcess(), port=port)
 
-    def readiness(child: FakeUIChild, *, timeout: float) -> dict[str, str]:
+    def readiness(
+        child: FakeUIChild,
+        *,
+        expected: object,
+        timeout: float,
+    ) -> dict[str, str]:
+        assert expected is not None
         assert timeout > 0
         if child.port == _AUTO_PORTS[0]:
             message = "address raced"
@@ -496,6 +621,163 @@ def test_auto_port_retries_failed_child_startup_with_a_fixed_bound(
     assert json.loads(capsys.readouterr().out)["port"] == _AUTO_PORTS[1]
     assert started == list(_AUTO_PORTS)
     assert stopped == list(_AUTO_PORTS)
+
+
+def test_auto_port_never_advertises_a_foreign_ready_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    checkout: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Reject a different AgileForge runtime already serving the selected port."""
+    _create_profile(checkout)
+    selected_ports = iter((_UI_PORT, _SECOND_UI_PORT))
+    children: dict[int, FakeUIChild] = {}
+    foreign_root = tmp_path / "foreign-checkout"
+    foreign_root.mkdir()
+    foreign_payload = {
+        "status": "ready",
+        "process_id": 9988,
+        "checkout_root": str(foreign_root.resolve()),
+        "commit": "b" * 40,
+        "business_database": str(foreign_root / "business.sqlite3"),
+        "trace_database": str(foreign_root / "trace.sqlite3"),
+    }
+
+    monkeypatch.setattr(
+        _main_module(),
+        "select_loopback_port",
+        lambda: next(selected_ports),
+    )
+
+    def fake_start_ui(**options: object) -> FakeUIChild:
+        port = cast("int", options["port"])
+        child = FakeUIChild(process=FakeProcess(pid=9000 + port), port=port)
+        children[port] = child
+        return child
+
+    def fake_urlopen(url: str, *, timeout: float) -> FakeResponse:
+        assert timeout > 0
+        port = urlsplit(url).port
+        assert port is not None
+        payload = (
+            foreign_payload
+            if port == _UI_PORT
+            else _ready_payload(
+                checkout,
+                process_id=children[_SECOND_UI_PORT].process.pid,
+            )
+        )
+        return FakeResponse(json.dumps(payload).encode())
+
+    monkeypatch.setattr(_main_module(), "start_ui", fake_start_ui)
+    monkeypatch.setattr(_module(), "urlopen", fake_urlopen)
+
+    status = _main_module().main(
+        [
+            "ui",
+            "--profile",
+            "local",
+            "--port",
+            "auto",
+            "--json",
+            "--ready-timeout",
+            "0.001",
+        ],
+        checkout_root=checkout,
+        runner=BootstrapRunner(checkout),
+    )
+
+    advertised = json.loads(capsys.readouterr().out)
+    assert status == 0
+    assert advertised["port"] == _SECOND_UI_PORT
+    assert advertised["business_database"] != foreign_payload["business_database"]
+    assert children[_UI_PORT].process.terminated == 1
+
+
+@pytest.mark.parametrize("fault_kind", ["sigint", "sigterm", "base"])
+def test_ephemeral_profile_handoff_fault_removes_only_the_child_profile(
+    monkeypatch: pytest.MonkeyPatch,
+    checkout: Path,
+    fault_kind: str,
+) -> None:
+    """Own unique profile cleanup before publishing the initialized profile."""
+    _create_profile(checkout)
+    parent = profile_paths(checkout, "local")
+    child_name = "local.ui-handoff"
+    child = profile_paths(checkout, child_name)
+    spawned: list[object] = []
+
+    monkeypatch.setattr(
+        _main_module(),
+        "_ephemeral_profile_name",
+        lambda _name: child_name,
+    )
+    monkeypatch.setattr(
+        _main_module(),
+        "_profile_handoff",
+        lambda _profile: _inject_handoff(fault_kind),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        _main_module(),
+        "start_ui",
+        lambda **options: spawned.append(options),
+    )
+
+    try:
+        result: int | str = _main_module().main(
+            ["ui", "--profile", "local", "--ephemeral", "--port", str(_UI_PORT)],
+            checkout_root=checkout,
+            runner=BootstrapRunner(checkout),
+        )
+    except HandoffFault:
+        result = "fault"
+
+    assert result == ("fault" if fault_kind == "base" else 0)
+    assert not child.root.exists()
+    assert parent.root.exists()
+    assert spawned == []
+
+
+@pytest.mark.parametrize("fault_kind", ["sigint", "sigterm", "base"])
+def test_ui_child_handoff_fault_stops_only_the_acquired_child(
+    monkeypatch: pytest.MonkeyPatch,
+    checkout: Path,
+    fault_kind: str,
+) -> None:
+    """Own child cleanup before publishing the started process."""
+    _create_profile(checkout)
+    parent = profile_paths(checkout, "local")
+    process = FakeProcess()
+    child = FakeUIChild(process=process, port=_UI_PORT)
+
+    monkeypatch.setattr(_main_module(), "start_ui", lambda **_options: child)
+    monkeypatch.setattr(
+        _main_module(),
+        "_ui_child_handoff",
+        lambda _child: _inject_handoff(fault_kind),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        _main_module(),
+        "wait_for_readiness",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError()),
+    )
+
+    try:
+        result: int | str = _main_module().main(
+            ["ui", "--profile", "local", "--port", str(_UI_PORT)],
+            checkout_root=checkout,
+            runner=BootstrapRunner(checkout),
+        )
+    except HandoffFault:
+        result = "fault"
+
+    assert result == ("fault" if fault_kind == "base" else 0)
+    assert process.terminated == 1
+    assert process.poll() == 0
+    assert parent.root.exists()
 
 
 def test_interrupt_during_readiness_stops_the_tracked_child(

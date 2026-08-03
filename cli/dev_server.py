@@ -8,15 +8,12 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol, cast
+from pathlib import Path
+from typing import TYPE_CHECKING, Literal, Protocol, cast
 from urllib.request import urlopen
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
-    from pathlib import Path
-
-    from workflow.contracts import JsonObject
-
 LOOPBACK_HOST = "127.0.0.1"
 READINESS_PATH = "/api/dashboard/config"
 _DEFAULT_PORT_ATTEMPTS = 5
@@ -61,8 +58,35 @@ class UIChild:
         return f"http://{LOOPBACK_HOST}:{self.port}"
 
 
+@dataclass(frozen=True, slots=True)
+class ExpectedUIRuntime:
+    """Exact runtime identity required from the readiness endpoint."""
+
+    checkout_root: Path
+    commit: str
+    business_database: Path
+    trace_database: Path
+    process_id: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class DashboardConfig:
+    """Parsed non-secret identity returned by one dashboard process."""
+
+    status: Literal["ready"]
+    process_id: int
+    checkout_root: Path
+    commit: str
+    business_database: Path
+    trace_database: Path
+
+
 class UIReadinessError(RuntimeError):
     """Dashboard child did not become ready within its contract."""
+
+
+class UIRuntimeMismatchError(UIReadinessError):
+    """Dashboard readiness came from a different runtime."""
 
 
 def _open_loopback_socket() -> socket.socket:
@@ -116,25 +140,92 @@ def start_ui(
     return UIChild(process=process, port=port)
 
 
-def _read_ready_payload(child: UIChild, *, timeout: float) -> JsonObject:
+def _required_path(payload: dict[str, object], key: str) -> Path:
+    value = payload.get(key)
+    if not isinstance(value, str):
+        message = "dashboard readiness returned an invalid payload"
+        raise UIReadinessError(message)
+    path = Path(value)
+    if not path.is_absolute():
+        message = "dashboard readiness returned an invalid payload"
+        raise UIReadinessError(message)
+    return path
+
+
+def _parse_dashboard_config(payload: object) -> DashboardConfig:
+    if not isinstance(payload, dict):
+        message = "dashboard readiness returned an invalid payload"
+        raise UIReadinessError(message)
+    config_payload = cast("dict[str, object]", payload)
+    if config_payload.get("status") != "ready":
+        message = "dashboard readiness returned an invalid payload"
+        raise UIReadinessError(message)
+    process_id = config_payload.get("process_id")
+    commit = config_payload.get("commit")
+    if (
+        not isinstance(process_id, int)
+        or isinstance(process_id, bool)
+        or process_id <= 0
+        or not isinstance(commit, str)
+    ):
+        message = "dashboard readiness returned an invalid payload"
+        raise UIReadinessError(message)
+    return DashboardConfig(
+        status="ready",
+        process_id=process_id,
+        checkout_root=_required_path(config_payload, "checkout_root"),
+        commit=commit,
+        business_database=_required_path(config_payload, "business_database"),
+        trace_database=_required_path(config_payload, "trace_database"),
+    )
+
+
+def _validate_runtime_identity(
+    config: DashboardConfig,
+    expected: ExpectedUIRuntime,
+) -> None:
+    try:
+        canonical_checkout = config.checkout_root.resolve(strict=True)
+    except OSError:
+        canonical_checkout = None
+    matches = (
+        canonical_checkout is not None
+        and config.checkout_root == canonical_checkout
+        and canonical_checkout == expected.checkout_root
+        and config.commit == expected.commit
+        and config.business_database == expected.business_database
+        and config.trace_database == expected.trace_database
+        and (expected.process_id is None or config.process_id == expected.process_id)
+    )
+    if not matches:
+        message = "dashboard readiness identity mismatch"
+        raise UIRuntimeMismatchError(message)
+
+
+def _read_ready_payload(
+    child: UIChild,
+    *,
+    expected: ExpectedUIRuntime,
+    timeout: float,
+) -> DashboardConfig:
     url = f"{child.url}{READINESS_PATH}"
     with urlopen(url, timeout=timeout) as response:  # noqa: S310 - fixed loopback URL
         if response.status != _HTTP_OK:
             message = f"dashboard readiness returned HTTP {response.status}"
             raise UIReadinessError(message)
         decoded = json.loads(response.read().decode("utf-8"))
-    if not isinstance(decoded, dict) or decoded.get("status") != "ready":
-        message = "dashboard readiness returned an invalid payload"
-        raise UIReadinessError(message)
-    return cast("JsonObject", decoded)
+    config = _parse_dashboard_config(decoded)
+    _validate_runtime_identity(config, expected)
+    return config
 
 
 def wait_for_readiness(
     child: UIChild,
     *,
+    expected: ExpectedUIRuntime,
     timeout: float,
     poll_interval: float = _DEFAULT_POLL_INTERVAL,
-) -> JsonObject:
+) -> DashboardConfig:
     """Poll the fixed readiness endpoint until success, exit, or timeout."""
     if timeout <= 0:
         message = "readiness timeout must be greater than zero"
@@ -156,8 +247,11 @@ def wait_for_readiness(
         try:
             return _read_ready_payload(
                 child,
+                expected=expected,
                 timeout=min(1.0, remaining),
             )
+        except UIRuntimeMismatchError:
+            raise
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, UIReadinessError):
             remaining = deadline - time.monotonic()
             if remaining <= 0:
