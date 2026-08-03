@@ -15,9 +15,12 @@ from pydantic import ValidationError
 from cli.dev_profiles import (
     CheckoutProvenance,
     ProfileMode,
+    ProfileRuntimeMetadata,
     RuntimeProfile,
+    finalize_profile_record,
     initialize_profile_record,
     load_profile,
+    prepare_profile_record,
     profile_environment,
     profile_paths,
     reset_profile,
@@ -168,6 +171,44 @@ def test_initialize_persists_private_atomic_manifest(checkout: Path) -> None:
     assert load_profile(checkout, "atomic") == profile
     assert stat.S_IMODE(paths.manifest.stat().st_mode) == _MANIFEST_MODE
     assert list(paths.root.glob(".profile.*.tmp")) == []
+
+
+def test_prepare_and_finalize_defer_manifest_persistence(checkout: Path) -> None:
+    """Reserve private state without publishing provenance before verification."""
+    profile = prepare_profile_record(
+        checkout,
+        "deferred",
+        runtime=ProfileRuntimeMetadata(uv_version="0.8.0"),
+    )
+    paths = profile_paths(checkout, "deferred")
+
+    assert paths.root.is_dir()
+    assert paths.artifacts.is_dir()
+    assert paths.logs.is_dir()
+    assert not paths.manifest.exists()
+
+    finalized = finalize_profile_record(profile)
+
+    assert finalized == profile
+    assert load_profile(checkout, "deferred") == profile
+
+
+def test_prepare_refuses_preexisting_root_without_modifying_it(checkout: Path) -> None:
+    """Keep the Task 1 refusal boundary for every pre-existing profile root."""
+    paths = profile_paths(checkout, "prepared-stale")
+    paths.root.mkdir(parents=True)
+    sentinel = paths.root / "keep.txt"
+    sentinel.write_text("keep\n", encoding="utf-8")
+
+    with pytest.raises(FileExistsError, match="profile root already exists"):
+        prepare_profile_record(
+            checkout,
+            "prepared-stale",
+            runtime=ProfileRuntimeMetadata(uv_version="0.8.0"),
+        )
+
+    assert sentinel.read_text(encoding="utf-8") == "keep\n"
+    assert set(paths.root.iterdir()) == {sentinel}
 
 
 def test_initialize_refuses_preexisting_root_without_modifying_databases(

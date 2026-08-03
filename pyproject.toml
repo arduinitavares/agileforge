@@ -28,6 +28,7 @@ dependencies = [
 
 [project.scripts]
 agileforge = "cli.main:main"
+agileforge-dev = "cli.dev_main:main"
 
 [tool.uv]
 package = true

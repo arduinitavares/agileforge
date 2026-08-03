@@ -147,6 +147,14 @@ class ProfilePaths:
     logs: Path
 
 
+@dataclass(frozen=True, slots=True)
+class ProfileRuntimeMetadata:
+    """Injectable runtime values captured during profile preparation."""
+
+    now: datetime | None = None
+    uv_version: str | None = None
+
+
 def _run_command(arguments: tuple[str, ...]) -> str:
     """Run fixed argv and return stripped stdout."""
     output = Git().execute(command=list(arguments))
@@ -378,15 +386,15 @@ def _write_profile(
             temporary_path.unlink()
 
 
-def initialize_profile_record(
+def prepare_profile_record(
     checkout_root: Path,
     profile_name: str,
     mode: ProfileMode = ProfileMode.DEVELOPMENT,
     expected_commit: str | None = None,
     *,
-    now: datetime | None = None,
+    runtime: ProfileRuntimeMetadata | None = None,
 ) -> RuntimeProfile:
-    """Create and atomically persist one profile provenance record."""
+    """Claim private profile state and build provenance without a manifest."""
     checkout = _checkout_provenance(checkout_root)
     paths = profile_paths(checkout.root, profile_name)
     if mode is ProfileMode.ACCEPTANCE:
@@ -406,7 +414,8 @@ def initialize_profile_record(
         raise ValueError(message)
 
     model_config_path = checkout.root / "config" / "models.yaml"
-    timestamp = now or datetime.now(tz=UTC)
+    metadata = runtime or ProfileRuntimeMetadata()
+    timestamp = metadata.now or datetime.now(tz=UTC)
     profile = RuntimeProfile(
         schema_version=_PROFILE_SCHEMA_VERSION,
         name=profile_name,
@@ -415,7 +424,9 @@ def initialize_profile_record(
         expected_commit=expected_commit,
         graph_version=GRAPH_VERSION,
         python_version=platform.python_version(),
-        uv_version=_run_command(("uv", "--version")).split()[1],
+        uv_version=(
+            metadata.uv_version or _run_command(("uv", "--version")).split()[1]
+        ),
         business_database=paths.business_database,
         trace_database=paths.trace_database,
         model_config_path=model_config_path,
@@ -427,8 +438,26 @@ def initialize_profile_record(
     _create_profile_root(checkout.root, paths.root)
     for directory in (paths.artifacts, paths.logs):
         _ensure_private_directory(checkout.root, directory)
-    _write_profile(checkout.root, paths, profile)
     return profile
+
+
+def initialize_profile_record(
+    checkout_root: Path,
+    profile_name: str,
+    mode: ProfileMode = ProfileMode.DEVELOPMENT,
+    expected_commit: str | None = None,
+    *,
+    now: datetime | None = None,
+) -> RuntimeProfile:
+    """Create and atomically persist one profile provenance record."""
+    profile = prepare_profile_record(
+        checkout_root,
+        profile_name,
+        mode,
+        expected_commit,
+        runtime=ProfileRuntimeMetadata(now=now),
+    )
+    return finalize_profile_record(profile)
 
 
 def _validate_profile_ownership(
@@ -466,6 +495,33 @@ def _validate_profile_ownership(
     ):
         message = "acceptance commit mismatch"
         raise ValueError(message)
+
+
+def finalize_profile_record(profile: RuntimeProfile) -> RuntimeProfile:
+    """Atomically publish one prepared profile after external verification."""
+    checkout = _checkout_provenance(profile.checkout.root)
+    paths = profile_paths(checkout.root, profile.name)
+    _validate_profile_ownership(profile, checkout, paths)
+    root_metadata = paths.root.lstat()
+    if stat.S_ISLNK(root_metadata.st_mode) or not stat.S_ISDIR(
+        root_metadata.st_mode
+    ):
+        message = f"profile root must be a real directory: {paths.root}"
+        raise ValueError(message)
+    try:
+        paths.manifest.lstat()
+    except FileNotFoundError:
+        pass
+    else:
+        message = f"profile manifest already exists: {paths.manifest}"
+        raise FileExistsError(message)
+    for directory in (paths.artifacts, paths.logs):
+        metadata = directory.lstat()
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+            message = f"profile state path must be a real directory: {directory}"
+            raise ValueError(message)
+    _write_profile(checkout.root, paths, profile)
+    return profile
 
 
 def load_profile(checkout_root: Path, profile_name: str) -> RuntimeProfile:

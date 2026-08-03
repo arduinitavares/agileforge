@@ -1,0 +1,16 @@
+#!/bin/sh
+set -eu
+
+BOOTSTRAP=$0
+case "$BOOTSTRAP" in
+    /*) ;;
+    *) BOOTSTRAP=$PWD/$BOOTSTRAP ;;
+esac
+
+if [ -L "$BOOTSTRAP" ]; then
+    printf '%s\n' 'refusing symlinked launcher path' >&2
+    exit 1
+fi
+
+ROOT=$(CDPATH= cd -P -- "$(dirname -- "$BOOTSTRAP")" && pwd -P)
+exec uv --directory "$ROOT" run --locked agileforge-dev "$@"
