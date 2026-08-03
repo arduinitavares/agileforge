@@ -124,6 +124,7 @@ class RecordBrownfieldSpecDraft(PositionedRequest):
     kind: Literal["record_brownfield_spec_draft"] = "record_brownfield_spec_draft"
     node_id: ClassVar[str] = "onboarding.brownfield.curation"
     repository_inventory_id: int
+    repository_inventory_fingerprint: str = Field(min_length=1)
     canonical_content: JsonObject
     supersedes_spec_draft_id: int | None = None
     provenance_path: str | None = None

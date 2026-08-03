@@ -23,6 +23,8 @@ from adapters.adk.recipes import (
     build_agentic_recipe_registry,
     build_backlog_generation_workflow,
 )
+from services.contracts.brownfield import BrownfieldCurationOutput
+from utils.agileforge_spec_profile import TechnicalSpecArtifact
 from utils.spec_schemas import SpecAuthorityCompilationSuccess
 from workflow.definitions.root import ROOT_GRAPH
 from workflow.requests import (
@@ -71,6 +73,30 @@ def _compiled_authority_payload() -> JsonObject:
     ).model_dump(mode="json")
 
 
+def _brownfield_spec_payload() -> JsonObject:
+    return TechnicalSpecArtifact.model_validate(
+        {
+            "schema_version": "agileforge.spec.v1",
+            "artifact_id": "SPEC.brownfield.recipe",
+            "title": "Brownfield Initial Scope",
+            "status": "draft",
+            "version": "0.1",
+            "created_at": "2026-08-03",
+            "updated_at": "2026-08-03",
+            "summary": "Initial scope curated from repository evidence.",
+            "problem_statement": "Existing behavior needs reviewed authority.",
+            "items": [],
+            "relations": [],
+            "controlled_terms": [],
+            "external_references": [],
+            "rendering": {
+                "markdown_profile": "agileforge.spec_markdown.v1",
+                "rendered_markdown_sha256": None,
+            },
+        }
+    ).model_dump(mode="json", by_alias=True)
+
+
 REQUEST_CASES: tuple[
     tuple[str, type[PositionedRequest], JsonObject],
     ...,
@@ -80,9 +106,10 @@ REQUEST_CASES: tuple[
         RecordBrownfieldSpecDraft,
         {
             "repository_inventory_id": 2,
-            "canonical_content": {"assessment_summary": "Observed repository"},
+            "repository_inventory_fingerprint": f"sha256:{'b' * 64}",
+            "canonical_content": _brownfield_spec_payload(),
             "supersedes_spec_draft_id": None,
-            "provenance_path": "reports/as-built.json",
+            "provenance_path": "repository-inventory:2",
         },
     ),
     (
@@ -180,7 +207,14 @@ class FakeLeafAgent(BaseAgent):
 def _agentic_nodes() -> AgenticRecipeNodes:
     """Build a complete provider-free retained-node replacement set."""
     return AgenticRecipeNodes(
-        as_built=FakeLeafAgent(name="fake_as_built", response={}),
+        brownfield_curator=FakeLeafAgent(
+            name="fake_brownfield_curator",
+            response=BrownfieldCurationOutput(
+                canonical_spec=TechnicalSpecArtifact.model_validate(
+                    _brownfield_spec_payload()
+                )
+            ).model_dump(mode="json"),
+        ),
         authority_compile=FakeLeafAgent(name="fake_authority_compile", response={}),
         authority_repair=FakeLeafAgent(name="fake_authority_repair", response={}),
         vision_generation=FakeLeafAgent(name="fake_vision", response={}),
@@ -247,7 +281,7 @@ def test_recipe_registry_covers_each_stable_agentic_domain_node_once() -> None:
     assert registered_recipe_ids == ROOT_GRAPH.agentic_node_ids
     brownfield_graph = registry.require("onboarding.brownfield.curation").workflow.graph
     assert brownfield_graph is not None
-    assert "execute_as_built_assessor" in {
+    assert "execute_brownfield_curator" in {
         node.name for node in brownfield_graph.nodes
     }
     for node_id in registry.node_ids:

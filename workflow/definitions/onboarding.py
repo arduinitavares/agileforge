@@ -932,6 +932,10 @@ BROWNFIELD_ONBOARDING_NODES: tuple[NodeSpec, ...] = (
         recommendation_kind=RecommendationKind.REQUIRED,
         required_inputs=(
             InputField(name="repository_inventory_id", value_type="integer"),
+            InputField(
+                name="repository_inventory_fingerprint",
+                value_type="string",
+            ),
             InputField(name="canonical_content", value_type="object"),
             InputField(
                 name="supersedes_spec_draft_id",

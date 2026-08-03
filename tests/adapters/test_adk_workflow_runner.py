@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import pytest
+from google.adk import Workflow as AdkWorkflow
 from google.adk.agents import BaseAgent, InvocationContext
 from google.adk.events import Event
 from google.adk.sessions import InMemorySessionService
 from google.adk.sessions import Session as AdkSession
+from google.adk.workflow import START, node
 from pydantic import TypeAdapter
 from sqlmodel import Session, col, select
 
@@ -29,12 +33,23 @@ from models.core import Product
 from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance, SpecRegistry
 from models.workflow import (
     BacklogArtifact,
+    RepositoryInventory,
+    SpecDraft,
     WorkflowNodeAttempt,
     WorkflowNodeAttemptOutcome,
     WorkflowTransitionReceipt,
 )
+from services.contracts.brownfield import (
+    BrownfieldCurationInput,
+    BrownfieldCurationOutput,
+)
 from services.specs import compiler_service
 from services.specs.authority_selection import pending_authority_fingerprint
+from services.specs.profile_content import normalize_spec_content_for_registry
+from utils.agileforge_spec_profile import (
+    TechnicalSpecArtifact,
+    canonical_spec_json,
+)
 from utils.runtime_config import ADK_EXECUTION_TRACE_IDENTITY
 from utils.spec_schemas import (
     SpecAuthorityCompilationSuccess,
@@ -51,9 +66,21 @@ from workflow.contracts import (
 )
 from workflow.definitions.authority import authority_graph
 from workflow.definitions.product_definition import product_definition_graph
+from workflow.definitions.root import ROOT_GRAPH
 from workflow.domain import WorkflowDomain
 from workflow.fingerprints import canonical_hash
-from workflow.requests import RecordBacklogDraft, StartNodeAttempt, TransitionRequest
+from workflow.repository_inventory import (
+    canonical_inventory_payload,
+    inventory_binding_fingerprint,
+)
+from workflow.requests import (
+    OpenProjectShell,
+    RecordBacklogDraft,
+    RecordRepositoryBaseline,
+    RecordRepositoryInventory,
+    StartNodeAttempt,
+    TransitionRequest,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -281,6 +308,266 @@ def _unused_leaf(name: str) -> FakeLeafAgent:
     return FakeLeafAgent(name=name, response={})
 
 
+def _brownfield_spec_artifact() -> TechnicalSpecArtifact:
+    return TechnicalSpecArtifact.model_validate(
+        {
+            "schema_version": "agileforge.spec.v1",
+            "artifact_id": "SPEC.brownfield.runner",
+            "title": "Brownfield Initial Scope",
+            "status": "draft",
+            "version": "0.1",
+            "created_at": "2026-08-03",
+            "updated_at": "2026-08-03",
+            "summary": "Initial scope curated from selected repository evidence.",
+            "problem_statement": "Existing behavior needs reviewed authority.",
+            "items": [
+                {
+                    "id": "REQ.brownfield.runner",
+                    "type": "REQ",
+                    "status": "proposed",
+                    "title": "Preserve reviewed behavior",
+                    "statement": "The system MUST preserve reviewed behavior.",
+                    "level": "MUST",
+                    "verification": "system-test",
+                    "acceptance": ["The reviewed behavior remains available."],
+                }
+            ],
+            "relations": [],
+            "controlled_terms": [],
+            "external_references": [],
+            "rendering": {
+                "markdown_profile": "agileforge.spec_markdown.v1",
+                "rendered_markdown_sha256": None,
+            },
+        }
+    )
+
+
+def _validating_brownfield_leaf(
+    observations: list[BrownfieldCurationInput],
+) -> AdkWorkflow:
+    """Build a provider-free leaf that consumes only pre-authority evidence."""
+
+    @node(name="validate_brownfield_input", rerun_on_resume=True)
+    async def validate_brownfield_input(
+        node_input: BrownfieldCurationInput,
+    ) -> BrownfieldCurationOutput:
+        dumped = node_input.model_dump(mode="json")
+        assert "compiled_authority" not in dumped
+        assert "accepted_authority" not in dumped
+        assert node_input.inventory.selected_for_model == ("README.md",)
+        assert node_input.selected_evidence[0].path == "README.md"
+        observations.append(node_input)
+        return BrownfieldCurationOutput(
+            canonical_spec=_brownfield_spec_artifact()
+        )
+
+    return AdkWorkflow(
+        name="fake_brownfield_curator",
+        input_schema=BrownfieldCurationInput,
+        output_schema=BrownfieldCurationOutput,
+        edges=[(START, validate_brownfield_input)],
+    )
+
+
+def _brownfield_registry(
+    leaf: BaseAgent | AdkWorkflow,
+) -> AdkRecipeRegistry:
+    return build_agentic_recipe_registry(
+        nodes=AgenticRecipeNodes(
+            brownfield_curator=leaf,
+            authority_compile=_unused_leaf("unused_authority_compile"),
+            authority_repair=_unused_leaf("unused_authority_repair"),
+            vision_generation=_unused_leaf("unused_vision"),
+            backlog_generation=_unused_leaf("unused_backlog"),
+            roadmap_generation=_unused_leaf("unused_roadmap"),
+            story_generation=_unused_leaf("unused_story"),
+            sprint_planning=_unused_leaf("unused_sprint"),
+        ),
+        execution_settings=EXECUTION_SETTINGS,
+    )
+
+
+def _positioned_guards(
+    domain: WorkflowDomain,
+    *,
+    project_id: int,
+    node_id: str,
+    idempotency_key: str,
+) -> dict[str, object]:
+    position = domain.position(project_id)
+    decision = next(item for item in position.decisions if item.node_id == node_id)
+    assert decision.category is NodeCategory.AVAILABLE
+    return {
+        "project_id": project_id,
+        "graph_version": position.graph_version,
+        "fact_fingerprint": position.fact_fingerprint,
+        "decision_fingerprint": decision.decision_fingerprint,
+        "instance_key": decision.instance_key,
+        "idempotency_key": idempotency_key,
+        "actor": "operator@example.com",
+        "correlation_id": "task-15-brownfield",
+    }
+
+
+def _brownfield_inventory_fingerprint() -> str:
+    inventory = canonical_inventory_payload(
+        git_available=True,
+        commit="b" * 40,
+        dirty=False,
+        files=(
+            (".env", 8, None, "secret"),
+            ("README.md", 64, f"sha256:{'c' * 64}", "hashable"),
+        ),
+        total_bytes=72,
+    )
+    return inventory_binding_fingerprint(inventory, ("README.md",))
+
+
+def _seed_brownfield(domain: WorkflowDomain) -> tuple[int, int, str]:
+    opened = domain.transition(
+        OpenProjectShell(
+            name="Runner Brownfield",
+            origin="brownfield",
+            idempotency_key="open-runner-brownfield",
+            actor="operator@example.com",
+        )
+    )
+    project_id = opened.output.get("project_id")
+    assert opened.ok is True
+    assert isinstance(project_id, int)
+    baseline_fingerprint = canonical_hash(
+        {
+            "repository_path": "/evidence/runner-brownfield",
+            "git_commit": "b" * 40,
+            "dirty": False,
+        }
+    )
+    baseline = domain.transition(
+        RecordRepositoryBaseline.model_validate(
+            {
+                **_positioned_guards(
+                    domain,
+                    project_id=project_id,
+                    node_id=RecordRepositoryBaseline.node_id,
+                    idempotency_key="runner-brownfield-baseline",
+                ),
+                "repository_path": "/evidence/runner-brownfield",
+                "git_commit": "b" * 40,
+                "dirty": False,
+                "baseline_fingerprint": baseline_fingerprint,
+            }
+        )
+    )
+    baseline_id = baseline.output.get("repository_baseline_id")
+    assert baseline.ok is True
+    assert isinstance(baseline_id, int)
+    inventory_fingerprint = _brownfield_inventory_fingerprint()
+    inventory = domain.transition(
+        RecordRepositoryInventory.model_validate(
+            {
+                **_positioned_guards(
+                    domain,
+                    project_id=project_id,
+                    node_id=RecordRepositoryInventory.node_id,
+                    idempotency_key="runner-brownfield-inventory",
+                ),
+                "repository_baseline_id": baseline_id,
+                "git_available": True,
+                "files": [
+                    {
+                        "path": ".env",
+                        "size_bytes": 8,
+                        "sha256": None,
+                        "content_status": "secret",
+                    },
+                    {
+                        "path": "README.md",
+                        "size_bytes": 64,
+                        "sha256": f"sha256:{'c' * 64}",
+                        "content_status": "hashable",
+                    },
+                ],
+                "selected_for_model": ["README.md"],
+                "total_bytes": 72,
+                "inventory_fingerprint": inventory_fingerprint,
+            }
+        )
+    )
+    inventory_id = inventory.output.get("repository_inventory_id")
+    assert inventory.ok is True
+    assert isinstance(inventory_id, int)
+    return project_id, inventory_id, inventory_fingerprint
+
+
+def _brownfield_runner_system(
+    engine: Engine,
+    leaf: BaseAgent | AdkWorkflow,
+) -> tuple[AdkWorkflowRunner, WorkflowDomain, int, int, str]:
+    registry = _brownfield_registry(leaf)
+    domain = WorkflowDomain(
+        engine=engine,
+        graph=ROOT_GRAPH,
+        clock=FixedClock(now_value=EVALUATED_AT),
+        adk_recipe_registry=registry,
+    )
+    project_id, inventory_id, inventory_fingerprint = _seed_brownfield(domain)
+    runner = AdkWorkflowRunner(
+        domain=domain,
+        registry=registry,
+        session_service=TrackingSessionService(),
+        config=AdkExecutionConfig(
+            project_id=project_id,
+            model_id="fake/brownfield-curator",
+            execution_settings=EXECUTION_SETTINGS,
+            lease_seconds=LEASE_SECONDS,
+            actor="operator@example.com",
+            correlation_id="task-15-brownfield",
+        ),
+    )
+    return runner, domain, project_id, inventory_id, inventory_fingerprint
+
+
+def _brownfield_runner_input(
+    *,
+    inventory_id: int,
+    inventory_fingerprint: str,
+) -> JsonObject:
+    content = "# Existing product\n\nThe service preserves reviewed behavior.\n"
+    content_digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    return {
+        "curation_input": {
+            "inventory": {
+                "repository_inventory_id": inventory_id,
+                "repository_inventory_fingerprint": inventory_fingerprint,
+                "file_count": 2,
+                "total_bytes": 72,
+                "selected_for_model": ["README.md"],
+            },
+            "selected_evidence": [
+                {
+                    "path": "README.md",
+                    "content": content,
+                    "content_sha256": f"sha256:{content_digest}",
+                }
+            ],
+        },
+        "supersedes_spec_draft_id": None,
+        "provenance_path": f"repository-inventory:{inventory_id}",
+    }
+
+
+def _brownfield_decision(
+    domain: WorkflowDomain,
+    project_id: int,
+) -> NodeDecision:
+    return next(
+        item
+        for item in domain.position(project_id).decisions
+        if item.node_id == "onboarding.brownfield.curation"
+    )
+
+
 def _adapter(
     output: object,
     context: AttemptCompletionContext,
@@ -436,6 +723,151 @@ def test_output_validation_failure_records_failure_without_business_fact(
         assert outcome.status == "failure"
 
 
+def test_brownfield_runner_persists_exact_inventory_bound_canonical_spec(
+    engine: Engine,
+) -> None:
+    """Execute one pre-authority curator and persist its canonical draft."""
+    observations: list[BrownfieldCurationInput] = []
+    runner, domain, project_id, inventory_id, inventory_fingerprint = (
+        _brownfield_runner_system(
+            engine,
+            _validating_brownfield_leaf(observations),
+        )
+    )
+    normalized_input = _brownfield_runner_input(
+        inventory_id=inventory_id,
+        inventory_fingerprint=inventory_fingerprint,
+    )
+
+    result = runner.run(
+        _brownfield_decision(domain, project_id),
+        normalized_input,
+    )
+
+    assert result.ok is True
+    assert len(observations) == 1
+    observed = observations[0]
+    assert observed.inventory.repository_inventory_id == inventory_id
+    assert (
+        observed.inventory.repository_inventory_fingerprint
+        == inventory_fingerprint
+    )
+    with Session(engine) as session:
+        inventory = session.exec(select(RepositoryInventory)).one()
+        draft = session.exec(select(SpecDraft)).one()
+        attempt = session.exec(select(WorkflowNodeAttempt)).one()
+        outcome = session.exec(select(WorkflowNodeAttemptOutcome)).one()
+        receipts = session.exec(select(WorkflowTransitionReceipt)).all()
+        completion_receipt = next(
+            receipt
+            for receipt in receipts
+            if receipt.request_kind == "record_brownfield_spec_draft"
+        )
+        completion_request = json.loads(completion_receipt.request_json)
+        attempt_input = json.loads(attempt.normalized_input_json)
+        normalized = normalize_spec_content_for_registry(
+            draft.canonical_content_json
+        )
+        expected = normalize_spec_content_for_registry(
+            canonical_spec_json(_brownfield_spec_artifact())
+        )
+
+        assert inventory.repository_inventory_id == inventory_id
+        assert inventory.content_fingerprint == inventory_fingerprint
+        assert completion_request["repository_inventory_id"] == inventory_id
+        assert (
+            completion_request["repository_inventory_fingerprint"]
+            == inventory_fingerprint
+        )
+        assert (
+            attempt_input["curation_input"]["inventory"]
+            ["repository_inventory_fingerprint"]
+            == inventory_fingerprint
+        )
+        assert normalized.content == expected.content
+        assert normalized.spec_hash == expected.spec_hash
+        assert outcome.status == "success"
+
+
+def test_brownfield_runner_rejects_missing_inventory_binding_before_leaf(
+    engine: Engine,
+) -> None:
+    """Record failure without invoking the curator when trusted input is incomplete."""
+    observations: list[BrownfieldCurationInput] = []
+    runner, domain, project_id, inventory_id, inventory_fingerprint = (
+        _brownfield_runner_system(
+            engine,
+            _validating_brownfield_leaf(observations),
+        )
+    )
+    normalized_input = _brownfield_runner_input(
+        inventory_id=inventory_id,
+        inventory_fingerprint=inventory_fingerprint,
+    )
+    curation_input = normalized_input["curation_input"]
+    assert isinstance(curation_input, dict)
+    inventory = curation_input["inventory"]
+    assert isinstance(inventory, dict)
+    inventory.pop("repository_inventory_fingerprint")
+
+    result = runner.run(
+        _brownfield_decision(domain, project_id),
+        normalized_input,
+    )
+
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.code is WorkflowErrorCode.EXTERNAL_EXECUTION_FAILED
+    assert observations == []
+    with Session(engine) as session:
+        assert session.exec(select(SpecDraft)).all() == []
+        assert session.exec(select(WorkflowNodeAttemptOutcome)).one().status == (
+            "failure"
+        )
+
+
+@pytest.mark.parametrize(
+    "generated",
+    [
+        {"assessment_summary": "post-authority As-Built output"},
+        {
+            "canonical_spec": {
+                "schema_version": "agileforge.spec.v0",
+                "title": "Noncanonical",
+            }
+        },
+    ],
+)
+def test_brownfield_runner_rejects_noncanonical_leaf_output(
+    engine: Engine,
+    generated: dict[str, object],
+) -> None:
+    """Persist a failed attempt and no draft for invalid model output."""
+    runner, domain, project_id, inventory_id, inventory_fingerprint = (
+        _brownfield_runner_system(
+            engine,
+            FakeLeafAgent(name="invalid_brownfield_curator", response=generated),
+        )
+    )
+
+    result = runner.run(
+        _brownfield_decision(domain, project_id),
+        _brownfield_runner_input(
+            inventory_id=inventory_id,
+            inventory_fingerprint=inventory_fingerprint,
+        ),
+    )
+
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.code is WorkflowErrorCode.EXTERNAL_EXECUTION_FAILED
+    with Session(engine) as session:
+        assert session.exec(select(SpecDraft)).all() == []
+        assert session.exec(select(WorkflowNodeAttemptOutcome)).one().status == (
+            "failure"
+        )
+
+
 async def _create_then_delete_old_trace(
     sessions: TrackingSessionService,
     *,
@@ -558,7 +990,7 @@ def test_authority_runner_executes_provider_once_before_completion_transaction(
     )
     registry = build_agentic_recipe_registry(
         nodes=AgenticRecipeNodes(
-            as_built=_unused_leaf("unused_as_built"),
+            brownfield_curator=_unused_leaf("unused_brownfield_curator"),
             authority_compile=compiler_leaf,
             authority_repair=_unused_leaf("unused_authority_repair"),
             vision_generation=_unused_leaf("unused_vision"),

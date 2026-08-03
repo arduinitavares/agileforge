@@ -10,7 +10,12 @@ from google.adk import Context, Workflow
 from google.adk.workflow import START, JoinNode, RetryConfig, node
 from pydantic import BaseModel, ConfigDict, TypeAdapter
 
-from services.contracts.as_built import AsBuiltAssessment, AsBuiltAssessorInput
+from services.contracts.brownfield import (
+    BrownfieldCurationInput,
+    BrownfieldCurationOutput,
+)
+from services.specs.profile_content import normalize_spec_content_for_registry
+from utils.agileforge_spec_profile import canonical_spec_json
 from utils.spec_schemas import (
     SpecAuthorityCompilationFailure,
     SpecAuthorityCompilationSuccess,
@@ -63,11 +68,10 @@ class _JoinedBacklogValidations(BaseModel):
 
 
 class _BrownfieldRecipePayload(BaseModel):
-    """Normalized host input kept separate from the retained leaf contract."""
+    """Trusted host metadata kept outside model-controlled output."""
 
     model_config = ConfigDict(extra="forbid")
-    repository_inventory_id: int
-    leaf_input: AsBuiltAssessorInput
+    curation_input: BrownfieldCurationInput
     supersedes_spec_draft_id: int | None = None
     provenance_path: str | None = None
 
@@ -131,7 +135,7 @@ class AdkRecipe:
 class AgenticRecipeNodes:
     """Injected retained execution nodes used to compose the complete registry."""
 
-    as_built: BaseAgent | Workflow
+    brownfield_curator: BaseAgent | Workflow
     authority_compile: BaseAgent | Workflow
     authority_repair: BaseAgent | Workflow
     vision_generation: BaseAgent | Workflow
@@ -283,30 +287,39 @@ def _build_brownfield_curation_workflow(
     leaf_agent: BaseAgent | Workflow,
     execution_settings: JsonObject,
 ) -> Workflow:
-    """Run retained As-Built assessment and emit one typed draft payload."""
+    """Run pre-authority curation and emit one canonical draft payload."""
     timeout_seconds, max_attempts = _execution_limits(execution_settings)
     retry_config = RetryConfig(max_attempts=max_attempts)
 
     @node(
-        name="execute_as_built_assessor",
+        name="execute_brownfield_curator",
         rerun_on_resume=True,
         retry_config=retry_config,
         timeout=timeout_seconds,
     )
-    async def execute_as_built_assessor(
+    async def execute_brownfield_curator(
         context: Context,
         node_input: RecipeInput,
     ) -> RecipeOutput:
         payload = _BrownfieldRecipePayload.model_validate(node_input.payload)
         generated = await context.run_node(
             leaf_agent,
-            node_input=payload.leaf_input.model_dump(mode="json"),
+            node_input=payload.curation_input.model_dump(mode="json"),
         )
-        assessment = AsBuiltAssessment.model_validate(generated)
+        curated = BrownfieldCurationOutput.model_validate(generated)
+        normalized = normalize_spec_content_for_registry(
+            canonical_spec_json(curated.canonical_spec)
+        )
+        inventory = payload.curation_input.inventory
         return RecipeOutput(
             payload={
-                "repository_inventory_id": payload.repository_inventory_id,
-                "canonical_content": assessment.model_dump(mode="json"),
+                "repository_inventory_id": inventory.repository_inventory_id,
+                "repository_inventory_fingerprint": (
+                    inventory.repository_inventory_fingerprint
+                ),
+                "canonical_content": _JSON_OBJECT.validate_json(
+                    normalized.content
+                ),
                 "supersedes_spec_draft_id": payload.supersedes_spec_draft_id,
                 "provenance_path": payload.provenance_path,
             }
@@ -318,7 +331,7 @@ def _build_brownfield_curation_workflow(
         timeout=timeout_seconds,
         input_schema=RecipeInput,
         output_schema=RecipeOutput,
-        edges=[(START, execute_as_built_assessor)],
+        edges=[(START, execute_brownfield_curator)],
     )
 
 
@@ -497,7 +510,7 @@ def build_agentic_recipe_registry(
             AdkRecipe(
                 node_id="onboarding.brownfield.curation",
                 workflow=_build_brownfield_curation_workflow(
-                    leaf_agent=nodes.as_built,
+                    leaf_agent=nodes.brownfield_curator,
                     execution_settings=execution_settings,
                 ),
                 output_adapter=_request_output_adapter(RecordBrownfieldSpecDraft),

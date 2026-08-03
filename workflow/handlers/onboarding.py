@@ -386,6 +386,8 @@ def execute_record_brownfield_spec_draft(
     ).one_or_none()
     if inventory is None:
         return _conflict("The draft does not target this Project's inventory.")
+    if inventory.content_fingerprint != request.repository_inventory_fingerprint:
+        return _conflict("The draft does not target the exact repository inventory.")
     run = _initial_run(session, request.project_id)
     if run is None:
         return _conflict("The Project does not have exactly one open initial run.")

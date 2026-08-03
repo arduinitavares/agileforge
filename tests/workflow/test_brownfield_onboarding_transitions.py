@@ -288,6 +288,7 @@ def test_brownfield_transitions_persist_evidence_then_share_registration(
                     "brownfield-spec-1",
                 ),
                 "repository_inventory_id": inventory_id,
+                "repository_inventory_fingerprint": _inventory_fingerprint(),
                 "canonical_content": _spec_content(),
                 "provenance_path": "repository-inventory:41",
             }
@@ -596,7 +597,46 @@ def test_brownfield_spec_attempt_binding_requires_complete_pair() -> None:
                 "actor": ACTOR,
                 "attempt_id": 3,
                 "repository_inventory_id": 4,
+                "repository_inventory_fingerprint": _inventory_fingerprint(),
                 "canonical_content": _spec_content(),
                 "provenance_path": None,
             }
         )
+
+
+def test_brownfield_spec_rejects_mismatched_inventory_fingerprint(
+    domain: WorkflowDomain,
+    engine: Engine,
+) -> None:
+    """Persist no draft when its trusted inventory binding is not exact."""
+    project_id = _open_brownfield(domain)
+    baseline_id = _record_baseline(domain, project_id, key="mismatch-baseline")
+    inventory_id = _record_inventory(
+        domain,
+        project_id,
+        baseline_id,
+        key="mismatch-inventory",
+    )
+
+    result = domain.transition(
+        RecordBrownfieldSpecDraft.model_validate(
+            {
+                **_guards(
+                    domain,
+                    project_id,
+                    RecordBrownfieldSpecDraft.node_id,
+                    "mismatch-curation",
+                ),
+                "repository_inventory_id": inventory_id,
+                "repository_inventory_fingerprint": f"sha256:{'f' * 64}",
+                "canonical_content": _spec_content(),
+                "provenance_path": f"repository-inventory:{inventory_id}",
+            }
+        )
+    )
+
+    assert result.ok is False
+    assert result.error is not None
+    assert "exact" in result.error.message
+    with Session(engine) as session:
+        assert session.exec(select(SpecDraft)).all() == []

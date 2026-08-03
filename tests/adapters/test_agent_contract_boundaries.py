@@ -83,6 +83,7 @@ def test_relocated_modules_do_not_load_temporary_root_orchestrator() -> None:
         "services.contracts.as_built",
         "services.contracts.authority",
         "services.contracts.backlog",
+        "services.contracts.brownfield",
         "services.contracts.roadmap",
         "services.contracts.specification",
         "services.contracts.specification_normalizer",
