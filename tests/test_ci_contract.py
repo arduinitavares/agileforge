@@ -165,33 +165,32 @@ def test_jobs_invoke_locked_repository_surfaces(workflow: dict[str, object]) -> 
     ) in " ".join(frontend.split())
 
 
-def test_macos_smoke_exercises_json_runtime_and_cleans_processes(
+def test_macos_smoke_delegates_to_exact_repository_command(
     workflow: dict[str, object],
 ) -> None:
-    """Pin acceptance state, parse JSON, and prove attached UI cleanup."""
+    """Keep lifecycle policy in one tested repository command."""
     smoke = _runs(_job(workflow, "macos-smoke"))
+    normalized = " ".join(smoke.split())
+    expected = (
+        "uv run --locked python scripts/ci_launcher_smoke.py "
+        "--profile ci-macos-${{ github.run_id }}-${{ github.run_attempt }} "
+        "--expect-sha ${{ github.sha }}"
+    )
 
-    assert 'test "$SHA" = "$GITHUB_SHA"' in smoke
-    assert "./agileforge-dev init" in smoke
-    assert "--mode acceptance" in smoke
-    assert '--expect-sha "$GITHUB_SHA"' in smoke
-    assert "./agileforge-dev info" in smoke
-    assert "./agileforge-dev cli" in smoke
-    assert "-- project list" in smoke
-    assert "./agileforge-dev ui" in smoke
-    assert "--ephemeral" in smoke
-    assert "--json" in smoke
-    assert "--reload" not in smoke
-    assert "uv run --locked python" in smoke
-    assert "json.loads" in smoke
-    assert "urllib.request.urlopen" in smoke
-    assert 'kill -TERM "$launcher_pid"' in smoke
-    assert 'kill -0 "$launcher_pid"' in smoke
-    assert 'kill -0 "$child_pid"' in smoke
-    assert "./agileforge-dev reset" in smoke
-    assert "ephemeral_profile" in smoke
-    assert "trap cleanup EXIT" in smoke
-    assert re.search(r"(?m)^\s*python(?:3)?\b", smoke) is None
+    assert normalized == expected
+    for policy_token in (
+        "./agileforge-dev",
+        "kill",
+        "trap",
+        "sleep",
+        "json",
+        "urllib",
+        "process_id",
+        "ephemeral_profile",
+        "reset",
+        "--reload",
+    ):
+        assert policy_token not in smoke
 
 
 def test_workflow_has_no_provider_secrets_or_live_markers() -> None:
