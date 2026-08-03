@@ -232,3 +232,178 @@ notices, and deliberate socket-guard warnings. No Task 17 failure remains.
 
 No blocking concerns. Existing third-party deprecation and experimental-feature
 warnings remain unchanged and are recorded above.
+
+## Second Review Fix Loop (2026-08-03)
+
+Baseline: `ee4e4c49e35494b8148260f809938be3c82fecd0`.
+
+### RED Evidence
+
+The second fix loop added failing tests before production changes:
+
+```text
+uv run --frozen pytest -q \
+  tests/test_canonical_packets.py::test_packet_fingerprints_cover_complete_canonical_validation_evidence
+1 failed: source_snapshot had no validation_evidence_hash
+
+uv run --frozen pytest -q \
+  tests/test_compiler_remediation_commands.py \
+  tests/test_specs_compiler_service.py::test_compiled_authority_schema_unsupported_helpers_use_graph_recovery \
+  tests/test_specs_compiler_service.py::test_source_metadata_failure_details_include_repair_guidance
+3 failed: compiler output still authored deleted authority commands and stale guards
+
+uv run --frozen pytest -q \
+  tests/test_task17_review_absence.py tests/test_fresh_process_bootstrap.py
+3 failed, 1 passed: both legacy services were importable, the ledger table was
+present, and current docs/tests/production contained deleted routing commands
+
+uv run --frozen pytest -q \
+  tests/test_prompt_package_resources.py::test_built_wheel_contains_and_loads_retained_prompt_resources
+1 failed: both deleted service modules were present in the built wheel
+```
+
+The initial whole-current-Python scan at the second-loop baseline also recorded
+`762` `Any` matches across `76` files and `653` typing/lint/checker suppression
+matches across `94` files. This established the inherited repository baseline
+instead of limiting the audit to added lines.
+
+### Implementation And Deletion Inventory
+
+- Added `source_snapshot.validation_evidence_hash` to both packet flavors. It is
+  SHA-256 over the complete parsed `ValidationEvidence.model_dump(mode="json")`
+  using canonical JSON key ordering. It therefore covers validity,
+  spec/input/validator binding, checked rules and invariants, boundary IDs,
+  failures, warnings, alignment findings, and their timestamps.
+- Added Task and Story regressions for warning, failure, rule, and compliance
+  boundary mutations while `validated_at` and `input_hash` remain fixed. The
+  same canonical evidence with reordered JSON object keys remains stable.
+- Replaced unsupported-schema and source-metadata compiler recovery output with
+  only `agileforge workflow next --project-id <id>`. A parser-backed regression
+  validates every compiler remediation output.
+- Replaced the obsolete CLI manual with the current WorkflowDomain contract:
+  `workflow position`, `workflow next`, the fixed graph command catalog, and
+  graph/fact/decision/repeated-instance guards.
+- Deleted `services/agent_workbench/mutation_ledger.py`,
+  `services/agent_workbench/backlog_refinement_events.py`, and
+  `tests/test_agent_workbench_mutation_ledger.py`.
+- Removed `CliMutationLedger` and `cli_mutation_ledger` from fresh metadata.
+  The remaining agent-workbench models now use explicit `ClassVar[str]` table
+  names, removing their local type suppressions.
+- Removed only the ledger-coupled approval tests/helpers from
+  `tests/test_backlog_refinement_service.py`; all 52 pure operation/contract
+  tests remain.
+- Moved two byte-identical historical feedback records to
+  `artifacts/historical-feedback/` (`R100`) rather than rewriting historical
+  observations as current behavior.
+- The wheel regression now builds from a clean temporary source snapshot and
+  proves the deleted modules, model, and table are absent while retained prompt
+  resources and leaf imports still work. It no longer creates `build/` or
+  `*.egg-info` in the worktree.
+
+### GREEN Evidence
+
+```text
+Focused packet/remediation/absence/schema/wheel/read suites:
+160 passed, 5 warnings
+
+Pure backlog-refinement operations:
+52 passed, 5 warnings
+
+Compiler, Story validation, and authority projection:
+173 passed, 5 warnings
+
+Task 16 replay/provider-at-most-once set:
+5 passed, 7 warnings
+
+API/CLI catalog, agent boundaries, and model roles:
+56 passed, 6 warnings
+
+Node frontend guards:
+9 passed, 0 failed
+
+Installed wheel resources and absence:
+2 passed, 5 warnings
+```
+
+The live parser probe parsed all `43` `COMMAND_PREFIXES` mutation forms plus
+`workflow next` and `workflow position` using graph/fact/decision guards.
+
+Final full gate:
+
+```text
+uv run --frozen pyrepo-check --all
+Ruff: pass
+annotation checks: pass
+ty: pass
+Bandit: 0 issues across 121,238 lines of code
+pytest: 1,797 passed, 2 skipped, 2 deselected, 17 warnings in 112.08s
+
+git diff --check
+clean
+```
+
+### Strict Scan Scope And Results
+
+The scan input was every existing current tracked plus untracked file from:
+
+```bash
+git ls-files -z --cached --others --exclude-standard
+```
+
+Only these historical roots were excluded:
+
+```text
+docs/superpowers/plans/**
+docs/superpowers/specs/**
+artifacts/**
+.superpowers/**
+```
+
+Final scope: `435` tracked-live files, including root files, `.env.example`,
+frontend, scripts, tools, current docs, package metadata, fixtures, and tests;
+`338` were Python files.
+
+```text
+orchestrator_agent|FSMController|STATE_REGISTRY|fsm_state|AGILEFORGE_SESSION_DB_URL|GreenfieldDiscoveryContext|context_key
+0 matches
+
+\bProduct\b|\bproduct_id\b|products\.product_id|repositories\.product|ProductRepository|ProductTeam|ProductPersona
+0 matches
+
+WORKFLOW_RUNNER_IDENTITY|agile_orchestrator|storage_schema_version|next_actions|AuthorityReviewService|PRODUCT_NOT_FOUND|SPEC_PRODUCT_MATCH|product_spec_linked|product_name|query_product_structure|benchmark_product_structure|link_spec_to_product|product_context|product_authority_cache_persisted|product_not_found|product_description|sample_product|--product-id|_load_product|_build_product|_update_product|analyze_product_personas
+0 matches
+
+CliMutationLedger|MutationLedgerRepository|cli_mutation_ledger|services\.agent_workbench\.(mutation_ledger|backlog_refinement_events)|agileforge (workflow state|project setup|authority (accept|reject|curate|regenerate)|backlog reset-active|sprint save|story save)|--expected-state|--expected-context-fingerprint|\bFSM\b|mutation ledger
+0 matches
+```
+
+The required whole-current-Python audit ended at `713` inherited `Any` matches
+across `72` files and `651` inherited suppression matches across `94` files.
+Deleting the obsolete runtime removed `49` `Any` matches and two suppressions.
+The second-loop added-line scan from `ee4e4c4` returned zero `Any`, type ignores,
+lint ignores, or checker suppressions. Ruff annotations and `ty` both pass.
+
+### Second-Loop Self-Review
+
+- The validation hash is inside the source snapshot, so every covered evidence
+  change necessarily changes `source_fingerprint` for both packet flavors.
+- Packet construction remains a pure read projection. No routing or provider
+  behavior was added.
+- `WorkflowTransitionReceipt`/`WorkflowDomain` remains the only live command
+  idempotency and replay mechanism; no production import reaches the deleted
+  services.
+- Fresh-process bootstrap and the isolated wheel both prove the removed table,
+  model, and service modules are absent.
+- The 43-kind catalog, exact frontend guards, facts-only authority reads, model
+  role equality, pinned authority/ownership/freshness behavior, and provider
+  at-most-once tests remain green.
+- Verification used only in-memory/temporary databases and offline wheel builds.
+  No provider, network, persistent database, external repository, caRtola, ASA,
+  or MyFinance mutation occurred.
+
+### Second-Loop Concerns
+
+No Task 17 blocker remains. The whole-live scan intentionally reports inherited
+repository-wide `Any` and checker-suppression debt rather than hiding it behind
+an added-lines-only scan; eliminating that baseline would be a separate broad
+typing refactor. Existing third-party warnings remain unchanged.

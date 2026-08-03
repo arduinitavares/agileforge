@@ -154,6 +154,13 @@ def _validation_evidence(raw_value: str | None) -> ValidationEvidence | None:
         return None
 
 
+def _validation_evidence_hash(evidence: ValidationEvidence | None) -> str | None:
+    """Hash the complete normalized persisted validation evidence."""
+    if evidence is None:
+        return None
+    return _hash_payload(_object(evidence.model_dump(mode="json")))
+
+
 def _authority_context(
     session: Session,
     *,
@@ -538,6 +545,7 @@ def _base_snapshot(context: _StoryPacketContext) -> JsonObject:
             evidence.validated_at if evidence is not None else None
         ),
         "validation_input_hash": context.validation_input_hash,
+        "validation_evidence_hash": _validation_evidence_hash(evidence),
         "compiled_authority_compiled_at": _serialize_temporal(
             authority.compiled_at if authority is not None else None
         ),

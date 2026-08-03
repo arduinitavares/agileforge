@@ -960,16 +960,11 @@ def test_compiled_authority_read_failure_describes_every_non_success_status(
         "observed_schema_version": observed_schema,
         "required_schema_version": "agileforge.compiled_authority.v3",
     }
-    assert failure.remediation == (
-        "Run agileforge authority regenerate "
-        "--project-id 17 "
-        "--spec-version-id 23 "
-        "--idempotency-key <new-key>.",
-    )
+    assert failure.remediation == ("agileforge workflow next --project-id 17",)
     assert "validation" not in failure.details
     assert "validation_error" not in failure.details
     with pytest.raises(FrozenInstanceError):
-        failure.error_code = "changed"  # ty: ignore[invalid-assignment]
+        failure.__setattr__("error_code", "changed")
 
 
 def test_compiled_authority_read_failure_is_none_only_for_success() -> None:
@@ -994,10 +989,8 @@ def test_compiled_authority_read_failure_is_none_only_for_success() -> None:
     )
 
 
-def test_compiled_authority_schema_unsupported_helpers_include_regenerate_details() -> (
-    None
-):
-    """Unsupported-artifact helpers should point operators at regeneration."""
+def test_compiled_authority_schema_unsupported_helpers_use_graph_recovery() -> None:
+    """Unsupported artifacts should orient operators through WorkflowDomain."""
     from services.specs.compiler_service import (  # noqa: PLC0415
         COMPILED_AUTHORITY_SCHEMA_VERSION,
         compiled_authority_schema_unsupported_details,
@@ -1020,10 +1013,7 @@ def test_compiled_authority_schema_unsupported_helpers_include_regenerate_detail
         "observed_schema_version": None,
         "required_schema_version": COMPILED_AUTHORITY_SCHEMA_VERSION,
     }
-    assert remediation == [
-        "Run agileforge authority regenerate --project-id 7 --spec-version-id 11 "
-        "--idempotency-key <new-key>."
-    ]
+    assert remediation == ["agileforge workflow next --project-id 7"]
 
 
 def test_services_package_exports_ensure_accepted_spec_authority() -> None:
@@ -3275,33 +3265,9 @@ def test_source_metadata_failure_details_include_repair_guidance(
     assert details["repair_attempted"] is True
     assert details["repair_item_ids"] == ["REQ.payments.email"]
     assert details["repair_result"] == "failed"
-    assert any(
-        "--compiler-model" in command for command in details["suggested_commands"]
-    )
-    assert any(
-        command.startswith("agileforge authority compile ")
-        for command in details["suggested_commands"]
-    )
-    assert any(
-        command.startswith("agileforge authority regenerate ")
-        for command in details["suggested_commands"]
-    )
-    assert all(
-        "--compiler-model openrouter/openai/gpt-5.6-luna" in command
-        for command in details["suggested_commands"]
-    )
-    assert all(
-        "authority-compile-retry-20260614" not in command
-        for command in details["suggested_commands"]
-    )
-    assert all(
-        "authority-regenerate-retry-20260614" not in command
-        for command in details["suggested_commands"]
-    )
-    assert all(
-        "--idempotency-key <new-idempotency-key>" in command
-        for command in details["suggested_commands"]
-    )
+    assert details["suggested_commands"] == [
+        f"agileforge workflow next --project-id {sample_project.project_id}"
+    ]
 
 
 def test_compile_spec_authority_for_version_iteratively_persists_must_coverage(
@@ -3983,10 +3949,7 @@ def test_compile_spec_authority_for_version_rejects_unsupported_cached_authority
         "required_schema_version": "agileforge.compiled_authority.v3",
     }
     assert result["remediation"] == [
-        "Run agileforge authority regenerate "
-        f"--project-id {project_id} "
-        f"--spec-version-id {spec_version_id} "
-        "--idempotency-key <new-key>."
+        f"agileforge workflow next --project-id {project_id}"
     ]
     assert "compiled_authority_cached" not in tool_context.state
     session.refresh(sample_project)
@@ -4615,10 +4578,7 @@ def test_check_spec_authority_status_does_not_report_historical_v2_artifact_curr
         "required_schema_version": "agileforge.compiled_authority.v3",
     }
     assert result["remediation"] == [
-        "Run agileforge authority regenerate "
-        f"--project-id {project_id} "
-        f"--spec-version-id {spec_version_id} "
-        "--idempotency-key <new-key>."
+        f"agileforge workflow next --project-id {project_id}"
     ]
 
 

@@ -38,6 +38,7 @@ type TaskPacket = {
     accepted_spec_version_id: number | null;
     validation_validated_at: string | null;
     validation_input_hash: string | null;
+    validation_evidence_hash: string | null;
     compiled_authority_id: number | null;
     compiled_authority_compiled_at: string | null;
   };
@@ -171,6 +172,7 @@ type TaskPacket = {
 ### Source fingerprint
 
 - `source_fingerprint` must change when task, story, sprint, sprint membership, task metadata, pinned authority, validation evidence, or Project timestamps relevant to the packet change.
+- `validation_evidence_hash` is the canonical SHA-256 hash of the complete parsed `ValidationEvidence` record. It covers validity, validator and input/spec binding, checked rules and invariants, finding boundary IDs, failures, warnings, and alignment findings. JSON object key order and storage formatting do not affect it.
 
 ## Public Endpoint
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import importlib.resources
+import importlib.util
 import multiprocessing
 import os
 import shutil
@@ -12,6 +13,7 @@ import zipfile
 from pathlib import Path
 
 import anyio
+from sqlmodel import SQLModel
 
 _RETAINED_PROMPTS = (
     "backlog.txt",
@@ -34,12 +36,34 @@ _RETAINED_LEAVES = (
     "adapters.adk.agents.story",
     "adapters.adk.agents.vision",
 )
+_OBSOLETE_WHEEL_PATHS = (
+    "services/agent_workbench/mutation_" + "ledger.py",
+    "services/agent_workbench/backlog_refinement_" + "events.py",
+)
+_OBSOLETE_WHEEL_MODULES = (
+    "services.agent_workbench.mutation_" + "ledger",
+    "services.agent_workbench.backlog_refinement_" + "events",
+)
 
 
 async def _build_wheel(repository_root: Path, wheel_dir: Path) -> None:
-    """Build one offline wheel with the installed uv executable."""
+    """Build one offline wheel from a clean temporary source snapshot."""
     uv_executable = shutil.which("uv")
     assert uv_executable is not None
+    source_root = wheel_dir.parent / "source"
+    shutil.copytree(
+        repository_root,
+        source_root,
+        ignore=shutil.ignore_patterns(
+            ".git",
+            ".venv",
+            ".pytest_cache",
+            "*.egg-info",
+            "__pycache__",
+            "build",
+            "dist",
+        ),
+    )
     completed = await anyio.run_process(
         [
             uv_executable,
@@ -49,7 +73,7 @@ async def _build_wheel(repository_root: Path, wheel_dir: Path) -> None:
             "--out-dir",
             str(wheel_dir),
         ],
-        cwd=repository_root,
+        cwd=source_root,
         check=False,
     )
     assert completed.returncode == 0, completed.stderr.decode()
@@ -70,6 +94,7 @@ def _wheel_import_worker(wheel_value: str, repository_root_value: str) -> None:
         if module_name.split(".", 1)[0] in {
             "adapters",
             "config",
+            "models",
             "services",
             "utils",
         }:
@@ -85,6 +110,11 @@ def _wheel_import_worker(wheel_value: str, repository_root_value: str) -> None:
         module = importlib.import_module(module_name)
         assert module.__file__ is not None
         assert str(wheel) in module.__file__
+    for module_name in _OBSOLETE_WHEEL_MODULES:
+        assert importlib.util.find_spec(module_name) is None
+    model_module = importlib.import_module("models.agent_workbench")
+    assert not hasattr(model_module, "Cli" + "MutationLedger")
+    assert "cli_" + "mutation" + "_ledger" not in SQLModel.metadata.tables
     prompt_root = importlib.resources.files("adapters.adk.prompts")
     for prompt_name in _RETAINED_PROMPTS:
         assert prompt_root.joinpath(prompt_name).read_text(encoding="utf-8").strip()
@@ -113,10 +143,14 @@ def test_built_wheel_contains_and_loads_retained_prompt_resources(
 
     with zipfile.ZipFile(wheel) as archive:
         names = set(archive.namelist())
+        model_source = archive.read("models/agent_workbench.py").decode("utf-8")
     expected_resources = {
         f"adapters/adk/prompts/{prompt_name}" for prompt_name in _RETAINED_PROMPTS
     }
     assert expected_resources <= names
+    assert set(_OBSOLETE_WHEEL_PATHS).isdisjoint(names)
+    assert "Cli" + "MutationLedger" not in model_source
+    assert "cli_" + "mutation" + "_ledger" not in model_source
 
     process = multiprocessing.get_context("spawn").Process(
         target=_wheel_import_worker,

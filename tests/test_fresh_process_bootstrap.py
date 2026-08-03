@@ -115,7 +115,8 @@ def test_production_api_bootstrap_creates_complete_fresh_schema(
     payload = json.loads(result_path.read_text(encoding="utf-8"))
     tables = set(payload["tables"])
     assert {"projects", "spec_registry", "workflow_events"} <= tables
-    assert {"products", "sessions"}.isdisjoint(tables)
+    obsolete_ledger_table = "cli_" + "mutation" + "_ledger"
+    assert {"products", "sessions", obsolete_ledger_table}.isdisjoint(tables)
     assert payload["resolved_foreign_keys"]
     for table_name in (
         "project_personas",

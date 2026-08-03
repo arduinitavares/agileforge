@@ -13,13 +13,13 @@ _Avoid_: repository, product row, workflow session
 **Workflow Fact**:
 A typed durable record whose current value can affect which workflow actions are
 available, waiting, blocked, or invalid.
-_Avoid_: session flag, cached FSM state, execution trace
+_Avoid_: transient routing flag, cached phase state, execution trace
 
 **Workflow Position**:
 The set of available, waiting, blocked, and invalid graph nodes derived from the
 current Workflow Facts. It is recalculated and is never stored as independent
 authority.
-_Avoid_: current FSM state, persisted graph cursor, session position
+_Avoid_: current phase label, persisted graph cursor, transport position
 
 **Project Shell**:
 A durable project identity that may own discovery or brownfield evidence before

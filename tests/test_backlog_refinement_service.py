@@ -1,31 +1,10 @@
 """Tests for backlog refinement operation helpers."""
 
-import json
-from datetime import datetime
-from typing import Any, cast
+from typing import cast
 
 import pytest
 from pydantic import ValidationError
-from sqlalchemy.engine import Engine
-from sqlmodel import Session, SQLModel, create_engine, select
 
-from models.agent_workbench import CliMutationLedger
-from models.core import Project
-from models.enums import WorkflowEventType
-from models.events import WorkflowEvent
-from services.agent_workbench.backlog_refinement_events import (
-    BACKLOG_REFINEMENT_APPROVE_COMMAND,
-    BacklogRefinementApprovalError,
-    BacklogRefinementApprovalRequest,
-    approval_request_fingerprint,
-    record_backlog_refinement_approval,
-)
-from services.agent_workbench.mutation_ledger import (
-    DEFAULT_LEASE_SECONDS,
-    LedgerLoadResult,
-    MutationLedgerRepository,
-    MutationStatus,
-)
 from services.phases.backlog_refinement import (
     AddIntakeOperation,
     AmbiguousRefinementDiffError,
@@ -118,39 +97,6 @@ def _questioned_source_artifact() -> dict[str, object]:
         source_attempt_id="backlog-attempt-1",
         source_artifact_fingerprint="sha256:source",
     )
-
-
-def _approval_request(**overrides: object) -> BacklogRefinementApprovalRequest:
-    payload: dict[str, object] = {
-        "project_id": 7,
-        "source_attempt_id": "backlog-attempt-1",
-        "operation_set_fingerprint": "sha256:operations",
-        "approved_artifact_fingerprint": "sha256:artifact",
-        "approved_operation_ids": ["op-1"],
-        "approval_source": "cli",
-        "idempotency_key": "approve-1",
-        "approved_by": "po",
-    }
-    payload.update(overrides)
-    return BacklogRefinementApprovalRequest.model_validate(payload)
-
-
-def _approval_event_engine() -> Engine:
-    assert Project.__tablename__ == "projects"
-    engine = create_engine("sqlite://")
-    SQLModel.metadata.create_all(engine)
-    with Session(engine) as session:
-        session.add(Project(project_id=7, name="Backlog refinement test"))
-        session.commit()
-    return engine
-
-
-def _workflow_events(session: Session) -> list[WorkflowEvent]:
-    return list(session.exec(select(WorkflowEvent)).all())
-
-
-def _ledger_rows(session: Session) -> list[CliMutationLedger]:
-    return list(session.exec(select(CliMutationLedger)).all())
 
 
 ORPHAN_AND_RECORDED_APPROVAL_EVENT_COUNT = 2
@@ -630,7 +576,7 @@ def test_operations_from_edited_artifact_rejects_no_op_import() -> None:
 
 def test_operation_set_rejects_agent_authored_approval() -> None:
     """Operation payloads cannot smuggle proposer-authored approval metadata."""
-    payload: dict[str, Any] = {
+    payload: dict[str, object] = {
         "source_attempt_id": "backlog-attempt-1",
         "source_artifact_fingerprint": "sha256:source",
         "authority_fingerprint": "sha256:authority",
@@ -655,231 +601,6 @@ def test_operation_set_rejects_agent_authored_approval() -> None:
 
     with pytest.raises(ValidationError):
         BacklogRefinementOperationSet.model_validate(payload)
-
-
-def test_approval_request_rejects_proposer_authored_metadata() -> None:
-    """Approval requests reject proposer-authored approval metadata."""
-    with pytest.raises(ValidationError):
-        BacklogRefinementApprovalRequest.model_validate(
-            {
-                "project_id": 7,
-                "source_attempt_id": "backlog-attempt-1",
-                "operation_set_fingerprint": "sha256:operations",
-                "approved_artifact_fingerprint": "sha256:artifact",
-                "approved_operation_ids": ["op-1"],
-                "approval_source": "cli",
-                "idempotency_key": "approve-1",
-                "approved_by": "po",
-                "approval": {"status": "po_reviewed"},
-            }
-        )
-
-
-def test_approval_request_fingerprint_canonicalizes_operation_ids() -> None:
-    """Approval fingerprints treat operation ids as a canonical set."""
-    first = _approval_request(approved_operation_ids=["op-2", "op-1"])
-    second = _approval_request(approved_operation_ids=["op-1", "op-2"])
-
-    assert approval_request_fingerprint(first) == approval_request_fingerprint(second)
-
-
-def test_record_backlog_refinement_approval_writes_append_only_event() -> None:
-    """Host approval writes a WorkflowEvent with canonical metadata."""
-    engine = _approval_event_engine()
-    request = _approval_request()
-
-    with Session(engine) as session:
-        result = record_backlog_refinement_approval(
-            session,
-            request=request,
-            now_iso=lambda: "2026-06-01T00:00:00Z",
-        )
-        events = _workflow_events(session)
-        ledgers = _ledger_rows(session)
-
-    metadata = json.loads(events[0].event_metadata or "{}")
-    ledger_response = json.loads(ledgers[0].response_json or "{}")
-    approval_id = result["approval_id"]
-    assert isinstance(approval_id, str)
-    assert approval_id.startswith("approval:")
-    assert result["idempotent_replay"] is False
-    assert result["approval_id"] == metadata["approval_id"]
-    assert events[0].event_type == WorkflowEventType.BACKLOG_REFINEMENT_APPROVED
-    assert events[0].project_id == request.project_id
-    assert metadata["command"] == "agileforge backlog approve"
-    assert metadata["source_attempt_id"] == "backlog-attempt-1"
-    assert metadata["approved_operation_ids"] == ["op-1"]
-    assert "approval" not in metadata
-    assert ledgers[0].command == BACKLOG_REFINEMENT_APPROVE_COMMAND
-    assert ledgers[0].idempotency_key == request.idempotency_key
-    assert ledgers[0].request_hash == result["request_fingerprint"]
-    assert ledgers[0].status == MutationStatus.SUCCEEDED.value
-    assert ledger_response["approval_id"] == result["approval_id"]
-    assert ledger_response["idempotent_replay"] is True
-
-
-def test_record_backlog_refinement_approval_replays_same_key() -> None:
-    """Same idempotency key and request fingerprint replays the first result."""
-    engine = _approval_event_engine()
-    request = _approval_request()
-
-    with Session(engine) as session:
-        first = record_backlog_refinement_approval(
-            session,
-            request=request,
-            now_iso=lambda: "2026-06-01T00:00:00Z",
-        )
-        second = record_backlog_refinement_approval(
-            session,
-            request=request,
-            now_iso=lambda: "2026-06-01T00:00:01Z",
-        )
-        events = _workflow_events(session)
-        ledgers = _ledger_rows(session)
-
-    assert second["idempotent_replay"] is True
-    assert second["approval_id"] == first["approval_id"]
-    assert second["request_fingerprint"] == first["request_fingerprint"]
-    assert len(events) == 1
-    assert len(ledgers) == 1
-
-
-def test_record_approval_rejects_reused_key_for_changed_request() -> None:
-    """Same idempotency key with different approval inputs fails closed."""
-    engine = _approval_event_engine()
-    request = _approval_request()
-    changed_request = _approval_request(approved_operation_ids=["op-2"])
-
-    with Session(engine) as session:
-        record_backlog_refinement_approval(
-            session,
-            request=request,
-            now_iso=lambda: "2026-06-01T00:00:00Z",
-        )
-        with pytest.raises(BacklogRefinementApprovalError):
-            record_backlog_refinement_approval(
-                session,
-                request=changed_request,
-                now_iso=lambda: "2026-06-01T00:00:01Z",
-            )
-        events = _workflow_events(session)
-        ledgers = _ledger_rows(session)
-
-    assert len(events) == 1
-    assert len(ledgers) == 1
-
-
-def test_record_approval_does_not_replay_from_workflow_events_without_ledger() -> None:
-    """An orphan WorkflowEvent cannot satisfy approval idempotency replay."""
-    engine = _approval_event_engine()
-    request = _approval_request()
-    request_fingerprint = approval_request_fingerprint(request)
-    orphan_metadata = {
-        "action": "backlog_refinement_approved",
-        "approval_id": "approval:orphan",
-        "request_fingerprint": request_fingerprint,
-        "approved_at": "2026-06-01T00:00:00Z",
-        "command": BACKLOG_REFINEMENT_APPROVE_COMMAND,
-        "project_id": request.project_id,
-        "source_attempt_id": request.source_attempt_id,
-        "attempt_id": request.attempt_id,
-        "operation_set_fingerprint": request.operation_set_fingerprint,
-        "approved_artifact_fingerprint": request.approved_artifact_fingerprint,
-        "approved_operation_ids": request.approved_operation_ids,
-        "approval_source": request.approval_source,
-        "idempotency_key": request.idempotency_key,
-        "approved_by": request.approved_by,
-    }
-
-    with Session(engine) as session:
-        session.add(
-            WorkflowEvent(
-                event_type=WorkflowEventType.BACKLOG_REFINEMENT_APPROVED,
-                project_id=request.project_id,
-                session_id=str(request.project_id),
-                event_metadata=json.dumps(orphan_metadata, sort_keys=True),
-            )
-        )
-        session.commit()
-        result = record_backlog_refinement_approval(
-            session,
-            request=request,
-            now_iso=lambda: "2026-06-01T00:00:01Z",
-        )
-        events = _workflow_events(session)
-        ledgers = _ledger_rows(session)
-
-    assert result["idempotent_replay"] is False
-    assert result["approval_id"] != "approval:orphan"
-    assert len(events) == ORPHAN_AND_RECORDED_APPROVAL_EVENT_COUNT
-    assert len(ledgers) == 1
-    assert ledgers[0].status == MutationStatus.SUCCEEDED.value
-
-
-def test_record_approval_fails_closed_when_ledger_finalization_fails(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Approval event rolls back if ledger success cannot be stored."""
-    engine = _approval_event_engine()
-    request = _approval_request()
-    original_create_or_load = MutationLedgerRepository.create_or_load
-
-    def create_then_steal_lease(  # noqa: PLR0913
-        self: MutationLedgerRepository,
-        *,
-        command: str,
-        idempotency_key: str,
-        request_hash: str,
-        project_id: int | None,
-        correlation_id: str,
-        changed_by: str,
-        lease_owner: str,
-        now: datetime,
-        recovers_mutation_event_id: int | None = None,
-        lease_seconds: int = DEFAULT_LEASE_SECONDS,
-    ) -> LedgerLoadResult:
-        loaded = original_create_or_load(
-            self,
-            command=command,
-            idempotency_key=idempotency_key,
-            request_hash=request_hash,
-            project_id=project_id,
-            correlation_id=correlation_id,
-            changed_by=changed_by,
-            lease_owner=lease_owner,
-            now=now,
-            recovers_mutation_event_id=recovers_mutation_event_id,
-            lease_seconds=lease_seconds,
-        )
-        event_id = loaded.ledger.mutation_event_id
-        assert event_id is not None
-        with Session(engine) as ledger_session:
-            ledger = ledger_session.get(CliMutationLedger, event_id)
-            assert ledger is not None
-            ledger.lease_owner = "other-worker"
-            ledger_session.add(ledger)
-            ledger_session.commit()
-        return loaded
-
-    monkeypatch.setattr(
-        MutationLedgerRepository,
-        "create_or_load",
-        create_then_steal_lease,
-    )
-
-    with Session(engine) as session:
-        with pytest.raises(BacklogRefinementApprovalError):
-            record_backlog_refinement_approval(
-                session,
-                request=request,
-                now_iso=lambda: "2026-06-01T00:00:00Z",
-            )
-        events = _workflow_events(session)
-        ledgers = _ledger_rows(session)
-
-    assert events == []
-    assert len(ledgers) == 1
-    assert ledgers[0].status == MutationStatus.PENDING.value
 
 
 def test_canonical_operations_fingerprint_is_order_stable() -> None:
@@ -995,16 +716,18 @@ def test_normalize_refined_artifact_compacts_priorities_after_filtering() -> Non
 def test_add_intake_requires_non_implementation_classification() -> None:
     """Authority-gap intake cannot be classified as product implementation work."""
     with pytest.raises(ValidationError):
-        AddIntakeOperation(
-            operation_id="op-intake",
-            source_item_ids=[],
-            source_item_fingerprints=[],
-            result_item_ids=["item-new"],
-            result_item=_item(3, "Build unsupported feature"),
-            authority_gap_ref="REQ.new-gap",
-            rationale="Unsupported gap.",
-            requested_by="agent",
-            classification=cast("Any", "product_new_work"),
+        AddIntakeOperation.model_validate(
+            {
+                "operation_id": "op-intake",
+                "source_item_ids": [],
+                "source_item_fingerprints": [],
+                "result_item_ids": ["item-new"],
+                "result_item": _item(3, "Build unsupported feature"),
+                "authority_gap_ref": "REQ.new-gap",
+                "rationale": "Unsupported gap.",
+                "requested_by": "agent",
+                "classification": "product_new_work",
+            }
         )
 
 

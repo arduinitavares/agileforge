@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from http import HTTPStatus
@@ -31,6 +32,7 @@ from utils.spec_schemas import (
     SpecAuthorityCompilationSuccess,
     SpecAuthorityCompilerOutput,
     ValidationEvidence,
+    ValidationFailure,
 )
 from utils.task_metadata import TaskMetadata, serialize_task_metadata
 from workflow.contracts import JsonObject, JsonValue
@@ -451,6 +453,114 @@ def test_packet_fingerprints_track_task_metadata_and_story_task_plan(
         _object(first_story["metadata"])["source_fingerprint"]
         != _object(second_story["metadata"])["source_fingerprint"]
     )
+
+
+def test_packet_fingerprints_cover_complete_canonical_validation_evidence(
+    engine: Engine,
+    session: Session,
+) -> None:
+    """Fingerprint every persisted validation input that shapes either packet."""
+    seed = _seed_packet_context(session)
+    reads = DurableReadProjectionService(engine=engine)
+    story = session.get(UserStory, seed.story_id)
+    assert story is not None
+    assert story.validation_evidence is not None
+    original_updated_at = story.updated_at
+    original = ValidationEvidence.model_validate_json(story.validation_evidence)
+
+    def packets() -> tuple[JsonObject, JsonObject]:
+        return (
+            _data(
+                reads.task_packet(
+                    project_id=seed.project_id,
+                    sprint_id=seed.sprint_id,
+                    task_id=seed.task_id,
+                )
+            ),
+            _data(
+                reads.story_packet(
+                    project_id=seed.project_id,
+                    sprint_id=seed.sprint_id,
+                    story_id=seed.story_id,
+                )
+            ),
+        )
+
+    def store(raw_evidence: str) -> None:
+        stored_story = session.get(UserStory, seed.story_id)
+        assert stored_story is not None
+        stored_story.validation_evidence = raw_evidence
+        stored_story.updated_at = original_updated_at
+        session.add(stored_story)
+        session.commit()
+        session.expire_all()
+
+    baseline_packets = packets()
+    baseline_hashes = tuple(
+        str(_object(packet["source_snapshot"])["validation_evidence_hash"])
+        for packet in baseline_packets
+    )
+    baseline_fingerprints = tuple(
+        str(_object(packet["metadata"])["source_fingerprint"])
+        for packet in baseline_packets
+    )
+    assert baseline_hashes[0] == baseline_hashes[1]
+    assert len(baseline_hashes[0]) == _SHA256_HEX_LENGTH
+
+    mutations = (
+        original.model_copy(
+            update={"warnings": [*original.warnings, "A new warning."]}
+        ),
+        original.model_copy(
+            update={
+                "failures": [
+                    *original.failures,
+                    ValidationFailure(
+                        rule="PAYLOAD_CASE",
+                        expected="lowercase",
+                        actual="mixed case",
+                        message="Payload casing is invalid.",
+                    ),
+                ]
+            }
+        ),
+        original.model_copy(
+            update={"rules_checked": [*original.rules_checked, "PAYLOAD_CASE"]}
+        ),
+        original.model_copy(update={"finding_invariant_ids": []}),
+    )
+    for changed_evidence in mutations:
+        assert changed_evidence.validated_at == original.validated_at
+        assert changed_evidence.input_hash == original.input_hash
+        store(changed_evidence.model_dump_json())
+        changed_packets = packets()
+        for index, changed_packet in enumerate(changed_packets):
+            changed_snapshot = _object(changed_packet["source_snapshot"])
+            changed_metadata = _object(changed_packet["metadata"])
+            assert (
+                changed_snapshot["validation_evidence_hash"]
+                != baseline_hashes[index]
+            )
+            assert (
+                changed_metadata["source_fingerprint"]
+                != baseline_fingerprints[index]
+            )
+
+    persisted = _object(json.loads(original.model_dump_json()))
+    reordered = {key: persisted[key] for key in reversed(tuple(persisted))}
+    store(json.dumps(reordered, ensure_ascii=True, separators=(",", ":")))
+    canonical_packets = packets()
+    for index, canonical_packet in enumerate(canonical_packets):
+        assert (
+            _object(canonical_packet["source_snapshot"])[
+                "validation_evidence_hash"
+            ]
+            == baseline_hashes[index]
+        )
+        assert (
+            _object(canonical_packet["metadata"])["source_fingerprint"]
+            == baseline_fingerprints[index]
+        )
 
 
 def test_packet_validation_freshness_and_unpinned_authority_are_exact(

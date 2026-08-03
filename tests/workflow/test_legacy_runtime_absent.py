@@ -44,7 +44,7 @@ _DELETED_MODULES = (
 )
 _FORBIDDEN_LITERALS = (
     "orchestrator" + "_agent",
-    "FSM" + "Controller",
+    "F" + "SMController",
     "STATE" + "_REGISTRY",
     "fsm" + "_state",
     "AGILEFORGE" + "_SESSION_DB_URL",

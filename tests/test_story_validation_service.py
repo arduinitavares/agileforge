@@ -202,7 +202,9 @@ def test_story_validation_blocks_malformed_v3_before_checks_or_evidence(
     assert result["error_code"] == "COMPILED_AUTHORITY_INVALID"
     assert result["details"]["load_status"] == "schema_invalid"
     assert result["details"]["authority_id"] == authority.authority_id
-    assert "agileforge authority regenerate" in " ".join(result["remediation"])
+    assert result["remediation"] == [
+        f"agileforge workflow next --project-id {project.project_id}"
+    ]
     assert calls == []
     session.refresh(story)
     assert story.validation_evidence is None

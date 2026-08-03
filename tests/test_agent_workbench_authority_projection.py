@@ -1297,7 +1297,7 @@ def test_authority_status_marks_compiler_prompt_mismatch_stale(
     assert result["data"]["stale_reason"] == "accepted_compiler_prompt_mismatch"
 
 
-def test_authority_status_reports_regenerate_for_unsupported_schema(
+def test_authority_status_reports_graph_recovery_for_unsupported_schema(
     session: Session,
     tmp_path: Path,
 ) -> None:
@@ -1322,9 +1322,9 @@ def test_authority_status_reports_regenerate_for_unsupported_schema(
     assert result["data"]["authority_status"] == "unsupported_schema"
     assert result["data"]["current"] is False
     assert result["data"]["accepted_current"] is False
-    assert "agileforge authority regenerate" in " ".join(
-        result["errors"][0]["remediation"]
-    )
+    assert result["errors"][0]["remediation"] == [
+        f"agileforge workflow next --project-id {project_id}"
+    ]
 
 
 def test_authority_status_prefers_pending_unsupported_over_supported_accepted(
@@ -1360,9 +1360,9 @@ def test_authority_status_prefers_pending_unsupported_over_supported_accepted(
     assert result["data"]["accepted_current"] is False
     assert result["data"]["pending_authority_id"] == pending_authority.authority_id
     assert result["data"]["latest_spec_version_id"] == pending_spec.spec_version_id
-    assert "agileforge authority regenerate" in " ".join(
-        result["errors"][0]["remediation"]
-    )
+    assert result["errors"][0]["remediation"] == [
+        f"agileforge workflow next --project-id {project_id}"
+    ]
 
 
 def test_authority_status_unsupported_schema_preserves_status_payload_shape(
@@ -1815,7 +1815,7 @@ def test_invariants_default_uses_exact_newest_accepted_authority(
     assert result["data"]["authority_id"] != authority_a.authority_id
 
 
-def test_invariants_reports_regenerate_for_unsupported_schema(
+def test_invariants_reports_graph_recovery_for_unsupported_schema(
     session: Session,
     tmp_path: Path,
 ) -> None:
@@ -1837,9 +1837,9 @@ def test_invariants_reports_regenerate_for_unsupported_schema(
 
     assert result["ok"] is False
     assert result["errors"][0]["code"] == "COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED"
-    assert "agileforge authority regenerate" in " ".join(
-        result["errors"][0]["remediation"]
-    )
+    assert result["errors"][0]["remediation"] == [
+        f"agileforge workflow next --project-id {project_id}"
+    ]
 
 
 def test_status_and_invariants_reject_malformed_v3_authority(
@@ -1869,7 +1869,9 @@ def test_status_and_invariants_reject_malformed_v3_authority(
         assert error["code"] == "COMPILED_AUTHORITY_INVALID"
         assert error["details"]["load_status"] == "schema_invalid"
         assert error["details"]["authority_id"] == authority.authority_id
-        assert "agileforge authority regenerate" in " ".join(error["remediation"])
+        assert error["remediation"] == [
+            f"agileforge workflow next --project-id {project_id}"
+        ]
         assert result["data"]["authority_status"] == "invalid"
         assert result["data"]["current"] is False
         assert result["data"]["accepted_current"] is False

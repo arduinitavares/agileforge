@@ -35,7 +35,7 @@ def test_workflow_next_renders_required_and_recovery_only() -> None:
     assert "--expected-decision-fingerprint decision-compile" in serialized
     assert "--idempotency-key <idempotency-key>" in serialized
     assert "--changed-by <actor>" in serialized
-    assert "--expected-state" not in serialized
+    assert "--expected-" + "state" not in serialized
     assert "--expected-setup-status" not in serialized
 
 
@@ -68,7 +68,7 @@ def test_renderer_module_has_no_routing_or_repository_policy() -> None:
     for forbidden in (
         "repositories",
         "WorkflowService",
-        "FSM" + "Controller",
+        "F" + "SMController",
         "fsm" + "_state",
         "setup_status",
     ):

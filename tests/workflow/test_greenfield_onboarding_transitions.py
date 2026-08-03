@@ -188,7 +188,10 @@ def _record_initial_spec(
     supersedes_spec_draft_id: int | None = None,
 ) -> tuple[int, dict[str, object]]:
     content: dict[str, object] = {
-        "scope": {"included": ["workflow graph"], "excluded": ["legacy FSM"]},
+        "scope": {
+            "included": ["workflow graph"],
+            "excluded": ["legacy state machine"],
+        },
         "prd_version_id": prd_version_id,
         "version": key,
     }

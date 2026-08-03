@@ -121,7 +121,6 @@ _SCHEMA_RETRY_FEEDBACK = (
 _SOURCE_METADATA_MISMATCH: str = "SOURCE_METADATA_MISMATCH"
 _REPAIRABLE_SOURCE_METADATA_SUBCODE: str = "BEHAVIORAL_SOURCE_EVIDENCE_UNSUPPORTED"
 _SOURCE_METADATA_EXCERPT_LIMIT: int = 500
-_SOURCE_METADATA_RETRY_COMPILER_MODEL: str = "openrouter/openai/gpt-5.6-luna"
 DEFAULT_AUTHORITY_COMPILE_HEARTBEAT_SECONDS: float = 60.0
 DEFAULT_AUTHORITY_COMPILE_TIMEOUT_SECONDS: float = 1800.0
 COMPILED_AUTHORITY_SCHEMA_VERSION = "agileforge.compiled_authority.v3"
@@ -524,19 +523,9 @@ def compiled_authority_schema_unsupported_remediation(
     project_id: int,
     spec_version_id: int | None,
 ) -> list[str]:
-    """Return standard regenerate guidance for unsupported authority artifacts."""
-    if spec_version_id is None:
-        return [
-            "Find the approved spec version, then run agileforge authority regenerate."
-        ]
-    return [
-        (
-            "Run agileforge authority regenerate "
-            f"--project-id {project_id} "
-            f"--spec-version-id {spec_version_id} "
-            "--idempotency-key <new-key>."
-        )
-    ]
+    """Return graph-owned recovery orientation for an unreadable authority."""
+    del spec_version_id
+    return [f"agileforge workflow next --project-id {project_id}"]
 
 
 def compiled_authority_read_failure(
@@ -1278,30 +1267,8 @@ def _coverage_repair_domain_hint(item_id: str) -> str:
 
 
 def _source_metadata_retry_commands(spec_version: SpecRegistry) -> list[str]:
-    """Return operator commands for retrying a source-metadata compiler failure."""
-    project_id = spec_version.project_id
-    spec_version_id = spec_version.spec_version_id
-    spec_hash = spec_version.spec_hash
-    compiler_model = _SOURCE_METADATA_RETRY_COMPILER_MODEL
-    return [
-        (
-            "agileforge authority compile "
-            f"--project-id {project_id} "
-            f"--spec-version-id {spec_version_id} "
-            f"--expected-spec-hash {spec_hash} "
-            "--expected-state SETUP_REQUIRED "
-            "--expected-setup-status authority_compile_failed "
-            f"--compiler-model {compiler_model} "
-            "--idempotency-key <new-idempotency-key>"
-        ),
-        (
-            "agileforge authority regenerate "
-            f"--project-id {project_id} "
-            f"--spec-version-id {spec_version_id} "
-            f"--compiler-model {compiler_model} "
-            "--idempotency-key <new-idempotency-key>"
-        ),
-    ]
+    """Return graph-owned recovery orientation after compiler failure."""
+    return [f"agileforge workflow next --project-id {spec_version.project_id}"]
 
 
 def _scope_extension_marker_from_notes(  # noqa: PLR0911

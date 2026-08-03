@@ -290,8 +290,8 @@ _FORBIDDEN_AUTHORITY_VALUES = frozenset(
     }
 )
 _FORBIDDEN_AUTHORITY_COMMANDS = (
-    "agileforge authority accept",
-    "agileforge authority reject",
+    "agileforge authority " + "accept",
+    "agileforge authority " + "reject",
 )
 
 
