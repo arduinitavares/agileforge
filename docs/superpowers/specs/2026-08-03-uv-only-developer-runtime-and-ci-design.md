@@ -42,6 +42,10 @@ and the environment example omits settings required by the graph runtime.
    process and embedded SQLite databases, so native uv execution is the smaller
    and more transparent boundary.
 8. The prior no-migration hard break remains unchanged.
+9. The launcher is branch-neutral. It derives identity from the checkout that
+   contains it and has no hardcoded branch, worktree, commit, profile, or port.
+   Once merged into the default branch, every future branch and linked worktree
+   inherits the same development interface.
 
 ## Goals
 
@@ -357,6 +361,19 @@ that use an ambiguous bare `agileforge` during worktree acceptance.
 - remove only an ephemeral profile;
 - reject a stale acceptance SHA;
 - prove no dependency on the user-level `agileforge` shim.
+
+### Cross-Worktree Isolation Test
+
+Create two linked worktrees that both contain the launcher, initialize the same
+profile name in each, and prove that they report different canonical checkout
+roots, commits, profile roots, business databases, ADK trace databases, and
+automatically selected UI ports. A CLI command launched from each worktree must
+execute that worktree's source. Neither invocation may read or modify the other
+worktree's profile state.
+
+An older branch that predates the launcher must merge or rebase the launcher
+change before using this interface. A launcher from another checkout must not be
+used to impersonate or execute that older branch.
 
 ### CI Contract Tests
 
