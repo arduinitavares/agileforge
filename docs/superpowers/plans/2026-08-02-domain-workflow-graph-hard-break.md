@@ -49,6 +49,25 @@ Branch-only scaffolding is limited to these two items:
 
 Neither item may remain after Task 17. No production caller switches to `WorkflowDomain` before Task 16, so intermediate commits do not create a dual-routing runtime.
 
+### Approved Task-Order Correction
+
+The Operator approved this correction after Task 14's RED phase exposed an
+ordering conflict with the approved design:
+
+1. Task 14 relocates deterministic contracts, prompts, story linkage, and
+   retained leaf-agent definitions. The existing root/write runtime remains
+   the sole production path on this unpublished branch; Task 14 adds no
+   compatibility wrapper or second mutation path.
+2. Task 15 adds durable attempts and the ADK graph runner against the relocated
+   leaf agents.
+3. Task 16 atomically switches every production caller, including legacy save
+   callers and the root-agent execution path, to `WorkflowDomain`.
+4. Task 17 deletes the root orchestrator, legacy write tools, FSM/session
+   routing, and every remaining `orchestrator_agent` import.
+
+This correction follows the design's fixed architectural order. The final
+hard-break scope and acceptance criteria are unchanged.
+
 ## Target File Map
 
 ### Domain
@@ -2158,7 +2177,7 @@ git add workflow services/agent_workbench/scope_discovery.py services/agent_work
 git commit -m "feat: model scope extension as a graph"
 ```
 
-## Task 14: Relocate Useful Agent Contracts And Delete Root-Orchestrator Behavior
+## Task 14: Relocate Useful Agent Contracts And Leaf Definitions
 
 **Files:**
 - Create: `services/contracts/__init__.py`
@@ -2182,14 +2201,19 @@ git commit -m "feat: model scope extension as a graph"
 - Create: `adapters/adk/prompts/__init__.py`
 - Create: `adapters/adk/prompts/specification.py`
 - Create: `services/story_linkage.py`
-- Modify: all live imports of `orchestrator_agent.agent_tools`
+- Modify: imports of every contract, prompt, linkage helper, and leaf agent
+  relocated in this task
 - Move/modify: retained tests named below
-- Delete in this task: `orchestrator_agent/agent.py`
-- Delete in this task: `orchestrator_agent/agent_tools/utils/resilience.py`
+- Keep temporarily: `orchestrator_agent/agent.py`, legacy write-tool modules,
+  and `orchestrator_agent/agent_tools/utils/resilience.py`; Task 16 replaces
+  their production callers atomically and Task 17 deletes them
 
 **Interfaces:**
 - Consumes: useful leaf definitions and deterministic Pydantic validation from `orchestrator_agent/agent_tools/`.
-- Produces: adapter-owned leaf agents, service-owned validation contracts, and no root agent or legacy retry wrapper.
+- Produces: adapter-owned leaf agents and service-owned validation contracts
+  ready for Task 15. The existing root/write runtime remains the sole
+  production mutation path until Task 16; this task creates no wrapper around
+  it and does not route a production caller through `WorkflowDomain`.
 
 - [ ] **Step 1: Write import-boundary tests before moving files**
 
@@ -2198,7 +2222,8 @@ Create `tests/adapters/test_agent_contract_boundaries.py` and update existing mo
 - `services.contracts` imports no `google.adk`, `litellm`, `orchestrator_agent`, repository, or workflow adapter;
 - `adapters.adk.agents` may import `services.contracts`, model config, prompts, and ADK;
 - no retained leaf agent imports SQLModel models or repositories;
-- no runtime import loads `orchestrator_agent.agent`.
+- importing the relocated contracts, leaf agents, prompts, or story linkage
+  does not load `orchestrator_agent.agent`.
 
 ```python
 def test_service_contracts_do_not_import_adk() -> None:
@@ -2224,13 +2249,13 @@ Use this exact mapping; do not move a mixed `tools.py` intact:
 | `agent_tools/authority_curation/schemes.py` | `services/contracts/authority.py` |
 | `agent_tools/backlog_primer/agent.py` | `adapters/adk/agents/backlog.py` |
 | `agent_tools/backlog_primer/schemes.py` | `services/contracts/backlog.py` |
-| `agent_tools/backlog_primer/tools.py` | validated output helpers to `services/contracts/backlog.py`; writes already moved to `workflow/handlers/product_definition.py` |
+| `agent_tools/backlog_primer/tools.py` | validated output helpers to `services/contracts/backlog.py`; keep the existing write entry point in place until Task 16 and make it consume the relocated contract |
 | `agent_tools/product_vision_tool/agent.py` | `adapters/adk/agents/vision.py` |
 | `agent_tools/product_vision_tool/schemes.py` | `services/contracts/vision.py` |
-| `agent_tools/product_vision_tool/tools.py` | validation to `services/contracts/vision.py`; writes already moved to handlers |
+| `agent_tools/product_vision_tool/tools.py` | validation to `services/contracts/vision.py`; keep the existing write entry point in place until Task 16 and make it consume the relocated contract |
 | `agent_tools/roadmap_builder/agent.py` | `adapters/adk/agents/roadmap.py` |
 | `agent_tools/roadmap_builder/schemes.py` | `services/contracts/roadmap.py` |
-| `agent_tools/roadmap_builder/tools.py` | validation to `services/contracts/roadmap.py`; writes already moved to handlers |
+| `agent_tools/roadmap_builder/tools.py` | validation to `services/contracts/roadmap.py`; keep the existing write entry point in place until Task 16 and make it consume the relocated contract |
 | `agent_tools/spec_authority_compiler_agent/agent.py` | `adapters/adk/agents/specification.py` |
 | `agent_tools/spec_authority_compiler_agent/compiler_contract.py` | `services/contracts/specification.py` |
 | `agent_tools/spec_authority_compiler_agent/instructions_source.py` | `adapters/adk/prompts/specification.py` |
@@ -2239,17 +2264,22 @@ Use this exact mapping; do not move a mixed `tools.py` intact:
 | `agent_tools/spec_validator_agent/tools.py` | deterministic validation to `services/specs/lifecycle_service.py` |
 | `agent_tools/sprint_planner_tool/agent.py` | `adapters/adk/agents/sprint.py` |
 | `agent_tools/sprint_planner_tool/schemes.py` | `services/contracts/sprint.py` |
-| `agent_tools/sprint_planner_tool/tools.py` | validation to `services/contracts/sprint.py`; writes already moved to `workflow/handlers/planning.py` |
+| `agent_tools/sprint_planner_tool/tools.py` | validation to `services/contracts/sprint.py`; keep the existing write entry point in place until Task 16 and make it consume the relocated contract |
 | `agent_tools/user_story_writer_tool/agent.py` | `adapters/adk/agents/story.py` |
 | `agent_tools/user_story_writer_tool/schemes.py` | `services/contracts/story.py` |
-| `agent_tools/user_story_writer_tool/tools.py` | validation to `services/contracts/story.py`; writes already moved to `workflow/handlers/planning.py` |
+| `agent_tools/user_story_writer_tool/tools.py` | validation to `services/contracts/story.py`; keep the existing write entry point in place until Task 16 and make it consume the relocated contract |
 | `agent_tools/story_linkage.py` | `services/story_linkage.py` |
 
-Where two source files target one destination, preserve exported type names only when they still represent one coherent contract. Split the destination if its McCabe complexity exceeds 10; name the split by domain concept, not by legacy package.
+Where two source files target one destination, preserve exported type names only when they still represent one coherent contract. Split the destination if its McCabe complexity exceeds 10; name the split by domain concept, not by legacy package. Do not copy a write implementation into a new package, wrap it, or expose a second mutation entry point. Physically move the pure definitions and retarget both new adapters and the temporary legacy runtime to their owning packages.
 
-- [ ] **Step 4: Remove root orchestration and legacy resilience**
+- [ ] **Step 4: Preserve one temporary production authority**
 
-Delete `orchestrator_agent/agent.py`; no replacement root agent exists. Delete the legacy resilience wrapper instead of wrapping ADK 2 graph execution with it. Task 15 adds explicit recipe-level retry/timeouts and the durable attempt lease.
+Keep `orchestrator_agent/agent.py`, the existing write-tool entry points, and the
+legacy resilience wrapper until the atomic cutover. Retarget their imports only
+as required by the physical relocation. Do not add new behavior, a compatibility
+alias, a new wrapper, or a production call to `WorkflowDomain`. Task 15 adds the
+replacement ADK execution path; Task 16 switches callers; Task 17 deletes this
+temporary legacy runtime.
 
 - [ ] **Step 5: Move retained tests to their owning packages**
 
@@ -2260,13 +2290,18 @@ Move and update:
 - compiler normalizer tests to `tests/services/contracts/test_specification.py`;
 - story linkage tests to `tests/test_story_linkage.py`.
 
-Delete only tests that assert the deleted root agent composition or legacy resilience behavior. Do not delete business validation coverage.
+Do not delete root-agent, resilience, or legacy write-tool tests in this task;
+that production path still exists. Move tests that own relocated contracts or
+leaf behavior, and preserve all business validation coverage.
 
-- [ ] **Step 6: Verify all live imports use the new boundaries**
+- [ ] **Step 6: Verify relocated imports use the new boundaries**
 
-Run: `rg -n "orchestrator_agent\.agent_tools|orchestrator_agent\.agent" --glob '*.py' --glob '!docs/**' .`
+Run a targeted import scan for every source physically relocated in Step 3.
 
-Expected: no output.
+Expected: no live import points to a relocated contract, prompt, linkage helper,
+or leaf-agent module. Remaining `orchestrator_agent` imports are reviewed and
+limited to the existing root/write runtime that Tasks 16-17 remove. The final
+zero-output scan is a Task 17 gate.
 
 Run: `uv run --frozen pytest tests/adapters tests/services/contracts tests/test_agent_tool_runtime_import_boundary.py tests/test_model_package_boundary.py -q`
 
@@ -2517,6 +2552,8 @@ git commit -m "feat: execute graph nodes through ADK"
 - Create: `tests/adapters/test_api_workflow_domain.py`
 - Create: `tests/test_workflow_position_display.mjs`
 - Modify: affected frontend `.mjs` tests
+- Modify: every production caller of legacy `save_*_tool` entry points and
+  `orchestrator_agent.agent`
 
 **Interfaces:**
 - Consumes: `WorkflowDomain`, closed requests, `WorkflowPosition`, and existing non-routing read projections.
@@ -2606,6 +2643,12 @@ Make `agileforge workflow next --project-id` call `position()` once and render e
 Replace `/api/projects/{project_id}/state` with `/api/projects/{project_id}/position`. API mutation schemas carry graph/fact/decision guards. The frontend stores the current decision fingerprint with each action and sends it back unchanged.
 
 Delete frontend phase arrays keyed by `SETUP_REQUIRED`, `VISION_*`, `BACKLOG_*`, `SPRINT_*`, and `SPRINT_COMPLETE`. Render child graph IDs plus available/waiting/blocked/invalid categories. A terminal Project may show an explicit "Start scope extension" control sourced from the optional decision, but it is not shown as unfinished work.
+
+In the same atomic cutover, replace every production caller of the legacy
+`save_*_tool` functions and the `services/workflow.py` root-agent path. After
+this step, those legacy functions may remain in the tree only as dead code
+awaiting Task 17 deletion; no production transport, service, or runner imports
+or invokes them.
 
 - [ ] **Step 7: Prove runtime imports only the new authority**
 
