@@ -72,9 +72,14 @@ def canonical_stored_json_hash(canonical_content_json: str) -> str:
     return canonical_hash(parsed)
 
 
-def fact_fingerprint(snapshot: WorkflowFactSnapshot) -> str:
-    """Return the graph-versioned fingerprint for an immutable fact snapshot."""
+def _snapshot_fingerprint(
+    snapshot: WorkflowFactSnapshot,
+    *,
+    include_node_attempts: bool,
+) -> str:
     facts = snapshot.model_dump(mode="json")
+    if not include_node_attempts:
+        facts.pop("node_attempts")
     for name, collection in facts.items():
         if name != "project" and isinstance(collection, tuple | list):
             facts[name] = sorted(collection, key=canonical_json)
@@ -83,6 +88,16 @@ def fact_fingerprint(snapshot: WorkflowFactSnapshot) -> str:
         "facts": facts,
     }
     return canonical_hash(payload)
+
+
+def fact_fingerprint(snapshot: WorkflowFactSnapshot) -> str:
+    """Return the graph-versioned fingerprint for the complete fact snapshot."""
+    return _snapshot_fingerprint(snapshot, include_node_attempts=True)
+
+
+def business_fact_fingerprint(snapshot: WorkflowFactSnapshot) -> str:
+    """Hash every Project business fact while excluding execution attempts."""
+    return _snapshot_fingerprint(snapshot, include_node_attempts=False)
 
 
 def decision_fingerprint(payload: Mapping[str, object]) -> str:

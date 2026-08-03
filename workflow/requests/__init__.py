@@ -1,5 +1,6 @@
 """Guarded request contracts for workflow graph transitions."""
 
+from workflow.requests.attempts import FailNodeAttempt, StartNodeAttempt
 from workflow.requests.authority import (
     CompileAuthority,
     DecideAuthority,
@@ -102,6 +103,8 @@ type TransitionRequest = (
     | RegisterScopeExtension
     | ReconcileScopeExtension
     | AbandonScopeExtension
+    | StartNodeAttempt
+    | FailNodeAttempt
 )
 
 __all__ = [
@@ -123,6 +126,7 @@ __all__ = [
     "DecideSprintPlan",
     "DecideStory",
     "DecideVision",
+    "FailNodeAttempt",
     "OpenProjectShell",
     "ReconcileBacklog",
     "ReconcileScopeExtension",
@@ -148,6 +152,7 @@ __all__ = [
     "RepairStoryReadiness",
     "ReviewSprint",
     "ScopeExtensionArtifactReference",
+    "StartNodeAttempt",
     "StartScopeExtension",
     "StartSprint",
     "TransitionRequest",

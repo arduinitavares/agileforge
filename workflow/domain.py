@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, assert_never
+from typing import TYPE_CHECKING, Protocol, assert_never
 
 from sqlalchemy import event
 from sqlalchemy.exc import OperationalError
@@ -14,13 +14,20 @@ from repositories.workflow import WorkflowFactLoadError, WorkflowFactRepository
 from workflow.contracts import (
     NodeCategory,
     NodeDecision,
+    RecommendationKind,
     TransitionResult,
     WorkflowError,
     WorkflowErrorCode,
     WorkflowPosition,
 )
-from workflow.fingerprints import canonical_hash, canonical_json
+from workflow.fingerprints import (
+    business_fact_fingerprint,
+    canonical_hash,
+    canonical_json,
+)
 from workflow.handlers import (
+    AttemptStartState,
+    as_utc,
     execute_abandon_project_shell,
     execute_compile_authority,
     execute_decide_authority,
@@ -45,6 +52,12 @@ from workflow.handlers import (
     execute_register_initial_scope,
     execute_repair_authority,
     execute_scope_extension_request,
+    execute_start_node_attempt,
+    load_attempt,
+    load_attempt_outcome,
+    record_failure_outcome,
+    record_obsolete_outcome,
+    record_success_outcome,
     validate_decide_authority_review,
     validate_decide_backlog_review,
     validate_decide_vision_review,
@@ -69,6 +82,7 @@ from workflow.requests import (
     DecideSprintPlan,
     DecideStory,
     DecideVision,
+    FailNodeAttempt,
     OpenProjectShell,
     ReconcileBacklog,
     ReconcileScopeExtension,
@@ -93,6 +107,7 @@ from workflow.requests import (
     RepairAuthority,
     RepairStoryReadiness,
     ReviewSprint,
+    StartNodeAttempt,
     StartScopeExtension,
     StartSprint,
     TransitionRequest,
@@ -105,8 +120,16 @@ if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
 
     from workflow.clock import Clock
+    from workflow.facts import WorkflowFactSnapshot
     from workflow.graph import WorkflowGraph
     from workflow.requests.base import PositionedRequest
+
+
+class AdkRecipeRegistryProtocol(Protocol):
+    """Domain-facing recipe lookup without importing the ADK adapter."""
+
+    def require(self, node_id: str) -> object:
+        """Return a recipe or raise LookupError when the node is unregistered."""
 
 _SQLITE_BUSY_TIMEOUT_MS = 1_000
 _SQLITE_LOCK_MESSAGES = ("database is locked", "database table is locked")
@@ -197,11 +220,19 @@ def _set_sqlite_busy_timeout(
 class WorkflowDomain:
     """Expose the only workflow position read and transition mutation APIs."""
 
-    def __init__(self, *, engine: Engine, graph: WorkflowGraph, clock: Clock) -> None:
+    def __init__(
+        self,
+        *,
+        engine: Engine,
+        graph: WorkflowGraph,
+        clock: Clock,
+        adk_recipe_registry: AdkRecipeRegistryProtocol | None = None,
+    ) -> None:
         """Retain explicit persistence, graph, and time dependencies."""
         self._engine = engine
         self._graph = graph
         self._clock = clock
+        self._adk_recipe_registry = adk_recipe_registry
         self._configure_busy_timeout()
 
     def position(self, project_id: int) -> WorkflowPosition:
@@ -382,7 +413,290 @@ class WorkflowDomain:
                 self._graph,
                 evaluated_at,
             )
+        if isinstance(request, StartNodeAttempt):
+            return self._execute_start_attempt(session, request, evaluated_at)
+        if isinstance(request, FailNodeAttempt):
+            return self._execute_failed_attempt(session, request, evaluated_at)
+        if request.attempt_id is not None:
+            return self._execute_attempt_continuation(
+                session,
+                request,
+                evaluated_at,
+            )
         return self._execute_positioned(session, request, evaluated_at)
+
+    def _execute_start_attempt(
+        self,
+        session: Session,
+        request: StartNodeAttempt,
+        evaluated_at: datetime,
+    ) -> TransitionResult:
+        """Guard and persist a currently available registry-backed decision."""
+        position = self._position_in_session(session, request.project_id, evaluated_at)
+        decision_or_failure = self._start_decision(position, request, evaluated_at)
+        if isinstance(decision_or_failure, TransitionResult):
+            return decision_or_failure
+        decision = decision_or_failure
+        if not self._has_registered_recipe(request.target_node_id):
+            return TransitionResult(
+                ok=False,
+                position=position,
+                error=WorkflowError(
+                    code=WorkflowErrorCode.TRANSITION_NOT_AVAILABLE,
+                    message="The requested node has no registered ADK recipe.",
+                ),
+            )
+        snapshot = WorkflowFactRepository(session).load(request.project_id)
+        state = AttemptStartState(
+            business_fingerprint=business_fact_fingerprint(snapshot),
+            expired_attempt_id=self._expired_attempt_id(
+                snapshot,
+                request,
+                decision,
+                evaluated_at,
+            ),
+        )
+        result = execute_start_node_attempt(
+            session,
+            request,
+            decision,
+            evaluated_at,
+            state,
+        )
+        return result.model_copy(
+            update={
+                "position": self._position_in_session(
+                    session,
+                    request.project_id,
+                    evaluated_at,
+                )
+            }
+        )
+
+    @staticmethod
+    def _start_decision(
+        position: WorkflowPosition,
+        request: StartNodeAttempt,
+        evaluated_at: datetime,
+    ) -> NodeDecision | TransitionResult:
+        """Validate full guards and availability for an attempt start."""
+        stale_message: str | None = None
+        if request.graph_version != position.graph_version:
+            stale_message = "The workflow graph version changed."
+        elif request.fact_fingerprint != position.fact_fingerprint:
+            stale_message = "The complete Project facts changed."
+        decision = next(
+            (
+                item
+                for item in position.decisions
+                if item.node_id == request.target_node_id
+                and item.instance_key == request.target_instance_key
+            ),
+            None,
+        )
+        if stale_message is None and decision is not None:
+            if request.decision_fingerprint != decision.decision_fingerprint:
+                stale_message = "The exact node decision changed."
+            elif (
+                decision.valid_until is not None
+                and evaluated_at >= decision.valid_until
+            ):
+                stale_message = "The node decision expired."
+        if stale_message is not None:
+            return WorkflowDomain._stale(position, stale_message)
+        if decision is None or decision.category is not NodeCategory.AVAILABLE:
+            return TransitionResult(
+                ok=False,
+                position=position,
+                error=WorkflowError(
+                    code=WorkflowErrorCode.TRANSITION_NOT_AVAILABLE,
+                    message="The requested node is not currently available.",
+                ),
+            )
+        return decision
+
+    def _has_registered_recipe(self, node_id: str) -> bool:
+        """Return whether the injected execution registry owns a node."""
+        if self._adk_recipe_registry is None:
+            return False
+        try:
+            self._adk_recipe_registry.require(node_id)
+        except LookupError:
+            return False
+        return True
+
+    @staticmethod
+    def _expired_attempt_id(
+        snapshot: WorkflowFactSnapshot,
+        request: StartNodeAttempt,
+        decision: NodeDecision,
+        evaluated_at: datetime,
+    ) -> int | None:
+        """Return the exact expired attempt replaced by a recovery decision."""
+        if decision.recommendation_kind is not RecommendationKind.RECOVERY:
+            return None
+        expired = tuple(
+            item
+            for item in snapshot.node_attempts
+            if item.node_id == request.target_node_id
+            and item.instance_key == request.target_instance_key
+            and item.outcome is None
+            and evaluated_at >= item.lease_expires_at
+        )
+        if not expired:
+            return None
+        return max(item.attempt_id for item in expired)
+
+    def _execute_attempt_continuation(
+        self,
+        session: Session,
+        request: _PositionedTransitionRequest,
+        evaluated_at: datetime,
+    ) -> TransitionResult:
+        """Apply one live attempt output without requiring public availability."""
+        if request.attempt_id is None or request.attempt_fingerprint is None:
+            msg = "Attempt continuation identity is incomplete."
+            raise RuntimeError(msg)
+        row = load_attempt(
+            session,
+            project_id=request.project_id,
+            attempt_id=request.attempt_id,
+        )
+        snapshot = WorkflowFactRepository(session).load(request.project_id)
+        mismatch = (
+            row is None
+            or load_attempt_outcome(
+                session,
+                project_id=request.project_id,
+                attempt_id=request.attempt_id,
+            )
+            is not None
+            or row.attempt_fingerprint != request.attempt_fingerprint
+            or row.node_id != request.decision_node_id()
+            or row.instance_key != request.decision_instance_key()
+            or row.graph_version != request.graph_version
+            or row.graph_version != self._graph.graph_version
+            or row.fact_fingerprint != request.fact_fingerprint
+            or row.decision_fingerprint != request.decision_fingerprint
+            or evaluated_at >= as_utc(row.lease_expires_at)
+            or row.business_fact_fingerprint
+            != business_fact_fingerprint(snapshot)
+        )
+        if mismatch:
+            return self._obsolete_attempt(
+                session,
+                project_id=request.project_id,
+                attempt_id=request.attempt_id,
+                evaluated_at=evaluated_at,
+            )
+        position = self._graph.evaluate(snapshot, evaluated_at)
+        decision = self._decision(position, request)
+        if decision is None:
+            return self._obsolete_attempt(
+                session,
+                project_id=request.project_id,
+                attempt_id=request.attempt_id,
+                evaluated_at=evaluated_at,
+            )
+        result = self._dispatch_positioned(
+            session,
+            request,
+            decision,
+            evaluated_at,
+        )
+        if result.ok:
+            record_success_outcome(
+                session,
+                project_id=request.project_id,
+                attempt_id=request.attempt_id,
+                output=result.output,
+                evaluated_at=evaluated_at,
+            )
+        return result.model_copy(
+            update={
+                "position": self._position_in_session(
+                    session,
+                    request.project_id,
+                    evaluated_at,
+                )
+            }
+        )
+
+    def _execute_failed_attempt(
+        self,
+        session: Session,
+        request: FailNodeAttempt,
+        evaluated_at: datetime,
+    ) -> TransitionResult:
+        """Record failure only while the exact attempt lease remains authoritative."""
+        row = load_attempt(
+            session,
+            project_id=request.project_id,
+            attempt_id=request.attempt_id,
+        )
+        snapshot = WorkflowFactRepository(session).load(request.project_id)
+        mismatch = (
+            row is None
+            or load_attempt_outcome(
+                session,
+                project_id=request.project_id,
+                attempt_id=request.attempt_id,
+            )
+            is not None
+            or row.attempt_fingerprint != request.attempt_fingerprint
+            or row.graph_version != self._graph.graph_version
+            or evaluated_at >= as_utc(row.lease_expires_at)
+            or row.business_fact_fingerprint
+            != business_fact_fingerprint(snapshot)
+        )
+        if mismatch:
+            return self._obsolete_attempt(
+                session,
+                project_id=request.project_id,
+                attempt_id=request.attempt_id,
+                evaluated_at=evaluated_at,
+            )
+        record_failure_outcome(session, request, evaluated_at)
+        return TransitionResult(
+            ok=True,
+            applied_node_id=row.node_id,
+            output={"attempt_id": request.attempt_id, "status": "failure"},
+            position=self._position_in_session(
+                session,
+                request.project_id,
+                evaluated_at,
+            ),
+        )
+
+    def _obsolete_attempt(
+        self,
+        session: Session,
+        *,
+        project_id: int,
+        attempt_id: int,
+        evaluated_at: datetime,
+    ) -> TransitionResult:
+        """Record obsolescence when possible and deny business mutation."""
+        row = load_attempt(
+            session,
+            project_id=project_id,
+            attempt_id=attempt_id,
+        )
+        if row is not None:
+            record_obsolete_outcome(
+                session,
+                project_id=project_id,
+                attempt_id=attempt_id,
+                evaluated_at=evaluated_at,
+            )
+        return TransitionResult(
+            ok=False,
+            position=self._position_in_session(session, project_id, evaluated_at),
+            error=WorkflowError(
+                code=WorkflowErrorCode.ATTEMPT_OBSOLETE,
+                message="The node attempt is no longer authoritative.",
+            ),
+        )
 
     def _execute_positioned(
         self,
@@ -399,25 +713,41 @@ class WorkflowDomain:
         if isinstance(decision_or_failure, TransitionResult):
             return decision_or_failure
 
-        result = self._execute_execution_or_scope(
+        result = self._dispatch_positioned(
             session,
             request,
             decision_or_failure,
             evaluated_at,
         )
-        if result is None:
-            result = self._execute_prior_positioned(
-                session,
-                request,
-                decision_or_failure,
-                evaluated_at,
-            )
         position = self._position_in_session(
             session,
             request.project_id,
             evaluated_at,
         )
         return result.model_copy(update={"position": position})
+
+    def _dispatch_positioned(
+        self,
+        session: Session,
+        request: _PositionedTransitionRequest,
+        decision: NodeDecision,
+        evaluated_at: datetime,
+    ) -> TransitionResult:
+        """Run the existing request-specific invariant handler."""
+        result = self._execute_execution_or_scope(
+            session,
+            request,
+            decision,
+            evaluated_at,
+        )
+        if result is not None:
+            return result
+        return self._execute_prior_positioned(
+            session,
+            request,
+            decision,
+            evaluated_at,
+        )
 
     def _execute_prior_positioned(
         self,

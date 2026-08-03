@@ -5,7 +5,7 @@ from __future__ import annotations
 import datetime as _datetime
 from typing import Annotated, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 
 from workflow.contracts import FactReference, FrozenModel, JsonObject
 
@@ -430,6 +430,14 @@ class NodeAttemptFact(FrozenModel):
     model_id: str
     lease_expires_at: _DATETIME
     outcome: Literal["success", "failure", "obsolete"] | None
+
+    @field_validator("lease_expires_at", mode="after")
+    @classmethod
+    def normalize_lease_timezone(cls, value: _DATETIME) -> _DATETIME:
+        """Treat SQLite's timezone-free persisted UTC value as UTC."""
+        if value.tzinfo is None:
+            return value.replace(tzinfo=_datetime.UTC)
+        return value.astimezone(_datetime.UTC)
 
 
 class WorkflowFactSnapshot(FrozenModel):

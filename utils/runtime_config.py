@@ -76,6 +76,14 @@ class RuntimeConfigError(RuntimeError):
             "AGILEFORGE_DB_URL."
         )
 
+    @classmethod
+    def shared_adk_execution_trace_database(cls) -> RuntimeConfigError:
+        """Build an error when business and ADK trace DBs share one file."""
+        return cls(
+            "AGILEFORGE_ADK_EXECUTION_TRACE_DB_URL must point to a different "
+            "SQLite file than AGILEFORGE_DB_URL."
+        )
+
 
 @dataclass(frozen=True)
 class DatabaseTarget:
@@ -92,6 +100,11 @@ class DatabaseTarget:
             return ":memory:"
         return str(self.sqlite_path)
 
+    @property
+    def async_sqlite_url(self) -> str:
+        """Return the aiosqlite URL required by ADK 2 session storage."""
+        return self.sqlite_url.replace("sqlite:///", "sqlite+aiosqlite:///", 1)
+
 
 @dataclass(frozen=True)
 class RunnerIdentity:
@@ -104,6 +117,10 @@ class RunnerIdentity:
 WORKFLOW_RUNNER_IDENTITY = RunnerIdentity(
     app_name="agile_orchestrator",
     user_id="local_developer",
+)
+ADK_EXECUTION_TRACE_IDENTITY = RunnerIdentity(
+    app_name="agileforge_graph_execution",
+    user_id="workflow_adapter",
 )
 VISION_RUNNER_IDENTITY = RunnerIdentity(
     app_name="product_vision_tool",
@@ -254,6 +271,22 @@ def get_session_db_target() -> DatabaseTarget:
     return target
 
 
+@lru_cache(maxsize=1)
+def get_adk_execution_trace_db_target() -> DatabaseTarget:
+    """Return the separate ADK execution-trace database target."""
+    target = resolve_database_target(
+        None,
+        env_name="AGILEFORGE_ADK_EXECUTION_TRACE_DB_URL",
+    )
+    business_target = get_business_db_target()
+    if (
+        target.sqlite_path is not None
+        and target.sqlite_path == business_target.sqlite_path
+    ):
+        raise RuntimeConfigError.shared_adk_execution_trace_database()
+    return target
+
+
 def get_openrouter_api_key() -> str | None:
     """Return the OpenRouter API key, if configured."""
     return get_optional_env("OPEN_ROUTER_API_KEY")
@@ -356,4 +389,5 @@ def clear_runtime_config_cache() -> None:
     """Clear cached runtime settings for tests."""
     get_business_db_target.cache_clear()
     get_session_db_target.cache_clear()
+    get_adk_execution_trace_db_target.cache_clear()
     get_database_echo.cache_clear()

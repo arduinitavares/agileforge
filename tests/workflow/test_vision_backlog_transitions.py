@@ -57,7 +57,7 @@ if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
 
 EVALUATED_AT = datetime(2026, 8, 2, 12, tzinfo=UTC)
-EXPECTED_REQUEST_VARIANT_COUNT = 44
+EXPECTED_REQUEST_VARIANT_COUNT = 46
 EXPECTED_VISION_VERSION_COUNT = 2
 CALLER_SESSION_FUNCTIONS: dict[ModuleType, frozenset[str]] = {
     vision_phase_module: frozenset(

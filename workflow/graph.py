@@ -129,7 +129,18 @@ class WorkflowGraph:
                     item.instance_key or "",
                 ),
             ):
-                decision = self._decision(node, evaluation, facts_hash)
+                fact_references = self._decision_fact_references(
+                    node,
+                    evaluation,
+                    snapshot,
+                    evaluated_at,
+                )
+                decision = self._decision(
+                    node,
+                    evaluation,
+                    facts_hash,
+                    fact_references,
+                )
                 if decision is not None:
                     decisions.append(decision)
 
@@ -177,6 +188,7 @@ class WorkflowGraph:
         node: NodeSpec,
         evaluation: RuleEvaluation,
         facts_hash: str,
+        fact_references: tuple[FactReference, ...],
     ) -> NodeDecision | None:
         """Project one internal evaluation into a public decision."""
         if evaluation.category is RuleCategory.SATISFIED:
@@ -199,7 +211,7 @@ class WorkflowGraph:
                 item.model_dump(mode="json") for item in node.required_inputs
             ),
             "fact_references": tuple(
-                item.model_dump(mode="json") for item in evaluation.fact_references
+                item.model_dump(mode="json") for item in fact_references
             ),
             "blockers": tuple(
                 item.model_dump(mode="json") for item in evaluation.blockers
@@ -215,8 +227,44 @@ class WorkflowGraph:
             recommendation_kind=recommendation_kind,
             reason_code=evaluation.reason_code,
             required_inputs=node.required_inputs,
-            fact_references=evaluation.fact_references,
+            fact_references=fact_references,
             blockers=evaluation.blockers,
             valid_until=evaluation.valid_until,
             decision_fingerprint=decision_fingerprint(payload),
         )
+
+    @staticmethod
+    def _decision_fact_references(
+        node: NodeSpec,
+        evaluation: RuleEvaluation,
+        snapshot: WorkflowFactSnapshot,
+        evaluated_at: datetime,
+    ) -> tuple[FactReference, ...]:
+        """Append the exact failed or expired attempt to recovery decisions."""
+        recommendation = evaluation.recommendation_kind or node.recommendation_kind
+        if recommendation is not RecommendationKind.RECOVERY:
+            return evaluation.fact_references
+        candidates = tuple(
+            attempt
+            for attempt in snapshot.node_attempts
+            if attempt.node_id == node.node_id
+            and attempt.instance_key == evaluation.instance_key
+            and (
+                attempt.outcome in {"failure", "obsolete"}
+                or (
+                    attempt.outcome is None
+                    and evaluated_at >= attempt.lease_expires_at
+                )
+            )
+        )
+        if not candidates:
+            return evaluation.fact_references
+        attempt = max(candidates, key=lambda item: item.attempt_id)
+        reference = FactReference(
+            fact_type="node_attempt",
+            fact_id=str(attempt.attempt_id),
+            fingerprint=attempt.attempt_fingerprint,
+        )
+        if reference in evaluation.fact_references:
+            return evaluation.fact_references
+        return (*evaluation.fact_references, reference)
