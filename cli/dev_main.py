@@ -34,6 +34,7 @@ from cli.dev_profiles import (
     touch_profile_last_used,
 )
 from utils.cli_output import emit
+from workflow.contracts import JsonObject, JsonValue
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -52,7 +53,8 @@ _MAX_PORT = 65_535
 _MIN_UV_VERSION_PARTS = 2
 _GIT_COMMIT_LENGTH = 40
 _PROVIDER_CREDENTIAL = "OPEN_ROUTER_API_KEY"
-_JSON_OBJECT = TypeAdapter(dict[str, object])
+_JSON_OBJECT = TypeAdapter(JsonObject)
+_INVALID_PRODUCTION_OUTPUT = "invalid_production_cli_output"
 
 
 class ExitCode(IntEnum):
@@ -187,7 +189,7 @@ class CliResult(BaseModel):
     trace_database: Path
     command: tuple[str, ...]
     exit_code: int
-    result: dict[str, object]
+    result: JsonObject
 
 
 class DeveloperCommandError(RuntimeError):
@@ -358,6 +360,14 @@ class CliRequest:
     json_output: bool
 
 
+@dataclass(frozen=True, slots=True)
+class ProductionJsonResult:
+    """Parsed child JSON or one fixed safe invalid-output marker."""
+
+    result: JsonObject
+    valid: bool
+
+
 def _initialize_profile(
     *,
     checkout_root: Path,
@@ -489,15 +499,31 @@ def _forwarded_arguments(raw_arguments: Sequence[str]) -> tuple[str, ...]:
 def _provider_environment(secrets_file: Path | None) -> dict[str, str]:
     file_value: str | None = None
     if secrets_file is not None:
-        metadata = secrets_file.lstat()
-        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        no_follow_flag = getattr(os, "O_NOFOLLOW", None)
+        if not isinstance(no_follow_flag, int):
             message = f"secrets file must be a regular file: {secrets_file}"
             raise DeveloperCommandError(message)
-        values = dotenv_values(
-            dotenv_path=secrets_file,
-            verbose=False,
-            interpolate=False,
-        )
+        descriptor: int | None = None
+        try:
+            try:
+                descriptor = os.open(secrets_file, os.O_RDONLY | no_follow_flag)
+            except OSError:
+                message = f"secrets file must be a regular file: {secrets_file}"
+                raise DeveloperCommandError(message) from None
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                message = f"secrets file must be a regular file: {secrets_file}"
+                raise DeveloperCommandError(message)
+            stream = os.fdopen(descriptor, mode="r", encoding="utf-8")
+            descriptor = None
+            with stream:
+                values = dotenv_values(
+                    stream=stream,
+                    verbose=False,
+                    interpolate=False,
+                )
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
         file_value = values.get(_PROVIDER_CREDENTIAL)
 
     if _PROVIDER_CREDENTIAL in os.environ:
@@ -515,19 +541,52 @@ def _redact_text(value: str, secret_values: tuple[str, ...]) -> str:
     return redacted
 
 
+def _redact_json_value(
+    value: JsonValue,
+    *,
+    secret_values: tuple[str, ...],
+) -> JsonValue:
+    if isinstance(value, str):
+        return _redact_text(value, secret_values)
+    if isinstance(value, list):
+        return [_redact_json_value(item, secret_values=secret_values) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: _redact_json_value(item, secret_values=secret_values)
+            for key, item in value.items()
+        }
+    return value
+
+
+def _invalid_production_json() -> ProductionJsonResult:
+    return ProductionJsonResult(
+        result={"ok": False, "error": _INVALID_PRODUCTION_OUTPUT},
+        valid=False,
+    )
+
+
 def _production_json(
     stdout: str,
     *,
     secret_values: tuple[str, ...],
-) -> dict[str, object]:
+) -> ProductionJsonResult:
     try:
-        payload = _JSON_OBJECT.validate_json(stdout)
-    except ValidationError as error:
-        message = "production CLI stdout must contain exactly one JSON object"
-        raise DeveloperCommandError(message) from error
-    serialized = json.dumps(payload, sort_keys=True, default=str)
-    redacted = _redact_text(serialized, secret_values)
-    return _JSON_OBJECT.validate_json(redacted)
+        decoded = json.loads(stdout)
+    except json.JSONDecodeError:
+        return _invalid_production_json()
+    if not isinstance(decoded, dict):
+        return _invalid_production_json()
+    try:
+        payload = _JSON_OBJECT.validate_python(decoded)
+    except ValidationError:
+        return _invalid_production_json()
+    return ProductionJsonResult(
+        result={
+            key: _redact_json_value(value, secret_values=secret_values)
+            for key, value in payload.items()
+        },
+        valid=True,
+    )
 
 
 def _emit_cli_provenance(
@@ -573,6 +632,10 @@ def _run_cli(
     )
 
     if request.json_output:
+        production_json = _production_json(
+            result.stdout,
+            secret_values=secret_values,
+        )
         _print_json(
             CliResult(
                 checkout=profile.checkout.root,
@@ -583,12 +646,11 @@ def _run_cli(
                 trace_database=profile.trace_database,
                 command=forwarded,
                 exit_code=result.exit_code,
-                result=_production_json(
-                    result.stdout,
-                    secret_values=secret_values,
-                ),
+                result=production_json.result,
             )
         )
+        if not production_json.valid:
+            return ExitCode.ERROR
         return result.exit_code
 
     sys.stdout.write(result.stdout)

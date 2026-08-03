@@ -17,11 +17,15 @@ from cli.dev_profiles import initialize_profile_record, profile_environment
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+    from os import PathLike
     from pathlib import Path
+    from typing import IO
 
 
 _RAW_FAILURE_EXIT = 7
 _JSON_FAILURE_EXIT = 9
+_INVALID_CHILD_EXIT = 13
+_INVALID_CHILD_RESULT = {"ok": False, "error": "invalid_production_cli_output"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,6 +123,36 @@ def _runner(
 
 def _clock() -> FixedClock:
     return FixedClock(datetime(2026, 8, 3, 10, 1, tzinfo=UTC))
+
+
+def _string_values(value: object) -> tuple[str, ...]:
+    if isinstance(value, str):
+        return (value,)
+    if isinstance(value, list):
+        return tuple(item for child in value for item in _string_values(child))
+    if isinstance(value, dict):
+        return tuple(item for child in value.values() for item in _string_values(child))
+    return ()
+
+
+def _assert_invalid_child_envelope(
+    payload: dict[str, object],
+    *,
+    checkout: Path,
+    child_exit_code: int,
+) -> None:
+    profile = dev_main.load_profile(checkout, "local")
+    assert payload == {
+        "checkout": str(checkout.resolve()),
+        "commit": _git(checkout, "rev-parse", "HEAD"),
+        "profile": "local",
+        "profile_mode": "development",
+        "business_database": str(profile.business_database),
+        "trace_database": str(profile.trace_database),
+        "command": ["project", "list"],
+        "exit_code": child_exit_code,
+        "result": _INVALID_CHILD_RESULT,
+    }
 
 
 def test_cli_forwarding_ignores_path_selected_agileforge(
@@ -240,6 +274,74 @@ def test_cli_secrets_file_allows_only_provider_key_and_parent_wins(
         "forbidden-cloud-secret",
     ):
         assert forbidden not in serialized
+
+
+def test_cli_reads_secrets_from_one_no_follow_descriptor(
+    checkout: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep parsing the opened inode when the selected pathname is swapped."""
+    selected_value = "selected-provider-value"
+    alternate_value = "alternate-provider-value"
+    selected = tmp_path / "provider.env"
+    alternate = tmp_path / "alternate.env"
+    selected.write_text(
+        f"OPEN_ROUTER_API_KEY={selected_value}\n",
+        encoding="utf-8",
+    )
+    alternate.write_text(
+        f"OPEN_ROUTER_API_KEY={alternate_value}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("OPEN_ROUTER_API_KEY", raising=False)
+    real_dotenv_values = dev_main.dotenv_values
+    swap_count = 0
+
+    def swap_then_parse(
+        dotenv_path: str | PathLike[str] | None = None,
+        stream: IO[str] | None = None,
+        verbose: bool = False,
+        interpolate: bool = True,
+        encoding: str | None = "utf-8",
+    ) -> dict[str, str | None]:
+        nonlocal swap_count
+        swap_count += 1
+        selected.unlink()
+        selected.symlink_to(alternate)
+        return real_dotenv_values(
+            dotenv_path=dotenv_path,
+            stream=stream,
+            verbose=verbose,
+            interpolate=interpolate,
+            encoding=encoding,
+        )
+
+    monkeypatch.setattr(dev_main, "dotenv_values", swap_then_parse)
+    runner = _runner(checkout)
+
+    exit_code = dev_main.main(
+        [
+            "cli",
+            "--profile",
+            "local",
+            "--secrets-file",
+            str(selected),
+            "--",
+            "project",
+            "list",
+        ],
+        checkout_root=checkout,
+        runner=runner,
+        clock=_clock(),
+    )
+
+    child_environment = runner.calls[-1][2]
+    assert exit_code == 0
+    assert swap_count == 1
+    assert child_environment is not None
+    assert child_environment["OPEN_ROUTER_API_KEY"] == selected_value
+    assert alternate_value not in child_environment.values()
 
 
 @pytest.mark.parametrize("kind", ["symlink", "directory"])
@@ -374,12 +476,65 @@ def test_cli_json_mode_wraps_provenance_and_redacts_secret(
     assert credential_value not in " ".join(runner.calls[-1][0])
 
 
+def test_cli_json_mode_recursively_redacts_escaped_credential_values(
+    checkout: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Redact structured strings even when JSON escaping changes their bytes."""
+    credential_value = 'quote"backslash\\newline\nnon-ascii-\u00e7'
+    monkeypatch.setenv("OPEN_ROUTER_API_KEY", credential_value)
+    runner = _runner(
+        checkout,
+        stdout=json.dumps(
+            {
+                "ok": True,
+                "direct": credential_value,
+                "nested": {
+                    "items": [
+                        f"before {credential_value} after",
+                        {"value": credential_value},
+                    ]
+                },
+            }
+        ),
+    )
+
+    exit_code = dev_main.main(
+        ["cli", "--profile", "local", "--json", "--", "project", "list"],
+        checkout_root=checkout,
+        runner=runner,
+        clock=_clock(),
+    )
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    result = cast("dict[str, object]", payload["result"])
+    assert exit_code == 0
+    assert captured.err == ""
+    assert result == {
+        "ok": True,
+        "direct": "[REDACTED]",
+        "nested": {
+            "items": [
+                "before [REDACTED] after",
+                {"value": "[REDACTED]"},
+            ]
+        },
+    }
+    assert all(credential_value not in value for value in _string_values(payload))
+
+
 def test_cli_json_mode_rejects_non_object_stdout_without_echoing_it(
     checkout: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Fail closed when production stdout is not one JSON object."""
-    runner = _runner(checkout, stdout='["unexpected-sensitive-output"]\n')
+    runner = _runner(
+        checkout,
+        exit_code=_INVALID_CHILD_EXIT,
+        stdout='["unexpected-sensitive-output"]\n',
+    )
 
     exit_code = dev_main.main(
         ["cli", "--profile", "local", "--json", "--", "project", "list"],
@@ -390,5 +545,53 @@ def test_cli_json_mode_rejects_non_object_stdout_without_echoing_it(
 
     captured = capsys.readouterr()
     assert exit_code == 1
+    assert captured.err == ""
     assert "unexpected-sensitive-output" not in captured.out
-    assert json.loads(captured.out)["status"] == "error"
+    _assert_invalid_child_envelope(
+        json.loads(captured.out),
+        checkout=checkout,
+        child_exit_code=_INVALID_CHILD_EXIT,
+    )
+
+
+def test_cli_json_mode_discards_secret_bearing_parse_errors(
+    checkout: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Return fixed provenance without retaining malformed stdout exceptions."""
+    credential_value = 'malformed"\\\nsecret-\u00e7'
+    monkeypatch.setenv("OPEN_ROUTER_API_KEY", credential_value)
+    raw_stdout = f'{{"ok": true, "detail": "{credential_value}'
+    runner = _runner(
+        checkout,
+        exit_code=_INVALID_CHILD_EXIT,
+        stdout=raw_stdout,
+    )
+    emitted_errors: list[Exception] = []
+    original_emit_error = dev_main._emit_error
+
+    def capture_error(error: Exception, *, json_output: bool) -> None:
+        emitted_errors.append(error)
+        original_emit_error(error, json_output=json_output)
+
+    monkeypatch.setattr(dev_main, "_emit_error", capture_error)
+
+    exit_code = dev_main.main(
+        ["cli", "--profile", "local", "--json", "--", "project", "list"],
+        checkout_root=checkout,
+        runner=runner,
+        clock=_clock(),
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert emitted_errors == []
+    assert captured.err == ""
+    assert raw_stdout not in captured.out
+    assert credential_value not in captured.out
+    _assert_invalid_child_envelope(
+        json.loads(captured.out),
+        checkout=checkout,
+        child_exit_code=_INVALID_CHILD_EXIT,
+    )
