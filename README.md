@@ -90,18 +90,18 @@ cp .env.example .env
 The CLI is the supported agent interface for workflow inspection and guarded
 mutations. For the full contract, workflows, idempotency rules, and recovery
 guidance, see [docs/agent-cli-manual.md](docs/agent-cli-manual.md).
+For the Operator-run caRtola, ASA, and MyFinance acceptance evidence package,
+see [docs/testing/workflow-graph-acceptance-checklist.md](docs/testing/workflow-graph-acceptance-checklist.md).
 For the `grill-with-docs` -> `to-prd` -> AgileForge Scope Discovery handoff,
 see [docs/scope-discovery-agent-runbook.md](docs/scope-discovery-agent-runbook.md).
-For direct spec-file project creation, create and validate an AgileForge profile
-spec at `specs/spec.json`; Markdown specs are review views, not project-create
-inputs.
 
 ```bash
 uv run --frozen agileforge --help
 uv run --frozen agileforge project list
 uv run --frozen agileforge status --project-id 1
 uv run --frozen agileforge context pack --project-id 1 --phase sprint-planning
-uv run --frozen agileforge project create --name "Example" --spec-file specs/spec.json --idempotency-key create-example-001
+uv run --frozen agileforge project create --name "Example" --origin brownfield --idempotency-key create-example-001 --changed-by operator
+uv run --frozen agileforge workflow next --project-id 1
 ```
 
 ### Running the Application
