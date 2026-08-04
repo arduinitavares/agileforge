@@ -9,16 +9,31 @@ README_PATH = Path("README.md")
 ENV_EXAMPLE_PATH = Path(".env.example")
 AGENTS_PATH = Path("AGENTS.md")
 CLI_MANUAL_PATH = Path("docs/agent-cli-manual.md")
+ACCEPTANCE_CHECKLIST_PATH = Path(
+    "docs/testing/workflow-graph-acceptance-checklist.md"
+)
 CURRENT_OPERATING_DOCS = (
     README_PATH,
     ENV_EXAMPLE_PATH,
     AGENTS_PATH,
     CLI_MANUAL_PATH,
+    ACCEPTANCE_CHECKLIST_PATH,
 )
 
 
 def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
+
+
+def test_current_operating_docs_gate_has_exact_bounded_scope() -> None:
+    """Cover current guidance while excluding historical design and plan docs."""
+    assert set(CURRENT_OPERATING_DOCS) == {
+        README_PATH,
+        ENV_EXAMPLE_PATH,
+        AGENTS_PATH,
+        CLI_MANUAL_PATH,
+        ACCEPTANCE_CHECKLIST_PATH,
+    }
 
 
 def test_current_operating_docs_use_only_uv_for_python_setup() -> None:
@@ -30,6 +45,17 @@ def test_current_operating_docs_use_only_uv_for_python_setup() -> None:
         assert f"{installer} install" not in text
     assert "python -m " + installer_names[0] not in text
     assert "uv sync --frozen" in _read(README_PATH)
+
+
+def test_current_operating_docs_exclude_removed_runtime_guidance() -> None:
+    """Reject removed session configuration and the old absolute user shim."""
+    removed_session_db_variable = "AGILEFORGE_" + "SESSION_DB_URL"
+    old_user_shim = "/Users/aaat/" + ".local/bin/" + "agileforge"
+
+    for path in CURRENT_OPERATING_DOCS:
+        text = _read(path)
+        assert removed_session_db_variable not in text
+        assert old_user_shim not in text
 
 
 def test_docs_separate_stable_and_checkout_local_commands() -> None:

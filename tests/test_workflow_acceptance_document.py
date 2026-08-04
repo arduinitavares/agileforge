@@ -492,6 +492,8 @@ def test_literal_pinned_cli_examples_parse_with_live_parser() -> None:
             build_parser().parse_args(forwarded)
     assert not re.search(r"^agileforge ", _checklist_text(), flags=re.MULTILINE)
     assert "uv run --frozen agileforge" not in _checklist_text()
+    old_user_shim = "/Users/aaat/" + ".local/bin/" + "agileforge"
+    assert old_user_shim not in _checklist_text()
 
 
 def test_readme_links_the_operator_checklist() -> None:
