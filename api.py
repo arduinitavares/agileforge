@@ -25,6 +25,7 @@ from services.application import (
 )
 from utils.api_schemas import WorkflowPositionGuards
 from utils.model_config import get_model_id
+from utils.runtime_controls import UI_LAUNCH_NONCE_ENV
 from workflow.contracts import (
     JsonObject,
     NodeCategory,
@@ -101,6 +102,7 @@ class DashboardConfig(BaseModel):
     commit: str
     business_database: Path
     trace_database: Path
+    launch_nonce: str | None = None
 
 
 AGENTIC_API_PATHS: dict[str, str] = {
@@ -323,6 +325,7 @@ def get_dashboard_config() -> DashboardConfig:
         commit=_runtime_provenance(checkout_root),
         business_database=_database_path("AGILEFORGE_DB_URL"),
         trace_database=_database_path("AGILEFORGE_ADK_EXECUTION_TRACE_DB_URL"),
+        launch_nonce=os.environ.get(UI_LAUNCH_NONCE_ENV) or None,
     )
 
 

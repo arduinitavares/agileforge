@@ -13,4 +13,20 @@ if [ -L "$BOOTSTRAP" ]; then
 fi
 
 ROOT=$(CDPATH= cd -P -- "$(dirname -- "$BOOTSTRAP")" && pwd -P)
+unset \
+    UV_CONFIG_FILE \
+    UV_ENV_FILE \
+    UV_FROZEN \
+    UV_ISOLATED \
+    UV_LOCKED \
+    UV_MANAGED_PYTHON \
+    UV_NO_CONFIG \
+    UV_NO_MANAGED_PYTHON \
+    UV_NO_PROJECT \
+    UV_NO_SYNC \
+    UV_PROJECT \
+    UV_PROJECT_ENVIRONMENT \
+    UV_PYTHON \
+    UV_WORKING_DIR \
+    UV_WORKING_DIRECTORY
 exec uv --directory "$ROOT" run --locked agileforge-dev "$@"

@@ -52,7 +52,17 @@ def checkout(tmp_path: Path) -> Path:
     _git(root, "config", "user.email", "profiles@example.invalid")
     (root / "config").mkdir()
     (root / "models").mkdir()
+    (root / "cli").mkdir()
+    (root / "services").mkdir()
+    (root / ".gitignore").write_text(".agileforge/\n", encoding="utf-8")
     (root / "README.md").write_text("profile fixture\n", encoding="utf-8")
+    (root / "agileforge-dev").write_text("#!/bin/sh\n", encoding="utf-8")
+    (root / "cli" / "main.py").write_text("CLI = 1\n", encoding="utf-8")
+    (root / "services" / "application.py").write_text(
+        "SERVICE = 1\n",
+        encoding="utf-8",
+    )
+    (root / "uv.lock").write_text("version = 1\n", encoding="utf-8")
     (root / "config" / "models.yaml").write_text(
         "models:\n  default: test-model\n",
         encoding="utf-8",
@@ -396,6 +406,95 @@ def test_acceptance_profile_rejects_commit_advancement(checkout: Path) -> None:
 
     with pytest.raises(ValueError, match="acceptance commit mismatch"):
         load_profile(checkout, "acceptance")
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    ["agileforge-dev", "cli/main.py", "uv.lock", "services/application.py"],
+)
+def test_acceptance_initialization_rejects_dirty_tracked_source_without_state(
+    checkout: Path,
+    relative_path: str,
+) -> None:
+    """Reject dirty launcher, CLI, lock, and service source without path leakage."""
+    commit = _git(checkout, "rev-parse", "HEAD")
+    dirty_path = checkout / relative_path
+    dirty_path.write_text(
+        f"{dirty_path.read_text(encoding='utf-8')}DIRTY = 1\n",
+        encoding="utf-8",
+    )
+    paths = profile_paths(checkout, "acceptance-dirty")
+
+    with pytest.raises(ValueError, match="acceptance checkout must be clean") as error:
+        initialize_profile_record(
+            checkout,
+            "acceptance-dirty",
+            mode=ProfileMode.ACCEPTANCE,
+            expected_commit=commit,
+        )
+
+    assert not paths.root.exists()
+    assert relative_path not in str(error.value)
+
+
+def test_acceptance_initialization_rejects_nonignored_untracked_source(
+    checkout: Path,
+) -> None:
+    """Reject untracked source while allowing ignored launcher-owned state."""
+    commit = _git(checkout, "rev-parse", "HEAD")
+    untracked = checkout / "services" / "untracked_runtime.py"
+    untracked.write_text("UNTRACKED = 1\n", encoding="utf-8")
+    paths = profile_paths(checkout, "acceptance-untracked")
+
+    with pytest.raises(ValueError, match="acceptance checkout must be clean") as error:
+        initialize_profile_record(
+            checkout,
+            "acceptance-untracked",
+            mode=ProfileMode.ACCEPTANCE,
+            expected_commit=commit,
+        )
+
+    assert not paths.root.exists()
+    assert untracked.name not in str(error.value)
+
+
+def test_acceptance_load_rejects_dirty_source_without_mutating_profile(
+    checkout: Path,
+) -> None:
+    """Recheck cleanliness on use and preserve all launcher-owned profile bytes."""
+    commit = _git(checkout, "rev-parse", "HEAD")
+    profile = initialize_profile_record(
+        checkout,
+        "acceptance-load",
+        mode=ProfileMode.ACCEPTANCE,
+        expected_commit=commit,
+    )
+    paths = profile_paths(checkout, "acceptance-load")
+    paths.business_database.write_bytes(b"durable-profile-data")
+    before = {
+        path.relative_to(paths.root): path.read_bytes()
+        for path in paths.root.rglob("*")
+        if path.is_file()
+    }
+    dirty_path = checkout / "cli" / "main.py"
+    dirty_path.write_text("CLI = 2\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="acceptance checkout must be clean"):
+        profile_environment(profile)
+    with pytest.raises(ValueError, match="acceptance checkout must be clean") as error:
+        touch_profile_last_used(
+            checkout,
+            "acceptance-load",
+            now=profile.last_used_at + timedelta(minutes=1),
+        )
+
+    after = {
+        path.relative_to(paths.root): path.read_bytes()
+        for path in paths.root.rglob("*")
+        if path.is_file()
+    }
+    assert after == before
+    assert dirty_path.name not in str(error.value)
 
 
 def test_development_profile_allows_commit_advancement(checkout: Path) -> None:

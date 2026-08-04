@@ -316,6 +316,36 @@ def test_initial_spec_read_returns_typed_failures(
     assert _error_code(result) == expected_code
 
 
+@pytest.mark.parametrize("corruption", ["malformed_content", "fingerprint_mismatch"])
+def test_initial_spec_read_returns_typed_failure_for_corrupt_active_draft(
+    corruption: str,
+    domain: WorkflowDomain,
+    engine: Engine,
+    session: Session,
+) -> None:
+    """Return the typed invalid-draft failure for both persisted corruption modes."""
+    project_id, draft_id, _fingerprint = _seed_active_draft(domain)
+    draft = session.get(SpecDraft, draft_id)
+    assert draft is not None
+    if corruption == "malformed_content":
+        draft.canonical_content_json = "{not-canonical-json"
+    else:
+        draft.content_fingerprint = "sha256:does-not-match-content"
+    session.add(draft)
+    session.commit()
+
+    result = DurableReadProjectionService(engine=engine).project_initial_spec(
+        project_id=project_id
+    )
+
+    assert result["ok"] is False
+    assert _error_code(result) == "INITIAL_SPEC_DRAFT_INVALID"
+    assert result["data"] == {
+        "project_id": project_id,
+        "spec_draft_id": draft_id,
+    }
+
+
 def test_project_initial_spec_cli_is_a_supported_read(
     domain: WorkflowDomain,
     engine: Engine,
@@ -349,8 +379,7 @@ def test_agent_cli_manual_names_initial_spec_read() -> None:
     manual = (Path(__file__).parents[2] / "docs" / "agent-cli-manual.md").read_text()
 
     assert (
-        "./agileforge-dev cli --profile local -- project initial-spec "
-        "--project-id 41"
+        "./agileforge-dev cli --profile local -- project initial-spec --project-id 41"
     ) in manual
     assert "canonical content" in manual
     assert "content_fingerprint" in manual

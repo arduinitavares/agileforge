@@ -140,6 +140,7 @@ def test_dashboard_config_preserves_source_checkout_git_sha(
 
     assert config.checkout_root == checkout
     assert config.commit == expected
+    assert config.launch_nonce is None
 
 
 def test_dashboard_config_uses_stable_installed_provenance_without_git(
@@ -156,6 +157,20 @@ def test_dashboard_config_uses_stable_installed_provenance_without_git(
 
     assert config.checkout_root == package_root
     assert config.commit == f"installed:agileforge@{agileforge_version()}"
+    assert config.launch_nonce is None
+
+
+def test_dashboard_config_exposes_launcher_nonce_when_present(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Return the non-secret per-launch identity only when a supervisor sets it."""
+    _set_dashboard_databases(monkeypatch, tmp_path)
+    monkeypatch.setenv("AGILEFORGE_UI_LAUNCH_NONCE", "supervisor-launch-nonce")
+
+    config = api_module.get_dashboard_config()
+
+    assert config.launch_nonce == "supervisor-launch-nonce"
 
 
 def test_installed_dashboard_config_validation_binds_child_and_databases(

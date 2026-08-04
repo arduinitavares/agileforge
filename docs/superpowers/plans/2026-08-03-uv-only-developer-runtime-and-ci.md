@@ -16,11 +16,13 @@
 - Runtime profiles live only under the selected worktree's `.agileforge/dev/profiles/` directory.
 - Business and ADK execution-trace SQLite paths are absolute, distinct, nonsymlinked, and contained by the selected profile root.
 - Development profiles may follow commits but fail closed on schema-source drift; acceptance profiles require an exact commit.
+- Acceptance profile initialization, load, and use require a clean Git worktree; tracked and nonignored untracked source changes are refused while ignored `.agileforge` state is allowed.
 - No provider credential is copied, persisted, logged, hashed, or included in JSON output.
 - No database migration, compatibility layer, or legacy database reuse is introduced.
 - caRtola, ASA, and MyFinance remain unaccessed and `not_run` throughout implementation.
 - Task 19 remains unstarted until revised Operator acceptance evidence or one concrete acceptance failure returns.
 - No Docker, additional task runner, routing policy, typing suppression, or unrelated refactor is added.
+- The shell owns only checkout and uv isolation policy and has no application, database, or routing policy.
 - Every task uses TDD, ends in a commit, passes focused checks, and receives an independent review before the next task starts.
 
 ## File Structure
@@ -186,13 +188,23 @@ git commit -m "feat: add worktree-local runtime profiles"
 
 - [ ] **Step 1: Write parser and bootstrap contract tests**
 
-Require all designed commands and options, structured exit codes, JSON output, and an executable bootstrap whose only execution line is exactly:
+Require all designed commands and options, structured exit codes, JSON output,
+and an executable bootstrap whose final execution line is exactly:
 
 ```sh
 exec uv --directory "$ROOT" run --locked agileforge-dev "$@"
 ```
 
-The bootstrap derives `ROOT` from its own canonical directory, rejects a symlinked bootstrap path, and contains no branch, worktree, database, profile, port, or user-home literal.
+The bootstrap derives `ROOT` from its own canonical directory, rejects a
+symlinked bootstrap path, and contains no branch, worktree, database, profile,
+port, or user-home literal. Before exec it removes hostile project, workdir,
+environment, interpreter, and sync selectors: `UV_PROJECT`,
+`UV_PROJECT_ENVIRONMENT`, `UV_NO_SYNC`, `UV_WORKING_DIR`,
+`UV_WORKING_DIRECTORY`, `UV_NO_PROJECT`, `UV_CONFIG_FILE`, `UV_ENV_FILE`,
+`UV_FROZEN`, `UV_ISOLATED`, `UV_LOCKED`, `UV_MANAGED_PYTHON`, `UV_NO_CONFIG`,
+`UV_NO_MANAGED_PYTHON`, and `UV_PYTHON`. It retains harmless uv cache, offline,
+and certificate settings. Tests must set hostile values and prove the checkout's
+project, lock, and environment still execute.
 
 - [ ] **Step 2: Run launcher tests and verify RED**
 
@@ -213,13 +225,24 @@ agileforge = "cli.main:main"
 agileforge-dev = "cli.dev_main:main"
 ```
 
-The shell bootstrap uses `set -eu`, canonicalizes its directory without consulting caller CWD, and delegates to uv. Make it executable with `chmod +x agileforge-dev`.
+The shell bootstrap uses `set -eu`, canonicalizes its directory without
+consulting caller CWD, sanitizes only the uv isolation selectors listed above,
+and delegates to uv. It owns only checkout and uv isolation policy, with no
+application, database, or routing policy. Make it executable with
+`chmod +x agileforge-dev`.
 
 - [ ] **Step 4: Implement the developer parser without eager production imports**
 
 `cli/dev_main.py` may import stdlib, Pydantic result contracts, and `cli.dev_profiles` at module import time. It must lazily import application/database modules only after a profile environment is installed.
 
-Define subcommands and exact required options from the specification. `cli` and `ui` accept an optional `--secrets-file PATH`; `cli` accepts `--json`; `ui` accepts `--ephemeral`, `--port`, `--reload`, `--json`, and `--ready-timeout`. Add injectable protocols for command execution and clocks so unit tests do not run uv or touch production databases.
+Define subcommands and exact required options from the specification. `info`,
+`cli`, and `ui` accept an optional `--secrets-file PATH`; `cli` accepts `--json`;
+`ui` accepts `--ephemeral`, `--port`, `--reload`, `--json`, and
+`--ready-timeout`. Add injectable protocols for command execution and clocks so
+unit tests do not run uv or touch production databases. Keep
+`profile_environment()` at exactly three profile keys, then add the fixed
+non-secret launcher-child dotenv-disable control to every schema, CLI, and UI
+child environment.
 
 - [ ] **Step 5: Write init atomicity tests**
 
@@ -240,7 +263,12 @@ Open the resulting SQLite file read-only for table verification. Do not create t
 
 - [ ] **Step 7: Implement info and reset output**
 
-`info --json` emits the complete redacted profile provenance plus current checkout commit and validation status. Human output is concise and sends no secret values. `reset` calls Task 1's owned cleanup only after exact confirmation.
+`info --json` emits the complete redacted profile provenance, current checkout
+commit, validation status, typed `configured_models`, boolean-only
+`provider_credentials`, and exact non-secret `child_runtime_environment`.
+Optional `--secrets-file` uses the existing descriptor-safe allowlist and
+precedence path. Human output is concise and sends no credential values. Keep
+imports lazy. `reset` calls Task 1's owned cleanup only after exact confirmation.
 
 - [ ] **Step 8: Run focused checks and update the lock**
 
@@ -365,7 +393,13 @@ git commit -m "feat: run branch cli with explicit provenance"
 
 - [ ] **Step 1: Write server lifecycle and resource tests**
 
-Cover loopback-only binding, automatic port selection, bounded retry, readiness timeout, foreground reload arguments, non-reloading agent mode, graceful terminate/kill fallback, JSON readiness output, ephemeral cleanup after both success and failure, preservation across restart for a non-ephemeral development profile, and frontend resources available through `importlib.resources.files("frontend")`.
+Cover loopback-only binding, automatic port selection, bounded retry, readiness
+timeout, foreground reload arguments, non-reloading agent mode, graceful
+terminate/kill fallback, per-launch nonce authentication for reload and
+non-reload readiness, JSON readiness output, ephemeral cleanup after both
+success and failure, preservation across restart for a non-ephemeral
+development profile, and frontend resources available through
+`importlib.resources.files("frontend")`.
 
 Mark live loopback tests with the repository's explicit localhost socket marker. No external socket is enabled.
 
@@ -400,7 +434,16 @@ Add a build-system declaration using `setuptools.build_meta`; retain existing pa
 
 - [ ] **Step 4: Implement UI child management**
 
-Launch fixed argv with `sys.executable -m uvicorn api:app`, checkout CWD, validated profile environment, host `127.0.0.1`, and selected port. Agent mode waits on `/api/dashboard/config`, emits readiness JSON, and keeps the child attached until interrupted. Human `--reload` mode stays foreground. On shutdown, terminate, wait with a finite timeout, then kill only the tracked child if necessary. `--ephemeral` creates a unique launcher-owned acceptance child profile, never reuses the named parent databases, and removes that child profile in a `finally` block without removing the parent profile.
+Launch fixed argv with `sys.executable -m uvicorn api:app`, checkout CWD,
+validated profile environment, host `127.0.0.1`, and selected port. Generate a
+fresh non-secret launch nonce for every attempt, pass it only to the UI child or
+reload supervisor, expose it in dashboard config, and require it in readiness
+identity. Agent mode waits on `/api/dashboard/config`, emits readiness JSON, and
+keeps the child attached until interrupted. Human `--reload` mode stays
+foreground. On shutdown, terminate, wait with a finite timeout, then kill only
+the tracked child if necessary. `--ephemeral` creates a unique launcher-owned
+acceptance child profile, never reuses the named parent databases, and removes
+that child profile in a `finally` block without removing the parent profile.
 
 - [ ] **Step 5: Extend cross-worktree isolation to concurrent UI processes**
 
@@ -683,7 +726,15 @@ git commit -m "docs: adopt uv-only branch runtime"
 
 - [ ] **Step 8: Regenerate and independently review Task 18 evidence**
 
-Update `.superpowers/sdd/task-18-report.md` with the complete commit range, launcher/CI/package evidence, full gate, and explicit `not_run` status. Generate an immutable review package for the final Task 18 range. A fresh reviewer verifies the design requirement matrix, exact package hash, no external repository access, no typing suppression, and the full gate.
+Finish and commit all implementation, tests, and operating documentation first;
+name the last such commit `IMPLEMENTATION_HEAD`. Run the complete gate at that
+clean commit. Generate the immutable binary diff from `cb3e32c` through
+`IMPLEMENTATION_HEAD` and record its SHA-256. Then create one evidence-only
+commit that updates `.superpowers/sdd/task-18-report.md` with the exact
+implementation coordinate, package path/hash, launcher/CI/package evidence,
+full gate, and explicit `not_run` status. The report and review evidence commits
+are outside the implementation package; do not chase a self-referential report
+commit hash.
 
 Expected reviewer verdict before handoff:
 
@@ -696,3 +747,15 @@ Task 19: not started
 ```
 
 Stop after the approved checklist handoff. Do not begin external acceptance or Task 19 in the implementation session.
+
+### Final Review Remediation Verification
+
+- Add direct typed-failure tests for malformed initial-spec content and content
+  fingerprint mismatch. Both must return `INITIAL_SPEC_DRAFT_INVALID`.
+- Add one real bounded Unix-local composition test around the production
+  `ProcessGroup`, `LocalRuntime.stop_ui`, and `dev_server.stop_ui`. A stubborn
+  process group ignores TERM; the test proves timeout, KILL, final reap, and no
+  surviving process or group.
+- Add real child-process regressions for checkout dotenv isolation, hostile uv
+  controls, dirty acceptance source, redacted operator preflight, and foreign
+  same-coordinate reload readiness.

@@ -7,6 +7,7 @@ import os
 import shutil
 import signal
 import subprocess  # nosec B404
+import sys
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -28,6 +29,8 @@ _SHA = "a" * 40
 _PORT = 18_765
 _CHILD_PID = 43_210
 _KILLED_RETURN_CODE = -9
+_LAUNCH_NONCE = "ci-smoke-launch-nonce"
+_MAX_STOP_ELAPSED_SECONDS = 2.0
 
 
 @dataclass(slots=True)
@@ -142,6 +145,7 @@ class FakeRuntime:
             commit=self.expected_sha,
             business_database=child.business_database,
             trace_database=child.trace_database,
+            launch_nonce=result.launch_nonce,
         )
 
     def stop_ui(self, process: smoke_runtime.ManagedProcess) -> None:
@@ -216,6 +220,16 @@ class FakeRuntime:
             "validation_status": "valid",
             "current_commit": self.expected_sha,
             "profile": self._profile_payload(),
+            "configured_models": [{"role": "default", "model_id": "fixture-model"}],
+            "provider_credentials": {"OPEN_ROUTER_API_KEY": False},
+            "child_runtime_environment": {
+                "AGILEFORGE_DB_URL": "sqlite:///fixture-business.sqlite3",
+                "AGILEFORGE_ADK_EXECUTION_TRACE_DB_URL": (
+                    "sqlite:///fixture-trace.sqlite3"
+                ),
+                "AGILEFORGE_LAUNCHER_CHILD": "1",
+                "MODEL_CONFIG_PATH": "fixture-models.yaml",
+            },
             "schema": {
                 "valid": True,
                 "tables": ["projects", "spec_registry", "workflow_events"],
@@ -250,6 +264,7 @@ class FakeRuntime:
             "ephemeral": True,
             "business_database": str(paths.business_database),
             "trace_database": str(paths.trace_database),
+            "launch_nonce": _LAUNCH_NONCE,
         }
 
 
@@ -540,6 +555,59 @@ def test_runtime_escalates_stubborn_process_through_real_stop_policy() -> None:
         f"wait:{timeout}",
     ]
     assert process.returncode == _KILLED_RETURN_CODE
+
+
+@pytest.mark.skipif(not hasattr(os, "killpg"), reason="requires Unix process groups")
+def test_real_process_group_escalates_kills_reaps_and_leaves_no_survivor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Compose LocalRuntime, ProcessGroup, and dev_server around a TERM-immune group."""
+    stop_timeout = 0.15
+    monkeypatch.setattr(smoke_runtime, "STOP_TIMEOUT_SECONDS", stop_timeout)
+    monkeypatch.setattr(smoke_runtime, "POLL_SECONDS", 0.01)
+    ready = tmp_path / "stubborn-ready"
+    script = (
+        "import os, pathlib, signal, sys, time; "
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        "pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); "
+        "time.sleep(60)"
+    )
+    runtime = smoke_runtime.LocalRuntime({})
+    process: smoke_runtime.ManagedProcess | None = None
+
+    with (
+        (tmp_path / "stdout.log").open("w", encoding="utf-8") as stdout,
+        (tmp_path / "stderr.log").open("w", encoding="utf-8") as stderr,
+    ):
+        try:
+            process = runtime.start_ui(
+                (sys.executable, "-c", script, str(ready)),
+                cwd=tmp_path,
+                stdout=stdout,
+                stderr=stderr,
+            )
+            deadline = time.monotonic() + 2.0
+            while not ready.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert ready.exists()
+            process_id = process.pid
+
+            started = time.monotonic()
+            runtime.stop_ui(process)
+            elapsed = time.monotonic() - started
+
+            assert isinstance(process, smoke_runtime.ProcessGroup)
+            assert elapsed >= stop_timeout
+            assert elapsed < _MAX_STOP_ELAPSED_SECONDS
+            assert process.returncode == _KILLED_RETURN_CODE
+            assert process.process.wait(timeout=0) == _KILLED_RETURN_CODE
+            assert not process.group_exists()
+            assert not runtime.process_exists(process_id)
+        finally:
+            if process is not None and process.poll() is None:
+                process.kill()
+                process.wait(timeout=1)
 
 
 def test_main_redacts_unexpected_failures(

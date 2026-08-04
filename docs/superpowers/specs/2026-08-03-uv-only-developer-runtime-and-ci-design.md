@@ -98,10 +98,18 @@ It resolves its own real checkout root and invokes only:
 uv run --locked agileforge-dev ...
 ```
 
+Before the final exec, the shell owns only checkout and uv isolation policy. It
+removes caller-provided `UV_PROJECT`, `UV_PROJECT_ENVIRONMENT`, `UV_NO_SYNC`,
+`UV_WORKING_DIR`, `UV_WORKING_DIRECTORY`, `UV_NO_PROJECT`, `UV_CONFIG_FILE`,
+`UV_ENV_FILE`, `UV_FROZEN`, `UV_ISOLATED`, `UV_LOCKED`, `UV_MANAGED_PYTHON`,
+`UV_NO_CONFIG`, `UV_NO_MANAGED_PYTHON`, and `UV_PYTHON` so a caller cannot select
+another project, working directory, interpreter environment, configuration, or
+sync/lock policy. It preserves harmless cache, offline, and certificate
+controls. The shell has no application, database, or routing policy.
+
 The installed project script dispatches to a lightweight developer-runtime
 module that loads profile configuration before importing the production
-application. The shell bootstrap contains no environment policy, database
-policy, or workflow logic.
+application.
 
 From another repository, including a Codex task rooted in a consumer project,
 the agent uses the absolute launcher path. It never relies on `PATH`:
@@ -114,7 +122,7 @@ the agent uses the absolute launcher path. It never relies on `PATH`:
 
 ```text
 ./agileforge-dev init --profile NAME [--mode development|acceptance]
-./agileforge-dev info --profile NAME [--json]
+./agileforge-dev info --profile NAME [--secrets-file PATH] [--json]
 ./agileforge-dev cli --profile NAME -- <agileforge arguments>
 ./agileforge-dev ui --profile NAME [--port auto|PORT] [--reload] [--json]
 ./agileforge-dev check
@@ -169,6 +177,14 @@ AGILEFORGE_ADK_EXECUTION_TRACE_DB_URL
 MODEL_CONFIG_PATH
 ```
 
+`profile_environment()` continues to return exactly those three profile-owned
+keys. Every launcher-owned schema, CLI, and UI child additionally receives the
+fixed non-secret `AGILEFORGE_LAUNCHER_CHILD=1` control. That control makes
+`utils.runtime_config` skip implicit checkout `.env` loading, so credentials,
+database URLs, model paths, and runtime controls cannot bypass the validated
+child environment. Direct stable execution, where the launcher control is not
+set, retains its existing dotenv behavior.
+
 The two database paths must be distinct, absolute, contained by the profile
 directory, and absent before first initialization. The launcher fails closed on
 path escape, symlink substitution, malformed manifest data, profile ownership
@@ -178,7 +194,10 @@ Development mode permits the worktree commit to advance. Every invocation
 records and reports the current commit. A changed schema fingerprint blocks use
 until the profile is explicitly reset or a supported future migration exists.
 
-Acceptance mode is immutable. Every invocation must match `expected_sha`.
+Acceptance mode is immutable. Every initialization, load, and use must match
+`expected_sha` and a clean Git worktree. Tracked changes and nonignored
+untracked files are refused. Ignored launcher-owned `.agileforge` state does not
+make the worktree dirty. Development profiles may run from a dirty worktree.
 
 ## Secrets
 
@@ -193,6 +212,13 @@ printed, hashed into evidence, written to manifests, or uploaded by CI.
 
 Non-agentic CLI reads, schema bootstrap, local tests, and UI startup must work
 without a provider credential.
+
+`info --json` is the operator preflight. It returns typed configured model roles
+and non-secret IDs in `configured_models`, boolean-only credential presence in
+`provider_credentials`, and the exact derived non-secret
+`child_runtime_environment`. Optional `--secrets-file` uses the same
+descriptor-safe allowlist and invoking-environment precedence as `cli` and
+`ui`. Credential values are never emitted. The command remains import-lazy.
 
 ## Initialization
 
@@ -252,6 +278,13 @@ Human mode remains foreground and supports `--reload`. Agent and CI mode uses a
 single non-reloading child process, a readiness timeout, JSON output, and clean
 termination. `--ephemeral` creates a child profile and removes only that
 launcher-owned state after the process exits.
+
+Each UI launch generates a fresh non-secret nonce. Only that UI child and its
+reload supervisor receive it. `/api/dashboard/config` exposes the nonce, and
+launcher readiness requires it for reload and non-reload launches in addition
+to checkout, commit, databases, and process identity. A foreign server using
+the same explicit port, checkout, and profile cannot authenticate a new launch.
+Direct installed API smoke remains compatible when no launcher nonce is set.
 
 ## Reset Safety
 
@@ -346,7 +379,10 @@ that use an ambiguous bare `agileforge` during worktree acceptance.
 - manifest atomicity and schema validation;
 - development versus acceptance commit behavior;
 - model-config and schema fingerprint drift;
+- clean acceptance initialization, load, and use with tracked and nonignored
+  untracked source changes;
 - secret allowlisting and redaction;
+- launcher-child dotenv isolation and complete redacted info preflight;
 - reset refusal outside owned state;
 - deterministic JSON envelopes.
 
@@ -356,11 +392,19 @@ that use an ambiguous bare `agileforge` during worktree acceptance.
 - run `project list` through `cli`;
 - start the UI on an automatically selected port;
 - wait for readiness and query current API routes;
+- reject same-coordinate UI readiness without the per-launch nonce;
 - terminate cleanly without leaked child processes;
+- compose the production `ProcessGroup` adapter with `LocalRuntime.stop_ui` and
+  `dev_server.stop_ui` around a bounded Unix-local TERM-immune process, proving
+  timeout, KILL, final reap, and no survivor;
 - preserve a development profile across restart;
 - remove only an ephemeral profile;
 - reject a stale acceptance SHA;
 - prove no dependency on the user-level `agileforge` shim.
+
+Initial-spec read tests corrupt persisted draft content and its fingerprint
+directly. Both cases must return typed `INITIAL_SPEC_DRAFT_INVALID` failures
+without overstating production evidence.
 
 ### Cross-Worktree Isolation Test
 

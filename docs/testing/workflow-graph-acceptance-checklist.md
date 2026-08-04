@@ -59,7 +59,9 @@ cd "$AGILEFORGE_WORKTREE"
 
 The profile root must not already exist. Initialization creates and validates
 the current business schema. It refuses later checkout advancement, model
-configuration drift, schema-source drift, and cross-profile state.
+configuration drift, schema-source drift, cross-profile state, tracked changes,
+and nonignored untracked files. The ignored launcher-owned `.agileforge` state
+does not make the checkout dirty.
 
 After each SHA check and before every product CLI step, run and record:
 
@@ -80,6 +82,20 @@ recorded.
 Perform a separate preflight for caRtola, ASA, and MyFinance. Use one new
 exact-SHA acceptance profile per repository. Never reuse a target's profile for
 another repository or create a second profile to repair a failed run.
+
+When the run needs provider access, set `AGILEFORGE_SECRETS_FILE` to the
+Operator-selected regular secrets file. Use one info command for the complete
+machine-readable preflight:
+
+```sh
+./agileforge-dev info --profile "$ACCEPTANCE_PROFILE" --secrets-file "$AGILEFORGE_SECRETS_FILE" --json
+```
+
+Omit `--secrets-file` when provider access is not needed. The result's
+`configured_models` contains typed roles and non-secret IDs,
+`provider_credentials` contains presence booleans, and
+`child_runtime_environment` contains the exact derived non-secret launcher-child
+environment. No credential values may appear.
 
 1. Record the profile-init JSON, matching `info --json`, reviewed AgileForge SHA,
    profile name, target repository, UTC start timestamp, and Operator identity as

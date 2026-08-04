@@ -306,6 +306,25 @@ def _schema_source_sha256(checkout_root: Path) -> str:
     return digest.hexdigest()
 
 
+def _require_clean_acceptance_checkout(
+    checkout_root: Path,
+    mode: ProfileMode,
+) -> None:
+    if mode is not ProfileMode.ACCEPTANCE:
+        return
+    status = _run_git(
+        checkout_root,
+        "status",
+        "--porcelain=v1",
+        "-z",
+        "--untracked-files=all",
+        "--ignore-submodules=none",
+    )
+    if status:
+        message = "acceptance checkout must be clean"
+        raise ValueError(message)
+
+
 def _ensure_private_directory(checkout_root: Path, path: Path) -> None:
     _validate_state_path(checkout_root, path)
     path.mkdir(mode=_DIRECTORY_MODE, parents=True, exist_ok=True)
@@ -413,6 +432,8 @@ def prepare_profile_record(
         message = "development expected_commit must be None"
         raise ValueError(message)
 
+    _require_clean_acceptance_checkout(checkout.root, mode)
+
     model_config_path = checkout.root / "config" / "models.yaml"
     metadata = runtime or ProfileRuntimeMetadata()
     timestamp = metadata.now or datetime.now(tz=UTC)
@@ -508,10 +529,9 @@ def finalize_profile_record(profile: RuntimeProfile) -> RuntimeProfile:
     checkout = _checkout_provenance(profile.checkout.root)
     paths = profile_paths(checkout.root, profile.name)
     _validate_profile_ownership(profile, checkout, paths)
+    _require_clean_acceptance_checkout(checkout.root, profile.mode)
     root_metadata = paths.root.lstat()
-    if stat.S_ISLNK(root_metadata.st_mode) or not stat.S_ISDIR(
-        root_metadata.st_mode
-    ):
+    if stat.S_ISLNK(root_metadata.st_mode) or not stat.S_ISDIR(root_metadata.st_mode):
         message = f"profile root must be a real directory: {paths.root}"
         raise ValueError(message)
     try:
@@ -550,6 +570,7 @@ def load_profile(checkout_root: Path, profile_name: str) -> RuntimeProfile:
 
     profile = RuntimeProfile.model_validate_json(paths.manifest.read_bytes())
     _validate_profile_ownership(profile, checkout, paths)
+    _require_clean_acceptance_checkout(checkout.root, profile.mode)
     for database_path in (profile.business_database, profile.trace_database):
         _validate_state_path(checkout.root, database_path)
     if profile.model_config_sha256 != _file_sha256(
@@ -584,6 +605,7 @@ def touch_profile_last_used(
 
 def profile_environment(profile: RuntimeProfile) -> dict[str, str]:
     """Return the exact non-secret runtime environment for a profile."""
+    _require_clean_acceptance_checkout(profile.checkout.root, profile.mode)
     return {
         "AGILEFORGE_DB_URL": f"sqlite:///{profile.business_database.as_posix()}",
         "AGILEFORGE_ADK_EXECUTION_TRACE_DB_URL": (

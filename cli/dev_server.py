@@ -67,6 +67,7 @@ class ExpectedUIRuntime:
     business_database: Path
     trace_database: Path
     process_id: int | None
+    launch_nonce: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,6 +80,7 @@ class DashboardConfig:
     commit: str
     business_database: Path
     trace_database: Path
+    launch_nonce: str | None
 
 
 class UIReadinessError(RuntimeError):
@@ -162,11 +164,16 @@ def _parse_dashboard_config(payload: object) -> DashboardConfig:
         raise UIReadinessError(message)
     process_id = config_payload.get("process_id")
     commit = config_payload.get("commit")
+    launch_nonce = config_payload.get("launch_nonce")
     if (
         not isinstance(process_id, int)
         or isinstance(process_id, bool)
         or process_id <= 0
         or not isinstance(commit, str)
+        or (
+            launch_nonce is not None
+            and (not isinstance(launch_nonce, str) or not launch_nonce)
+        )
     ):
         message = "dashboard readiness returned an invalid payload"
         raise UIReadinessError(message)
@@ -177,6 +184,7 @@ def _parse_dashboard_config(payload: object) -> DashboardConfig:
         commit=commit,
         business_database=_required_path(config_payload, "business_database"),
         trace_database=_required_path(config_payload, "trace_database"),
+        launch_nonce=launch_nonce,
     )
 
 
@@ -196,6 +204,7 @@ def _validate_runtime_identity(
         and config.business_database == expected.business_database
         and config.trace_database == expected.trace_database
         and (expected.process_id is None or config.process_id == expected.process_id)
+        and config.launch_nonce == expected.launch_nonce
     )
     if not matches:
         message = "dashboard readiness identity mismatch"

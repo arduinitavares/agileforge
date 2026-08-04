@@ -34,6 +34,8 @@ _MAX_PORT_ATTEMPTS = 3
 _SELECTED_PORT = 43210
 _UI_PORT = 8123
 _SECOND_UI_PORT = 8124
+_LAUNCH_NONCE = "launcher-nonce"
+_UI_LAUNCH_NONCE_ENV = "AGILEFORGE_UI_LAUNCH_NONCE"
 
 
 class HandoffFault(BaseException):
@@ -63,6 +65,7 @@ def checkout(tmp_path: Path) -> Path:
     _git(root, "config", "user.email", "dev-server@example.invalid")
     (root / "config").mkdir()
     (root / "models").mkdir()
+    (root / ".gitignore").write_text(".agileforge/\n", encoding="utf-8")
     (root / "README.md").write_text("fixture\n", encoding="utf-8")
     (root / "config" / "models.yaml").write_text(
         "models:\n  default: fixture\n",
@@ -214,6 +217,7 @@ def _runtime_identity(
         business_database=paths.business_database,
         trace_database=paths.trace_database,
         process_id=process_id,
+        launch_nonce=_LAUNCH_NONCE,
     )
 
 
@@ -230,6 +234,7 @@ def _ready_payload(
         "commit": _git(checkout, "rev-parse", "HEAD"),
         "business_database": str(paths.business_database),
         "trace_database": str(paths.trace_database),
+        "launch_nonce": _LAUNCH_NONCE,
     }
 
 
@@ -533,7 +538,11 @@ def test_ui_json_readiness_preserves_normal_profile_across_restarts(
         assert payload["port"] == _UI_PORT
 
     assert len(started_environments) == _EXPECTED_POLL_ATTEMPTS
+    first_nonce = started_environments[0].pop(_UI_LAUNCH_NONCE_ENV)
+    second_nonce = started_environments[1].pop(_UI_LAUNCH_NONCE_ENV)
+    assert first_nonce != second_nonce
     assert started_environments[0] == started_environments[1]
+    assert started_environments[0]["AGILEFORGE_LAUNCHER_CHILD"] == "1"
     with sqlite3.connect(profile.business_database) as connection:
         assert connection.execute("SELECT id FROM projects").fetchall() == [(41,)]
     assert profile.root.exists()
@@ -642,7 +651,13 @@ def test_auto_port_never_advertises_a_foreign_ready_runtime(
         "commit": "b" * 40,
         "business_database": str(foreign_root / "business.sqlite3"),
         "trace_database": str(foreign_root / "trace.sqlite3"),
+        "launch_nonce": "foreign-launcher-nonce",
     }
+    monkeypatch.setattr(
+        _main_module().secrets,
+        "token_hex",
+        lambda _bytes: _LAUNCH_NONCE,
+    )
 
     monkeypatch.setattr(
         _main_module(),
@@ -693,6 +708,50 @@ def test_auto_port_never_advertises_a_foreign_ready_runtime(
     assert advertised["port"] == _SECOND_UI_PORT
     assert advertised["business_database"] != foreign_payload["business_database"]
     assert children[_UI_PORT].process.terminated == 1
+
+
+def test_explicit_reload_rejects_same_profile_foreign_server_nonce(
+    monkeypatch: pytest.MonkeyPatch,
+    checkout: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Refuse a same-checkout/profile server occupying a new reload launch port."""
+    _create_profile(checkout)
+    process = FakeProcess()
+    child = FakeUIChild(process=process, port=_UI_PORT)
+    started_environment: dict[str, str] = {}
+    monkeypatch.setattr(
+        _main_module().secrets,
+        "token_hex",
+        lambda _bytes: "new-reload-launch",
+    )
+
+    def fake_start_ui(**options: object) -> FakeUIChild:
+        environment = cast("Mapping[str, str]", options["environment"])
+        started_environment.update(environment)
+        return child
+
+    foreign_payload = _ready_payload(checkout, process_id=9988)
+    foreign_payload["launch_nonce"] = "foreign-existing-launch"
+    monkeypatch.setattr(_main_module(), "start_ui", fake_start_ui)
+    monkeypatch.setattr(
+        _module(),
+        "urlopen",
+        lambda _url, **_options: FakeResponse(json.dumps(foreign_payload).encode()),
+    )
+
+    status = _main_module().main(
+        ["ui", "--profile", "local", "--port", str(_UI_PORT), "--reload"],
+        checkout_root=checkout,
+        runner=BootstrapRunner(checkout),
+    )
+
+    captured = capsys.readouterr()
+    assert status == 1
+    assert started_environment[_UI_LAUNCH_NONCE_ENV] == "new-reload-launch"
+    assert "Dashboard ready" not in captured.out
+    assert "identity mismatch" in captured.err
+    assert process.terminated == 1
 
 
 @pytest.mark.parametrize("fault_kind", ["sigint", "sigterm", "base"])

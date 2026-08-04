@@ -20,6 +20,19 @@ isolated development profile with
 linked worktree, run that checkout's launcher and record `info --json` before
 mutations. The installed stable release remains a separate runtime.
 
+One info command provides the complete redacted preflight:
+
+```sh
+./agileforge-dev info --profile local --secrets-file /path/to/provider.env --json
+```
+
+Omit `--secrets-file` when no provider source is needed. The JSON includes typed
+model roles and IDs in `configured_models`, presence booleans in
+`provider_credentials`, and the exact derived non-secret values in
+`child_runtime_environment`. It never emits credential values. Acceptance
+profiles additionally refuse tracked changes or nonignored untracked source at
+initialization and every use.
+
 ## Routing Authority
 
 `WorkflowDomain` is the sole routing authority. It derives a Project's current

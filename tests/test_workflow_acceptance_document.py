@@ -104,9 +104,7 @@ ACCEPTANCE_PROFILES = {
     "ASA": "acceptance-asa",
     "MyFinance": "acceptance-myfinance",
 }
-LAUNCHER_CLI_PREFIX = (
-    "./agileforge-dev cli --profile \"$ACCEPTANCE_PROFILE\" --json -- "
-)
+LAUNCHER_CLI_PREFIX = './agileforge-dev cli --profile "$ACCEPTANCE_PROFILE" --json -- '
 LEGACY_COMMAND_STRINGS = (
     "agileforge " + "workflow state",
     "agileforge " + "project setup",
@@ -315,6 +313,12 @@ class ChecklistValidator:
             "business and trace paths differ",
             "Profile initialization creates the current schema",
             "Do not export database URLs manually",
+            "configured_models",
+            "provider_credentials",
+            "child_runtime_environment",
+            "credential values",
+            "--secrets-file",
+            "one info command",
         ):
             assert required in normalized_preflight
         assert not re.search(

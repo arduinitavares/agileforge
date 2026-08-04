@@ -9,6 +9,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from utils.runtime_controls import LAUNCHER_CHILD_ENV, LAUNCHER_CHILD_VALUE
+
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _CONFIG_ROOT_ENV = "AGILEFORGE_CONFIG_ROOT"
 _LEGACY_DB_FILENAMES = frozenset({"agile_simple.db", "agile_sqlmodel.db"})
@@ -141,6 +143,8 @@ SPEC_VALIDATOR_IDENTITY = RunnerIdentity(
 
 def load_runtime_env() -> None:
     """Load the repository .env file once for all runtime consumers."""
+    if os.environ.get(LAUNCHER_CHILD_ENV) == LAUNCHER_CHILD_VALUE:
+        return
     env_path = _env_path()
     if env_path.exists():
         load_dotenv(env_path, override=False)

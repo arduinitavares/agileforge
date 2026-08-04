@@ -250,6 +250,7 @@ class LocalRuntime:
                 business_database=result.business_database,
                 trace_database=result.trace_database,
                 process_id=None,
+                launch_nonce=result.launch_nonce,
             ),
             timeout=READY_TIMEOUT_SECONDS,
         )
@@ -338,9 +339,7 @@ class LocalProfiles:
 def safe_environment(parent: Mapping[str, str]) -> dict[str, str]:
     """Copy only non-credential runtime values into launcher children."""
     environment = {
-        name: parent[name]
-        for name in _SAFE_ENVIRONMENT_NAMES
-        if parent.get(name)
+        name: parent[name] for name in _SAFE_ENVIRONMENT_NAMES if parent.get(name)
     }
     environment.setdefault("PATH", os.defpath)
     environment["NO_COLOR"] = "1"

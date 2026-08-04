@@ -222,7 +222,10 @@ def test_cli_forwarding_installs_only_profile_environment(
 
     child_environment = runner.calls[-1][2]
     profile = dev_main.load_profile(checkout, "local")
-    assert child_environment == profile_environment(profile)
+    assert child_environment == {
+        **profile_environment(profile),
+        "AGILEFORGE_LAUNCHER_CHILD": "1",
+    }
 
 
 def test_cli_secrets_file_allows_only_provider_key_and_parent_wins(

@@ -19,6 +19,7 @@ from enum import IntEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, NoReturn, Protocol
 
+import yaml
 from dotenv import dotenv_values
 from git.exc import GitCommandError
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
@@ -48,6 +49,11 @@ from cli.dev_server import (
     wait_for_readiness,
 )
 from utils.cli_output import emit
+from utils.runtime_controls import (
+    LAUNCHER_CHILD_ENV,
+    LAUNCHER_CHILD_VALUE,
+    UI_LAUNCH_NONCE_ENV,
+)
 from workflow.contracts import JsonObject, JsonValue
 
 if TYPE_CHECKING:
@@ -173,6 +179,37 @@ class InitResult(BaseModel):
     schema_validation: SchemaValidation = Field(serialization_alias="schema")
 
 
+class ConfiguredModel(BaseModel):
+    """One configured model role and its non-secret provider model ID."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    role: str = Field(min_length=1)
+    model_id: str = Field(min_length=1)
+
+
+class ProviderCredentialPresence(BaseModel):
+    """Boolean-only provider credential preflight state."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    open_router_api_key: bool = Field(alias=_PROVIDER_CREDENTIAL)
+
+
+class ChildRuntimeEnvironment(BaseModel):
+    """Exact non-secret environment installed in every launcher child."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    business_database_url: str = Field(alias="AGILEFORGE_DB_URL", min_length=1)
+    trace_database_url: str = Field(
+        alias="AGILEFORGE_ADK_EXECUTION_TRACE_DB_URL",
+        min_length=1,
+    )
+    launcher_child: Literal["1"] = Field(alias=LAUNCHER_CHILD_ENV)
+    model_config_path: str = Field(alias="MODEL_CONFIG_PATH", min_length=1)
+
+
 class InfoResult(BaseModel):
     """Complete redacted provenance and current validation state."""
 
@@ -181,6 +218,9 @@ class InfoResult(BaseModel):
     validation_status: Literal["valid"] = "valid"
     current_commit: str
     profile: RuntimeProfile
+    configured_models: tuple[ConfiguredModel, ...]
+    provider_credentials: ProviderCredentialPresence
+    child_runtime_environment: ChildRuntimeEnvironment
     schema_validation: SchemaValidation = Field(serialization_alias="schema")
 
 
@@ -261,6 +301,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     info_parser = commands.add_parser("info", help="Show validated provenance")
     _add_profile_argument(info_parser)
+    info_parser.add_argument("--secrets-file", type=Path)
     info_parser.add_argument("--json", action="store_true")
 
     cli_parser = commands.add_parser("cli", help="Run the product CLI")
@@ -416,6 +457,14 @@ class UiReadyResult(BaseModel):
     ephemeral: bool
     business_database: Path
     trace_database: Path
+    launch_nonce: str = Field(min_length=1)
+
+
+def _launcher_child_environment(profile: RuntimeProfile) -> dict[str, str]:
+    """Add the fixed child boundary without changing the profile contract."""
+    environment = profile_environment(profile)
+    environment[LAUNCHER_CHILD_ENV] = LAUNCHER_CHILD_VALUE
+    return environment
 
 
 def _initialize_profile(
@@ -465,7 +514,7 @@ def _initialize_profile(
     )
     finalized = False
     try:
-        environment = profile_environment(profile)
+        environment = _launcher_child_environment(profile)
         bootstrap_arguments = (
             sys.executable,
             str(checkout_root / "agile_sqlmodel.py"),
@@ -513,16 +562,46 @@ def _current_commit(runner: CommandRunner, checkout_root: Path) -> str:
     return commit
 
 
+def _configured_models(profile: RuntimeProfile) -> tuple[ConfiguredModel, ...]:
+    try:
+        payload = yaml.safe_load(profile.model_config_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, yaml.YAMLError) as error:
+        message = "model configuration preflight failed"
+        raise DeveloperCommandError(message) from error
+    if not isinstance(payload, dict):
+        message = "model configuration preflight requires a mapping"
+        raise DeveloperCommandError(message)
+    models = payload.get("models")
+    if not isinstance(models, dict) or not models:
+        message = "model configuration preflight requires configured models"
+        raise DeveloperCommandError(message)
+    configured: list[ConfiguredModel] = []
+    for role, model_id in models.items():
+        if (
+            not isinstance(role, str)
+            or not role.strip()
+            or not isinstance(model_id, str)
+            or not model_id.strip()
+        ):
+            message = "model configuration preflight contains an invalid role or ID"
+            raise DeveloperCommandError(message)
+        configured.append(ConfiguredModel(role=role.strip(), model_id=model_id.strip()))
+    return tuple(sorted(configured, key=lambda item: item.role))
+
+
 def _profile_info(
     *,
     checkout_root: Path,
     profile_name: str,
+    secrets_file: Path | None,
     runner: CommandRunner,
     clock: Clock,
 ) -> InfoResult:
     profile = load_profile(checkout_root, profile_name)
     validation = _verify_business_schema(profile.business_database)
     current_commit = _current_commit(runner, checkout_root)
+    configured_models = _configured_models(profile)
+    provider_environment = _provider_environment(secrets_file)
     touched = touch_profile_last_used(
         checkout_root,
         profile_name,
@@ -531,6 +610,13 @@ def _profile_info(
     return InfoResult(
         current_commit=current_commit,
         profile=touched,
+        configured_models=configured_models,
+        provider_credentials=ProviderCredentialPresence(
+            OPEN_ROUTER_API_KEY=bool(provider_environment.get(_PROVIDER_CREDENTIAL))
+        ),
+        child_runtime_environment=ChildRuntimeEnvironment.model_validate(
+            _launcher_child_environment(touched)
+        ),
         schema_validation=validation,
     )
 
@@ -690,7 +776,7 @@ def _run_cli(
         request.profile_name,
         now=clock.now(),
     )
-    environment = profile_environment(profile)
+    environment = _launcher_child_environment(profile)
     environment.update(_provider_environment(request.secrets_file))
     secret_values = tuple(
         value
@@ -802,8 +888,8 @@ def _emit_ui_ready(
     *,
     current_commit: str,
     child: UIChild,
-    ephemeral: bool,
-    json_output: bool,
+    launch_nonce: str,
+    request: UiRequest,
 ) -> None:
     result = UiReadyResult(
         url=f"{child.url}/dashboard",
@@ -812,11 +898,12 @@ def _emit_ui_ready(
         commit=current_commit,
         profile=profile.name,
         profile_mode=profile.mode,
-        ephemeral=ephemeral,
+        ephemeral=request.ephemeral,
         business_database=profile.business_database,
         trace_database=profile.trace_database,
+        launch_nonce=launch_nonce,
     )
-    if json_output:
+    if request.json_output:
         emit(result.model_dump_json(), flush=True)
         return
     emit(f"Dashboard ready: {result.url}")
@@ -875,15 +962,18 @@ def _ready_ui_lifecycle(
     current_commit: str,
     environment: Mapping[str, str],
     request: UiRequest,
-) -> Iterator[UIChild]:
+) -> Iterator[tuple[UIChild, str]]:
     attempts = _AUTO_UI_ATTEMPTS if request.port == "auto" else 1
     for attempt in range(attempts):
         selected_port = (
             select_loopback_port() if request.port == "auto" else int(request.port)
         )
+        launch_nonce = secrets.token_hex(16)
+        child_environment = dict(environment)
+        child_environment[UI_LAUNCH_NONCE_ENV] = launch_nonce
         with _managed_ui_child(
             checkout_root=profile.checkout.root,
-            environment=environment,
+            environment=child_environment,
             port=selected_port,
             reload=request.reload,
         ) as child:
@@ -893,6 +983,7 @@ def _ready_ui_lifecycle(
                 business_database=profile.business_database,
                 trace_database=profile.trace_database,
                 process_id=None if request.reload else child.process.pid,
+                launch_nonce=launch_nonce,
             )
             try:
                 wait_for_readiness(
@@ -904,7 +995,7 @@ def _ready_ui_lifecycle(
                 if attempt == attempts - 1:
                     raise
                 continue
-            yield child
+            yield child, launch_nonce
             return
     message = "dashboard startup retry invariant failed"
     raise RuntimeError(message)
@@ -925,20 +1016,20 @@ def _run_ui(
                 runner=runner,
                 clock=clock,
             ) as (profile, current_commit):
-                environment = profile_environment(profile)
+                environment = _launcher_child_environment(profile)
                 environment.update(_provider_environment(request.secrets_file))
                 with _ready_ui_lifecycle(
                     profile=profile,
                     current_commit=current_commit,
                     environment=environment,
                     request=request,
-                ) as child:
+                ) as (child, launch_nonce):
                     _emit_ui_ready(
                         profile,
                         current_commit=current_commit,
                         child=child,
-                        ephemeral=request.ephemeral,
-                        json_output=request.json_output,
+                        launch_nonce=launch_nonce,
+                        request=request,
                     )
                     return child.process.wait()
         except KeyboardInterrupt:
@@ -967,6 +1058,17 @@ def _emit_info(result: InfoResult, *, json_output: bool) -> None:
     emit(f"Current commit: {result.current_commit}")
     emit(f"Business database: {result.profile.business_database}")
     emit(f"Trace database: {result.profile.trace_database}")
+    emit("Configured models:")
+    for configured in result.configured_models:
+        emit(f"  {configured.role}: {configured.model_id}")
+    credential_status = (
+        "present" if result.provider_credentials.open_router_api_key else "absent"
+    )
+    emit(f"Provider credential OPEN_ROUTER_API_KEY: {credential_status}")
+    emit("Child runtime environment:")
+    child_environment = result.child_runtime_environment.model_dump(by_alias=True)
+    for name, value in sorted(child_environment.items()):
+        emit(f"  {name}={value}")
     emit("Validation: valid")
 
 
@@ -1048,6 +1150,7 @@ def main(
             result = _profile_info(
                 checkout_root=root,
                 profile_name=arguments.profile,
+                secrets_file=arguments.secrets_file,
                 runner=command_runner,
                 clock=command_clock,
             )

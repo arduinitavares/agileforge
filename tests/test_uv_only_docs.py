@@ -9,8 +9,12 @@ README_PATH = Path("README.md")
 ENV_EXAMPLE_PATH = Path(".env.example")
 AGENTS_PATH = Path("AGENTS.md")
 CLI_MANUAL_PATH = Path("docs/agent-cli-manual.md")
-ACCEPTANCE_CHECKLIST_PATH = Path(
-    "docs/testing/workflow-graph-acceptance-checklist.md"
+ACCEPTANCE_CHECKLIST_PATH = Path("docs/testing/workflow-graph-acceptance-checklist.md")
+DESIGN_PATH = Path(
+    "docs/superpowers/specs/2026-08-03-uv-only-developer-runtime-and-ci-design.md"
+)
+PLAN_PATH = Path(
+    "docs/superpowers/plans/2026-08-03-uv-only-developer-runtime-and-ci.md"
 )
 CURRENT_OPERATING_DOCS = (
     README_PATH,
@@ -66,10 +70,7 @@ def test_docs_separate_stable_and_checkout_local_commands() -> None:
             "Current checkout: `./agileforge-dev cli --profile local -- "
             "workflow next --project-id 1`"
         ),
-        (
-            "Current checkout UI: "
-            "`./agileforge-dev ui --profile local --port auto`"
-        ),
+        ("Current checkout UI: `./agileforge-dev ui --profile local --port auto`"),
         "Provenance: `./agileforge-dev info --profile local --json`",
     )
 
@@ -110,3 +111,34 @@ def test_agents_registers_development_branch_runtime_rule() -> None:
     )
 
     assert expected in text
+
+
+def test_info_is_the_complete_redacted_operator_preflight() -> None:
+    """Document one machine-readable command for models, credentials, and child env."""
+    for path in (README_PATH, CLI_MANUAL_PATH, ACCEPTANCE_CHECKLIST_PATH):
+        text = _read(path)
+        for field in (
+            "configured_models",
+            "provider_credentials",
+            "child_runtime_environment",
+        ):
+            assert field in text
+        assert "credential values" in text
+    assert "--secrets-file" in _read(CLI_MANUAL_PATH)
+    assert "--secrets-file" in _read(ACCEPTANCE_CHECKLIST_PATH)
+
+
+def test_bootstrap_policy_is_limited_to_checkout_and_uv_isolation() -> None:
+    """Keep shell ownership narrow while naming every hostile uv selector."""
+    for path in (DESIGN_PATH, PLAN_PATH):
+        normalized = " ".join(_read(path).split())
+        assert "checkout and uv isolation policy" in normalized
+        assert "no application, database, or routing policy" in normalized
+        for variable in (
+            "UV_PROJECT",
+            "UV_PROJECT_ENVIRONMENT",
+            "UV_NO_SYNC",
+            "UV_WORKING_DIR",
+            "UV_WORKING_DIRECTORY",
+        ):
+            assert variable in normalized

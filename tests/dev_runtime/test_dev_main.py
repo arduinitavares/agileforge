@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib
 import json
 import os
+import shutil
 import sqlite3
 import stat
 import sys
@@ -18,6 +19,7 @@ from git import Git
 from git.exc import GitCommandError
 
 from cli.dev_checks import CheckCommandResult
+from cli.dev_profiles import initialize_profile_record
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -27,6 +29,23 @@ _EXPECTED_TABLES = {"projects", "spec_registry", "workflow_events"}
 _FORBIDDEN_TABLES = {"products", "sessions", "cli_" + "mutation" + "_ledger"}
 _DEFAULT_READY_TIMEOUT = 15.0
 _USAGE_EXIT_CODE = 2
+_HOSTILE_UV_CONTROLS = (
+    "UV_CONFIG_FILE",
+    "UV_ENV_FILE",
+    "UV_FROZEN",
+    "UV_ISOLATED",
+    "UV_LOCKED",
+    "UV_MANAGED_PYTHON",
+    "UV_NO_CONFIG",
+    "UV_NO_MANAGED_PYTHON",
+    "UV_NO_PROJECT",
+    "UV_NO_SYNC",
+    "UV_PROJECT",
+    "UV_PROJECT_ENVIRONMENT",
+    "UV_PYTHON",
+    "UV_WORKING_DIR",
+    "UV_WORKING_DIRECTORY",
+)
 
 
 def _module() -> ModuleType:
@@ -175,7 +194,16 @@ def test_parser_exposes_required_commands_and_options() -> None:
             "--json",
         ]
     )
-    info_args = parser.parse_args(["info", "--profile", "local", "--json"])
+    info_args = parser.parse_args(
+        [
+            "info",
+            "--profile",
+            "local",
+            "--secrets-file",
+            "secrets.env",
+            "--json",
+        ]
+    )
     cli_args = parser.parse_args(
         [
             "cli",
@@ -215,6 +243,7 @@ def test_parser_exposes_required_commands_and_options() -> None:
     assert init_args.expect_sha == "a" * 40
     assert init_args.json is True
     assert info_args.command == "info"
+    assert info_args.secrets_file == Path("secrets.env")
     assert info_args.json is True
     assert cli_args.command == "cli"
     assert cli_args.secrets_file == Path("secrets.env")
@@ -255,12 +284,35 @@ def test_bootstrap_is_executable_canonical_and_uv_owned(tmp_path: Path) -> None:
     bin_directory = tmp_path / "bin"
     bin_directory.mkdir()
     fake_uv = bin_directory / "uv"
-    fake_uv.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n', encoding="utf-8")
+    control_checks = "\n".join(
+        f'[ "${{{name}+set}}" != set ] || printf "leaked:{name}\\n"'
+        for name in _HOSTILE_UV_CONTROLS
+    )
+    harmless_controls = {
+        "SSL_CERT_FILE": "preserved",
+        "UV_CACHE_DIR": "preserved",
+        "UV_NATIVE_TLS": "preserved",
+        "UV_OFFLINE": "preserved",
+    }
+    harmless_checks = "\n".join(
+        f'[ "${{{name}}}" = preserved ] || printf "erased:{name}\\n"'
+        for name in harmless_controls
+    )
+    fake_uv.write_text(
+        f'#!/bin/sh\n{control_checks}\n{harmless_checks}\nprintf "%s\\n" "$@"\n',
+        encoding="utf-8",
+    )
     fake_uv.chmod(0o700)
+    hostile_environment = dict.fromkeys(_HOSTILE_UV_CONTROLS, "hostile")
     exit_code, stdout, _stderr = _run_process(
         (str(launcher), "--help"),
         cwd=tmp_path,
-        env={**os.environ, "PATH": f"{bin_directory}:{os.environ['PATH']}"},
+        env={
+            **os.environ,
+            **hostile_environment,
+            **harmless_controls,
+            "PATH": f"{bin_directory}:{os.environ['PATH']}",
+        },
     )
 
     assert exit_code == 0
@@ -272,6 +324,62 @@ def test_bootstrap_is_executable_canonical_and_uv_owned(tmp_path: Path) -> None:
         "agileforge-dev",
         "--help",
     ]
+
+
+def test_bootstrap_rejects_real_hostile_uv_project_and_environment(
+    tmp_path: Path,
+) -> None:
+    """Use this checkout's locked environment despite hostile caller uv controls."""
+    module_path = Path(cast("str", _module().__file__))
+    launcher = module_path.parents[1] / "agileforge-dev"
+    hostile_project = tmp_path / "hostile-project"
+    hostile_project.mkdir()
+    (hostile_project / "pyproject.toml").write_text(
+        "[project]\nname = 'hostile'\nversion = '0'\n",
+        encoding="utf-8",
+    )
+    hostile_environment = tmp_path / "hostile-environment"
+    hostile_bin = hostile_environment / "bin"
+    hostile_bin.mkdir(parents=True)
+    (hostile_environment / "pyvenv.cfg").write_text(
+        f"home = {Path(sys.executable).parent}\n",
+        encoding="utf-8",
+    )
+    hostile_command = hostile_bin / "agileforge-dev"
+    hostile_command.write_text(
+        "#!/bin/sh\nprintf '%s\\n' 'HOSTILE_UV_ENVIRONMENT'\n",
+        encoding="utf-8",
+    )
+    hostile_command.chmod(0o700)
+    hostile_config = tmp_path / "hostile-uv.toml"
+    hostile_config.write_text("", encoding="utf-8")
+    hostile_dotenv = tmp_path / "hostile.env"
+    hostile_dotenv.write_text("HOSTILE_DOTENV=1\n", encoding="utf-8")
+    environment = {
+        **os.environ,
+        **dict.fromkeys(_HOSTILE_UV_CONTROLS, "hostile"),
+        "UV_CONFIG_FILE": str(hostile_config),
+        "UV_ENV_FILE": str(hostile_dotenv),
+        "UV_FROZEN": "1",
+        "UV_ISOLATED": "1",
+        "UV_NO_PROJECT": "1",
+        "UV_NO_SYNC": "1",
+        "UV_PROJECT": str(hostile_project),
+        "UV_PROJECT_ENVIRONMENT": str(hostile_environment),
+        "UV_PYTHON": str(tmp_path / "hostile-python"),
+        "UV_WORKING_DIR": str(hostile_project),
+        "UV_WORKING_DIRECTORY": str(hostile_project),
+    }
+
+    exit_code, stdout, stderr = _run_process(
+        (str(launcher), "--help"),
+        cwd=tmp_path,
+        env=environment,
+    )
+
+    assert exit_code == 0, stderr
+    assert "usage: agileforge-dev" in stdout
+    assert "HOSTILE_UV_ENVIRONMENT" not in stdout
 
 
 def test_bootstrap_rejects_symlinked_entrypoint(tmp_path: Path) -> None:
@@ -443,6 +551,7 @@ def test_init_schema_bootstrap_receives_only_profile_environment(
         "AGILEFORGE_ADK_EXECUTION_TRACE_DB_URL": (
             f"sqlite:///{paths.trace_database.as_posix()}"
         ),
+        "AGILEFORGE_LAUNCHER_CHILD": "1",
         "MODEL_CONFIG_PATH": str(checkout / "config" / "models.yaml"),
     }
     for secret_value in parent_values.values():
@@ -609,9 +718,135 @@ def test_info_json_is_complete_redacted_and_validated(
     assert payload["current_commit"] == _git(checkout, "rev-parse", "HEAD")
     assert payload["profile"]["name"] == "local"
     assert set(payload["schema"]["tables"]) >= _EXPECTED_TABLES
+    assert payload["configured_models"] == [{"role": "default", "model_id": "fixture"}]
+    assert payload["provider_credentials"] == {"OPEN_ROUTER_API_KEY": False}
+    paths = module.profile_paths(checkout, "local")
+    assert payload["child_runtime_environment"] == {
+        "AGILEFORGE_DB_URL": f"sqlite:///{paths.business_database.as_posix()}",
+        "AGILEFORGE_ADK_EXECUTION_TRACE_DB_URL": (
+            f"sqlite:///{paths.trace_database.as_posix()}"
+        ),
+        "AGILEFORGE_LAUNCHER_CHILD": "1",
+        "MODEL_CONFIG_PATH": str(checkout / "config" / "models.yaml"),
+    }
     serialized = json.dumps(payload).lower()
-    for secret_key in ("api_key", "password", "token"):
+    assert serialized.count("open_router_api_key") == 1
+    for secret_key in ("password", "token"):
         assert secret_key not in serialized
+
+
+def test_info_secrets_file_reports_presence_without_credential_value(
+    checkout: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reuse descriptor-safe secret precedence and emit only a presence boolean."""
+    module = _module()
+    assert (
+        module.main(
+            ["init", "--profile", "preflight", "--json"],
+            checkout_root=checkout,
+            runner=FakeRunner(checkout),
+            clock=_clock(),
+        )
+        == 0
+    )
+    capsys.readouterr()
+    credential = "preflight-provider-value-must-not-leak"
+    secrets_file = tmp_path / "provider.env"
+    secrets_file.write_text(
+        f"OPEN_ROUTER_API_KEY={credential}\nMODEL_CONFIG_PATH=forbidden\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("OPEN_ROUTER_API_KEY", raising=False)
+
+    exit_code = module.main(
+        [
+            "info",
+            "--profile",
+            "preflight",
+            "--secrets-file",
+            str(secrets_file),
+            "--json",
+        ],
+        checkout_root=checkout,
+        runner=FakeRunner(checkout),
+        clock=_clock(minute=1),
+    )
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert exit_code == 0
+    assert payload["provider_credentials"] == {"OPEN_ROUTER_API_KEY": True}
+    assert credential not in captured.out
+    assert credential not in captured.err
+    assert payload["child_runtime_environment"]["MODEL_CONFIG_PATH"] == str(
+        checkout / "config" / "models.yaml"
+    )
+
+
+def test_real_launcher_child_ignores_checkout_dotenv_controls_and_credentials(
+    checkout: Path,
+) -> None:
+    """Prove the real child import cannot load checkout dotenv values."""
+    module = _module()
+    source_root = Path(cast("str", module.__file__)).parents[1]
+    local_utils = checkout / "utils"
+    local_utils.mkdir()
+    (local_utils / "__init__.py").write_text("", encoding="utf-8")
+    shutil.copy2(source_root / "utils" / "runtime_config.py", local_utils)
+    shutil.copy2(source_root / "utils" / "runtime_controls.py", local_utils)
+    credential = "checkout-dotenv-provider-must-not-leak"
+    poison_values = (
+        credential,
+        "sqlite:///dotenv-business.sqlite3",
+        "sqlite:///dotenv-trace.sqlite3",
+        "dotenv-models.yaml",
+        "true",
+    )
+    (checkout / ".env").write_text(
+        "\n".join(
+            (
+                f"OPEN_ROUTER_API_KEY={credential}",
+                "AGILEFORGE_DB_URL=sqlite:///dotenv-business.sqlite3",
+                "AGILEFORGE_ADK_EXECUTION_TRACE_DB_URL=sqlite:///dotenv-trace.sqlite3",
+                "MODEL_CONFIG_PATH=dotenv-models.yaml",
+                "RELAX_ZDR_FOR_TESTS=true",
+            )
+        ),
+        encoding="utf-8",
+    )
+    profile = initialize_profile_record(checkout, "real-child")
+    child_environment = module._launcher_child_environment(profile)
+    probe = (
+        "import json, os; import utils.runtime_config; "
+        "print(json.dumps({"
+        "'business': os.environ.get('AGILEFORGE_DB_URL'), "
+        "'trace': os.environ.get('AGILEFORGE_ADK_EXECUTION_TRACE_DB_URL'), "
+        "'model': os.environ.get('MODEL_CONFIG_PATH'), "
+        "'provider_present': 'OPEN_ROUTER_API_KEY' in os.environ, "
+        "'relax_present': 'RELAX_ZDR_FOR_TESTS' in os.environ}))"
+    )
+
+    result = module.SubprocessCommandRunner().run(
+        (sys.executable, "-c", probe),
+        cwd=checkout,
+        env=child_environment,
+    )
+
+    payload = json.loads(result.stdout)
+    assert result.exit_code == 0
+    assert payload == {
+        "business": child_environment["AGILEFORGE_DB_URL"],
+        "trace": child_environment["AGILEFORGE_ADK_EXECUTION_TRACE_DB_URL"],
+        "model": child_environment["MODEL_CONFIG_PATH"],
+        "provider_present": False,
+        "relax_present": False,
+    }
+    for poison in poison_values:
+        assert poison not in result.stdout
+        assert poison not in result.stderr
 
 
 def test_reset_requires_exact_confirmation_and_reports_removed_paths(

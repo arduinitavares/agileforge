@@ -96,6 +96,47 @@ def test_runtime_env_loads_from_config_root(
     )
 
 
+def test_launcher_child_skips_implicit_runtime_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Ignore checkout dotenv values in an explicitly marked launcher child."""
+    config_root = tmp_path / "agileforge-root"
+    config_root.mkdir()
+    (config_root / ".env").write_text(
+        "\n".join(
+            (
+                "OPEN_ROUTER_API_KEY=dotenv-provider-secret",
+                "AGILEFORGE_DB_URL=sqlite:///dotenv-business.sqlite3",
+                "MODEL_CONFIG_PATH=dotenv-models.yaml",
+            )
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("AGILEFORGE_CONFIG_ROOT", str(config_root))
+    monkeypatch.setenv("AGILEFORGE_LAUNCHER_CHILD", "1")
+    for name in (
+        "OPEN_ROUTER_API_KEY",
+        "AGILEFORGE_DB_URL",
+        "MODEL_CONFIG_PATH",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    try:
+        runtime_config_module.load_runtime_env()
+
+        assert "OPEN_ROUTER_API_KEY" not in runtime_config_module.os.environ
+        assert "AGILEFORGE_DB_URL" not in runtime_config_module.os.environ
+        assert "MODEL_CONFIG_PATH" not in runtime_config_module.os.environ
+    finally:
+        for name in (
+            "OPEN_ROUTER_API_KEY",
+            "AGILEFORGE_DB_URL",
+            "MODEL_CONFIG_PATH",
+        ):
+            runtime_config_module.os.environ.pop(name, None)
+
+
 def test_explicit_database_target_overrides_environment(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

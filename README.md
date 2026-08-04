@@ -111,6 +111,13 @@ For branch and linked-worktree development, use only that checkout's
 mutations, and keep the installed stable release separate from checkout-local
 testing.
 
+One `info --json` command is the complete redacted runtime preflight. Its
+`configured_models` field lists typed model roles and IDs,
+`provider_credentials` reports presence booleans, and
+`child_runtime_environment` contains the exact derived non-secret child values.
+It never emits credential values. Use optional `--secrets-file PATH` when the
+same allowlisted provider source will be used by a later agentic command.
+
 ### Running the Application
 
 ```bash
