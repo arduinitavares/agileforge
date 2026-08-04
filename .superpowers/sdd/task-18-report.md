@@ -13,21 +13,23 @@ Original Task 18 base:
 `cb3e32c4144866e81bf367f073984905abce77e9`
 
 Final implementation HEAD:
-`34d1c08f2dfa7ba077dff2ece91598068a5b3aba`
+`09d2935930eb52f4eb7acebf10bb3ac158e852bc`
 
 Complete regenerated implementation range:
-`cb3e32c4144866e81bf367f073984905abce77e9..34d1c08f2dfa7ba077dff2ece91598068a5b3aba`
+`cb3e32c4144866e81bf367f073984905abce77e9..09d2935930eb52f4eb7acebf10bb3ac158e852bc`
 
 Immutable implementation package:
-`.superpowers/sdd/review-cb3e32c..34d1c08.diff`
+`.superpowers/sdd/review-cb3e32c..09d2935.diff`
 
 Package SHA-256:
-`1f4ae1678bbc0a7d4a08668f1556c00f6a984e78054f9d98b20780326894a960`
+`482b1bc14218e5d40ee4665417801088c002d3f7ec3cb322b76a5c3e72322c01`
 
 The range includes the original Task 18 checklist/read work, the independently
 approved Task 18 fixes at `9b16965`, the uv-owned profile/launcher/UI/check/CI/
 distribution implementation through `3c4b62c`, and the operating-document
-regeneration at `34d1c08`.
+regeneration at `34d1c08`. Review remediation at `09d2935` extends the bounded
+current-operating-doc gate to the acceptance checklist and constructs removed
+guidance values from fragments inside tests.
 
 The earlier Task 18 review-fix starting HEAD was
 `6031483e4aa3c419bf213b57804d869d0b6511f4`.
@@ -97,9 +99,9 @@ trace DB, model config, and checkout provenance without manual DB exports.
 
 Restart means two independent one-shot CLI processes with identical pins and
 recorded timestamps. The trace reset can delete only a separately configured
-disposable trace file inside the acceptance temp root after path inequality and
-inactive-process checks. The durable DB remains untouched and no session command
-is invented.
+disposable trace file inside the acceptance profile root after path inequality
+and inactive-process checks. The durable DB remains untouched and no session
+command is invented.
 
 ### Correlated Evidence And Command Safety
 
@@ -127,6 +129,25 @@ All literal launcher examples parse through the developer parser, and every
 forwarded product argv parses through the live product parser.
 
 ## TDD Evidence
+
+### Task 7 Review Remediation
+
+The exact bounded-scope assertion was added while the checklist was still
+omitted:
+
+```text
+uv run --locked pytest tests/test_uv_only_docs.py \
+  tests/test_workflow_acceptance_document.py -q
+1 failed, 8 passed, 5 warnings
+```
+
+After adding the checklist and fragmented removed-guidance checks:
+
+```text
+uv run --locked pytest tests/test_uv_only_docs.py \
+  tests/test_workflow_acceptance_document.py -q
+10 passed, 5 warnings
+```
 
 ### RED
 
@@ -227,8 +248,8 @@ All checks passed!
 Ruff: pass
 annotation checks: pass
 ty: pass
-Bandit: 0 issues across 129,008 lines of code
-pytest: 1,947 passed, 2 skipped, 2 deselected, 17 warnings
+Bandit: 0 issues across 129,031 lines of code
+pytest: 1,949 passed, 2 skipped, 2 deselected, 17 warnings
 Node: 9 passed, 0 failed
 wheel: verified
 sdist: verified
@@ -239,15 +260,14 @@ Focused current-document contract:
 ```text
 uv run --locked pytest tests/test_uv_only_docs.py \
   tests/test_workflow_acceptance_document.py -q
-8 passed, 5 warnings
+10 passed, 5 warnings
 ```
 
 Exact current-guidance scan:
 
 ```text
-rg -n "AGILEFORGE_SESSION_DB_URL|/Users/aaat/.local/bin/agileforge" \
-  README.md .env.example AGENTS.md docs/agent-cli-manual.md \
-  docs/testing/workflow-graph-acceptance-checklist.md cli tests
+the removed session variable and old absolute user shim are assembled from
+fragments in tests and checked across the exact bounded current-doc set
 no matches
 ```
 
