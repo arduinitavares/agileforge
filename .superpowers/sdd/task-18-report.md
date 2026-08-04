@@ -2,7 +2,8 @@
 
 ## Verdict
 
-PASS for the Task 18 review fix loop. The Operator-run package is prepared, but
+PASS for the regenerated implementation package and self-review. Fresh
+independent review is still required. The Operator-run package is prepared, but
 acceptance execution has not started: caRtola, ASA, and MyFinance remain
 `not_run`. This report makes no external-repository pass claim.
 
@@ -11,8 +12,25 @@ acceptance execution has not started: caRtola, ASA, and MyFinance remain
 Original Task 18 base:
 `cb3e32c4144866e81bf367f073984905abce77e9`
 
-Review-fix starting HEAD:
-`6031483e4aa3c419bf213b57804d869d0b6511f4`
+Final implementation HEAD:
+`34d1c08f2dfa7ba077dff2ece91598068a5b3aba`
+
+Complete regenerated implementation range:
+`cb3e32c4144866e81bf367f073984905abce77e9..34d1c08f2dfa7ba077dff2ece91598068a5b3aba`
+
+Immutable implementation package:
+`.superpowers/sdd/review-cb3e32c..34d1c08.diff`
+
+Package SHA-256:
+`1f4ae1678bbc0a7d4a08668f1556c00f6a984e78054f9d98b20780326894a960`
+
+The range includes the original Task 18 checklist/read work, the independently
+approved Task 18 fixes at `9b16965`, the uv-owned profile/launcher/UI/check/CI/
+distribution implementation through `3c4b62c`, and the operating-document
+regeneration at `34d1c08`.
+
+The earlier Task 18 review-fix starting HEAD was
+`6031483e4aa3c419bf213b57804d869d0b6511f4`.
 
 All four Important findings and the Minor finding in
 `.superpowers/sdd/task-18-review.md` were treated as valid. The fix loop changes:
@@ -34,6 +52,24 @@ or otherwise mutated caRtola, ASA, MyFinance, or another external repository.
 No provider, network workflow, persistent database, acceptance command, or Task
 19 work ran. Tests used only temporary or in-memory databases.
 
+## Task 7 Package Regeneration
+
+Current operating guidance now distinguishes the installed stable release from
+development branches and linked worktrees. Repository setup is uv-only.
+Checkout-local examples use that checkout's `./agileforge-dev`; `AGENTS.md`
+requires fresh sessions to record `info --json` before mutations and preserve
+per-worktree profile, business database, trace database, and UI-port ownership.
+
+The Operator checklist now initializes one exact-SHA acceptance profile for
+each target. It records `info --json` before each product CLI step and takes
+database/model provenance, exact forwarded argv, exit status, and the production
+JSON result from the launcher's JSON envelope. It contains no manual business or
+trace database exports and performs no manual schema bootstrap.
+
+The stable release remains separate. This package does not claim that replacing
+an installed stable shim is supported; that decision remains after Operator
+acceptance.
+
 ## Review Fixes
 
 ### Initial-Spec Read
@@ -52,10 +88,12 @@ decision and accepted by its guarded request payload.
 
 ### Pinned Operator Procedure
 
-Every schema, read, and mutation instruction now starts from the literal
-reviewed worktree and uses `uv run --frozen`. The checklist requires a recorded
-SHA equality check before every CLI invocation and restart boundary. It pins the
-business DB, separate ADK trace DB, model config, actor, and all run values.
+Every profile, read, and mutation instruction now starts from the literal
+reviewed worktree and uses that checkout's `./agileforge-dev`. The checklist
+requires a recorded SHA equality check before every CLI invocation and restart
+boundary, then `info --json` before each product CLI step. One exact-SHA
+acceptance profile per target owns the current schema, business DB, separate ADK
+trace DB, model config, and checkout provenance without manual DB exports.
 
 Restart means two independent one-shot CLI processes with identical pins and
 recorded timestamps. The trace reset can delete only a separately configured
@@ -65,12 +103,13 @@ is invented.
 
 ### Correlated Evidence And Command Safety
 
-The Task 18 top-level YAML keys remain exact. `steps` is now authoritative, with
-one complete record for repository, phase/status/timestamps, graph command
-metadata, substitutions, exact argv/result, before/after positions and guards,
-authority/model identity, verification, artifacts, and structured failure.
-Statuses are `not_run`, `passed`, `failed`, and `blocked`; the prepared overall
-status remains `not_run`.
+The Task 18 top-level YAML keys remain exact. `steps` is authoritative, with one
+complete record for repository, phase/status/timestamps, graph command metadata,
+substitutions, profile-info provenance, launcher argv, exact forwarded argv,
+production JSON result, before/after positions and guards, authority/model
+identity, verification, artifacts, and structured failure. Statuses are
+`not_run`, `passed`, `failed`, and `blocked`; the prepared overall status remains
+`not_run`.
 
 The Operator records the returned template, substitutes only declared values,
 and records the executed argv. A new idempotency key is required for each
@@ -84,7 +123,8 @@ The validator requires exact section headings/order and section-scoped
 preflight, caRtola, ASA, MyFinance, stale-probe, restart, trace-reset, evidence,
 and stop-boundary contracts. It parses YAML and validates the complete nested
 step schema and status enum. The adversarial keyword-only document is rejected.
-All literal wrapped AgileForge examples parse through the live parser.
+All literal launcher examples parse through the developer parser, and every
+forwarded product argv parses through the live product parser.
 
 ## TDD Evidence
 
@@ -183,12 +223,32 @@ All checks passed!
 ## Full Verification
 
 ```text
-uv run --frozen pyrepo-check --all
+./agileforge-dev check
 Ruff: pass
 annotation checks: pass
 ty: pass
-Bandit: 0 issues across 122,154 lines of code
-pytest: 1,808 passed, 2 skipped, 2 deselected, 17 warnings
+Bandit: 0 issues across 129,008 lines of code
+pytest: 1,947 passed, 2 skipped, 2 deselected, 17 warnings
+Node: 9 passed, 0 failed
+wheel: verified
+sdist: verified
+```
+
+Focused current-document contract:
+
+```text
+uv run --locked pytest tests/test_uv_only_docs.py \
+  tests/test_workflow_acceptance_document.py -q
+8 passed, 5 warnings
+```
+
+Exact current-guidance scan:
+
+```text
+rg -n "AGILEFORGE_SESSION_DB_URL|/Users/aaat/.local/bin/agileforge" \
+  README.md .env.example AGENTS.md docs/agent-cli-manual.md \
+  docs/testing/workflow-graph-acceptance-checklist.md cli tests
+no matches
 ```
 
 ```text
@@ -202,8 +262,9 @@ network-test warnings. They caused no failures.
 ## Stop Boundary And Concerns
 
 Checklist preparation is not acceptance execution. The package still requires
-independent review, then Operator execution and returned evidence. Task 19 must
-not start before that evidence or one concrete acceptance failure is returned.
+fresh independent review, then Operator execution and returned evidence. Task
+19 must not start before that evidence or one concrete acceptance failure is
+returned.
 
 No implementation blocker remains. External acceptance status is deliberately
 `not_run` for all three repositories.
