@@ -1,290 +1,204 @@
-# Task 18 Report: Prepare Operator-Led Acceptance Checklist
+# Task 18 Report: UV-Only Runtime Final Remediation
 
 ## Verdict
 
-PASS for the regenerated implementation package and self-review. Fresh
-independent review is still required. The Operator-run package is prepared, but
-acceptance execution has not started: caRtola, ASA, and MyFinance remain
-`not_run`. This report makes no external-repository pass claim.
+PASS for implementation self-review and the complete repository gate. All five
+Important and three Minor final-review findings are remediated in the immutable
+implementation package below. Fresh independent review is still required.
 
-## Scope
+External acceptance has not run:
+
+- caRtola: `not_run`
+- ASA: `not_run`
+- MyFinance: `not_run`
+- Task 19: not started
+
+## Durable Coordinates
 
 Original Task 18 base:
 `cb3e32c4144866e81bf367f073984905abce77e9`
 
-Final implementation HEAD:
-`09d2935930eb52f4eb7acebf10bb3ac158e852bc`
+Final non-evidence commit (`IMPLEMENTATION_HEAD`):
+`fc6cc2089d14d865a39011d110623ccc0bc8d44e`
 
-Complete regenerated implementation range:
-`cb3e32c4144866e81bf367f073984905abce77e9..09d2935930eb52f4eb7acebf10bb3ac158e852bc`
+Implementation commit:
+`fc6cc2089d14d865a39011d110623ccc0bc8d44e` -
+`fix: harden uv-only developer runtime`
+
+Complete implementation range:
+`cb3e32c4144866e81bf367f073984905abce77e9..fc6cc2089d14d865a39011d110623ccc0bc8d44e`
 
 Immutable implementation package:
-`.superpowers/sdd/review-cb3e32c..09d2935.diff`
+`.superpowers/sdd/review-cb3e32c..fc6cc20.diff`
+
+Package size:
+`454239` bytes
 
 Package SHA-256:
-`482b1bc14218e5d40ee4665417801088c002d3f7ec3cb322b76a5c3e72322c01`
+`603643a9d34a439e10671ccd5f68045a350fc6e61a446c902bb7500a2b443e25`
 
-The range includes the original Task 18 checklist/read work, the independently
-approved Task 18 fixes at `9b16965`, the uv-owned profile/launcher/UI/check/CI/
-distribution implementation through `3c4b62c`, and the operating-document
-regeneration at `34d1c08`. Review remediation at `09d2935` extends the bounded
-current-operating-doc gate to the acceptance checklist and constructs removed
-guidance values from fragments inside tests.
+The package was generated only after the full gate passed at the clean
+`IMPLEMENTATION_HEAD`. Regenerating the exact binary diff produced the same
+SHA-256. This report commit and any later review evidence commits are outside
+the implementation package. The report is read separately; no self-referential
+report commit hash is required.
 
-The earlier Task 18 review-fix starting HEAD was
-`6031483e4aa3c419bf213b57804d869d0b6511f4`.
+## Scope And Safety
 
-All four Important findings and the Minor finding in
-`.superpowers/sdd/task-18-review.md` were treated as valid. The fix loop changes:
+Implementation started from
+`1c5e7920b0163356b22617edcd43c83a311652ce` in the requested worktree. The
+protected `.superpowers/sdd/task-18-review.md` was not edited. No typing
+suppression was added. Python execution and verification used uv only.
 
-- `services/read_projections.py`
-- `services/application.py`
-- `cli/main.py`
-- `docs/agent-cli-manual.md`
-- `docs/testing/workflow-graph-acceptance-checklist.md`
-- `tests/adapters/test_initial_spec_read.py`
-- `tests/adapters/test_production_read_surfaces.py`
-- `tests/test_workflow_acceptance_document.py`
-- `.superpowers/sdd/task-18-report.md`
+No command inspected deeply, edited, branched, created a worktree in, or
+otherwise mutated caRtola, ASA, MyFinance, or another external repository. No
+external acceptance command or provider-backed workflow ran. Tests used only
+the AgileForge checkout, temporary Git repositories, temporary SQLite files,
+and Unix-local processes/loopback endpoints.
 
-The existing `README.md` checklist link remains present and contract-tested.
+## Remediation Matrix
 
-No command accessed, inspected deeply, edited, branched, created a worktree in,
-or otherwise mutated caRtola, ASA, MyFinance, or another external repository.
-No provider, network workflow, persistent database, acceptance command, or Task
-19 work ran. Tests used only temporary or in-memory databases.
+### 1. Launcher-Child Dotenv Isolation
 
-## Task 7 Package Regeneration
+`utils.runtime_controls` defines the fixed non-secret
+`AGILEFORGE_LAUNCHER_CHILD=1` control. Schema bootstrap, production CLI, and UI
+children receive it in addition to the unchanged exact three-key
+`profile_environment()` result. `utils.runtime_config` skips implicit dotenv
+loading only for that marked child. Direct stable execution retains the prior
+dotenv behavior.
 
-Current operating guidance now distinguishes the installed stable release from
-development branches and linked worktrees. Repository setup is uv-only.
-Checkout-local examples use that checkout's `./agileforge-dev`; `AGENTS.md`
-requires fresh sessions to record `info --json` before mutations and preserve
-per-worktree profile, business database, trace database, and UI-port ownership.
+Unit and real-subprocess regressions place provider credentials, business/trace
+database controls, model controls, and another runtime flag in checkout `.env`.
+Launcher children use only validated profile values, and every poison value is
+absent from stdout and stderr.
 
-The Operator checklist now initializes one exact-SHA acceptance profile for
-each target. It records `info --json` before each product CLI step and takes
-database/model provenance, exact forwarded argv, exit status, and the production
-JSON result from the launcher's JSON envelope. It contains no manual business or
-trace database exports and performs no manual schema bootstrap.
+### 2. Hostile uv Controls
 
-The stable release remains separate. This package does not claim that replacing
-an installed stable shim is supported; that decision remains after Operator
-acceptance.
+The root bootstrap removes caller controls that can redirect or bypass project,
+workdir, config, interpreter environment, sync, or lock selection before its
+fixed `uv --directory "$ROOT" run --locked` exec. The list includes
+`UV_PROJECT`, `UV_PROJECT_ENVIRONMENT`, `UV_NO_SYNC`, `UV_WORKING_DIR`,
+`UV_WORKING_DIRECTORY`, `UV_NO_PROJECT`, `UV_CONFIG_FILE`, `UV_ENV_FILE`,
+`UV_FROZEN`, `UV_ISOLATED`, `UV_LOCKED`, `UV_MANAGED_PYTHON`,
+`UV_NO_CONFIG`, `UV_NO_MANAGED_PYTHON`, and `UV_PYTHON`.
 
-## Review Fixes
+The bootstrap preserves cache, offline, native-certificate, and certificate
+file controls. A real hostile-project/hostile-environment launcher regression
+proves the requested checkout command and lock environment execute.
 
-### Initial-Spec Read
+### 3. Exact Acceptance Source
 
-`agileforge project initial-spec --project-id <id>` is now a supported
-facts-only read across the durable projection, production application port, and
-CLI parser/handler. It returns the exact active initial-draft ID, canonical
-content, content fingerprint, discovery provenance, and immutable
-created/updated timestamp. It authors no routing decision or command.
+Acceptance profile preparation, finalization, load, timestamp touch, and runtime
+environment use require a clean Git worktree. Tracked changes and nonignored
+untracked files are refused with one generic path-free error. Ignored
+launcher-owned `.agileforge` state remains allowed. Development profiles retain
+dirty-worktree behavior.
 
-The projection uses the graph's complete-chain selection rules and verifies the
-persisted content hash. Typed failures cover missing Project, missing active
-draft, ambiguous draft chain, malformed content, and hash mismatch. Tests prove
-the returned ID/hash/content are the values referenced by the available human
-decision and accepted by its guarded request payload.
+Regressions cover dirty launcher, CLI, lock, service, and untracked source.
+Refusal occurs before new profile state and preserves every byte of an existing
+profile.
 
-### Pinned Operator Procedure
+### 4. Operator Preflight
 
-Every profile, read, and mutation instruction now starts from the literal
-reviewed worktree and uses that checkout's `./agileforge-dev`. The checklist
-requires a recorded SHA equality check before every CLI invocation and restart
-boundary, then `info --json` before each product CLI step. One exact-SHA
-acceptance profile per target owns the current schema, business DB, separate ADK
-trace DB, model config, and checkout provenance without manual DB exports.
+`info --json` now emits fixed typed `configured_models`,
+`provider_credentials`, and `child_runtime_environment` contracts. Model roles
+and IDs are non-secret. Provider state is boolean-only. The child environment
+is the exact four-key launcher-child shape and rejects extra fields.
 
-Restart means two independent one-shot CLI processes with identical pins and
-recorded timestamps. The trace reset can delete only a separately configured
-disposable trace file inside the acceptance profile root after path inequality
-and inactive-process checks. The durable DB remains untouched and no session
-command is invented.
+Optional `--secrets-file` reuses the existing descriptor-safe regular-file,
+no-follow, allowlist, and invoking-environment precedence path. Neither JSON nor
+human output emits credential values. Production application/database imports
+remain lazy. README, agent manual, design, plan, and Operator checklist document
+one-command preflight.
 
-### Correlated Evidence And Command Safety
+### 5. Durable Evidence Coordinates
 
-The Task 18 top-level YAML keys remain exact. `steps` is authoritative, with one
-complete record for repository, phase/status/timestamps, graph command metadata,
-substitutions, profile-info provenance, launcher argv, exact forwarded argv,
-production JSON result, before/after positions and guards, authority/model
-identity, verification, artifacts, and structured failure. Statuses are
-`not_run`, `passed`, `failed`, and `blocked`; the prepared overall status remains
-`not_run`.
+All code, tests, design, plan, and operating docs were committed first. The full
+gate ran at that immutable clean commit. The package is exactly
+`cb3e32c..IMPLEMENTATION_HEAD`; this evidence-only report commit is excluded.
 
-The Operator records the returned template, substitutes only declared values,
-and records the executed argv. A new idempotency key is required for each
-distinct request. The stale probe reruns the successful original template with
-only a new key while preserving old guards and requires rejection with no second
-mutation.
+### 6. Real Process-Group Escalation
 
-### Structural Documentation Contract
+A bounded Unix-local test launches a real new-session process group whose
+process ignores TERM. It composes production `ProcessGroup` through
+`LocalRuntime.stop_ui` into `dev_server.stop_ui`, proves the finite timeout,
+KILL escalation, final reap, absent process group, and absent process.
 
-The validator requires exact section headings/order and section-scoped
-preflight, caRtola, ASA, MyFinance, stale-probe, restart, trace-reset, evidence,
-and stop-boundary contracts. It parses YAML and validates the complete nested
-step schema and status enum. The adversarial keyword-only document is rejected.
-All literal launcher examples parse through the developer parser, and every
-forwarded product argv parses through the live product parser.
+### 7. Initial-Spec Typed Failures
+
+Direct production tests corrupt active draft canonical content and content
+fingerprint independently. Both return typed `INITIAL_SPEC_DRAFT_INVALID` with
+project and draft coordinates. The earlier report claim is now directly
+supported.
+
+### 8. UI Launch Ownership
+
+Every UI launch attempt receives a fresh non-secret nonce. It is added only to
+the UI child/supervisor environment, exposed through dashboard config, and
+required by `ExpectedUIRuntime` for reload and non-reload readiness. Direct
+installed API smoke remains compatible with no nonce. An explicit-port,
+same-checkout/profile foreign-server regression proves a stale server cannot
+authenticate a new reload launch.
 
 ## TDD Evidence
 
-### Task 7 Review Remediation
+The first behavior-focused RED run produced 15 intended failures and 82 passes
+across runtime config, profiles, developer launcher, and CLI forwarding. The
+failures were the missing child control, dirty acceptance refusal, fixed info
+fields/secrets option, hostile uv sanitization, and real child isolation.
 
-The exact bounded-scope assertion was added while the checklist was still
-omitted:
+A second focused RED run failed at the new launch-nonce, dashboard-config,
+operator-doc, and checklist assertions. No production behavior was changed for
+the process-group escalation or malformed initial-spec findings: both behaviors
+already existed, while direct evidence did not. Their RED was the confirmed
+absence of a production-composition test and direct corruption tests. New tests
+were then added and run against the actual adapters.
 
-```text
-uv run --locked pytest tests/test_uv_only_docs.py \
-  tests/test_workflow_acceptance_document.py -q
-1 failed, 8 passed, 5 warnings
-```
-
-After adding the checklist and fragmented removed-guidance checks:
-
-```text
-uv run --locked pytest tests/test_uv_only_docs.py \
-  tests/test_workflow_acceptance_document.py -q
-10 passed, 5 warnings
-```
-
-### RED
-
-The initial-spec tests were written before the production read surface:
+Final focused GREEN was split only to respect acceptance clean-source behavior:
 
 ```text
-uv run --frozen pytest tests/adapters/test_initial_spec_read.py -q
-5 failed, 4 warnings in 1.19s
+affected runtime/docs suite:
+161 passed, 2 deselected, 4 warnings
+
+clean-checkout real launcher lifecycle:
+2 passed, 4 warnings
+
+targeted hostile uv/dotenv/clean-use/process composition:
+5 passed
 ```
 
-All failures were caused by the missing projection/parser contract.
-
-The strengthened checklist validator was run against the reviewed document
-before its rewrite:
-
-```text
-uv run --frozen pytest tests/test_workflow_acceptance_document.py -q
-2 failed, 2 passed, 5 warnings in 0.85s
-```
-
-The real checklist failed exact structure and pinned-command requirements; the
-adversarial document was already rejected.
-
-A final structural assertion for explicit repository-level result handling was
-also added before its prose:
-
-```text
-uv run --frozen pytest tests/test_workflow_acceptance_document.py -q
-1 failed, 3 passed, 5 warnings in 0.92s
-```
-
-It passed 4/4 after defining that only complete returned evidence can establish
-`passed`, a concrete required-step failure establishes `failed`, and incomplete
-evidence remains `not_run`.
-
-The CLI-manual contract was then added before its documentation update:
-
-```text
-uv run --frozen pytest \
-  tests/adapters/test_initial_spec_read.py::test_agent_cli_manual_names_initial_spec_read -q
-1 failed, 4 warnings in 0.77s
-```
-
-### GREEN
-
-Read, production transport, command renderer, CLI, durable replay, and complete
-checklist/adversarial contracts:
-
-```text
-uv run --frozen pytest \
-  tests/adapters/test_initial_spec_read.py \
-  tests/adapters/test_production_read_surfaces.py \
-  tests/adapters/test_command_renderer.py \
-  tests/adapters/test_cli_workflow_domain.py \
-  tests/adapters/test_adk_workflow_runner.py \
-  tests/workflow/test_transition_idempotency.py \
-  tests/test_workflow_acceptance_document.py -q
-65 passed, 16 warnings in 6.07s
-```
-
-The exact required document command passes independently:
-
-```text
-uv run --frozen pytest tests/test_workflow_acceptance_document.py -q
-4 passed, 5 warnings
-```
-
-Live parser help succeeds:
-
-```text
-uv run --frozen agileforge project initial-spec --help
-usage: agileforge project initial-spec [-h] --project-id PROJECT_ID
-```
-
-Node tests were not run because no frontend or Node source/test changed.
-
-## Hard-Break Evidence
-
-Targeted Task 17 routing/review-residue and forbidden legacy-command scans
-returned zero matches. The Task 16 command-renderer, CLI graph, ADK replay, and
-transition-idempotency tests are included in the 65-test focused gate and the
-full suite.
-
-Static checks before the full gate:
-
-```text
-uv run --frozen ruff check <touched-python-files>
-All checks passed!
-
-uv run --frozen ty check
-All checks passed!
-```
+Ruff, Ruff format, `ty`, POSIX shell syntax, and `git diff --check` passed before
+the implementation commit.
 
 ## Full Verification
 
+Command run at `IMPLEMENTATION_HEAD`:
+
 ```text
 ./agileforge-dev check
+```
+
+Results:
+
+```text
+Python: 3.13.12
 Ruff: pass
-annotation checks: pass
+Ruff annotation checks: pass
 ty: pass
-Bandit: 0 issues across 129,031 lines of code
-pytest: 1,949 passed, 2 skipped, 2 deselected, 17 warnings
+Bandit: 0 issues across 129690 lines of code
+pytest: 1966 passed, 2 skipped, 2 deselected, 17 warnings in 198.19s
 Node: 9 passed, 0 failed
-wheel: verified
-sdist: verified
+wheel: verified agileforge-0.1.0-py3-none-any.whl
+sdist: verified agileforge-0.1.0.tar.gz
+git diff --check: clean
+tracked worktree after implementation commit: clean
 ```
 
-Focused current-document contract:
+Warnings were existing dependency deprecation/experimental notices and the
+guarded network-test warning. They caused no failures.
 
-```text
-uv run --locked pytest tests/test_uv_only_docs.py \
-  tests/test_workflow_acceptance_document.py -q
-10 passed, 5 warnings
-```
+## Stop Boundary
 
-Exact current-guidance scan:
-
-```text
-the removed session variable and old absolute user shim are assembled from
-fragments in tests and checked across the exact bounded current-doc set
-no matches
-```
-
-```text
-git diff --check
-clean
-```
-
-Warnings are existing Pydantic/ADK, Starlette/httpx, resumability, and guarded
-network-test warnings. They caused no failures.
-
-## Stop Boundary And Concerns
-
-Checklist preparation is not acceptance execution. The package still requires
-fresh independent review, then Operator execution and returned evidence. Task
-19 must not start before that evidence or one concrete acceptance failure is
-returned.
-
-No implementation blocker remains. External acceptance status is deliberately
-`not_run` for all three repositories.
+This package is ready for fresh independent review. Checklist preparation and
+self-review are not external acceptance. caRtola, ASA, and MyFinance remain
+`not_run`, and Task 19 has not started.
