@@ -27,83 +27,88 @@ reads and any Operator-owned external changes as evidence.
 
 ## Reviewed Runtime Pin
 
-Use one reviewed checkout for schema creation and every CLI invocation:
+Use the reviewed checkout's launcher for profile creation and every product CLI
+invocation:
 
 ```sh
 export AGILEFORGE_WORKTREE="/Users/aaat/projects/agileforge/.worktrees/domain-workflow-graph-hard-break"
 export AGILEFORGE_SHA="<reviewed-agileforge-sha>"
 ```
 
-The Operator must, before every CLI invocation and before each restart boundary,
-run and record:
+Assign exactly one profile name to each target and do not reuse it for another
+repository:
+
+- caRtola: `acceptance-cartola`
+- ASA: `acceptance-asa`
+- MyFinance: `acceptance-myfinance`
+
+Set `ACCEPTANCE_PROFILE` to that target's listed value. The Operator must,
+before every CLI invocation and before each restart boundary, run and record:
 
 ```sh
 git -C "$AGILEFORGE_WORKTREE" rev-parse HEAD
 ```
 
-The result must equal `AGILEFORGE_SHA`. Stop on any mismatch. Do not use a
-globally installed or PATH-selected `agileforge`. Start each command from the
-reviewed checkout:
+The result must equal `AGILEFORGE_SHA`. Stop on any mismatch. From the reviewed
+checkout, initialize the target's exact-SHA profile once:
 
 ```sh
 cd "$AGILEFORGE_WORKTREE"
-uv run --frozen agileforge project list
+./agileforge-dev init --profile "$ACCEPTANCE_PROFILE" --mode acceptance --expect-sha "$AGILEFORGE_SHA" --json
 ```
 
-All later `uv run --frozen agileforge` examples assume the current directory is
-still `AGILEFORGE_WORKTREE` and that the SHA equality check just passed. Record
-the `cd`, SHA check, exact argv, exit result, and timestamp with each step.
+The profile root must not already exist. Initialization creates and validates
+the current business schema. It refuses later checkout advancement, model
+configuration drift, schema-source drift, and cross-profile state.
+
+After each SHA check and before every product CLI step, run and record:
+
+```sh
+./agileforge-dev info --profile "$ACCEPTANCE_PROFILE" --json
+```
+
+The JSON must identify the reviewed checkout, exact current commit, acceptance
+mode, profile name, business database, ADK trace database, model configuration,
+schema fingerprints, and valid status. Stop on a mismatch. Do not use a bare,
+user-level, globally installed, or PATH-selected `agileforge` shim. All later
+launcher examples assume the current directory is `AGILEFORGE_WORKTREE`, the
+SHA equality check just passed, and the matching `info --json` result was
+recorded.
 
 ## Fresh Database Preflight
 
-Perform a separate preflight for caRtola, ASA, and MyFinance. Allocate a new
-disposable database per repository acceptance run. Never reuse one run's
-database or temp root for another run.
+Perform a separate preflight for caRtola, ASA, and MyFinance. Use one new
+exact-SHA acceptance profile per repository. Never reuse a target's profile for
+another repository or create a second profile to repair a failed run.
 
-1. Create and record a new test-only `ACCEPTANCE_TEMP_ROOT` that did not exist for
-   an earlier run.
-2. Pin all non-secret acceptance environment values for the entire run:
-
-```sh
-export ACCEPTANCE_TEMP_ROOT="<new-absolute-test-temp-root>"
-export BUSINESS_DB_PATH="$ACCEPTANCE_TEMP_ROOT/agileforge-business.sqlite3"
-export TRACE_DB_PATH="$ACCEPTANCE_TEMP_ROOT/agileforge-adk-trace.sqlite3"
-export AGILEFORGE_DB_URL="sqlite:///${BUSINESS_DB_PATH}"
-export AGILEFORGE_ADK_EXECUTION_TRACE_DB_URL="sqlite:///${TRACE_DB_PATH}"
-export MODEL_CONFIG_PATH="$AGILEFORGE_WORKTREE/config/models.yaml"
-export ACCEPTANCE_ACTOR="<operator-identity>"
-```
-
-3. Record the values, the model-config file hash, every configured model role and
-   model ID, the reviewed AgileForge SHA, and the UTC start timestamp. Record
-   credential presence without writing credential values into evidence.
-4. Prove both files are new and the business and trace paths differ:
-
-```sh
-test ! -e "$BUSINESS_DB_PATH"
-test ! -e "$TRACE_DB_PATH"
-test "$BUSINESS_DB_PATH" != "$TRACE_DB_PATH"
-```
-
-5. Confirm both paths resolve inside `ACCEPTANCE_TEMP_ROOT`. Stop if either path
-   escapes it.
-6. From the SHA-verified checkout, create only the current schema:
-
-```sh
-cd "$AGILEFORGE_WORKTREE"
-uv run --frozen python agile_sqlmodel.py
-```
-
-7. Confirm the fresh business database now exists. There is no migration. The
-   prior durable database remains untouched: do not copy, migrate, rename,
-   replace, delete, or point any acceptance environment variable at it.
-8. Record the target repository SHA and dirty state with Operator-run read-only
+1. Record the profile-init JSON, matching `info --json`, reviewed AgileForge SHA,
+   profile name, target repository, UTC start timestamp, and Operator identity as
+   `ACCEPTANCE_ACTOR`.
+2. From `info --json`, record the checkout-local profile root, business database,
+   ADK trace database, `AGILEFORGE_DB_URL`,
+   `AGILEFORGE_ADK_EXECUTION_TRACE_DB_URL`, `MODEL_CONFIG_PATH`, model-config
+   fingerprint, schema-source fingerprint, configured model roles, and model IDs.
+   Record credential presence without writing credential values into evidence.
+3. Prove the business and trace paths differ, both are owned by the same
+   acceptance profile root, and neither is a symlink. The business database must
+   contain the validated current schema; the trace database may be absent until
+   first use.
+4. Profile initialization creates the current schema in a fresh business
+   database. There is no migration. The prior durable database remains
+   untouched: do not copy, migrate, rename, replace, delete, or point the profile
+   at it.
+5. Do not export database URLs manually. Do not export or override
+   `AGILEFORGE_DB_URL`, `AGILEFORGE_ADK_EXECUTION_TRACE_DB_URL`, or
+   `MODEL_CONFIG_PATH`; `./agileforge-dev` installs only the validated profile
+   values into each child process.
+6. Record the target repository SHA and dirty state with Operator-run read-only
    Git commands before Operator-owned work. Never let AgileForge inventory alter
    that state.
 
-Keep `AGILEFORGE_WORKTREE`, `AGILEFORGE_SHA`, `AGILEFORGE_DB_URL`,
-`AGILEFORGE_ADK_EXECUTION_TRACE_DB_URL`, `MODEL_CONFIG_PATH`, and
-`ACCEPTANCE_ACTOR` unchanged for the whole repository run.
+Keep `AGILEFORGE_WORKTREE`, `AGILEFORGE_SHA`, `ACCEPTANCE_PROFILE`, and
+`ACCEPTANCE_ACTOR` unchanged for the whole repository run. Every recorded
+`info --json` result must prove the same separate business and ADK trace
+database provenance.
 
 ## Command And Placeholder Protocol
 
@@ -112,13 +117,13 @@ Shell creation is the only pre-position mutation. Open it through the pinned
 checkout:
 
 ```sh
-uv run --frozen agileforge project create --name "$PROJECT_NAME" --origin brownfield --idempotency-key "$PROJECT_OPEN_KEY" --changed-by "$ACCEPTANCE_ACTOR"
+./agileforge-dev cli --profile "$ACCEPTANCE_PROFILE" --json -- project create --name "$PROJECT_NAME" --origin brownfield --idempotency-key "$PROJECT_OPEN_KEY" --changed-by "$ACCEPTANCE_ACTOR"
 ```
 
 Record the returned `PROJECT_ID`. Before every later mutation, run:
 
 ```sh
-uv run --frozen agileforge workflow next --project-id "$PROJECT_ID"
+./agileforge-dev cli --profile "$ACCEPTANCE_PROFILE" --json -- workflow next --project-id "$PROJECT_ID"
 ```
 
 Save the graph-returned command template unchanged. It begins with `agileforge`
@@ -130,8 +135,10 @@ and may declare only these substitution slots: `<input-file>` or
 3. Record a placeholder-to-value map without secrets.
 4. Parse and record the final executed argv, preserving project, graph, fact,
    decision, and `instance_key` guards exactly.
-5. Run that argv from `AGILEFORGE_WORKTREE` through `uv run --frozen`, so argv
-   element zero remains the checkout's `agileforge` entry point.
+5. Run the production argv from `AGILEFORGE_WORKTREE` through
+   `./agileforge-dev cli --profile "$ACCEPTANCE_PROFILE" --json --`. Record the
+   launcher's `command` array as the exact forwarded CLI argv and its `result`
+   object as the production JSON result.
 
 Never call an uninstantiated angle-bracket template as an executable command.
 Never infer a mutation from `node_id`, a phase name, or visible artifacts.
@@ -143,14 +150,14 @@ template, substitutions, payload, guards, and actor must also remain identical.
 Record before and after facts-only reads for every mutation:
 
 ```sh
-uv run --frozen agileforge workflow position --project-id "$PROJECT_ID"
-uv run --frozen agileforge workflow next --project-id "$PROJECT_ID"
+./agileforge-dev cli --profile "$ACCEPTANCE_PROFILE" --json -- workflow position --project-id "$PROJECT_ID"
+./agileforge-dev cli --profile "$ACCEPTANCE_PROFILE" --json -- workflow next --project-id "$PROJECT_ID"
 ```
 
 The supported initial-specification review is also a facts-only read:
 
 ```sh
-uv run --frozen agileforge project initial-spec --project-id "$PROJECT_ID"
+./agileforge-dev cli --profile "$ACCEPTANCE_PROFILE" --json -- project initial-spec --project-id "$PROJECT_ID"
 ```
 
 It returns the exact active draft ID, canonical content, content fingerprint,
@@ -162,10 +169,10 @@ graph-authored human decision to that same ID and fingerprint. Stop on typed
 Other supported facts-only reads used by this checklist are:
 
 ```sh
-uv run --frozen agileforge project show --project-id "$PROJECT_ID"
-uv run --frozen agileforge authority status --project-id "$PROJECT_ID"
-uv run --frozen agileforge authority invariants --project-id "$PROJECT_ID"
-uv run --frozen agileforge authority review --project-id "$PROJECT_ID" --include-spec full
+./agileforge-dev cli --profile "$ACCEPTANCE_PROFILE" --json -- project show --project-id "$PROJECT_ID"
+./agileforge-dev cli --profile "$ACCEPTANCE_PROFILE" --json -- authority status --project-id "$PROJECT_ID"
+./agileforge-dev cli --profile "$ACCEPTANCE_PROFILE" --json -- authority invariants --project-id "$PROJECT_ID"
+./agileforge-dev cli --profile "$ACCEPTANCE_PROFILE" --json -- authority review --project-id "$PROJECT_ID" --include-spec full
 ```
 
 Stop when an advertised, fully instantiated command cannot parse or execute, or
@@ -184,7 +191,7 @@ Execute and record this ordered lifecycle:
 3. Record a complete Git-aware inventory.
 4. Run initial specification curation through the graph-returned template.
 5. Inspect it with
-   `uv run --frozen agileforge project initial-spec --project-id "$PROJECT_ID"`.
+   `./agileforge-dev cli --profile "$ACCEPTANCE_PROFILE" --json -- project initial-spec --project-id "$PROJECT_ID"`.
 6. Submit the graph-authored human initial-spec decision bound to the reviewed
    draft ID and hash.
 7. Complete initial scope registration.
@@ -217,7 +224,7 @@ Execute and record this ordered lifecycle:
 3. Record a complete Git-aware inventory.
 4. Run initial specification curation through the graph-returned template.
 5. Inspect it with
-   `uv run --frozen agileforge project initial-spec --project-id "$PROJECT_ID"`.
+   `./agileforge-dev cli --profile "$ACCEPTANCE_PROFILE" --json -- project initial-spec --project-id "$PROJECT_ID"`.
 6. Submit the graph-authored human initial-spec decision bound to the reviewed
    draft ID and hash.
 7. Complete initial scope registration.
@@ -255,7 +262,7 @@ Execute and record this ordered lifecycle:
 1. Open one brownfield Project Shell and record the approved context.
 2. Record the repository baseline and complete Git-aware inventory.
 3. Run curation, then inspect the draft with
-   `uv run --frozen agileforge project initial-spec --project-id "$PROJECT_ID"`.
+   `./agileforge-dev cli --profile "$ACCEPTANCE_PROFILE" --json -- project initial-spec --project-id "$PROJECT_ID"`.
 4. Submit the graph-authored human initial-spec decision.
 5. Complete initial scope registration and reach accepted authority.
 6. Generate and decide a backlog consistent with the approved Statement Streams
@@ -299,41 +306,44 @@ stop or resume.
 
 For restart proof, record invocation A, wait for it to exit, repeat the SHA
 check, then perform a separate fresh process/shell invocation B. Both must use
-the same recorded worktree SHA, same AGILEFORGE_DB_URL, same MODEL_CONFIG_PATH,
-same ACCEPTANCE_ACTOR, and same AGILEFORGE_ADK_EXECUTION_TRACE_DB_URL. Also keep
-the Project ID and all other pinned environment values unchanged.
+the same recorded worktree SHA, same acceptance profile, same AGILEFORGE_DB_URL,
+same MODEL_CONFIG_PATH, same ACCEPTANCE_ACTOR, and same
+AGILEFORGE_ADK_EXECUTION_TRACE_DB_URL as proven by `info --json`. Also keep the
+Project ID and all other pinned values unchanged.
 
 Use position reads on both sides:
 
 ```sh
-uv run --frozen agileforge workflow position --project-id "$PROJECT_ID"
-uv run --frozen agileforge workflow position --project-id "$PROJECT_ID"
+./agileforge-dev cli --profile "$ACCEPTANCE_PROFILE" --json -- workflow position --project-id "$PROJECT_ID"
+./agileforge-dev cli --profile "$ACCEPTANCE_PROFILE" --json -- workflow position --project-id "$PROJECT_ID"
 ```
 
-Record both argv vectors, process exit results, and timestamps. Compare the full
+Before each invocation, record the fresh profile `info --json` result. Record
+both argv vectors, process exit results, and timestamps. Compare the full
 position snapshots while excluding only `evaluated_at`. For caRtola and ASA,
-repeat authority reads and prove accepted authority ID/hash stability. Do not run
-a mutation between A and B.
+repeat authority reads and prove accepted authority ID/hash stability. Do not
+run a mutation between A and B.
 
 ## ADK Execution-Trace Reset
 
 Run this only for MyFinance after a position capture. The target must be the
-separately configured disposable trace file from preflight, inside
-ACCEPTANCE_TEMP_ROOT, and it must differ from the durable business database.
+separately configured disposable trace file reported by `info --json`, inside
+the acceptance profile root, and it must differ from the durable business
+database.
 
 1. Record that the preceding one-shot command exited and no active acceptance
    CLI process remains. Do not delete while any test command is active.
-2. Resolve and record `TRACE_DB_PATH`, `BUSINESS_DB_PATH`, and
-   `ACCEPTANCE_TEMP_ROOT`; stop unless trace is inside the root and unequal to
-   business.
+2. From the latest `info --json` result, resolve and record `TRACE_DB_PATH`,
+   `BUSINESS_DB_PATH`, and the acceptance profile root; stop unless trace is
+   inside the root and unequal to business.
 3. Preserve required trace evidence, then delete only that trace file:
 
 ```sh
 rm -- "$TRACE_DB_PATH"
 ```
 
-4. Repeat the reviewed-SHA check and start a new pinned CLI process with every
-   preflight value unchanged.
+4. Repeat the reviewed-SHA check and `info --json`; then start a new pinned CLI
+   process with the same exact-SHA acceptance profile.
 5. Capture position before any mutation and compare graph version, fact
    fingerprint, decision fingerprint, and `instance_key` values with the
    pre-reset snapshot.
@@ -367,6 +377,11 @@ all required verification succeeds. Mark it `failed` when returned evidence
 contains a concrete required-step failure. A blocked step prevents a pass, and
 incomplete evidence remains not_run rather than being inferred as success.
 
+Run and record `info --json` before every product CLI step. Each step preserves
+that complete provenance result, the launcher's exact argv, the exact forwarded
+argv from its `command` array, and the production JSON result from its `result`
+object. Do not reconstruct these fields from shell history or database exports.
+
 ```yaml
 acceptance_status: not_run
 repository_name: ""
@@ -388,7 +403,8 @@ final_position: {}
 observed_failures: []
 runtime:
   agileforge_worktree: ""
-  acceptance_temp_root: ""
+  acceptance_profile: ""
+  profile_root: ""
   business_db_url: ""
   trace_db_url: ""
   model_config_path: ""
@@ -411,10 +427,16 @@ steps:
     recommendation_kind: null
     command_template: null
     placeholder_substitutions: {}
-    executed:
+    runtime_info:
+      captured_at: null
       argv: []
       exit_code: null
       result: {}
+    executed:
+      argv: []
+      forwarded_argv: []
+      exit_code: null
+      production_result: {}
     positions:
       before:
         captured_at: null
@@ -458,8 +480,9 @@ steps:
 
 Copy the step object for every preflight read, Project read, graph read,
 mutation, negative probe, restart read, trace reset, and verification. Record
-exact executed argv, not a reconstructed shell string. Preserve raw JSON results
-as attached artifacts when they are too large for the inline result.
+`info --json` provenance, exact executed argv, exact forwarded argv, and the
+production JSON result, not reconstructed shell strings. Preserve raw JSON
+results as attached artifacts when they are too large for the inline result.
 
 ## Stop Boundary
 

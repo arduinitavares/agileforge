@@ -4,6 +4,22 @@ This is the current operational contract for the `agileforge` command-line
 interface. The CLI is JSON-first. Parse its JSON output and use the exact
 commands advertised by the workflow graph.
 
+## Runtime Selection
+
+Stable release: `agileforge workflow next --project-id 1`
+
+Current checkout: `./agileforge-dev cli --profile local -- workflow next --project-id 1`
+
+Current checkout UI: `./agileforge-dev ui --profile local --port auto`
+
+Provenance: `./agileforge-dev info --profile local --json`
+
+Use only uv for repository setup. Run `uv sync --frozen`, then initialize one
+isolated development profile with
+`./agileforge-dev init --profile local --json`. In a development branch or
+linked worktree, run that checkout's launcher and record `info --json` before
+mutations. The installed stable release remains a separate runtime.
+
 ## Routing Authority
 
 `WorkflowDomain` is the sole routing authority. It derives a Project's current
@@ -13,8 +29,8 @@ position. A caller does not select a phase or reconstruct routing state.
 Use these reads before every mutation:
 
 ```sh
-agileforge workflow position --project-id 41
-agileforge workflow next --project-id 41
+./agileforge-dev cli --profile local -- workflow position --project-id 41
+./agileforge-dev cli --profile local -- workflow next --project-id 41
 ```
 
 `workflow position` returns the complete typed position. Add
@@ -37,7 +53,7 @@ three fingerprints as one read snapshot.
 Open a new Project Shell before it has a graph position:
 
 ```sh
-agileforge project create \
+./agileforge-dev cli --profile local -- project create \
   --name "Example Project" \
   --origin greenfield \
   --idempotency-key project-41-open \
@@ -71,7 +87,7 @@ the other.
 Example of the command shape returned for an agentic authority compilation:
 
 ```sh
-agileforge authority compile \
+./agileforge-dev cli --profile local -- authority compile \
   --project-id 41 \
   --graph-version agileforge.workflow.v1 \
   --expected-fact-fingerprint <fact-fingerprint> \
@@ -115,9 +131,9 @@ positioned mutations use deterministic request JSON.
 The retained authority reads are facts-only:
 
 ```sh
-agileforge authority status --project-id 41
-agileforge authority invariants --project-id 41
-agileforge authority review --project-id 41
+./agileforge-dev cli --profile local -- authority status --project-id 41
+./agileforge-dev cli --profile local -- authority invariants --project-id 41
+./agileforge-dev cli --profile local -- authority review --project-id 41
 ```
 
 `authority review` may use `--include-spec auto|full|summary`. Read projections
@@ -131,14 +147,14 @@ rationale fields intact.
 Read commands do not advance the workflow. Useful current projections include:
 
 ```sh
-agileforge project list
-agileforge project show --project-id 41
-agileforge project initial-spec --project-id 41
-agileforge authority status --project-id 41
-agileforge authority invariants --project-id 41
-agileforge authority review --project-id 41
-agileforge workflow position --project-id 41
-agileforge workflow next --project-id 41
+./agileforge-dev cli --profile local -- project list
+./agileforge-dev cli --profile local -- project show --project-id 41
+./agileforge-dev cli --profile local -- project initial-spec --project-id 41
+./agileforge-dev cli --profile local -- authority status --project-id 41
+./agileforge-dev cli --profile local -- authority invariants --project-id 41
+./agileforge-dev cli --profile local -- authority review --project-id 41
+./agileforge-dev cli --profile local -- workflow position --project-id 41
+./agileforge-dev cli --profile local -- workflow next --project-id 41
 ```
 
 `project initial-spec` returns the exact active curated initial-spec draft ID,
@@ -149,7 +165,8 @@ This is a facts-only, non-routing read: it returns no commands,
 recommendations, decision authorship, or process/session state.
 
 Artifact history and Project-specific reads remain available through
-`agileforge --help` and nested `--help` output. A read result is evidence, not a
+checkout-local launcher help and nested production `--help` output. A read
+result is evidence, not a
 routing instruction, unless it came from `workflow position` or `workflow next`.
 
 ## Guard Failures
@@ -179,7 +196,7 @@ work around an in-progress result.
 Compiler failures can include this orientation command:
 
 ```sh
-agileforge workflow next --project-id 41
+./agileforge-dev cli --profile local -- workflow next --project-id 41
 ```
 
 That command is intentionally a fresh graph read. It may advertise repair,
@@ -191,11 +208,12 @@ facts. Compiler code does not author a replacement mutation command.
 Use parser help to confirm installed syntax:
 
 ```sh
-agileforge --help
-agileforge workflow --help
-agileforge workflow next --help
-agileforge workflow position --help
-agileforge authority --help
+./agileforge-dev --help
+./agileforge-dev cli --profile local -- --help
+./agileforge-dev cli --profile local -- workflow --help
+./agileforge-dev cli --profile local -- workflow next --help
+./agileforge-dev cli --profile local -- workflow position --help
+./agileforge-dev cli --profile local -- authority --help
 ```
 
 For machine execution, prefer the command string returned by `workflow next`

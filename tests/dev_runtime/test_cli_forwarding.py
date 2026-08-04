@@ -193,7 +193,8 @@ def test_cli_forwarding_ignores_path_selected_agileforge(
         "--project-id",
         "41",
     )
-    assert "/Users/aaat/.local/bin/agileforge" not in child_argv
+    forbidden_user_shim = "/Users/aaat/" + ".local/bin/" + "agileforge"
+    assert forbidden_user_shim not in child_argv
     assert child_cwd == checkout.resolve()
 
 

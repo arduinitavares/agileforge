@@ -348,6 +348,9 @@ def test_agent_cli_manual_names_initial_spec_read() -> None:
     """Keep the supported review command in the operational CLI contract."""
     manual = (Path(__file__).parents[2] / "docs" / "agent-cli-manual.md").read_text()
 
-    assert "agileforge project initial-spec --project-id 41" in manual
+    assert (
+        "./agileforge-dev cli --profile local -- project initial-spec "
+        "--project-id 41"
+    ) in manual
     assert "canonical content" in manual
     assert "content_fingerprint" in manual

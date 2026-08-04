@@ -11,6 +11,7 @@ import pytest
 import yaml
 from pydantic import TypeAdapter
 
+from cli.dev_main import build_parser as build_dev_parser
 from cli.main import build_parser
 from workflow.contracts import JsonObject, JsonValue
 
@@ -98,6 +99,14 @@ REQUIRED_EVIDENCE_KEYS = {
     "observed_failures",
 }
 STEP_STATUS_VALUES = {"not_run", "passed", "failed", "blocked"}
+ACCEPTANCE_PROFILES = {
+    "caRtola": "acceptance-cartola",
+    "ASA": "acceptance-asa",
+    "MyFinance": "acceptance-myfinance",
+}
+LAUNCHER_CLI_PREFIX = (
+    "./agileforge-dev cli --profile \"$ACCEPTANCE_PROFILE\" --json -- "
+)
 LEGACY_COMMAND_STRINGS = (
     "agileforge " + "workflow state",
     "agileforge " + "project setup",
@@ -196,6 +205,7 @@ def _validate_step(step: JsonValue) -> None:
         "recommendation_kind",
         "command_template",
         "placeholder_substitutions",
+        "runtime_info",
         "executed",
         "positions",
         "guards",
@@ -210,7 +220,18 @@ def _validate_step(step: JsonValue) -> None:
     assert status in STEP_STATUS_VALUES
     assert set(_object(step["repository"])) == {"name", "path", "commit", "dirty"}
     assert set(_object(step["timestamps"])) == {"started_at", "completed_at"}
-    assert set(_object(step["executed"])) == {"argv", "exit_code", "result"}
+    assert set(_object(step["runtime_info"])) == {
+        "captured_at",
+        "argv",
+        "exit_code",
+        "result",
+    }
+    assert set(_object(step["executed"])) == {
+        "argv",
+        "forwarded_argv",
+        "exit_code",
+        "production_result",
+    }
     positions = _object(step["positions"])
     assert set(positions) == {"before", "after"}
     _validate_position_snapshot(positions["before"])
@@ -271,24 +292,39 @@ class ChecklistValidator:
             "AGILEFORGE_SHA",
             "before every CLI invocation",
             "before each restart boundary",
-            "uv run --frozen agileforge",
+            (
+                './agileforge-dev init --profile "$ACCEPTANCE_PROFILE" '
+                '--mode acceptance --expect-sha "$AGILEFORGE_SHA" --json'
+            ),
+            './agileforge-dev info --profile "$ACCEPTANCE_PROFILE" --json',
         ):
             assert required in normalized_runtime
+        for repository, profile in ACCEPTANCE_PROFILES.items():
+            assert f"{repository}: `{profile}`" in runtime
+        assert runtime.count("--mode acceptance") == 1
         preflight = self.parsed.section("Fresh Database Preflight")
         normalized_preflight = " ".join(preflight.split())
         for required in (
-            "new disposable database per repository acceptance run",
+            "one new exact-SHA acceptance profile per repository",
             "prior durable database remains untouched",
             "no migration",
-            "ACCEPTANCE_TEMP_ROOT",
             "AGILEFORGE_DB_URL",
             "AGILEFORGE_ADK_EXECUTION_TRACE_DB_URL",
             "MODEL_CONFIG_PATH",
             "ACCEPTANCE_ACTOR",
             "business and trace paths differ",
-            "uv run --frozen python agile_sqlmodel.py",
+            "Profile initialization creates the current schema",
+            "Do not export database URLs manually",
         ):
             assert required in normalized_preflight
+        assert not re.search(
+            (
+                r"^export (?:AGILEFORGE_DB_URL|"
+                r"AGILEFORGE_ADK_EXECUTION_TRACE_DB_URL|MODEL_CONFIG_PATH)="
+            ),
+            preflight,
+            flags=re.MULTILINE,
+        )
 
     def _validate_repository_flows(self) -> None:
         for heading in ("caRtola Acceptance", "ASA Acceptance"):
@@ -301,7 +337,7 @@ class ChecklistValidator:
                 "complete inventory file count and paths",
                 "accepted authority ID and hash",
                 "same fact fingerprint",
-                "uv run --frozen agileforge project initial-spec --project-id",
+                f"{LAUNCHER_CLI_PREFIX}project initial-spec --project-id",
             ):
                 assert required in normalized_section
         myfinance = self.parsed.section("MyFinance Real-Feature Acceptance")
@@ -316,7 +352,7 @@ class ChecklistValidator:
             "ADK execution-trace reset",
             "Do not prescribe MyFinance code changes",
             "Operator owns all external changes",
-            "uv run --frozen agileforge project initial-spec --project-id",
+            f"{LAUNCHER_CLI_PREFIX}project initial-spec --project-id",
         ):
             assert required in normalized_myfinance
 
@@ -344,6 +380,7 @@ class ChecklistValidator:
             "same MODEL_CONFIG_PATH",
             "same ACCEPTANCE_ACTOR",
             "same AGILEFORGE_ADK_EXECUTION_TRACE_DB_URL",
+            "same acceptance profile",
             "both argv vectors, process exit results, and timestamps",
         ):
             assert required in normalized_restart
@@ -351,7 +388,7 @@ class ChecklistValidator:
         normalized_trace = " ".join(trace.split())
         for required in (
             "separately configured disposable trace file",
-            "inside ACCEPTANCE_TEMP_ROOT",
+            "inside the acceptance profile root",
             "must differ from the durable business database",
             "no active acceptance CLI process",
             'rm -- "$TRACE_DB_PATH"',
@@ -382,6 +419,9 @@ class ChecklistValidator:
         assert "every required step is passed" in normalized_evidence
         assert "incomplete evidence remains not_run" in normalized_evidence
         assert "Task 19" in normalized_evidence
+        assert "`info --json` before every product CLI step" in normalized_evidence
+        assert "exact forwarded argv" in normalized_evidence
+        assert "production JSON result" in normalized_evidence
 
     def _validate_stop_boundary(self) -> None:
         stop = self.parsed.section("Stop Boundary")
@@ -427,15 +467,17 @@ AGILEFORGE_DB_URL MODEL_CONFIG_PATH instance_key Task 19
 
 
 def test_literal_pinned_cli_examples_parse_with_live_parser() -> None:
-    """Parse each wrapped AgileForge command through the production parser."""
+    """Parse checkout-local launcher examples and their forwarded CLI argv."""
     commands = re.findall(
-        r"^uv run --frozen agileforge .+$",
+        r"^\./agileforge-dev .+$",
         _checklist_text(),
         flags=re.MULTILINE,
     )
     assert commands
     assert any("project initial-spec" in command for command in commands)
     replacements = {
+        "$ACCEPTANCE_PROFILE": "acceptance-cartola",
+        "$AGILEFORGE_SHA": "a" * 40,
         "$PROJECT_ID": "41",
         "$PROJECT_NAME": "Acceptance Project",
         "$PROJECT_OPEN_KEY": "open-41",
@@ -443,10 +485,13 @@ def test_literal_pinned_cli_examples_parse_with_live_parser() -> None:
     }
     for command in commands:
         tokens = shlex.split(command)
-        assert tokens[:4] == ["uv", "run", "--frozen", "agileforge"]
-        argv = [replacements.get(token, token) for token in tokens[4:]]
-        build_parser().parse_args(argv)
+        launcher_argv = [replacements.get(token, token) for token in tokens[1:]]
+        build_dev_parser().parse_args(launcher_argv)
+        if "--" in launcher_argv:
+            forwarded = launcher_argv[launcher_argv.index("--") + 1 :]
+            build_parser().parse_args(forwarded)
     assert not re.search(r"^agileforge ", _checklist_text(), flags=re.MULTILINE)
+    assert "uv run --frozen agileforge" not in _checklist_text()
 
 
 def test_readme_links_the_operator_checklist() -> None:

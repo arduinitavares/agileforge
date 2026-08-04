@@ -63,7 +63,7 @@ submits the exact guarded transition advertised by `workflow position`.
 
 ### Prerequisites
 - Python 3.12+
-- [Poetry](https://python-poetry.org/) or pip
+- [uv](https://docs.astral.sh/uv/)
 - OpenRouter API key (for LLM access)
 
 ### Installation
@@ -73,16 +73,19 @@ submits the exact guarded transition advertised by `workflow position`.
 git clone https://github.com/arduinitavares/agileforge.git
 cd agileforge
 
-# Install dependencies
-pip install -e .
-# or with Poetry
-poetry install
+# Install the locked environment
+uv sync --frozen
 
 # Set up environment variables
 cp .env.example .env
 # Then edit .env and set:
 # - OPEN_ROUTER_API_KEY
 # - AGILEFORGE_DB_URL
+# - AGILEFORGE_ADK_EXECUTION_TRACE_DB_URL
+# - MODEL_CONFIG_PATH
+
+# Initialize isolated state for this checkout
+./agileforge-dev init --profile local --json
 ```
 
 ### Agent CLI
@@ -95,22 +98,26 @@ see [docs/testing/workflow-graph-acceptance-checklist.md](docs/testing/workflow-
 For the `grill-with-docs` -> `to-prd` -> AgileForge Scope Discovery handoff,
 see [docs/scope-discovery-agent-runbook.md](docs/scope-discovery-agent-runbook.md).
 
-```bash
-uv run --frozen agileforge --help
-uv run --frozen agileforge project list
-uv run --frozen agileforge status --project-id 1
-uv run --frozen agileforge context pack --project-id 1 --phase sprint-planning
-uv run --frozen agileforge project create --name "Example" --origin brownfield --idempotency-key create-example-001 --changed-by operator
-uv run --frozen agileforge workflow next --project-id 1
-```
+Stable release: `agileforge workflow next --project-id 1`
+
+Current checkout: `./agileforge-dev cli --profile local -- workflow next --project-id 1`
+
+Current checkout UI: `./agileforge-dev ui --profile local --port auto`
+
+Provenance: `./agileforge-dev info --profile local --json`
+
+For branch and linked-worktree development, use only that checkout's
+`./agileforge-dev`. Initialize its profile once, record `info --json` before
+mutations, and keep the installed stable release separate from checkout-local
+testing.
 
 ### Running the Application
 
 ```bash
-# Start the deterministic FastAPI interface
-uvicorn api:app --reload
+# Start the managed checkout-local dashboard
+./agileforge-dev ui --profile local --port auto
 
-# Open the dashboard at http://localhost:8000/dashboard
+# Open the dashboard URL reported by the launcher
 ```
 
 ---

@@ -10,6 +10,14 @@ When reviewing a pull request, always fetch and consider the existing PR comment
 
 If you create a temporary worktree for investigation, review, or implementation, remove it after you finish using it.
 
+## Development Branch Runtime
+
+Use only uv. For a development branch or linked worktree, invoke that checkout's
+`./agileforge-dev`; never use a bare or user-level `agileforge` shim. Run
+`info --json` before mutations. Each worktree owns separate profiles, business
+and ADK trace databases, and UI ports. Older branches must merge or rebase the
+launcher change before using it.
+
 ## Typing Style
 
 Keep repo-level style guidance short, specific, and broadly applicable.
