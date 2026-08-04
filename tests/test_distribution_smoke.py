@@ -18,6 +18,7 @@ import scripts.verify_distribution as distribution_verifier
 from scripts.verify_distribution import (
     _RESOURCE_PROBE,
     REQUIRED_ARCHIVE_RESOURCES,
+    BuiltArtifact,
     DistributionVerificationError,
     IsolationLayout,
     build_command,
@@ -28,7 +29,114 @@ from scripts.verify_distribution import (
 from services.agent_workbench.version import agileforge_version
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
+
+
+def _checkout_file_state(checkout: Path) -> dict[str, tuple[int, bytes]]:
+    """Capture non-Git file modes and bytes for mutation checks."""
+    state: dict[str, tuple[int, bytes]] = {}
+    for path in sorted(checkout.rglob("*")):
+        relative = path.relative_to(checkout)
+        if ".git" in relative.parts or not path.is_file():
+            continue
+        state[relative.as_posix()] = (path.stat().st_mode, path.read_bytes())
+    return state
+
+
+def _clone_checkout(source: Path, destination: Path) -> None:
+    """Create one independent local checkout for a distribution probe."""
+    git_executable = shutil.which("git")
+    assert git_executable is not None
+    subprocess.run(  # noqa: S603  # nosec B603
+        (
+            git_executable,
+            "clone",
+            "--quiet",
+            "--no-hardlinks",
+            str(source),
+            str(destination),
+        ),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _git_status_with_ignored(checkout: Path) -> str:
+    """Return exact tracked, untracked, and ignored state for a fixture checkout."""
+    git_executable = shutil.which("git")
+    assert git_executable is not None
+    return subprocess.run(  # noqa: S603  # nosec B603
+        (
+            git_executable,
+            "status",
+            "--short",
+            "--untracked-files=all",
+            "--ignored",
+        ),
+        cwd=checkout,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+
+
+def _write_contaminating_uv(bin_directory: Path) -> Path:
+    """Write a local builder that packages stale files found in its source root."""
+    bin_directory.mkdir()
+    fake_uv = bin_directory / "uv"
+    fake_uv.write_text(
+        f"""#!{sys.executable}
+import io
+import sys
+import tarfile
+import zipfile
+from pathlib import Path
+
+arguments = sys.argv[1:]
+output = Path(arguments[arguments.index("--out-dir") + 1])
+output.mkdir(parents=True, exist_ok=True)
+source = Path.cwd()
+payloads = {{"cli/__init__.py": (source / "cli/__init__.py").read_bytes()}}
+for relative in (
+    "build/lib/cli/stale_shadow.py",
+    "agileforge.egg-info/SOURCES.txt",
+):
+    candidate = source / relative
+    if candidate.is_file():
+        payloads[relative] = candidate.read_bytes()
+with zipfile.ZipFile(output / "agileforge-0.1.0-py3-none-any.whl", "w") as wheel:
+    for relative, content in payloads.items():
+        wheel.writestr(relative, content)
+with tarfile.open(output / "agileforge-0.1.0.tar.gz", "w:gz") as sdist:
+    for relative, content in payloads.items():
+        member = tarfile.TarInfo(f"agileforge-0.1.0/{{relative}}")
+        member.size = len(content)
+        sdist.addfile(member, io.BytesIO(content))
+""",
+        encoding="utf-8",
+    )
+    fake_uv.chmod(0o700)
+    return fake_uv
+
+
+def _run_uv_build(
+    source: Path,
+    output: Path,
+    environment: Mapping[str, str],
+) -> None:
+    """Run one bounded uv build for a distribution test fixture."""
+    output.mkdir()
+    completed = subprocess.run(  # noqa: S603  # nosec B603
+        build_command(output),
+        cwd=source,
+        env=dict(environment),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_distribution_commands_use_uv_and_exact_artifact_paths(tmp_path: Path) -> None:
@@ -237,6 +345,98 @@ def test_archive_resource_verification_requires_models_and_frontend(
         match=r"frontend/project\.js",
     ):
         verify_archive_resources(archive)
+
+
+def test_clean_snapshot_build_excludes_ignored_stale_state_and_preserves_checkout(
+    tmp_path: Path,
+) -> None:
+    """Build working-tree source without stale ignored build metadata or modules."""
+    source_checkout = Path(__file__).resolve().parents[1]
+    checkout = tmp_path / "checkout"
+    _clone_checkout(source_checkout, checkout)
+    tracked_source = checkout / "cli" / "__init__.py"
+    tracked_marker = "# clean-snapshot-working-tree-marker\n"
+    tracked_source.write_text(
+        tracked_source.read_text(encoding="utf-8") + tracked_marker,
+        encoding="utf-8",
+    )
+    stale_module = checkout / "build" / "lib" / "cli" / "stale_shadow.py"
+    stale_module.parent.mkdir(parents=True)
+    stale_module.write_text("STALE_BUILD_SHADOW = True\n", encoding="utf-8")
+    stale_egg_info = checkout / "agileforge.egg-info" / "SOURCES.txt"
+    stale_egg_info.parent.mkdir()
+    stale_egg_info.write_text(
+        "build/lib/cli/stale_shadow.py\nSTALE_EGG_INFO_SENTINEL\n",
+        encoding="utf-8",
+    )
+    fake_bin = tmp_path / "fake-bin"
+    _write_contaminating_uv(fake_bin)
+    build_environment = {
+        **os.environ,
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+    }
+    live_output = tmp_path / "live-checkout-dist"
+    _run_uv_build(checkout, live_output, build_environment)
+    live_wheel = next(live_output.glob("*.whl"))
+    with zipfile.ZipFile(live_wheel) as package:
+        assert "build/lib/cli/stale_shadow.py" in package.namelist()
+        assert b"STALE_EGG_INFO_SENTINEL" in package.read(
+            "agileforge.egg-info/SOURCES.txt"
+        )
+    before_status = _git_status_with_ignored(checkout)
+    assert "!! agileforge.egg-info/" in before_status
+    assert "!! build/" in before_status
+    before_files = _checkout_file_state(checkout)
+    build_distributions = getattr(
+        distribution_verifier,
+        "_build_distributions_from_clean_snapshot",
+        None,
+    )
+    assert build_distributions is not None
+    typed_build = cast(
+        "Callable[..., tuple[BuiltArtifact, BuiltArtifact]]",
+        build_distributions,
+    )
+
+    artifacts = typed_build(
+        checkout_root=checkout,
+        temporary_root=tmp_path / "distribution-workspace",
+        parent_environment=build_environment,
+    )
+
+    after_status = _git_status_with_ignored(checkout)
+    assert after_status == before_status
+    assert _checkout_file_state(checkout) == before_files
+    wheel_path = next(
+        artifact.path for artifact in artifacts if artifact.kind == "wheel"
+    )
+    with zipfile.ZipFile(wheel_path) as wheel:
+        names = set(wheel.namelist())
+        assert "cli/stale_shadow.py" not in names
+        assert tracked_marker.encode() in wheel.read("cli/__init__.py")
+        assert all(
+            b"STALE_EGG_INFO_SENTINEL" not in wheel.read(name)
+            for name in names
+            if not name.endswith("/")
+        )
+    sdist_path = next(
+        artifact.path for artifact in artifacts if artifact.kind == "sdist"
+    )
+    with tarfile.open(sdist_path, mode="r:gz") as source_distribution:
+        files = [
+            member for member in source_distribution.getmembers() if member.isfile()
+        ]
+        assert not any(member.name.endswith("/cli/stale_shadow.py") for member in files)
+        init_member = next(
+            member for member in files if member.name.endswith("/cli/__init__.py")
+        )
+        init_stream = source_distribution.extractfile(init_member)
+        assert init_stream is not None
+        assert tracked_marker.encode() in init_stream.read()
+        for member in files:
+            stream = source_distribution.extractfile(member)
+            assert stream is not None
+            assert b"STALE_EGG_INFO_SENTINEL" not in stream.read()
 
 
 def test_built_distributions_pass_isolated_smoke_and_preserve_checkout() -> None:

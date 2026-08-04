@@ -14,6 +14,9 @@ fi
 
 ROOT=$(CDPATH= cd -P -- "$(dirname -- "$BOOTSTRAP")" && pwd -P)
 unset \
+    PYTHONHOME \
+    PYTHONPATH \
+    PYTHONUSERBASE \
     UV_CONFIG_FILE \
     UV_ENV_FILE \
     UV_FROZEN \
@@ -21,6 +24,7 @@ unset \
     UV_LOCKED \
     UV_MANAGED_PYTHON \
     UV_NO_CONFIG \
+    UV_NO_EDITABLE \
     UV_NO_MANAGED_PYTHON \
     UV_NO_PROJECT \
     UV_NO_SYNC \
@@ -28,5 +32,6 @@ unset \
     UV_PROJECT_ENVIRONMENT \
     UV_PYTHON \
     UV_WORKING_DIR \
-    UV_WORKING_DIRECTORY
+    UV_WORKING_DIRECTORY \
+    VIRTUAL_ENV
 exec uv --directory "$ROOT" run --locked agileforge-dev "$@"

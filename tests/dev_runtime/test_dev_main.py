@@ -46,6 +46,13 @@ _HOSTILE_UV_CONTROLS = (
     "UV_WORKING_DIR",
     "UV_WORKING_DIRECTORY",
 )
+_HOSTILE_SOURCE_CONTROLS = (
+    "PYTHONHOME",
+    "PYTHONPATH",
+    "PYTHONUSERBASE",
+    "UV_NO_EDITABLE",
+    "VIRTUAL_ENV",
+)
 
 
 def _module() -> ModuleType:
@@ -278,15 +285,17 @@ def test_bootstrap_is_executable_canonical_and_uv_owned(tmp_path: Path) -> None:
     assert execution_lines == [
         'exec uv --directory "$ROOT" run --locked agileforge-dev "$@"'
     ]
-    for forbidden in ("branch", "worktree", "database", "profile", "port", "home"):
+    for forbidden in ("branch", "worktree", "database", "profile", "port"):
         assert forbidden not in source.lower()
+    assert "$HOME" not in source
 
     bin_directory = tmp_path / "bin"
     bin_directory.mkdir()
     fake_uv = bin_directory / "uv"
+    hostile_controls = (*_HOSTILE_UV_CONTROLS, *_HOSTILE_SOURCE_CONTROLS)
     control_checks = "\n".join(
         f'[ "${{{name}+set}}" != set ] || printf "leaked:{name}\\n"'
-        for name in _HOSTILE_UV_CONTROLS
+        for name in hostile_controls
     )
     harmless_controls = {
         "SSL_CERT_FILE": "preserved",
@@ -303,7 +312,7 @@ def test_bootstrap_is_executable_canonical_and_uv_owned(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     fake_uv.chmod(0o700)
-    hostile_environment = dict.fromkeys(_HOSTILE_UV_CONTROLS, "hostile")
+    hostile_environment = dict.fromkeys(hostile_controls, "hostile")
     exit_code, stdout, _stderr = _run_process(
         (str(launcher), "--help"),
         cwd=tmp_path,
@@ -380,6 +389,47 @@ def test_bootstrap_rejects_real_hostile_uv_project_and_environment(
     assert exit_code == 0, stderr
     assert "usage: agileforge-dev" in stdout
     assert "HOSTILE_UV_ENVIRONMENT" not in stdout
+
+
+def test_bootstrap_rejects_real_shadow_module_source_controls(
+    tmp_path: Path,
+) -> None:
+    """Import this checkout's dev CLI despite hostile Python source controls."""
+    module_path = Path(cast("str", _module().__file__))
+    launcher = module_path.parents[1] / "agileforge-dev"
+    shadow_root = tmp_path / "shadow-source"
+    shadow_cli = shadow_root / "cli"
+    shadow_cli.mkdir(parents=True)
+    (shadow_cli / "__init__.py").write_text("", encoding="utf-8")
+    marker = tmp_path / "shadow-imported"
+    (shadow_cli / "dev_main.py").write_text(
+        (
+            "import os\n"
+            "from pathlib import Path\n"
+            "Path(os.environ['SHADOW_IMPORT_MARKER']).write_text('imported')\n"
+            "def main():\n"
+            "    print('HOSTILE_SHADOW_DEV_MAIN')\n"
+            "    return 71\n"
+        ),
+        encoding="utf-8",
+    )
+    hostile_environment = {
+        **os.environ,
+        "PYTHONPATH": str(shadow_root),
+        "UV_NO_EDITABLE": "1",
+        "SHADOW_IMPORT_MARKER": str(marker),
+    }
+
+    exit_code, stdout, stderr = _run_process(
+        (str(launcher), "--help"),
+        cwd=tmp_path,
+        env=hostile_environment,
+    )
+
+    assert exit_code == 0, stderr
+    assert "usage: agileforge-dev" in stdout
+    assert "HOSTILE_SHADOW_DEV_MAIN" not in stdout
+    assert not marker.exists()
 
 
 def test_bootstrap_rejects_symlinked_entrypoint(tmp_path: Path) -> None:

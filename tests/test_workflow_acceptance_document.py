@@ -104,7 +104,10 @@ ACCEPTANCE_PROFILES = {
     "ASA": "acceptance-asa",
     "MyFinance": "acceptance-myfinance",
 }
-LAUNCHER_CLI_PREFIX = './agileforge-dev cli --profile "$ACCEPTANCE_PROFILE" --json -- '
+LAUNCHER_CLI_PREFIX = (
+    './agileforge-dev cli --profile "$ACCEPTANCE_PROFILE" '
+    '--secrets-file "$AGILEFORGE_SECRETS_FILE" --json -- '
+)
 LEGACY_COMMAND_STRINGS = (
     "agileforge " + "workflow state",
     "agileforge " + "project setup",
@@ -294,7 +297,10 @@ class ChecklistValidator:
                 './agileforge-dev init --profile "$ACCEPTANCE_PROFILE" '
                 '--mode acceptance --expect-sha "$AGILEFORGE_SHA" --json'
             ),
-            './agileforge-dev info --profile "$ACCEPTANCE_PROFILE" --json',
+            (
+                './agileforge-dev info --profile "$ACCEPTANCE_PROFILE" '
+                '--secrets-file "$AGILEFORGE_SECRETS_FILE" --json'
+            ),
         ):
             assert required in normalized_runtime
         for repository, profile in ACCEPTANCE_PROFILES.items():
@@ -479,9 +485,21 @@ def test_literal_pinned_cli_examples_parse_with_live_parser() -> None:
     )
     assert commands
     assert any("project initial-spec" in command for command in commands)
+    cli_commands = [
+        command for command in commands if command.startswith("./agileforge-dev cli ")
+    ]
+    info_commands = [
+        command for command in commands if command.startswith("./agileforge-dev info ")
+    ]
+    secrets_option = '--secrets-file "$AGILEFORGE_SECRETS_FILE"'
+    assert cli_commands
+    assert info_commands
+    assert all(secrets_option in command for command in cli_commands)
+    assert all(secrets_option in command for command in info_commands)
     replacements = {
         "$ACCEPTANCE_PROFILE": "acceptance-cartola",
         "$AGILEFORGE_SHA": "a" * 40,
+        "$AGILEFORGE_SECRETS_FILE": "provider.env",
         "$PROJECT_ID": "41",
         "$PROJECT_NAME": "Acceptance Project",
         "$PROJECT_OPEN_KEY": "open-41",

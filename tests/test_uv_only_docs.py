@@ -128,8 +128,26 @@ def test_info_is_the_complete_redacted_operator_preflight() -> None:
     assert "--secrets-file" in _read(ACCEPTANCE_CHECKLIST_PATH)
 
 
+def test_checkout_quick_start_uses_explicit_provider_secrets_file() -> None:
+    """Do not direct launcher users to an implicitly loaded checkout dotenv."""
+    text = _read(README_PATH)
+
+    assert "launcher children ignore the checkout `.env`" in text
+    assert (
+        'export AGILEFORGE_SECRETS_FILE="$HOME/.config/agileforge/provider.env"' in text
+    )
+    assert (
+        "./agileforge-dev info --profile local --secrets-file "
+        '"$AGILEFORGE_SECRETS_FILE" --json'
+    ) in text
+    assert (
+        "./agileforge-dev cli --profile local --secrets-file "
+        '"$AGILEFORGE_SECRETS_FILE" -- workflow next --project-id 1'
+    ) in text
+
+
 def test_bootstrap_policy_is_limited_to_checkout_and_uv_isolation() -> None:
-    """Keep shell ownership narrow while naming every hostile uv selector."""
+    """Keep shell ownership narrow while naming source and uv selectors."""
     for path in (DESIGN_PATH, PLAN_PATH):
         normalized = " ".join(_read(path).split())
         assert "checkout and uv isolation policy" in normalized
@@ -140,5 +158,10 @@ def test_bootstrap_policy_is_limited_to_checkout_and_uv_isolation() -> None:
             "UV_NO_SYNC",
             "UV_WORKING_DIR",
             "UV_WORKING_DIRECTORY",
+            "PYTHONHOME",
+            "PYTHONPATH",
+            "PYTHONUSERBASE",
+            "UV_NO_EDITABLE",
+            "VIRTUAL_ENV",
         ):
             assert variable in normalized

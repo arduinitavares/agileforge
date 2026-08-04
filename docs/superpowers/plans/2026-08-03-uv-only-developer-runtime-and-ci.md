@@ -197,14 +197,15 @@ exec uv --directory "$ROOT" run --locked agileforge-dev "$@"
 
 The bootstrap derives `ROOT` from its own canonical directory, rejects a
 symlinked bootstrap path, and contains no branch, worktree, database, profile,
-port, or user-home literal. Before exec it removes hostile project, workdir,
-environment, interpreter, and sync selectors: `UV_PROJECT`,
+port, or user-home literal. Before exec it removes hostile source, project,
+workdir, environment, interpreter, and sync selectors: `PYTHONHOME`,
+`PYTHONPATH`, `PYTHONUSERBASE`, `VIRTUAL_ENV`, `UV_NO_EDITABLE`, `UV_PROJECT`,
 `UV_PROJECT_ENVIRONMENT`, `UV_NO_SYNC`, `UV_WORKING_DIR`,
 `UV_WORKING_DIRECTORY`, `UV_NO_PROJECT`, `UV_CONFIG_FILE`, `UV_ENV_FILE`,
 `UV_FROZEN`, `UV_ISOLATED`, `UV_LOCKED`, `UV_MANAGED_PYTHON`, `UV_NO_CONFIG`,
 `UV_NO_MANAGED_PYTHON`, and `UV_PYTHON`. It retains harmless uv cache, offline,
 and certificate settings. Tests must set hostile values and prove the checkout's
-project, lock, and environment still execute.
+`cli.dev_main`, project, lock, and environment still execute.
 
 - [ ] **Step 2: Run launcher tests and verify RED**
 
@@ -226,9 +227,9 @@ agileforge-dev = "cli.dev_main:main"
 ```
 
 The shell bootstrap uses `set -eu`, canonicalizes its directory without
-consulting caller CWD, sanitizes only the uv isolation selectors listed above,
-and delegates to uv. It owns only checkout and uv isolation policy, with no
-application, database, or routing policy. Make it executable with
+consulting caller CWD, sanitizes only the source and uv isolation selectors
+listed above, and delegates to uv. It owns only checkout and uv isolation
+policy, with no application, database, or routing policy. Make it executable with
 `chmod +x agileforge-dev`.
 
 - [ ] **Step 4: Implement the developer parser without eager production imports**
@@ -530,11 +531,11 @@ Return a typed result containing command, exit code, elapsed time, and failed st
 
 - [ ] **Step 5: Write isolated distribution verification tests**
 
-Test command construction and safety with temporary `UV_TOOL_DIR`, `UV_TOOL_BIN_DIR`, build output, state root, and working directory outside the checkout. Require source and wheel archives to contain model config and frontend resources. Require isolated installation of each artifact to expose `agileforge --help`, `agileforge --version`, current graph parsers, fresh schema bootstrap, dashboard readiness, `/position`, and no `/state` route.
+Test command construction and safety with temporary `UV_TOOL_DIR`, `UV_TOOL_BIN_DIR`, build output, state root, and working directory outside the checkout. Create ignored stale `build/` and egg-info state, then prove a clean Git-indexed working-tree snapshot excludes it, retains tracked working-tree bytes, and leaves the checkout unchanged. Require source and wheel archives to contain model config and frontend resources. Require isolated installation of each artifact to expose `agileforge --help`, `agileforge --version`, current graph parsers, fresh schema bootstrap, dashboard readiness, `/position`, and no `/state` route.
 
 - [ ] **Step 6: Implement `scripts/verify_distribution.py`**
 
-The script uses only uv subprocesses and stdlib temporary directories. It runs this sequence once for the wheel and once for the source distribution, with a fresh tool directory and bin directory for each artifact:
+The script uses Git to copy only tracked paths with their current working-tree bytes into a stdlib temporary directory, excluding ignored build and egg-info contamination without mutating the checkout. It then uses only uv subprocesses for build and installation. It runs this sequence once for the wheel and once for the source distribution, with a fresh tool directory and bin directory for each artifact:
 
 ```text
 uv build --no-sources --out-dir <temporary-dist>

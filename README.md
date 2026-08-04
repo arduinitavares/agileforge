@@ -76,17 +76,28 @@ cd agileforge
 # Install the locked environment
 uv sync --frozen
 
-# Set up environment variables
-cp .env.example .env
-# Then edit .env and set:
-# - OPEN_ROUTER_API_KEY
-# - AGILEFORGE_DB_URL
-# - AGILEFORGE_ADK_EXECUTION_TRACE_DB_URL
-# - MODEL_CONFIG_PATH
-
 # Initialize isolated state for this checkout
 ./agileforge-dev init --profile local --json
+
+# Select an operator-owned regular provider secrets file outside the checkout
+export AGILEFORGE_SECRETS_FILE="$HOME/.config/agileforge/provider.env"
+
+# Verify model IDs, credential presence, and the derived child environment
+./agileforge-dev info --profile local --secrets-file "$AGILEFORGE_SECRETS_FILE" --json
 ```
+
+Branch-local launcher children ignore the checkout `.env`. Put the allowlisted
+`OPEN_ROUTER_API_KEY` in the selected secrets file, then pass that file
+explicitly to provider-backed launcher commands. Credential values are never
+included in launcher output:
+
+```bash
+./agileforge-dev cli --profile local --secrets-file "$AGILEFORGE_SECRETS_FILE" -- workflow next --project-id 1
+```
+
+Stable direct execution retains its existing implicit dotenv behavior. The
+checkout-local launcher owns its database and model paths through the profile;
+do not place those controls in the provider secrets file.
 
 ### Agent CLI
 

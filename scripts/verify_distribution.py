@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import socket
 import sqlite3
 import subprocess  # nosec B404
@@ -153,6 +154,86 @@ def build_command(output_directory: Path) -> tuple[str, ...]:
 def tool_install_command(artifact: Path) -> tuple[str, ...]:
     """Return the fixed uv tool installation command."""
     return ("uv", "tool", "install", "--force", str(artifact))
+
+
+def _tracked_worktree_paths(checkout_root: Path) -> tuple[Path, ...]:
+    """List Git-tracked paths while retaining their current working-tree bytes."""
+    git_executable = shutil.which("git")
+    if git_executable is None:
+        message = "git executable was not found for source snapshot creation"
+        raise DistributionVerificationError(message)
+    completed = subprocess.run(  # noqa: S603  # nosec B603
+        (git_executable, "-C", str(checkout_root), "ls-files", "--cached", "-z"),
+        check=False,
+        capture_output=True,
+    )
+    if completed.returncode != 0:
+        stderr = completed.stderr.decode(errors="replace")[-4000:]
+        message = (
+            f"git ls-files failed ({completed.returncode}) while creating the "
+            f"source snapshot:\n{stderr}"
+        )
+        raise DistributionVerificationError(message)
+    paths: list[Path] = []
+    for encoded_path in completed.stdout.split(b"\0"):
+        if not encoded_path:
+            continue
+        path = Path(os.fsdecode(encoded_path))
+        if path.is_absolute() or ".." in path.parts:
+            message = f"git returned an unsafe tracked path: {path}"
+            raise DistributionVerificationError(message)
+        paths.append(path)
+    return tuple(paths)
+
+
+def _create_clean_source_snapshot(checkout_root: Path, snapshot_root: Path) -> None:
+    """Copy only tracked working-tree files into a fresh build source root."""
+    canonical_checkout = checkout_root.resolve(strict=True)
+    canonical_snapshot = snapshot_root.resolve(strict=False)
+    if canonical_snapshot == canonical_checkout or canonical_checkout in (
+        canonical_snapshot.parents
+    ):
+        message = "distribution source snapshot must be outside the checkout"
+        raise DistributionVerificationError(message)
+    if snapshot_root.exists():
+        message = "distribution source snapshot path already exists"
+        raise DistributionVerificationError(message)
+    snapshot_root.mkdir(parents=True)
+    for relative_path in _tracked_worktree_paths(canonical_checkout):
+        source = canonical_checkout / relative_path
+        destination = snapshot_root / relative_path
+        if not source.exists() and not source.is_symlink():
+            continue
+        if not source.is_file() and not source.is_symlink():
+            message = f"tracked source path is not a file: {relative_path}"
+            raise DistributionVerificationError(message)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination, follow_symlinks=False)
+
+
+def _build_distributions_from_clean_snapshot(
+    *,
+    checkout_root: Path,
+    temporary_root: Path,
+    parent_environment: Mapping[str, str],
+) -> tuple[BuiltArtifact, BuiltArtifact]:
+    """Build current tracked working-tree source without ignored contamination."""
+    temporary_root.mkdir(parents=True, exist_ok=True)
+    source_root = temporary_root / "source"
+    output_directory = temporary_root / "dist"
+    _create_clean_source_snapshot(checkout_root, source_root)
+    output_directory.mkdir()
+    build_layout = IsolationLayout.create(temporary_root / "build")
+    build_environment = isolated_environment(
+        build_layout,
+        parent_environment=parent_environment,
+    )
+    _run_checked(
+        build_command(output_directory),
+        cwd=source_root,
+        environment=build_environment,
+    )
+    return _find_artifacts(output_directory)
 
 
 def isolated_environment(
@@ -496,19 +577,12 @@ def main() -> int:
             prefix="agileforge-distributions-"
         ) as temporary:
             temporary_root = Path(temporary)
-            output_directory = temporary_root / "dist"
-            output_directory.mkdir()
-            build_layout = IsolationLayout.create(temporary_root / "build")
-            build_environment = isolated_environment(
-                build_layout,
+            artifacts = _build_distributions_from_clean_snapshot(
+                checkout_root=checkout_root,
+                temporary_root=temporary_root,
                 parent_environment=parent_environment,
             )
-            _run_checked(
-                build_command(output_directory),
-                cwd=checkout_root,
-                environment=build_environment,
-            )
-            for artifact in _find_artifacts(output_directory):
+            for artifact in artifacts:
                 _verify_artifact(
                     artifact,
                     isolation_root=temporary_root / "installations",

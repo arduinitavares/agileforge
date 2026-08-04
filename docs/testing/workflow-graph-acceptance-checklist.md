@@ -63,10 +63,12 @@ configuration drift, schema-source drift, cross-profile state, tracked changes,
 and nonignored untracked files. The ignored launcher-owned `.agileforge` state
 does not make the checkout dirty.
 
-After each SHA check and before every product CLI step, run and record:
+For this provider-backed Operator flow, set `AGILEFORGE_SECRETS_FILE` to the
+Operator-selected regular secrets file before the first preflight. After each
+SHA check and before every product CLI step, run and record:
 
 ```sh
-./agileforge-dev info --profile "$ACCEPTANCE_PROFILE" --json
+./agileforge-dev info --profile "$ACCEPTANCE_PROFILE" --secrets-file "$AGILEFORGE_SECRETS_FILE" --json
 ```
 
 The JSON must identify the reviewed checkout, exact current commit, acceptance
@@ -83,15 +85,15 @@ Perform a separate preflight for caRtola, ASA, and MyFinance. Use one new
 exact-SHA acceptance profile per repository. Never reuse a target's profile for
 another repository or create a second profile to repair a failed run.
 
-When the run needs provider access, set `AGILEFORGE_SECRETS_FILE` to the
-Operator-selected regular secrets file. Use one info command for the complete
-machine-readable preflight:
+Use one info command with the same `AGILEFORGE_SECRETS_FILE` selected above for
+the complete machine-readable preflight:
 
 ```sh
 ./agileforge-dev info --profile "$ACCEPTANCE_PROFILE" --secrets-file "$AGILEFORGE_SECRETS_FILE" --json
 ```
 
-Omit `--secrets-file` when provider access is not needed. The result's
+Every `info` and `cli` invocation in this provider-backed flow forwards that
+file through the launcher's descriptor-safe allowlist. The result's
 `configured_models` contains typed roles and non-secret IDs,
 `provider_credentials` contains presence booleans, and
 `child_runtime_environment` contains the exact derived non-secret launcher-child
@@ -133,13 +135,13 @@ Shell creation is the only pre-position mutation. Open it through the pinned
 checkout:
 
 ```sh
-./agileforge-dev cli --profile "$ACCEPTANCE_PROFILE" --json -- project create --name "$PROJECT_NAME" --origin brownfield --idempotency-key "$PROJECT_OPEN_KEY" --changed-by "$ACCEPTANCE_ACTOR"
+./agileforge-dev cli --profile "$ACCEPTANCE_PROFILE" --secrets-file "$AGILEFORGE_SECRETS_FILE" --json -- project create --name "$PROJECT_NAME" --origin brownfield --idempotency-key "$PROJECT_OPEN_KEY" --changed-by "$ACCEPTANCE_ACTOR"
 ```
 
 Record the returned `PROJECT_ID`. Before every later mutation, run:
 
 ```sh
-./agileforge-dev cli --profile "$ACCEPTANCE_PROFILE" --json -- workflow next --project-id "$PROJECT_ID"
+./agileforge-dev cli --profile "$ACCEPTANCE_PROFILE" --secrets-file "$AGILEFORGE_SECRETS_FILE" --json -- workflow next --project-id "$PROJECT_ID"
 ```
 
 Save the graph-returned command template unchanged. It begins with `agileforge`
@@ -152,7 +154,7 @@ and may declare only these substitution slots: `<input-file>` or
 4. Parse and record the final executed argv, preserving project, graph, fact,
    decision, and `instance_key` guards exactly.
 5. Run the production argv from `AGILEFORGE_WORKTREE` through
-   `./agileforge-dev cli --profile "$ACCEPTANCE_PROFILE" --json --`. Record the
+   `./agileforge-dev cli --profile "$ACCEPTANCE_PROFILE" --secrets-file "$AGILEFORGE_SECRETS_FILE" --json --`. Record the
    launcher's `command` array as the exact forwarded CLI argv and its `result`
    object as the production JSON result.
 
@@ -166,14 +168,14 @@ template, substitutions, payload, guards, and actor must also remain identical.
 Record before and after facts-only reads for every mutation:
 
 ```sh
-./agileforge-dev cli --profile "$ACCEPTANCE_PROFILE" --json -- workflow position --project-id "$PROJECT_ID"
-./agileforge-dev cli --profile "$ACCEPTANCE_PROFILE" --json -- workflow next --project-id "$PROJECT_ID"
+./agileforge-dev cli --profile "$ACCEPTANCE_PROFILE" --secrets-file "$AGILEFORGE_SECRETS_FILE" --json -- workflow position --project-id "$PROJECT_ID"
+./agileforge-dev cli --profile "$ACCEPTANCE_PROFILE" --secrets-file "$AGILEFORGE_SECRETS_FILE" --json -- workflow next --project-id "$PROJECT_ID"
 ```
 
 The supported initial-specification review is also a facts-only read:
 
 ```sh
-./agileforge-dev cli --profile "$ACCEPTANCE_PROFILE" --json -- project initial-spec --project-id "$PROJECT_ID"
+./agileforge-dev cli --profile "$ACCEPTANCE_PROFILE" --secrets-file "$AGILEFORGE_SECRETS_FILE" --json -- project initial-spec --project-id "$PROJECT_ID"
 ```
 
 It returns the exact active draft ID, canonical content, content fingerprint,
@@ -185,10 +187,10 @@ graph-authored human decision to that same ID and fingerprint. Stop on typed
 Other supported facts-only reads used by this checklist are:
 
 ```sh
-./agileforge-dev cli --profile "$ACCEPTANCE_PROFILE" --json -- project show --project-id "$PROJECT_ID"
-./agileforge-dev cli --profile "$ACCEPTANCE_PROFILE" --json -- authority status --project-id "$PROJECT_ID"
-./agileforge-dev cli --profile "$ACCEPTANCE_PROFILE" --json -- authority invariants --project-id "$PROJECT_ID"
-./agileforge-dev cli --profile "$ACCEPTANCE_PROFILE" --json -- authority review --project-id "$PROJECT_ID" --include-spec full
+./agileforge-dev cli --profile "$ACCEPTANCE_PROFILE" --secrets-file "$AGILEFORGE_SECRETS_FILE" --json -- project show --project-id "$PROJECT_ID"
+./agileforge-dev cli --profile "$ACCEPTANCE_PROFILE" --secrets-file "$AGILEFORGE_SECRETS_FILE" --json -- authority status --project-id "$PROJECT_ID"
+./agileforge-dev cli --profile "$ACCEPTANCE_PROFILE" --secrets-file "$AGILEFORGE_SECRETS_FILE" --json -- authority invariants --project-id "$PROJECT_ID"
+./agileforge-dev cli --profile "$ACCEPTANCE_PROFILE" --secrets-file "$AGILEFORGE_SECRETS_FILE" --json -- authority review --project-id "$PROJECT_ID" --include-spec full
 ```
 
 Stop when an advertised, fully instantiated command cannot parse or execute, or
@@ -207,7 +209,7 @@ Execute and record this ordered lifecycle:
 3. Record a complete Git-aware inventory.
 4. Run initial specification curation through the graph-returned template.
 5. Inspect it with
-   `./agileforge-dev cli --profile "$ACCEPTANCE_PROFILE" --json -- project initial-spec --project-id "$PROJECT_ID"`.
+   `./agileforge-dev cli --profile "$ACCEPTANCE_PROFILE" --secrets-file "$AGILEFORGE_SECRETS_FILE" --json -- project initial-spec --project-id "$PROJECT_ID"`.
 6. Submit the graph-authored human initial-spec decision bound to the reviewed
    draft ID and hash.
 7. Complete initial scope registration.
@@ -240,7 +242,7 @@ Execute and record this ordered lifecycle:
 3. Record a complete Git-aware inventory.
 4. Run initial specification curation through the graph-returned template.
 5. Inspect it with
-   `./agileforge-dev cli --profile "$ACCEPTANCE_PROFILE" --json -- project initial-spec --project-id "$PROJECT_ID"`.
+   `./agileforge-dev cli --profile "$ACCEPTANCE_PROFILE" --secrets-file "$AGILEFORGE_SECRETS_FILE" --json -- project initial-spec --project-id "$PROJECT_ID"`.
 6. Submit the graph-authored human initial-spec decision bound to the reviewed
    draft ID and hash.
 7. Complete initial scope registration.
@@ -278,7 +280,7 @@ Execute and record this ordered lifecycle:
 1. Open one brownfield Project Shell and record the approved context.
 2. Record the repository baseline and complete Git-aware inventory.
 3. Run curation, then inspect the draft with
-   `./agileforge-dev cli --profile "$ACCEPTANCE_PROFILE" --json -- project initial-spec --project-id "$PROJECT_ID"`.
+   `./agileforge-dev cli --profile "$ACCEPTANCE_PROFILE" --secrets-file "$AGILEFORGE_SECRETS_FILE" --json -- project initial-spec --project-id "$PROJECT_ID"`.
 4. Submit the graph-authored human initial-spec decision.
 5. Complete initial scope registration and reach accepted authority.
 6. Generate and decide a backlog consistent with the approved Statement Streams
@@ -330,8 +332,8 @@ Project ID and all other pinned values unchanged.
 Use position reads on both sides:
 
 ```sh
-./agileforge-dev cli --profile "$ACCEPTANCE_PROFILE" --json -- workflow position --project-id "$PROJECT_ID"
-./agileforge-dev cli --profile "$ACCEPTANCE_PROFILE" --json -- workflow position --project-id "$PROJECT_ID"
+./agileforge-dev cli --profile "$ACCEPTANCE_PROFILE" --secrets-file "$AGILEFORGE_SECRETS_FILE" --json -- workflow position --project-id "$PROJECT_ID"
+./agileforge-dev cli --profile "$ACCEPTANCE_PROFILE" --secrets-file "$AGILEFORGE_SECRETS_FILE" --json -- workflow position --project-id "$PROJECT_ID"
 ```
 
 Before each invocation, record the fresh profile `info --json` result. Record

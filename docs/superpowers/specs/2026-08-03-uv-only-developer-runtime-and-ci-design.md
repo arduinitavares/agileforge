@@ -99,13 +99,15 @@ uv run --locked agileforge-dev ...
 ```
 
 Before the final exec, the shell owns only checkout and uv isolation policy. It
-removes caller-provided `UV_PROJECT`, `UV_PROJECT_ENVIRONMENT`, `UV_NO_SYNC`,
-`UV_WORKING_DIR`, `UV_WORKING_DIRECTORY`, `UV_NO_PROJECT`, `UV_CONFIG_FILE`,
-`UV_ENV_FILE`, `UV_FROZEN`, `UV_ISOLATED`, `UV_LOCKED`, `UV_MANAGED_PYTHON`,
-`UV_NO_CONFIG`, `UV_NO_MANAGED_PYTHON`, and `UV_PYTHON` so a caller cannot select
-another project, working directory, interpreter environment, configuration, or
-sync/lock policy. It preserves harmless cache, offline, and certificate
-controls. The shell has no application, database, or routing policy.
+removes caller-provided `PYTHONHOME`, `PYTHONPATH`, `PYTHONUSERBASE`,
+`VIRTUAL_ENV`, `UV_NO_EDITABLE`, `UV_PROJECT`, `UV_PROJECT_ENVIRONMENT`,
+`UV_NO_SYNC`, `UV_WORKING_DIR`, `UV_WORKING_DIRECTORY`, `UV_NO_PROJECT`,
+`UV_CONFIG_FILE`, `UV_ENV_FILE`, `UV_FROZEN`, `UV_ISOLATED`, `UV_LOCKED`,
+`UV_MANAGED_PYTHON`, `UV_NO_CONFIG`, `UV_NO_MANAGED_PYTHON`, and `UV_PYTHON` so
+a caller cannot replace `cli.dev_main` or select another project, source root,
+working directory, interpreter environment, configuration, or sync/lock policy.
+It preserves harmless cache, offline, and certificate controls. The shell has
+no application, database, or routing policy.
 
 The installed project script dispatches to a lightweight developer-runtime
 module that loads profile configuration before importing the production
