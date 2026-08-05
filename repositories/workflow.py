@@ -1072,7 +1072,7 @@ class WorkflowFactRepository:
         self,
         project_id: int,
         revisions: dict[int, VisionRevisionIntentFact],
-        attempts: dict[int, str],
+        attempts: dict[int, str] | None,
     ) -> dict[int, VisionInterviewTurnFact]:
         rows = self._session.exec(
             select(VisionInterviewTurn)
@@ -1124,12 +1124,13 @@ class WorkflowFactRepository:
                     prior_turn.turn_number + 1 == row.turn_number,
                     "Vision turn prior turn is not sequential.",
                 )
-            self._require_fingerprint_reference(
-                row.workflow_node_attempt_id,
-                row.attempt_fingerprint,
-                attempts,
-                "Vision turn workflow attempt",
-            )
+            if attempts is not None:
+                self._require_fingerprint_reference(
+                    row.workflow_node_attempt_id,
+                    row.attempt_fingerprint,
+                    attempts,
+                    "Vision turn workflow attempt",
+                )
             components = self._canonical_json_object(
                 row.components_json,
                 "Vision turn components",
@@ -1170,7 +1171,7 @@ class WorkflowFactRepository:
         self,
         project_id: int,
         visions: dict[int, str],
-        attempts: dict[int, str],
+        attempts: dict[int, str] | None,
     ) -> dict[int, ProductGoalInterviewTurnFact]:
         rows = self._session.exec(
             select(ProductGoalInterviewTurn)
@@ -1233,12 +1234,13 @@ class WorkflowFactRepository:
                     last_turn_by_identity.get(identity) == row.prior_turn_id,
                     "Product Goal interview prior turn is not sequential.",
                 )
-            self._require_fingerprint_reference(
-                row.workflow_node_attempt_id,
-                row.attempt_fingerprint,
-                attempts,
-                "Product Goal interview workflow attempt",
-            )
+            if attempts is not None:
+                self._require_fingerprint_reference(
+                    row.workflow_node_attempt_id,
+                    row.attempt_fingerprint,
+                    attempts,
+                    "Product Goal interview workflow attempt",
+                )
             components = self._canonical_json_object(
                 row.components_json,
                 "Product Goal interview components",
@@ -1281,7 +1283,7 @@ class WorkflowFactRepository:
         self,
         project_id: int,
         visions: dict[int, str],
-        turns: dict[int, ProductGoalInterviewTurnFact],
+        turns: dict[int, ProductGoalInterviewTurnFact] | None,
     ) -> dict[int, ProductGoalArtifactFact]:
         rows = self._session.exec(
             select(ProductGoalArtifact)
@@ -1302,11 +1304,14 @@ class WorkflowFactRepository:
                 canonical_hash({"statement": row.statement}) == row.content_fingerprint,
                 "Product Goal artifact fingerprint changed.",
             )
-            source_turn = turns.get(row.source_interview_turn_id)
-            self._require_product_condition(
-                source_turn is not None,
-                "Product Goal source turn is not owned by this Project.",
+            source_turn = (
+                None if turns is None else turns.get(row.source_interview_turn_id)
             )
+            if turns is not None:
+                self._require_product_condition(
+                    source_turn is not None,
+                    "Product Goal source turn is not owned by this Project.",
+                )
             if source_turn is not None:
                 self._require_product_condition(
                     row.statement == source_turn.goal_statement,
@@ -4656,3 +4661,155 @@ class WorkflowFactRepository:
         return {
             story_id: tuple(values) for story_id, values in sorted(blockers.items())
         }
+
+
+@dataclass(frozen=True)
+class VisionInputContext:
+    """Canonical durable rows required to prepare one Vision interview input."""
+
+    project: ProjectFact
+    project_description: str | None
+    vision_artifacts: tuple[VisionArtifactFact, ...]
+    vision_decisions: tuple[VisionArtifactDecisionFact, ...]
+    revision_intents: tuple[VisionRevisionIntentFact, ...]
+    interview_turns: tuple[VisionInterviewTurnFact, ...]
+
+
+@dataclass(frozen=True)
+class VisionInputSelection:
+    """Current Vision chain state without expanding to a workflow snapshot."""
+
+    mode: _VisionMode
+    accepted_vision_statement: str | None
+    revision_intent_id: int | None
+    prior_turn: VisionInterviewTurnFact | None
+
+
+class VisionInputFactRepository(WorkflowFactRepository):
+    """Read the narrow, canonical fact projection used by Vision host input."""
+
+    def load_context(self, project_id: int) -> VisionInputContext:
+        """Load Project identity and Vision rows without attempts or other domains."""
+        self._identity_token = object()
+        with self._session.no_autoflush:
+            project = self._project(project_id)
+            project_description = self._session.exec(
+                select(Project.description)
+                .where(col(Project.project_id) == project_id)
+                .order_by(col(Project.project_id)),
+                execution_options=self._query_options(),
+            ).one()
+            visions, decisions = self._vision_artifacts(project_id)
+            accepted_visions = {
+                item.vision_artifact_id: item.artifact_fingerprint
+                for item in decisions.values()
+                if item.decision == "accepted"
+            }
+            revisions = self._vision_revision_intents(project_id, accepted_visions)
+            turns = self._vision_interview_turns(project_id, revisions, None)
+            self._validate_vision_artifact_sources(visions, turns)
+        return VisionInputContext(
+            project=project,
+            project_description=project_description,
+            vision_artifacts=tuple(visions.values()),
+            vision_decisions=tuple(decisions.values()),
+            revision_intents=tuple(revisions.values()),
+            interview_turns=tuple(turns.values()),
+        )
+
+    def has_active_product_goal(self, context: VisionInputContext) -> bool:
+        """Validate only Goal rows required to gate a pending Vision revision."""
+        project_id = context.project.project_id
+        vision_fingerprints = {
+            item.vision_artifact_id: item.content_fingerprint
+            for item in context.vision_artifacts
+        }
+        with self._session.no_autoflush:
+            goal_turns = self._product_goal_interview_turns(
+                project_id,
+                vision_fingerprints,
+                None,
+            )
+            goals = self._product_goals(project_id, vision_fingerprints, goal_turns)
+            decisions = self._product_goal_decisions(project_id, goals)
+            outcomes = self._product_goal_outcomes(project_id, goals, decisions)
+        return bool(self._active_accepted_product_goal_ids(decisions, outcomes))
+
+
+def select_vision_interview_input(context: VisionInputContext) -> VisionInputSelection:
+    """Select one current Vision interview chain from its narrow fact projection."""
+    artifacts_by_id = {
+        item.vision_artifact_id: item for item in context.vision_artifacts
+    }
+    children = {
+        item.supersedes_vision_artifact_id
+        for item in context.vision_artifacts
+        if item.supersedes_vision_artifact_id is not None
+    }
+    current = [
+        item
+        for item in context.vision_artifacts
+        if item.vision_artifact_id not in children
+    ]
+    if len(current) > 1:
+        message = "Vision facts are ambiguous."
+        raise WorkflowFactLoadError(message)
+    artifact = current[0] if current else None
+    decisions_by_artifact = {
+        item.vision_artifact_id: item for item in context.vision_decisions
+    }
+    if len(decisions_by_artifact) != len(context.vision_decisions):
+        message = "Vision facts are ambiguous."
+        raise WorkflowFactLoadError(message)
+    completed_turn_ids = {
+        item.source_interview_turn_id for item in context.vision_artifacts
+    }
+    open_intents = [
+        item
+        for item in context.revision_intents
+        if not any(
+            turn.mode == "revision"
+            and turn.revision_intent_id == item.vision_revision_intent_id
+            and turn.vision_interview_turn_id in completed_turn_ids
+            for turn in context.interview_turns
+        )
+    ]
+    if len(open_intents) > 1:
+        message = "Vision facts are ambiguous."
+        raise WorkflowFactLoadError(message)
+    revision = open_intents[0] if open_intents else None
+    if revision is not None:
+        source = artifacts_by_id[revision.source_vision_artifact_id]
+        mode: _VisionMode = "revision"
+        accepted_statement = source.statement
+        intent_id = revision.vision_revision_intent_id
+    else:
+        mode = "initial"
+        accepted_statement = None
+        intent_id = None
+        artifact_decision = (
+            None
+            if artifact is None
+            else decisions_by_artifact.get(artifact.vision_artifact_id)
+        )
+        if artifact_decision is not None and artifact_decision.decision == "accepted":
+            message = "Accepted Vision requires an explicit revision intent."
+            raise WorkflowFactLoadError(message)
+    turns = tuple(
+        item
+        for item in context.interview_turns
+        if item.mode == mode and item.revision_intent_id == intent_id
+    )
+    prior_ids = {item.prior_turn_id for item in turns if item.prior_turn_id is not None}
+    leaves = [
+        item for item in turns if item.vision_interview_turn_id not in prior_ids
+    ]
+    if len(leaves) > 1:
+        message = "Vision interview turn chain is ambiguous."
+        raise WorkflowFactLoadError(message)
+    return VisionInputSelection(
+        mode=mode,
+        accepted_vision_statement=accepted_statement,
+        revision_intent_id=intent_id,
+        prior_turn=leaves[0] if leaves else None,
+    )

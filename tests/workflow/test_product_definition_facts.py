@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 from google.adk.sessions import DatabaseSessionService
-from sqlmodel import Session
+from sqlmodel import Session, col, delete, select, update
 
 from models.core import Project
 from models.product_definition import (
@@ -19,33 +19,87 @@ from models.product_definition import (
     ProductGoalOutcome,
     SpecificationCandidate,
     SpecificationDecision,
+    VisionArtifact,
+    VisionArtifactDecision,
     VisionInterviewTurn,
     VisionRevisionIntent,
 )
-from models.specs import CompiledSpecAuthority, SpecRegistry
-from models.workflow import VisionArtifact, VisionArtifactDecision, WorkflowNodeAttempt
+from models.specs import SpecRegistry
+from models.workflow import WorkflowNodeAttempt
 from repositories.workflow import WorkflowFactLoadError, WorkflowFactRepository
-from services.specs.authority_selection import pending_authority_fingerprint
 from utils.runtime_config import (
     ADK_EXECUTION_TRACE_IDENTITY,
     clear_runtime_config_cache,
     get_adk_execution_trace_db_target,
 )
-from utils.spec_schemas import (
-    Invariant,
-    InvariantType,
-    RequiredFieldParams,
-    SpecAuthorityCompilationSuccess,
-    SpecAuthorityCompilerOutput,
-)
 from workflow.facts import WorkflowFactSnapshot
 from workflow.fingerprints import canonical_hash, canonical_json
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Iterator, Mapping
     from pathlib import Path
 
     from sqlalchemy.engine import Engine
+
+
+@pytest.fixture(autouse=True)
+def _clear_product_definition_fixture_rows(engine: Engine) -> Iterator[None]:
+    """Remove explicit durable rows before the per-test schema is dropped."""
+    yield
+    with Session(engine) as session:
+        session.exec(delete(SpecificationDecision))
+        session.exec(delete(SpecRegistry))
+        session.exec(delete(SpecificationCandidate))
+        session.exec(delete(DiscoveryArtifact))
+        session.exec(delete(ProductGoalOutcome))
+        session.exec(delete(ProductGoalArtifactDecision))
+        for artifact in session.exec(
+            select(ProductGoalArtifact).order_by(
+                col(ProductGoalArtifact.product_goal_artifact_id).desc()
+            )
+        ):
+            session.delete(artifact)
+            session.flush()
+        for turn in session.exec(
+            select(ProductGoalInterviewTurn).order_by(
+                col(ProductGoalInterviewTurn.product_goal_interview_turn_id).desc()
+            )
+        ):
+            session.delete(turn)
+            session.flush()
+        session.exec(delete(VisionArtifactDecision))
+        source_turn_ids = set(
+            session.exec(select(VisionArtifact.source_interview_turn_id)).all()
+        )
+        for turn in session.exec(
+            select(VisionInterviewTurn).order_by(
+                col(VisionInterviewTurn.turn_number).desc(),
+                col(VisionInterviewTurn.vision_interview_turn_id).desc(),
+            )
+        ):
+            if turn.vision_interview_turn_id not in source_turn_ids:
+                session.delete(turn)
+                session.flush()
+        session.exec(update(VisionInterviewTurn).values(revision_intent_id=None))
+        session.flush()
+        session.exec(delete(VisionRevisionIntent))
+        session.flush()
+        for artifact in session.exec(
+            select(VisionArtifact).order_by(col(VisionArtifact.vision_artifact_id).desc())
+        ):
+            session.delete(artifact)
+            session.flush()
+        for turn in session.exec(
+            select(VisionInterviewTurn).order_by(
+                col(VisionInterviewTurn.turn_number).desc(),
+                col(VisionInterviewTurn.vision_interview_turn_id).desc(),
+            )
+        ):
+            session.delete(turn)
+            session.flush()
+        session.exec(delete(WorkflowNodeAttempt))
+        session.exec(delete(Project))
+        session.commit()
 
 
 def _id(value: int | None) -> int:
@@ -97,28 +151,6 @@ def _product_goal_output_fingerprint(
     )
 
 
-def _authority_json() -> str:
-    """Build valid persisted compiled-authority content for the Vision parent."""
-    return SpecAuthorityCompilerOutput(
-        root=SpecAuthorityCompilationSuccess(
-            scope_themes=["Durable product definitions"],
-            invariants=[
-                Invariant(
-                    id="INV-0123456789abcdef",
-                    type=InvariantType.REQUIRED_FIELD,
-                    parameters=RequiredFieldParams(field_name="project_id"),
-                )
-            ],
-            eligible_feature_rules=[],
-            gaps=[],
-            assumptions=[],
-            source_map=[],
-            compiler_version="3.0.0",
-            prompt_hash="a" * 64,
-        )
-    ).model_dump_json()
-
-
 def _attempt(
     session: Session,
     project_id: int,
@@ -158,8 +190,8 @@ def _vision_artifact(
     recorded_at: datetime,
     *,
     version_number: int = 1,
-) -> tuple[int, str, int]:
-    """Persist one staged Vision artifact backed by a valid authority row."""
+) -> tuple[int, str, int, int]:
+    """Persist one complete initial Vision and its nullable legacy spec row."""
     legacy_spec = SpecRegistry(
         project_id=project_id,
         spec_hash=f"sha256:legacy-spec:{project_id}",
@@ -168,31 +200,67 @@ def _vision_artifact(
     )
     session.add(legacy_spec)
     session.flush()
-    authority = CompiledSpecAuthority(
-        spec_version_id=_id(legacy_spec.spec_version_id),
-        compiler_version="3.0.0",
-        prompt_hash="a" * 64,
-        compiled_at=recorded_at,
-        scope_themes="[]",
-        invariants="[]",
-        eligible_feature_ids="[]",
-        rejected_features="[]",
-        spec_gaps="[]",
-        compiled_artifact_json=_authority_json(),
+    attempt_id = _attempt(
+        session,
+        project_id,
+        recorded_at,
+        node_id="vision.interview",
+        key=f"vision-initial-{version_number}",
     )
-    session.add(authority)
+    components = {"constraint": f"initial-{version_number}"}
+    clarifying_questions: list[str] = []
+    statement = f"Vision {project_id} version {version_number}."
+    prior_turn = session.exec(
+        select(VisionInterviewTurn)
+        .where(
+            VisionInterviewTurn.project_id == project_id,
+            VisionInterviewTurn.mode == "initial",
+        )
+        .order_by(col(VisionInterviewTurn.turn_number).desc())
+    ).first()
+    parent = session.exec(
+        select(VisionArtifact)
+        .where(VisionArtifact.project_id == project_id)
+        .order_by(col(VisionArtifact.vision_artifact_id).desc())
+    ).first()
+    turn = VisionInterviewTurn(
+        project_id=project_id,
+        mode="initial",
+        turn_number=1 if prior_turn is None else prior_turn.turn_number + 1,
+        revision_intent_id=None,
+        prior_turn_id=(
+            None if prior_turn is None else prior_turn.vision_interview_turn_id
+        ),
+        user_text="Define the initial Vision.",
+        components_json=canonical_json(components),
+        vision_statement=statement,
+        is_complete=True,
+        clarifying_questions_json=canonical_json(clarifying_questions),
+        output_fingerprint=_vision_output_fingerprint(
+            components,
+            statement,
+            True,
+            clarifying_questions,
+        ),
+        workflow_node_attempt_id=attempt_id,
+        attempt_fingerprint=f"sha256:attempt:vision-initial-{version_number}:{project_id}",
+        recorded_at=recorded_at,
+    )
+    session.add(turn)
     session.flush()
-    authority_fingerprint = pending_authority_fingerprint(authority)
-    assert authority_fingerprint is not None
-    content = {"vision": f"Vision {project_id} version {version_number}"}
+    turn_id = _id(turn.vision_interview_turn_id)
     artifact = VisionArtifact(
         project_id=project_id,
-        authority_id=_id(authority.authority_id),
-        authority_fingerprint=authority_fingerprint,
         version_number=version_number,
-        canonical_content_json=canonical_json(content),
-        content_fingerprint=canonical_hash(content),
-        supersedes_vision_artifact_id=None,
+        components_json=canonical_json(components),
+        statement=statement,
+        content_fingerprint=canonical_hash(
+            {"components": components, "statement": statement}
+        ),
+        supersedes_vision_artifact_id=(
+            None if parent is None else parent.vision_artifact_id
+        ),
+        source_interview_turn_id=turn_id,
         created_by="test",
         created_at=recorded_at,
     )
@@ -214,49 +282,8 @@ def _vision_artifact(
         _id(artifact.vision_artifact_id),
         artifact.content_fingerprint,
         _id(legacy_spec.spec_version_id),
+        turn_id,
     )
-
-
-def _add_initial_vision_turn(
-    session: Session,
-    project_id: int,
-    recorded_at: datetime,
-) -> int:
-    """Persist the first immutable Vision interview in its initial chain."""
-    attempt_id = _attempt(
-        session,
-        project_id,
-        recorded_at,
-        node_id="vision.interview",
-        key="vision-initial",
-    )
-    components = {"constraint": "initial"}
-    clarifying_questions: list[str] = []
-    vision_statement = "An initial deterministic workflow."
-    turn = VisionInterviewTurn(
-        project_id=project_id,
-        mode="initial",
-        turn_number=1,
-        revision_intent_id=None,
-        prior_turn_id=None,
-        user_text="Define the initial Vision.",
-        components_json=canonical_json(components),
-        vision_statement=vision_statement,
-        is_complete=True,
-        clarifying_questions_json=canonical_json(clarifying_questions),
-        output_fingerprint=_vision_output_fingerprint(
-            components,
-            vision_statement,
-            True,
-            clarifying_questions,
-        ),
-        workflow_node_attempt_id=attempt_id,
-        attempt_fingerprint=f"sha256:attempt:vision-initial:{project_id}",
-        recorded_at=recorded_at,
-    )
-    session.add(turn)
-    session.flush()
-    return _id(turn.vision_interview_turn_id)
 
 
 def _record_product_goal_decision(
@@ -298,12 +325,11 @@ def _seed_product_definition(
     session.add(project)
     session.flush()
     project_id = _id(project.project_id)
-    vision_id, vision_fingerprint, legacy_spec_id = _vision_artifact(
+    vision_id, vision_fingerprint, legacy_spec_id, initial_turn_id = _vision_artifact(
         session,
         project_id,
         recorded_at,
     )
-    initial_turn_id = _add_initial_vision_turn(session, project_id, recorded_at)
     attempt_id = _attempt(
         session,
         project_id,
@@ -936,7 +962,12 @@ def test_loader_rejects_same_project_product_definition_chain_swaps(
     with Session(engine) as session:
         seed = _seed_product_definition(session, "Product chain swap")
         project_id = int(seed["project_id"])
-        other_vision_id, other_vision_fingerprint, _legacy_spec_id = _vision_artifact(
+        (
+            other_vision_id,
+            other_vision_fingerprint,
+            _legacy_spec_id,
+            _initial_turn_id,
+        ) = _vision_artifact(
             session,
             project_id,
             recorded_at,
