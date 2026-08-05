@@ -9,7 +9,7 @@ import json
 import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 import pytest
 from google.adk import Workflow as AdkWorkflow
@@ -32,7 +32,7 @@ from adapters.adk.recipes import (
 )
 from adapters.adk.runner import AdkExecutionConfig, AdkRunGuards, AdkWorkflowRunner
 from models.core import Project
-from models.product_definition import VisionInterviewTurn
+from models.product_definition import VisionArtifact, VisionInterviewTurn
 from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance, SpecRegistry
 from models.workflow import (
     BacklogArtifact,
@@ -60,7 +60,6 @@ from utils.spec_schemas import (
 )
 from workflow.clock import FixedClock
 from workflow.contracts import (
-    GRAPH_VERSION,
     JsonObject,
     NodeCategory,
     NodeDecision,
@@ -72,7 +71,7 @@ from workflow.definitions.authority import authority_graph
 from workflow.definitions.product_definition import product_definition_graph
 from workflow.definitions.root import ROOT_GRAPH
 from workflow.domain import WorkflowDomain
-from workflow.fingerprints import canonical_hash
+from workflow.fingerprints import canonical_hash, canonical_json
 from workflow.repository_inventory import (
     canonical_inventory_payload,
     inventory_binding_fingerprint,
@@ -82,7 +81,6 @@ from workflow.requests import (
     RecordBacklogDraft,
     RecordRepositoryBaseline,
     RecordRepositoryInventory,
-    RecordVisionDraft,
     StartNodeAttempt,
     TransitionRequest,
 )
@@ -831,30 +829,23 @@ def test_runner_executes_legacy_vision_recipe_through_record_vision_draft(
         "authority_fingerprint": authority_fingerprint,
         "supersedes_vision_artifact_id": None,
     }
-    recipe = registry.require("vision.generate")
-    output = asyncio.run(
-        runner._run_recipe(recipe, attempt_id=1, input_payload=payload)
-    )
-    completion = recipe.output_adapter(
-        output,
-        AttemptCompletionContext(
-            project_id=project_id,
-            graph_version=GRAPH_VERSION,
-            fact_fingerprint="sha256:facts",
-            decision_fingerprint="sha256:decision",
-            instance_key=None,
-            attempt_id=1,
-            attempt_fingerprint="sha256:attempt",
-            idempotency_key="legacy-vision:complete",
-            actor="operator@example.com",
-            correlation_id=None,
-            normalized_input=payload,
-        ),
+    decision = next(
+        item
+        for item in domain.position(project_id).decisions
+        if item.node_id == "vision.generate"
     )
 
-    legacy_draft = cast("RecordVisionDraft", completion)
-    assert legacy_draft.canonical_content == legacy_output
-    assert legacy_draft.content_fingerprint == canonical_hash(legacy_output)
+    result = runner.run(decision, payload)
+
+    assert result.ok
+    with Session(engine) as session:
+        turn = session.exec(select(VisionInterviewTurn)).one()
+        artifact = session.exec(select(VisionArtifact)).one()
+        assert turn.user_text == "Build a durable workflow tool."
+        assert artifact.components_json == canonical_json(
+            legacy_output["updated_components"]
+        )
+        assert artifact.statement == legacy_output["product_vision_statement"]
 
 
 def test_runner_executes_fake_leaf_and_commits_validated_output(engine: Engine) -> None:

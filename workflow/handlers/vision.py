@@ -250,6 +250,12 @@ def execute_decide_vision_review(
         is not None
     ):
         return _conflict("Vision artifact already has a terminal review decision.")
+    if request.decision == "accepted" and _active_goal_exists(
+        session, request.project_id
+    ):
+        return _conflict(
+            "Vision revision acceptance is blocked while a Product Goal is active."
+        )
     row = VisionArtifactDecision(
         project_id=request.project_id,
         vision_artifact_id=request.vision_artifact_id,

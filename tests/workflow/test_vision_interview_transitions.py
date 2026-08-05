@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Literal
 
 from sqlmodel import Session, select
 
 from models.core import Project
 from models.product_definition import (
+    ProductGoalArtifact,
+    ProductGoalArtifactDecision,
+    ProductGoalInterviewTurn,
+    ProductGoalOutcome,
     VisionArtifact,
     VisionArtifactDecision,
     VisionInterviewTurn,
@@ -28,6 +32,7 @@ from workflow.clock import FixedClock
 from workflow.contracts import WorkflowErrorCode
 from workflow.definitions.product_definition import product_definition_graph
 from workflow.domain import WorkflowDomain
+from workflow.fingerprints import canonical_hash, canonical_json
 from workflow.requests import (
     BeginVisionRevision,
     DecideVisionReview,
@@ -62,10 +67,96 @@ class _RecordRequest:
     statement: str = "A trusted workflow tool."
 
 
+@dataclass(frozen=True)
+class _VisionReview:
+    artifact_id: int
+    fingerprint: str
+    decision: Literal["accepted", "rejected", "feedback"]
+    rationale: str
+    idempotency_key: str
+
+
+@dataclass(frozen=True)
+class _GoalLineage:
+    project_id: int
+    vision_artifact_id: int
+    vision_fingerprint: str
+    attempt_id: int
+    attempt_fingerprint: str
+    revised_vision_artifact_id: int
+    revised_vision_fingerprint: str
+
+
 class _Registry:
     def require(self, node_id: str) -> object:
         assert node_id == "vision.interview"
         return object()
+
+
+def _seed_accepted_goal(
+    session: Session,
+    lineage: _GoalLineage,
+) -> tuple[int, str]:
+    """Persist one accepted Goal anchored to the prior accepted Vision."""
+    components: JsonObject = {"outcome": "Deliver durable workflow facts."}
+    statement = "Deliver durable workflow facts."
+    turn = ProductGoalInterviewTurn(
+        project_id=lineage.project_id,
+        vision_artifact_id=lineage.vision_artifact_id,
+        vision_fingerprint=lineage.vision_fingerprint,
+        goal_number=1,
+        revision_number=1,
+        prior_turn_id=None,
+        user_text="Define the original product goal.",
+        components_json=canonical_json(components),
+        goal_statement=statement,
+        is_complete=True,
+        clarifying_questions_json=canonical_json([]),
+        output_fingerprint=canonical_hash(
+            {
+                "components_json": components,
+                "goal_statement": statement,
+                "is_complete": True,
+                "clarifying_questions_json": [],
+            }
+        ),
+        workflow_node_attempt_id=lineage.attempt_id,
+        attempt_fingerprint=lineage.attempt_fingerprint,
+        recorded_at=NOW,
+    )
+    session.add(turn)
+    session.flush()
+    assert turn.product_goal_interview_turn_id is not None
+    fingerprint = canonical_hash({"statement": statement})
+    goal = ProductGoalArtifact(
+        project_id=lineage.project_id,
+        vision_artifact_id=lineage.vision_artifact_id,
+        vision_fingerprint=lineage.vision_fingerprint,
+        goal_number=1,
+        revision_number=1,
+        statement=statement,
+        content_fingerprint=fingerprint,
+        supersedes_product_goal_artifact_id=None,
+        source_interview_turn_id=turn.product_goal_interview_turn_id,
+        created_by="operator@example.com",
+        created_at=NOW,
+    )
+    session.add(goal)
+    session.flush()
+    assert goal.product_goal_artifact_id is not None
+    session.add(
+        ProductGoalArtifactDecision(
+            project_id=lineage.project_id,
+            product_goal_artifact_id=goal.product_goal_artifact_id,
+            artifact_fingerprint=fingerprint,
+            decision="accepted",
+            rationale="Accepted original Goal.",
+            reviewer="operator@example.com",
+            idempotency_key="original-goal-accepted",
+            decided_at=NOW + timedelta(seconds=1),
+        )
+    )
+    return goal.product_goal_artifact_id, fingerprint
 
 
 class _PositionMustNotRunDomain:
@@ -159,6 +250,90 @@ def _record(
             attempt_fingerprint=attempt_fingerprint,
         )
     )
+
+
+def _review_vision(
+    domain: WorkflowDomain,
+    project_id: int,
+    review_request: _VisionReview,
+) -> TransitionResult:
+    """Submit one review with the current durable Vision guards."""
+    position = domain.position(project_id)
+    review = _decision(domain, project_id, "vision.review")
+    return domain.transition(
+        DecideVisionReview(
+            project_id=project_id,
+            graph_version=position.graph_version,
+            fact_fingerprint=position.fact_fingerprint,
+            decision_fingerprint=review.decision_fingerprint,
+            idempotency_key=review_request.idempotency_key,
+            actor="operator@example.com",
+            vision_artifact_id=review_request.artifact_id,
+            vision_fingerprint=review_request.fingerprint,
+            decision=review_request.decision,
+            rationale=review_request.rationale,
+        )
+    )
+
+
+def _assert_active_goal_blocks_revision_acceptance(
+    engine: Engine,
+    domain: WorkflowDomain,
+    lineage: _GoalLineage,
+) -> None:
+    """Keep a pending revision unaccepted until its prior Goal is resolved."""
+    with Session(engine) as session:
+        goal_id, goal_fingerprint = _seed_accepted_goal(session, lineage)
+        session.commit()
+    blocked = _review_vision(
+        domain,
+        lineage.project_id,
+        _VisionReview(
+            artifact_id=lineage.revised_vision_artifact_id,
+            fingerprint=lineage.revised_vision_fingerprint,
+            decision="accepted",
+            rationale="Revised Vision accepted.",
+            idempotency_key="revision-accept-blocked",
+        ),
+    )
+
+    assert blocked.ok is False
+    assert blocked.error is not None
+    assert blocked.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
+    with Session(engine) as session:
+        assert len(session.exec(select(VisionArtifactDecision)).all()) == 1
+        session.add(
+            ProductGoalOutcome(
+                project_id=lineage.project_id,
+                product_goal_artifact_id=goal_id,
+                artifact_fingerprint=goal_fingerprint,
+                outcome="fulfilled",
+                rationale="Original Goal fulfilled.",
+                decided_by="operator@example.com",
+                idempotency_key="original-goal-fulfilled",
+                decided_at=NOW + timedelta(seconds=2),
+            )
+        )
+        session.commit()
+    accepted = _review_vision(
+        domain,
+        lineage.project_id,
+        _VisionReview(
+            artifact_id=lineage.revised_vision_artifact_id,
+            fingerprint=lineage.revised_vision_fingerprint,
+            decision="accepted",
+            rationale="Revised Vision accepted.",
+            idempotency_key="revision-accept",
+        ),
+    )
+
+    assert accepted.ok
+    current_goal = _decision(domain, lineage.project_id, "goal.interview")
+    assert current_goal.fact_references[0].fact_id == str(
+        lineage.revised_vision_artifact_id
+    )
+    available_nodes = domain.position(lineage.project_id).available_nodes
+    assert all("discovery" not in node_id for node_id in available_nodes)
 
 
 def test_incomplete_then_complete_turn_creates_one_pending_vision(
@@ -423,21 +598,16 @@ def test_accepted_revision_creates_only_a_new_vision(engine: Engine) -> None:
     fingerprint = initial.output["vision_fingerprint"]
     assert isinstance(artifact_id, int)
     assert isinstance(fingerprint, str)
-    initial_position = domain.position(project_id)
-    initial_review = _decision(domain, project_id, "vision.review")
-    accepted = domain.transition(
-        DecideVisionReview(
-            project_id=project_id,
-            graph_version=initial_position.graph_version,
-            fact_fingerprint=initial_position.fact_fingerprint,
-            decision_fingerprint=initial_review.decision_fingerprint,
-            idempotency_key="revision-initial-accept",
-            actor="operator@example.com",
-            vision_artifact_id=artifact_id,
-            vision_fingerprint=fingerprint,
+    accepted = _review_vision(
+        domain,
+        project_id,
+        _VisionReview(
+            artifact_id=artifact_id,
+            fingerprint=fingerprint,
             decision="accepted",
             rationale="Initial Vision accepted.",
-        )
+            idempotency_key="revision-initial-accept",
+        ),
     )
     assert accepted.ok
     revision_position = domain.position(project_id)
@@ -480,24 +650,23 @@ def test_accepted_revision_creates_only_a_new_vision(engine: Engine) -> None:
     revised_fingerprint = revised.output["vision_fingerprint"]
     assert isinstance(revised_id, int)
     assert isinstance(revised_fingerprint, str)
-    pending_position = domain.position(project_id)
-    pending_review = _decision(domain, project_id, "vision.review")
-    accepted_revision = domain.transition(
-        DecideVisionReview(
+    initial_attempt_id = initial_attempt.output["attempt_id"]
+    initial_attempt_fingerprint = initial_attempt.output["attempt_fingerprint"]
+    assert isinstance(initial_attempt_id, int)
+    assert isinstance(initial_attempt_fingerprint, str)
+    _assert_active_goal_blocks_revision_acceptance(
+        engine,
+        domain,
+        _GoalLineage(
             project_id=project_id,
-            graph_version=pending_position.graph_version,
-            fact_fingerprint=pending_position.fact_fingerprint,
-            decision_fingerprint=pending_review.decision_fingerprint,
-            idempotency_key="revision-accept",
-            actor="operator@example.com",
-            vision_artifact_id=revised_id,
-            vision_fingerprint=revised_fingerprint,
-            decision="accepted",
-            rationale="Revised Vision accepted.",
-        )
+            vision_artifact_id=artifact_id,
+            vision_fingerprint=fingerprint,
+            attempt_id=initial_attempt_id,
+            attempt_fingerprint=initial_attempt_fingerprint,
+            revised_vision_artifact_id=revised_id,
+            revised_vision_fingerprint=revised_fingerprint,
+        ),
     )
-
-    assert accepted_revision.ok
     with Session(engine) as session:
         artifacts = session.exec(select(VisionArtifact)).all()
         assert len(artifacts) == EXPECTED_VISION_ARTIFACT_COUNT

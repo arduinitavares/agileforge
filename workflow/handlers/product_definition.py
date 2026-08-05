@@ -250,12 +250,12 @@ def execute_record_vision_draft(
         row = record_vision_draft_in_session(
             session,
             project_id=request.project_id,
-            authority_id=request.authority_id,
-            authority_fingerprint=request.authority_fingerprint,
             canonical_content=request.canonical_content,
             content_fingerprint=request.content_fingerprint,
             supersedes_vision_artifact_id=request.supersedes_vision_artifact_id,
-            artifact_id=_next_artifact_id(session),
+            user_text=request.user_text,
+            attempt_id=request.attempt_id,
+            attempt_fingerprint=request.attempt_fingerprint,
             actor=request.actor,
             recorded_at=evaluated_at,
         )
@@ -268,7 +268,7 @@ def execute_record_vision_draft(
         {
             "vision_artifact_id": row.vision_artifact_id,
             "content_fingerprint": row.content_fingerprint,
-            "authority_id": row.authority_id,
+            "authority_id": request.authority_id,
         },
     )
 

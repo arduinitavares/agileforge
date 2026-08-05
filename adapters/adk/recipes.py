@@ -263,6 +263,32 @@ def _request_output_adapter(
     return adapt
 
 
+def _legacy_vision_output_adapter(
+    output: object,
+    context: AttemptCompletionContext,
+) -> RecordVisionDraft:
+    """Bind the retained recipe to its persisted human input and attempt."""
+    payload = dict(RecipeOutput.model_validate(output).payload)
+    user_text = context.normalized_input.get("user_raw_text")
+    if isinstance(user_text, str) and user_text.strip():
+        payload["user_text"] = user_text
+    payload.update(
+        {
+            "project_id": context.project_id,
+            "graph_version": context.graph_version,
+            "fact_fingerprint": context.fact_fingerprint,
+            "decision_fingerprint": context.decision_fingerprint,
+            "instance_key": context.instance_key,
+            "attempt_id": context.attempt_id,
+            "attempt_fingerprint": context.attempt_fingerprint,
+            "idempotency_key": context.idempotency_key,
+            "actor": context.actor,
+            "correlation_id": context.correlation_id,
+        }
+    )
+    return RecordVisionDraft.model_validate(payload)
+
+
 def _vision_interview_output_adapter(
     output: object,
     context: AttemptCompletionContext,
@@ -654,7 +680,7 @@ def build_agentic_recipe_registry(
                     leaf_agent=nodes.vision_generation,
                     execution_settings=execution_settings,
                 ),
-                output_adapter=_request_output_adapter(RecordVisionDraft),
+                output_adapter=_legacy_vision_output_adapter,
             ),
             AdkRecipe(
                 node_id="vision.interview",

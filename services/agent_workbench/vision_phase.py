@@ -10,7 +10,11 @@ from sqlmodel import Session, col, func, select
 from models.core import Project
 from models.enums import WorkflowEventType
 from models.events import WorkflowEvent
-from models.workflow import VisionArtifact, VisionArtifactDecision
+from models.product_definition import (
+    VisionArtifact,
+    VisionArtifactDecision,
+    VisionInterviewTurn,
+)
 from services.contracts.vision import OutputSchema
 from workflow.contracts import JsonObject
 from workflow.fingerprints import canonical_hash, canonical_json
@@ -25,16 +29,16 @@ def record_vision_draft_in_session(  # noqa: PLR0913
     session: Session,
     *,
     project_id: int,
-    authority_id: int,
-    authority_fingerprint: str,
     canonical_content: JsonObject,
     content_fingerprint: str,
     supersedes_vision_artifact_id: int | None,
-    artifact_id: int,
+    user_text: str,
+    attempt_id: int | None,
+    attempt_fingerprint: str | None,
     actor: str,
     recorded_at: datetime,
 ) -> VisionArtifact:
-    """Validate and append one immutable Vision artifact in caller transaction."""
+    """Materialize one retained legacy result as narrowed Vision facts."""
     if session.get(Project, project_id) is None:
         message = f"Project {project_id} not found."
         raise ValueError(message)
@@ -48,6 +52,12 @@ def record_vision_draft_in_session(  # noqa: PLR0913
         raise ValueError(message)
     if canonical_hash(canonical_content) != content_fingerprint:
         message = "Vision content fingerprint does not match canonical content."
+        raise ValueError(message)
+    if not user_text.strip():
+        message = "Legacy Vision input must include the trusted user text."
+        raise ValueError(message)
+    if attempt_id is None or attempt_fingerprint is None:
+        message = "Legacy Vision completion requires its durable node attempt."
         raise ValueError(message)
 
     parent: VisionArtifact | None = None
@@ -70,17 +80,63 @@ def record_vision_draft_in_session(  # noqa: PLR0913
         ).one()
         + 1
     )
-    row = VisionArtifact(
-        vision_artifact_id=artifact_id,
+    prior_turn = session.exec(
+        select(VisionInterviewTurn)
+        .where(
+            col(VisionInterviewTurn.project_id) == project_id,
+            col(VisionInterviewTurn.mode) == "initial",
+            col(VisionInterviewTurn.revision_intent_id).is_(None),
+        )
+        .order_by(col(VisionInterviewTurn.turn_number).desc())
+    ).first()
+    components = validated.updated_components.model_dump(mode="json")
+    questions = list(validated.clarifying_questions)
+    turn = VisionInterviewTurn(
         project_id=project_id,
-        authority_id=authority_id,
-        authority_fingerprint=authority_fingerprint,
+        mode="initial",
+        turn_number=1 if prior_turn is None else prior_turn.turn_number + 1,
+        revision_intent_id=None,
+        prior_turn_id=(
+            None if prior_turn is None else prior_turn.vision_interview_turn_id
+        ),
+        user_text=user_text.strip(),
+        components_json=canonical_json(components),
+        vision_statement=validated.product_vision_statement.strip(),
+        is_complete=True,
+        clarifying_questions_json=canonical_json(questions),
+        output_fingerprint=canonical_hash(
+            {
+                "components_json": components,
+                "vision_statement": validated.product_vision_statement.strip(),
+                "is_complete": True,
+                "clarifying_questions_json": questions,
+            }
+        ),
+        workflow_node_attempt_id=attempt_id,
+        attempt_fingerprint=attempt_fingerprint,
+        recorded_at=recorded_at,
+    )
+    session.add(turn)
+    session.flush()
+    if turn.vision_interview_turn_id is None:
+        message = "Legacy Vision turn did not receive a durable identity."
+        raise ValueError(message)
+    artifact_fingerprint = canonical_hash(
+        {
+            "components": components,
+            "statement": validated.product_vision_statement.strip(),
+        }
+    )
+    row = VisionArtifact(
+        project_id=project_id,
         version_number=version_number,
-        canonical_content_json=canonical_json(canonical_content),
-        content_fingerprint=content_fingerprint,
+        components_json=canonical_json(components),
+        statement=validated.product_vision_statement.strip(),
+        content_fingerprint=artifact_fingerprint,
         supersedes_vision_artifact_id=(
             None if parent is None else parent.vision_artifact_id
         ),
+        source_interview_turn_id=turn.vision_interview_turn_id,
         created_by=actor,
         created_at=recorded_at,
     )
@@ -121,13 +177,11 @@ def record_vision_decision_in_session(  # noqa: PLR0913
     )
     session.add(row)
     if decision == "accepted":
-        content = _JSON_OBJECT.validate_json(artifact.canonical_content_json)
-        validated = OutputSchema.model_validate(content)
         project = session.get(Project, artifact.project_id)
         if project is None:
             message = f"Project {artifact.project_id} not found."
             raise ValueError(message)
-        project.vision = validated.product_vision_statement
+        project.vision = artifact.statement
         session.add(project)
         session.add(
             WorkflowEvent(
@@ -139,8 +193,6 @@ def record_vision_decision_in_session(  # noqa: PLR0913
                         "action": "vision_artifact_accepted",
                         "vision_artifact_id": artifact.vision_artifact_id,
                         "artifact_fingerprint": artifact.content_fingerprint,
-                        "authority_id": artifact.authority_id,
-                        "authority_fingerprint": artifact.authority_fingerprint,
                     }
                 ),
             )

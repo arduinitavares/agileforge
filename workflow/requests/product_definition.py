@@ -22,6 +22,7 @@ class RecordVisionDraft(PositionedRequest):
     canonical_content: JsonObject
     content_fingerprint: str = Field(min_length=1)
     supersedes_vision_artifact_id: int | None = None
+    user_text: str = Field(default="Legacy Vision generation.", min_length=1)
 
 
 class DecideVision(PositionedRequest):
