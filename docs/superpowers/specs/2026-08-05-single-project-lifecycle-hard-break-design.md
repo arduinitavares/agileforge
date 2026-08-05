@@ -3,27 +3,30 @@
 **Date:** 2026-08-05
 **Status:** Approved for written-spec review
 **Supersedes:** `2026-08-02-domain-workflow-graph-hard-break-design.md`
-**Scope:** Project creation, optional repository attachment, deterministic local
-repository inspection, workflow convergence, and removal of the former
-dual-origin setup architecture
+**Scope:** Project creation, initial Vision and Product Goal, optional repository
+attachment, deterministic local repository inspection, Authority sequencing,
+workflow convergence, and removal of the former dual-origin setup architecture
 
 ## Summary
 
-AgileForge will have one Project lifecycle. A Project is created with a name and
-human-owned Product Goal. A local Git repository may be attached during creation
-or later, but repository attachment does not select a different workflow.
+AgileForge will have one Project lifecycle. A Project is created with a name. A
+local Git repository may be attached during creation or later, but repository
+attachment does not select a different workflow. The first product step is an
+interactive Project Vision interview that also captures the initial Product
+Goal.
 
 The existing product-definition and delivery sequence remains intact. Expanded,
 the lifecycle is:
 
 ```text
-Create Project (Name + concise Product Goal)
+Create Project (Name)
 -> Optional Repository Attachment (during creation or later)
+-> Project Vision Interview
+-> Human Review And Acceptance Of Vision + Initial Product Goal
 -> Grill Me With Docs
 -> To Spec
 -> Human Specification Review And Acceptance
 -> Specification Authority Compile, Review, And Acceptance
--> Product Vision Generate, Refine, Review, And Acceptance
 -> Product Backlog Extract/Generate, Refine, Review, And Acceptance
 -> Roadmap Generate, Refine, Review, And Acceptance
 -> User Stories Generate, Refine, Dependency Review, And Acceptance
@@ -35,11 +38,13 @@ Create Project (Name + concise Product Goal)
 -> Post-Sprint Triage
 ```
 
-The Product Goal entered at creation is the operator's concise initial intent.
-It does not replace the richer reviewed Product Vision artifact. The expanded
-sequence above documents the workflow that this hard break must preserve; this
-design does not authorize deleting, collapsing, or silently reordering those
-downstream artifacts and human decisions.
+The Project Vision and Product Goal are related but distinct. The Vision states
+the product's enduring direction. The Product Goal states the first concrete
+outcome pursued within that direction. The interview gathers both without
+making the operator repeat the same context in separate setup forms. The
+expanded sequence above documents the workflow that this hard break must
+preserve; this design does not authorize deleting or collapsing downstream
+artifacts and human decisions.
 
 Repository attachment is an orthogonal capability. It records a small,
 deterministic snapshot without reading repository content, building a complete
@@ -74,11 +79,12 @@ Project must use the same product-development flow.
 ## Goals
 
 - Provide one Project lifecycle and one workflow graph.
-- Require a human-owned Product Goal before product discovery starts.
+- Make an interview-based Project Vision the first product step.
+- Capture and human-accept the initial Product Goal with the initial Vision.
 - Allow one local Git repository to be attached during creation or later.
 - Inspect repository identity and working-tree state without provider calls.
 - Preserve `grill-me-with-docs`, `to spec`, specification and authority review,
-  Product Vision, Product Backlog extraction and refinement, Roadmap, User Story
+  Product Backlog extraction and refinement, Roadmap, User Story
   generation and refinement, dependency review, Sprint planning and review,
   execution, closure, and post-Sprint triage behavior.
 - Keep repository inspection behind a small replaceable interface.
@@ -100,10 +106,12 @@ Project must use the same product-development flow.
 - No remote repository cloning.
 - No multi-repository Project support in this slice.
 - No import or migration of existing AgileForge Project records.
-- No deletion, collapse, or reordering of Product Vision, Product Backlog,
+- No deletion or collapse of Project Vision, Product Goal, Product Backlog,
   Roadmap, User Story refinement, Sprint review, or execution stages.
 - No redesign of the established discovery, specification, extraction,
-  planning, or execution stages beyond reconnecting them to one lifecycle.
+  planning, or execution stages beyond making Vision the first product step,
+  placing Authority after accepted specification, and reconnecting every stage
+  to one lifecycle.
 
 Feature-level implementation assessment is a separate follow-up module. It will
 compare one accepted desired outcome with targeted repository evidence after
@@ -117,14 +125,69 @@ compare one accepted desired outcome with targeted repository evidence after
 
 - `project_id`;
 - `name`;
-- `product_goal`;
 - optional description;
 - creation and update timestamps; and
 - the existing product artifacts accumulated by the common workflow.
 
-`product_goal` is concise human intent. It is not generated repository truth and
-does not replace a richer reviewed Vision artifact if the downstream workflow
-produces one.
+Project creation does not require a Product Goal or generated product content.
+It creates the durable identity needed to conduct and review the Vision
+interview.
+
+### Project Vision And Product Goal
+
+The first product action is a guided interview. It gathers the established
+Vision components and asks follow-up questions until it can produce:
+
+- one immutable Project Vision draft; and
+- one immutable initial Product Goal draft describing the first concrete
+  outcome within that Vision.
+
+Incomplete interview turns are resumable draft state, not accepted product
+facts. A human reviews the completed pair and accepts, rejects, or provides
+feedback against their exact fingerprints. Initial acceptance records separate
+versioned Vision and Product Goal artifacts in one guarded transaction. They may
+evolve independently later: changing a Product Goal does not silently rewrite
+the Vision, and revising the Vision makes dependent goals and specifications
+explicitly stale.
+
+The Vision interview may use the attached repository's identity as provenance,
+but it does not infer product intent from source code. Human answers remain the
+highest-authority source for Vision and Product Goal.
+
+The full Vision interview is required only while the Project has no accepted
+Vision. Later product increments normally start by proposing and reviewing a new
+Product Goal under the accepted Vision, then repeat discovery, specification,
+Authority, and backlog admission for that Goal. An intentional Vision revision
+reopens the interview and triggers explicit downstream freshness handling.
+
+### Product Artifact Lineage
+
+The initial and recurring lineage is explicit:
+
+```text
+Project
+-> accepted Vision
+-> accepted Product Goal
+-> accepted Grill Me With Docs discovery artifact
+-> accepted To Spec specification
+-> accepted Specification Authority
+-> accepted Product Backlog changes
+-> Roadmap
+-> User Stories
+-> Sprint
+```
+
+Each arrow carries the source artifact identity and fingerprint. Replacing an
+upstream artifact makes dependent downstream artifacts stale; it never mutates
+them in place.
+
+Vision is Project-owned, not Authority-owned. Its generation request, graph
+rule, persistence record, and fingerprint therefore have no Authority
+prerequisite or Authority lineage fields. Product Goal references the accepted
+Vision. Specification references the accepted Vision, Product Goal, and
+discovery artifact. Authority references the accepted specification. Product
+Backlog changes reference both the accepted Product Goal and Authority. Roadmap,
+Stories, and Sprint artifacts retain their downstream lineage guards.
 
 ### Repository Binding
 
@@ -207,19 +270,57 @@ setup blocker.
 
 ### Project Creation Without A Repository
 
-1. The operator supplies `name` and `product_goal`.
+1. The operator supplies `name` and may supply an optional description.
 2. AgileForge creates the Project under the common graph.
-3. Product discovery is immediately available.
+3. The Project Vision interview is immediately available.
 4. Repository attachment remains available as an independent action.
 
 ### Project Creation With A Repository
 
-1. The operator supplies `name`, `product_goal`, and an optional local path.
+1. The operator supplies `name`, an optional description, and a local path.
 2. AgileForge probes the path before mutating Project state.
 3. If probing fails, Project creation fails without a partial Project record.
 4. If probing succeeds, Project and binding are committed atomically.
-5. Product discovery is immediately available, exactly as when no repository is
-   attached.
+5. The Project Vision interview is immediately available, exactly as when no
+   repository is attached.
+
+### Initial Vision And Product Goal
+
+1. AgileForge starts or resumes the interview using recorded human answers and
+   any prior incomplete Vision components.
+2. Each turn returns the current draft and focused follow-up questions; the UI
+   never asks the operator for raw JSON or workflow guard values.
+3. When all required Vision components and an initial Product Goal are present,
+   AgileForge produces the immutable review pair.
+4. Human feedback resumes the interview without accepting either artifact.
+5. Human acceptance records both artifacts atomically and unlocks
+   `grill-me-with-docs` discovery for the accepted Product Goal.
+
+### Discovery, Specification, And Authority
+
+1. `grill-me-with-docs` receives the accepted Vision and Product Goal as
+   baseline context and gathers goal-specific documents, constraints, examples,
+   edge cases, and unresolved decisions.
+2. `to spec` converts that accepted discovery output into a desired-behavior
+   specification.
+3. A human reviews and accepts the exact specification version.
+4. Authority compilation converts only that accepted specification into
+   versioned invariants and guardrails. It does not invent Vision or Product
+   Goal content.
+5. A human reviews and accepts, rejects, or provides feedback on the compiled
+   Authority.
+6. Accepted Authority unlocks Product Backlog extraction and refinement,
+   followed by Roadmap, User Stories, Sprint planning, and execution.
+
+Authority therefore never gates the initial Vision interview. It gates
+downstream delivery artifacts that must remain consistent with the accepted
+specification.
+
+For later increments, AgileForge keeps the accepted Vision and starts with a new
+human-reviewed Product Goal. The Goal then follows the same discovery,
+specification, Authority, and backlog-admission sequence. Repeating weekly
+feature work does not require recreating the Project or rerunning the Vision
+interview unless the product direction itself changes.
 
 ### Later Repository Attachment
 
@@ -242,8 +343,12 @@ dashboard does not trigger repository scanning, provider calls, or mutation.
 The create form contains:
 
 - Project Name;
-- Product Goal; and
+- optional Description; and
 - optional Repository Path.
+
+After creation, the UI opens the guided Vision interview. It presents one or a
+small related set of plain-language questions per turn, preserves prior answers,
+and shows the completed Vision and Product Goal together for human review.
 
 There is no setup-type selector. Repository details are presented as plain
 status: path, branch or detached HEAD, short commit, clean or dirty, and latest
@@ -258,15 +363,20 @@ configuration for setup.
 The CLI exposes task-specific structured commands:
 
 ```text
-agileforge project create --name ... --product-goal ... [--repository-path ...]
+agileforge project create --name ... [--description ...] [--repository-path ...]
+agileforge vision respond --project-id ... --text ...
+agileforge vision status --project-id ...
+agileforge vision review --project-id ... --decision ...
 agileforge repository attach --project-id ... --path ...
 agileforge repository status --project-id ...
 agileforge repository refresh --project-id ...
 ```
 
 Mutating commands retain graph, fact, decision, idempotency, and actor guards.
-JSON responses include repository provenance, warnings, and typed errors. The
-agent never supplies derived commit, dirty-state, remote, or fingerprint data.
+Vision responses return the current components, completion status, and focused
+questions in structured output. Repository responses include provenance,
+warnings, and typed errors. The agent never supplies derived commit,
+dirty-state, remote, artifact-fingerprint, or workflow-guard data.
 
 ### Optional Future Providers
 
@@ -352,11 +462,19 @@ Provider-free temporary-repository tests cover:
 
 ### Domain And Persistence
 
-- Project creation requires name and Product Goal.
+- Project creation requires a name and does not require generated product
+  content.
 - Project creation succeeds without a repository.
 - Project creation with a valid repository stores Project and binding atomically.
 - Failed probing creates neither Project nor binding.
-- Later attachment does not alter discovery availability.
+- The Vision interview is available immediately with or without a repository.
+- Initial Vision and Product Goal acceptance is atomic and fingerprint-bound.
+- A later Product Goal can begin under the accepted Vision without rerunning the
+  Vision interview.
+- Product Goal revisions do not rewrite Vision history.
+- Vision revisions make dependent Product Goals and specifications explicitly
+  stale.
+- Later repository attachment does not alter product-definition availability.
 - Reattachment is guarded and replaces only the active binding.
 - No origin field or specialized setup table exists in the fresh schema.
 - Domain facts and fingerprints are identical in shape regardless of repository
@@ -367,6 +485,12 @@ Provider-free temporary-repository tests cover:
 - CLI and API reject legacy request fields as unknown input.
 - CLI emits structured repository provenance and warnings.
 - The create modal has no setup-type selector.
+- The create modal requires only Project Name and contains optional Description
+  and Repository Path fields.
+- Project creation opens the guided Vision interview.
+- Vision interview turns preserve accepted answers and expose focused questions,
+  not raw JSON.
+- Human review shows the exact Vision and initial Product Goal before acceptance.
 - Human forms never request commit, dirty state, remotes, or fingerprints.
 - Project pages expose attach, replace, and refresh repository actions.
 - Playwright verifies creation and attachment on desktop and mobile viewports.
@@ -375,10 +499,12 @@ Provider-free temporary-repository tests cover:
 
 - A whole-tree case-insensitive scan finds neither retired origin label.
 - Package-resource tests prove deleted prompts and agents are absent.
-- `grill-me-with-docs`, `to spec`, specification and authority review, Product
-  Vision, Product Backlog, Roadmap, User Story refinement and dependency review,
-  Sprint planning and review, execution, closure, and post-Sprint triage contract
-  tests remain green.
+- Project Vision interview and review, `grill-me-with-docs`, `to spec`,
+  specification and authority review, Product Backlog, Roadmap, User Story
+  refinement and dependency review, Sprint planning and review, execution,
+  closure, and post-Sprint triage contract tests remain green.
+- Graph tests prove that Vision is available before Authority and Authority is
+  unavailable until an exact specification version has human acceptance.
 - A clean-source wheel and sdist contain no retired modules or resources.
 - `uv run --frozen pyrepo-check --all` passes without typing suppressions.
 - `git diff --check` passes.
@@ -388,19 +514,30 @@ Provider-free temporary-repository tests cover:
 For each of caRtola, ASA Deep Process Control Advisory System, and MyFinance:
 
 1. initialize a fresh isolated AgileForge profile;
-2. create the Project with name and Product Goal;
-3. attach the local Git worktree;
+2. create the Project with its name, using repository-at-creation for at least
+   one Project and later attachment for at least one other Project;
+3. attach the local Git worktree when it was not supplied during creation;
 4. verify the projected path, commit, branch or detached state, and dirty state;
-5. verify product discovery is immediately available;
-6. confirm setup performed no provider-backed model call; and
-7. stop before running paid discovery unless the operator explicitly approves
+5. verify the Vision interview is the first available product action;
+6. confirm creation and repository probing performed no provider-backed model
+   call;
+7. conduct and human-review the Vision plus initial Product Goal;
+8. verify accepted Vision and Product Goal unlock `grill-me-with-docs` rather
+   than Authority compilation; and
+9. stop before further paid discovery unless the operator explicitly approves
    that repository's real feature test.
 
 ## Acceptance Criteria
 
 - One Project graph serves every Project.
 - Repository attachment never selects a workflow variant.
-- Product discovery is available immediately after valid Project creation.
+- The guided Vision interview is the first product action after valid Project
+  creation.
+- Project creation requires no Product Goal or provider call.
+- Human acceptance of the initial Vision and Product Goal unlocks discovery.
+- Authority compilation occurs only after human acceptance of a `to spec`
+  specification and before Product Backlog extraction.
+- Authority never gates or authors the initial Project Vision.
 - The deterministic probe performs no content scan, network call, or model call.
 - Dirty and detached repositories are represented honestly without blocking.
 - The Project domain, database schema, CLI, API, frontend, tests, package, and
