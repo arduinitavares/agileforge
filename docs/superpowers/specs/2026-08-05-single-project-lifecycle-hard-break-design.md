@@ -1,7 +1,7 @@
 # Single Project Lifecycle Hard-Break Design
 
 **Date:** 2026-08-05
-**Status:** Approved for written-spec review
+**Status:** Approved
 **Supersedes:** `2026-08-02-domain-workflow-graph-hard-break-design.md`
 **Scope:** Project creation, initial Vision and Product Goal, optional repository
 attachment, deterministic local repository inspection, Authority sequencing,
