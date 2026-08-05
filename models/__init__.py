@@ -12,6 +12,7 @@ __all__ = [
     "db",
     "enums",
     "events",
+    "product_definition",
     "repository",
     "specs",
     "workflow",

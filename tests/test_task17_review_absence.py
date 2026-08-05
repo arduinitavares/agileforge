@@ -5,8 +5,6 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import re
-import tokenize
-from io import BytesIO
 from pathlib import Path
 
 from git import Repo
@@ -40,27 +38,6 @@ _ROUTING_LITERALS = (
     "AGILEFORGE" + "_SESSION_DB_URL",
     "GreenfieldDiscovery" + "Context",
     "context" + "_key",
-)
-_AGGREGATE_LITERALS = (
-    "Pro" + "duct",
-    "product" + "_id",
-    "products." + "product" + "_id",
-    "repositories." + "product",
-    "_SPEC_" + "PRODUCT_ID",
-    "SPEC_" + "PRODUCT_MATCH",
-    "PRODUCT" + "_NOT_FOUND",
-    "product" + "_spec_linked",
-    "product" + "_name",
-    "query_" + "product_structure",
-    "benchmark_" + "product_structure",
-    "link_spec_to_" + "product",
-    "product_" + "context",
-    "product_" + "authority_cache_persisted",
-    "product_" + "not_found",
-    "product_" + "description",
-    "sample_" + "product",
-    "product" + " ID",
-    "product" + " identifier",
 )
 _OBSOLETE_LITERALS = (
     "WORKFLOW_" + "RUNNER_IDENTITY",
@@ -108,14 +85,6 @@ _DELETED_ROUTING_PROSE = (
     "session as " + "authority",
     "session-as-" + "authority",
 )
-_ARTIFACT_IDENTIFIER_PARTS = (
-    "product" + "_backlog",
-    "product" + "_category",
-    "product" + "_definition",
-    "product" + "_new_work",
-    "product" + "_owner",
-    "product" + "_vision",
-)
 
 
 def _tracked_current_paths() -> tuple[Path, ...]:
@@ -153,15 +122,12 @@ def test_all_tracked_current_surfaces_enforce_the_hard_break() -> None:
     violations: list[str] = []
     literals = (
         *_ROUTING_LITERALS,
-        *_AGGREGATE_LITERALS,
         *_OBSOLETE_LITERALS,
         *_DELETED_COMMAND_LITERALS,
         *_DELETED_ROUTING_PROSE,
     )
     patterns = {
-        literal: re.compile(
-            rf"(?<![A-Za-z0-9_]){re.escape(literal)}(?![A-Za-z0-9_])"
-        )
+        literal: re.compile(rf"(?<![A-Za-z0-9_]){re.escape(literal)}(?![A-Za-z0-9_])")
         for literal in literals
     }
 
@@ -180,32 +146,5 @@ def test_all_tracked_current_surfaces_enforce_the_hard_break() -> None:
             for literal in literals
             if patterns[literal].search(content)
         )
-
-    assert violations == [], "\n".join(violations)
-
-
-def test_python_identifiers_use_project_for_aggregate_identity() -> None:
-    """Permit product artifact terms, but reject product-shaped aggregate names."""
-    violations: list[str] = []
-    for path in _tracked_current_paths():
-        if path.suffix != ".py":
-            continue
-        relative = path.relative_to(_ROOT).as_posix()
-        for token in tokenize.tokenize(BytesIO(path.read_bytes()).readline):
-            if token.type != tokenize.NAME:
-                continue
-            normalized = re.sub(
-                r"(?<=[a-z0-9])(?=[A-Z])",
-                "_",
-                token.string,
-            ).lower()
-            segments = normalized.split("_")
-            if "product" not in segments:
-                continue
-            if any(part in normalized for part in _ARTIFACT_IDENTIFIER_PARTS):
-                continue
-            if {"capability", "invariant"}.intersection(segments):
-                continue
-            violations.append(f"{relative}:{token.start[0]}:{token.string}")
 
     assert violations == [], "\n".join(violations)

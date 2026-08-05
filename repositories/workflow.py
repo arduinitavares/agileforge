@@ -19,6 +19,17 @@ from models.core import (
 )
 from models.enums import SprintStatus, StoryStatus, WorkflowEventType
 from models.events import WorkflowEvent
+from models.product_definition import (
+    DiscoveryArtifact,
+    ProductGoalArtifact,
+    ProductGoalArtifactDecision,
+    ProductGoalInterviewTurn,
+    ProductGoalOutcome,
+    SpecificationCandidate,
+    SpecificationDecision,
+    VisionInterviewTurn,
+    VisionRevisionIntent,
+)
 from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance, SpecRegistry
 from models.workflow import (
     BacklogArtifact,
@@ -78,6 +89,7 @@ from workflow.facts import (
     BacklogReconciliationFact,
     BacklogRequirementFact,
     ChallengeArtifactFact,
+    DiscoveryArtifactFact,
     DiscoveryRunAbandonmentFact,
     DiscoveryRunFact,
     InitialScopeRegistrationFact,
@@ -86,6 +98,9 @@ from workflow.facts import (
     PlanningArtifactFact,
     PostSprintTriageFact,
     PrdVersionFact,
+    ProductGoalArtifactFact,
+    ProductGoalInterviewTurnFact,
+    ProductGoalOutcomeFact,
     ProjectAbandonmentFact,
     ProjectFact,
     RepositoryBaselineFact,
@@ -94,6 +109,7 @@ from workflow.facts import (
     ScopeExtensionReconciliationFact,
     ScopeExtensionRegistrationFact,
     SpecDraftFact,
+    SpecificationCandidateFact,
     SpecVersionFact,
     SprintClosureFact,
     SprintFact,
@@ -106,6 +122,8 @@ from workflow.facts import (
     StoryFact,
     TaskCompletionFact,
     TaskFact,
+    VisionInterviewTurnFact,
+    VisionRevisionIntentFact,
     WorkflowFactSnapshot,
 )
 from workflow.fingerprints import canonical_hash, canonical_json
@@ -161,6 +179,8 @@ type _PhaseStatus = Literal[
 ]
 type _SpecDraftKind = Literal["initial", "amendment"]
 type _SprintFactStatus = Literal["planned", "active", "completed"]
+type _VisionMode = Literal["initial", "revision"]
+type _ProductGoalOutcome = Literal["fulfilled", "abandoned"]
 
 _SPRINT_STATUSES: dict[SprintStatus, _SprintFactStatus] = {
     SprintStatus.PLANNED: "planned",
@@ -209,6 +229,19 @@ class _PhaseArtifactLoad:
 
     facts: tuple[PhaseArtifactFact, ...]
     reviews: tuple[ReviewDecisionFact, ...]
+
+
+@dataclass(frozen=True)
+class _ProductDefinitionFactLoad:
+    """Validated immutable product-definition facts from one Project."""
+
+    revision_intents: tuple[VisionRevisionIntentFact, ...]
+    interview_turns: tuple[VisionInterviewTurnFact, ...]
+    goal_interview_turns: tuple[ProductGoalInterviewTurnFact, ...]
+    product_goals: tuple[ProductGoalArtifactFact, ...]
+    goal_outcomes: tuple[ProductGoalOutcomeFact, ...]
+    discoveries: tuple[DiscoveryArtifactFact, ...]
+    specification_candidates: tuple[SpecificationCandidateFact, ...]
 
 
 @dataclass(frozen=True)
@@ -318,6 +351,20 @@ class WorkflowFactRepository:
             project_id,
             {item.authority_id: item for item in authority_load.facts},
         )
+        node_attempts = self._node_attempts(project_id)
+        product_definition = self._product_definition(
+            project_id,
+            phase_load.facts,
+            spec_versions,
+            node_attempts,
+        )
+        spec_version_facts = self._spec_versions_with_lineage(
+            spec_version_facts,
+            product_definition,
+        )
+        spec_versions = {
+            item.spec_version_id: item.spec_hash for item in spec_version_facts
+        }
         planning_load = self._planning_artifacts(project_id)
         repository_baselines = self._repository_baselines(project_id)
         sprints = self._sprints(project_id)
@@ -436,6 +483,13 @@ class WorkflowFactRepository:
                     sprint_starts=sprint_starts,
                 ),
             ),
+            vision_revision_intents=product_definition.revision_intents,
+            vision_interview_turns=product_definition.interview_turns,
+            product_goal_interview_turns=product_definition.goal_interview_turns,
+            product_goal_artifacts=product_definition.product_goals,
+            product_goal_outcomes=product_definition.goal_outcomes,
+            discovery_artifacts=product_definition.discoveries,
+            specification_candidates=product_definition.specification_candidates,
             spec_versions=spec_version_facts,
             repository_baselines=repository_baselines,
             repository_inventories=self._repository_inventories(
@@ -469,7 +523,7 @@ class WorkflowFactRepository:
             sprint_reviews=sprint_reviews,
             sprint_closures=sprint_closures,
             post_sprint_triage=self._post_sprint_triage(project_id, sprints),
-            node_attempts=self._node_attempts(project_id),
+            node_attempts=node_attempts,
         )
 
     def _query_options(self) -> dict[str, object]:
@@ -791,9 +845,638 @@ class WorkflowFactRepository:
                     spec_hash=row.spec_hash,
                     status=status,
                     approved_at=row.approved_at,
+                    source_specification_candidate_id=(
+                        row.source_specification_candidate_id
+                    ),
+                    source_vision_artifact_id=row.source_vision_artifact_id,
+                    source_vision_fingerprint=row.source_vision_fingerprint,
+                    source_product_goal_artifact_id=(
+                        row.source_product_goal_artifact_id
+                    ),
+                    source_product_goal_fingerprint=(
+                        row.source_product_goal_fingerprint
+                    ),
+                    source_discovery_artifact_id=row.source_discovery_artifact_id,
+                    source_discovery_fingerprint=row.source_discovery_fingerprint,
+                    supersedes_spec_version_id=row.supersedes_spec_version_id,
                 )
             )
         return tuple(facts)
+
+    def _product_definition(
+        self,
+        project_id: int,
+        phase_artifacts: tuple[PhaseArtifactFact, ...],
+        spec_versions: dict[int, str],
+        node_attempts: tuple[NodeAttemptFact, ...],
+    ) -> _ProductDefinitionFactLoad:
+        """Load staged product-definition records without ADK session state."""
+        visions = {
+            int(item.artifact_id): item.artifact_fingerprint
+            for item in phase_artifacts
+            if item.artifact_type == "vision" and isinstance(item.artifact_id, int)
+        }
+        attempts = {item.attempt_id: item.attempt_fingerprint for item in node_attempts}
+        revisions = self._vision_revision_intents(project_id, visions)
+        turns = self._vision_interview_turns(project_id, revisions, attempts)
+        goal_turns = self._product_goal_interview_turns(project_id, visions, attempts)
+        goals = self._product_goals(project_id, visions, goal_turns)
+        accepted_goal_ids = self._product_goal_decisions(project_id, goals)
+        outcomes = self._product_goal_outcomes(
+            project_id,
+            goals,
+            accepted_goal_ids,
+        )
+        discoveries = self._discovery_artifacts(project_id, visions, goals)
+        candidates = self._specification_candidates(
+            project_id, visions, goals, discoveries, spec_versions
+        )
+        self._specification_decisions(project_id, candidates)
+        return _ProductDefinitionFactLoad(
+            revision_intents=tuple(revisions.values()),
+            interview_turns=tuple(turns.values()),
+            goal_interview_turns=tuple(goal_turns.values()),
+            product_goals=tuple(goals.values()),
+            goal_outcomes=tuple(outcomes.values()),
+            discoveries=tuple(discoveries.values()),
+            specification_candidates=tuple(candidates.values()),
+        )
+
+    def _vision_revision_intents(
+        self,
+        project_id: int,
+        visions: dict[int, str],
+    ) -> dict[int, VisionRevisionIntentFact]:
+        rows = self._session.exec(
+            select(VisionRevisionIntent)
+            .where(col(VisionRevisionIntent.project_id) == project_id)
+            .order_by(col(VisionRevisionIntent.vision_revision_intent_id)),
+            execution_options=self._query_options(),
+        ).all()
+        facts: dict[int, VisionRevisionIntentFact] = {}
+        for row in rows:
+            identifier = self._required_id(
+                row.vision_revision_intent_id,
+                "Vision revision intent",
+            )
+            self._require_fingerprint_reference(
+                row.source_vision_artifact_id,
+                row.source_vision_fingerprint,
+                visions,
+                "Vision revision intent source",
+            )
+            facts[identifier] = VisionRevisionIntentFact(
+                vision_revision_intent_id=identifier,
+                source_vision_artifact_id=row.source_vision_artifact_id,
+                source_vision_fingerprint=row.source_vision_fingerprint,
+                reason=row.reason,
+                initiated_by=row.initiated_by,
+                initiated_at=row.initiated_at,
+            )
+        return facts
+
+    def _vision_interview_turns(
+        self,
+        project_id: int,
+        revisions: dict[int, VisionRevisionIntentFact],
+        attempts: dict[int, str],
+    ) -> dict[int, VisionInterviewTurnFact]:
+        rows = self._session.exec(
+            select(VisionInterviewTurn)
+            .where(col(VisionInterviewTurn.project_id) == project_id)
+            .order_by(
+                col(VisionInterviewTurn.turn_number),
+                col(VisionInterviewTurn.vision_interview_turn_id),
+            ),
+            execution_options=self._query_options(),
+        ).all()
+        facts: dict[int, VisionInterviewTurnFact] = {}
+        for row in rows:
+            identifier = self._required_id(row.vision_interview_turn_id, "Vision turn")
+            message = f"Vision turn {identifier} has invalid mode."
+            self._require_product_condition(
+                row.mode in {"initial", "revision"},
+                message,
+            )
+            self._require_product_condition(
+                row.revision_intent_id is None or row.revision_intent_id in revisions,
+                "Vision turn revision intent is not owned by this Project.",
+            )
+            self._require_product_condition(
+                row.prior_turn_id is None or row.prior_turn_id in facts,
+                "Vision turn prior turn is not owned by this Project.",
+            )
+            self._require_fingerprint_reference(
+                row.workflow_node_attempt_id,
+                row.attempt_fingerprint,
+                attempts,
+                "Vision turn workflow attempt",
+            )
+            facts[identifier] = VisionInterviewTurnFact(
+                vision_interview_turn_id=identifier,
+                mode=self._vision_mode(row.mode),
+                turn_number=row.turn_number,
+                revision_intent_id=row.revision_intent_id,
+                prior_turn_id=row.prior_turn_id,
+                user_text=row.user_text,
+                components=self._canonical_json_object(
+                    row.components_json,
+                    "Vision turn components",
+                ),
+                vision_statement=row.vision_statement,
+                is_complete=row.is_complete,
+                clarifying_questions=self._canonical_string_list(
+                    row.clarifying_questions_json,
+                    "Vision turn clarifying questions",
+                ),
+                output_fingerprint=row.output_fingerprint,
+                workflow_node_attempt_id=row.workflow_node_attempt_id,
+                attempt_fingerprint=row.attempt_fingerprint,
+                recorded_at=row.recorded_at,
+            )
+        return facts
+
+    def _product_goal_interview_turns(
+        self,
+        project_id: int,
+        visions: dict[int, str],
+        attempts: dict[int, str],
+    ) -> dict[int, ProductGoalInterviewTurnFact]:
+        rows = self._session.exec(
+            select(ProductGoalInterviewTurn)
+            .where(col(ProductGoalInterviewTurn.project_id) == project_id)
+            .order_by(
+                col(ProductGoalInterviewTurn.goal_number),
+                col(ProductGoalInterviewTurn.revision_number),
+                col(ProductGoalInterviewTurn.product_goal_interview_turn_id),
+            ),
+            execution_options=self._query_options(),
+        ).all()
+        facts: dict[int, ProductGoalInterviewTurnFact] = {}
+        for row in rows:
+            identifier = self._required_id(
+                row.product_goal_interview_turn_id,
+                "Product Goal interview turn",
+            )
+            self._require_fingerprint_reference(
+                row.vision_artifact_id,
+                row.vision_fingerprint,
+                visions,
+                "Product Goal interview Vision",
+            )
+            prior_turn = (
+                None if row.prior_turn_id is None else facts.get(row.prior_turn_id)
+            )
+            self._require_product_condition(
+                row.prior_turn_id is None or prior_turn is not None,
+                "Product Goal interview prior turn is not owned by this Project.",
+            )
+            if prior_turn is not None:
+                self._require_product_condition(
+                    (
+                        prior_turn.vision_artifact_id,
+                        prior_turn.vision_fingerprint,
+                        prior_turn.goal_number,
+                        prior_turn.revision_number,
+                    )
+                    == (
+                        row.vision_artifact_id,
+                        row.vision_fingerprint,
+                        row.goal_number,
+                        row.revision_number,
+                    ),
+                    "Product Goal interview prior turn has different identity.",
+                )
+            self._require_fingerprint_reference(
+                row.workflow_node_attempt_id,
+                row.attempt_fingerprint,
+                attempts,
+                "Product Goal interview workflow attempt",
+            )
+            facts[identifier] = ProductGoalInterviewTurnFact(
+                product_goal_interview_turn_id=identifier,
+                vision_artifact_id=row.vision_artifact_id,
+                vision_fingerprint=row.vision_fingerprint,
+                goal_number=row.goal_number,
+                revision_number=row.revision_number,
+                prior_turn_id=row.prior_turn_id,
+                user_text=row.user_text,
+                components=self._canonical_json_object(
+                    row.components_json,
+                    "Product Goal interview components",
+                ),
+                goal_statement=row.goal_statement,
+                is_complete=row.is_complete,
+                clarifying_questions=self._canonical_string_list(
+                    row.clarifying_questions_json,
+                    "Product Goal interview clarifying questions",
+                ),
+                output_fingerprint=row.output_fingerprint,
+                workflow_node_attempt_id=row.workflow_node_attempt_id,
+                attempt_fingerprint=row.attempt_fingerprint,
+                recorded_at=row.recorded_at,
+            )
+        return facts
+
+    def _product_goals(
+        self,
+        project_id: int,
+        visions: dict[int, str],
+        turns: dict[int, ProductGoalInterviewTurnFact],
+    ) -> dict[int, ProductGoalArtifactFact]:
+        rows = self._session.exec(
+            select(ProductGoalArtifact)
+            .where(col(ProductGoalArtifact.project_id) == project_id)
+            .order_by(col(ProductGoalArtifact.product_goal_artifact_id)),
+            execution_options=self._query_options(),
+        ).all()
+        facts: dict[int, ProductGoalArtifactFact] = {}
+        for row in rows:
+            identifier = self._required_id(row.product_goal_artifact_id, "Product Goal")
+            self._require_fingerprint_reference(
+                row.vision_artifact_id,
+                row.vision_fingerprint,
+                visions,
+                "Product Goal Vision",
+            )
+            self._require_product_condition(
+                canonical_hash({"statement": row.statement}) == row.content_fingerprint,
+                "Product Goal artifact fingerprint changed.",
+            )
+            source_turn = turns.get(row.source_interview_turn_id)
+            self._require_product_condition(
+                source_turn is not None,
+                "Product Goal source turn is not owned by this Project.",
+            )
+            if source_turn is not None:
+                self._require_product_condition(
+                    source_turn.is_complete,
+                    "Product Goal source interview must be complete.",
+                )
+                self._require_product_condition(
+                    (
+                        source_turn.vision_artifact_id,
+                        source_turn.vision_fingerprint,
+                        source_turn.goal_number,
+                        source_turn.revision_number,
+                    )
+                    == (
+                        row.vision_artifact_id,
+                        row.vision_fingerprint,
+                        row.goal_number,
+                        row.revision_number,
+                    ),
+                    "Product Goal source interview has different identity.",
+                )
+            self._require_product_condition(
+                row.supersedes_product_goal_artifact_id is None
+                or row.supersedes_product_goal_artifact_id in facts,
+                "Product Goal supersession is invalid.",
+            )
+            facts[identifier] = ProductGoalArtifactFact(
+                product_goal_artifact_id=identifier,
+                vision_artifact_id=row.vision_artifact_id,
+                vision_fingerprint=row.vision_fingerprint,
+                goal_number=row.goal_number,
+                revision_number=row.revision_number,
+                statement=row.statement,
+                content_fingerprint=row.content_fingerprint,
+                supersedes_product_goal_artifact_id=(
+                    row.supersedes_product_goal_artifact_id
+                ),
+                source_interview_turn_id=row.source_interview_turn_id,
+                created_by=row.created_by,
+                created_at=row.created_at,
+            )
+        return facts
+
+    def _discovery_artifacts(
+        self,
+        project_id: int,
+        visions: dict[int, str],
+        goals: dict[int, ProductGoalArtifactFact],
+    ) -> dict[int, DiscoveryArtifactFact]:
+        rows = self._session.exec(
+            select(DiscoveryArtifact)
+            .where(col(DiscoveryArtifact.project_id) == project_id)
+            .order_by(col(DiscoveryArtifact.discovery_artifact_id)),
+            execution_options=self._query_options(),
+        ).all()
+        facts: dict[int, DiscoveryArtifactFact] = {}
+        goal_fingerprints = {
+            identifier: item.content_fingerprint for identifier, item in goals.items()
+        }
+        for row in rows:
+            identifier = self._required_id(row.discovery_artifact_id, "discovery")
+            self._require_fingerprint_reference(
+                row.vision_artifact_id,
+                row.vision_fingerprint,
+                visions,
+                "discovery Vision",
+            )
+            self._require_fingerprint_reference(
+                row.product_goal_artifact_id,
+                row.product_goal_fingerprint,
+                goal_fingerprints,
+                "discovery Product Goal",
+            )
+            self._canonical_object(
+                row.canonical_content_json,
+                row.content_fingerprint,
+                "discovery",
+            )
+            self._require_product_condition(
+                row.supersedes_discovery_artifact_id is None
+                or row.supersedes_discovery_artifact_id in facts,
+                "Discovery supersession is invalid.",
+            )
+            facts[identifier] = DiscoveryArtifactFact(
+                discovery_artifact_id=identifier,
+                vision_artifact_id=row.vision_artifact_id,
+                vision_fingerprint=row.vision_fingerprint,
+                product_goal_artifact_id=row.product_goal_artifact_id,
+                product_goal_fingerprint=row.product_goal_fingerprint,
+                content_fingerprint=row.content_fingerprint,
+                content_ref=row.content_ref,
+                producer=row.producer,
+                supersedes_discovery_artifact_id=(row.supersedes_discovery_artifact_id),
+                recorded_by=row.recorded_by,
+                recorded_at=row.recorded_at,
+            )
+        return facts
+
+    def _specification_candidates(
+        self,
+        project_id: int,
+        visions: dict[int, str],
+        goals: dict[int, ProductGoalArtifactFact],
+        discoveries: dict[int, DiscoveryArtifactFact],
+        spec_versions: dict[int, str],
+    ) -> dict[int, SpecificationCandidateFact]:
+        rows = self._session.exec(
+            select(SpecificationCandidate)
+            .where(col(SpecificationCandidate.project_id) == project_id)
+            .order_by(col(SpecificationCandidate.specification_candidate_id)),
+            execution_options=self._query_options(),
+        ).all()
+        facts: dict[int, SpecificationCandidateFact] = {}
+        goal_fingerprints = {
+            identifier: item.content_fingerprint for identifier, item in goals.items()
+        }
+        discovery_fingerprints = {
+            identifier: item.content_fingerprint
+            for identifier, item in discoveries.items()
+        }
+        for row in rows:
+            identifier = self._required_id(
+                row.specification_candidate_id,
+                "specification candidate",
+            )
+            self._require_fingerprint_reference(
+                row.vision_artifact_id,
+                row.vision_fingerprint,
+                visions,
+                "specification candidate Vision",
+            )
+            self._require_fingerprint_reference(
+                row.product_goal_artifact_id,
+                row.product_goal_fingerprint,
+                goal_fingerprints,
+                "specification candidate Product Goal",
+            )
+            self._require_fingerprint_reference(
+                row.discovery_artifact_id,
+                row.discovery_fingerprint,
+                discovery_fingerprints,
+                "specification candidate discovery",
+            )
+            base_is_complete = (
+                row.base_spec_version_id is not None and row.base_spec_hash is not None
+            )
+            self._require_product_condition(
+                base_is_complete
+                or (row.base_spec_version_id is None and row.base_spec_hash is None),
+                "Specification candidate base specification is invalid.",
+            )
+            if base_is_complete:
+                self._require_fingerprint_reference(
+                    row.base_spec_version_id,
+                    row.base_spec_hash,
+                    spec_versions,
+                    "specification candidate base specification",
+                )
+            self._canonical_object(
+                row.canonical_content_json,
+                row.content_fingerprint,
+                "specification candidate",
+            )
+            self._require_product_condition(
+                row.supersedes_specification_candidate_id is None
+                or row.supersedes_specification_candidate_id in facts,
+                "Specification candidate supersession is invalid.",
+            )
+            facts[identifier] = SpecificationCandidateFact(
+                specification_candidate_id=identifier,
+                vision_artifact_id=row.vision_artifact_id,
+                vision_fingerprint=row.vision_fingerprint,
+                product_goal_artifact_id=row.product_goal_artifact_id,
+                product_goal_fingerprint=row.product_goal_fingerprint,
+                discovery_artifact_id=row.discovery_artifact_id,
+                discovery_fingerprint=row.discovery_fingerprint,
+                base_spec_version_id=row.base_spec_version_id,
+                base_spec_hash=row.base_spec_hash,
+                content_fingerprint=row.content_fingerprint,
+                content_ref=row.content_ref,
+                supersedes_specification_candidate_id=(
+                    row.supersedes_specification_candidate_id
+                ),
+                recorded_by=row.recorded_by,
+                recorded_at=row.recorded_at,
+            )
+        return facts
+
+    def _product_goal_decisions(
+        self,
+        project_id: int,
+        goals: dict[int, ProductGoalArtifactFact],
+    ) -> frozenset[int]:
+        rows = self._session.exec(
+            select(ProductGoalArtifactDecision)
+            .where(col(ProductGoalArtifactDecision.project_id) == project_id)
+            .order_by(
+                col(ProductGoalArtifactDecision.product_goal_artifact_decision_id)
+            ),
+            execution_options=self._query_options(),
+        ).all()
+        accepted_goal_ids: set[int] = set()
+        goal_fingerprints = {
+            item_id: item.content_fingerprint for item_id, item in goals.items()
+        }
+        for row in rows:
+            self._require_product_condition(
+                row.decision in {"accepted", "rejected"},
+                "Product Goal decision has an invalid value.",
+            )
+            self._require_fingerprint_reference(
+                row.product_goal_artifact_id,
+                row.artifact_fingerprint,
+                goal_fingerprints,
+                "Product Goal decision",
+            )
+            if row.decision == "accepted":
+                accepted_goal_ids.add(row.product_goal_artifact_id)
+        return frozenset(accepted_goal_ids)
+
+    def _product_goal_outcomes(
+        self,
+        project_id: int,
+        goals: dict[int, ProductGoalArtifactFact],
+        accepted_goal_ids: frozenset[int],
+    ) -> dict[int, ProductGoalOutcomeFact]:
+        rows = self._session.exec(
+            select(ProductGoalOutcome)
+            .where(col(ProductGoalOutcome.project_id) == project_id)
+            .order_by(col(ProductGoalOutcome.product_goal_outcome_id)),
+            execution_options=self._query_options(),
+        ).all()
+        facts: dict[int, ProductGoalOutcomeFact] = {}
+        outcomes_by_goal: set[int] = set()
+        goal_fingerprints = {
+            item_id: item.content_fingerprint for item_id, item in goals.items()
+        }
+        for row in rows:
+            identifier = self._required_id(
+                row.product_goal_outcome_id,
+                "Product Goal outcome",
+            )
+            self._require_product_condition(
+                row.outcome in {"fulfilled", "abandoned"},
+                "Product Goal outcome has an invalid value.",
+            )
+            self._require_fingerprint_reference(
+                row.product_goal_artifact_id,
+                row.artifact_fingerprint,
+                goal_fingerprints,
+                "Product Goal outcome",
+            )
+            self._require_product_condition(
+                row.product_goal_artifact_id in accepted_goal_ids,
+                "Product Goal outcome requires an accepted Product Goal.",
+            )
+            self._require_product_condition(
+                row.product_goal_artifact_id not in outcomes_by_goal,
+                "Product Goal has multiple outcomes.",
+            )
+            outcomes_by_goal.add(row.product_goal_artifact_id)
+            facts[identifier] = ProductGoalOutcomeFact(
+                product_goal_outcome_id=identifier,
+                product_goal_artifact_id=row.product_goal_artifact_id,
+                artifact_fingerprint=row.artifact_fingerprint,
+                outcome=self._product_goal_outcome(row.outcome),
+                rationale=row.rationale,
+                decided_by=row.decided_by,
+                decided_at=row.decided_at,
+            )
+        self._require_product_condition(
+            len(accepted_goal_ids - outcomes_by_goal) <= 1,
+            "Project has more than one accepted Product Goal without an outcome.",
+        )
+        return facts
+
+    def _specification_decisions(
+        self,
+        project_id: int,
+        candidates: dict[int, SpecificationCandidateFact],
+    ) -> None:
+        rows = self._session.exec(
+            select(SpecificationDecision)
+            .where(col(SpecificationDecision.project_id) == project_id)
+            .order_by(col(SpecificationDecision.specification_decision_id)),
+            execution_options=self._query_options(),
+        ).all()
+        for row in rows:
+            self._require_product_condition(
+                row.decision in {"accepted", "rejected"},
+                "Specification decision has an invalid value.",
+            )
+            self._require_fingerprint_reference(
+                row.specification_candidate_id,
+                row.artifact_fingerprint,
+                {
+                    item_id: item.content_fingerprint
+                    for item_id, item in candidates.items()
+                },
+                "Specification decision",
+            )
+
+    def _spec_versions_with_lineage(
+        self,
+        spec_versions: tuple[SpecVersionFact, ...],
+        product_definition: _ProductDefinitionFactLoad,
+    ) -> tuple[SpecVersionFact, ...]:
+        """Validate nullable staging lineage and enrich specification facts."""
+        candidates = {
+            item.specification_candidate_id: item
+            for item in product_definition.specification_candidates
+        }
+        versions_by_id = {item.spec_version_id: item for item in spec_versions}
+        enriched: list[SpecVersionFact] = []
+        for item in spec_versions:
+            candidate = (
+                None
+                if item.source_specification_candidate_id is None
+                else candidates.get(item.source_specification_candidate_id)
+            )
+            source_values = (
+                item.source_vision_artifact_id,
+                item.source_vision_fingerprint,
+                item.source_product_goal_artifact_id,
+                item.source_product_goal_fingerprint,
+                item.source_discovery_artifact_id,
+                item.source_discovery_fingerprint,
+            )
+            if candidate is None:
+                if item.source_specification_candidate_id is not None or any(
+                    value is not None for value in source_values
+                ):
+                    self._require_product_condition(
+                        False,
+                        "Specification registry source lineage is invalid.",
+                    )
+                candidate_fingerprint = None
+            else:
+                expected = (
+                    candidate.vision_artifact_id,
+                    candidate.vision_fingerprint,
+                    candidate.product_goal_artifact_id,
+                    candidate.product_goal_fingerprint,
+                    candidate.discovery_artifact_id,
+                    candidate.discovery_fingerprint,
+                )
+                if source_values != expected:
+                    self._require_product_condition(
+                        False,
+                        "Specification registry source lineage changed.",
+                    )
+                candidate_fingerprint = candidate.content_fingerprint
+            if (
+                item.supersedes_spec_version_id is not None
+                and item.supersedes_spec_version_id not in versions_by_id
+            ):
+                self._require_product_condition(
+                    False,
+                    "Specification registry supersession is invalid.",
+                )
+            enriched.append(
+                item.model_copy(
+                    update={
+                        "source_specification_candidate_fingerprint": (
+                            candidate_fingerprint
+                        )
+                    }
+                )
+            )
+        return tuple(enriched)
 
     def _authority_feedback(
         self,
@@ -3260,6 +3943,12 @@ class WorkflowFactRepository:
         return value
 
     @staticmethod
+    def _require_product_condition(condition: bool, message: str) -> None:
+        """Raise a fact-load error when a durable product condition is false."""
+        if not condition:
+            raise WorkflowFactRepository._error(message)
+
+    @staticmethod
     def _require_project_run(
         discovery_run_id: int,
         discovery_run_ids: frozenset[int],
@@ -3366,6 +4055,32 @@ class WorkflowFactRepository:
         except ValidationError as exc:
             message = f"Stored canonical {label} {identifier} JSON is invalid."
             raise WorkflowFactRepository._error(message) from exc
+
+    @staticmethod
+    def _canonical_json_object(content: str, label: str) -> dict[str, JsonValue]:
+        """Decode one canonical JSON object retained without a content hash field."""
+        try:
+            value = _JSON_OBJECT.validate_json(content)
+        except ValidationError as exc:
+            message = f"{label} JSON is invalid."
+            raise WorkflowFactRepository._error(message) from exc
+        if canonical_json(value) != content:
+            message = f"{label} JSON is not canonical."
+            raise WorkflowFactRepository._error(message)
+        return value
+
+    @staticmethod
+    def _canonical_string_list(content: str, label: str) -> tuple[str, ...]:
+        """Decode one canonical JSON string list retained without a content hash."""
+        try:
+            value = _STRING_LIST.validate_json(content)
+        except ValidationError as exc:
+            message = f"{label} JSON is invalid."
+            raise WorkflowFactRepository._error(message) from exc
+        if canonical_json(value) != content:
+            message = f"{label} JSON is not canonical."
+            raise WorkflowFactRepository._error(message)
+        return tuple(value)
 
     @staticmethod
     def _validate_authority_json(
@@ -3523,6 +4238,24 @@ class WorkflowFactRepository:
         if value == "amendment":
             return "amendment"
         message = f"Specification draft has invalid kind {value!r}."
+        raise WorkflowFactRepository._error(message)
+
+    @staticmethod
+    def _vision_mode(value: str) -> _VisionMode:
+        if value == "initial":
+            return "initial"
+        if value == "revision":
+            return "revision"
+        message = f"Invalid Vision interview mode {value!r}."
+        raise WorkflowFactRepository._error(message)
+
+    @staticmethod
+    def _product_goal_outcome(value: str) -> _ProductGoalOutcome:
+        if value == "fulfilled":
+            return "fulfilled"
+        if value == "abandoned":
+            return "abandoned"
+        message = f"Invalid Product Goal outcome {value!r}."
         raise WorkflowFactRepository._error(message)
 
     @staticmethod

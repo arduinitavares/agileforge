@@ -6,7 +6,13 @@ from services.agent_workbench.fingerprints import (
     canonical_hash as legacy_canonical_hash,
 )
 from workflow.contracts import TransitionResult
-from workflow.facts import NodeAttemptFact, ProjectFact, WorkflowFactSnapshot
+from workflow.facts import (
+    NodeAttemptFact,
+    ProductGoalInterviewTurnFact,
+    ProjectFact,
+    VisionInterviewTurnFact,
+    WorkflowFactSnapshot,
+)
 from workflow.fingerprints import (
     business_fact_fingerprint,
     canonical_hash,
@@ -87,6 +93,91 @@ def test_business_fact_changes_both_fingerprints() -> None:
 
     assert fact_fingerprint(changed) != fact_fingerprint(snapshot)
     assert business_fact_fingerprint(changed) != business_fact_fingerprint(snapshot)
+
+
+def test_incomplete_vision_turn_changes_business_fact_fingerprint() -> None:
+    """Treat durable incomplete interview turns as product business evidence."""
+    created = datetime(2026, 8, 2, 12, tzinfo=UTC)
+    snapshot = WorkflowFactSnapshot(
+        project=ProjectFact(
+            project_id=3,
+            name="MyFinance",
+            origin="brownfield",
+            created_at=created,
+        ),
+        vision_interview_turns=(
+            VisionInterviewTurnFact(
+                vision_interview_turn_id=7,
+                mode="initial",
+                turn_number=1,
+                revision_intent_id=None,
+                prior_turn_id=None,
+                user_text="Track the household ledger.",
+                components={"scope": "household"},
+                vision_statement="A household ledger.",
+                is_complete=False,
+                clarifying_questions=("Which institutions?",),
+                output_fingerprint="sha256:turn",
+                workflow_node_attempt_id=11,
+                attempt_fingerprint="sha256:attempt",
+                recorded_at=created,
+            ),
+        ),
+    )
+    completed = snapshot.model_copy(
+        update={
+            "vision_interview_turns": (
+                snapshot.vision_interview_turns[0].model_copy(
+                    update={"is_complete": True}
+                ),
+            )
+        }
+    )
+
+    assert business_fact_fingerprint(snapshot) != business_fact_fingerprint(completed)
+
+
+def test_incomplete_product_goal_turn_changes_business_fact_fingerprint() -> None:
+    """Treat incomplete Product Goal turns as durable business evidence."""
+    created = datetime(2026, 8, 2, 12, tzinfo=UTC)
+    snapshot = WorkflowFactSnapshot(
+        project=ProjectFact(
+            project_id=3,
+            name="MyFinance",
+            origin="brownfield",
+            created_at=created,
+        ),
+        product_goal_interview_turns=(
+            ProductGoalInterviewTurnFact(
+                product_goal_interview_turn_id=8,
+                vision_artifact_id=7,
+                vision_fingerprint="sha256:vision",
+                goal_number=1,
+                revision_number=1,
+                prior_turn_id=None,
+                user_text="Preserve exact lineage.",
+                components={"scope": "lineage"},
+                goal_statement="Preserve durable lineage.",
+                is_complete=False,
+                clarifying_questions=("Which parent records?",),
+                output_fingerprint="sha256:goal-turn",
+                workflow_node_attempt_id=12,
+                attempt_fingerprint="sha256:attempt",
+                recorded_at=created,
+            ),
+        ),
+    )
+    completed = snapshot.model_copy(
+        update={
+            "product_goal_interview_turns": (
+                snapshot.product_goal_interview_turns[0].model_copy(
+                    update={"is_complete": True}
+                ),
+            )
+        }
+    )
+
+    assert business_fact_fingerprint(snapshot) != business_fact_fingerprint(completed)
 
 
 def test_decision_fingerprint_is_order_stable() -> None:

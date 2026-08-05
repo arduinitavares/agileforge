@@ -136,6 +136,119 @@ class ScopeExtensionReconciliationFact(FrozenModel):
     reconciled_at: _DATETIME
 
 
+class VisionRevisionIntentFact(FrozenModel):
+    """Requested revision of one exact staged Vision artifact."""
+
+    vision_revision_intent_id: int
+    source_vision_artifact_id: int
+    source_vision_fingerprint: str
+    reason: str
+    initiated_by: str
+    initiated_at: _DATETIME
+
+
+class VisionInterviewTurnFact(FrozenModel):
+    """Immutable initial or revision interview turn."""
+
+    vision_interview_turn_id: int
+    mode: Literal["initial", "revision"]
+    turn_number: int
+    revision_intent_id: int | None
+    prior_turn_id: int | None
+    user_text: str
+    components: JsonObject
+    vision_statement: str
+    is_complete: bool
+    clarifying_questions: tuple[str, ...]
+    output_fingerprint: str
+    workflow_node_attempt_id: int
+    attempt_fingerprint: str
+    recorded_at: _DATETIME
+
+
+class ProductGoalInterviewTurnFact(FrozenModel):
+    """Immutable interview turn for one numbered Product Goal revision."""
+
+    product_goal_interview_turn_id: int
+    vision_artifact_id: int
+    vision_fingerprint: str
+    goal_number: int
+    revision_number: int
+    prior_turn_id: int | None
+    user_text: str
+    components: JsonObject
+    goal_statement: str
+    is_complete: bool
+    clarifying_questions: tuple[str, ...]
+    output_fingerprint: str
+    workflow_node_attempt_id: int
+    attempt_fingerprint: str
+    recorded_at: _DATETIME
+
+
+class ProductGoalArtifactFact(FrozenModel):
+    """Immutable product-goal version with staged Vision lineage."""
+
+    product_goal_artifact_id: int
+    vision_artifact_id: int
+    vision_fingerprint: str
+    goal_number: int
+    revision_number: int
+    statement: str
+    content_fingerprint: str
+    supersedes_product_goal_artifact_id: int | None
+    source_interview_turn_id: int
+    created_by: str
+    created_at: _DATETIME
+
+
+class ProductGoalOutcomeFact(FrozenModel):
+    """Durable resolution of one accepted Product Goal."""
+
+    product_goal_outcome_id: int
+    product_goal_artifact_id: int
+    artifact_fingerprint: str
+    outcome: Literal["fulfilled", "abandoned"]
+    rationale: str
+    decided_by: str
+    decided_at: _DATETIME
+
+
+class DiscoveryArtifactFact(FrozenModel):
+    """Immutable discovery result with exact Vision and goal parents."""
+
+    discovery_artifact_id: int
+    vision_artifact_id: int
+    vision_fingerprint: str
+    product_goal_artifact_id: int
+    product_goal_fingerprint: str
+    content_fingerprint: str
+    content_ref: str | None
+    producer: str
+    supersedes_discovery_artifact_id: int | None
+    recorded_by: str
+    recorded_at: _DATETIME
+
+
+class SpecificationCandidateFact(FrozenModel):
+    """Immutable candidate specification with exact product-definition lineage."""
+
+    specification_candidate_id: int
+    vision_artifact_id: int
+    vision_fingerprint: str
+    product_goal_artifact_id: int
+    product_goal_fingerprint: str
+    discovery_artifact_id: int
+    discovery_fingerprint: str
+    base_spec_version_id: int | None
+    base_spec_hash: str | None
+    content_fingerprint: str
+    content_ref: str | None
+    supersedes_specification_candidate_id: int | None
+    recorded_by: str
+    recorded_at: _DATETIME
+
+
 class SpecVersionFact(FrozenModel):
     """Approved or superseded registered specification version."""
 
@@ -143,6 +256,15 @@ class SpecVersionFact(FrozenModel):
     spec_hash: str
     status: Literal["approved", "superseded"]
     approved_at: _DATETIME | None
+    source_specification_candidate_id: int | None = None
+    source_specification_candidate_fingerprint: str | None = None
+    source_vision_artifact_id: int | None = None
+    source_vision_fingerprint: str | None = None
+    source_product_goal_artifact_id: int | None = None
+    source_product_goal_fingerprint: str | None = None
+    source_discovery_artifact_id: int | None = None
+    source_discovery_fingerprint: str | None = None
+    supersedes_spec_version_id: int | None = None
 
 
 class RepositoryBaselineFact(FrozenModel):
@@ -454,6 +576,13 @@ class WorkflowFactSnapshot(FrozenModel):
     initial_registrations: tuple[InitialScopeRegistrationFact, ...] = ()
     extension_registrations: tuple[ScopeExtensionRegistrationFact, ...] = ()
     scope_extension_reconciliations: tuple[ScopeExtensionReconciliationFact, ...] = ()
+    vision_revision_intents: tuple[VisionRevisionIntentFact, ...] = ()
+    vision_interview_turns: tuple[VisionInterviewTurnFact, ...] = ()
+    product_goal_interview_turns: tuple[ProductGoalInterviewTurnFact, ...] = ()
+    product_goal_artifacts: tuple[ProductGoalArtifactFact, ...] = ()
+    product_goal_outcomes: tuple[ProductGoalOutcomeFact, ...] = ()
+    discovery_artifacts: tuple[DiscoveryArtifactFact, ...] = ()
+    specification_candidates: tuple[SpecificationCandidateFact, ...] = ()
     spec_versions: tuple[SpecVersionFact, ...] = ()
     repository_baselines: tuple[RepositoryBaselineFact, ...] = ()
     repository_inventories: tuple[RepositoryInventoryFact, ...] = ()

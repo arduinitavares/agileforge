@@ -45,6 +45,17 @@ from models.events import (
     TaskExecutionLog,
     WorkflowEvent,
 )
+from models.product_definition import (
+    DiscoveryArtifact,
+    ProductGoalArtifact,
+    ProductGoalArtifactDecision,
+    ProductGoalInterviewTurn,
+    ProductGoalOutcome,
+    SpecificationCandidate,
+    SpecificationDecision,
+    VisionInterviewTurn,
+    VisionRevisionIntent,
+)
 from models.repository import RepositoryBinding
 from models.specs import (
     CompiledSpecAuthority,
@@ -60,8 +71,13 @@ __all__ = [
     "BrownfieldSpecApproval",
     "BrownfieldSpecDraftAttempt",
     "CompiledSpecAuthority",
+    "DiscoveryArtifact",
     "Epic",
     "Feature",
+    "ProductGoalArtifact",
+    "ProductGoalArtifactDecision",
+    "ProductGoalInterviewTurn",
+    "ProductGoalOutcome",
     "Project",
     "ProjectPersona",
     "ProjectTeam",
@@ -69,6 +85,8 @@ __all__ = [
     "SpecAuthorityAcceptance",
     "SpecAuthorityStatus",
     "SpecRegistry",
+    "SpecificationCandidate",
+    "SpecificationDecision",
     "Sprint",
     "SprintStatus",
     "SprintStory",
@@ -87,6 +105,8 @@ __all__ = [
     "TimeFrame",
     "UserStory",
     "UserStoryDependency",
+    "VisionInterviewTurn",
+    "VisionRevisionIntent",
     "WorkflowEvent",
     "WorkflowEventType",
 ]
