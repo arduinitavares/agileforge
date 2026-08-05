@@ -44,6 +44,17 @@ from workflow.requests.product_definition import (
     RecordBacklogDraft,
     RecordVisionDraft,
 )
+from workflow.requests.product_discovery import (
+    DecideSpecification,
+    RecordDiscoveryArtifact,
+    RecordSpecificationCandidate,
+)
+from workflow.requests.product_goal import (
+    AbandonProductGoal,
+    DecideProductGoalReview,
+    FulfillProductGoal,
+    RecordProductGoalInterviewTurn,
+)
 from workflow.requests.project_shell import AbandonProjectShell, OpenProjectShell
 from workflow.requests.scope_extension import (
     AbandonScopeExtension,
@@ -85,6 +96,13 @@ type TransitionRequest = (
     | RecordVisionInterviewTurn
     | DecideVisionReview
     | BeginVisionRevision
+    | RecordProductGoalInterviewTurn
+    | DecideProductGoalReview
+    | FulfillProductGoal
+    | AbandonProductGoal
+    | RecordDiscoveryArtifact
+    | RecordSpecificationCandidate
+    | DecideSpecification
     | RecordBacklogDraft
     | DecideBacklog
     | ReconcileBacklog
@@ -116,6 +134,7 @@ type TransitionRequest = (
 )
 
 __all__ = [
+    "AbandonProductGoal",
     "AbandonProjectShell",
     "AbandonScopeExtension",
     "ApplyStoryDependencies",
@@ -131,12 +150,15 @@ __all__ = [
     "DecideExtensionPrd",
     "DecideInitialSpecDraft",
     "DecidePrd",
+    "DecideProductGoalReview",
     "DecideRoadmap",
+    "DecideSpecification",
     "DecideSprintPlan",
     "DecideStory",
     "DecideVision",
     "DecideVisionReview",
     "FailNodeAttempt",
+    "FulfillProductGoal",
     "OpenProjectShell",
     "ReconcileBacklog",
     "ReconcileScopeExtension",
@@ -145,14 +167,17 @@ __all__ = [
     "RecordBacklogDraft",
     "RecordBrownfieldSpecDraft",
     "RecordChallengeArtifact",
+    "RecordDiscoveryArtifact",
     "RecordExtensionChallenge",
     "RecordExtensionPrd",
     "RecordInitialSpecDraft",
     "RecordPostSprintTriage",
     "RecordPrdVersion",
+    "RecordProductGoalInterviewTurn",
     "RecordRepositoryBaseline",
     "RecordRepositoryInventory",
     "RecordRoadmapDraft",
+    "RecordSpecificationCandidate",
     "RecordSprintPlan",
     "RecordStoryDraft",
     "RecordVisionDraft",

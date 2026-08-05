@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from sqlalchemy.orm import relationship
-from sqlalchemy.schema import ForeignKeyConstraint, UniqueConstraint
+from sqlalchemy.schema import CheckConstraint, UniqueConstraint
 from sqlalchemy.types import Text
 from sqlmodel import Field, Relationship, SQLModel
 
@@ -19,17 +19,14 @@ class SpecRegistry(SQLModel, table=True):
 
     __tablename__ = "spec_registry"  # type: ignore[assignment]
     __table_args__ = (
-        ForeignKeyConstraint(
-            ["source_specification_candidate_id"],
-            ["specification_candidates.specification_candidate_id"],
-            name="fk_spec_registry_source_specification_candidate",
-            use_alter=True,
-            ondelete="SET NULL",
-        ),
         UniqueConstraint(
             "project_id",
             "spec_version_id",
             name="uq_spec_registry_project_id",
+        ),
+        CheckConstraint(
+            "status IN ('approved', 'superseded')",
+            name="ck_spec_registry_status",
         ),
         UniqueConstraint(
             "project_id",
@@ -53,8 +50,7 @@ class SpecRegistry(SQLModel, table=True):
         description="Original file path or reference for provenance",
     )
     status: str = Field(
-        default="draft",
-        description="Lifecycle status: draft | approved | superseded",
+        description="Lifecycle status: approved | superseded",
     )
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(UTC),
@@ -72,16 +68,13 @@ class SpecRegistry(SQLModel, table=True):
         sa_type=Text,
         description="Review notes or justification for approval",
     )
-    source_specification_candidate_id: int | None = Field(
-        default=None,
-        unique=True,
-    )
-    source_vision_artifact_id: int | None = Field(default=None, index=True)
-    source_vision_fingerprint: str | None = Field(default=None, index=True)
-    source_product_goal_artifact_id: int | None = Field(default=None, index=True)
-    source_product_goal_fingerprint: str | None = Field(default=None, index=True)
-    source_discovery_artifact_id: int | None = Field(default=None, index=True)
-    source_discovery_fingerprint: str | None = Field(default=None, index=True)
+    source_specification_candidate_id: int = Field(unique=True)
+    source_vision_artifact_id: int = Field(index=True)
+    source_vision_fingerprint: str = Field(index=True)
+    source_product_goal_artifact_id: int = Field(index=True)
+    source_product_goal_fingerprint: str = Field(index=True)
+    source_discovery_artifact_id: int = Field(index=True)
+    source_discovery_fingerprint: str = Field(index=True)
     supersedes_spec_version_id: int | None = Field(
         default=None,
         foreign_key="spec_registry.spec_version_id",

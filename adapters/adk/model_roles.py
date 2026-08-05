@@ -14,6 +14,7 @@ AGENTIC_MODEL_ROLES: Final[MappingProxyType[str, str]] = MappingProxyType(
         "authority.repair": "spec_authority_compiler",
         "vision.generate": "product_vision",
         "vision.interview": "product_vision",
+        "goal.interview": "product_goal",
         "backlog.generate": "backlog_primer",
         "planning.roadmap.generate": "roadmap_builder",
         "planning.story.generate": "user_story_writer",

@@ -2,6 +2,7 @@ models:
   brownfield_curator: "openrouter/openai/gpt-oss-20b:free"
   spec_authority_compiler: "openrouter/openai/gpt-oss-20b:free"
   product_vision: "openrouter/openai/gpt-oss-20b:free"
+  product_goal: "openrouter/openai/gpt-oss-20b:free"
   spec_validator: "openrouter/openai/gpt-oss-20b:free"
   backlog_primer: "openrouter/openai/gpt-oss-20b:free"
   roadmap_builder: "openrouter/openai/gpt-oss-20b:free"

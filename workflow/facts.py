@@ -289,6 +289,19 @@ class SpecificationCandidateFact(FrozenModel):
     recorded_at: _DATETIME
 
 
+class SpecificationDecisionFact(FrozenModel):
+    """Append-only review decision bound to one exact specification candidate."""
+
+    specification_decision_id: int
+    specification_candidate_id: int
+    artifact_fingerprint: str
+    decision: Literal["accepted", "rejected", "feedback"]
+    rationale: str
+    reviewer: str
+    idempotency_key: str
+    decided_at: _DATETIME
+
+
 class SpecVersionFact(FrozenModel):
     """Approved or superseded registered specification version."""
 
@@ -296,14 +309,14 @@ class SpecVersionFact(FrozenModel):
     spec_hash: str
     status: Literal["approved", "superseded"]
     approved_at: _DATETIME | None
-    source_specification_candidate_id: int | None = None
+    source_specification_candidate_id: int
     source_specification_candidate_fingerprint: str | None = None
-    source_vision_artifact_id: int | None = None
-    source_vision_fingerprint: str | None = None
-    source_product_goal_artifact_id: int | None = None
-    source_product_goal_fingerprint: str | None = None
-    source_discovery_artifact_id: int | None = None
-    source_discovery_fingerprint: str | None = None
+    source_vision_artifact_id: int
+    source_vision_fingerprint: str
+    source_product_goal_artifact_id: int
+    source_product_goal_fingerprint: str
+    source_discovery_artifact_id: int
+    source_discovery_fingerprint: str
     supersedes_spec_version_id: int | None = None
 
 
@@ -626,6 +639,7 @@ class WorkflowFactSnapshot(FrozenModel):
     product_goal_outcomes: tuple[ProductGoalOutcomeFact, ...] = ()
     discovery_artifacts: tuple[DiscoveryArtifactFact, ...] = ()
     specification_candidates: tuple[SpecificationCandidateFact, ...] = ()
+    specification_decisions: tuple[SpecificationDecisionFact, ...] = ()
     spec_versions: tuple[SpecVersionFact, ...] = ()
     repository_baselines: tuple[RepositoryBaselineFact, ...] = ()
     repository_inventories: tuple[RepositoryInventoryFact, ...] = ()

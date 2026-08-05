@@ -31,6 +31,15 @@ from services.packets.canonical import (
 )
 from services.specs.compiler_service import load_compiled_artifact
 from workflow.contracts import JsonObject, JsonValue
+from workflow.definitions.product_discovery import (
+    accepted_current_spec,
+    current_discovery,
+    current_specification_candidate,
+)
+from workflow.definitions.product_goal import (
+    accepted_current_goal,
+    accepted_current_vision,
+)
 from workflow.fingerprints import canonical_hash
 
 if TYPE_CHECKING:
@@ -590,6 +599,146 @@ class DurableReadProjectionService:
                     "created_at": timestamp,
                     "updated_at": timestamp,
                 },
+            }
+        )
+
+    def vision_status(self, *, project_id: int) -> JsonObject:
+        """Project the current durable Vision without consulting mutable caches."""
+        snapshot = self._snapshot(project_id)
+        if isinstance(snapshot, dict):
+            return snapshot
+        vision = accepted_current_vision(snapshot)
+        if vision is None:
+            return _success({"current": None, "stale_reason": "VISION_NOT_ACCEPTED"})
+        return _success(
+            {
+                "current": {
+                    "vision_artifact_id": vision.vision_artifact_id,
+                    "fingerprint": vision.content_fingerprint,
+                    "statement": vision.statement,
+                },
+                "stale_reason": None,
+            }
+        )
+
+    def product_goal_status(self, *, project_id: int) -> JsonObject:
+        """Project accepted Goal and durable outcome state from workflow facts."""
+        snapshot = self._snapshot(project_id)
+        if isinstance(snapshot, dict):
+            return snapshot
+        goal = accepted_current_goal(snapshot)
+        if goal is None:
+            return _success(
+                {
+                    "active": None,
+                    "outcome": None,
+                    "stale_reason": "GOAL_NOT_ACTIVE",
+                }
+            )
+        return _success(
+            {
+                "active": {
+                    "product_goal_artifact_id": goal.product_goal_artifact_id,
+                    "fingerprint": goal.content_fingerprint,
+                    "statement": goal.statement,
+                    "goal_number": goal.goal_number,
+                    "revision_number": goal.revision_number,
+                },
+                "outcome": None,
+                "stale_reason": None,
+            }
+        )
+
+    def discovery_status(self, *, project_id: int) -> JsonObject:
+        """Project the current durable discovery artifact and exact parents."""
+        snapshot = self._snapshot(project_id)
+        if isinstance(snapshot, dict):
+            return snapshot
+        discovery = current_discovery(snapshot)
+        if discovery is None:
+            return _success(
+                {"current": None, "stale_reason": "DISCOVERY_NOT_CURRENT"}
+            )
+        return _success(
+            {
+                "current": {
+                    "discovery_artifact_id": discovery.discovery_artifact_id,
+                    "fingerprint": discovery.content_fingerprint,
+                    "content_ref": discovery.content_ref,
+                    "vision_artifact_id": discovery.vision_artifact_id,
+                    "product_goal_artifact_id": discovery.product_goal_artifact_id,
+                },
+                "stale_reason": None,
+            }
+        )
+
+    def specification_status(self, *, project_id: int) -> JsonObject:
+        """Project the graph-selected approved registry identity only."""
+        snapshot = self._snapshot(project_id)
+        if isinstance(snapshot, dict):
+            return snapshot
+        spec = accepted_current_spec(snapshot)
+        if spec is None:
+            return _success(
+                {
+                    "current": None,
+                    "stale_reason": "SPECIFICATION_NOT_APPROVED",
+                }
+            )
+        return _success(
+            {
+                "current": {
+                    "spec_version_id": spec.spec_version_id,
+                    "spec_hash": spec.spec_hash,
+                    "status": spec.status,
+                    "source_specification_candidate_id": (
+                        spec.source_specification_candidate_id
+                    ),
+                },
+                "stale_reason": None,
+            }
+        )
+
+    def specification_review(self, *, project_id: int) -> JsonObject:
+        """Project the pending or terminal durable candidate review state."""
+        snapshot = self._snapshot(project_id)
+        if isinstance(snapshot, dict):
+            return snapshot
+        candidate = current_specification_candidate(snapshot)
+        if candidate is None:
+            return _success(
+                {
+                    "candidate": None,
+                    "review": None,
+                    "stale_reason": "NO_CURRENT_CANDIDATE",
+                }
+            )
+        decisions = [
+            decision
+            for decision in snapshot.specification_decisions
+            if (
+                decision.specification_candidate_id
+                == candidate.specification_candidate_id
+            )
+        ]
+        review: JsonObject | None = None
+        if len(decisions) == 1:
+            decision = decisions[0]
+            review = {
+                "specification_decision_id": decision.specification_decision_id,
+                "decision": decision.decision,
+                "rationale": decision.rationale,
+                "reviewer": decision.reviewer,
+            }
+        return _success(
+            {
+                "candidate": {
+                    "specification_candidate_id": candidate.specification_candidate_id,
+                    "fingerprint": candidate.content_fingerprint,
+                    "content_ref": candidate.content_ref,
+                },
+                "review": review,
+                "stale_reason": None if review is None else "CANDIDATE_REVIEWED",
             }
         )
 

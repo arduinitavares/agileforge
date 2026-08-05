@@ -111,6 +111,7 @@ from workflow.facts import (
     ScopeExtensionRegistrationFact,
     SpecDraftFact,
     SpecificationCandidateFact,
+    SpecificationDecisionFact,
     SpecVersionFact,
     SprintClosureFact,
     SprintFact,
@@ -249,6 +250,7 @@ class _ProductDefinitionFactLoad:
     goal_outcomes: tuple[ProductGoalOutcomeFact, ...]
     discoveries: tuple[DiscoveryArtifactFact, ...]
     specification_candidates: tuple[SpecificationCandidateFact, ...]
+    specification_decisions: tuple[SpecificationDecisionFact, ...]
 
 
 @dataclass(frozen=True)
@@ -499,6 +501,7 @@ class WorkflowFactRepository:
             product_goal_outcomes=product_definition.goal_outcomes,
             discovery_artifacts=product_definition.discoveries,
             specification_candidates=product_definition.specification_candidates,
+            specification_decisions=product_definition.specification_decisions,
             spec_versions=spec_version_facts,
             repository_baselines=repository_baselines,
             repository_inventories=self._repository_inventories(
@@ -840,8 +843,10 @@ class WorkflowFactRepository:
         ).all()
         facts: list[SpecVersionFact] = []
         for row in rows:
-            if row.status not in {"approved", "superseded"}:
-                continue
+            self._require_product_condition(
+                row.status in {"approved", "superseded"},
+                "Specification registry has an invalid status.",
+            )
             status: Literal["approved", "superseded"] = (
                 "approved" if row.status == "approved" else "superseded"
             )
@@ -916,7 +921,7 @@ class WorkflowFactRepository:
         candidates = self._specification_candidates(
             project_id, vision_fingerprints, goals, discoveries, spec_versions
         )
-        self._specification_decisions(project_id, candidates)
+        specification_decisions = self._specification_decisions(project_id, candidates)
         return _ProductDefinitionFactLoad(
             revision_intents=tuple(revisions.values()),
             interview_turns=tuple(turns.values()),
@@ -928,6 +933,7 @@ class WorkflowFactRepository:
             goal_outcomes=tuple(outcomes.values()),
             discoveries=tuple(discoveries.values()),
             specification_candidates=tuple(candidates.values()),
+            specification_decisions=tuple(specification_decisions.values()),
         )
 
     def _vision_artifacts(
@@ -1614,9 +1620,7 @@ class WorkflowFactRepository:
             for item in decisions.values()
             if item.decision == "accepted"
         }
-        outcome_goal_ids = {
-            item.product_goal_artifact_id for item in outcomes.values()
-        }
+        outcome_goal_ids = {item.product_goal_artifact_id for item in outcomes.values()}
         unresolved_goal_ids = frozenset(accepted_goal_ids - outcome_goal_ids)
         self._require_product_condition(
             len(unresolved_goal_ids) <= 1,
@@ -1700,27 +1704,58 @@ class WorkflowFactRepository:
         self,
         project_id: int,
         candidates: dict[int, SpecificationCandidateFact],
-    ) -> None:
+    ) -> dict[int, SpecificationDecisionFact]:
         rows = self._session.exec(
             select(SpecificationDecision)
             .where(col(SpecificationDecision.project_id) == project_id)
             .order_by(col(SpecificationDecision.specification_decision_id)),
             execution_options=self._query_options(),
         ).all()
+        facts: dict[int, SpecificationDecisionFact] = {}
+        decided_candidates: set[int] = set()
+        candidate_fingerprints = {
+            item_id: item.content_fingerprint for item_id, item in candidates.items()
+        }
         for row in rows:
+            identifier = self._required_id(
+                row.specification_decision_id,
+                "Specification decision",
+            )
             self._require_product_condition(
-                row.decision in {"accepted", "rejected"},
+                row.decision in {"accepted", "rejected", "feedback"},
                 "Specification decision has an invalid value.",
             )
             self._require_fingerprint_reference(
                 row.specification_candidate_id,
                 row.artifact_fingerprint,
-                {
-                    item_id: item.content_fingerprint
-                    for item_id, item in candidates.items()
-                },
+                candidate_fingerprints,
                 "Specification decision",
             )
+            candidate = candidates.get(row.specification_candidate_id)
+            self._require_product_condition(
+                candidate is not None and candidate.recorded_at < row.decided_at,
+                "Specification decision must follow candidate creation.",
+            )
+            self._require_product_condition(
+                row.specification_candidate_id not in decided_candidates,
+                "Specification candidate has multiple terminal review decisions.",
+            )
+            self._require_product_condition(
+                row.decision == "accepted" or bool(row.rationale.strip()),
+                "Rejected or feedback specification decisions require rationale.",
+            )
+            decided_candidates.add(row.specification_candidate_id)
+            facts[identifier] = SpecificationDecisionFact(
+                specification_decision_id=identifier,
+                specification_candidate_id=row.specification_candidate_id,
+                artifact_fingerprint=row.artifact_fingerprint,
+                decision=self._product_goal_decision(row.decision),
+                rationale=row.rationale,
+                reviewer=row.reviewer,
+                idempotency_key=row.idempotency_key,
+                decided_at=row.decided_at,
+            )
+        return facts
 
     def _spec_versions_with_lineage(
         self,
@@ -1733,14 +1768,15 @@ class WorkflowFactRepository:
             for item in product_definition.specification_candidates
         }
         versions_by_id = {item.spec_version_id: item for item in spec_versions}
+        accepted_candidate_ids = {
+            decision.specification_candidate_id
+            for decision in product_definition.specification_decisions
+            if decision.decision == "accepted"
+        }
         current_vision = self._accepted_current_vision(product_definition)
         enriched: list[SpecVersionFact] = []
         for item in spec_versions:
-            candidate = (
-                None
-                if item.source_specification_candidate_id is None
-                else candidates.get(item.source_specification_candidate_id)
-            )
+            candidate = candidates.get(item.source_specification_candidate_id)
             source_values = (
                 item.source_vision_artifact_id,
                 item.source_vision_fingerprint,
@@ -1749,30 +1785,33 @@ class WorkflowFactRepository:
                 item.source_discovery_artifact_id,
                 item.source_discovery_fingerprint,
             )
+            self._require_product_condition(
+                candidate is not None,
+                "Specification registry source candidate is missing.",
+            )
             if candidate is None:
-                if item.source_specification_candidate_id is not None or any(
-                    value is not None for value in source_values
-                ):
-                    self._require_product_condition(
-                        False,
-                        "Specification registry source lineage is invalid.",
-                    )
-                candidate_fingerprint = None
-            else:
-                expected = (
-                    candidate.vision_artifact_id,
-                    candidate.vision_fingerprint,
-                    candidate.product_goal_artifact_id,
-                    candidate.product_goal_fingerprint,
-                    candidate.discovery_artifact_id,
-                    candidate.discovery_fingerprint,
-                )
-                if source_values != expected:
-                    self._require_product_condition(
-                        False,
-                        "Specification registry source lineage changed.",
-                    )
-                candidate_fingerprint = candidate.content_fingerprint
+                continue
+            expected = (
+                candidate.vision_artifact_id,
+                candidate.vision_fingerprint,
+                candidate.product_goal_artifact_id,
+                candidate.product_goal_fingerprint,
+                candidate.discovery_artifact_id,
+                candidate.discovery_fingerprint,
+            )
+            self._require_product_condition(
+                source_values == expected,
+                "Specification registry source lineage changed.",
+            )
+            self._require_product_condition(
+                candidate.specification_candidate_id in accepted_candidate_ids,
+                "Specification registry requires an accepted candidate decision.",
+            )
+            self._require_product_condition(
+                item.spec_hash == candidate.content_fingerprint,
+                "Specification registry hash does not match its accepted candidate.",
+            )
+            candidate_fingerprint = candidate.content_fingerprint
             if (
                 item.supersedes_spec_version_id is not None
                 and item.supersedes_spec_version_id not in versions_by_id
@@ -4801,9 +4840,7 @@ def select_vision_interview_input(context: VisionInputContext) -> VisionInputSel
         if item.mode == mode and item.revision_intent_id == intent_id
     )
     prior_ids = {item.prior_turn_id for item in turns if item.prior_turn_id is not None}
-    leaves = [
-        item for item in turns if item.vision_interview_turn_id not in prior_ids
-    ]
+    leaves = [item for item in turns if item.vision_interview_turn_id not in prior_ids]
     if len(leaves) > 1:
         message = "Vision interview turn chain is ambiguous."
         raise WorkflowFactLoadError(message)

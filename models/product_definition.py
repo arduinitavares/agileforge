@@ -575,7 +575,7 @@ class SpecificationDecision(SQLModel, table=True):
     __tablename__ = "specification_decisions"
     __table_args__ = (
         CheckConstraint(
-            "decision IN ('accepted', 'rejected')",
+            "decision IN ('accepted', 'rejected', 'feedback')",
             name="ck_specification_decision",
         ),
         UniqueConstraint(

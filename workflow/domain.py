@@ -31,6 +31,7 @@ from workflow.fingerprints import (
 from workflow.handlers import (
     AttemptStartState,
     as_utc,
+    execute_abandon_product_goal,
     execute_abandon_project_shell,
     execute_begin_vision_revision,
     execute_compile_authority,
@@ -39,9 +40,12 @@ from workflow.handlers import (
     execute_decide_brownfield_initial_spec,
     execute_decide_initial_spec_draft,
     execute_decide_prd,
+    execute_decide_product_goal_review,
+    execute_decide_specification,
     execute_decide_vision,
     execute_decide_vision_review,
     execute_execution_request,
+    execute_fulfill_product_goal,
     execute_open_project_shell,
     execute_planning_request,
     execute_reconcile_backlog,
@@ -49,10 +53,13 @@ from workflow.handlers import (
     execute_record_backlog_draft,
     execute_record_brownfield_spec_draft,
     execute_record_challenge_artifact,
+    execute_record_discovery_artifact,
     execute_record_initial_spec_draft,
     execute_record_prd_version,
+    execute_record_product_goal_interview_turn,
     execute_record_repository_baseline,
     execute_record_repository_inventory,
+    execute_record_specification_candidate,
     execute_record_vision_draft,
     execute_record_vision_interview_turn,
     execute_register_initial_scope,
@@ -70,6 +77,7 @@ from workflow.handlers import (
     validate_planning_review,
 )
 from workflow.requests import (
+    AbandonProductGoal,
     AbandonProjectShell,
     AbandonScopeExtension,
     ApplyStoryDependencies,
@@ -85,12 +93,15 @@ from workflow.requests import (
     DecideExtensionPrd,
     DecideInitialSpecDraft,
     DecidePrd,
+    DecideProductGoalReview,
     DecideRoadmap,
+    DecideSpecification,
     DecideSprintPlan,
     DecideStory,
     DecideVision,
     DecideVisionReview,
     FailNodeAttempt,
+    FulfillProductGoal,
     OpenProjectShell,
     ReconcileBacklog,
     ReconcileScopeExtension,
@@ -99,14 +110,17 @@ from workflow.requests import (
     RecordBacklogDraft,
     RecordBrownfieldSpecDraft,
     RecordChallengeArtifact,
+    RecordDiscoveryArtifact,
     RecordExtensionChallenge,
     RecordExtensionPrd,
     RecordInitialSpecDraft,
     RecordPostSprintTriage,
     RecordPrdVersion,
+    RecordProductGoalInterviewTurn,
     RecordRepositoryBaseline,
     RecordRepositoryInventory,
     RecordRoadmapDraft,
+    RecordSpecificationCandidate,
     RecordSprintPlan,
     RecordStoryDraft,
     RecordVisionDraft,
@@ -168,6 +182,15 @@ type _ProductDefinitionRequest = (
     | DecideVisionReview
     | BeginVisionRevision
 )
+type _ProductGoalRequest = (
+    RecordProductGoalInterviewTurn
+    | DecideProductGoalReview
+    | FulfillProductGoal
+    | AbandonProductGoal
+)
+type _ProductDiscoveryRequest = (
+    RecordDiscoveryArtifact | RecordSpecificationCandidate | DecideSpecification
+)
 type _PlanningRequest = (
     RecordRoadmapDraft
     | DecideRoadmap
@@ -211,6 +234,8 @@ type _PositionedTransitionRequest = (
     | RecordVisionInterviewTurn
     | DecideVisionReview
     | BeginVisionRevision
+    | _ProductGoalRequest
+    | _ProductDiscoveryRequest
     | _PlanningRequest
     | _ExecutionRequest
     | _ScopeExtensionRequest
@@ -820,6 +845,14 @@ class WorkflowDomain:
         )
         if result is not None:
             return result
+        result = self._execute_product_definition_cycle(
+            session,
+            request,
+            decision,
+            evaluated_at,
+        )
+        if result is not None:
+            return result
         return self._execute_prior_positioned(
             session,
             request,
@@ -947,8 +980,96 @@ class WorkflowDomain:
                 evaluated_at,
             )
         else:
-            assert_never(request)
+            message = "Unsupported positioned request reached the prior dispatcher."
+            raise TypeError(message)
         return result
+
+    @staticmethod
+    def _execute_product_definition_cycle(
+        session: Session,
+        request: _PositionedTransitionRequest,
+        decision: NodeDecision,
+        evaluated_at: datetime,
+    ) -> TransitionResult | None:
+        """Execute the isolated Product Goal and discovery cycle request families."""
+        if isinstance(
+            request,
+            RecordProductGoalInterviewTurn
+            | DecideProductGoalReview
+            | FulfillProductGoal
+            | AbandonProductGoal,
+        ):
+            return WorkflowDomain._execute_product_goal_request(
+                session,
+                request,
+                decision,
+                evaluated_at,
+            )
+        if isinstance(
+            request,
+            RecordDiscoveryArtifact
+            | RecordSpecificationCandidate
+            | DecideSpecification,
+        ):
+            return WorkflowDomain._execute_product_discovery_request(
+                session,
+                request,
+                decision,
+                evaluated_at,
+            )
+        return None
+
+    @staticmethod
+    def _execute_product_goal_request(
+        session: Session,
+        request: _ProductGoalRequest,
+        decision: NodeDecision,
+        evaluated_at: datetime,
+    ) -> TransitionResult:
+        if isinstance(request, RecordProductGoalInterviewTurn):
+            return execute_record_product_goal_interview_turn(
+                session, request, decision, evaluated_at
+            )
+        if isinstance(request, DecideProductGoalReview):
+            return execute_decide_product_goal_review(
+                session,
+                request,
+                decision,
+                evaluated_at,
+            )
+        if isinstance(request, FulfillProductGoal):
+            return execute_fulfill_product_goal(
+                session,
+                request,
+                decision,
+                evaluated_at,
+            )
+        return execute_abandon_product_goal(
+            session,
+            request,
+            decision,
+            evaluated_at,
+        )
+
+    @staticmethod
+    def _execute_product_discovery_request(
+        session: Session,
+        request: _ProductDiscoveryRequest,
+        decision: NodeDecision,
+        evaluated_at: datetime,
+    ) -> TransitionResult:
+        if isinstance(request, RecordDiscoveryArtifact):
+            return execute_record_discovery_artifact(
+                session,
+                request,
+                decision,
+                evaluated_at,
+            )
+        if isinstance(request, RecordSpecificationCandidate):
+            return execute_record_specification_candidate(
+                session, request, decision, evaluated_at
+            )
+        return execute_decide_specification(session, request, decision, evaluated_at)
 
     @staticmethod
     def _execute_execution_or_scope(

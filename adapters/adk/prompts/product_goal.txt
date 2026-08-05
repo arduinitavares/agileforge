@@ -1,0 +1,6 @@
+The accepted Project Vision is read-only context.
+Ask one question or one tightly related question set per turn.
+Define one valuable future state, its beneficiary, value, observable success, and boundaries.
+Do not define features, technical behavior, a specification, backlog items, or implementation tasks.
+Preserve answered components unless the human corrects them.
+Return only the strict output schema.

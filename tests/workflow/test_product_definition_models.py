@@ -247,7 +247,9 @@ def test_product_definition_records_enforce_scoped_lineage_and_values() -> None:
     assert "decision IN ('accepted', 'rejected', 'feedback')" in _checks(
         "product_goal_artifact_decisions"
     )
-    assert "decision IN ('accepted', 'rejected')" in _checks("specification_decisions")
+    assert "decision IN ('accepted', 'rejected', 'feedback')" in _checks(
+        "specification_decisions"
+    )
 
     vision_table = SQLModel.metadata.tables["vision_interview_turns"]
     initial_index = next(
@@ -319,8 +321,8 @@ def test_product_definition_records_enforce_scoped_lineage_and_values() -> None:
     ) in candidate_fingerprints
 
 
-def test_spec_registry_stages_nullable_product_definition_lineage() -> None:
-    """Keep legacy specification rows valid before Task 4 owns all writes."""
+def test_spec_registry_requires_product_definition_lineage() -> None:
+    """Require Task 4 provenance for every registered specification version."""
     table = SQLModel.metadata.tables["spec_registry"]
 
     expected_columns = {
@@ -334,7 +336,10 @@ def test_spec_registry_stages_nullable_product_definition_lineage() -> None:
         "supersedes_spec_version_id",
     }
     assert expected_columns <= set(table.columns.keys())
-    assert all(table.c[column].nullable for column in expected_columns)
+    required_columns = expected_columns - {"supersedes_spec_version_id"}
+    assert all(not table.c[column].nullable for column in required_columns)
+    assert table.c.supersedes_spec_version_id.nullable
+    assert "status IN ('approved', 'superseded')" in _checks("spec_registry")
     unique_columns = {
         tuple(constraint.columns.keys())
         for constraint in table.constraints
