@@ -217,6 +217,48 @@ def _vision_artifact(
     )
 
 
+def _add_initial_vision_turn(
+    session: Session,
+    project_id: int,
+    recorded_at: datetime,
+) -> int:
+    """Persist the first immutable Vision interview in its initial chain."""
+    attempt_id = _attempt(
+        session,
+        project_id,
+        recorded_at,
+        node_id="vision.interview",
+        key="vision-initial",
+    )
+    components = {"constraint": "initial"}
+    clarifying_questions: list[str] = []
+    vision_statement = "An initial deterministic workflow."
+    turn = VisionInterviewTurn(
+        project_id=project_id,
+        mode="initial",
+        turn_number=1,
+        revision_intent_id=None,
+        prior_turn_id=None,
+        user_text="Define the initial Vision.",
+        components_json=canonical_json(components),
+        vision_statement=vision_statement,
+        is_complete=True,
+        clarifying_questions_json=canonical_json(clarifying_questions),
+        output_fingerprint=_vision_output_fingerprint(
+            components,
+            vision_statement,
+            True,
+            clarifying_questions,
+        ),
+        workflow_node_attempt_id=attempt_id,
+        attempt_fingerprint=f"sha256:attempt:vision-initial:{project_id}",
+        recorded_at=recorded_at,
+    )
+    session.add(turn)
+    session.flush()
+    return _id(turn.vision_interview_turn_id)
+
+
 def _seed_product_definition(
     session: Session,
     name: str,
@@ -234,12 +276,13 @@ def _seed_product_definition(
         project_id,
         recorded_at,
     )
+    initial_turn_id = _add_initial_vision_turn(session, project_id, recorded_at)
     attempt_id = _attempt(
         session,
         project_id,
         recorded_at,
         node_id="vision.interview",
-        key="vision",
+        key="vision-revision",
     )
     revision = VisionRevisionIntent(
         project_id=project_id,
@@ -272,7 +315,7 @@ def _seed_product_definition(
             vision_questions,
         ),
         workflow_node_attempt_id=attempt_id,
-        attempt_fingerprint=f"sha256:attempt:vision:{project_id}",
+        attempt_fingerprint=f"sha256:attempt:vision-revision:{project_id}",
         recorded_at=recorded_at,
     )
     session.add(turn)
@@ -422,6 +465,8 @@ def _seed_product_definition(
         "project_id": project_id,
         "vision_id": vision_id,
         "vision_fingerprint": vision_fingerprint,
+        "initial_turn_id": initial_turn_id,
+        "revision_id": _id(revision.vision_revision_intent_id),
         "turn_id": _id(turn.vision_interview_turn_id),
         "goal_turn_id": _id(goal_turn.product_goal_interview_turn_id),
         "goal_id": goal_id,
@@ -525,9 +570,9 @@ def test_loader_retains_product_definition_identity_and_legacy_spec_lineage(
     assert "repository_bindings" not in WorkflowFactSnapshot.model_fields
     assert snapshot.spec_versions[0].spec_version_id == seed["legacy_spec_id"]
     assert snapshot.spec_versions[0].source_specification_candidate_id is None
-    assert (
-        snapshot.vision_interview_turns[0].vision_interview_turn_id == seed["turn_id"]
-    )
+    assert {
+        turn.vision_interview_turn_id for turn in snapshot.vision_interview_turns
+    } == {seed["initial_turn_id"], seed["turn_id"]}
     assert (
         snapshot.product_goal_interview_turns[0].product_goal_interview_turn_id
         == seed["goal_turn_id"]
@@ -566,6 +611,23 @@ def test_loader_retains_product_definition_identity_and_legacy_spec_lineage(
         snapshot.spec_versions[1].source_specification_candidate_fingerprint
         == seed["candidate_fingerprint"]
     )
+
+
+def test_loader_loads_initial_and_revision_vision_chains_with_turn_one(
+    engine: Engine,
+) -> None:
+    """Keep initial and revision chains independently numbered per Project."""
+    with Session(engine) as session:
+        seed = _seed_product_definition(session, "Initial then revision Vision")
+        snapshot = WorkflowFactRepository(session).load(int(seed["project_id"]))
+
+    assert {
+        (turn.mode, turn.revision_intent_id, turn.turn_number)
+        for turn in snapshot.vision_interview_turns
+    } == {
+        ("initial", None, 1),
+        ("revision", seed["revision_id"], 1),
+    }
 
 
 async def _persist_trace_session(service: DatabaseSessionService) -> None:
@@ -607,7 +669,7 @@ def test_loader_keeps_interview_turn_after_configured_adk_trace_database_is_dele
     assert not trace_database.exists()
     assert [
         turn.vision_interview_turn_id for turn in snapshot.vision_interview_turns
-    ] == [seed["turn_id"]]
+    ] == [seed["initial_turn_id"], seed["turn_id"]]
 
 
 @pytest.mark.parametrize(
@@ -781,13 +843,13 @@ def test_loader_rejects_same_project_product_definition_chain_swaps(
             },
         ),
         (
-            "UPDATE vision_interview_turns SET mode = 'initial' "
-            "WHERE project_id = :project_id",
+            "UPDATE vision_interview_turns SET revision_intent_id = :revision_id "
+            "WHERE vision_interview_turn_id = :initial_turn_id",
             {},
         ),
         (
             "UPDATE vision_interview_turns SET revision_intent_id = NULL "
-            "WHERE project_id = :project_id",
+            "WHERE vision_interview_turn_id = :turn_id",
             {},
         ),
     ],
@@ -801,7 +863,17 @@ def test_loader_rejects_interview_and_goal_artifact_tampering(
     with Session(engine) as session:
         seed = _seed_product_definition(session, f"Interview tamper {statement}")
         _force_sql(session, "PRAGMA foreign_keys = OFF")
-        _force_sql(session, statement, {**params, "project_id": seed["project_id"]})
+        _force_sql(
+            session,
+            statement,
+            {
+                **params,
+                "project_id": seed["project_id"],
+                "initial_turn_id": seed["initial_turn_id"],
+                "revision_id": seed["revision_id"],
+                "turn_id": seed["turn_id"],
+            },
+        )
         session.commit()
         _force_sql(session, "PRAGMA foreign_keys = ON")
 

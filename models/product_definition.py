@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+from sqlalchemy import Index, text
 from sqlalchemy.schema import CheckConstraint, ForeignKeyConstraint, UniqueConstraint
 from sqlalchemy.types import Text
 from sqlmodel import Field, SQLModel
@@ -54,10 +55,20 @@ class VisionInterviewTurn(SQLModel, table=True):
             "vision_interview_turn_id",
             name="uq_vision_interview_turn_project_id",
         ),
-        UniqueConstraint(
+        Index(
+            "uq_vision_interview_initial_turn_number",
             "project_id",
             "turn_number",
-            name="uq_vision_interview_turn_number",
+            unique=True,
+            sqlite_where=text("mode = 'initial'"),
+        ),
+        Index(
+            "uq_vision_interview_revision_turn_number",
+            "project_id",
+            "revision_intent_id",
+            "turn_number",
+            unique=True,
+            sqlite_where=text("mode = 'revision'"),
         ),
         CheckConstraint(
             "mode IN ('initial', 'revision')",

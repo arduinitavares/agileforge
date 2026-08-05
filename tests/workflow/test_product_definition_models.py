@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import pytest
 from sqlalchemy import inspect
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.schema import CheckConstraint, UniqueConstraint
-from sqlmodel import SQLModel
+from sqlmodel import Session, SQLModel
 
 from models import product_definition
 from models.db import _CURRENT_MODEL_MODULES
@@ -247,6 +249,28 @@ def test_product_definition_records_enforce_scoped_lineage_and_values() -> None:
     )
     assert "decision IN ('accepted', 'rejected')" in _checks("specification_decisions")
 
+    vision_table = SQLModel.metadata.tables["vision_interview_turns"]
+    initial_index = next(
+        index
+        for index in vision_table.indexes
+        if index.name == "uq_vision_interview_initial_turn_number"
+    )
+    assert initial_index.unique
+    assert tuple(initial_index.columns.keys()) == ("project_id", "turn_number")
+    assert str(initial_index.dialect_options["sqlite"]["where"]) == "mode = 'initial'"
+    revision_index = next(
+        index
+        for index in vision_table.indexes
+        if index.name == "uq_vision_interview_revision_turn_number"
+    )
+    assert revision_index.unique
+    assert tuple(revision_index.columns.keys()) == (
+        "project_id",
+        "revision_intent_id",
+        "turn_number",
+    )
+    assert str(revision_index.dialect_options["sqlite"]["where"]) == "mode = 'revision'"
+
     goal_fingerprints = _foreign_keys("product_goal_artifacts")
     assert (
         ("project_id", "vision_artifact_id", "vision_fingerprint"),
@@ -317,3 +341,78 @@ def test_spec_registry_stages_nullable_product_definition_lineage() -> None:
         if isinstance(constraint, UniqueConstraint)
     }
     assert ("source_specification_candidate_id",) in unique_columns
+
+
+def _insert_vision_turn(
+    session: Session,
+    *,
+    mode: str,
+    revision_intent_id: int | None,
+    turn_number: int,
+) -> None:
+    """Insert minimal rows to exercise SQLite's partial unique indexes."""
+    session.connection().exec_driver_sql(
+        "INSERT INTO vision_interview_turns ("
+        "project_id, mode, turn_number, revision_intent_id, prior_turn_id, "
+        "user_text, components_json, vision_statement, is_complete, "
+        "clarifying_questions_json, output_fingerprint, workflow_node_attempt_id, "
+        "attempt_fingerprint, recorded_at"
+        ") VALUES (1, :mode, :turn_number, :revision_intent_id, NULL, "
+        "'user', '{}', 'statement', 1, '[]', 'sha256:output', 1, "
+        "'sha256:attempt', '2026-08-05 12:00:00')",
+        {
+            "mode": mode,
+            "revision_intent_id": revision_intent_id,
+            "turn_number": turn_number,
+        },
+    )
+
+
+def test_vision_interview_turn_number_indexes_are_scoped_to_each_chain(
+    engine: Engine,
+) -> None:
+    """Allow equal chain-local numbers and reject duplicates in one chain."""
+    with Session(engine) as session:
+        session.connection().exec_driver_sql("PRAGMA foreign_keys = OFF")
+        _insert_vision_turn(
+            session,
+            mode="initial",
+            revision_intent_id=None,
+            turn_number=1,
+        )
+        _insert_vision_turn(
+            session,
+            mode="revision",
+            revision_intent_id=10,
+            turn_number=1,
+        )
+        _insert_vision_turn(
+            session,
+            mode="revision",
+            revision_intent_id=11,
+            turn_number=1,
+        )
+        with pytest.raises(IntegrityError):
+            _insert_vision_turn(
+                session,
+                mode="initial",
+                revision_intent_id=None,
+                turn_number=1,
+            )
+        session.rollback()
+
+        _insert_vision_turn(
+            session,
+            mode="revision",
+            revision_intent_id=10,
+            turn_number=1,
+        )
+        with pytest.raises(IntegrityError):
+            _insert_vision_turn(
+                session,
+                mode="revision",
+                revision_intent_id=10,
+                turn_number=1,
+            )
+        session.rollback()
+        session.connection().exec_driver_sql("PRAGMA foreign_keys = ON")
