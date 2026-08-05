@@ -40,11 +40,31 @@ class WorkflowDomainPort(Protocol):
         """Apply one exact typed transition."""
         ...
 
+    def load_persisted_attempt_input(
+        self,
+        *,
+        project_id: int,
+        attempt_id: int,
+        attempt_fingerprint: str,
+    ) -> JsonObject:
+        """Load trusted input for a durable node attempt."""
+        ...
+
 
 class _VisionInterviewInputPort(Protocol):
     """Host preparation for a Project Vision interview turn."""
 
     def replay(self, query: NodeAttemptReplayQuery) -> TransitionResult | None: ...
+
+    def replay_transition(
+        self,
+        *,
+        request_kind: str,
+        project_id: int,
+        idempotency_key: str,
+        actor: str,
+        correlation_id: str | None,
+    ) -> TransitionResult | None: ...
 
     def build(
         self,
@@ -339,6 +359,17 @@ class AgileForgeApplication:
 
     def review_vision(self, request: VisionReviewRequest) -> TransitionResult:
         """Prepare exact pending Vision identity internally before review."""
+        input_service = self._vision_interview_input
+        if input_service is not None:
+            replay = input_service.replay_transition(
+                request_kind="decide_vision_review",
+                project_id=request.project_id,
+                idempotency_key=request.idempotency_key,
+                actor=request.actor,
+                correlation_id=request.correlation_id,
+            )
+            if replay is not None:
+                return replay
         position = self.position(project_id=request.project_id)
         decision = _unique_available_decision(position, "vision.review")
         if decision is None:
@@ -367,6 +398,17 @@ class AgileForgeApplication:
         request: VisionRevisionRequest,
     ) -> TransitionResult:
         """Prepare the accepted Vision identity internally before revision start."""
+        input_service = self._vision_interview_input
+        if input_service is not None:
+            replay = input_service.replay_transition(
+                request_kind="begin_vision_revision",
+                project_id=request.project_id,
+                idempotency_key=request.idempotency_key,
+                actor=request.actor,
+                correlation_id=request.correlation_id,
+            )
+            if replay is not None:
+                return replay
         position = self.position(project_id=request.project_id)
         decision = _unique_available_decision(position, "vision.revision.start")
         if decision is None:
@@ -488,7 +530,10 @@ def production_application() -> AgileForgeApplication:
     from adapters.adk.agents.story import (  # noqa: PLC0415
         create_user_story_writer_agent,
     )
-    from adapters.adk.agents.vision import root_agent as vision_agent  # noqa: PLC0415
+    from adapters.adk.agents.vision import legacy_root_agent  # noqa: PLC0415
+    from adapters.adk.agents.vision import (  # noqa: PLC0415
+        root_agent as vision_interview_agent,
+    )
     from adapters.adk.recipes import (  # noqa: PLC0415
         AgenticRecipeNodes,
         build_agentic_recipe_registry,
@@ -507,7 +552,8 @@ def production_application() -> AgileForgeApplication:
             brownfield_curator=build_brownfield_curator_agent(),
             authority_compile=build_spec_authority_compiler_agent(),
             authority_repair=build_spec_authority_compiler_agent(),
-            vision_generation=vision_agent,
+            vision_generation=legacy_root_agent,
+            vision_interview=vision_interview_agent,
             backlog_generation=backlog_agent,
             roadmap_generation=roadmap_agent,
             story_generation=create_user_story_writer_agent(),

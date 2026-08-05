@@ -50,6 +50,16 @@ class WorkflowDomainRunnerPort(Protocol):
         """Apply one typed transition."""
         ...
 
+    def load_persisted_attempt_input(
+        self,
+        *,
+        project_id: int,
+        attempt_id: int,
+        attempt_fingerprint: str,
+    ) -> JsonObject:
+        """Load validated normalized input for one assigned durable attempt."""
+        ...
+
 
 _TRANSITION_REQUEST = TypeAdapter(TransitionRequest)
 
@@ -192,6 +202,11 @@ class AdkWorkflowRunner:
         if not isinstance(attempt_id, int) or not isinstance(attempt_fingerprint, str):
             msg = "StartNodeAttempt returned an invalid durable receipt."
             raise TypeError(msg)
+        persisted_input = self._domain.load_persisted_attempt_input(
+            project_id=start_request.project_id,
+            attempt_id=attempt_id,
+            attempt_fingerprint=attempt_fingerprint,
+        )
         context = AttemptCompletionContext(
             project_id=start_request.project_id,
             graph_version=start_request.graph_version,
@@ -203,7 +218,7 @@ class AdkWorkflowRunner:
             idempotency_key=f"{start_request.idempotency_key}:completion",
             actor=start_request.actor,
             correlation_id=start_request.correlation_id,
-            normalized_input=start_request.normalized_input,
+            normalized_input=persisted_input,
         )
         try:
             recipe = self._registry.require(request.node_id)

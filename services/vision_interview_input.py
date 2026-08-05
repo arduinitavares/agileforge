@@ -12,6 +12,7 @@ from repositories.workflow import WorkflowFactRepository
 from services.contracts.vision import VisionComponents, VisionInterviewInput
 from services.node_attempt_replay import (
     DurableNodeAttemptReplayService,
+    DurableTransitionReplayService,
     NodeAttemptReplayQuery,
 )
 from workflow.definitions.vision import _active_goal_exists, _isolated_vision_state
@@ -31,6 +32,24 @@ class VisionInterviewInputService:
     def replay(self, query: NodeAttemptReplayQuery) -> TransitionResult | None:
         """Recover a persisted attempt before deriving current interview state."""
         return DurableNodeAttemptReplayService(engine=self.engine).replay(query)
+
+    def replay_transition(
+        self,
+        *,
+        request_kind: str,
+        project_id: int,
+        idempotency_key: str,
+        actor: str,
+        correlation_id: str | None,
+    ) -> TransitionResult | None:
+        """Recover a completed Vision lifecycle command before state evaluation."""
+        return DurableTransitionReplayService(engine=self.engine).replay(
+            request_kind=request_kind,
+            project_id=project_id,
+            idempotency_key=idempotency_key,
+            actor=actor,
+            correlation_id=correlation_id,
+        )
 
     def build(
         self,

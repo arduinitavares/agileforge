@@ -25,6 +25,10 @@ from models.workflow import (
     WorkflowNodeAttemptOutcome,
     WorkflowTransitionReceipt,
 )
+from services.node_attempt_replay import (
+    DurableNodeAttemptReplayService,
+    NodeAttemptReplayQuery,
+)
 from services.specs.authority_selection import pending_authority_fingerprint
 from utils.spec_schemas import SpecAuthorityCompilationSuccess
 from workflow.contracts import (
@@ -35,7 +39,7 @@ from workflow.contracts import (
 )
 from workflow.definitions.product_definition import product_definition_graph
 from workflow.domain import WorkflowDomain
-from workflow.fingerprints import canonical_hash
+from workflow.fingerprints import canonical_hash, canonical_json
 from workflow.requests import FailNodeAttempt, RecordBacklogDraft, StartNodeAttempt
 
 if TYPE_CHECKING:
@@ -216,6 +220,20 @@ def _attempt_identity(result: object) -> tuple[int, str]:
     return attempt_id, attempt_fingerprint
 
 
+def _replay_query(request: StartNodeAttempt) -> NodeAttemptReplayQuery:
+    return NodeAttemptReplayQuery(
+        project_id=request.project_id,
+        graph_version=request.graph_version,
+        fact_fingerprint=request.fact_fingerprint,
+        decision_fingerprint=request.decision_fingerprint,
+        node_id=request.target_node_id,
+        instance_key=request.target_instance_key,
+        idempotency_key=request.idempotency_key,
+        actor=request.actor,
+        correlation_id=request.correlation_id,
+    )
+
+
 def _completion_request(
     *,
     start_request: StartNodeAttempt,
@@ -296,6 +314,82 @@ def test_duplicate_start_replays_without_second_attempt(engine: Engine) -> None:
     assert replay == first.model_copy(update={"replayed": True})
     with Session(engine) as session:
         assert len(session.exec(select(WorkflowNodeAttempt)).all()) == 1
+
+
+def test_replay_query_returns_in_flight_start_before_external_work(
+    engine: Engine,
+) -> None:
+    """Expose the persisted start receipt without requiring normalized input."""
+    project_id, _authority_id, _authority_fingerprint = _seed_accepted_authority(engine)
+    domain = _domain(engine, MutableClock(EVALUATED_AT), _registry())
+    request = _start_request(domain, project_id, idempotency_key="replay-running")
+    started = domain.transition(request)
+
+    replay = DurableNodeAttemptReplayService(engine=engine).replay(
+        _replay_query(request)
+    )
+
+    assert replay == started.model_copy(update={"replayed": True})
+
+
+def test_replay_query_returns_terminal_result_after_position_advanced(
+    engine: Engine,
+) -> None:
+    """Recover a lost terminal response before evaluating the new position."""
+    project_id, authority_id, authority_fingerprint = _seed_accepted_authority(engine)
+    domain = _domain(engine, MutableClock(EVALUATED_AT), _registry())
+    request = _start_request(domain, project_id, idempotency_key="replay-terminal")
+    started = domain.transition(request)
+    attempt_id, attempt_fingerprint = _attempt_identity(started)
+    completed = domain.transition(
+        _completion_request(
+            start_request=request,
+            attempt_id=attempt_id,
+            attempt_fingerprint=attempt_fingerprint,
+            authority=(authority_id, authority_fingerprint),
+        )
+    )
+
+    replay = DurableNodeAttemptReplayService(engine=engine).replay(
+        _replay_query(request)
+    )
+
+    assert completed.ok is True
+    assert replay == completed.model_copy(update={"replayed": True})
+
+
+def test_replay_query_prefers_terminal_completion_receipt(
+    engine: Engine,
+) -> None:
+    """Terminal replay remains correct even when the start receipt is retained."""
+    project_id, authority_id, authority_fingerprint = _seed_accepted_authority(engine)
+    domain = _domain(engine, MutableClock(EVALUATED_AT), _registry())
+    request = _start_request(domain, project_id, idempotency_key="replay-terminal-row")
+    started = domain.transition(request)
+    attempt_id, attempt_fingerprint = _attempt_identity(started)
+    completed = domain.transition(
+        _completion_request(
+            start_request=request,
+            attempt_id=attempt_id,
+            attempt_fingerprint=attempt_fingerprint,
+            authority=(authority_id, authority_fingerprint),
+        )
+    )
+    with Session(engine) as session:
+        start_receipt = session.exec(
+            select(WorkflowTransitionReceipt).where(
+                WorkflowTransitionReceipt.request_kind == "start_node_attempt"
+            )
+        ).one()
+        start_receipt.result_json = canonical_json(started.model_dump(mode="json"))
+        session.add(start_receipt)
+        session.commit()
+
+    replay = DurableNodeAttemptReplayService(engine=engine).replay(
+        _replay_query(request)
+    )
+
+    assert replay == completed.model_copy(update={"replayed": True})
 
 
 def test_live_attempt_changes_target_to_waiting(engine: Engine) -> None:

@@ -145,6 +145,7 @@ class AgenticRecipeNodes:
     roadmap_generation: BaseAgent | Workflow
     story_generation: BaseAgent | Workflow
     sprint_planning: BaseAgent | Workflow
+    vision_interview: BaseAgent | Workflow | None = None
 
 
 class UnknownAdkRecipeError(LookupError):
@@ -593,7 +594,7 @@ def build_agentic_recipe_registry(
                 workflow=_build_single_leaf_workflow(
                     workflow_name="vision_interview",
                     execution_node_name="execute_vision_interviewer",
-                    leaf_agent=nodes.vision_generation,
+                    leaf_agent=_require_vision_interviewer(nodes),
                     execution_settings=execution_settings,
                 ),
                 output_adapter=_vision_interview_output_adapter,
@@ -638,6 +639,16 @@ def build_agentic_recipe_registry(
             ),
         ),
     )
+
+
+def _require_vision_interviewer(
+    nodes: AgenticRecipeNodes,
+) -> BaseAgent | Workflow:
+    """Return the explicitly injected isolated Vision interview agent."""
+    if nodes.vision_interview is None:
+        message = "The isolated Vision interview recipe requires its own agent."
+        raise ValueError(message)
+    return nodes.vision_interview
 
 
 __all__ = [

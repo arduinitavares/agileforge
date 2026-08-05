@@ -441,7 +441,9 @@ def _interview_instance_key(
         if item.mode == mode and item.revision_intent_id == revision_id
     )
     if not turns:
-        return None
+        if revision is None:
+            return None
+        return f"revision:{revision.vision_revision_intent_id}"
     return f"after-turn:{max(item.vision_interview_turn_id for item in turns)}"
 
 
@@ -557,6 +559,7 @@ def _goal_interview_rule(
         state.artifact is None
         or state.decision is None
         or state.decision.decision != "accepted"
+        or state.open_revision is not None
     ):
         return (RuleEvaluation(RuleCategory.SATISFIED, "PRODUCT_GOAL_NOT_READY"),)
     return (

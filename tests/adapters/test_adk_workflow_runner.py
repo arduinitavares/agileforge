@@ -32,6 +32,7 @@ from adapters.adk.recipes import (
 )
 from adapters.adk.runner import AdkExecutionConfig, AdkRunGuards, AdkWorkflowRunner
 from models.core import Project
+from models.product_definition import VisionInterviewTurn
 from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance, SpecRegistry
 from models.workflow import (
     BacklogArtifact,
@@ -414,6 +415,7 @@ def _brownfield_registry(
             authority_compile=_unused_leaf("unused_authority_compile"),
             authority_repair=_unused_leaf("unused_authority_repair"),
             vision_generation=_unused_leaf("unused_vision"),
+            vision_interview=_unused_leaf("unused_vision_interview"),
             backlog_generation=_unused_leaf("unused_backlog"),
             roadmap_generation=_unused_leaf("unused_roadmap"),
             story_generation=_unused_leaf("unused_story"),
@@ -677,6 +679,92 @@ def _decision(domain: WorkflowDomain, project_id: int) -> NodeDecision:
         for item in domain.position(project_id).decisions
         if item.node_id == "backlog.generate"
     )
+
+
+def test_runner_loads_vision_input_from_persisted_attempt(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Completion ignores a mutated in-memory start request after persistence."""
+    with Session(engine) as session:
+        project = Project(name="Persisted Vision", origin="greenfield")
+        session.add(project)
+        session.commit()
+        assert project.project_id is not None
+        project_id = project.project_id
+    vision_response: JsonObject = {
+        "updated_components": {
+            "project_name": "Persisted Vision",
+            "target_user": "Operators",
+            "problem": "State drift",
+            "product_category": "Tool",
+            "key_benefit": "Trust",
+            "competitors": "Spreadsheets",
+            "differentiator": "Durable facts",
+        },
+        "project_vision_statement": "A trusted workflow tool.",
+        "is_complete": True,
+        "clarifying_questions": [],
+    }
+    registry = build_agentic_recipe_registry(
+        nodes=AgenticRecipeNodes(
+            brownfield_curator=_unused_leaf("unused_brownfield_curator"),
+            authority_compile=_unused_leaf("unused_authority_compile"),
+            authority_repair=_unused_leaf("unused_authority_repair"),
+            vision_generation=_unused_leaf("unused_legacy_vision"),
+            vision_interview=FakeLeafAgent(
+                name="vision_interview",
+                response=vision_response,
+            ),
+            backlog_generation=_unused_leaf("unused_backlog"),
+            roadmap_generation=_unused_leaf("unused_roadmap"),
+            story_generation=_unused_leaf("unused_story"),
+            sprint_planning=_unused_leaf("unused_sprint"),
+        ),
+        execution_settings=EXECUTION_SETTINGS,
+    )
+    domain = WorkflowDomain(
+        engine=engine,
+        graph=product_definition_graph(),
+        clock=FixedClock(now_value=EVALUATED_AT),
+        adk_recipe_registry=registry,
+    )
+    runner = AdkWorkflowRunner(
+        domain=domain,
+        registry=registry,
+        session_service=TrackingSessionService(),
+        config=AdkExecutionConfig(
+            project_id=project_id,
+            model_id="fake/vision",
+            execution_settings=EXECUTION_SETTINGS,
+            lease_seconds=LEASE_SECONDS,
+            actor="operator@example.com",
+        ),
+    )
+    transition = domain.transition
+
+    def persist_then_tamper(request: TransitionRequest) -> TransitionResult:
+        result = transition(request)
+        if isinstance(request, StartNodeAttempt):
+            request.normalized_input["user_response"] = "Tampered in memory."
+        return result
+
+    monkeypatch.setattr(domain, "transition", persist_then_tamper)
+    decision = next(
+        item
+        for item in domain.position(project_id).decisions
+        if item.node_id == "vision.interview"
+    )
+
+    result = runner.run(
+        decision,
+        {"mode": "initial", "user_response": "Trusted persisted answer."},
+    )
+
+    assert result.ok
+    with Session(engine) as session:
+        turn = session.exec(select(VisionInterviewTurn)).one()
+        assert turn.user_text == "Trusted persisted answer."
 
 
 def test_runner_executes_fake_leaf_and_commits_validated_output(engine: Engine) -> None:
@@ -1126,6 +1214,7 @@ def test_authority_runner_executes_provider_once_before_completion_transaction(
             authority_compile=compiler_leaf,
             authority_repair=_unused_leaf("unused_authority_repair"),
             vision_generation=_unused_leaf("unused_vision"),
+            vision_interview=_unused_leaf("unused_vision_interview"),
             backlog_generation=_unused_leaf("unused_backlog"),
             roadmap_generation=_unused_leaf("unused_roadmap"),
             story_generation=_unused_leaf("unused_story"),

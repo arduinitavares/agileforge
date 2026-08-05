@@ -219,6 +219,10 @@ def _agentic_nodes() -> AgenticRecipeNodes:
         authority_compile=FakeLeafAgent(name="fake_authority_compile", response={}),
         authority_repair=FakeLeafAgent(name="fake_authority_repair", response={}),
         vision_generation=FakeLeafAgent(name="fake_vision", response={}),
+        vision_interview=FakeLeafAgent(
+            name="fake_vision_interview",
+            response={},
+        ),
         backlog_generation=FakeLeafAgent(name="fake_backlog", response={}),
         roadmap_generation=FakeLeafAgent(name="fake_roadmap", response={}),
         story_generation=FakeLeafAgent(name="fake_story", response={}),

@@ -15,7 +15,7 @@ def product_definition_graph() -> WorkflowGraph:
             child_graph_id="product_lifecycle",
             nodes=(),
             children=(
-            ChildGraphSpec(child_graph_id="vision", nodes=VISION_INTERVIEW_NODES),
+                ChildGraphSpec(child_graph_id="vision", nodes=VISION_INTERVIEW_NODES),
                 ChildGraphSpec(child_graph_id="backlog", nodes=BACKLOG_NODES),
                 ChildGraphSpec(
                     child_graph_id="planning",

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, assert_never
 
+from pydantic import TypeAdapter
 from sqlalchemy import event
 from sqlalchemy.exc import OperationalError
 from sqlmodel import Session, col, select
@@ -12,6 +14,7 @@ from sqlmodel import Session, col, select
 from models.workflow import WorkflowNodeAttempt, WorkflowTransitionReceipt
 from repositories.workflow import WorkflowFactLoadError, WorkflowFactRepository
 from workflow.contracts import (
+    JsonObject,
     NodeCategory,
     NodeDecision,
     RecommendationKind,
@@ -118,6 +121,8 @@ from workflow.requests import (
     StartSprint,
     TransitionRequest,
 )
+
+_JSON_OBJECT = TypeAdapter(JsonObject)
 
 if TYPE_CHECKING:
     import sqlite3
@@ -254,6 +259,26 @@ class WorkflowDomain:
         with Session(self._engine) as session:
             return self._position_in_session(session, project_id, evaluated_at)
 
+    def load_persisted_attempt_input(
+        self,
+        *,
+        project_id: int,
+        attempt_id: int,
+        attempt_fingerprint: str,
+    ) -> JsonObject:
+        """Load validated normalized input by the assigned durable attempt identity."""
+        with Session(self._engine) as session:
+            attempt = load_attempt(
+                session,
+                project_id=project_id,
+                attempt_id=attempt_id,
+            )
+            if attempt is None or attempt.attempt_fingerprint != attempt_fingerprint:
+                message = "The durable node attempt identity is invalid."
+                raise ValueError(message)
+            normalized_input = json.loads(attempt.normalized_input_json)
+            return _JSON_OBJECT.validate_python(normalized_input)
+
     def transition(self, request: TransitionRequest) -> TransitionResult:
         """Guard and apply one request inside its receipt transaction."""
         evaluated_at = self._clock.now()
@@ -301,7 +326,6 @@ class WorkflowDomain:
             request,
             DecideAuthority
             | DecideVision
-            | DecideVisionReview
             | DecideVisionReview
             | DecideBacklog
             | DecideRoadmap

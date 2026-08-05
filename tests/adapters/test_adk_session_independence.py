@@ -29,19 +29,12 @@ if TYPE_CHECKING:
 EVALUATED_AT = datetime(2026, 8, 3, 12, tzinfo=UTC)
 
 
-async def _create_and_delete_session(service: DatabaseSessionService) -> None:
+async def _create_session(service: DatabaseSessionService) -> None:
     await service.create_session(
         app_name=ADK_EXECUTION_TRACE_IDENTITY.app_name,
         user_id=ADK_EXECUTION_TRACE_IDENTITY.user_id,
         session_id="999",
     )
-    await service.delete_session(
-        app_name=ADK_EXECUTION_TRACE_IDENTITY.app_name,
-        user_id=ADK_EXECUTION_TRACE_IDENTITY.user_id,
-        session_id="999",
-    )
-
-
 def test_deleting_adk_trace_database_does_not_change_domain_position(
     engine: Engine,
     tmp_path: Path,
@@ -69,10 +62,12 @@ def test_deleting_adk_trace_database_does_not_change_domain_position(
     before = domain.position(project_id)
     target = get_adk_execution_trace_db_target()
     service = DatabaseSessionService(db_url=target.async_sqlite_url)
-    asyncio.run(_create_and_delete_session(service))
+    asyncio.run(_create_session(service))
     assert trace_path.exists()
+    with_trace = domain.position(project_id)
     trace_path.unlink()
 
     after = domain.position(project_id)
 
+    assert with_trace == before
     assert after == before

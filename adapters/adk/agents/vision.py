@@ -10,7 +10,12 @@ from google.adk.agents import Agent
 from google.adk.models.lite_llm import LiteLlm
 
 from adapters.adk.prompts import load_prompt
-from services.contracts.vision import VisionInterviewInput, VisionInterviewOutput
+from services.contracts.vision import (
+    InputSchema,
+    OutputSchema,
+    VisionInterviewInput,
+    VisionInterviewOutput,
+)
 from utils.model_config import get_model_id, get_openrouter_extra_body
 from utils.runtime_config import (
     get_openrouter_api_key,
@@ -18,6 +23,7 @@ from utils.runtime_config import (
 )
 
 instructions = load_prompt("vision.txt")
+legacy_instructions = load_prompt("vision_legacy.txt")
 
 # --- Initialize Model with drop_params to prevent logging issues ---
 _max_tokens = get_vision_interviewer_max_tokens()
@@ -41,6 +47,19 @@ root_agent: Agent = Agent(
     input_schema=VisionInterviewInput,
     output_schema=VisionInterviewOutput,
     instruction=instructions,
+    output_key="product_vision_assessment",
+    disallow_transfer_to_parent=True,
+    disallow_transfer_to_peers=True,
+)
+
+
+legacy_root_agent: Agent = Agent(
+    name="product_vision_tool",
+    description="An agent that creates a legacy root-graph product vision.",
+    model=model,
+    input_schema=InputSchema,
+    output_schema=OutputSchema,
+    instruction=legacy_instructions,
     output_key="product_vision_assessment",
     disallow_transfer_to_parent=True,
     disallow_transfer_to_peers=True,
