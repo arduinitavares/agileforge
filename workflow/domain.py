@@ -1363,6 +1363,8 @@ class WorkflowDomain:
             | DecideSprintPlan
             | DecideExtensionPrd
             | DecideAmendmentSpecDraft
+            | DecideProductGoalReview
+            | DecideSpecification
             | ReviewSprint,
         ) and (decision.category is NodeCategory.WAITING)
         if decision.category is not NodeCategory.AVAILABLE and not human_review_waiting:

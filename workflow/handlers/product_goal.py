@@ -127,7 +127,11 @@ def execute_record_product_goal_interview_turn(
         vision_fingerprint=vision_refs[0].fingerprint,
         goal_number=goal_number,
         revision_number=revision_number,
-        prior_turn_id=turns[0].product_goal_interview_turn_id if turns else None,
+        prior_turn_id=(
+            None
+            if prior_goal is not None or not turns
+            else turns[0].product_goal_interview_turn_id
+        ),
         user_text=request.user_text.strip(),
         components_json=canonical_json(request.updated_components),
         goal_statement=request.product_goal_statement.strip(),
@@ -264,6 +268,21 @@ def _outcome(
             goal.content_fingerprint,
         )
     ):
+        return _fail("Product Goal outcome does not target the active Goal.")
+    accepted = session.exec(
+        select(ProductGoalArtifactDecision).where(
+            col(ProductGoalArtifactDecision.project_id) == request.project_id,
+            col(ProductGoalArtifactDecision.product_goal_artifact_id) == goal_id,
+            col(ProductGoalArtifactDecision.decision) == "accepted",
+        )
+    ).one_or_none()
+    existing = session.exec(
+        select(ProductGoalOutcome).where(
+            col(ProductGoalOutcome.project_id) == request.project_id,
+            col(ProductGoalOutcome.product_goal_artifact_id) == goal_id,
+        )
+    ).one_or_none()
+    if accepted is None or existing is not None:
         return _fail("Product Goal outcome does not target the active Goal.")
     row = ProductGoalOutcome(
         project_id=request.project_id,
