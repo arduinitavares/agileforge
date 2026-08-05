@@ -8,6 +8,7 @@ from services.agent_workbench.fingerprints import (
 from workflow.contracts import TransitionResult
 from workflow.facts import (
     NodeAttemptFact,
+    ProductGoalArtifactDecisionFact,
     ProductGoalInterviewTurnFact,
     ProjectFact,
     VisionInterviewTurnFact,
@@ -178,6 +179,50 @@ def test_incomplete_product_goal_turn_changes_business_fact_fingerprint() -> Non
     )
 
     assert business_fact_fingerprint(snapshot) != business_fact_fingerprint(completed)
+
+
+def test_product_goal_decision_state_changes_business_fingerprint_before_discovery(
+) -> None:
+    """Goal review state is authoritative even before discovery is recorded."""
+    created = datetime(2026, 8, 2, 12, tzinfo=UTC)
+    pending = WorkflowFactSnapshot(
+        project=ProjectFact(
+            project_id=3,
+            name="MyFinance",
+            origin="brownfield",
+            created_at=created,
+        )
+    )
+    states = {
+        decision: pending.model_copy(
+            update={
+                "product_goal_artifact_decisions": (
+                    ProductGoalArtifactDecisionFact(
+                        product_goal_artifact_decision_id=7,
+                        product_goal_artifact_id=6,
+                        artifact_fingerprint="sha256:goal",
+                        decision=decision,
+                        rationale=f"{decision} review state",
+                        reviewer="operator",
+                        idempotency_key=f"goal-{decision}",
+                        decided_at=created,
+                    ),
+                )
+            }
+        )
+        for decision in ("accepted", "rejected", "feedback")
+    }
+
+    fingerprints = {
+        business_fact_fingerprint(snapshot)
+        for snapshot in (pending, *states.values())
+    }
+
+    assert not pending.discovery_artifacts
+    assert business_fact_fingerprint(states["accepted"]) != business_fact_fingerprint(
+        pending
+    )
+    assert len(fingerprints) == len(states) + 1
 
 
 def test_decision_fingerprint_is_order_stable() -> None:

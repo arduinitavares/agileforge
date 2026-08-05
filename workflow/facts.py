@@ -202,6 +202,19 @@ class ProductGoalArtifactFact(FrozenModel):
     created_at: _DATETIME
 
 
+class ProductGoalArtifactDecisionFact(FrozenModel):
+    """Immutable review decision recorded against one Product Goal artifact."""
+
+    product_goal_artifact_decision_id: int
+    product_goal_artifact_id: int
+    artifact_fingerprint: str
+    decision: Literal["accepted", "rejected", "feedback"]
+    rationale: str
+    reviewer: str
+    idempotency_key: str
+    decided_at: _DATETIME
+
+
 class ProductGoalOutcomeFact(FrozenModel):
     """Durable resolution of one accepted Product Goal."""
 
@@ -580,6 +593,7 @@ class WorkflowFactSnapshot(FrozenModel):
     vision_interview_turns: tuple[VisionInterviewTurnFact, ...] = ()
     product_goal_interview_turns: tuple[ProductGoalInterviewTurnFact, ...] = ()
     product_goal_artifacts: tuple[ProductGoalArtifactFact, ...] = ()
+    product_goal_artifact_decisions: tuple[ProductGoalArtifactDecisionFact, ...] = ()
     product_goal_outcomes: tuple[ProductGoalOutcomeFact, ...] = ()
     discovery_artifacts: tuple[DiscoveryArtifactFact, ...] = ()
     specification_candidates: tuple[SpecificationCandidateFact, ...] = ()

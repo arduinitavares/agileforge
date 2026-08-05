@@ -244,7 +244,7 @@ def test_product_definition_records_enforce_scoped_lineage_and_values() -> None:
     ) in _foreign_keys("vision_interview_turns")
     assert "mode IN ('initial', 'revision')" in _checks("vision_interview_turns")
     assert "outcome IN ('fulfilled', 'abandoned')" in _checks("product_goal_outcomes")
-    assert "decision IN ('accepted', 'rejected')" in _checks(
+    assert "decision IN ('accepted', 'rejected', 'feedback')" in _checks(
         "product_goal_artifact_decisions"
     )
     assert "decision IN ('accepted', 'rejected')" in _checks("specification_decisions")

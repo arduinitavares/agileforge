@@ -98,6 +98,7 @@ from workflow.facts import (
     PlanningArtifactFact,
     PostSprintTriageFact,
     PrdVersionFact,
+    ProductGoalArtifactDecisionFact,
     ProductGoalArtifactFact,
     ProductGoalInterviewTurnFact,
     ProductGoalOutcomeFact,
@@ -181,6 +182,7 @@ type _SpecDraftKind = Literal["initial", "amendment"]
 type _SprintFactStatus = Literal["planned", "active", "completed"]
 type _VisionMode = Literal["initial", "revision"]
 type _ProductGoalOutcome = Literal["fulfilled", "abandoned"]
+type _ProductGoalDecision = Literal["accepted", "rejected", "feedback"]
 
 _SPRINT_STATUSES: dict[SprintStatus, _SprintFactStatus] = {
     SprintStatus.PLANNED: "planned",
@@ -239,6 +241,7 @@ class _ProductDefinitionFactLoad:
     interview_turns: tuple[VisionInterviewTurnFact, ...]
     goal_interview_turns: tuple[ProductGoalInterviewTurnFact, ...]
     product_goals: tuple[ProductGoalArtifactFact, ...]
+    goal_decisions: tuple[ProductGoalArtifactDecisionFact, ...]
     goal_outcomes: tuple[ProductGoalOutcomeFact, ...]
     discoveries: tuple[DiscoveryArtifactFact, ...]
     specification_candidates: tuple[SpecificationCandidateFact, ...]
@@ -487,6 +490,7 @@ class WorkflowFactRepository:
             vision_interview_turns=product_definition.interview_turns,
             product_goal_interview_turns=product_definition.goal_interview_turns,
             product_goal_artifacts=product_definition.product_goals,
+            product_goal_artifact_decisions=product_definition.goal_decisions,
             product_goal_outcomes=product_definition.goal_outcomes,
             discovery_artifacts=product_definition.discoveries,
             specification_candidates=product_definition.specification_candidates,
@@ -885,21 +889,22 @@ class WorkflowFactRepository:
         turns = self._vision_interview_turns(project_id, revisions, attempts)
         goal_turns = self._product_goal_interview_turns(project_id, visions, attempts)
         goals = self._product_goals(project_id, visions, goal_turns)
-        accepted_goal_ids = self._product_goal_decisions(project_id, goals)
-        active_goal_ids = self._active_accepted_product_goal_ids(
-            goals,
-            accepted_goal_ids,
-        )
+        decisions = self._product_goal_decisions(project_id, goals)
         outcomes = self._product_goal_outcomes(
             project_id,
             goals,
-            accepted_goal_ids,
+            decisions,
+        )
+        self._active_accepted_product_goal_ids(
+            decisions,
+            outcomes,
         )
         discoveries = self._discovery_artifacts(
             project_id,
             visions,
             goals,
-            active_goal_ids,
+            decisions,
+            outcomes,
         )
         candidates = self._specification_candidates(
             project_id, visions, goals, discoveries, spec_versions
@@ -910,6 +915,7 @@ class WorkflowFactRepository:
             interview_turns=tuple(turns.values()),
             goal_interview_turns=tuple(goal_turns.values()),
             product_goals=tuple(goals.values()),
+            goal_decisions=tuple(decisions.values()),
             goal_outcomes=tuple(outcomes.values()),
             discoveries=tuple(discoveries.values()),
             specification_candidates=tuple(candidates.values()),
@@ -1238,7 +1244,8 @@ class WorkflowFactRepository:
         project_id: int,
         visions: dict[int, str],
         goals: dict[int, ProductGoalArtifactFact],
-        active_goal_ids: frozenset[int],
+        decisions: dict[int, ProductGoalArtifactDecisionFact],
+        outcomes: dict[int, ProductGoalOutcomeFact],
     ) -> dict[int, DiscoveryArtifactFact]:
         rows = self._session.exec(
             select(DiscoveryArtifact)
@@ -1249,6 +1256,12 @@ class WorkflowFactRepository:
         facts: dict[int, DiscoveryArtifactFact] = {}
         goal_fingerprints = {
             identifier: item.content_fingerprint for identifier, item in goals.items()
+        }
+        accepted_decisions_by_goal = self._accepted_goal_decisions_by_goal(
+            decisions.values()
+        )
+        outcomes_by_goal = {
+            item.product_goal_artifact_id: item for item in outcomes.values()
         }
         for row in rows:
             identifier = self._required_id(row.discovery_artifact_id, "discovery")
@@ -1265,9 +1278,18 @@ class WorkflowFactRepository:
                 "discovery Product Goal",
             )
             goal = goals.get(row.product_goal_artifact_id)
+            accepted_decisions = accepted_decisions_by_goal.get(
+                row.product_goal_artifact_id,
+                (),
+            )
             self._require_product_condition(
-                row.product_goal_artifact_id in active_goal_ids,
-                "Discovery Product Goal is not accepted and active.",
+                any(item.decided_at <= row.recorded_at for item in accepted_decisions),
+                "Discovery Product Goal was not accepted when discovery was recorded.",
+            )
+            outcome = outcomes_by_goal.get(row.product_goal_artifact_id)
+            self._require_product_condition(
+                outcome is None or row.recorded_at < outcome.decided_at,
+                "Discovery was recorded after its Product Goal outcome.",
             )
             if goal is not None:
                 self._require_product_condition(
@@ -1417,7 +1439,7 @@ class WorkflowFactRepository:
         self,
         project_id: int,
         goals: dict[int, ProductGoalArtifactFact],
-    ) -> frozenset[int]:
+    ) -> dict[int, ProductGoalArtifactDecisionFact]:
         rows = self._session.exec(
             select(ProductGoalArtifactDecision)
             .where(col(ProductGoalArtifactDecision.project_id) == project_id)
@@ -1426,13 +1448,17 @@ class WorkflowFactRepository:
             ),
             execution_options=self._query_options(),
         ).all()
-        accepted_goal_ids: set[int] = set()
+        facts: dict[int, ProductGoalArtifactDecisionFact] = {}
         goal_fingerprints = {
             item_id: item.content_fingerprint for item_id, item in goals.items()
         }
         for row in rows:
+            identifier = self._required_id(
+                row.product_goal_artifact_decision_id,
+                "Product Goal decision",
+            )
             self._require_product_condition(
-                row.decision in {"accepted", "rejected"},
+                row.decision in {"accepted", "rejected", "feedback"},
                 "Product Goal decision has an invalid value.",
             )
             self._require_fingerprint_reference(
@@ -1441,28 +1467,60 @@ class WorkflowFactRepository:
                 goal_fingerprints,
                 "Product Goal decision",
             )
-            if row.decision == "accepted":
-                accepted_goal_ids.add(row.product_goal_artifact_id)
-        return frozenset(accepted_goal_ids)
+            goal = goals.get(row.product_goal_artifact_id)
+            self._require_product_condition(
+                goal is not None and goal.created_at < row.decided_at,
+                "Product Goal decision must follow Product Goal artifact creation.",
+            )
+            facts[identifier] = ProductGoalArtifactDecisionFact(
+                product_goal_artifact_decision_id=identifier,
+                product_goal_artifact_id=row.product_goal_artifact_id,
+                artifact_fingerprint=row.artifact_fingerprint,
+                decision=self._product_goal_decision(row.decision),
+                rationale=row.rationale,
+                reviewer=row.reviewer,
+                idempotency_key=row.idempotency_key,
+                decided_at=row.decided_at,
+            )
+        return facts
+
+    def _active_accepted_product_goal_ids(
+        self,
+        decisions: dict[int, ProductGoalArtifactDecisionFact],
+        outcomes: dict[int, ProductGoalOutcomeFact],
+    ) -> frozenset[int]:
+        """Return accepted Goals that have not reached a terminal outcome."""
+        accepted_goal_ids = {
+            item.product_goal_artifact_id
+            for item in decisions.values()
+            if item.decision == "accepted"
+        }
+        outcome_goal_ids = {
+            item.product_goal_artifact_id for item in outcomes.values()
+        }
+        unresolved_goal_ids = frozenset(accepted_goal_ids - outcome_goal_ids)
+        self._require_product_condition(
+            len(unresolved_goal_ids) <= 1,
+            "Project has more than one accepted Product Goal without an outcome.",
+        )
+        return unresolved_goal_ids
 
     @staticmethod
-    def _active_accepted_product_goal_ids(
-        goals: dict[int, ProductGoalArtifactFact],
-        accepted_goal_ids: frozenset[int],
-    ) -> frozenset[int]:
-        """Return accepted Goals not replaced by a newer immutable version."""
-        superseded_goal_ids = {
-            item.supersedes_product_goal_artifact_id
-            for item in goals.values()
-            if item.supersedes_product_goal_artifact_id is not None
-        }
-        return accepted_goal_ids - superseded_goal_ids
+    def _accepted_goal_decisions_by_goal(
+        decisions: Iterable[ProductGoalArtifactDecisionFact],
+    ) -> dict[int, tuple[ProductGoalArtifactDecisionFact, ...]]:
+        """Group accepted immutable Goal decisions for causal validation."""
+        accepted: dict[int, list[ProductGoalArtifactDecisionFact]] = {}
+        for item in decisions:
+            if item.decision == "accepted":
+                accepted.setdefault(item.product_goal_artifact_id, []).append(item)
+        return {identifier: tuple(items) for identifier, items in accepted.items()}
 
     def _product_goal_outcomes(
         self,
         project_id: int,
         goals: dict[int, ProductGoalArtifactFact],
-        accepted_goal_ids: frozenset[int],
+        decisions: dict[int, ProductGoalArtifactDecisionFact],
     ) -> dict[int, ProductGoalOutcomeFact]:
         rows = self._session.exec(
             select(ProductGoalOutcome)
@@ -1472,6 +1530,9 @@ class WorkflowFactRepository:
         ).all()
         facts: dict[int, ProductGoalOutcomeFact] = {}
         outcomes_by_goal: set[int] = set()
+        accepted_decisions_by_goal = self._accepted_goal_decisions_by_goal(
+            decisions.values()
+        )
         goal_fingerprints = {
             item_id: item.content_fingerprint for item_id, item in goals.items()
         }
@@ -1491,8 +1552,14 @@ class WorkflowFactRepository:
                 "Product Goal outcome",
             )
             self._require_product_condition(
-                row.product_goal_artifact_id in accepted_goal_ids,
-                "Product Goal outcome requires an accepted Product Goal.",
+                any(
+                    item.decided_at < row.decided_at
+                    for item in accepted_decisions_by_goal.get(
+                        row.product_goal_artifact_id,
+                        (),
+                    )
+                ),
+                "Product Goal outcome requires a prior accepted Product Goal.",
             )
             self._require_product_condition(
                 row.product_goal_artifact_id not in outcomes_by_goal,
@@ -1508,10 +1575,6 @@ class WorkflowFactRepository:
                 decided_by=row.decided_by,
                 decided_at=row.decided_at,
             )
-        self._require_product_condition(
-            len(accepted_goal_ids - outcomes_by_goal) <= 1,
-            "Project has more than one accepted Product Goal without an outcome.",
-        )
         return facts
 
     def _specification_decisions(
@@ -4421,6 +4484,17 @@ class WorkflowFactRepository:
         if value == "abandoned":
             return "abandoned"
         message = f"Invalid Product Goal outcome {value!r}."
+        raise WorkflowFactRepository._error(message)
+
+    @staticmethod
+    def _product_goal_decision(value: str) -> _ProductGoalDecision:
+        if value == "accepted":
+            return "accepted"
+        if value == "rejected":
+            return "rejected"
+        if value == "feedback":
+            return "feedback"
+        message = f"Invalid Product Goal decision {value!r}."
         raise WorkflowFactRepository._error(message)
 
     @staticmethod

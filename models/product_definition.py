@@ -243,12 +243,12 @@ class ProductGoalArtifact(SQLModel, table=True):
 
 
 class ProductGoalArtifactDecision(SQLModel, table=True):
-    """Append-only acceptance or rejection of one product-goal artifact."""
+    """Append-only review state recorded against one product-goal artifact."""
 
     __tablename__ = "product_goal_artifact_decisions"
     __table_args__ = (
         CheckConstraint(
-            "decision IN ('accepted', 'rejected')",
+            "decision IN ('accepted', 'rejected', 'feedback')",
             name="ck_product_goal_artifact_decision",
         ),
         UniqueConstraint(

@@ -259,6 +259,30 @@ def _add_initial_vision_turn(
     return _id(turn.vision_interview_turn_id)
 
 
+def _record_product_goal_decision(
+    session: Session,
+    goal: ProductGoalArtifact,
+    *,
+    decision: str,
+    idempotency_key: str,
+    decided_at: datetime,
+) -> int:
+    """Persist one durable Goal review decision for a fixture."""
+    review = ProductGoalArtifactDecision(
+        project_id=goal.project_id,
+        product_goal_artifact_id=_id(goal.product_goal_artifact_id),
+        artifact_fingerprint=goal.content_fingerprint,
+        decision=decision,
+        rationale=f"{decision} review evidence.",
+        reviewer="operator",
+        idempotency_key=idempotency_key,
+        decided_at=decided_at,
+    )
+    session.add(review)
+    session.flush()
+    return _id(review.product_goal_artifact_decision_id)
+
+
 def _seed_product_definition(
     session: Session,
     name: str,
@@ -267,6 +291,9 @@ def _seed_product_definition(
 ) -> dict[str, int | str]:
     """Seed one complete, loader-valid product-definition lineage."""
     recorded_at = datetime(2026, 8, 5, 12, tzinfo=UTC)
+    accepted_at = recorded_at + timedelta(minutes=1)
+    discovery_recorded_at = recorded_at + timedelta(minutes=2)
+    outcome_at = recorded_at + timedelta(minutes=3)
     project = Project(name=name)
     session.add(project)
     session.flush()
@@ -370,17 +397,12 @@ def _seed_product_definition(
     session.add(goal)
     session.flush()
     goal_id = _id(goal.product_goal_artifact_id)
-    session.add(
-        ProductGoalArtifactDecision(
-            project_id=project_id,
-            product_goal_artifact_id=goal_id,
-            artifact_fingerprint=goal.content_fingerprint,
-            decision="accepted",
-            rationale="Required for the next durable record.",
-            reviewer="operator",
-            idempotency_key=f"goal-review-{project_id}",
-            decided_at=recorded_at,
-        )
+    goal_decision_id = _record_product_goal_decision(
+        session,
+        goal,
+        decision="accepted",
+        idempotency_key=f"goal-review-{project_id}",
+        decided_at=accepted_at,
     )
     outcome: ProductGoalOutcome | None = None
     if create_goal_outcome:
@@ -392,7 +414,7 @@ def _seed_product_definition(
             rationale="The durable records are available.",
             decided_by="operator",
             idempotency_key=f"goal-outcome-{project_id}",
-            decided_at=recorded_at,
+            decided_at=outcome_at,
         )
         session.add(outcome)
     discovery_content = {"discovery": "complete"}
@@ -408,7 +430,7 @@ def _seed_product_definition(
         producer="test",
         supersedes_discovery_artifact_id=None,
         recorded_by="operator",
-        recorded_at=recorded_at,
+        recorded_at=discovery_recorded_at,
     )
     session.add(discovery)
     session.flush()
@@ -471,6 +493,7 @@ def _seed_product_definition(
         "goal_turn_id": _id(goal_turn.product_goal_interview_turn_id),
         "goal_id": goal_id,
         "goal_fingerprint": goal.content_fingerprint,
+        "goal_decision_id": goal_decision_id,
         "outcome_id": 0 if outcome is None else _id(outcome.product_goal_outcome_id),
         "discovery_id": _id(discovery.discovery_artifact_id),
         "discovery_fingerprint": discovery.content_fingerprint,
@@ -549,7 +572,7 @@ def _add_accepted_product_goal(
             rationale="Track the remaining work.",
             reviewer="operator",
             idempotency_key=f"goal-review-{goal_number}-{project_id}",
-            decided_at=recorded_at,
+            decided_at=recorded_at + timedelta(minutes=1),
         )
     )
     return {
@@ -587,6 +610,11 @@ def test_loader_retains_product_definition_identity_and_legacy_spec_lineage(
         == seed["goal_turn_id"]
     )
     assert (
+        snapshot.product_goal_artifact_decisions[0].product_goal_artifact_decision_id
+        == seed["goal_decision_id"]
+    )
+    assert snapshot.product_goal_artifact_decisions[0].decision == "accepted"
+    assert (
         snapshot.product_goal_outcomes[0].product_goal_outcome_id == seed["outcome_id"]
     )
     assert snapshot.product_goal_outcomes[0].product_goal_artifact_id == seed["goal_id"]
@@ -611,6 +639,34 @@ def test_loader_retains_product_definition_identity_and_legacy_spec_lineage(
         snapshot.spec_versions[1].source_specification_candidate_fingerprint
         == seed["candidate_fingerprint"]
     )
+
+
+def test_loader_retains_product_goal_review_states_as_business_facts(
+    engine: Engine,
+) -> None:
+    """Accepted, rejected, and feedback Goal reviews survive loading verbatim."""
+    review_at = datetime(2026, 8, 5, 14, tzinfo=UTC)
+    with Session(engine) as session:
+        seed = _seed_product_definition(session, "Goal review state facts")
+        for decision in ("rejected", "feedback"):
+            session.add(
+                ProductGoalArtifactDecision(
+                    project_id=int(seed["project_id"]),
+                    product_goal_artifact_id=int(seed["goal_id"]),
+                    artifact_fingerprint=str(seed["goal_fingerprint"]),
+                    decision=decision,
+                    rationale=f"{decision} is durable review evidence.",
+                    reviewer="operator",
+                    idempotency_key=f"goal-{decision}-{seed['project_id']}",
+                    decided_at=review_at,
+                )
+            )
+        session.commit()
+        snapshot = WorkflowFactRepository(session).load(int(seed["project_id"]))
+
+    assert {
+        item.decision for item in snapshot.product_goal_artifact_decisions
+    } == {"accepted", "rejected", "feedback"}
 
 
 def test_loader_loads_initial_and_revision_vision_chains_with_turn_one(
@@ -710,7 +766,7 @@ def test_loader_rejects_discovery_without_accepted_active_product_goal(
     engine: Engine,
     statement: str,
 ) -> None:
-    """Discovery requires its exact accepted, non-superseded Product Goal."""
+    """Discovery requires its exact Product Goal to have been accepted."""
     with Session(engine) as session:
         seed = _seed_product_definition(
             session,
@@ -724,20 +780,36 @@ def test_loader_rejects_discovery_without_accepted_active_product_goal(
             WorkflowFactRepository(session).load(int(seed["project_id"]))
 
 
-def test_loader_rejects_discovery_of_a_superseded_product_goal(
+def test_loader_keeps_historical_discovery_after_later_goal_outcome_and_revision(
     engine: Engine,
 ) -> None:
-    """Discovery cannot continue from an accepted Goal replaced by a newer one."""
+    """Later Goal facts do not invalidate discovery valid when recorded."""
     recorded_at = datetime(2026, 8, 5, 13, tzinfo=UTC)
     with Session(engine) as session:
-        seed = _seed_product_definition(session, "Superseded Product Goal parent")
+        seed = _seed_product_definition(
+            session,
+            "Historical Product Goal discovery",
+            create_goal_outcome=False,
+        )
         project_id = int(seed["project_id"])
+        session.add(
+            ProductGoalOutcome(
+                project_id=project_id,
+                product_goal_artifact_id=int(seed["goal_id"]),
+                artifact_fingerprint=str(seed["goal_fingerprint"]),
+                outcome="fulfilled",
+                rationale="The original Goal was completed later.",
+                decided_by="operator",
+                idempotency_key=f"historical-goal-outcome-{project_id}",
+                decided_at=recorded_at,
+            )
+        )
         replacement = _add_accepted_product_goal(
             session,
             project_id=project_id,
             vision=(int(seed["vision_id"]), str(seed["vision_fingerprint"])),
             goal_number=2,
-            recorded_at=recorded_at,
+            recorded_at=recorded_at + timedelta(minutes=1),
         )
         _force_sql(
             session,
@@ -751,8 +823,87 @@ def test_loader_rejects_discovery_of_a_superseded_product_goal(
         )
         session.commit()
 
+        snapshot = WorkflowFactRepository(session).load(project_id)
+
+    assert [item.discovery_artifact_id for item in snapshot.discovery_artifacts] == [
+        seed["discovery_id"]
+    ]
+
+
+def test_loader_rejects_discovery_recorded_after_product_goal_outcome(
+    engine: Engine,
+) -> None:
+    """A terminal Goal outcome closes discovery eligibility at its decision time."""
+    recorded_at = datetime(2026, 8, 5, 13, tzinfo=UTC)
+    with Session(engine) as session:
+        seed = _seed_product_definition(
+            session,
+            "Post-outcome Product Goal discovery",
+            create_goal_outcome=False,
+        )
+        project_id = int(seed["project_id"])
+        session.add(
+            ProductGoalOutcome(
+                project_id=project_id,
+                product_goal_artifact_id=int(seed["goal_id"]),
+                artifact_fingerprint=str(seed["goal_fingerprint"]),
+                outcome="fulfilled",
+                rationale="The Goal is done.",
+                decided_by="operator",
+                idempotency_key=f"post-outcome-goal-{project_id}",
+                decided_at=recorded_at,
+            )
+        )
+        content = {"discovery": "after-outcome"}
+        session.add(
+            DiscoveryArtifact(
+                project_id=project_id,
+                vision_artifact_id=int(seed["vision_id"]),
+                vision_fingerprint=str(seed["vision_fingerprint"]),
+                product_goal_artifact_id=int(seed["goal_id"]),
+                product_goal_fingerprint=str(seed["goal_fingerprint"]),
+                canonical_content_json=canonical_json(content),
+                content_fingerprint=canonical_hash(content),
+                content_ref="after-outcome.md",
+                producer="test",
+                supersedes_discovery_artifact_id=None,
+                recorded_by="operator",
+                recorded_at=recorded_at,
+            )
+        )
+        session.commit()
+
         with pytest.raises(WorkflowFactLoadError):
             WorkflowFactRepository(session).load(project_id)
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "UPDATE product_goal_artifact_decisions SET decided_at = ("
+        "SELECT created_at FROM product_goal_artifacts WHERE "
+        "product_goal_artifact_id = "
+        "product_goal_artifact_decisions.product_goal_artifact_id"
+        ") WHERE project_id = :project_id",
+        "UPDATE product_goal_outcomes SET decided_at = ("
+        "SELECT decided_at FROM product_goal_artifact_decisions WHERE "
+        "product_goal_artifact_id = product_goal_outcomes.product_goal_artifact_id "
+        "AND decision = 'accepted'"
+        ") WHERE project_id = :project_id",
+    ],
+)
+def test_loader_rejects_noncausal_product_goal_decision_ordering(
+    engine: Engine,
+    statement: str,
+) -> None:
+    """Goal decisions and outcomes must follow their required parent facts."""
+    with Session(engine) as session:
+        seed = _seed_product_definition(session, "Noncausal Product Goal order")
+        _force_sql(session, statement, {"project_id": int(seed["project_id"])})
+        session.commit()
+
+        with pytest.raises(WorkflowFactLoadError):
+            WorkflowFactRepository(session).load(int(seed["project_id"]))
 
 
 @pytest.mark.parametrize(
