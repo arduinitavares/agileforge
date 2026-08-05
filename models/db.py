@@ -18,6 +18,7 @@ from models import (
     brownfield,
     core,
     events,
+    repository,
     specs,
     workflow,
 )
@@ -33,6 +34,7 @@ _CURRENT_MODEL_MODULES: tuple[ModuleType, ...] = (
     core,
     specs,
     events,
+    repository,
     workflow,
     agent_workbench,
     authority_curation,

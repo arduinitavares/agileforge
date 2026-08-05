@@ -45,6 +45,7 @@ from models.events import (
     TaskExecutionLog,
     WorkflowEvent,
 )
+from models.repository import RepositoryBinding
 from models.specs import (
     CompiledSpecAuthority,
     SpecAuthorityAcceptance,
@@ -64,6 +65,7 @@ __all__ = [
     "Project",
     "ProjectPersona",
     "ProjectTeam",
+    "RepositoryBinding",
     "SpecAuthorityAcceptance",
     "SpecAuthorityStatus",
     "SpecRegistry",
