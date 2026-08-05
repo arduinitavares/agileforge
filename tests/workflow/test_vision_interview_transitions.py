@@ -15,10 +15,15 @@ from models.product_definition import (
     VisionInterviewTurn,
     VisionRevisionIntent,
 )
+from services.application import (
+    AgileForgeApplication,
+    VisionInterviewRequest,
+)
 from services.node_attempt_replay import (
     DurableNodeAttemptReplayService,
     NodeAttemptReplayQuery,
 )
+from services.vision_interview_input import VisionInterviewInputService
 from workflow.clock import FixedClock
 from workflow.contracts import WorkflowErrorCode
 from workflow.definitions.product_definition import product_definition_graph
@@ -61,6 +66,20 @@ class _Registry:
     def require(self, node_id: str) -> object:
         assert node_id == "vision.interview"
         return object()
+
+
+class _PositionMustNotRunDomain:
+    """Fail when a durable replay attempts to derive current graph state."""
+
+    def position(self, project_id: int) -> object:
+        del project_id
+        message = "receipt replay must happen before position reads"
+        raise AssertionError(message)
+
+    def transition(self, request: object) -> TransitionResult:
+        del request
+        message = "receipt replay must happen before transitions"
+        raise AssertionError(message)
 
 
 def _domain(engine: Engine) -> WorkflowDomain:
@@ -230,6 +249,68 @@ def test_replay_uses_persisted_after_turn_instance_key(engine: Engine) -> None:
     assert changed_input is not None
     assert changed_input.error is not None
     assert changed_input.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
+
+
+def test_application_replay_normalizes_retry_user_text_before_position_read(
+    engine: Engine,
+) -> None:
+    """Padded retries use the same Vision input boundary as persisted starts."""
+    with Session(engine) as session:
+        project = Project(name="Vision replay normalization", origin="greenfield")
+        session.add(project)
+        session.commit()
+        assert project.project_id is not None
+        project_id = project.project_id
+    domain = _domain(engine)
+    decision = _decision(domain, project_id, "vision.interview")
+    input_service = VisionInterviewInputService(engine=engine)
+    persisted_input = input_service.build(
+        project_id=project_id,
+        decision=decision,
+        user_text="  Same answer.  ",
+    )
+    start = StartNodeAttempt(
+        project_id=project_id,
+        graph_version=domain.position(project_id).graph_version,
+        fact_fingerprint=domain.position(project_id).fact_fingerprint,
+        decision_fingerprint=decision.decision_fingerprint,
+        idempotency_key="vision-padded-replay",
+        actor="operator@example.com",
+        target_node_id="vision.interview",
+        target_instance_key=decision.instance_key,
+        normalized_input=persisted_input,
+        model_id="fake/vision",
+        execution_settings={"timeout_seconds": 5.0, "max_attempts": 1},
+        lease_seconds=60,
+    )
+    started = domain.transition(start)
+    assert started.ok
+    app = object.__new__(AgileForgeApplication)
+    app._workflow_domain = _PositionMustNotRunDomain()
+    app._vision_interview_input = input_service
+    app._prepared_agentic_inputs = type(
+        "PreparedVisionInputServices",
+        (),
+        {"vision_interview": input_service},
+    )()
+    same_request = VisionInterviewRequest(
+        project_id=project_id,
+        graph_version=start.graph_version,
+        fact_fingerprint=start.fact_fingerprint,
+        decision_fingerprint=start.decision_fingerprint,
+        user_text="  Same answer.  ",
+        idempotency_key=start.idempotency_key,
+        actor=start.actor,
+    )
+
+    replay = app.run_vision_interview(same_request)
+    changed = app.run_vision_interview(
+        same_request.model_copy(update={"user_text": "Changed answer."})
+    )
+
+    assert replay == started.model_copy(update={"replayed": True})
+    assert changed.error is not None
+    assert changed.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
 
 
 def test_review_accepts_one_vision_exactly_once(engine: Engine) -> None:

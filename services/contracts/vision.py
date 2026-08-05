@@ -59,11 +59,19 @@ class VisionInterviewInput(BaseModel):
     prior_components: VisionComponents | None
     accepted_vision_statement: str | None
 
+    @classmethod
+    def normalize_user_response(cls, value: str) -> str:
+        """Apply the persisted Vision interview response boundary."""
+        return _strip_required(value, "user_response")
+
     @field_validator("project_name", "user_response")
     @classmethod
     def normalize_required(cls, value: str, info: object) -> str:
         """Reject blank required input before invoking any provider."""
-        return _strip_required(value, str(getattr(info, "field_name", "value")))
+        field_name = str(getattr(info, "field_name", "value"))
+        if field_name == "user_response":
+            return cls.normalize_user_response(value)
+        return _strip_required(value, field_name)
 
     @field_validator("project_description", "accepted_vision_statement")
     @classmethod

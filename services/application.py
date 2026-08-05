@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Literal, Protocol
 from pydantic import Field
 
 from adapters.adk.model_roles import AGENTIC_MODEL_ROLES
+from services.contracts.vision import VisionInterviewInput
 from services.node_attempt_replay import NodeAttemptReplayQuery, TransitionReplayQuery
 from services.vision_interview_input import VisionInterviewInputService
 from utils.model_config import get_model_id
@@ -324,7 +325,9 @@ class AgileForgeApplication:
                 idempotency_key=request.idempotency_key,
                 actor=request.actor,
                 correlation_id=request.correlation_id,
-                user_text=request.user_text,
+                user_text=VisionInterviewInput.normalize_user_response(
+                    request.user_text
+                ),
             )
         )
         if replay is not None:
