@@ -1,7 +1,7 @@
 # Single Project Lifecycle Hard-Break Design
 
 **Date:** 2026-08-05
-**Status:** Approved for amended written-spec review
+**Status:** Approved
 **Supersedes:** `2026-08-02-domain-workflow-graph-hard-break-design.md`
 **Scope:** Project creation, initial Vision and Product Goal, optional repository
 attachment, deterministic local repository inspection, Authority sequencing,
@@ -122,8 +122,9 @@ Project must use the same product-development flow.
   to one lifecycle.
 
 Feature-level implementation assessment is a separate follow-up module. It will
-compare one accepted desired outcome with targeted repository evidence after
-`to spec` and before remaining work is admitted to the Product Backlog.
+compare one accepted desired outcome and its accepted Specification Authority
+with targeted repository evidence after Authority acceptance and before
+remaining work is admitted to the Product Backlog.
 
 ## Domain Model
 
@@ -640,5 +641,6 @@ For each of caRtola, ASA Deep Process Control Advisory System, and MyFinance:
 After this hard break is accepted, design the separate feature-level
 `CurrentStateAssessment` module. That module will use deterministic retrieval
 first, optional CodeGraph context second, and broader analysis only when risk or
-dependency evidence requires it. It will not reintroduce a Project lifecycle
-variant.
+dependency evidence requires it. It will consume accepted Specification
+Authority and run before Backlog admission. It will not reintroduce a Project
+lifecycle variant.

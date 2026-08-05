@@ -4,7 +4,7 @@
 
 **Goal:** Replace the dual-origin setup architecture with one durable Project lifecycle that starts with a Vision interview, treats local repository attachment as optional Git provenance, and preserves the complete specification-to-delivery workflow.
 
-**Architecture:** Product state lives in versioned business tables and is projected into one `agileforge.workflow.v2` graph; ADK sessions and attempt outputs remain execution traces only. A small GitPython adapter probes repository identity and status without reading source contents, while application services prepare every model-backed input from durable facts. Human UI and agent CLI expose task language and semantic choices, never raw workflow JSON or derived guards.
+**Architecture:** Product state lives in versioned business tables and is projected into one `agileforge.workflow.v2` graph; ADK sessions and attempt outputs remain execution traces only. Project Vision and Product Goal use separate host-prepared interviews and separate fingerprint-bound human decisions. A small GitPython adapter probes repository identity and status without reading source contents, while application services prepare every model-backed input from durable facts. Human UI and agent CLI expose task language and semantic choices, never raw workflow JSON or derived guards.
 
 **Tech Stack:** Python 3.12+, SQLModel 0.0.27+, FastAPI 0.119+, Google ADK 2.2.0, GitPython 3.1.57, argparse, vanilla JavaScript, Tailwind, Material Symbols, pytest 9+, Node test runner, Playwright 1.58+, uv.
 
@@ -14,8 +14,10 @@
 - Set `GRAPH_VERSION` to `agileforge.workflow.v2` when the root graph cuts over.
 - Project creation accepts only `name`, optional `description`, and optional `repository_path` as business input.
 - Vision is Project-owned. Vision records and rules have no Authority prerequisite, Authority ID, or Authority fingerprint.
-- Initial Vision and Product Goal acceptance is one transaction over two separately versioned artifacts.
-- The accepted sequence is Vision and Goal, discovery artifact, specification review, Authority review, Backlog, Roadmap, Stories, Sprint, execution, closure, and triage.
+- Vision and Product Goal are interviewed, reviewed, and accepted separately. Accepted Vision unlocks only the Product Goal interview; accepted Product Goal unlocks discovery.
+- Exactly one accepted Product Goal may be active. It remains active across Sprints until a human records it fulfilled or abandoned while no Sprint is active and all closed Sprints under it have completed triage.
+- The accepted sequence is Vision, Product Goal, discovery artifact, specification review, Authority review, Backlog, Roadmap, Stories, Sprint, execution, closure, and triage.
+- Feature-level Current-State/Gap Assessment is a separate follow-up module after this hard break. It will consume accepted Authority plus targeted repository evidence before Backlog admission.
 - Repository attachment never changes graph availability or the graph fact fingerprint.
 - Repository probing reads Git metadata and status only. It reads no source-file contents, performs no network request, calls no model, and mutates no Git state.
 - Dirty and detached repositories succeed with explicit structured state; only typed probe errors fail.
@@ -48,11 +50,17 @@ RETIRED_ORIGIN_B="$(printf '%s%s' 'green' 'field')"
 - `models/repository.py`: immutable repository observations.
 - `models/product_definition.py`: Vision interview, Vision, Product Goal, discovery, and specification-review records.
 - `workflow/requests/vision.py`: Vision interview, review, and revision requests.
-- `workflow/handlers/vision.py`: transactional Vision and initial-Goal handlers.
-- `workflow/requests/product_discovery.py`: later Goal, discovery, and specification requests.
-- `workflow/handlers/product_discovery.py`: transactional Goal, discovery, specification, and registry handlers.
-- `workflow/definitions/product_discovery.py`: Goal, discovery, and specification graph rules.
+- `workflow/handlers/vision.py`: transactional Vision interview and review handlers.
+- `workflow/requests/product_goal.py`: Product Goal interview, review, fulfillment, and abandonment requests.
+- `workflow/handlers/product_goal.py`: transactional Product Goal interview, review, and outcome handlers.
+- `workflow/definitions/product_goal.py`: Product Goal interview, review, and outcome graph rules.
+- `workflow/requests/product_discovery.py`: discovery and specification requests.
+- `workflow/handlers/product_discovery.py`: transactional discovery, specification, and registry handlers.
+- `workflow/definitions/product_discovery.py`: discovery and specification graph rules.
 - `services/vision_interview_input.py`: host preparation of one Vision turn from durable state.
+- `services/product_goal_interview_input.py`: host preparation of one Product Goal turn from accepted Vision and durable Goal state.
+- `services/contracts/product_goal.py`: strict Product Goal interview input and output contracts.
+- `adapters/adk/agents/product_goal.py`: Product Goal interview agent with no discovery or implementation responsibility.
 - `services/project_lifecycle.py`: create, attach, replace, refresh, and status application boundary.
 
 ### Existing modules retained and narrowed
@@ -62,10 +70,10 @@ RETIRED_ORIGIN_B="$(printf '%s%s' 'green' 'field')"
 - `workflow/definitions/authority.py`: compile only an accepted current specification; remove the Vision boundary.
 - `workflow/definitions/backlog.py`, `workflow/definitions/planning.py`, `workflow/definitions/execution.py`: retain delivery behavior and bind it to the current Product Goal through accepted Backlog lineage.
 - `repositories/workflow.py`: load only current domain facts and validate exact lineage.
-- `services/application.py`: compose repository probe, Vision input preparation, existing Authority input preparation, ADK recipes, and durable reads.
+- `services/application.py`: compose repository probe, Vision and Product Goal input preparation, existing Authority input preparation, ADK recipes, and durable reads.
 - `services/read_projections.py`: project, repository, Vision, Goal, specification, Authority, and delivery reads from durable facts.
 - `api.py`, `cli/main.py`, `cli/workflow_commands.py`: task-specific transports.
-- `frontend/index.html`, `frontend/app.js`, `frontend/project.html`, `frontend/project.js`: human-oriented creation, Vision, repository status, review, and workflow views.
+- `frontend/index.html`, `frontend/app.js`, `frontend/project.html`, `frontend/project.js`: human-oriented creation, separate Vision and Product Goal interviews, repository status, review, and workflow views.
 
 ### Modules deleted at cutover
 
@@ -291,13 +299,15 @@ git commit -m "feat: add deterministic repository probe"
 - Modify: `agile_sqlmodel.py`
 - Modify: `workflow/facts.py`
 - Modify: `repositories/workflow.py`
+- Modify: `tests/test_task17_review_absence.py`
+- Modify: `tests/workflow/test_graph_properties.py`
 - Test: `tests/workflow/test_product_definition_models.py`
 - Test: `tests/workflow/test_product_definition_facts.py`
 - Test: `tests/workflow/test_fingerprints.py`
 
 **Interfaces:**
 - Consumes: `RepositoryBinding` from Task 1 and existing canonical JSON/hash utilities.
-- Produces: append-only Vision interview, Product Goal, discovery, and specification records plus corresponding immutable facts in `WorkflowFactSnapshot`. Existing Vision records remain in place until Task 3 moves and narrows them in one commit.
+- Produces: append-only Vision interview, Product Goal interview, Product Goal outcome, discovery, and specification records plus corresponding immutable facts in `WorkflowFactSnapshot`. Existing Vision records remain in place until Task 3 moves and narrows them in one commit.
 
 - [ ] **Step 1: Write fresh-schema model tests**
 
@@ -309,8 +319,10 @@ def test_fresh_schema_has_versioned_product_definition_tables(engine: Engine) ->
     assert {
         "vision_revision_intents",
         "vision_interview_turns",
+        "product_goal_interview_turns",
         "product_goal_artifacts",
         "product_goal_artifact_decisions",
+        "product_goal_outcomes",
         "discovery_artifacts",
         "specification_candidates",
         "specification_decisions",
@@ -335,20 +347,32 @@ VisionRevisionIntent
 VisionInterviewTurn
   vision_interview_turn_id, project_id, mode(initial|revision), turn_number,
   revision_intent_id nullable, prior_turn_id nullable, user_text,
-  components_json, vision_statement, product_goal_statement nullable,
-  is_complete, clarifying_questions_json, output_fingerprint,
+  components_json, vision_statement, is_complete, clarifying_questions_json,
+  output_fingerprint,
   workflow_node_attempt_id, attempt_fingerprint, recorded_at
+
+ProductGoalInterviewTurn
+  product_goal_interview_turn_id, project_id, vision_artifact_id,
+  vision_fingerprint, goal_number, revision_number, prior_turn_id nullable,
+  user_text, components_json, goal_statement, is_complete,
+  clarifying_questions_json, output_fingerprint, workflow_node_attempt_id,
+  attempt_fingerprint, recorded_at
 
 ProductGoalArtifact
   product_goal_artifact_id, project_id, vision_artifact_id,
   vision_fingerprint, goal_number, revision_number, statement,
   content_fingerprint, supersedes_product_goal_artifact_id nullable,
-  source_interview_turn_id nullable, created_by, created_at
+  source_interview_turn_id, created_by, created_at
 
 ProductGoalArtifactDecision
   product_goal_artifact_decision_id, project_id, product_goal_artifact_id,
-  artifact_fingerprint, review_pair_fingerprint, decision,
-  rationale, reviewer, idempotency_key, decided_at
+  artifact_fingerprint, decision, rationale, reviewer, idempotency_key,
+  decided_at
+
+ProductGoalOutcome
+  product_goal_outcome_id, project_id, product_goal_artifact_id,
+  artifact_fingerprint, outcome(fulfilled|abandoned), rationale,
+  decided_by, idempotency_key, decided_at
 
 DiscoveryArtifact
   discovery_artifact_id, project_id, vision_artifact_id,
@@ -370,7 +394,7 @@ SpecificationDecision
   idempotency_key, decided_at
 ```
 
-Use strict check constraints for modes and decisions. Use same-Project composite foreign keys for every parent link. References to `vision_artifacts` use the existing table during this staging task. Make every new artifact immutable; only append decisions and replacements.
+Use strict check constraints for modes, decisions, and outcomes. Use same-Project composite foreign keys for every parent link. `ProductGoalArtifact.source_interview_turn_id` is required and points to the exact completed Goal interview turn. References to `vision_artifacts` use the existing table during this staging task. Make every new artifact immutable; only append decisions, outcomes, and replacements. Enforce at most one outcome per accepted Goal with a unique Goal reference; the handler and fact loader enforce at most one accepted Goal without an outcome per Project.
 
 - [ ] **Step 4: Stage nullable `SpecRegistry` lineage for the later atomic cutover**
 
@@ -404,10 +428,12 @@ Add exact tests proving:
 ```text
 repository binding does not appear in WorkflowFactSnapshot
 an incomplete Vision turn changes business_fact_fingerprint
+an incomplete Product Goal turn changes business_fact_fingerprint
 deleting the ADK trace database does not remove an interview turn
 cross-Project Goal, discovery, or specification references fail loading
 content or parent fingerprint tampering raises WorkflowFactLoadError
-Product Goal, discovery, and specification facts retain exact parent identity
+Product Goal interview, artifact, outcome, discovery, and specification facts retain exact parent identity
+two accepted Goals without an outcome raise WorkflowFactLoadError
 legacy spec rows load with nullable staged lineage until Task 4
 ```
 
@@ -418,32 +444,36 @@ Add these exact fact types:
 ```python
 VisionRevisionIntentFact
 VisionInterviewTurnFact
+ProductGoalInterviewTurnFact
 ProductGoalArtifactFact
+ProductGoalOutcomeFact
 DiscoveryArtifactFact
 SpecificationCandidateFact
 ```
 
 Extend `SpecVersionFact` with nullable source Vision, Goal, discovery, and specification-candidate identity/fingerprints for this staging task. Add tuple fields with the same names to `WorkflowFactSnapshot`. Load and validate the new records in `WorkflowFactRepository`; do not consult ADK session tables.
 
+Extend the graph-property sensitivity matrix for every new `WorkflowFactSnapshot` field. Narrow the old review-absence policy so it rejects only deleted runtime symbols and permits the new Product Goal domain vocabulary required by this plan.
+
 - [ ] **Step 7: Run focused tests and commit**
 
 Run:
 
 ```bash
-uv run --frozen pytest tests/workflow/test_product_definition_models.py tests/workflow/test_product_definition_facts.py tests/workflow/test_fingerprints.py -q
+uv run --frozen pytest tests/workflow/test_product_definition_models.py tests/workflow/test_product_definition_facts.py tests/workflow/test_fingerprints.py tests/workflow/test_graph_properties.py tests/test_task17_review_absence.py -q
 git diff --check
 ```
 
 Commit:
 
 ```bash
-git add models/product_definition.py models/specs.py models/__init__.py models/db.py agile_sqlmodel.py workflow/facts.py repositories/workflow.py tests/workflow/test_product_definition_models.py tests/workflow/test_product_definition_facts.py tests/workflow/test_fingerprints.py
+git add models/product_definition.py models/specs.py models/__init__.py models/db.py agile_sqlmodel.py workflow/facts.py repositories/workflow.py tests/workflow/test_product_definition_models.py tests/workflow/test_product_definition_facts.py tests/workflow/test_fingerprints.py tests/workflow/test_graph_properties.py tests/test_task17_review_absence.py
 git commit -m "feat: add durable product definition facts"
 ```
 
 ---
 
-### Task 3: Vision Interview, Initial Goal, And Revision Flow
+### Task 3: Vision Interview And Revision Flow
 
 **Files:**
 - Create: `workflow/requests/vision.py`
@@ -498,7 +528,6 @@ class VisionInterviewOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     updated_components: VisionComponents
     project_vision_statement: str
-    initial_product_goal_statement: str | None
     is_complete: bool
     clarifying_questions: list[str]
 ```
@@ -507,8 +536,6 @@ Validators must enforce:
 
 ```text
 incomplete output has at least one non-empty clarifying question
-complete initial output has a non-empty Product Goal statement
-complete revision output has no Product Goal statement
 is_complete equals VisionComponents.is_fully_defined()
 all strings are stripped and blank strings are rejected where required
 ```
@@ -517,7 +544,7 @@ all strings are stripped and blank strings are rejected where required
 
 Run: `uv run --frozen pytest tests/services/contracts/test_vision.py -q`
 
-Expected: fail because the old input still requires specification and Authority content and the output lacks Product Goal.
+Expected: fail because the old input still requires specification and Authority content and does not implement the focused interview contract.
 
 - [ ] **Step 3: Replace the prompt and agent contract**
 
@@ -525,11 +552,10 @@ The prompt must state these exact boundaries:
 
 ```text
 Human answers are the authority for product intent.
-Do not infer Vision or Goal from repository contents.
+Do not infer Vision from repository contents.
 Ask one question or one tightly related question set per turn.
 Preserve already answered components unless the human corrects them.
-Initial mode produces both Project Vision and one concrete initial Product Goal.
-Revision mode changes Vision only and never rewrites a Product Goal.
+Produce Project Vision only. Do not define a Product Goal, feature, specification, or implementation task.
 Return only the strict output schema.
 ```
 
@@ -547,8 +573,8 @@ VisionArtifact
 
 VisionArtifactDecision
   vision_artifact_decision_id, project_id, vision_artifact_id,
-  artifact_fingerprint, review_pair_fingerprint, decision,
-  rationale, reviewer, idempotency_key, decided_at
+  artifact_fingerprint, decision, rationale, reviewer, idempotency_key,
+  decided_at
 ```
 
 Add `VisionArtifactFact` and its validated loader. Remove Vision from the generic phase-artifact loader so there is exactly one Vision source of truth.
@@ -564,18 +590,16 @@ Add exact tests proving:
 ```text
 vision.interview is immediately available on a new Project with no Authority
 an incomplete turn persists and keeps vision.interview available
-a complete initial turn creates one pending Vision and one pending Product Goal
-vision.review references both exact fingerprints
-accept inserts both decisions or neither decision
-feedback records both decisions and reopens interview
-initial acceptance makes discovery the next required stage
-vision.revision.start is optional after an accepted Vision
+a complete turn creates one pending Vision only
+vision.review references the exact Vision fingerprint
+accept inserts one Vision decision exactly once
+feedback records one Vision decision and reopens the Vision interview
+initial acceptance makes goal.interview the next required stage while discovery remains blocked
+vision.revision.start is optional only when an accepted Vision exists and no Product Goal is active
 a complete revision creates Vision only
-accepted revision makes older Goal and specification lineage stale
+accepted revision makes older resolved Goal and specification lineage non-current
 removing ADK trace rows does not change Vision position
 ```
-
-For atomicity, monkeypatch the second decision insert to raise and assert both decision tables remain empty.
 
 - [ ] **Step 7: Implement typed requests and handlers**
 
@@ -589,7 +613,6 @@ class RecordVisionInterviewTurn(PositionedRequest):
     user_text: str
     updated_components: JsonObject
     project_vision_statement: str
-    initial_product_goal_statement: str | None
     is_complete: bool
     clarifying_questions: tuple[str, ...]
     attempt_id: int
@@ -601,9 +624,6 @@ class DecideVisionReview(PositionedRequest):
     node_id: ClassVar[str] = "vision.review"
     vision_artifact_id: int
     vision_fingerprint: str
-    product_goal_artifact_id: int | None
-    product_goal_fingerprint: str | None
-    review_pair_fingerprint: str
     decision: Literal["accepted", "rejected", "feedback"]
     rationale: str
 
@@ -616,11 +636,11 @@ class BeginVisionRevision(PositionedRequest):
     reason: str
 ```
 
-Handlers compute canonical fingerprints server-side, append immutable rows, and return assigned identities. Initial acceptance inserts separate Vision and Goal decisions in one caller-owned transaction. Revision acceptance inserts only the Vision decision.
+Handlers compute canonical fingerprints server-side, append immutable rows, and return assigned identities. Initial and revision acceptance each insert only one Vision decision in the caller-owned transaction. Vision revision acceptance fails without writes while any accepted Product Goal lacks a fulfilled or abandoned outcome.
 
 - [ ] **Step 8: Implement host-prepared Vision input**
 
-`VisionInterviewInputService.build(project_id, decision, user_text)` must load Project identity, the latest valid turn, an open revision intent when present, and the accepted Vision when revising. It must reject ambiguous turn chains and never read specification, Authority, repository contents, or ADK session state.
+`VisionInterviewInputService.build(project_id, decision, user_text)` must load Project identity, the latest valid turn, an open revision intent when present, and the accepted Vision when revising. It may read Product Goal outcomes only to enforce the no-active-Goal revision rule. It must reject ambiguous turn chains and never read specification, Authority, repository contents, or ADK session state.
 
 Define the application request exactly:
 
@@ -634,9 +654,26 @@ class VisionInterviewRequest(FrozenModel):
     idempotency_key: str = Field(min_length=1)
     actor: str = Field(min_length=1)
     correlation_id: str | None = None
+
+
+class VisionReviewRequest(FrozenModel):
+    project_id: int
+    decision: Literal["accepted", "rejected", "feedback"]
+    rationale: str
+    idempotency_key: str = Field(min_length=1)
+    actor: str = Field(min_length=1)
+    correlation_id: str | None = None
+
+
+class VisionRevisionRequest(FrozenModel):
+    project_id: int
+    reason: str = Field(min_length=1)
+    idempotency_key: str = Field(min_length=1)
+    actor: str = Field(min_length=1)
+    correlation_id: str | None = None
 ```
 
-Add `AgileForgeApplication.run_vision_interview(request: VisionInterviewRequest)`. It must replay before current-state reads, validate the exact available decision, choose the configured production model internally, build input internally, and call the generic ADK runner.
+Add `AgileForgeApplication.run_vision_interview(request: VisionInterviewRequest)`, `review_vision(request: VisionReviewRequest)`, and `begin_vision_revision(request: VisionRevisionRequest)`. Each method replays before current-state reads, validates the unique current decision, and prepares exact IDs/fingerprints internally. Interview execution chooses the configured production model internally, builds input internally, and calls the generic ADK runner.
 
 - [ ] **Step 9: Run focused tests and commit**
 
@@ -651,42 +688,211 @@ Commit:
 
 ```bash
 git add workflow/requests/vision.py workflow/handlers/vision.py services/vision_interview_input.py services/node_attempt_replay.py models/product_definition.py models/workflow.py workflow/facts.py repositories/workflow.py workflow/definitions/vision.py workflow/requests/__init__.py workflow/handlers/__init__.py workflow/domain.py services/contracts/vision.py adapters/adk/agents/vision.py adapters/adk/prompts/vision.txt adapters/adk/recipes.py adapters/adk/runner.py adapters/adk/model_roles.py services/application.py tests/workflow/test_vision_interview_graph.py tests/workflow/test_vision_interview_transitions.py tests/services/test_vision_interview_input.py tests/services/contracts/test_vision.py tests/adapters/test_vision.py tests/adapters/test_adk_graph_recipes.py tests/adapters/test_adk_workflow_runner.py tests/adapters/test_adk_session_independence.py tests/workflow/test_node_attempts.py
-git commit -m "feat: add vision interview and initial goal review"
+git commit -m "feat: add vision interview and review"
 ```
 
 ---
 
-### Task 4: Unified Goal, Discovery, And Specification Cycle
+### Task 4: Product Goal Interview, Discovery, And Specification Cycle
 
 **Files:**
+- Create: `workflow/requests/product_goal.py`
+- Create: `workflow/handlers/product_goal.py`
+- Create: `workflow/definitions/product_goal.py`
+- Create: `services/product_goal_interview_input.py`
+- Create: `services/contracts/product_goal.py`
+- Create: `adapters/adk/agents/product_goal.py`
+- Create: `adapters/adk/prompts/product_goal.txt`
 - Create: `workflow/requests/product_discovery.py`
 - Create: `workflow/handlers/product_discovery.py`
 - Create: `workflow/definitions/product_discovery.py`
+- Create: `services/authority_compilation_input.py`
 - Modify: `models/specs.py`
 - Modify: `workflow/facts.py`
 - Modify: `repositories/workflow.py`
 - Modify: `workflow/requests/__init__.py`
 - Modify: `workflow/handlers/__init__.py`
 - Modify: `workflow/domain.py`
+- Modify: `services/application.py`
 - Modify: `services/read_projections.py`
-- Create: `services/authority_compilation_input.py`
+- Modify: `adapters/adk/recipes.py`
+- Modify: `adapters/adk/runner.py`
+- Modify: `adapters/adk/model_roles.py`
+- Modify: `config/models.yaml`
+- Modify: `config/models.test.yaml`
 - Modify: `utils/agileforge_spec_profile.py`
+- Test: `tests/services/contracts/test_product_goal.py`
+- Test: `tests/services/test_product_goal_interview_input.py`
+- Test: `tests/adapters/test_product_goal.py`
+- Test: `tests/workflow/test_product_goal_graph.py`
+- Test: `tests/workflow/test_product_goal_transitions.py`
 - Test: `tests/workflow/test_product_discovery_graph.py`
 - Test: `tests/workflow/test_product_discovery_transitions.py`
 - Test: `tests/services/test_authority_compilation_input.py`
 - Test: `tests/adapters/test_initial_spec_read.py`
 
 **Interfaces:**
-- Consumes: accepted Vision and Goal facts from Task 3; `SpecRegistry` lineage from Task 2.
-- Produces: `goal.propose`, `goal.review`, `discovery.record`, `specification.record`, `specification.review`, and an approved current `SpecRegistry` row.
+- Consumes: accepted Vision facts from Task 3, Goal records from Task 2, generic durable attempt replay, and staged `SpecRegistry` lineage.
+- Produces: `goal.interview`, `goal.review`, `goal.fulfill`, `goal.abandon`, `discovery.record`, `specification.record`, `specification.review`, host-prepared Product Goal execution, and an approved current `SpecRegistry` row.
 
-- [ ] **Step 1: Write the single-cycle graph tests**
+- [ ] **Step 1: Write the strict Product Goal interview contract tests**
 
-Add exact position assertions:
+Use this exact contract shape:
+
+```python
+class ProductGoalComponents(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    valuable_future_state: str | None = None
+    beneficiary: str | None = None
+    value: str | None = None
+    success_signals: tuple[str, ...] = ()
+    boundaries: tuple[str, ...] = ()
+
+
+class ProductGoalInterviewInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    project_name: str
+    accepted_vision_statement: str
+    user_response: str
+    prior_components: ProductGoalComponents | None
+
+
+class ProductGoalInterviewOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    updated_components: ProductGoalComponents
+    product_goal_statement: str
+    is_complete: bool
+    clarifying_questions: list[str]
+```
+
+`ProductGoalComponents.is_fully_defined()` is true only when all three scalar fields are non-blank and both tuples contain at least one non-blank item. Validators require focused questions for incomplete output, no questions for complete output, equality between `is_complete` and `is_fully_defined()`, stripped strings, and no blank collection entries.
+
+- [ ] **Step 2: Run contract tests and verify RED**
+
+Run: `uv run --frozen pytest tests/services/contracts/test_product_goal.py -q`
+
+Expected: fail because the separate Goal contract and agent do not exist.
+
+- [ ] **Step 3: Add the focused Product Goal agent and host-prepared input**
+
+The prompt must state these exact boundaries:
 
 ```text
-accepted initial Goal exposes discovery.record
-discovery.record references exact accepted Vision and Goal
+The accepted Project Vision is read-only context.
+Ask one question or one tightly related question set per turn.
+Define one valuable future state, its beneficiary, value, observable success, and boundaries.
+Do not define features, technical behavior, a specification, backlog items, or implementation tasks.
+Preserve answered components unless the human corrects them.
+Return only the strict output schema.
+```
+
+Add the `product_goal` model role. Production resolves it to `openrouter/openai/gpt-5.6-luna`; tests resolve it to `openrouter/openai/gpt-oss-20b:free` but use fake execution with sockets disabled. `ProductGoalInterviewInputService.build(project_id, decision, user_text)` loads only Project identity, exact accepted Vision, latest valid Goal turn, latest review feedback, and current Goal outcome state. It rejects an absent Vision, an active Goal, or ambiguous turn chains and never reads repository contents, specifications, Authority, or ADK session state.
+
+- [ ] **Step 4: Write Product Goal graph and transaction tests**
+
+Add exact tests proving:
+
+```text
+accepted Vision exposes goal.interview while discovery remains blocked
+an incomplete Goal turn persists and keeps goal.interview available
+a complete Goal turn creates one immutable pending candidate
+goal.review references only the exact Goal fingerprint and accepted Vision parent
+feedback creates a new revision with the same goal_number
+acceptance creates the only active Goal and exposes discovery.record
+a second Goal cannot start while the accepted Goal lacks an outcome
+goal.fulfill and goal.abandon are unavailable during an active Sprint or incomplete triage
+fulfillment and abandonment require a non-blank rationale and exact active Goal
+an outcome is idempotent and cannot be replaced
+after an outcome, goal.interview creates goal_number + 1 under the unchanged Vision
+Sprint closure or an empty backlog never creates a ProductGoalOutcome
+removing ADK trace rows does not change Goal position
+```
+
+- [ ] **Step 5: Implement typed Goal requests, handlers, and application methods**
+
+Define internal positioned requests:
+
+```python
+class RecordProductGoalInterviewTurn(PositionedRequest):
+    kind: Literal["record_product_goal_interview_turn"] = "record_product_goal_interview_turn"
+    node_id: ClassVar[str] = "goal.interview"
+    user_text: str
+    updated_components: JsonObject
+    product_goal_statement: str
+    is_complete: bool
+    clarifying_questions: tuple[str, ...]
+    attempt_id: int
+    attempt_fingerprint: str
+
+
+class DecideProductGoalReview(PositionedRequest):
+    kind: Literal["decide_product_goal_review"] = "decide_product_goal_review"
+    node_id: ClassVar[str] = "goal.review"
+    product_goal_artifact_id: int
+    product_goal_fingerprint: str
+    decision: Literal["accepted", "rejected", "feedback"]
+    rationale: str
+
+
+class FulfillProductGoal(PositionedRequest):
+    kind: Literal["fulfill_product_goal"] = "fulfill_product_goal"
+    node_id: ClassVar[str] = "goal.fulfill"
+    product_goal_artifact_id: int
+    product_goal_fingerprint: str
+    rationale: str
+
+
+class AbandonProductGoal(PositionedRequest):
+    kind: Literal["abandon_product_goal"] = "abandon_product_goal"
+    node_id: ClassVar[str] = "goal.abandon"
+    product_goal_artifact_id: int
+    product_goal_fingerprint: str
+    rationale: str
+```
+
+`RecordProductGoalInterviewTurn` carries trusted output plus attempt identity. `DecideProductGoalReview` carries the exact candidate identity/fingerprint and `accepted|rejected|feedback`. Outcome requests carry the exact active Goal identity/fingerprint and non-blank rationale. Handlers derive goal and revision numbers, canonical fingerprints, and parent Vision identity server-side; all writes use the caller-owned transaction.
+
+Define the public host-prepared request:
+
+```python
+class ProductGoalInterviewRequest(FrozenModel):
+    project_id: int
+    graph_version: str
+    fact_fingerprint: str
+    decision_fingerprint: str
+    user_text: str = Field(min_length=1)
+    idempotency_key: str = Field(min_length=1)
+    actor: str = Field(min_length=1)
+    correlation_id: str | None = None
+
+
+class ProductGoalReviewRequest(FrozenModel):
+    project_id: int
+    decision: Literal["accepted", "rejected", "feedback"]
+    rationale: str
+    idempotency_key: str = Field(min_length=1)
+    actor: str = Field(min_length=1)
+    correlation_id: str | None = None
+
+
+class ProductGoalOutcomeRequest(FrozenModel):
+    project_id: int
+    outcome: Literal["fulfilled", "abandoned"]
+    rationale: str = Field(min_length=1)
+    idempotency_key: str = Field(min_length=1)
+    actor: str = Field(min_length=1)
+    correlation_id: str | None = None
+```
+
+`AgileForgeApplication.run_product_goal_interview()` replays first, validates the exact `goal.interview` decision, builds input internally, selects the configured role internally, and runs the Goal recipe. Review and outcome application methods resolve the exact current candidate or active Goal internally; public callers never submit artifact fingerprints.
+
+- [ ] **Step 6: Write and implement the discovery/specification cycle**
+
+Add exact graph assertions:
+
+```text
+accepted Goal exposes discovery.record
+discovery.record references exact accepted Vision and active Goal
 recorded discovery exposes specification.record
 specification.record references exact discovery fingerprint
 specification.review is the only required action for a pending candidate
@@ -695,27 +901,11 @@ there is no intermediate PRD node or fact
 a rejected or feedback specification can be replaced only through exact supersedes
 ```
 
-- [ ] **Step 2: Run graph tests and verify RED**
+Define `RecordDiscoveryArtifact`, `RecordSpecificationCandidate`, and `DecideSpecification`. Discovery input contains canonical JSON, optional content reference, and producer fixed to `grill-me-with-docs`. Specification input contains canonical JSON and optional content reference; the handler derives current base spec identity from durable state. Callers never supply base version or hash.
 
-Run: `uv run --frozen pytest tests/workflow/test_product_discovery_graph.py -q`
+- [ ] **Step 7: Harden specification lineage and transaction tests**
 
-Expected: fail because the unified nodes do not exist.
-
-- [ ] **Step 3: Add typed Goal, discovery, and specification requests**
-
-Define these public domain requests:
-
-```python
-ProposeProductGoal
-DecideProductGoal
-RecordDiscoveryArtifact
-RecordSpecificationCandidate
-DecideSpecification
-```
-
-`ProposeProductGoal` contains a human statement and exact accepted-Vision parent. `RecordDiscoveryArtifact` contains canonical JSON, optional content reference, and producer fixed to `grill-me-with-docs`. `RecordSpecificationCandidate` contains canonical specification JSON and optional content reference; the handler derives current base spec identity from durable state. Callers never supply base version/hash.
-
-- [ ] **Step 4: Write transaction and lineage tests**
+Make every Task 2 `SpecRegistry` source field non-nullable. Permit only `approved` and `superseded` status. `DecideSpecification(decision="accepted")` inserts one registry row with every exact source identity/fingerprint and supersedes the prior current row in the same transaction.
 
 Add exact tests proving:
 
@@ -727,18 +917,11 @@ accepted specification atomically creates one approved SpecRegistry row
 accepting a replacement marks the prior registry row superseded
 registered content hash equals canonical_stored_json_hash(content)
 AuthorityCompilationInputService reads only the graph-selected approved registry row
-later Goal proposal leaves accepted Vision unchanged
-Goal replacement increments revision_number without changing goal_number
-new accepted Goal makes prior discovery, specification, Authority, and Backlog non-current
+a new accepted Goal after an outcome leaves Vision unchanged
+a new accepted Goal makes prior discovery, specification, Authority, and Backlog non-current
 ```
 
-- [ ] **Step 5: Harden accepted specification lineage and implement handlers**
-
-Make every Task 2 `SpecRegistry` source field non-nullable. Permit only `approved` and `superseded` status. `DecideSpecification(decision="accepted")` must insert the registry row with every exact source identity/fingerprint and supersede the prior current registry row in the same transaction. Update `SpecVersionFact` and its loader so current-version facts cannot contain missing lineage.
-
-Implement current-state selectors with exact signatures:
-
-Use append-only helpers with exact signatures:
+Use append-only selectors with exact signatures:
 
 ```python
 def accepted_current_vision(snapshot: WorkflowFactSnapshot) -> VisionArtifactFact | None: ...
@@ -750,36 +933,26 @@ def current_specification_candidate(
 def accepted_current_spec(snapshot: WorkflowFactSnapshot) -> SpecVersionFact | None: ...
 ```
 
-Every selector must return `None` on ambiguous chains or mismatched upstream fingerprints. Graph rules must then return `WORKFLOW_FACT_CONFLICT`, not choose a row by timestamp.
+Every selector returns `None` on ambiguous chains or mismatched upstream fingerprints. Graph rules return `WORKFLOW_FACT_CONFLICT`; they never choose by timestamp.
 
-- [ ] **Step 6: Add durable status/read projections**
+- [ ] **Step 8: Add durable read projections**
 
-Expose these service reads from facts:
+Expose `vision_status(project_id)`, `product_goal_status(project_id)`, `discovery_status(project_id)`, `specification_status(project_id)`, and `specification_review(project_id)` from durable facts. Responses include IDs/fingerprints for machine output, human content, review state, active/outcome state, and stale reasons. They never resolve specification content from a mutable Project cache or disk path.
 
-```text
-vision_status(project_id)
-product_goal_status(project_id)
-discovery_status(project_id)
-specification_status(project_id)
-specification_review(project_id)
-```
-
-Responses include artifact IDs, fingerprints for machine output, human content, review state, and stale reasons. They never resolve a specification from a mutable Project cache or disk path.
-
-- [ ] **Step 7: Run focused tests and commit**
+- [ ] **Step 9: Run focused tests and commit**
 
 Run:
 
 ```bash
-uv run --frozen pytest tests/workflow/test_product_discovery_graph.py tests/workflow/test_product_discovery_transitions.py tests/services/test_authority_compilation_input.py tests/adapters/test_initial_spec_read.py -q
+uv run --frozen pytest tests/services/contracts/test_product_goal.py tests/services/test_product_goal_interview_input.py tests/adapters/test_product_goal.py tests/workflow/test_product_goal_graph.py tests/workflow/test_product_goal_transitions.py tests/workflow/test_product_discovery_graph.py tests/workflow/test_product_discovery_transitions.py tests/services/test_authority_compilation_input.py tests/adapters/test_initial_spec_read.py -q
 git diff --check
 ```
 
 Commit:
 
 ```bash
-git add workflow/requests/product_discovery.py workflow/handlers/product_discovery.py workflow/definitions/product_discovery.py models/specs.py workflow/facts.py repositories/workflow.py workflow/requests/__init__.py workflow/handlers/__init__.py workflow/domain.py services/read_projections.py services/authority_compilation_input.py utils/agileforge_spec_profile.py tests/workflow/test_product_discovery_graph.py tests/workflow/test_product_discovery_transitions.py tests/services/test_authority_compilation_input.py tests/adapters/test_initial_spec_read.py
-git commit -m "feat: unify goal discovery and specification flow"
+git add workflow/requests/product_goal.py workflow/handlers/product_goal.py workflow/definitions/product_goal.py services/product_goal_interview_input.py services/contracts/product_goal.py adapters/adk/agents/product_goal.py adapters/adk/prompts/product_goal.txt workflow/requests/product_discovery.py workflow/handlers/product_discovery.py workflow/definitions/product_discovery.py services/authority_compilation_input.py models/specs.py workflow/facts.py repositories/workflow.py workflow/requests/__init__.py workflow/handlers/__init__.py workflow/domain.py services/application.py services/read_projections.py adapters/adk/recipes.py adapters/adk/runner.py adapters/adk/model_roles.py config/models.yaml config/models.test.yaml utils/agileforge_spec_profile.py tests/services/contracts/test_product_goal.py tests/services/test_product_goal_interview_input.py tests/adapters/test_product_goal.py tests/workflow/test_product_goal_graph.py tests/workflow/test_product_goal_transitions.py tests/workflow/test_product_discovery_graph.py tests/workflow/test_product_discovery_transitions.py tests/services/test_authority_compilation_input.py tests/adapters/test_initial_spec_read.py
+git commit -m "feat: add product goal and discovery cycle"
 ```
 
 ---
@@ -827,7 +1000,7 @@ git commit -m "feat: unify goal discovery and specification flow"
 - Test: `tests/adapters/test_production_runtime_cutover.py`
 
 **Interfaces:**
-- Consumes: Vision and unified discovery graphs from Tasks 3-4; existing Authority, Backlog, Roadmap, Story, Sprint, and execution facts.
+- Consumes: separate Vision, Product Goal, and product-discovery graphs from Tasks 3-4; existing Authority, Backlog, Roadmap, Story, Sprint, and execution facts.
 - Produces: `ROOT_GRAPH` version 2 with one lifecycle and automatic current-lineage selection.
 
 - [ ] **Step 1: Write the root-order and retained-stage tests**
@@ -838,6 +1011,7 @@ Assert this exact child graph order and key transitions:
 assert ROOT_GRAPH.graph_version == "agileforge.workflow.v2"
 assert tuple(child.child_graph_id for child in ROOT_GRAPH.root.children) == (
     "vision",
+    "product_goal",
     "product_discovery",
     "authority",
     "backlog",
@@ -846,7 +1020,7 @@ assert tuple(child.child_graph_id for child in ROOT_GRAPH.root.children) == (
 )
 ```
 
-Add one provider-free domain journey that records and accepts Vision plus Goal, discovery, specification, Authority, Backlog, Roadmap, Story set, dependencies, Sprint plan, Sprint start, Task completion, Story closure, Sprint review, Sprint closure, and triage. At every boundary assert the next required semantic node.
+Add one provider-free domain journey that records and accepts Vision, separately interviews and accepts Product Goal, then records discovery, specification, Authority, Backlog, Roadmap, Story set, dependencies, Sprint plan, Sprint start, Task completion, Story closure, Sprint review, Sprint closure, and triage. At every boundary assert the next required semantic node.
 
 - [ ] **Step 2: Run the journey and verify RED**
 
@@ -856,7 +1030,7 @@ Expected: fail because the root still starts with setup/Authority and uses graph
 
 - [ ] **Step 3: Recompose the root and Authority graph**
 
-Set `GRAPH_VERSION = "agileforge.workflow.v2"`. Compose only the six child graphs above. Remove root scope wrappers, reconciliation masking, terminal scope-start routing, and the Authority-to-Vision boundary node.
+Set `GRAPH_VERSION = "agileforge.workflow.v2"`. Compose only the seven child graphs above. Remove root scope wrappers, reconciliation masking, terminal scope-start routing, and the Authority-to-Vision boundary node.
 
 Remove the retired curator from `AgenticRecipeNodes`, `AdkRecipeRegistry`, lazy production composition, prepared-input services, and the stable agentic catalog in the same cutover. The old files may remain physically present until Task 9, but no production import or graph node may reach them after this step.
 
@@ -885,9 +1059,11 @@ Remove project-wide implementation-state annotations, scope mode, Authority delt
 
 - [ ] **Step 5: Replace explicit scope reconciliation with lineage selection**
 
-Historical Backlog, Roadmap, Story, Sprint-plan, and execution facts remain immutable. Rules select only descendants of the current accepted Goal and Authority. A new Goal therefore makes old delivery facts non-current without mutating or reconciling them.
+Historical Backlog, Roadmap, Story, Sprint-plan, and execution facts remain immutable. Rules select only descendants of the current accepted Goal and Authority. A new Goal therefore makes old delivery facts non-current without mutating them.
 
-Expose `goal.propose` as optional reentry only when all required nodes for the current Goal are satisfied, no unresolved Story candidate remains, every active Sprint is closed, and every closed Sprint has triage. Starting a new Goal does not rerun Vision.
+Keep the active Goal across Sprint boundaries. After triage, remaining accepted Backlog work exposes another Sprint-planning cycle. When no Sprint is active, no review is pending, and completed Sprints have triage, `discovery.record` may reopen for another increment under the same Goal; its later Backlog replacement carries forward unresolved accepted work under exact lineage rather than creating a Goal.
+
+Expose `goal.fulfill` and `goal.abandon` only at that quiescent boundary. After either outcome, expose `goal.interview`; never expose it while a Goal remains active. Starting a later Goal does not rerun Vision, and Sprint closure alone never resolves a Goal.
 
 - [ ] **Step 6: Run the retained workflow suites**
 
@@ -944,7 +1120,7 @@ probe failure creates neither Project nor binding nor receipt
 post-binding injected failure rolls back Project, binding, and receipt
 same idempotency and same probe result replays one Project
 same idempotency and changed semantic input returns WORKFLOW_FACT_CONFLICT
-attach to an existing Project leaves graph fact fingerprint unchanged
+attach to an existing Project leaves graph fact fingerprint and every graph decision unchanged
 replace requires the exact active binding fingerprint
 refresh reuses the active path and appends a new immutable observation
 failed attach or refresh preserves the prior active binding pointer
@@ -1064,14 +1240,18 @@ Add parser tests for these concrete commands:
 agileforge project create --name MyFinance --description "Local household finance" --repository-path /Users/aaat/myfinance --idempotency-key create-myfinance-1 --actor acceptance-agent
 agileforge vision respond --project-id 1 --text "The target user manages household finances and needs reliable movement reconciliation." --idempotency-key vision-myfinance-1 --actor acceptance-agent
 agileforge vision status --project-id 1
-agileforge vision review --project-id 1 --decision accepted --rationale "Vision and first goal are accurate." --idempotency-key vision-review-myfinance-1 --actor acceptance-agent
+agileforge vision review --project-id 1 --decision accepted --rationale "The product direction is accurate." --idempotency-key vision-review-myfinance-1 --actor acceptance-agent
+agileforge goal respond --project-id 1 --text "The first valuable future state is reliable Beobank statement reconciliation for the household operator." --idempotency-key goal-myfinance-1 --actor acceptance-agent
+agileforge goal status --project-id 1
+agileforge goal review --project-id 1 --decision accepted --rationale "The outcome and success signals are correct." --idempotency-key goal-review-myfinance-1 --actor acceptance-agent
 agileforge repository attach --project-id 1 --path /Users/aaat/myfinance --idempotency-key attach-myfinance-1 --actor acceptance-agent
 agileforge repository status --project-id 1
 agileforge repository refresh --project-id 1 --idempotency-key refresh-myfinance-1 --actor acceptance-agent
-agileforge goal propose --project-id 1 --statement "Import and reconcile one Beobank statement end to end." --idempotency-key goal-myfinance-2 --actor acceptance-agent
 agileforge discovery record --project-id 1 --file /tmp/agileforge-acceptance/discovery.json --idempotency-key discovery-myfinance-1 --actor acceptance-agent
 agileforge specification record --project-id 1 --file /tmp/agileforge-acceptance/specification.json --idempotency-key spec-myfinance-1 --actor acceptance-agent
 agileforge specification review --project-id 1 --decision accepted --rationale "Desired behavior is correct." --idempotency-key spec-review-myfinance-1 --actor acceptance-agent
+agileforge goal complete --project-id 1 --rationale "The accepted success signals were achieved." --idempotency-key goal-complete-myfinance-1 --actor acceptance-agent
+agileforge goal abandon --project-id 1 --rationale "The outcome is no longer worth pursuing." --idempotency-key goal-abandon-myfinance-1 --actor acceptance-agent
 ```
 
 - [ ] **Step 2: Run transport tests and verify RED**
@@ -1097,8 +1277,11 @@ POST   /api/projects/{project_id}/vision/respond
 GET    /api/projects/{project_id}/vision/status
 POST   /api/projects/{project_id}/vision/review
 POST   /api/projects/{project_id}/vision/revision
-POST   /api/projects/{project_id}/goals
+POST   /api/projects/{project_id}/goals/respond
+GET    /api/projects/{project_id}/goals/status
 POST   /api/projects/{project_id}/goals/review
+POST   /api/projects/{project_id}/goals/complete
+POST   /api/projects/{project_id}/goals/abandon
 POST   /api/projects/{project_id}/discovery
 GET    /api/projects/{project_id}/discovery
 POST   /api/projects/{project_id}/specifications
@@ -1118,7 +1301,7 @@ Graph-node browser mutations may carry hidden current guards generated by the pa
 
 Each graph-node CLI command reads current position once, selects the exact semantic decision, builds the internal guarded request, and then mutates. Project creation has no prior position; repository commands read the active binding projection and build the orthogonal guard internally. If no unique graph decision is available, return structured `TRANSITION_NOT_AVAILABLE`; never ask the agent to copy graph/fact/decision fingerprints.
 
-`workflow next` renders commands containing only semantic arguments, exact IDs required for selection, idempotency key, and actor. It must advertise `vision respond` first on a new Project, discovery after initial pair acceptance, and Authority compile only after specification acceptance.
+`workflow next` renders commands containing only semantic arguments, exact IDs required for selection, idempotency key, and actor. It must advertise `vision respond` first on a new Project, `goal respond` after Vision acceptance, discovery only after Goal acceptance, and Authority compile only after specification acceptance. At the quiescent Goal boundary it may advertise completion or abandonment; after either outcome it advertises a new Goal interview without rerunning Vision.
 
 - [ ] **Step 5: Run transport tests and commit**
 
@@ -1138,7 +1321,7 @@ git commit -m "feat: expose task specific workflow interfaces"
 
 ---
 
-### Task 8: Human Project, Vision, Specification, Authority, And Repository UI
+### Task 8: Human Project, Vision, Product Goal, Specification, Authority, And Repository UI
 
 **Files:**
 - Modify: `frontend/index.html`
@@ -1148,11 +1331,12 @@ git commit -m "feat: expose task specific workflow interfaces"
 - Test: `tests/test_create_project_modal_required_fields.mjs`
 - Test: `tests/test_workflow_position_display.mjs`
 - Create: `tests/test_vision_interview_ui.mjs`
+- Create: `tests/test_product_goal_interview_ui.mjs`
 - Create: `tests/e2e/test_single_project_lifecycle_ui.py`
 
 **Interfaces:**
 - Consumes: task-specific API routes from Task 7.
-- Produces: usable human project creation, Vision conversation/review, specification review, one-click Authority compilation/review, repository status/actions, and plain-language workflow navigation.
+- Produces: usable human project creation, separate Vision and Product Goal conversations/reviews, specification review, one-click Authority compilation/review, repository status/actions, and plain-language workflow navigation.
 
 - [ ] **Step 1: Write DOM tests for the new human contract**
 
@@ -1164,8 +1348,12 @@ only Project Name is required
 successful create navigates to the new Project page
 new Project page opens the Vision interview panel
 Vision panel contains one response field and focused questions
-review panel shows exact Vision and Product Goal side by side
-review controls expose Accept, Feedback, and Reject
+Vision review panel shows only the exact Vision candidate
+accepted Vision opens a separate Product Goal interview panel
+Product Goal panel contains one response field and focused questions
+Product Goal review shows the exact Goal candidate with accepted Vision as read-only context
+each review exposes its own Accept, Feedback, and Reject controls
+Goal outcome controls appear only when the graph advertises Fulfill or Abandon
 recorded discovery and specification artifacts are readable without raw JSON editing
 specification review exposes Accept, Feedback, and Reject for the exact candidate
 Authority compile is one labeled button with no payload form
@@ -1181,7 +1369,7 @@ human stage labels cover Vision, Product Goal, Discovery, Specification, Authori
 Run:
 
 ```bash
-node --test tests/test_create_project_modal_required_fields.mjs tests/test_workflow_position_display.mjs tests/test_vision_interview_ui.mjs
+node --test tests/test_create_project_modal_required_fields.mjs tests/test_workflow_position_display.mjs tests/test_vision_interview_ui.mjs tests/test_product_goal_interview_ui.mjs
 ```
 
 Expected: failures show the old selector, raw payload modal, and graph identifiers.
@@ -1192,9 +1380,11 @@ Use one compact modal with name, description, and optional local path. Keep exis
 
 After `201`, redirect to `/dashboard/project.html?id={project_id}`. Replace the origin summary with Product Goal and repository status summaries.
 
-- [ ] **Step 4: Build the Vision conversation and review states**
+- [ ] **Step 4: Build separate Vision and Product Goal conversation/review states**
 
-Render the current focused questions above one multiline response input. Preserve prior turns in a compact transcript. When complete, replace the response form with exact immutable Vision and Goal content plus Accept, Feedback, and Reject controls. Feedback opens one rationale field and returns to the interview after success.
+Render the current Vision questions above one multiline response input and preserve prior Vision turns in a compact transcript. When complete, replace that form with only the exact immutable Vision candidate plus Accept, Feedback, and Reject controls. After Vision acceptance, open a distinct Product Goal interview with its own transcript and one response input. Goal review renders the exact Goal candidate and the accepted Vision as read-only context; its controls decide only the Goal. Feedback opens one rationale field and returns to the corresponding interview.
+
+At the quiescent delivery boundary, render separate Fulfill Goal and Abandon Goal commands only when advertised. Each requires a human rationale and a confirmation dialog. The UI never infers Goal completion from Sprint or Backlog state.
 
 - [ ] **Step 5: Build specification, Authority, repository, and plain-language workflow controls**
 
@@ -1208,10 +1398,10 @@ Map node IDs internally to human labels and commands. The operator sees stage na
 
 - [ ] **Step 6: Add Playwright desktop and mobile verification**
 
-In a temporary fresh profile with fake Vision and Authority execution, verify:
+In a temporary fresh profile with fake Vision, Product Goal, and Authority execution, verify:
 
 ```text
-1440x900: create without repository, answer Vision, review pair, record discovery/specification through the test API, review specification, compile/review Authority, no overlap
+1440x900: create without repository, answer/review Vision, answer/review Product Goal, record discovery/specification through the test API, review specification, compile/review Authority, no overlap
 390x844: create with temporary Git repository, dirty warning wraps, no horizontal overflow
 both: repository refresh leaves workflow stage unchanged
 both: no raw JSON, compiler payload, or internal guard input is visible
@@ -1224,7 +1414,7 @@ Capture screenshots under `artifacts/ui/single-project-lifecycle/` and assert `d
 Run:
 
 ```bash
-node --test tests/test_create_project_modal_required_fields.mjs tests/test_workflow_position_display.mjs tests/test_vision_interview_ui.mjs
+node --test tests/test_create_project_modal_required_fields.mjs tests/test_workflow_position_display.mjs tests/test_vision_interview_ui.mjs tests/test_product_goal_interview_ui.mjs
 uv run --frozen pytest tests/e2e/test_single_project_lifecycle_ui.py -q
 git diff --check
 ```
@@ -1232,7 +1422,7 @@ git diff --check
 Commit:
 
 ```bash
-git add frontend/index.html frontend/app.js frontend/project.html frontend/project.js tests/test_create_project_modal_required_fields.mjs tests/test_workflow_position_display.mjs tests/test_vision_interview_ui.mjs tests/e2e/test_single_project_lifecycle_ui.py artifacts/ui/single-project-lifecycle
+git add frontend/index.html frontend/app.js frontend/project.html frontend/project.js tests/test_create_project_modal_required_fields.mjs tests/test_workflow_position_display.mjs tests/test_vision_interview_ui.mjs tests/test_product_goal_interview_ui.mjs tests/e2e/test_single_project_lifecycle_ui.py artifacts/ui/single-project-lifecycle
 git commit -m "feat: add human single lifecycle dashboard"
 ```
 
@@ -1348,7 +1538,7 @@ Rewrite the four active documents named in this task around the one lifecycle. D
 
 - [ ] **Step 5: Remove stale package resources and model role**
 
-Delete the retired curator key from both model YAML files, remove deleted prompts/modules from package data, and update resource tests to assert they are absent while Vision, Authority, Backlog, Roadmap, Story, and Sprint resources remain importable from a wheel.
+Delete the retired curator key from both model YAML files, remove deleted prompts/modules from package data, and update resource tests to assert they are absent while Vision, Product Goal, Authority, Backlog, Roadmap, Story, and Sprint resources remain importable from a wheel.
 
 Update the pytest marker description to `integration: marks environment-dependent acceptance or external-provider tests` while retaining the default `-m 'not integration'` exclusion.
 
@@ -1453,7 +1643,7 @@ mkdir -p "$ACCEPTANCE_OUTPUT_ROOT"
 
 Assert exact local path, current SHA, branch or detached state, dirty state, warnings, and `vision.interview` as the first required product action. Assert trace DBs contain no model execution after this step. Keep results under `$ACCEPTANCE_OUTPUT_ROOT` until every acceptance-mode command has finished so the checkout remains clean.
 
-- [ ] **Step 5: Verify CLI and UI behavior with fake Vision execution**
+- [ ] **Step 5: Verify CLI and UI behavior with fake Vision and Goal execution**
 
 Add a parameterized, provider-free acceptance test over these exact tuples:
 
@@ -1469,7 +1659,7 @@ Add a parameterized, provider-free acceptance test over these exact tuples:
 )
 ```
 
-The test composes a fresh temporary business DB, the production Git probe, and a fake complete Vision recipe. For each tuple it creates/attaches as indicated, accepts the exact Vision/Goal pair, and asserts `discovery.record` is required while `authority.compile` remains blocked. Mark it `integration` because it depends on local repositories, not because it uses a provider.
+The test composes a fresh temporary business DB, the production Git probe, one fake complete Vision recipe, and one fake complete Product Goal recipe. For each tuple it creates/attaches as indicated, accepts the exact Vision, asserts `goal.interview` is required while discovery remains blocked, separately interviews and accepts the exact Goal, and then asserts `discovery.record` is required while `authority.compile` remains blocked. Mark it `integration` because it depends on local repositories, not because it uses a provider.
 
 Run:
 
@@ -1479,7 +1669,7 @@ uv run --frozen pytest -m integration tests/acceptance/test_named_repository_lif
 
 - [ ] **Step 6: Stop before paid acceptance and request explicit operator approval**
 
-Do not call the production Vision model during automated implementation. Record `provider_backed_vision: not_run_pending_operator_approval` for each repository. A later operator-approved run may use the repository `.env` through `--secrets-file /Users/aaat/projects/agileforge/.env`; never create another secrets file or print its values.
+Do not call the production Vision or Product Goal model during automated implementation. Record `provider_backed_vision: not_run_pending_operator_approval` and `provider_backed_product_goal: not_run_pending_operator_approval` for each repository. A later operator-approved run may use the repository `.env` through `--secrets-file /Users/aaat/projects/agileforge/.env`; never create another secrets file or print its values.
 
 - [ ] **Step 7: Write and review the acceptance report**
 
@@ -1496,7 +1686,8 @@ wheel and sdist evidence
 per-repository create/attach provenance
 first available product action
 provider-call count before Vision
-fake Vision/Goal review result
+fake Vision review result
+fake Product Goal review result
 paid acceptance status
 remaining follow-up: feature-level CurrentStateAssessment only
 ```
