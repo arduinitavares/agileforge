@@ -1722,12 +1722,13 @@ class WorkflowFactRepository:
         spec_versions: tuple[SpecVersionFact, ...],
         product_definition: _ProductDefinitionFactLoad,
     ) -> tuple[SpecVersionFact, ...]:
-        """Validate nullable staging lineage and enrich specification facts."""
+        """Validate staging lineage and retain only the current Vision spec line."""
         candidates = {
             item.specification_candidate_id: item
             for item in product_definition.specification_candidates
         }
         versions_by_id = {item.spec_version_id: item for item in spec_versions}
+        current_vision = self._accepted_current_vision(product_definition)
         enriched: list[SpecVersionFact] = []
         for item in spec_versions:
             candidate = (
@@ -1780,11 +1781,71 @@ class WorkflowFactRepository:
                     update={
                         "source_specification_candidate_fingerprint": (
                             candidate_fingerprint
-                        )
+                        ),
+                        "status": (
+                            "superseded"
+                            if self._specification_precedes_current_vision(
+                                item,
+                                current_vision,
+                            )
+                            else item.status
+                        ),
                     }
                 )
             )
         return tuple(enriched)
+
+    @staticmethod
+    def _accepted_current_vision(
+        product_definition: _ProductDefinitionFactLoad,
+    ) -> VisionArtifactFact | None:
+        """Return one accepted Vision chain leaf without selecting by timestamp."""
+        artifacts = product_definition.visions
+        by_id = {item.vision_artifact_id: item for item in artifacts}
+        superseded_ids = {
+            item.supersedes_vision_artifact_id
+            for item in artifacts
+            if item.supersedes_vision_artifact_id is not None
+        }
+        current = [
+            item for item in artifacts if item.vision_artifact_id not in superseded_ids
+        ]
+        if len(current) != 1:
+            return None
+        artifact = current[0]
+        decisions = [
+            item
+            for item in product_definition.vision_decisions
+            if item.vision_artifact_id == artifact.vision_artifact_id
+        ]
+        if (
+            artifact.vision_artifact_id not in by_id
+            or len(decisions) != 1
+            or decisions[0].decision != "accepted"
+            or decisions[0].artifact_fingerprint != artifact.content_fingerprint
+        ):
+            return None
+        return artifact
+
+    @staticmethod
+    def _specification_precedes_current_vision(
+        spec: SpecVersionFact,
+        current_vision: VisionArtifactFact | None,
+    ) -> bool:
+        """Keep staged legacy specifications while retiring replaced Vision lines."""
+        return (
+            current_vision is not None
+            and spec.status == "approved"
+            and spec.source_vision_artifact_id is not None
+            and (
+                spec.source_vision_artifact_id,
+                spec.source_vision_fingerprint,
+            )
+            != (
+                current_vision.vision_artifact_id,
+                current_vision.content_fingerprint,
+            )
+        )
 
     def _authority_feedback(
         self,

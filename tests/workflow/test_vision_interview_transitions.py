@@ -10,15 +10,20 @@ from sqlmodel import Session, select
 
 from models.core import Project
 from models.product_definition import (
+    DiscoveryArtifact,
     ProductGoalArtifact,
     ProductGoalArtifactDecision,
     ProductGoalInterviewTurn,
     ProductGoalOutcome,
+    SpecificationCandidate,
+    SpecificationDecision,
     VisionArtifact,
     VisionArtifactDecision,
     VisionInterviewTurn,
     VisionRevisionIntent,
 )
+from models.specs import SpecRegistry
+from repositories.workflow import WorkflowFactRepository
 from services.application import (
     AgileForgeApplication,
     VisionInterviewRequest,
@@ -85,6 +90,13 @@ class _GoalLineage:
     attempt_fingerprint: str
     revised_vision_artifact_id: int
     revised_vision_fingerprint: str
+
+
+@dataclass(frozen=True)
+class _ResolvedGoalSpecificationLineage:
+    product_goal_artifact_id: int
+    product_goal_fingerprint: str
+    spec_version_id: int
 
 
 class _Registry:
@@ -157,6 +169,90 @@ def _seed_accepted_goal(
         )
     )
     return goal.product_goal_artifact_id, fingerprint
+
+
+def _seed_accepted_goal_specification_lineage(
+    session: Session,
+    lineage: _GoalLineage,
+) -> _ResolvedGoalSpecificationLineage:
+    """Persist the durable Task 2 Goal through registered-specification lineage."""
+    goal_id, goal_fingerprint = _seed_accepted_goal(session, lineage)
+    discovery_content: JsonObject = {"discovery": "Original Goal discovery."}
+    discovery = DiscoveryArtifact(
+        project_id=lineage.project_id,
+        vision_artifact_id=lineage.vision_artifact_id,
+        vision_fingerprint=lineage.vision_fingerprint,
+        product_goal_artifact_id=goal_id,
+        product_goal_fingerprint=goal_fingerprint,
+        canonical_content_json=canonical_json(discovery_content),
+        content_fingerprint=canonical_hash(discovery_content),
+        content_ref="discovery.md",
+        producer="test",
+        supersedes_discovery_artifact_id=None,
+        recorded_by="operator@example.com",
+        recorded_at=NOW + timedelta(seconds=1, microseconds=1),
+    )
+    session.add(discovery)
+    session.flush()
+    assert discovery.discovery_artifact_id is not None
+    candidate_content: JsonObject = {"specification": "Original Goal scope."}
+    candidate = SpecificationCandidate(
+        project_id=lineage.project_id,
+        vision_artifact_id=lineage.vision_artifact_id,
+        vision_fingerprint=lineage.vision_fingerprint,
+        product_goal_artifact_id=goal_id,
+        product_goal_fingerprint=goal_fingerprint,
+        discovery_artifact_id=discovery.discovery_artifact_id,
+        discovery_fingerprint=discovery.content_fingerprint,
+        base_spec_version_id=None,
+        base_spec_hash=None,
+        canonical_content_json=canonical_json(candidate_content),
+        content_fingerprint=canonical_hash(candidate_content),
+        content_ref="specification.json",
+        supersedes_specification_candidate_id=None,
+        recorded_by="operator@example.com",
+        recorded_at=NOW + timedelta(seconds=1, microseconds=2),
+    )
+    session.add(candidate)
+    session.flush()
+    assert candidate.specification_candidate_id is not None
+    session.add(
+        SpecificationDecision(
+            project_id=lineage.project_id,
+            specification_candidate_id=candidate.specification_candidate_id,
+            artifact_fingerprint=candidate.content_fingerprint,
+            decision="accepted",
+            rationale="Original Goal specification accepted.",
+            reviewer="operator@example.com",
+            idempotency_key="original-goal-specification-accepted",
+            decided_at=NOW + timedelta(seconds=1, microseconds=3),
+        )
+    )
+    spec_content = "# Original Goal specification"
+    registered_spec = SpecRegistry(
+        project_id=lineage.project_id,
+        spec_hash=canonical_hash({"content": spec_content}),
+        content=spec_content,
+        status="approved",
+        approved_at=NOW + timedelta(seconds=1, microseconds=4),
+        approved_by="operator@example.com",
+        source_specification_candidate_id=candidate.specification_candidate_id,
+        source_vision_artifact_id=lineage.vision_artifact_id,
+        source_vision_fingerprint=lineage.vision_fingerprint,
+        source_product_goal_artifact_id=goal_id,
+        source_product_goal_fingerprint=goal_fingerprint,
+        source_discovery_artifact_id=discovery.discovery_artifact_id,
+        source_discovery_fingerprint=discovery.content_fingerprint,
+        supersedes_spec_version_id=None,
+    )
+    session.add(registered_spec)
+    session.flush()
+    assert registered_spec.spec_version_id is not None
+    return _ResolvedGoalSpecificationLineage(
+        product_goal_artifact_id=goal_id,
+        product_goal_fingerprint=goal_fingerprint,
+        spec_version_id=registered_spec.spec_version_id,
+    )
 
 
 class _PositionMustNotRunDomain:
@@ -280,10 +376,10 @@ def _assert_active_goal_blocks_revision_acceptance(
     engine: Engine,
     domain: WorkflowDomain,
     lineage: _GoalLineage,
-) -> None:
+) -> _ResolvedGoalSpecificationLineage:
     """Keep a pending revision unaccepted until its prior Goal is resolved."""
     with Session(engine) as session:
-        goal_id, goal_fingerprint = _seed_accepted_goal(session, lineage)
+        resolved_lineage = _seed_accepted_goal_specification_lineage(session, lineage)
         session.commit()
     blocked = _review_vision(
         domain,
@@ -305,8 +401,8 @@ def _assert_active_goal_blocks_revision_acceptance(
         session.add(
             ProductGoalOutcome(
                 project_id=lineage.project_id,
-                product_goal_artifact_id=goal_id,
-                artifact_fingerprint=goal_fingerprint,
+                product_goal_artifact_id=resolved_lineage.product_goal_artifact_id,
+                artifact_fingerprint=resolved_lineage.product_goal_fingerprint,
                 outcome="fulfilled",
                 rationale="Original Goal fulfilled.",
                 decided_by="operator@example.com",
@@ -334,6 +430,7 @@ def _assert_active_goal_blocks_revision_acceptance(
     )
     available_nodes = domain.position(lineage.project_id).available_nodes
     assert all("discovery" not in node_id for node_id in available_nodes)
+    return resolved_lineage
 
 
 def test_incomplete_then_complete_turn_creates_one_pending_vision(
@@ -654,7 +751,7 @@ def test_accepted_revision_creates_only_a_new_vision(engine: Engine) -> None:
     initial_attempt_fingerprint = initial_attempt.output["attempt_fingerprint"]
     assert isinstance(initial_attempt_id, int)
     assert isinstance(initial_attempt_fingerprint, str)
-    _assert_active_goal_blocks_revision_acceptance(
+    resolved_lineage = _assert_active_goal_blocks_revision_acceptance(
         engine,
         domain,
         _GoalLineage(
@@ -668,6 +765,21 @@ def test_accepted_revision_creates_only_a_new_vision(engine: Engine) -> None:
         ),
     )
     with Session(engine) as session:
+        snapshot = WorkflowFactRepository(session).load(project_id)
+        old_goal_ids = {
+            item.product_goal_artifact_id
+            for item in snapshot.product_goal_artifact_decisions
+            if item.decision == "accepted"
+        } - {
+            item.product_goal_artifact_id for item in snapshot.product_goal_outcomes
+        }
+        current_specs = tuple(
+            item for item in snapshot.spec_versions if item.status == "approved"
+        )
+        assert resolved_lineage.product_goal_artifact_id not in old_goal_ids
+        assert resolved_lineage.spec_version_id not in {
+            item.spec_version_id for item in current_specs
+        }
         artifacts = session.exec(select(VisionArtifact)).all()
         assert len(artifacts) == EXPECTED_VISION_ARTIFACT_COUNT
         assert artifacts[-1].supersedes_vision_artifact_id == artifact_id
@@ -675,6 +787,19 @@ def test_accepted_revision_creates_only_a_new_vision(engine: Engine) -> None:
             len(session.exec(select(VisionArtifactDecision)).all())
             == EXPECTED_VISION_ARTIFACT_COUNT
         )
+        for row_type in (
+            SpecificationDecision,
+            SpecRegistry,
+            SpecificationCandidate,
+            DiscoveryArtifact,
+            ProductGoalOutcome,
+            ProductGoalArtifactDecision,
+            ProductGoalArtifact,
+            ProductGoalInterviewTurn,
+        ):
+            for row in session.exec(select(row_type)).all():
+                session.delete(row)
+        session.flush()
         revision_turns = session.exec(
             select(VisionInterviewTurn).where(VisionInterviewTurn.mode == "revision")
         ).all()
