@@ -137,11 +137,28 @@ def _specification_rule(
     if discovery is None:
         return (RuleEvaluation(RuleCategory.SATISFIED, "SPECIFICATION_NOT_READY"),)
     candidate = current_specification_candidate(snapshot)
-    if candidate is not None and _candidate_decision(snapshot, candidate) is None:
+    decision = None if candidate is None else _candidate_decision(snapshot, candidate)
+    if candidate is not None and decision is None:
         return (
             RuleEvaluation(
                 RuleCategory.SATISFIED,
                 "SPECIFICATION_REVIEW_PENDING",
+            ),
+        )
+    if decision == "accepted":
+        return (RuleEvaluation(RuleCategory.SATISFIED, "SPECIFICATION_ACCEPTED"),)
+    if decision in {"rejected", "feedback"}:
+        return (
+            RuleEvaluation(
+                RuleCategory.AVAILABLE,
+                f"SPECIFICATION_{decision.upper()}_REPLACEMENT_REQUIRED",
+                fact_references=(
+                    _reference(
+                        "discovery",
+                        discovery.discovery_artifact_id,
+                        discovery.content_fingerprint,
+                    ),
+                ),
             ),
         )
     return (
@@ -171,11 +188,12 @@ def _review_rule(
                 "SPECIFICATION_REVIEW_NOT_PENDING",
             ),
         )
-    if _candidate_decision(snapshot, candidate) is not None:
+    decision = _candidate_decision(snapshot, candidate)
+    if decision is not None:
         return (
             RuleEvaluation(
                 RuleCategory.SATISFIED,
-                "SPECIFICATION_REVIEW_RESOLVED",
+                f"SPECIFICATION_REVIEW_{decision.upper()}",
             ),
         )
     return (

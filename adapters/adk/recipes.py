@@ -14,6 +14,7 @@ from services.contracts.brownfield import (
     BrownfieldCurationInput,
     BrownfieldCurationOutput,
 )
+from services.contracts.product_goal import ProductGoalInterviewOutput
 from services.contracts.vision import (
     LegacyVisionInput,
     LegacyVisionOutput,
@@ -35,6 +36,7 @@ from workflow.requests import (
     CompileAuthority,
     RecordBacklogDraft,
     RecordBrownfieldSpecDraft,
+    RecordProductGoalInterviewTurn,
     RecordRoadmapDraft,
     RecordSprintPlan,
     RecordStoryDraft,
@@ -55,6 +57,12 @@ TASK3_AGENTIC_NODE_IDS = (
     *ROOT_GRAPH.agentic_node_ids[:_VISION_INTERVIEW_INSERTION_INDEX],
     "vision.interview",
     *ROOT_GRAPH.agentic_node_ids[_VISION_INTERVIEW_INSERTION_INDEX:],
+)
+_PRODUCT_GOAL_INSERTION_INDEX = TASK3_AGENTIC_NODE_IDS.index("vision.interview") + 1
+TASK4_AGENTIC_NODE_IDS = (
+    *TASK3_AGENTIC_NODE_IDS[:_PRODUCT_GOAL_INSERTION_INDEX],
+    "goal.interview",
+    *TASK3_AGENTIC_NODE_IDS[_PRODUCT_GOAL_INSERTION_INDEX:],
 )
 
 
@@ -161,6 +169,7 @@ class AgenticRecipeNodes:
     story_generation: BaseAgent | Workflow
     sprint_planning: BaseAgent | Workflow
     vision_interview: BaseAgent | Workflow | None = None
+    product_goal: BaseAgent | Workflow | None = None
 
 
 class UnknownAdkRecipeError(LookupError):
@@ -321,6 +330,37 @@ def _vision_interview_output_adapter(
         user_text=user_text,
         updated_components=parsed.updated_components.model_dump(mode="json"),
         project_vision_statement=parsed.project_vision_statement,
+        is_complete=parsed.is_complete,
+        clarifying_questions=tuple(parsed.clarifying_questions),
+        attempt_id=context.attempt_id,
+        attempt_fingerprint=context.attempt_fingerprint,
+    )
+
+
+def _product_goal_interview_output_adapter(
+    output: object,
+    context: AttemptCompletionContext,
+) -> RecordProductGoalInterviewTurn:
+    """Bind validated Goal output to the persisted human response."""
+    parsed = ProductGoalInterviewOutput.model_validate(
+        RecipeOutput.model_validate(output).payload
+    )
+    user_text = context.normalized_input.get("user_response")
+    if not isinstance(user_text, str):
+        message = "Product Goal attempt lacks the captured user response."
+        raise TypeError(message)
+    return RecordProductGoalInterviewTurn(
+        project_id=context.project_id,
+        graph_version=context.graph_version,
+        fact_fingerprint=context.fact_fingerprint,
+        decision_fingerprint=context.decision_fingerprint,
+        instance_key=context.instance_key,
+        idempotency_key=context.idempotency_key,
+        actor=context.actor,
+        correlation_id=context.correlation_id,
+        user_text=user_text,
+        updated_components=parsed.updated_components.model_dump(mode="json"),
+        product_goal_statement=parsed.product_goal_statement,
         is_complete=parsed.is_complete,
         clarifying_questions=tuple(parsed.clarifying_questions),
         attempt_id=context.attempt_id,
@@ -692,6 +732,22 @@ def build_agentic_recipe_registry(
                 ),
                 output_adapter=_vision_interview_output_adapter,
             ),
+            *(
+                (
+                    AdkRecipe(
+                        node_id="goal.interview",
+                        workflow=_build_single_leaf_workflow(
+                            workflow_name="product_goal_interview",
+                            execution_node_name="execute_product_goal_interviewer",
+                            leaf_agent=_require_product_goal_interviewer(nodes),
+                            execution_settings=execution_settings,
+                        ),
+                        output_adapter=_product_goal_interview_output_adapter,
+                    ),
+                )
+                if nodes.product_goal is not None
+                else ()
+            ),
             AdkRecipe(
                 node_id="backlog.generate",
                 workflow=build_backlog_generation_workflow(
@@ -731,7 +787,11 @@ def build_agentic_recipe_registry(
                 output_adapter=_request_output_adapter(RecordSprintPlan),
             ),
         ),
-        required_node_ids=TASK3_AGENTIC_NODE_IDS,
+        required_node_ids=(
+            TASK4_AGENTIC_NODE_IDS
+            if nodes.product_goal is not None
+            else TASK3_AGENTIC_NODE_IDS
+        ),
     )
 
 
@@ -745,8 +805,19 @@ def _require_vision_interviewer(
     return nodes.vision_interview
 
 
+def _require_product_goal_interviewer(
+    nodes: AgenticRecipeNodes,
+) -> BaseAgent | Workflow:
+    """Return the explicitly injected isolated Product Goal interview agent."""
+    if nodes.product_goal is None:
+        message = "The Product Goal interview recipe requires its own agent."
+        raise ValueError(message)
+    return nodes.product_goal
+
+
 __all__ = [
     "TASK3_AGENTIC_NODE_IDS",
+    "TASK4_AGENTIC_NODE_IDS",
     "AdkRecipe",
     "AdkRecipeRegistry",
     "AgenticRecipeNodes",

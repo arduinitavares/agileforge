@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Literal
 
+import pytest
+
 from workflow.definitions.product_discovery import (
     _discovery_rule,
     _review_rule,
@@ -148,9 +150,33 @@ def test_discovery_and_specification_are_exactly_chained() -> None:
     assert review.fact_references[0].fingerprint == "spec"
 
 
-def test_feedback_reopens_specification_recording() -> None:
-    """A feedback decision is durable review state, not a pending candidate."""
-    snapshot = _snapshot(candidate_decision="feedback")
+@pytest.mark.parametrize(
+    ("candidate_decision", "record_reason", "review_reason"),
+    [
+        (
+            "accepted",
+            "SPECIFICATION_ACCEPTED",
+            "SPECIFICATION_REVIEW_ACCEPTED",
+        ),
+        (
+            "rejected",
+            "SPECIFICATION_REJECTED_REPLACEMENT_REQUIRED",
+            "SPECIFICATION_REVIEW_REJECTED",
+        ),
+        (
+            "feedback",
+            "SPECIFICATION_FEEDBACK_REPLACEMENT_REQUIRED",
+            "SPECIFICATION_REVIEW_FEEDBACK",
+        ),
+    ],
+)
+def test_terminal_specification_decisions_remain_distinguishable(
+    candidate_decision: Literal["accepted", "rejected", "feedback"],
+    record_reason: str,
+    review_reason: str,
+) -> None:
+    """Pending, accepted, rejected, and feedback states drive different rules."""
+    snapshot = _snapshot(candidate_decision=candidate_decision)
 
-    assert _specification_rule(snapshot, NOW)[0].reason_code == "SPECIFICATION_REQUIRED"
-    assert _review_rule(snapshot, NOW)[0].reason_code == "SPECIFICATION_REVIEW_RESOLVED"
+    assert _specification_rule(snapshot, NOW)[0].reason_code == record_reason
+    assert _review_rule(snapshot, NOW)[0].reason_code == review_reason

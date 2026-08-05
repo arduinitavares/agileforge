@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from functools import cache
-from typing import TYPE_CHECKING, Literal, Protocol
+from importlib import import_module
+from typing import TYPE_CHECKING, Literal, Protocol, cast
 
 from pydantic import Field
 
 from adapters.adk.model_roles import AGENTIC_MODEL_ROLES
+from services.contracts.product_goal import ProductGoalInterviewInput
 from services.contracts.vision import VisionInterviewInput
 from services.node_attempt_replay import NodeAttemptReplayQuery, TransitionReplayQuery
+from services.product_goal_interview_input import ProductGoalInterviewInputService
 from services.vision_interview_input import VisionInterviewInputService
 from utils.model_config import get_model_id
 from workflow.contracts import (
@@ -23,9 +27,20 @@ from workflow.contracts import (
     WorkflowErrorCode,
     WorkflowPosition,
 )
-from workflow.requests import BeginVisionRevision, DecideVisionReview
+from workflow.requests import (
+    AbandonProductGoal,
+    BeginVisionRevision,
+    DecideProductGoalReview,
+    DecideSpecification,
+    DecideVisionReview,
+    FulfillProductGoal,
+    RecordDiscoveryArtifact,
+    RecordSpecificationCandidate,
+)
 
 if TYPE_CHECKING:
+    from google.adk.agents import BaseAgent
+
     from adapters.adk.recipes import AdkRecipeRegistry
     from workflow.requests import TransitionRequest
 
@@ -70,6 +85,38 @@ class _VisionInterviewInputPort(Protocol):
     ) -> JsonObject: ...
 
 
+class _ProductGoalInterviewInputPort(Protocol):
+    """Host preparation for a Product Goal interview turn."""
+
+    def replay(self, query: NodeAttemptReplayQuery) -> TransitionResult | None: ...
+
+    def replay_transition(
+        self,
+        query: TransitionReplayQuery,
+    ) -> TransitionResult | None: ...
+
+    def build(
+        self,
+        project_id: int,
+        decision: NodeDecision,
+        user_text: str,
+    ) -> JsonObject: ...
+
+
+class _ProductDiscoverySelectionPort(Protocol):
+    """Resolve replacement specification lineage from canonical durable facts."""
+
+    def resolve_specification_supersedes(self, project_id: int) -> int | None: ...
+
+
+@dataclass(frozen=True)
+class ProductGoalLifecycleServices:
+    """Host-owned services for the isolated Product Goal child graph."""
+
+    interview_input: _ProductGoalInterviewInputPort
+    discovery_selection: _ProductDiscoverySelectionPort
+
+
 class _ReadProjectionPort(Protocol):
     """Supported non-routing reads exposed to production transports."""
 
@@ -78,6 +125,16 @@ class _ReadProjectionPort(Protocol):
     def project_show(self, *, project_id: int) -> JsonObject: ...
 
     def project_initial_spec(self, *, project_id: int) -> JsonObject: ...
+
+    def vision_status(self, *, project_id: int) -> JsonObject: ...
+
+    def product_goal_status(self, *, project_id: int) -> JsonObject: ...
+
+    def discovery_status(self, *, project_id: int) -> JsonObject: ...
+
+    def specification_status(self, *, project_id: int) -> JsonObject: ...
+
+    def specification_review(self, *, project_id: int) -> JsonObject: ...
 
     def authority_status(self, *, project_id: int) -> JsonObject: ...
 
@@ -232,6 +289,74 @@ class VisionRevisionRequest(FrozenModel):
     correlation_id: str | None = None
 
 
+class ProductGoalInterviewRequest(FrozenModel):
+    """Transport request for one host-prepared Product Goal interview attempt."""
+
+    project_id: int
+    graph_version: str
+    fact_fingerprint: str
+    decision_fingerprint: str
+    user_text: str = Field(min_length=1)
+    idempotency_key: str = Field(min_length=1)
+    actor: str = Field(min_length=1)
+    correlation_id: str | None = None
+
+
+class ProductGoalReviewRequest(FrozenModel):
+    """Operator choice for the graph-selected pending Product Goal."""
+
+    project_id: int
+    decision: Literal["accepted", "rejected", "feedback"]
+    rationale: str
+    idempotency_key: str = Field(min_length=1)
+    actor: str = Field(min_length=1)
+    correlation_id: str | None = None
+
+
+class ProductGoalOutcomeRequest(FrozenModel):
+    """Operator outcome choice for the graph-selected active Product Goal."""
+
+    project_id: int
+    outcome: Literal["fulfilled", "abandoned"]
+    rationale: str = Field(min_length=1)
+    idempotency_key: str = Field(min_length=1)
+    actor: str = Field(min_length=1)
+    correlation_id: str | None = None
+
+
+class DiscoveryArtifactRequest(FrozenModel):
+    """Semantic discovery content for the graph-selected active Product Goal."""
+
+    project_id: int
+    canonical_content: JsonObject
+    content_ref: str | None = None
+    idempotency_key: str = Field(min_length=1)
+    actor: str = Field(min_length=1)
+    correlation_id: str | None = None
+
+
+class SpecificationCandidateRequest(FrozenModel):
+    """Semantic specification candidate content with host-derived lineage."""
+
+    project_id: int
+    canonical_content: JsonObject
+    content_ref: str | None = None
+    idempotency_key: str = Field(min_length=1)
+    actor: str = Field(min_length=1)
+    correlation_id: str | None = None
+
+
+class SpecificationReviewRequest(FrozenModel):
+    """Operator choice for the graph-selected specification candidate."""
+
+    project_id: int
+    decision: Literal["accepted", "rejected", "feedback"]
+    rationale: str
+    idempotency_key: str = Field(min_length=1)
+    actor: str = Field(min_length=1)
+    correlation_id: str | None = None
+
+
 class AgileForgeApplication:
     """Expose the narrow workflow application interface to transports."""
 
@@ -242,12 +367,14 @@ class AgileForgeApplication:
         recipe_registry: AdkRecipeRegistry | None = None,
         read_projection: _ReadProjectionPort | None = None,
         vision_interview_input: _VisionInterviewInputPort | None = None,
+        product_goal_services: ProductGoalLifecycleServices | None = None,
     ) -> None:
         """Retain exactly one workflow authority."""
         self._workflow_domain = workflow_domain
         self._recipe_registry = recipe_registry
         self._read_projection = read_projection
         self._vision_interview_input = vision_interview_input
+        self._product_goal_services = product_goal_services
 
     @property
     def reads(self) -> _ReadProjectionPort:
@@ -439,6 +566,288 @@ class AgileForgeApplication:
             )
         )
 
+    def run_product_goal_interview(
+        self,
+        request: ProductGoalInterviewRequest,
+    ) -> TransitionResult:
+        """Run a replay-safe Goal interview with host-derived durable context."""
+        node_id = "goal.interview"
+        services = self._product_goal_services
+        if services is None:
+            message = "Product Goal interview requires an injected input builder."
+            raise RuntimeError(message)
+        input_service = services.interview_input
+        replay = input_service.replay(
+            NodeAttemptReplayQuery(
+                project_id=request.project_id,
+                graph_version=request.graph_version,
+                fact_fingerprint=request.fact_fingerprint,
+                decision_fingerprint=request.decision_fingerprint,
+                node_id=node_id,
+                idempotency_key=request.idempotency_key,
+                actor=request.actor,
+                correlation_id=request.correlation_id,
+                user_text=ProductGoalInterviewInput.normalize_user_response(
+                    request.user_text
+                ),
+            )
+        )
+        if replay is not None:
+            return replay
+        position = self.position(project_id=request.project_id)
+        decision = _guarded_product_goal_interview_decision(position, request)
+        if decision is None:
+            return _stale_product_goal_interview(position)
+        input_payload = input_service.build(
+            project_id=request.project_id,
+            decision=decision,
+            user_text=request.user_text,
+        )
+        return self.run_agentic_action(
+            AgenticActionRequest(
+                project_id=request.project_id,
+                graph_version=request.graph_version,
+                fact_fingerprint=request.fact_fingerprint,
+                decision_fingerprint=request.decision_fingerprint,
+                node_id=node_id,
+                input_payload=input_payload,
+                model_id=get_model_id(AGENTIC_MODEL_ROLES[node_id]),
+                idempotency_key=request.idempotency_key,
+                actor=request.actor,
+                correlation_id=request.correlation_id,
+            )
+        )
+
+    def review_product_goal(
+        self,
+        request: ProductGoalReviewRequest,
+    ) -> TransitionResult:
+        """Resolve the exact pending Goal identity internally before review."""
+        replay = self._replay_product_goal_transition(
+            TransitionReplayQuery(
+                request_kind="decide_product_goal_review",
+                project_id=request.project_id,
+                idempotency_key=request.idempotency_key,
+                actor=request.actor,
+                correlation_id=request.correlation_id,
+                operator_input={
+                    "decision": request.decision,
+                    "rationale": request.rationale,
+                },
+            )
+        )
+        if replay is not None:
+            return replay
+        position = self.position(project_id=request.project_id)
+        decision = _unique_available_decision(position, "goal.review")
+        reference = None if decision is None else _single_fact_reference(
+            decision, "product_goal"
+        )
+        if decision is None or reference is None:
+            return _stale_product_goal_review(position)
+        return self.transition(
+            DecideProductGoalReview(
+                project_id=request.project_id,
+                graph_version=position.graph_version,
+                fact_fingerprint=position.fact_fingerprint,
+                decision_fingerprint=decision.decision_fingerprint,
+                idempotency_key=request.idempotency_key,
+                actor=request.actor,
+                correlation_id=request.correlation_id,
+                product_goal_artifact_id=int(reference.fact_id),
+                product_goal_fingerprint=reference.fingerprint,
+                decision=request.decision,
+                rationale=request.rationale,
+            )
+        )
+
+    def resolve_product_goal(
+        self,
+        request: ProductGoalOutcomeRequest,
+    ) -> TransitionResult:
+        """Resolve the exact active Goal identity internally at terminal outcome."""
+        node_id = "goal.fulfill" if request.outcome == "fulfilled" else "goal.abandon"
+        request_kind = (
+            "fulfill_product_goal"
+            if request.outcome == "fulfilled"
+            else "abandon_product_goal"
+        )
+        replay = self._replay_product_goal_transition(
+            TransitionReplayQuery(
+                request_kind=request_kind,
+                project_id=request.project_id,
+                idempotency_key=request.idempotency_key,
+                actor=request.actor,
+                correlation_id=request.correlation_id,
+                operator_input={"rationale": request.rationale},
+            )
+        )
+        if replay is not None:
+            return replay
+        position = self.position(project_id=request.project_id)
+        decision = _unique_available_decision(position, node_id)
+        reference = None if decision is None else _single_fact_reference(
+            decision, "product_goal"
+        )
+        if decision is None or reference is None:
+            return _stale_product_goal_outcome(position)
+        request_type = (
+            FulfillProductGoal if request.outcome == "fulfilled" else AbandonProductGoal
+        )
+        return self.transition(
+            request_type(
+                project_id=request.project_id,
+                graph_version=position.graph_version,
+                fact_fingerprint=position.fact_fingerprint,
+                decision_fingerprint=decision.decision_fingerprint,
+                idempotency_key=request.idempotency_key,
+                actor=request.actor,
+                correlation_id=request.correlation_id,
+                product_goal_artifact_id=int(reference.fact_id),
+                product_goal_fingerprint=reference.fingerprint,
+                rationale=request.rationale,
+            )
+        )
+
+    def record_discovery(
+        self,
+        request: DiscoveryArtifactRequest,
+    ) -> TransitionResult:
+        """Record semantic discovery content under graph-selected durable parents."""
+        replay = self._replay_product_goal_transition(
+            TransitionReplayQuery(
+                request_kind="record_discovery_artifact",
+                project_id=request.project_id,
+                idempotency_key=request.idempotency_key,
+                actor=request.actor,
+                correlation_id=request.correlation_id,
+                operator_input={
+                    "canonical_content": request.canonical_content,
+                    "content_ref": request.content_ref,
+                },
+            )
+        )
+        if replay is not None:
+            return replay
+        position = self.position(project_id=request.project_id)
+        decision = _unique_available_decision(position, "discovery.record")
+        if decision is None:
+            return _stale_product_discovery(position)
+        return self.transition(
+            RecordDiscoveryArtifact(
+                project_id=request.project_id,
+                graph_version=position.graph_version,
+                fact_fingerprint=position.fact_fingerprint,
+                decision_fingerprint=decision.decision_fingerprint,
+                idempotency_key=request.idempotency_key,
+                actor=request.actor,
+                correlation_id=request.correlation_id,
+                canonical_content=request.canonical_content,
+                content_ref=request.content_ref,
+            )
+        )
+
+    def record_specification_candidate(
+        self,
+        request: SpecificationCandidateRequest,
+    ) -> TransitionResult:
+        """Record semantic specification content with host-derived lineage."""
+        replay = self._replay_product_goal_transition(
+            TransitionReplayQuery(
+                request_kind="record_specification_candidate",
+                project_id=request.project_id,
+                idempotency_key=request.idempotency_key,
+                actor=request.actor,
+                correlation_id=request.correlation_id,
+                operator_input={
+                    "canonical_content": request.canonical_content,
+                    "content_ref": request.content_ref,
+                },
+            )
+        )
+        if replay is not None:
+            return replay
+        position = self.position(project_id=request.project_id)
+        decision = _unique_available_decision(position, "specification.record")
+        if decision is None:
+            return _stale_product_discovery(position)
+        services = self._product_goal_services
+        if services is None:
+            message = "Specification candidates require an injected lineage selector."
+            raise RuntimeError(message)
+        return self.transition(
+            RecordSpecificationCandidate(
+                project_id=request.project_id,
+                graph_version=position.graph_version,
+                fact_fingerprint=position.fact_fingerprint,
+                decision_fingerprint=decision.decision_fingerprint,
+                idempotency_key=request.idempotency_key,
+                actor=request.actor,
+                correlation_id=request.correlation_id,
+                canonical_content=request.canonical_content,
+                content_ref=request.content_ref,
+                supersedes_specification_candidate_id=(
+                    services.discovery_selection.resolve_specification_supersedes(
+                        request.project_id
+                    )
+                ),
+            )
+        )
+
+    def review_specification(
+        self,
+        request: SpecificationReviewRequest,
+    ) -> TransitionResult:
+        """Resolve the exact pending specification candidate before review."""
+        replay = self._replay_product_goal_transition(
+            TransitionReplayQuery(
+                request_kind="decide_specification",
+                project_id=request.project_id,
+                idempotency_key=request.idempotency_key,
+                actor=request.actor,
+                correlation_id=request.correlation_id,
+                operator_input={
+                    "decision": request.decision,
+                    "rationale": request.rationale,
+                },
+            )
+        )
+        if replay is not None:
+            return replay
+        position = self.position(project_id=request.project_id)
+        decision = _unique_available_decision(position, "specification.review")
+        reference = (
+            None
+            if decision is None
+            else _single_fact_reference(decision, "specification_candidate")
+        )
+        if decision is None or reference is None:
+            return _stale_product_discovery(position)
+        return self.transition(
+            DecideSpecification(
+                project_id=request.project_id,
+                graph_version=position.graph_version,
+                fact_fingerprint=position.fact_fingerprint,
+                decision_fingerprint=decision.decision_fingerprint,
+                idempotency_key=request.idempotency_key,
+                actor=request.actor,
+                correlation_id=request.correlation_id,
+                specification_candidate_id=int(reference.fact_id),
+                specification_fingerprint=reference.fingerprint,
+                decision=request.decision,
+                rationale=request.rationale,
+            )
+        )
+
+    def _replay_product_goal_transition(
+        self, query: TransitionReplayQuery
+    ) -> TransitionResult | None:
+        """Replay all Product Goal child-graph commands before state reads."""
+        services = self._product_goal_services
+        if services is None:
+            return None
+        return services.interview_input.replay_transition(query)
+
 
 def _guarded_vision_interview_decision(
     position: WorkflowPosition,
@@ -455,6 +864,28 @@ def _guarded_vision_interview_decision(
             decision
             for decision in position.decisions
             if decision.node_id == "vision.interview"
+            and decision.category is NodeCategory.AVAILABLE
+            and decision.decision_fingerprint == request.decision_fingerprint
+        ),
+        None,
+    )
+
+
+def _guarded_product_goal_interview_decision(
+    position: WorkflowPosition,
+    request: ProductGoalInterviewRequest,
+) -> NodeDecision | None:
+    """Return the exact current Goal interview decision supplied by the caller."""
+    if (
+        position.graph_version != request.graph_version
+        or position.fact_fingerprint != request.fact_fingerprint
+    ):
+        return None
+    return next(
+        (
+            decision
+            for decision in position.decisions
+            if decision.node_id == "goal.interview"
             and decision.category is NodeCategory.AVAILABLE
             and decision.decision_fingerprint == request.decision_fingerprint
         ),
@@ -495,6 +926,54 @@ def _stale_vision_interview(position: WorkflowPosition) -> TransitionResult:
         error=WorkflowError(
             code=WorkflowErrorCode.STALE_POSITION,
             message="The Vision interview position is stale.",
+        ),
+    )
+
+
+def _stale_product_goal_interview(position: WorkflowPosition) -> TransitionResult:
+    """Reject a Goal interview attempt whose guards no longer match facts."""
+    return TransitionResult(
+        ok=False,
+        position=position,
+        error=WorkflowError(
+            code=WorkflowErrorCode.STALE_POSITION,
+            message="The Product Goal interview position is stale.",
+        ),
+    )
+
+
+def _stale_product_goal_review(position: WorkflowPosition) -> TransitionResult:
+    """Reject a Goal review without one pending graph candidate."""
+    return TransitionResult(
+        ok=False,
+        position=position,
+        error=WorkflowError(
+            code=WorkflowErrorCode.STALE_POSITION,
+            message="The Product Goal review position is stale.",
+        ),
+    )
+
+
+def _stale_product_goal_outcome(position: WorkflowPosition) -> TransitionResult:
+    """Reject a Goal outcome without one active graph candidate."""
+    return TransitionResult(
+        ok=False,
+        position=position,
+        error=WorkflowError(
+            code=WorkflowErrorCode.STALE_POSITION,
+            message="The Product Goal outcome position is stale.",
+        ),
+    )
+
+
+def _stale_product_discovery(position: WorkflowPosition) -> TransitionResult:
+    """Reject discovery or specification commands without one current decision."""
+    return TransitionResult(
+        ok=False,
+        position=position,
+        error=WorkflowError(
+            code=WorkflowErrorCode.STALE_POSITION,
+            message="The Product Discovery position is stale.",
         ),
     )
 
@@ -547,6 +1026,9 @@ def production_application() -> AgileForgeApplication:
         build_agentic_recipe_registry,
     )
     from models.db import ensure_business_db_ready, get_engine  # noqa: PLC0415
+    from services.product_discovery_selection import (  # noqa: PLC0415
+        ProductDiscoverySelectionService,
+    )
     from services.read_projections import (  # noqa: PLC0415
         DurableReadProjectionService,
     )
@@ -554,6 +1036,10 @@ def production_application() -> AgileForgeApplication:
     from workflow.definitions.root import project_graph  # noqa: PLC0415
     from workflow.domain import WorkflowDomain  # noqa: PLC0415
 
+    product_goal_interview_agent = cast(
+        "BaseAgent",
+        vars(import_module("adapters.adk.agents.product_goal"))["root_agent"],
+    )
     graph = project_graph()
     registry = build_agentic_recipe_registry(
         nodes=AgenticRecipeNodes(
@@ -562,6 +1048,7 @@ def production_application() -> AgileForgeApplication:
             authority_repair=build_spec_authority_compiler_agent(),
             vision_generation=legacy_root_agent,
             vision_interview=vision_interview_agent,
+            product_goal=product_goal_interview_agent,
             backlog_generation=backlog_agent,
             roadmap_generation=roadmap_agent,
             story_generation=create_user_story_writer_agent(),
@@ -583,12 +1070,23 @@ def production_application() -> AgileForgeApplication:
         recipe_registry=registry,
         read_projection=DurableReadProjectionService(engine=engine),
         vision_interview_input=VisionInterviewInputService(engine=engine),
+        product_goal_services=ProductGoalLifecycleServices(
+            interview_input=ProductGoalInterviewInputService(engine=engine),
+            discovery_selection=ProductDiscoverySelectionService(engine=engine),
+        ),
     )
 
 
 __all__ = [
     "AgenticActionRequest",
     "AgileForgeApplication",
+    "DiscoveryArtifactRequest",
+    "ProductGoalInterviewRequest",
+    "ProductGoalLifecycleServices",
+    "ProductGoalOutcomeRequest",
+    "ProductGoalReviewRequest",
+    "SpecificationCandidateRequest",
+    "SpecificationReviewRequest",
     "VisionInterviewRequest",
     "VisionReviewRequest",
     "VisionRevisionRequest",
