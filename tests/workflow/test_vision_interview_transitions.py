@@ -37,7 +37,12 @@ from workflow.clock import FixedClock
 from workflow.contracts import WorkflowErrorCode
 from workflow.definitions.product_definition import product_definition_graph
 from workflow.domain import WorkflowDomain
-from workflow.fingerprints import canonical_hash, canonical_json
+from workflow.fingerprints import (
+    canonical_hash,
+    canonical_json,
+    product_goal_artifact_fingerprint,
+    product_goal_interview_output_fingerprint,
+)
 from workflow.requests import (
     BeginVisionRevision,
     DecideVisionReview,
@@ -124,13 +129,8 @@ def _seed_accepted_goal(
         goal_statement=statement,
         is_complete=True,
         clarifying_questions_json=canonical_json([]),
-        output_fingerprint=canonical_hash(
-            {
-                "components_json": components,
-                "goal_statement": statement,
-                "is_complete": True,
-                "clarifying_questions_json": [],
-            }
+        output_fingerprint=product_goal_interview_output_fingerprint(
+            components, statement, True, []
         ),
         workflow_node_attempt_id=lineage.attempt_id,
         attempt_fingerprint=lineage.attempt_fingerprint,
@@ -139,7 +139,7 @@ def _seed_accepted_goal(
     session.add(turn)
     session.flush()
     assert turn.product_goal_interview_turn_id is not None
-    fingerprint = canonical_hash({"statement": statement})
+    fingerprint = product_goal_artifact_fingerprint(components, statement)
     goal = ProductGoalArtifact(
         project_id=lineage.project_id,
         vision_artifact_id=lineage.vision_artifact_id,
@@ -228,10 +228,10 @@ def _seed_accepted_goal_specification_lineage(
             decided_at=NOW + timedelta(seconds=1, microseconds=3),
         )
     )
-    spec_content = "# Original Goal specification"
+    spec_content = canonical_json(candidate_content)
     registered_spec = SpecRegistry(
         project_id=lineage.project_id,
-        spec_hash=canonical_hash({"content": spec_content}),
+        spec_hash=canonical_hash(candidate_content),
         content=spec_content,
         status="approved",
         approved_at=NOW + timedelta(seconds=1, microseconds=4),

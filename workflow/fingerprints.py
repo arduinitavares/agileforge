@@ -72,6 +72,30 @@ def canonical_stored_json_hash(canonical_content_json: str) -> str:
     return canonical_hash(parsed)
 
 
+def product_goal_interview_output_fingerprint(
+    components: Mapping[str, object],
+    goal_statement: str,
+    is_complete: bool,
+    clarifying_questions: Sequence[str],
+) -> str:
+    """Fingerprint the persisted Product Goal model output, not its trace data."""
+    return canonical_hash(
+        {
+            "components_json": dict(components),
+            "goal_statement": goal_statement,
+            "is_complete": is_complete,
+            "clarifying_questions_json": list(clarifying_questions),
+        }
+    )
+
+
+def product_goal_artifact_fingerprint(
+    components: Mapping[str, object], goal_statement: str
+) -> str:
+    """Fingerprint immutable Goal content using the complete source interview."""
+    return canonical_hash({"components": dict(components), "statement": goal_statement})
+
+
 def _snapshot_fingerprint(
     snapshot: WorkflowFactSnapshot,
     *,

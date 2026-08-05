@@ -198,8 +198,15 @@ def _outcome_rule(
     ) -> tuple[RuleEvaluation, ...]:
         goal = accepted_current_goal(snapshot)
         active_sprint = any(sprint.status == "active" for sprint in snapshot.sprints)
-        closed_sprint = any(sprint.status == "completed" for sprint in snapshot.sprints)
-        triage_complete = not closed_sprint or bool(snapshot.post_sprint_triage)
+        completed_sprint_ids = {
+            sprint.sprint_id
+            for sprint in snapshot.sprints
+            if sprint.status == "completed"
+        }
+        triaged_sprint_ids = {
+            triage.sprint_id for triage in snapshot.post_sprint_triage
+        }
+        triage_complete = completed_sprint_ids <= triaged_sprint_ids
         if goal is None or active_sprint or not triage_complete:
             return (
                 RuleEvaluation(

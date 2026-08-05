@@ -130,7 +130,12 @@ from workflow.facts import (
     VisionRevisionIntentFact,
     WorkflowFactSnapshot,
 )
-from workflow.fingerprints import canonical_hash, canonical_json
+from workflow.fingerprints import (
+    canonical_hash,
+    canonical_json,
+    product_goal_artifact_fingerprint,
+    product_goal_interview_output_fingerprint,
+)
 from workflow.planning_integrity import (
     dependency_edges_are_canonical,
     dependency_edges_have_cycle,
@@ -1257,7 +1262,7 @@ class WorkflowFactRepository:
             )
             self._require_product_condition(
                 row.output_fingerprint
-                == self._product_goal_interview_output_fingerprint(
+                == product_goal_interview_output_fingerprint(
                     components,
                     row.goal_statement,
                     row.is_complete,
@@ -1306,10 +1311,6 @@ class WorkflowFactRepository:
                 visions,
                 "Product Goal Vision",
             )
-            self._require_product_condition(
-                canonical_hash({"statement": row.statement}) == row.content_fingerprint,
-                "Product Goal artifact fingerprint changed.",
-            )
             source_turn = (
                 None if turns is None else turns.get(row.source_interview_turn_id)
             )
@@ -1326,6 +1327,13 @@ class WorkflowFactRepository:
                 self._require_product_condition(
                     source_turn.is_complete,
                     "Product Goal source interview must be complete.",
+                )
+                self._require_product_condition(
+                    product_goal_artifact_fingerprint(
+                        source_turn.components, row.statement
+                    )
+                    == row.content_fingerprint,
+                    "Product Goal artifact fingerprint changed.",
                 )
                 self._require_product_condition(
                     (
@@ -1422,7 +1430,7 @@ class WorkflowFactRepository:
                     == (row.vision_artifact_id, row.vision_fingerprint),
                     "Discovery Vision does not match its Product Goal Vision.",
                 )
-            self._canonical_object(
+            canonical_content = self._canonical_object(
                 row.canonical_content_json,
                 row.content_fingerprint,
                 "discovery",
@@ -1438,6 +1446,7 @@ class WorkflowFactRepository:
                 vision_fingerprint=row.vision_fingerprint,
                 product_goal_artifact_id=row.product_goal_artifact_id,
                 product_goal_fingerprint=row.product_goal_fingerprint,
+                canonical_content=canonical_content,
                 content_fingerprint=row.content_fingerprint,
                 content_ref=row.content_ref,
                 producer=row.producer,
@@ -1530,7 +1539,7 @@ class WorkflowFactRepository:
                     spec_versions,
                     "specification candidate base specification",
                 )
-            self._canonical_object(
+            canonical_content = self._canonical_object(
                 row.canonical_content_json,
                 row.content_fingerprint,
                 "specification candidate",
@@ -1550,6 +1559,7 @@ class WorkflowFactRepository:
                 discovery_fingerprint=row.discovery_fingerprint,
                 base_spec_version_id=row.base_spec_version_id,
                 base_spec_hash=row.base_spec_hash,
+                canonical_content=canonical_content,
                 content_fingerprint=row.content_fingerprint,
                 content_ref=row.content_ref,
                 supersedes_specification_candidate_id=(
@@ -4594,23 +4604,6 @@ class WorkflowFactRepository:
             {
                 "components_json": components,
                 "vision_statement": vision_statement,
-                "is_complete": is_complete,
-                "clarifying_questions_json": list(clarifying_questions),
-            }
-        )
-
-    @staticmethod
-    def _product_goal_interview_output_fingerprint(
-        components: JsonObject,
-        goal_statement: str,
-        is_complete: bool,
-        clarifying_questions: tuple[str, ...],
-    ) -> str:
-        """Hash the canonical Product Goal model output without trace data."""
-        return canonical_hash(
-            {
-                "components_json": components,
-                "goal_statement": goal_statement,
                 "is_complete": is_complete,
                 "clarifying_questions_json": list(clarifying_questions),
             }

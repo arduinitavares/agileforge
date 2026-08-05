@@ -262,6 +262,7 @@ class DiscoveryArtifactFact(FrozenModel):
     vision_fingerprint: str
     product_goal_artifact_id: int
     product_goal_fingerprint: str
+    canonical_content: JsonObject = Field(default_factory=dict)
     content_fingerprint: str
     content_ref: str | None
     producer: str
@@ -282,6 +283,7 @@ class SpecificationCandidateFact(FrozenModel):
     discovery_fingerprint: str
     base_spec_version_id: int | None
     base_spec_hash: str | None
+    canonical_content: JsonObject = Field(default_factory=dict)
     content_fingerprint: str
     content_ref: str | None
     supersedes_specification_candidate_id: int | None

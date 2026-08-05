@@ -180,3 +180,53 @@ def test_terminal_specification_decisions_remain_distinguishable(
 
     assert _specification_rule(snapshot, NOW)[0].reason_code == record_reason
     assert _review_rule(snapshot, NOW)[0].reason_code == review_reason
+
+
+@pytest.mark.parametrize(
+    "update",
+    [
+        {"vision_fingerprint": "wrong-vision"},
+        {"product_goal_fingerprint": "wrong-goal"},
+    ],
+)
+def test_mismatched_discovery_parent_fails_closed(update: dict[str, str]) -> None:
+    """A selected Goal chain never treats a mismatched discovery as a new action."""
+    snapshot = _snapshot()
+    malformed = snapshot.discovery_artifacts[0].model_copy(update=update)
+    conflicted = snapshot.model_copy(update={"discovery_artifacts": (malformed,)})
+
+    assert _discovery_rule(conflicted, NOW)[0].reason_code == "WORKFLOW_FACT_CONFLICT"
+    assert _discovery_rule(conflicted, NOW)[0].category.value == "invalid"
+
+
+@pytest.mark.parametrize(
+    "update",
+    [
+        {"vision_fingerprint": "wrong-vision"},
+        {"product_goal_fingerprint": "wrong-goal"},
+        {"discovery_fingerprint": "wrong-discovery"},
+    ],
+)
+def test_mismatched_candidate_parent_fails_closed(update: dict[str, str]) -> None:
+    """Every candidate parent is exact before record/review rules are exposed."""
+    snapshot = _snapshot()
+    malformed = snapshot.specification_candidates[0].model_copy(update=update)
+    conflicted = snapshot.model_copy(update={"specification_candidates": (malformed,)})
+
+    assert (
+        _specification_rule(conflicted, NOW)[0].reason_code == "WORKFLOW_FACT_CONFLICT"
+    )
+    assert _review_rule(conflicted, NOW)[0].reason_code == "WORKFLOW_FACT_CONFLICT"
+
+
+def test_duplicate_unsuperseded_discovery_leaf_fails_closed() -> None:
+    """Ambiguous leaves are invalid facts, not another discovery opportunity."""
+    snapshot = _snapshot()
+    duplicate = snapshot.discovery_artifacts[0].model_copy(
+        update={"discovery_artifact_id": 8, "content_fingerprint": "duplicate"}
+    )
+    conflicted = snapshot.model_copy(
+        update={"discovery_artifacts": (*snapshot.discovery_artifacts, duplicate)}
+    )
+
+    assert _discovery_rule(conflicted, NOW)[0].reason_code == "WORKFLOW_FACT_CONFLICT"

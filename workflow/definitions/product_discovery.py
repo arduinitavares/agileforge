@@ -30,61 +30,203 @@ def _reference(kind: str, identifier: int, fingerprint: str) -> FactReference:
     )
 
 
-def current_discovery(snapshot: WorkflowFactSnapshot) -> DiscoveryArtifactFact | None:
-    """Return the sole leaf discovery for the current accepted Goal."""
+def _current_discovery_state(
+    snapshot: WorkflowFactSnapshot,
+) -> tuple[DiscoveryArtifactFact | None, bool]:
+    """Return the current discovery and whether its active chain is invalid."""
+    vision = accepted_current_vision(snapshot)
     goal = accepted_current_goal(snapshot)
-    if goal is None:
-        return None
+    if vision is None or goal is None:
+        return None, False
     superseded = {
         artifact.supersedes_discovery_artifact_id
         for artifact in snapshot.discovery_artifacts
         if artifact.supersedes_discovery_artifact_id is not None
     }
-    choices = [
+    leaves = [
         artifact
         for artifact in snapshot.discovery_artifacts
         if artifact.discovery_artifact_id not in superseded
-        and artifact.product_goal_artifact_id == goal.product_goal_artifact_id
-        and artifact.product_goal_fingerprint == goal.content_fingerprint
     ]
-    return choices[0] if len(choices) == 1 else None
+    choices = [
+        artifact
+        for artifact in leaves
+        if (
+            artifact.vision_artifact_id,
+            artifact.vision_fingerprint,
+            artifact.product_goal_artifact_id,
+            artifact.product_goal_fingerprint,
+        )
+        == (
+            vision.vision_artifact_id,
+            vision.content_fingerprint,
+            goal.product_goal_artifact_id,
+            goal.content_fingerprint,
+        )
+    ]
+    malformed = any(
+        artifact.product_goal_artifact_id == goal.product_goal_artifact_id
+        and (
+            artifact.product_goal_fingerprint != goal.content_fingerprint
+            or (artifact.vision_artifact_id, artifact.vision_fingerprint)
+            != (vision.vision_artifact_id, vision.content_fingerprint)
+        )
+        for artifact in leaves
+    )
+    return (choices[0] if len(choices) == 1 else None), malformed or len(choices) > 1
 
 
-def current_specification_candidate(
+def current_discovery(snapshot: WorkflowFactSnapshot) -> DiscoveryArtifactFact | None:
+    """Return the sole exact discovery leaf or ``None`` on conflict."""
+    discovery, _conflict = _current_discovery_state(snapshot)
+    return discovery
+
+
+def _current_specification_candidate_state(
     snapshot: WorkflowFactSnapshot,
-) -> SpecificationCandidateFact | None:
-    """Return the sole current candidate for the current discovery."""
-    discovery = current_discovery(snapshot)
+) -> tuple[SpecificationCandidateFact | None, bool]:
+    """Return the candidate and whether its selected parent chain is invalid."""
+    discovery, discovery_conflict = _current_discovery_state(snapshot)
     if discovery is None:
-        return None
+        return None, discovery_conflict
     superseded = {
         candidate.supersedes_specification_candidate_id
         for candidate in snapshot.specification_candidates
         if candidate.supersedes_specification_candidate_id is not None
     }
-    choices = [
+    leaves = [
         candidate
         for candidate in snapshot.specification_candidates
         if candidate.specification_candidate_id not in superseded
-        and candidate.discovery_artifact_id == discovery.discovery_artifact_id
-        and candidate.discovery_fingerprint == discovery.content_fingerprint
     ]
-    return choices[0] if len(choices) == 1 else None
+    choices = [
+        candidate
+        for candidate in leaves
+        if (
+            candidate.vision_artifact_id,
+            candidate.vision_fingerprint,
+            candidate.product_goal_artifact_id,
+            candidate.product_goal_fingerprint,
+            candidate.discovery_artifact_id,
+            candidate.discovery_fingerprint,
+        )
+        == (
+            discovery.vision_artifact_id,
+            discovery.vision_fingerprint,
+            discovery.product_goal_artifact_id,
+            discovery.product_goal_fingerprint,
+            discovery.discovery_artifact_id,
+            discovery.content_fingerprint,
+        )
+    ]
+    malformed = any(
+        candidate.discovery_artifact_id == discovery.discovery_artifact_id
+        and (
+            candidate.discovery_fingerprint != discovery.content_fingerprint
+            or (
+                candidate.vision_artifact_id,
+                candidate.vision_fingerprint,
+                candidate.product_goal_artifact_id,
+                candidate.product_goal_fingerprint,
+            )
+            != (
+                discovery.vision_artifact_id,
+                discovery.vision_fingerprint,
+                discovery.product_goal_artifact_id,
+                discovery.product_goal_fingerprint,
+            )
+        )
+        for candidate in leaves
+    )
+    return (
+        choices[0] if len(choices) == 1 else None,
+        discovery_conflict or malformed or len(choices) > 1,
+    )
 
 
-def accepted_current_spec(snapshot: WorkflowFactSnapshot) -> SpecVersionFact | None:
-    """Return the current approved registry row for the active Goal chain."""
-    goal = accepted_current_goal(snapshot)
-    if goal is None:
-        return None
+def current_specification_candidate(
+    snapshot: WorkflowFactSnapshot,
+) -> SpecificationCandidateFact | None:
+    """Return the sole exact candidate leaf or ``None`` on conflict."""
+    candidate, _conflict = _current_specification_candidate_state(snapshot)
+    return candidate
+
+
+def _accepted_current_spec_state(
+    snapshot: WorkflowFactSnapshot,
+) -> tuple[SpecVersionFact | None, bool]:
+    """Return the approved registry row and any exact-lineage conflict."""
+    candidate, candidate_conflict = _current_specification_candidate_state(snapshot)
+    if candidate is None:
+        return None, candidate_conflict
     choices = [
         spec
         for spec in snapshot.spec_versions
         if spec.status == "approved"
-        and spec.source_product_goal_artifact_id == goal.product_goal_artifact_id
-        and spec.source_product_goal_fingerprint == goal.content_fingerprint
+        and (
+            spec.source_vision_artifact_id,
+            spec.source_vision_fingerprint,
+            spec.source_product_goal_artifact_id,
+            spec.source_product_goal_fingerprint,
+            spec.source_discovery_artifact_id,
+            spec.source_discovery_fingerprint,
+            spec.source_specification_candidate_id,
+            spec.source_specification_candidate_fingerprint,
+        )
+        == (
+            candidate.vision_artifact_id,
+            candidate.vision_fingerprint,
+            candidate.product_goal_artifact_id,
+            candidate.product_goal_fingerprint,
+            candidate.discovery_artifact_id,
+            candidate.discovery_fingerprint,
+            candidate.specification_candidate_id,
+            candidate.content_fingerprint,
+        )
     ]
-    return choices[0] if len(choices) == 1 else None
+    malformed = any(
+        spec.status == "approved"
+        and spec.source_specification_candidate_id
+        == candidate.specification_candidate_id
+        and (
+            spec.source_specification_candidate_fingerprint
+            != candidate.content_fingerprint
+            or (
+                spec.source_vision_artifact_id,
+                spec.source_vision_fingerprint,
+                spec.source_product_goal_artifact_id,
+                spec.source_product_goal_fingerprint,
+                spec.source_discovery_artifact_id,
+                spec.source_discovery_fingerprint,
+            )
+            != (
+                candidate.vision_artifact_id,
+                candidate.vision_fingerprint,
+                candidate.product_goal_artifact_id,
+                candidate.product_goal_fingerprint,
+                candidate.discovery_artifact_id,
+                candidate.discovery_fingerprint,
+            )
+        )
+        for spec in snapshot.spec_versions
+    )
+    return choices[0] if len(
+        choices
+    ) == 1 else None, candidate_conflict or malformed or len(choices) > 1
+
+
+def accepted_current_spec(snapshot: WorkflowFactSnapshot) -> SpecVersionFact | None:
+    """Return the approved exact-lineage registry row or ``None`` on conflict."""
+    spec, _conflict = _accepted_current_spec_state(snapshot)
+    return spec
+
+
+def _fact_conflict(snapshot: WorkflowFactSnapshot) -> bool:
+    """Report malformed current product-definition lineage for graph rules."""
+    _discovery, discovery_conflict = _current_discovery_state(snapshot)
+    _candidate, candidate_conflict = _current_specification_candidate_state(snapshot)
+    _spec, spec_conflict = _accepted_current_spec_state(snapshot)
+    return discovery_conflict or candidate_conflict or spec_conflict
 
 
 def _candidate_decision(
@@ -103,6 +245,8 @@ def _discovery_rule(
     snapshot: WorkflowFactSnapshot,
     _at: datetime,
 ) -> tuple[RuleEvaluation, ...]:
+    if _fact_conflict(snapshot):
+        return (RuleEvaluation(RuleCategory.INVALID, "WORKFLOW_FACT_CONFLICT"),)
     vision = accepted_current_vision(snapshot)
     goal = accepted_current_goal(snapshot)
     if vision is None or goal is None:
@@ -133,6 +277,8 @@ def _specification_rule(
     snapshot: WorkflowFactSnapshot,
     _at: datetime,
 ) -> tuple[RuleEvaluation, ...]:
+    if _fact_conflict(snapshot):
+        return (RuleEvaluation(RuleCategory.INVALID, "WORKFLOW_FACT_CONFLICT"),)
     discovery = current_discovery(snapshot)
     if discovery is None:
         return (RuleEvaluation(RuleCategory.SATISFIED, "SPECIFICATION_NOT_READY"),)
@@ -180,6 +326,8 @@ def _review_rule(
     snapshot: WorkflowFactSnapshot,
     _at: datetime,
 ) -> tuple[RuleEvaluation, ...]:
+    if _fact_conflict(snapshot):
+        return (RuleEvaluation(RuleCategory.INVALID, "WORKFLOW_FACT_CONFLICT"),)
     candidate = current_specification_candidate(snapshot)
     if candidate is None:
         return (

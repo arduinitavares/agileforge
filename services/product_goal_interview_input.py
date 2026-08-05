@@ -27,6 +27,11 @@ if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
 
     from workflow.contracts import JsonObject, NodeDecision, TransitionResult
+    from workflow.facts import (
+        ProductGoalArtifactFact,
+        VisionArtifactFact,
+        WorkflowFactSnapshot,
+    )
 
 
 @dataclass(frozen=True)
@@ -67,19 +72,70 @@ class ProductGoalInterviewInputService:
         ) != (str(vision.vision_artifact_id), vision.content_fingerprint):
             message = "Product Goal interview Vision reference is stale."
             raise ValueError(message)
+        feedback_or_rejected = _revision_candidate(snapshot, vision)
+        if feedback_or_rejected is None:
+            return ProductGoalInterviewInput(
+                project_name=snapshot.project.name,
+                accepted_vision_statement=vision.statement,
+                user_response=user_text,
+                prior_components=None,
+            ).model_dump(mode="json")
         turns = [
             item
             for item in snapshot.product_goal_interview_turns
             if item.vision_artifact_id == vision.vision_artifact_id
             and item.vision_fingerprint == vision.content_fingerprint
+            and item.goal_number == feedback_or_rejected.goal_number
         ]
-        prior = None
-        if turns:
-            latest = max(turns, key=lambda item: item.product_goal_interview_turn_id)
-            prior = ProductGoalComponents.model_validate(latest.components)
+        if not turns:
+            message = "Product Goal revision has no interview chain."
+            raise ValueError(message)
+        latest = max(turns, key=lambda item: item.product_goal_interview_turn_id)
+        prior = ProductGoalComponents.model_validate(latest.components)
         return ProductGoalInterviewInput(
             project_name=snapshot.project.name,
             accepted_vision_statement=vision.statement,
             user_response=user_text,
             prior_components=prior,
         ).model_dump(mode="json")
+
+
+def _revision_candidate(
+    snapshot: WorkflowFactSnapshot,
+    vision: VisionArtifactFact,
+) -> ProductGoalArtifactFact | None:
+    """Return the sole leaf awaiting a feedback/rejection revision.
+
+    Resolved Goals intentionally never contribute prior components to the next
+    goal number. A terminal feedback/rejection only contributes within its
+    exact unsuperseded Goal chain.
+    """
+    superseded = {
+        goal.supersedes_product_goal_artifact_id
+        for goal in snapshot.product_goal_artifacts
+        if goal.supersedes_product_goal_artifact_id is not None
+    }
+    outcomes = {
+        outcome.product_goal_artifact_id for outcome in snapshot.product_goal_outcomes
+    }
+    candidates = []
+    for goal in snapshot.product_goal_artifacts:
+        decisions = [
+            decision
+            for decision in snapshot.product_goal_artifact_decisions
+            if decision.product_goal_artifact_id == goal.product_goal_artifact_id
+        ]
+        if (
+            goal.product_goal_artifact_id not in superseded
+            and goal.product_goal_artifact_id not in outcomes
+            and (goal.vision_artifact_id, goal.vision_fingerprint)
+            == (vision.vision_artifact_id, vision.content_fingerprint)
+            and len(decisions) == 1
+            and decisions[0].artifact_fingerprint == goal.content_fingerprint
+            and decisions[0].decision in {"feedback", "rejected"}
+        ):
+            candidates.append(goal)
+    if len(candidates) > 1:
+        message = "Product Goal revision chain is ambiguous."
+        raise ValueError(message)
+    return candidates[0] if candidates else None

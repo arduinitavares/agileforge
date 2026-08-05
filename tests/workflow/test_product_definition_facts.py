@@ -33,7 +33,12 @@ from utils.runtime_config import (
     get_adk_execution_trace_db_target,
 )
 from workflow.facts import WorkflowFactSnapshot
-from workflow.fingerprints import canonical_hash, canonical_json
+from workflow.fingerprints import (
+    canonical_hash,
+    canonical_json,
+    product_goal_artifact_fingerprint,
+    product_goal_interview_output_fingerprint,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
@@ -85,7 +90,9 @@ def _clear_product_definition_fixture_rows(engine: Engine) -> Iterator[None]:
         session.exec(delete(VisionRevisionIntent))
         session.flush()
         for artifact in session.exec(
-            select(VisionArtifact).order_by(col(VisionArtifact.vision_artifact_id).desc())
+            select(VisionArtifact).order_by(
+                col(VisionArtifact.vision_artifact_id).desc()
+            )
         ):
             session.delete(artifact)
             session.flush()
@@ -140,14 +147,9 @@ def _product_goal_output_fingerprint(
     is_complete: bool,
     clarifying_questions: list[str],
 ) -> str:
-    """Hash only the canonical persisted Product Goal model output."""
-    return canonical_hash(
-        {
-            "components_json": dict(components),
-            "goal_statement": goal_statement,
-            "is_complete": is_complete,
-            "clarifying_questions_json": clarifying_questions,
-        }
+    """Use the production fingerprint helper for persisted Goal output."""
+    return product_goal_interview_output_fingerprint(
+        components, goal_statement, is_complete, clarifying_questions
     )
 
 
@@ -190,16 +192,8 @@ def _vision_artifact(
     recorded_at: datetime,
     *,
     version_number: int = 1,
-) -> tuple[int, str, int, int]:
-    """Persist one complete initial Vision and its nullable legacy spec row."""
-    legacy_spec = SpecRegistry(
-        project_id=project_id,
-        spec_hash=f"sha256:legacy-spec:{project_id}",
-        content="# Legacy specification",
-        status="approved",
-    )
-    session.add(legacy_spec)
-    session.flush()
+) -> tuple[int, str, int]:
+    """Persist one complete initial Vision under non-null specification lineage."""
     attempt_id = _attempt(
         session,
         project_id,
@@ -281,7 +275,6 @@ def _vision_artifact(
     return (
         _id(artifact.vision_artifact_id),
         artifact.content_fingerprint,
-        _id(legacy_spec.spec_version_id),
         turn_id,
     )
 
@@ -325,7 +318,7 @@ def _seed_product_definition(
     session.add(project)
     session.flush()
     project_id = _id(project.project_id)
-    vision_id, vision_fingerprint, legacy_spec_id, initial_turn_id = _vision_artifact(
+    vision_id, vision_fingerprint, initial_turn_id = _vision_artifact(
         session,
         project_id,
         recorded_at,
@@ -414,7 +407,9 @@ def _seed_product_definition(
         goal_number=1,
         revision_number=1,
         statement=statement,
-        content_fingerprint=canonical_hash({"statement": statement}),
+        content_fingerprint=product_goal_artifact_fingerprint(
+            goal_components, statement
+        ),
         supersedes_product_goal_artifact_id=None,
         source_interview_turn_id=_id(goal_turn.product_goal_interview_turn_id),
         created_by="operator",
@@ -476,7 +471,7 @@ def _seed_product_definition(
         content_ref="spec.json",
         supersedes_specification_candidate_id=None,
         recorded_by="operator",
-        recorded_at=recorded_at,
+        recorded_at=discovery_recorded_at + timedelta(minutes=1),
     )
     session.add(candidate)
     session.flush()
@@ -490,13 +485,13 @@ def _seed_product_definition(
             rationale="Ready for registration.",
             reviewer="operator",
             idempotency_key=f"specification-review-{project_id}",
-            decided_at=recorded_at,
+            decided_at=discovery_recorded_at + timedelta(minutes=2),
         )
     )
     registered_spec = SpecRegistry(
         project_id=project_id,
-        spec_hash=f"sha256:registered-spec:{project_id}",
-        content="# Registered specification",
+        spec_hash=canonical_hash(candidate_content),
+        content=canonical_json(candidate_content),
         status="approved",
         source_specification_candidate_id=candidate_id,
         source_vision_artifact_id=vision_id,
@@ -525,7 +520,6 @@ def _seed_product_definition(
         "discovery_fingerprint": discovery.content_fingerprint,
         "candidate_id": candidate_id,
         "candidate_fingerprint": candidate.content_fingerprint,
-        "legacy_spec_id": legacy_spec_id,
         "registered_spec_id": _id(registered_spec.spec_version_id),
     }
 
@@ -581,7 +575,7 @@ def _add_accepted_product_goal(
         goal_number=goal_number,
         revision_number=1,
         statement=statement,
-        content_fingerprint=canonical_hash({"statement": statement}),
+        content_fingerprint=product_goal_artifact_fingerprint(components, statement),
         supersedes_product_goal_artifact_id=None,
         source_interview_turn_id=_id(turn.product_goal_interview_turn_id),
         created_by="operator",
@@ -608,17 +602,20 @@ def _add_accepted_product_goal(
     }
 
 
-def test_loader_retains_product_definition_identity_and_legacy_spec_lineage(
+def test_loader_retains_product_definition_identity_and_registered_spec_lineage(
     engine: Engine,
 ) -> None:
-    """Load product records while legacy specs retain nullable staged lineage."""
+    """Load product records with non-null durable specification provenance."""
     with Session(engine) as session:
         seed = _seed_product_definition(session, "Product facts")
         snapshot = WorkflowFactRepository(session).load(int(seed["project_id"]))
 
     assert "repository_bindings" not in WorkflowFactSnapshot.model_fields
-    assert snapshot.spec_versions[0].spec_version_id == seed["legacy_spec_id"]
-    assert snapshot.spec_versions[0].source_specification_candidate_id is None
+    assert snapshot.spec_versions[0].spec_version_id == seed["registered_spec_id"]
+    assert (
+        snapshot.spec_versions[0].source_specification_candidate_id
+        == seed["candidate_id"]
+    )
     assert {
         turn.vision_interview_turn_id for turn in snapshot.vision_interview_turns
     } == {seed["initial_turn_id"], seed["turn_id"]}
@@ -658,11 +655,11 @@ def test_loader_retains_product_definition_identity_and_legacy_spec_lineage(
         == seed["discovery_fingerprint"]
     )
     assert (
-        snapshot.spec_versions[1].source_specification_candidate_id
+        snapshot.spec_versions[0].source_specification_candidate_id
         == seed["candidate_id"]
     )
     assert (
-        snapshot.spec_versions[1].source_specification_candidate_fingerprint
+        snapshot.spec_versions[0].source_specification_candidate_fingerprint
         == seed["candidate_fingerprint"]
     )
 
@@ -690,9 +687,11 @@ def test_loader_retains_product_goal_review_states_as_business_facts(
         session.commit()
         snapshot = WorkflowFactRepository(session).load(int(seed["project_id"]))
 
-    assert {
-        item.decision for item in snapshot.product_goal_artifact_decisions
-    } == {"accepted", "rejected", "feedback"}
+    assert {item.decision for item in snapshot.product_goal_artifact_decisions} == {
+        "accepted",
+        "rejected",
+        "feedback",
+    }
 
 
 def test_loader_loads_initial_and_revision_vision_chains_with_turn_one(
@@ -965,7 +964,6 @@ def test_loader_rejects_same_project_product_definition_chain_swaps(
         (
             other_vision_id,
             other_vision_fingerprint,
-            _legacy_spec_id,
             _initial_turn_id,
         ) = _vision_artifact(
             session,

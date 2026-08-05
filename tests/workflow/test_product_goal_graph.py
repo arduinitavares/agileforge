@@ -8,12 +8,15 @@ from typing import Literal
 from workflow.definitions.product_goal import (
     _goal_interview_rule,
     _goal_review_rule,
+    _outcome_rule,
     accepted_current_goal,
 )
 from workflow.facts import (
+    PostSprintTriageFact,
     ProductGoalArtifactDecisionFact,
     ProductGoalArtifactFact,
     ProjectFact,
+    SprintFact,
     VisionArtifactDecisionFact,
     VisionArtifactFact,
     WorkflowFactSnapshot,
@@ -136,4 +139,62 @@ def test_feedback_reopens_goal_interview_without_an_active_goal() -> None:
     assert (
         _goal_interview_rule(snapshot, NOW)[0].reason_code
         == "PRODUCT_GOAL_INTERVIEW_REQUIRED"
+    )
+
+
+def test_goal_outcome_requires_triage_for_every_completed_sprint() -> None:
+    """One triaged closure cannot make another completed Sprint quiescent."""
+    snapshot = _snapshot(goal_decision="accepted").model_copy(
+        update={
+            "sprints": (
+                SprintFact(sprint_id=1, status="completed", completed_at=NOW),
+                SprintFact(sprint_id=2, status="completed", completed_at=NOW),
+            ),
+            "post_sprint_triage": (
+                PostSprintTriageFact(
+                    triage_id=1,
+                    sprint_id=1,
+                    impact="none",
+                    canonical_payload={},
+                    payload_fingerprint="triage-1",
+                ),
+            ),
+        }
+    )
+
+    assert _outcome_rule("fulfilled")(snapshot, NOW)[0].reason_code == (
+        "PRODUCT_GOAL_OUTCOME_NOT_READY"
+    )
+    complete = snapshot.model_copy(
+        update={
+            "post_sprint_triage": (
+                *snapshot.post_sprint_triage,
+                PostSprintTriageFact(
+                    triage_id=2,
+                    sprint_id=2,
+                    impact="none",
+                    canonical_payload={},
+                    payload_fingerprint="triage-2",
+                ),
+            )
+        }
+    )
+    assert _outcome_rule("fulfilled")(complete, NOW)[0].reason_code == (
+        "PRODUCT_GOAL_FULFILLED_AVAILABLE"
+    )
+
+
+def test_goal_outcome_is_blocked_by_active_sprint_but_not_no_sprints() -> None:
+    """Quiescence permits a Goal without Sprint history and blocks active work."""
+    quiescent = _snapshot(goal_decision="accepted")
+    assert _outcome_rule("abandoned")(quiescent, NOW)[0].reason_code == (
+        "PRODUCT_GOAL_ABANDONED_AVAILABLE"
+    )
+    active = quiescent.model_copy(
+        update={
+            "sprints": (SprintFact(sprint_id=1, status="active", completed_at=None),)
+        }
+    )
+    assert _outcome_rule("abandoned")(active, NOW)[0].reason_code == (
+        "PRODUCT_GOAL_OUTCOME_NOT_READY"
     )

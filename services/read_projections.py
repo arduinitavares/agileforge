@@ -47,7 +47,11 @@ if TYPE_CHECKING:
 
     from sqlalchemy.engine import Engine
 
-    from workflow.facts import SprintFact, WorkflowFactSnapshot
+    from workflow.facts import (
+        SpecificationDecisionFact,
+        SprintFact,
+        WorkflowFactSnapshot,
+    )
 
 _JSON_OBJECT = TypeAdapter(JsonObject)
 _AUTO_SPEC_CONTENT_LIMIT_BYTES = 64_000
@@ -88,6 +92,62 @@ def _enum_value(value: object) -> JsonValue:
 def _result_data(result: JsonObject) -> JsonObject:
     data = result.get("data")
     return data if isinstance(data, dict) else {}
+
+
+def _latest_resolved_goal(
+    snapshot: WorkflowFactSnapshot,
+) -> tuple[int, JsonObject] | None:
+    """Return the latest exact accepted Goal/outcome pair without mutable state."""
+    goals = {
+        goal.product_goal_artifact_id: goal for goal in snapshot.product_goal_artifacts
+    }
+    accepted = {
+        decision.product_goal_artifact_id: decision
+        for decision in snapshot.product_goal_artifact_decisions
+        if decision.decision == "accepted"
+    }
+    resolved: list[tuple[int, JsonObject]] = []
+    for outcome in snapshot.product_goal_outcomes:
+        goal = goals.get(outcome.product_goal_artifact_id)
+        decision = accepted.get(outcome.product_goal_artifact_id)
+        if (
+            goal is None
+            or decision is None
+            or outcome.artifact_fingerprint != goal.content_fingerprint
+            or decision.artifact_fingerprint != goal.content_fingerprint
+        ):
+            continue
+        resolved.append(
+            (
+                goal.goal_number,
+                {
+                    "product_goal_artifact_id": goal.product_goal_artifact_id,
+                    "fingerprint": goal.content_fingerprint,
+                    "statement": goal.statement,
+                    "goal_number": goal.goal_number,
+                    "revision_number": goal.revision_number,
+                    "outcome": outcome.outcome,
+                    "rationale": outcome.rationale,
+                    "decided_by": outcome.decided_by,
+                },
+            )
+        )
+    return max(resolved, key=lambda item: item[0]) if resolved else None
+
+
+def _specification_review_data(
+    decisions: list[SpecificationDecisionFact],
+) -> JsonObject | None:
+    """Project one terminal candidate decision only when it is unambiguous."""
+    if len(decisions) != 1:
+        return None
+    decision = decisions[0]
+    return {
+        "specification_decision_id": decision.specification_decision_id,
+        "decision": decision.decision,
+        "rationale": decision.rationale,
+        "reviewer": decision.reviewer,
+    }
 
 
 def _active_initial_spec_draft(drafts: list[SpecDraft]) -> SpecDraft | None:
@@ -628,11 +688,14 @@ class DurableReadProjectionService:
             return snapshot
         goal = accepted_current_goal(snapshot)
         if goal is None:
+            resolved = _latest_resolved_goal(snapshot)
             return _success(
                 {
                     "active": None,
-                    "outcome": None,
-                    "stale_reason": "GOAL_NOT_ACTIVE",
+                    "outcome": None if resolved is None else resolved[1],
+                    "stale_reason": (
+                        "GOAL_NOT_ACTIVE" if resolved is None else "GOAL_RESOLVED"
+                    ),
                 }
             )
         return _success(
@@ -656,9 +719,7 @@ class DurableReadProjectionService:
             return snapshot
         discovery = current_discovery(snapshot)
         if discovery is None:
-            return _success(
-                {"current": None, "stale_reason": "DISCOVERY_NOT_CURRENT"}
-            )
+            return _success({"current": None, "stale_reason": "DISCOVERY_NOT_CURRENT"})
         return _success(
             {
                 "current": {
@@ -667,6 +728,7 @@ class DurableReadProjectionService:
                     "content_ref": discovery.content_ref,
                     "vision_artifact_id": discovery.vision_artifact_id,
                     "product_goal_artifact_id": discovery.product_goal_artifact_id,
+                    "canonical_content": discovery.canonical_content,
                 },
                 "stale_reason": None,
             }
@@ -677,25 +739,49 @@ class DurableReadProjectionService:
         snapshot = self._snapshot(project_id)
         if isinstance(snapshot, dict):
             return snapshot
+        candidate = current_specification_candidate(snapshot)
         spec = accepted_current_spec(snapshot)
-        if spec is None:
+        if candidate is None:
             return _success(
                 {
                     "current": None,
-                    "stale_reason": "SPECIFICATION_NOT_APPROVED",
+                    "candidate": None,
+                    "review": None,
+                    "stale_reason": "SPECIFICATION_NOT_CURRENT",
                 }
             )
+        decisions = [
+            decision
+            for decision in snapshot.specification_decisions
+            if decision.specification_candidate_id
+            == candidate.specification_candidate_id
+        ]
+        review = _specification_review_data(decisions)
         return _success(
             {
-                "current": {
-                    "spec_version_id": spec.spec_version_id,
-                    "spec_hash": spec.spec_hash,
-                    "status": spec.status,
-                    "source_specification_candidate_id": (
-                        spec.source_specification_candidate_id
-                    ),
+                "current": (
+                    None
+                    if spec is None
+                    else {
+                        "spec_version_id": spec.spec_version_id,
+                        "spec_hash": spec.spec_hash,
+                        "status": spec.status,
+                        "source_specification_candidate_id": (
+                            spec.source_specification_candidate_id
+                        ),
+                        "canonical_content": candidate.canonical_content,
+                    }
+                ),
+                "candidate": {
+                    "specification_candidate_id": candidate.specification_candidate_id,
+                    "fingerprint": candidate.content_fingerprint,
+                    "canonical_content": candidate.canonical_content,
+                    "content_ref": candidate.content_ref,
                 },
-                "stale_reason": None,
+                "review": review,
+                "stale_reason": None
+                if spec is not None
+                else "SPECIFICATION_NOT_APPROVED",
             }
         )
 
@@ -721,20 +807,13 @@ class DurableReadProjectionService:
                 == candidate.specification_candidate_id
             )
         ]
-        review: JsonObject | None = None
-        if len(decisions) == 1:
-            decision = decisions[0]
-            review = {
-                "specification_decision_id": decision.specification_decision_id,
-                "decision": decision.decision,
-                "rationale": decision.rationale,
-                "reviewer": decision.reviewer,
-            }
+        review = _specification_review_data(decisions)
         return _success(
             {
                 "candidate": {
                     "specification_candidate_id": candidate.specification_candidate_id,
                     "fingerprint": candidate.content_fingerprint,
+                    "canonical_content": candidate.canonical_content,
                     "content_ref": candidate.content_ref,
                 },
                 "review": review,

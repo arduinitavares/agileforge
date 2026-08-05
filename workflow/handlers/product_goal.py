@@ -18,7 +18,11 @@ from workflow.contracts import (
     WorkflowError,
     WorkflowErrorCode,
 )
-from workflow.fingerprints import canonical_hash, canonical_json
+from workflow.fingerprints import (
+    canonical_json,
+    product_goal_artifact_fingerprint,
+    product_goal_interview_output_fingerprint,
+)
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -112,7 +116,11 @@ def execute_record_product_goal_interview_turn(
         )
         .order_by(col(ProductGoalInterviewTurn.revision_number).desc())
     ).all()
-    revision_number = turns[0].revision_number + 1 if turns else 1
+    revision_number = (
+        prior_goal.revision_number + 1
+        if prior_goal is not None
+        else (turns[0].revision_number if turns else 1)
+    )
     turn = ProductGoalInterviewTurn(
         project_id=request.project_id,
         vision_artifact_id=int(vision_refs[0].fact_id),
@@ -125,13 +133,11 @@ def execute_record_product_goal_interview_turn(
         goal_statement=request.product_goal_statement.strip(),
         is_complete=request.is_complete,
         clarifying_questions_json=canonical_json(list(request.clarifying_questions)),
-        output_fingerprint=canonical_hash(
-            {
-                "components": request.updated_components,
-                "statement": request.product_goal_statement.strip(),
-                "is_complete": request.is_complete,
-                "questions": request.clarifying_questions,
-            }
+        output_fingerprint=product_goal_interview_output_fingerprint(
+            request.updated_components,
+            request.product_goal_statement.strip(),
+            request.is_complete,
+            request.clarifying_questions,
         ),
         workflow_node_attempt_id=request.attempt_id,
         attempt_fingerprint=request.attempt_fingerprint,
@@ -152,11 +158,9 @@ def execute_record_product_goal_interview_turn(
             goal_number=goal_number,
             revision_number=revision_number,
             statement=turn.goal_statement,
-            content_fingerprint=canonical_hash(
-                {
-                    "components": request.updated_components,
-                    "statement": turn.goal_statement,
-                }
+            content_fingerprint=product_goal_artifact_fingerprint(
+                request.updated_components,
+                turn.goal_statement,
             ),
             supersedes_product_goal_artifact_id=(
                 None if prior_goal is None else prior_goal.product_goal_artifact_id

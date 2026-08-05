@@ -17,7 +17,11 @@ from workflow.contracts import (
     WorkflowPosition,
 )
 from workflow.facts import WorkflowFactSnapshot
-from workflow.fingerprints import decision_fingerprint, fact_fingerprint
+from workflow.fingerprints import (
+    business_fact_fingerprint,
+    decision_fingerprint,
+    fact_fingerprint,
+)
 
 
 class RuleCategory(StrEnum):
@@ -88,12 +92,16 @@ def _overlay_agentic_attempt(
         return evaluation
     latest = max(attempts, key=lambda item: item.attempt_id)
     if latest.outcome == "success":
-        return replace(
-            evaluation,
-            category=RuleCategory.INVALID,
-            reason_code="WORKFLOW_FACT_CONFLICT",
-            valid_until=None,
-            recommendation_kind=None,
+        return (
+            replace(
+                evaluation,
+                category=RuleCategory.INVALID,
+                reason_code="WORKFLOW_FACT_CONFLICT",
+                valid_until=None,
+                recommendation_kind=None,
+            )
+            if latest.business_fact_fingerprint == business_fact_fingerprint(snapshot)
+            else evaluation
         )
     if latest.outcome == "failure":
         return replace(
@@ -271,9 +279,7 @@ class WorkflowGraph:
             return None
 
         category = NodeCategory(evaluation.category.value)
-        recommendation_kind = (
-            evaluation.recommendation_kind or node.recommendation_kind
-        )
+        recommendation_kind = evaluation.recommendation_kind or node.recommendation_kind
         payload: dict[str, object] = {
             "graph_version": self.graph_version,
             "fact_fingerprint": facts_hash,
@@ -328,8 +334,7 @@ class WorkflowGraph:
             and (
                 attempt.outcome in {"failure", "obsolete"}
                 or (
-                    attempt.outcome is None
-                    and evaluated_at >= attempt.lease_expires_at
+                    attempt.outcome is None and evaluated_at >= attempt.lease_expires_at
                 )
             )
         )
