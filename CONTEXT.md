@@ -10,6 +10,26 @@ The single AgileForge aggregate that owns one product's discovery, authority,
 planning, and execution history. One discovery targets at most one Project.
 _Avoid_: repository, product row, workflow session
 
+**Project Vision**:
+The accepted enduring direction for a Project. It is reviewed independently and
+may guide multiple Product Goals over the Project's lifetime.
+_Avoid_: Product Goal, specification, feature request
+
+**Product Goal**:
+One accepted valuable future state pursued under the current Project Vision. A
+Project has at most one active Product Goal, which may span multiple Sprints.
+_Avoid_: weekly feature, Sprint Goal, backlog item, Project Vision
+
+**Product Goal Interview**:
+The guided conversation that drafts one Product Goal after Project Vision is
+accepted and before goal-specific discovery begins.
+_Avoid_: Vision interview, backlog refinement, implementation planning
+
+**Product Goal Outcome**:
+The human decision that an active Product Goal is fulfilled or abandoned. Sprint
+closure and an empty backlog are not Product Goal Outcomes.
+_Avoid_: Sprint review, automatic completion, replacement Goal
+
 **Workflow Fact**:
 A typed durable record whose current value can affect which workflow actions are
 available, waiting, blocked, or invalid.

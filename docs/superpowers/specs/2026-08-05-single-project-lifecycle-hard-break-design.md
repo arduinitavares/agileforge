@@ -1,7 +1,7 @@
 # Single Project Lifecycle Hard-Break Design
 
 **Date:** 2026-08-05
-**Status:** Approved
+**Status:** Approved for amended written-spec review
 **Supersedes:** `2026-08-02-domain-workflow-graph-hard-break-design.md`
 **Scope:** Project creation, initial Vision and Product Goal, optional repository
 attachment, deterministic local repository inspection, Authority sequencing,
@@ -12,17 +12,20 @@ workflow convergence, and removal of the former dual-origin setup architecture
 AgileForge will have one Project lifecycle. A Project is created with a name. A
 local Git repository may be attached during creation or later, but repository
 attachment does not select a different workflow. The first product step is an
-interactive Project Vision interview that also captures the initial Product
-Goal.
+interactive Project Vision interview. After a human accepts Vision, a separate
+Product Goal interview defines the objective that scopes discovery.
 
-The existing product-definition and delivery sequence remains intact. Expanded,
-the lifecycle is:
+The existing product-definition and delivery sequence remains intact. Vision
+and Product Goal use separate focused interviews and separate review decisions.
+Expanded, the lifecycle is:
 
 ```text
 Create Project (Name)
 -> Optional Repository Attachment (during creation or later)
 -> Project Vision Interview
--> Human Review And Acceptance Of Vision + Initial Product Goal
+-> Human Review And Acceptance Of Project Vision
+-> Product Goal Interview
+-> Human Review And Acceptance Of Product Goal
 -> Grill Me With Docs
 -> To Spec
 -> Human Specification Review And Acceptance
@@ -39,12 +42,14 @@ Create Project (Name)
 ```
 
 The Project Vision and Product Goal are related but distinct. The Vision states
-the product's enduring direction. The Product Goal states the first concrete
-outcome pursued within that direction. The interview gathers both without
-making the operator repeat the same context in separate setup forms. The
-expanded sequence above documents the workflow that this hard break must
-preserve; this design does not authorize deleting or collapsing downstream
-artifacts and human decisions.
+the product's enduring direction. The Product Goal states one valuable future
+state pursued within that direction. The accepted Vision is trusted context for
+the Goal interview, so the operator does not repeat it. One accepted Product
+Goal remains active across as many Sprints as needed until a human records it as
+fulfilled or abandoned. Weekly features normally contribute to that Goal; they
+do not create new Product Goals. The expanded sequence above documents the
+workflow that this hard break must preserve; this design does not authorize
+deleting or collapsing downstream artifacts and human decisions.
 
 Repository attachment is an orthogonal capability. It records a small,
 deterministic snapshot without reading repository content, building a complete
@@ -80,7 +85,10 @@ Project must use the same product-development flow.
 
 - Provide one Project lifecycle and one workflow graph.
 - Make an interview-based Project Vision the first product step.
-- Capture and human-accept the initial Product Goal with the initial Vision.
+- Capture and human-accept Project Vision before starting a separate Product
+  Goal interview.
+- Permit exactly one active accepted Product Goal until it is fulfilled or
+  abandoned.
 - Allow one local Git repository to be attached during creation or later.
 - Inspect repository identity and working-tree state without provider calls.
 - Preserve `grill-me-with-docs`, `to spec`, specification and authority review,
@@ -133,32 +141,60 @@ Project creation does not require a Product Goal or generated product content.
 It creates the durable identity needed to conduct and review the Vision
 interview.
 
-### Project Vision And Product Goal
+### Project Vision
 
-The first product action is a guided interview. It gathers the established
-Vision components and asks follow-up questions until it can produce:
-
-- one immutable Project Vision draft; and
-- one immutable initial Product Goal draft describing the first concrete
-  outcome within that Vision.
-
-Incomplete interview turns are resumable draft state, not accepted product
-facts. A human reviews the completed pair and accepts, rejects, or provides
-feedback against their exact fingerprints. Initial acceptance records separate
-versioned Vision and Product Goal artifacts in one guarded transaction. They may
-evolve independently later: changing a Product Goal does not silently rewrite
-the Vision, and revising the Vision makes dependent goals and specifications
-explicitly stale.
+The first product action is a guided Vision interview. It gathers the
+established Vision components and asks follow-up questions until it can produce
+one immutable Project Vision draft. Incomplete turns are resumable draft state,
+not accepted product facts. A human accepts, rejects, or provides feedback
+against the exact Vision fingerprint.
 
 The Vision interview may use the attached repository's identity as provenance,
 but it does not infer product intent from source code. Human answers remain the
-highest-authority source for Vision and Product Goal.
+highest-authority source for Vision.
 
 The full Vision interview is required only while the Project has no accepted
-Vision. Later product increments normally start by proposing and reviewing a new
-Product Goal under the accepted Vision, then repeat discovery, specification,
-Authority, and backlog admission for that Goal. An intentional Vision revision
-reopens the interview and triggers explicit downstream freshness handling.
+Vision. An intentional Vision revision reopens the Vision interview. An active
+Product Goal must be fulfilled or explicitly abandoned before a revised Vision
+can be accepted, preventing the revision from silently invalidating committed
+work.
+
+### Product Goal
+
+After Vision acceptance, a separate guided Product Goal interview receives the
+accepted Vision as read-only context. It asks focused questions about the next
+valuable future state, beneficiary, value, observable success, and boundaries.
+It produces one immutable Product Goal candidate. It does not define features,
+technical behavior, or implementation tasks.
+
+Incomplete Goal interview turns are resumable draft state. A human accepts,
+rejects, or provides feedback against the exact Goal fingerprint. Feedback
+creates another revision of the same Goal candidate. Acceptance creates the
+single active Product Goal under the current Vision.
+
+An accepted Product Goal is immutable and may span multiple Sprints. Weekly
+ideas become Product Backlog candidates under that Goal. A candidate that does
+not contribute to the active Goal is rejected, deferred, or triggers an
+explicit human decision to abandon the Goal. AgileForge permits another Goal
+interview only after the active Goal is recorded as fulfilled or abandoned.
+
+The Goal lifecycle is explicit:
+
+```text
+interview draft
+-> immutable review candidate
+-> accepted and active
+-> fulfilled | abandoned
+```
+
+Rejected candidates and feedback revisions never become active. Exactly one
+accepted Goal may lack an outcome for a Project. `fulfilled` means the human has
+confirmed that the valuable future state has been achieved. `abandoned` means
+the human has intentionally stopped pursuing it and supplied a rationale. A
+weekly release, Sprint closure, or empty Sprint backlog does not implicitly
+finish the Goal. Either outcome is available only when no Sprint is active and
+every closed Sprint under the Goal has completed post-Sprint triage; abandoning
+a Goal never silently cancels execution work.
 
 ### Product Artifact Lineage
 
@@ -284,17 +320,34 @@ setup blocker.
 5. The Project Vision interview is immediately available, exactly as when no
    repository is attached.
 
-### Initial Vision And Product Goal
+### Initial Project Vision
 
 1. AgileForge starts or resumes the interview using recorded human answers and
    any prior incomplete Vision components.
 2. Each turn returns the current draft and focused follow-up questions; the UI
    never asks the operator for raw JSON or workflow guard values.
-3. When all required Vision components and an initial Product Goal are present,
-   AgileForge produces the immutable review pair.
-4. Human feedback resumes the interview without accepting either artifact.
-5. Human acceptance records both artifacts atomically and unlocks
-   `grill-me-with-docs` discovery for the accepted Product Goal.
+3. When all required Vision components are present, AgileForge produces one
+   immutable Vision candidate.
+4. Human feedback resumes the Vision interview without accepting the artifact.
+5. Human acceptance records the Vision decision and unlocks the Product Goal
+   interview, not discovery or Authority.
+
+### Product Goal Interview And Review
+
+1. AgileForge starts or resumes a Goal interview using the accepted Vision and
+   recorded human answers.
+2. Each turn returns the current Goal components and focused follow-up
+   questions. The agent may reuse accepted Vision context but may not rewrite
+   Vision.
+3. When the Goal has a valuable future state, beneficiary, value, observable
+   success, and boundaries, AgileForge produces one immutable Goal candidate.
+4. Human feedback creates another revision of that Goal candidate.
+5. Human acceptance records the single active Product Goal and unlocks
+   `grill-me-with-docs` discovery.
+6. A later Goal interview remains unavailable until the active Goal has an
+   explicit fulfilled or abandoned outcome.
+7. Goal fulfillment or abandonment is a separate fingerprint-bound human
+   decision. It cannot be inferred from Sprint state or generated by a model.
 
 ### Discovery, Specification, And Authority
 
@@ -316,11 +369,12 @@ Authority therefore never gates the initial Vision interview. It gates
 downstream delivery artifacts that must remain consistent with the accepted
 specification.
 
-For later increments, AgileForge keeps the accepted Vision and starts with a new
-human-reviewed Product Goal. The Goal then follows the same discovery,
-specification, Authority, and backlog-admission sequence. Repeating weekly
-feature work does not require recreating the Project or rerunning the Vision
-interview unless the product direction itself changes.
+For later increments, AgileForge keeps both the accepted Vision and active
+Product Goal. Repeating weekly feature work is refined under that Goal and does
+not recreate the Project, rerun the Vision interview, or create another Product
+Goal. After the Goal is fulfilled or abandoned, AgileForge starts a new Goal
+interview under the accepted Vision; the accepted replacement then follows the
+same discovery, specification, Authority, and backlog-admission sequence.
 
 ### Later Repository Attachment
 
@@ -348,7 +402,9 @@ The create form contains:
 
 After creation, the UI opens the guided Vision interview. It presents one or a
 small related set of plain-language questions per turn, preserves prior answers,
-and shows the completed Vision and Product Goal together for human review.
+and shows the completed Vision for human review. After Vision acceptance, the
+same page opens the separate Goal interview and later shows the Goal candidate
+with its accepted parent Vision for a separate human decision.
 
 There is no setup-type selector. Repository details are presented as plain
 status: path, branch or detached HEAD, short commit, clean or dirty, and latest
@@ -367,16 +423,25 @@ agileforge project create --name ... [--description ...] [--repository-path ...]
 agileforge vision respond --project-id ... --text ...
 agileforge vision status --project-id ...
 agileforge vision review --project-id ... --decision ...
+agileforge goal respond --project-id ... --text ...
+agileforge goal status --project-id ...
+agileforge goal review --project-id ... --decision ...
+agileforge goal complete --project-id ... --rationale ...
+agileforge goal abandon --project-id ... --rationale ...
 agileforge repository attach --project-id ... --path ...
 agileforge repository status --project-id ...
 agileforge repository refresh --project-id ...
 ```
 
 Mutating commands retain graph, fact, decision, idempotency, and actor guards.
-Vision responses return the current components, completion status, and focused
-questions in structured output. Repository responses include provenance,
-warnings, and typed errors. The agent never supplies derived commit,
+Vision and Goal responses return their current components, completion status,
+and focused questions in structured output. Repository responses include
+provenance, warnings, and typed errors. The agent never supplies derived commit,
 dirty-state, remote, artifact-fingerprint, or workflow-guard data.
+
+`goal complete` records the `fulfilled` outcome. Both Goal outcome commands
+require a human rationale and resolve the exact active Goal internally; the
+operator does not paste its fingerprint.
 
 ### Optional Future Providers
 
@@ -405,6 +470,16 @@ The repository boundary returns typed failures for:
 
 Detached HEAD and dirty state are successful results with explicit fields;
 dirty state also emits a warning. Missing remotes are valid.
+
+The product-definition boundary returns typed failures when:
+
+- a Goal interview starts without an accepted Vision;
+- another Product Goal is already active;
+- Vision acceptance is attempted while a Product Goal is active;
+- a Goal outcome is recorded for a stale or already resolved Goal; or
+- a review decision does not match the exact immutable candidate.
+
+These failures write no partial artifact, decision, or outcome row.
 
 No failure path may create a partial binding, silently fall back to a full
 filesystem scan, call a model, or reinterpret the Project workflow.
@@ -468,12 +543,16 @@ Provider-free temporary-repository tests cover:
 - Project creation with a valid repository stores Project and binding atomically.
 - Failed probing creates neither Project nor binding.
 - The Vision interview is available immediately with or without a repository.
-- Initial Vision and Product Goal acceptance is atomic and fingerprint-bound.
-- A later Product Goal can begin under the accepted Vision without rerunning the
-  Vision interview.
-- Product Goal revisions do not rewrite Vision history.
-- Vision revisions make dependent Product Goals and specifications explicitly
-  stale.
+- Vision acceptance is fingerprint-bound and unlocks only the Product Goal
+  interview.
+- Product Goal acceptance is separately fingerprint-bound and unlocks
+  discovery.
+- Exactly one accepted Product Goal is active at a time.
+- A later Product Goal can begin under the accepted Vision only after the active
+  Goal is fulfilled or abandoned.
+- Product Goal feedback revisions do not rewrite Vision history.
+- Vision revision acceptance requires any active Product Goal to be fulfilled
+  or abandoned first.
 - Later repository attachment does not alter product-definition availability.
 - Reattachment is guarded and replaces only the active binding.
 - No origin field or specialized setup table exists in the fresh schema.
@@ -490,7 +569,9 @@ Provider-free temporary-repository tests cover:
 - Project creation opens the guided Vision interview.
 - Vision interview turns preserve accepted answers and expose focused questions,
   not raw JSON.
-- Human review shows the exact Vision and initial Product Goal before acceptance.
+- Human Vision review shows only the exact Vision candidate.
+- Accepted Vision opens a separate guided Product Goal interview.
+- Human Goal review shows the exact Goal candidate and accepted parent Vision.
 - Human forms never request commit, dirty state, remotes, or fingerprints.
 - Project pages expose attach, replace, and refresh repository actions.
 - Playwright verifies creation and attachment on desktop and mobile viewports.
@@ -521,10 +602,11 @@ For each of caRtola, ASA Deep Process Control Advisory System, and MyFinance:
 5. verify the Vision interview is the first available product action;
 6. confirm creation and repository probing performed no provider-backed model
    call;
-7. conduct and human-review the Vision plus initial Product Goal;
-8. verify accepted Vision and Product Goal unlock `grill-me-with-docs` rather
+7. conduct and human-review the Vision;
+8. conduct and human-review the Product Goal under the accepted Vision;
+9. verify accepted Vision and Product Goal unlock `grill-me-with-docs` rather
    than Authority compilation; and
-9. stop before further paid discovery unless the operator explicitly approves
+10. stop before further paid discovery unless the operator explicitly approves
    that repository's real feature test.
 
 ## Acceptance Criteria
@@ -534,7 +616,10 @@ For each of caRtola, ASA Deep Process Control Advisory System, and MyFinance:
 - The guided Vision interview is the first product action after valid Project
   creation.
 - Project creation requires no Product Goal or provider call.
-- Human acceptance of the initial Vision and Product Goal unlocks discovery.
+- Human Vision acceptance unlocks only the Product Goal interview.
+- Human Product Goal acceptance unlocks discovery.
+- One accepted Product Goal remains active until a human records it fulfilled
+  or abandoned; weekly features do not create replacement Goals.
 - Authority compilation occurs only after human acceptance of a `to spec`
   specification and before Product Backlog extraction.
 - Authority never gates or authors the initial Project Vision.
