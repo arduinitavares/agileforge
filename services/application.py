@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Literal, Protocol
 from pydantic import Field
 
 from adapters.adk.model_roles import AGENTIC_MODEL_ROLES
-from services.node_attempt_replay import NodeAttemptReplayQuery
+from services.node_attempt_replay import NodeAttemptReplayQuery, TransitionReplayQuery
 from services.vision_interview_input import VisionInterviewInputService
 from utils.model_config import get_model_id
 from workflow.contracts import (
@@ -58,12 +58,7 @@ class _VisionInterviewInputPort(Protocol):
 
     def replay_transition(
         self,
-        *,
-        request_kind: str,
-        project_id: int,
-        idempotency_key: str,
-        actor: str,
-        correlation_id: str | None,
+        query: TransitionReplayQuery,
     ) -> TransitionResult | None: ...
 
     def build(
@@ -329,6 +324,7 @@ class AgileForgeApplication:
                 idempotency_key=request.idempotency_key,
                 actor=request.actor,
                 correlation_id=request.correlation_id,
+                user_text=request.user_text,
             )
         )
         if replay is not None:
@@ -362,11 +358,17 @@ class AgileForgeApplication:
         input_service = self._vision_interview_input
         if input_service is not None:
             replay = input_service.replay_transition(
-                request_kind="decide_vision_review",
-                project_id=request.project_id,
-                idempotency_key=request.idempotency_key,
-                actor=request.actor,
-                correlation_id=request.correlation_id,
+                TransitionReplayQuery(
+                    request_kind="decide_vision_review",
+                    project_id=request.project_id,
+                    idempotency_key=request.idempotency_key,
+                    actor=request.actor,
+                    correlation_id=request.correlation_id,
+                    operator_input={
+                        "decision": request.decision,
+                        "rationale": request.rationale,
+                    },
+                )
             )
             if replay is not None:
                 return replay
@@ -401,11 +403,14 @@ class AgileForgeApplication:
         input_service = self._vision_interview_input
         if input_service is not None:
             replay = input_service.replay_transition(
-                request_kind="begin_vision_revision",
-                project_id=request.project_id,
-                idempotency_key=request.idempotency_key,
-                actor=request.actor,
-                correlation_id=request.correlation_id,
+                TransitionReplayQuery(
+                    request_kind="begin_vision_revision",
+                    project_id=request.project_id,
+                    idempotency_key=request.idempotency_key,
+                    actor=request.actor,
+                    correlation_id=request.correlation_id,
+                    operator_input={"reason": request.reason},
+                )
             )
             if replay is not None:
                 return replay

@@ -12,6 +12,7 @@ from adapters.adk.recipes import (
 )
 from services.application import (
     AgileForgeApplication,
+    VisionInterviewRequest,
     VisionReviewRequest,
     VisionRevisionRequest,
 )
@@ -21,7 +22,8 @@ from services.contracts.vision import (
     VisionInterviewInput,
     VisionInterviewOutput,
 )
-from workflow.contracts import TransitionResult
+from services.node_attempt_replay import NodeAttemptReplayQuery, TransitionReplayQuery
+from workflow.contracts import TransitionResult, WorkflowError, WorkflowErrorCode
 from workflow.requests import RecordVisionDraft
 
 
@@ -158,20 +160,36 @@ class _ReceiptReplay:
 
     def __init__(self, result: TransitionResult) -> None:
         self.result = result
-        self.calls: list[tuple[str, int, str, str]] = []
+        self.calls: list[object] = []
 
-    def replay_transition(
-        self,
-        *,
-        request_kind: str,
-        project_id: int,
-        idempotency_key: str,
-        actor: str,
-        correlation_id: str | None,
-    ) -> TransitionResult | None:
-        del correlation_id
-        self.calls.append((request_kind, project_id, idempotency_key, actor))
-        return self.result
+    def replay(self, query: NodeAttemptReplayQuery) -> TransitionResult:
+        self.calls.append(query)
+        if query.user_text == "Same answer.":
+            return self.result
+        return _conflict()
+
+    def replay_transition(self, query: TransitionReplayQuery) -> TransitionResult:
+        self.calls.append(query)
+        expected = {
+            "decide_vision_review": {
+                "decision": "feedback",
+                "rationale": "Clarify the audience.",
+            },
+            "begin_vision_revision": {"reason": "Intent changed."},
+        }
+        if query.operator_input == expected[query.request_kind]:
+            return self.result
+        return _conflict()
+
+
+def _conflict() -> TransitionResult:
+    return TransitionResult(
+        ok=False,
+        error=WorkflowError(
+            code=WorkflowErrorCode.WORKFLOW_FACT_CONFLICT,
+            message="The idempotency key was already used for different input.",
+        ),
+    )
 
 
 def test_review_and_revision_replay_before_position_reads() -> None:
@@ -187,6 +205,17 @@ def test_review_and_revision_replay_before_position_reads() -> None:
         {"vision_interview": replay},
     )()
 
+    interview = app.run_vision_interview(
+        VisionInterviewRequest(
+            project_id=7,
+            graph_version="agileforge.workflow.v1",
+            fact_fingerprint="sha256:facts",
+            decision_fingerprint="sha256:decision",
+            user_text="Same answer.",
+            idempotency_key="interview-retry",
+            actor="operator@example.com",
+        )
+    )
     review = app.review_vision(
         VisionReviewRequest(
             project_id=7,
@@ -207,7 +236,56 @@ def test_review_and_revision_replay_before_position_reads() -> None:
 
     assert review == result
     assert revision == result
-    assert replay.calls == [
-        ("decide_vision_review", 7, "review-retry", "operator@example.com"),
-        ("begin_vision_revision", 7, "revision-retry", "operator@example.com"),
-    ]
+    assert interview == result
+    assert isinstance(replay.calls[0], NodeAttemptReplayQuery)
+    assert isinstance(replay.calls[1], TransitionReplayQuery)
+    assert isinstance(replay.calls[2], TransitionReplayQuery)
+
+
+def test_replay_rejects_changed_vision_operator_input_before_position_reads() -> None:
+    """A reused key cannot replay a different human answer, decision, or reason."""
+    app = object.__new__(AgileForgeApplication)
+    app._workflow_domain = _PositionMustNotRunDomain()
+    replay = _ReceiptReplay(TransitionResult(ok=True, replayed=True))
+    app._vision_interview_input = replay
+    app._prepared_agentic_inputs = type(
+        "PreparedVisionInputServices",
+        (),
+        {"vision_interview": replay},
+    )()
+
+    interview = app.run_vision_interview(
+        VisionInterviewRequest(
+            project_id=7,
+            graph_version="agileforge.workflow.v1",
+            fact_fingerprint="sha256:facts",
+            decision_fingerprint="sha256:decision",
+            user_text="Changed answer.",
+            idempotency_key="interview-retry",
+            actor="operator@example.com",
+        )
+    )
+    review = app.review_vision(
+        VisionReviewRequest(
+            project_id=7,
+            decision="accepted",
+            rationale="Clarify the audience.",
+            idempotency_key="review-retry",
+            actor="operator@example.com",
+        )
+    )
+    revision = app.begin_vision_revision(
+        VisionRevisionRequest(
+            project_id=7,
+            reason="Changed intent.",
+            idempotency_key="revision-retry",
+            actor="operator@example.com",
+        )
+    )
+
+    assert interview.error is not None
+    assert review.error is not None
+    assert revision.error is not None
+    assert interview.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
+    assert review.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
+    assert revision.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT

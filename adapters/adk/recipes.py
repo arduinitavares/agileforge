@@ -14,7 +14,12 @@ from services.contracts.brownfield import (
     BrownfieldCurationInput,
     BrownfieldCurationOutput,
 )
-from services.contracts.vision import VisionInterviewOutput
+from services.contracts.vision import (
+    LegacyVisionInput,
+    LegacyVisionOutput,
+    LegacyVisionRecipeInput,
+    VisionInterviewOutput,
+)
 from services.specs.profile_content import normalize_spec_content_for_registry
 from utils.agileforge_spec_profile import canonical_spec_json
 from utils.spec_schemas import (
@@ -24,6 +29,8 @@ from utils.spec_schemas import (
     SpecAuthorityCompilerInput,
 )
 from workflow.contracts import JsonObject
+from workflow.definitions.root import ROOT_GRAPH
+from workflow.fingerprints import canonical_hash
 from workflow.requests import (
     CompileAuthority,
     RecordBacklogDraft,
@@ -41,6 +48,14 @@ if TYPE_CHECKING:
     from google.adk.agents import BaseAgent
 
 _JSON_OBJECT = TypeAdapter(JsonObject)
+_VISION_INTERVIEW_INSERTION_INDEX = ROOT_GRAPH.agentic_node_ids.index(
+    "vision.generate"
+) + 1
+TASK3_AGENTIC_NODE_IDS = (
+    *ROOT_GRAPH.agentic_node_ids[:_VISION_INTERVIEW_INSERTION_INDEX],
+    "vision.interview",
+    *ROOT_GRAPH.agentic_node_ids[_VISION_INTERVIEW_INSERTION_INDEX:],
+)
 
 
 class RecipeInput(BaseModel):
@@ -324,6 +339,60 @@ def _build_single_leaf_workflow(
     )
 
 
+def _build_legacy_vision_workflow(
+    *,
+    leaf_agent: BaseAgent | Workflow,
+    execution_settings: JsonObject,
+) -> Workflow:
+    """Bridge the retained legacy Vision output into RecordVisionDraft fields."""
+    timeout_seconds, max_attempts = _execution_limits(execution_settings)
+    retry_config = RetryConfig(max_attempts=max_attempts)
+
+    @node(
+        name="execute_legacy_vision_generator",
+        rerun_on_resume=True,
+        retry_config=retry_config,
+        timeout=timeout_seconds,
+    )
+    async def execute_legacy_vision_generator(
+        context: Context,
+        node_input: RecipeInput,
+    ) -> RecipeOutput:
+        payload = LegacyVisionRecipeInput.model_validate(node_input.payload)
+        legacy_input = LegacyVisionInput(
+            user_raw_text=payload.user_raw_text,
+            specification_content=payload.specification_content,
+            prior_vision_state=payload.prior_vision_state,
+            compiled_authority=payload.compiled_authority,
+        )
+        generated = await context.run_node(
+            leaf_agent,
+            node_input=legacy_input.model_dump(mode="json"),
+        )
+        legacy_output = LegacyVisionOutput.model_validate(generated)
+        canonical_content = legacy_output.model_dump(mode="json")
+        return RecipeOutput(
+            payload={
+                "authority_id": payload.authority_id,
+                "authority_fingerprint": payload.authority_fingerprint,
+                "canonical_content": canonical_content,
+                "content_fingerprint": canonical_hash(canonical_content),
+                "supersedes_vision_artifact_id": (
+                    payload.supersedes_vision_artifact_id
+                ),
+            }
+        )
+
+    return Workflow(
+        name="legacy_vision_generation",
+        retry_config=retry_config,
+        timeout=timeout_seconds,
+        input_schema=RecipeInput,
+        output_schema=RecipeOutput,
+        edges=[(START, execute_legacy_vision_generator)],
+    )
+
+
 def _build_brownfield_curation_workflow(
     *,
     leaf_agent: BaseAgent | Workflow,
@@ -581,9 +650,7 @@ def build_agentic_recipe_registry(
             ),
             AdkRecipe(
                 node_id="vision.generate",
-                workflow=_build_single_leaf_workflow(
-                    workflow_name="legacy_vision_generation",
-                    execution_node_name="execute_legacy_vision_generator",
+                workflow=_build_legacy_vision_workflow(
                     leaf_agent=nodes.vision_generation,
                     execution_settings=execution_settings,
                 ),
@@ -638,6 +705,7 @@ def build_agentic_recipe_registry(
                 output_adapter=_request_output_adapter(RecordSprintPlan),
             ),
         ),
+        required_node_ids=TASK3_AGENTIC_NODE_IDS,
     )
 
 
@@ -652,6 +720,7 @@ def _require_vision_interviewer(
 
 
 __all__ = [
+    "TASK3_AGENTIC_NODE_IDS",
     "AdkRecipe",
     "AdkRecipeRegistry",
     "AgenticRecipeNodes",

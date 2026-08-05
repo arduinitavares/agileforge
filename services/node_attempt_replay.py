@@ -15,6 +15,7 @@ from models.workflow import (
 )
 from workflow.contracts import (
     FrozenModel,
+    JsonObject,
     TransitionResult,
     WorkflowError,
     WorkflowErrorCode,
@@ -29,7 +30,7 @@ if TYPE_CHECKING:
 
 
 class NodeAttemptReplayQuery(FrozenModel):
-    """Identity of a host-prepared attempt, excluding its persisted input."""
+    """Identity and operator input of a host-prepared attempt."""
 
     project_id: int
     graph_version: str
@@ -40,6 +41,18 @@ class NodeAttemptReplayQuery(FrozenModel):
     idempotency_key: str
     actor: str
     correlation_id: str | None = None
+    user_text: str | None = None
+
+
+class TransitionReplayQuery(FrozenModel):
+    """Identity and operator choice for one replayed host transition."""
+
+    request_kind: str
+    project_id: int
+    idempotency_key: str
+    actor: str
+    correlation_id: str | None = None
+    operator_input: JsonObject
 
 
 @dataclass(frozen=True)
@@ -71,7 +84,7 @@ class DurableNodeAttemptReplayService:
                 correlation_id=query.correlation_id,
                 target_node_id=query.node_id,
                 target_instance_key=stored.target_instance_key,
-                normalized_input=stored.normalized_input,
+                normalized_input=_replay_normalized_input(stored, query),
                 model_id=stored.model_id,
                 execution_settings=stored.execution_settings,
                 lease_seconds=stored.lease_seconds,
@@ -93,30 +106,27 @@ class DurableTransitionReplayService:
 
     engine: Engine
 
-    def replay(
-        self,
-        *,
-        request_kind: str,
-        project_id: int,
-        idempotency_key: str,
-        actor: str,
-        correlation_id: str | None,
-    ) -> TransitionResult | None:
+    def replay(self, query: TransitionReplayQuery) -> TransitionResult | None:
         """Return a compatible terminal receipt or no result for a new request."""
         with Session(self.engine) as session:
             receipt = session.exec(
                 select(WorkflowTransitionReceipt).where(
-                    col(WorkflowTransitionReceipt.request_kind) == request_kind,
-                    col(WorkflowTransitionReceipt.idempotency_key) == idempotency_key,
+                    col(WorkflowTransitionReceipt.request_kind) == query.request_kind,
+                    col(WorkflowTransitionReceipt.idempotency_key)
+                    == query.idempotency_key,
                 )
             ).one_or_none()
             if receipt is None:
                 return None
             stored = _TRANSITION_REQUEST.validate_json(receipt.request_json)
             if (
-                stored.project_id != project_id
-                or stored.actor != actor
-                or stored.correlation_id != correlation_id
+                stored.project_id != query.project_id
+                or stored.actor != query.actor
+                or stored.correlation_id != query.correlation_id
+                or any(
+                    getattr(stored, key, None) != value
+                    for key, value in query.operator_input.items()
+                )
             ):
                 return _fact_conflict(
                     "The idempotency key was already used for different input."
@@ -124,6 +134,17 @@ class DurableTransitionReplayService:
             if receipt.result_json is None or receipt.completed_at is None:
                 return _fact_conflict("The idempotency receipt is incomplete.")
             return _replayed_result(receipt)
+
+
+def _replay_normalized_input(
+    stored: StartNodeAttempt,
+    query: NodeAttemptReplayQuery,
+) -> JsonObject:
+    """Replace only current human input before checking stored attempt identity."""
+    normalized_input = dict(stored.normalized_input)
+    if query.user_text is not None:
+        normalized_input["user_response"] = query.user_text
+    return normalized_input
 
 
 def _replay_attempt_result(
@@ -203,4 +224,5 @@ __all__ = [
     "DurableNodeAttemptReplayService",
     "DurableTransitionReplayService",
     "NodeAttemptReplayQuery",
+    "TransitionReplayQuery",
 ]

@@ -9,7 +9,7 @@ import json
 import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import pytest
 from google.adk import Workflow as AdkWorkflow
@@ -60,6 +60,7 @@ from utils.spec_schemas import (
 )
 from workflow.clock import FixedClock
 from workflow.contracts import (
+    GRAPH_VERSION,
     JsonObject,
     NodeCategory,
     NodeDecision,
@@ -81,6 +82,7 @@ from workflow.requests import (
     RecordBacklogDraft,
     RecordRepositoryBaseline,
     RecordRepositoryInventory,
+    RecordVisionDraft,
     StartNodeAttempt,
     TransitionRequest,
 )
@@ -765,6 +767,94 @@ def test_runner_loads_vision_input_from_persisted_attempt(
     with Session(engine) as session:
         turn = session.exec(select(VisionInterviewTurn)).one()
         assert turn.user_text == "Trusted persisted answer."
+
+
+def test_runner_executes_legacy_vision_recipe_through_record_vision_draft(
+    engine: Engine,
+) -> None:
+    """The temporary root recipe adapts real legacy agent output end to end."""
+    project_id, authority_id, authority_fingerprint = _seed(engine)
+    legacy_output: JsonObject = {
+        "updated_components": {
+            "project_name": "Runner",
+            "target_user": "Operators",
+            "problem": "State drift",
+            "product_category": "Tool",
+            "key_benefit": "Trust",
+            "competitors": "Spreadsheets",
+            "differentiator": "Durable facts",
+        },
+        "product_vision_statement": "A trusted workflow tool.",
+        "is_complete": True,
+        "clarifying_questions": [],
+    }
+    registry = build_agentic_recipe_registry(
+        nodes=AgenticRecipeNodes(
+            brownfield_curator=_unused_leaf("unused_brownfield_curator"),
+            authority_compile=_unused_leaf("unused_authority_compile"),
+            authority_repair=_unused_leaf("unused_authority_repair"),
+            vision_generation=FakeLeafAgent(
+                name="legacy_vision", response=legacy_output
+            ),
+            vision_interview=_unused_leaf("unused_vision_interview"),
+            backlog_generation=_unused_leaf("unused_backlog"),
+            roadmap_generation=_unused_leaf("unused_roadmap"),
+            story_generation=_unused_leaf("unused_story"),
+            sprint_planning=_unused_leaf("unused_sprint"),
+        ),
+        execution_settings=EXECUTION_SETTINGS,
+    )
+    domain = WorkflowDomain(
+        engine=engine,
+        graph=ROOT_GRAPH,
+        clock=FixedClock(now_value=EVALUATED_AT),
+        adk_recipe_registry=registry,
+    )
+    runner = AdkWorkflowRunner(
+        domain=domain,
+        registry=registry,
+        session_service=TrackingSessionService(),
+        config=AdkExecutionConfig(
+            project_id=project_id,
+            model_id="fake/legacy-vision",
+            execution_settings=EXECUTION_SETTINGS,
+            lease_seconds=LEASE_SECONDS,
+            actor="operator@example.com",
+        ),
+    )
+    payload: JsonObject = {
+        "user_raw_text": "Build a durable workflow tool.",
+        "specification_content": "",
+        "prior_vision_state": "NO_HISTORY",
+        "compiled_authority": "{}",
+        "authority_id": authority_id,
+        "authority_fingerprint": authority_fingerprint,
+        "supersedes_vision_artifact_id": None,
+    }
+    recipe = registry.require("vision.generate")
+    output = asyncio.run(
+        runner._run_recipe(recipe, attempt_id=1, input_payload=payload)
+    )
+    completion = recipe.output_adapter(
+        output,
+        AttemptCompletionContext(
+            project_id=project_id,
+            graph_version=GRAPH_VERSION,
+            fact_fingerprint="sha256:facts",
+            decision_fingerprint="sha256:decision",
+            instance_key=None,
+            attempt_id=1,
+            attempt_fingerprint="sha256:attempt",
+            idempotency_key="legacy-vision:complete",
+            actor="operator@example.com",
+            correlation_id=None,
+            normalized_input=payload,
+        ),
+    )
+
+    legacy_draft = cast("RecordVisionDraft", completion)
+    assert legacy_draft.canonical_content == legacy_output
+    assert legacy_draft.content_fingerprint == canonical_hash(legacy_output)
 
 
 def test_runner_executes_fake_leaf_and_commits_validated_output(engine: Engine) -> None:

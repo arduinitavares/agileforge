@@ -14,6 +14,7 @@ from adapters.adk.prompts.specification import (
     SPEC_AUTHORITY_COMPILER_VERSION,
 )
 from adapters.adk.recipes import (
+    TASK3_AGENTIC_NODE_IDS,
     AdkRecipe,
     AdkRecipeRegistry,
     AgenticRecipeNodes,
@@ -277,9 +278,11 @@ def test_recipe_registry_covers_each_stable_agentic_domain_node_once() -> None:
     graph_node_ids = {node.node_id for node in ROOT_GRAPH.root.iter_nodes()}
     registry = _complete_registry()
 
+    assert set(TASK3_AGENTIC_NODE_IDS) == set(ROOT_GRAPH.agentic_node_ids) | {
+        "vision.interview"
+    }
     assert set(ROOT_GRAPH.agentic_node_ids) <= graph_node_ids
-    assert set(ROOT_GRAPH.agentic_node_ids) <= set(registry.node_ids)
-    assert "vision.interview" in registry.node_ids
+    assert registry.node_ids == TASK3_AGENTIC_NODE_IDS
     assert len(registry.node_ids) == len(set(registry.node_ids))
     registered_recipe_ids = tuple(
         registry.require(node_id).node_id for node_id in registry.node_ids
@@ -314,7 +317,7 @@ def test_recipe_registry_rejects_any_domain_catalog_gap() -> None:
     with pytest.raises(ValueError, match="domain agentic catalog"):
         AdkRecipeRegistry(
             (recipe,),
-            required_node_ids=ROOT_GRAPH.agentic_node_ids,
+            required_node_ids=TASK3_AGENTIC_NODE_IDS,
         )
 
 

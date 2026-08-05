@@ -20,6 +20,7 @@ from services.node_attempt_replay import (
     NodeAttemptReplayQuery,
 )
 from workflow.clock import FixedClock
+from workflow.contracts import WorkflowErrorCode
 from workflow.definitions.product_definition import product_definition_graph
 from workflow.domain import WorkflowDomain
 from workflow.requests import (
@@ -207,10 +208,28 @@ def test_replay_uses_persisted_after_turn_instance_key(engine: Engine) -> None:
             node_id="vision.interview",
             idempotency_key=second_start.idempotency_key,
             actor=second_start.actor,
+            user_text="Build a tool.",
         )
     )
 
     assert replay == second_attempt.model_copy(update={"replayed": True})
+
+    changed_input = DurableNodeAttemptReplayService(engine=engine).replay(
+        NodeAttemptReplayQuery(
+            project_id=project_id,
+            graph_version=second_start.graph_version,
+            fact_fingerprint=second_start.fact_fingerprint,
+            decision_fingerprint=second_start.decision_fingerprint,
+            node_id="vision.interview",
+            idempotency_key=second_start.idempotency_key,
+            actor=second_start.actor,
+            user_text="Changed answer.",
+        )
+    )
+
+    assert changed_input is not None
+    assert changed_input.error is not None
+    assert changed_input.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
 
 
 def test_review_accepts_one_vision_exactly_once(engine: Engine) -> None:

@@ -14,6 +14,7 @@ from services.node_attempt_replay import (
     DurableNodeAttemptReplayService,
     DurableTransitionReplayService,
     NodeAttemptReplayQuery,
+    TransitionReplayQuery,
 )
 from workflow.definitions.vision import _active_goal_exists, _isolated_vision_state
 
@@ -35,21 +36,10 @@ class VisionInterviewInputService:
 
     def replay_transition(
         self,
-        *,
-        request_kind: str,
-        project_id: int,
-        idempotency_key: str,
-        actor: str,
-        correlation_id: str | None,
+        query: TransitionReplayQuery,
     ) -> TransitionResult | None:
         """Recover a completed Vision lifecycle command before state evaluation."""
-        return DurableTransitionReplayService(engine=self.engine).replay(
-            request_kind=request_kind,
-            project_id=project_id,
-            idempotency_key=idempotency_key,
-            actor=actor,
-            correlation_id=correlation_id,
-        )
+        return DurableTransitionReplayService(engine=self.engine).replay(query)
 
     def build(
         self,
