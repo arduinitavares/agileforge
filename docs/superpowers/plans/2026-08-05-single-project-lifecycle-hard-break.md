@@ -366,8 +366,8 @@ ProductGoalArtifact
 
 ProductGoalArtifactDecision
   product_goal_artifact_decision_id, project_id, product_goal_artifact_id,
-  artifact_fingerprint, decision, rationale, reviewer, idempotency_key,
-  decided_at
+  artifact_fingerprint, decision(accepted|rejected|feedback), rationale,
+  reviewer, idempotency_key, decided_at
 
 ProductGoalOutcome
   product_goal_outcome_id, project_id, product_goal_artifact_id,
@@ -434,6 +434,10 @@ cross-Project Goal, discovery, or specification references fail loading
 content or parent fingerprint tampering raises WorkflowFactLoadError
 Product Goal interview, artifact, outcome, discovery, and specification facts retain exact parent identity
 two accepted Goals without an outcome raise WorkflowFactLoadError
+Goal decision facts distinguish pending, accepted, rejected, and feedback snapshots
+Goal acceptance changes business_fact_fingerprint before discovery exists
+historical discovery remains valid after a later Goal outcome or revision
+discovery recorded at or after its Goal outcome raises WorkflowFactLoadError
 legacy spec rows load with nullable staged lineage until Task 4
 ```
 
@@ -446,12 +450,13 @@ VisionRevisionIntentFact
 VisionInterviewTurnFact
 ProductGoalInterviewTurnFact
 ProductGoalArtifactFact
+ProductGoalArtifactDecisionFact
 ProductGoalOutcomeFact
 DiscoveryArtifactFact
 SpecificationCandidateFact
 ```
 
-Extend `SpecVersionFact` with nullable source Vision, Goal, discovery, and specification-candidate identity/fingerprints for this staging task. Add tuple fields with the same names to `WorkflowFactSnapshot`. Load and validate the new records in `WorkflowFactRepository`; do not consult ADK session tables.
+Extend `SpecVersionFact` with nullable source Vision, Goal, discovery, and specification-candidate identity/fingerprints for this staging task. Add tuple fields with the same names to `WorkflowFactSnapshot`. Load and validate the new records in `WorkflowFactRepository`; do not consult ADK session tables. Discovery validation is causal: the exact Goal must have an accepted decision at or before discovery, and discovery must precede any Goal outcome. Derive the current active Goal separately as an accepted Goal without an outcome so later events never make valid historical facts unloadable.
 
 Extend the graph-property sensitivity matrix for every new `WorkflowFactSnapshot` field. Narrow the old review-absence policy so it rejects only deleted runtime symbols and permits the new Product Goal domain vocabulary required by this plan.
 
