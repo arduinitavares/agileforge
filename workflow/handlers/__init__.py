@@ -48,11 +48,17 @@ from workflow.handlers.project_shell import (
     execute_open_project_shell,
 )
 from workflow.handlers.scope_extension import execute_scope_extension_request
+from workflow.handlers.vision import (
+    execute_begin_vision_revision,
+    execute_decide_vision_review,
+    execute_record_vision_interview_turn,
+)
 
 __all__ = [
     "AttemptStartState",
     "as_utc",
     "execute_abandon_project_shell",
+    "execute_begin_vision_revision",
     "execute_compile_authority",
     "execute_decide_authority",
     "execute_decide_backlog",
@@ -60,6 +66,7 @@ __all__ = [
     "execute_decide_initial_spec_draft",
     "execute_decide_prd",
     "execute_decide_vision",
+    "execute_decide_vision_review",
     "execute_execution_request",
     "execute_open_project_shell",
     "execute_planning_request",
@@ -73,6 +80,7 @@ __all__ = [
     "execute_record_repository_baseline",
     "execute_record_repository_inventory",
     "execute_record_vision_draft",
+    "execute_record_vision_interview_turn",
     "execute_register_initial_scope",
     "execute_repair_authority",
     "execute_scope_extension_request",

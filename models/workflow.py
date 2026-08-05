@@ -14,6 +14,10 @@ from sqlalchemy.schema import (
 from sqlalchemy.types import Text
 from sqlmodel import Field, SQLModel
 
+from models.product_definition import VisionArtifact, VisionArtifactDecision
+
+__all__ = ["VisionArtifact", "VisionArtifactDecision"]
+
 
 def utc_now() -> datetime:
     """Return the current UTC time."""
@@ -608,7 +612,7 @@ class RepositoryInventory(SQLModel, table=True):
     recorded_at: datetime = Field(default_factory=utc_now, nullable=False)
 
 
-class VisionArtifact(SQLModel, table=True):
+class _LegacyVisionArtifact(SQLModel, table=False):
     """Immutable Vision artifact bound to one accepted authority."""
 
     __tablename__ = "vision_artifacts"
@@ -656,7 +660,7 @@ class VisionArtifact(SQLModel, table=True):
     created_at: datetime = Field(default_factory=utc_now, nullable=False)
 
 
-class VisionArtifactDecision(SQLModel, table=True):
+class _LegacyVisionArtifactDecision(SQLModel, table=False):
     """Append-only review decision for one immutable Vision artifact."""
 
     __tablename__ = "vision_artifact_decisions"
@@ -690,6 +694,8 @@ class VisionArtifactDecision(SQLModel, table=True):
     reviewer: str = Field(index=True)
     idempotency_key: str = Field(index=True)
     decided_at: datetime = Field(default_factory=utc_now, nullable=False)
+
+
 
 
 class BacklogArtifact(SQLModel, table=True):

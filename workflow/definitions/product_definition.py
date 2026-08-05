@@ -3,7 +3,7 @@
 from workflow.contracts import GRAPH_VERSION
 from workflow.definitions.backlog import BACKLOG_NODES
 from workflow.definitions.planning import PLANNING_NODES
-from workflow.definitions.vision import VISION_NODES
+from workflow.definitions.vision import VISION_INTERVIEW_NODES
 from workflow.graph import ChildGraphSpec, WorkflowGraph
 
 
@@ -15,7 +15,7 @@ def product_definition_graph() -> WorkflowGraph:
             child_graph_id="product_lifecycle",
             nodes=(),
             children=(
-                ChildGraphSpec(child_graph_id="vision", nodes=VISION_NODES),
+            ChildGraphSpec(child_graph_id="vision", nodes=VISION_INTERVIEW_NODES),
                 ChildGraphSpec(child_graph_id="backlog", nodes=BACKLOG_NODES),
                 ChildGraphSpec(
                     child_graph_id="planning",

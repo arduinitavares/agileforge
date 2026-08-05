@@ -1,162 +1,139 @@
-"""Input and output schemas for the product vision agent."""
+"""Strict host-prepared contracts for the Vision interview agent."""
 
-from typing import Annotated
+from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from typing import Literal, Self
+
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 
-class SaveVisionInput(BaseModel):
-    """Schema for the temporary legacy Vision write entry point."""
-
-    project_id: Annotated[
-        int | None,
-        Field(
-            description="ID of the project to update. If None, creates a NEW project."
-        ),
-    ] = None
-    project_name: Annotated[str, Field(description="Unique name of the project.")]
-    product_vision_statement: Annotated[
-        str,
-        Field(description="Finalized vision text."),
-    ]
+def _strip_required(value: str, label: str) -> str:
+    """Normalize one required human or model-facing string."""
+    normalized = value.strip()
+    if not normalized:
+        message = f"{label} must not be blank."
+        raise ValueError(message)
+    return normalized
 
 
 class VisionComponents(BaseModel):
-    """The granular components of the vision.
+    """The complete set of human-defined product Vision components."""
 
-    This is the object we serialize/deserialize to DB.
-    """
+    model_config = ConfigDict(extra="forbid")
 
-    # NOTE: We use Optional[str] and instruct the LLM to use 'null'
-    # so we don't have to parse strings like "UNKNOWN" or "N/A".
+    project_name: str | None
+    target_user: str | None
+    problem: str | None
+    product_category: str | None
+    key_benefit: str | None
+    competitors: str | None
+    differentiator: str | None
 
-    project_name: Annotated[
-        str | None,
-        Field(description="Name of project. Return null if not yet defined."),
-    ]
-    target_user: Annotated[
-        str | None,
-        Field(description="Who is the customer? Return null if ambiguous or unknown."),
-    ]
-    problem: Annotated[
-        str | None,
-        Field(description="What is the pain point? Return null if unknown."),
-    ]
-    product_category: Annotated[
-        str | None,
-        Field(
-            description="What is it? (App, Service, Device). Return null if unknown."
-        ),
-    ]
-    key_benefit: Annotated[
-        str | None,
-        Field(description="Primary value proposition. Return null if unknown."),
-    ]
-    competitors: Annotated[
-        str | None,
-        Field(description="Existing alternatives. Return null if unknown."),
-    ]
-    differentiator: Annotated[
-        str | None,
-        Field(description="Why us? (USP). Return null if unknown."),
-    ]
+    @field_validator("*", mode="before")
+    @classmethod
+    def normalize_component(cls, value: object, info: object) -> object:
+        """Strip provided component strings and reject ambiguous blanks."""
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            return value
+        return _strip_required(value, str(getattr(info, "field_name", "component")))
 
     def is_fully_defined(self) -> bool:
-        """Return whether all seven fields contain non-empty values."""
-        # We check strictly for None or empty whitespace
-        missing_fields = [
-            k
-            for k, v in self.model_dump().items()
-            if v is None or (isinstance(v, str) and not v.strip()) or v == "/UNKNOWN"
-        ]
-        return len(missing_fields) == 0
+        """Return whether every Vision component has one substantive answer."""
+        return all(
+            isinstance(value, str) and bool(value)
+            for value in self.model_dump().values()
+        )
+
+
+class VisionInterviewInput(BaseModel):
+    """All and only the host-prepared information passed to the Vision model."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    project_name: str
+    project_description: str | None
+    mode: Literal["initial", "revision"]
+    user_response: str
+    prior_components: VisionComponents | None
+    accepted_vision_statement: str | None
+
+    @field_validator("project_name", "user_response")
+    @classmethod
+    def normalize_required(cls, value: str, info: object) -> str:
+        """Reject blank required input before invoking any provider."""
+        return _strip_required(value, str(getattr(info, "field_name", "value")))
+
+    @field_validator("project_description", "accepted_vision_statement")
+    @classmethod
+    def normalize_optional(cls, value: str | None, info: object) -> str | None:
+        """Normalize optional strings while preserving absent context."""
+        if value is None:
+            return None
+        return _strip_required(value, str(getattr(info, "field_name", "value")))
+
+
+class VisionInterviewOutput(BaseModel):
+    """Strict model result persisted as one immutable Vision interview turn."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    updated_components: VisionComponents
+    project_vision_statement: str
+    is_complete: bool
+    clarifying_questions: list[str]
+
+    @field_validator("project_vision_statement")
+    @classmethod
+    def normalize_statement(cls, value: str) -> str:
+        """Require a substantive statement on every interview turn."""
+        return _strip_required(value, "project_vision_statement")
+
+    @field_validator("clarifying_questions")
+    @classmethod
+    def normalize_questions(cls, value: list[str]) -> list[str]:
+        """Strip every question and reject blank questions individually."""
+        return [_strip_required(item, "clarifying_questions") for item in value]
+
+    @model_validator(mode="after")
+    def validate_completion(self) -> Self:
+        """Keep completion and the next human question internally coherent."""
+        if self.is_complete != self.updated_components.is_fully_defined():
+            message = "is_complete must match updated_components."
+            raise ValueError(message)
+        if not self.is_complete and not self.clarifying_questions:
+            message = "Incomplete Vision output requires a clarifying question."
+            raise ValueError(message)
+        return self
 
 
 class InputSchema(BaseModel):
-    """
-    Schema for the input arguments the workflow adapter MUST provide to the tool.
+    """Legacy root-graph contract retained until the Task 5 cutover."""
 
-    CRITICAL: All fields must be REQUIRED (no defaults) so the Google ADK
-    knows to force the workflow adapter to generate/provide them.
-    """
+    model_config = ConfigDict(extra="forbid")
 
-    user_raw_text: Annotated[
-        str,
-        Field(
-            description="The latest instruction or feedback text provided by the user."
-        ),
-    ]
-    specification_content: Annotated[
-        str,
-        Field(
-            description=(
-                "The full text of a specification file to analyze. If no spec file "
-                "is available, pass an empty string."
-            )
-        ),
-    ]
-    prior_vision_state: Annotated[
-        str,
-        Field(
-            description=(
-                "The raw JSON string representing the previous 'VisionComponents' "
-                "state. "
-                "If this is the first turn, pass the string 'NO_HISTORY'. "
-                "Do not attempt to parse or summarize this; pass it exactly as "
-                "received."
-            ),
-        ),
-    ]
-    compiled_authority: Annotated[
-        str,
-        Field(
-            description=(
-                "Compiled authority JSON (invariants/constraints) from the "
-                "workflow adapter. "
-                "If no authority is available yet, pass an empty string."
-            ),
-        ),
-    ]
+    user_raw_text: str
+    specification_content: str
+    prior_vision_state: str
+    compiled_authority: str
 
 
 class OutputSchema(BaseModel):
-    """The structured response returned by the product vision agent."""
+    """Legacy root-graph output retained until the Task 5 cutover."""
 
-    # A. The State (To be saved to DB)
-    updated_components: Annotated[
-        VisionComponents,
-        Field(
-            description="The updated state object containing the 7 vision components."
-        ),
-    ]
+    model_config = ConfigDict(extra="forbid")
 
-    # B. The Artifact (To be shown to User)
-    product_vision_statement: Annotated[
-        str,
-        Field(
-            description=(
-                "A natural language vision statement generated from the components. "
-                "If components are missing, draft what you have with placeholders."
-            )
-        ),
-    ]
+    updated_components: VisionComponents
+    product_vision_statement: str
+    is_complete: bool
+    clarifying_questions: list[str]
 
-    # C. Metadata (For workflow adapter logic)
-    is_complete: Annotated[
-        bool,
-        Field(
-            description=(
-                "True ONLY if all 7 components are fully defined in updated_components."
-            )
-        ),
-    ]
 
-    clarifying_questions: Annotated[
-        list[str],
-        Field(
-            description=(
-                "A list of specific questions to ask the user to fill missing "
-                "components."
-            )
-        ),
-    ]
+__all__ = [
+    "InputSchema",
+    "OutputSchema",
+    "VisionComponents",
+    "VisionInterviewInput",
+    "VisionInterviewOutput",
+]

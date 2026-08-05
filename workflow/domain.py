@@ -29,6 +29,7 @@ from workflow.handlers import (
     AttemptStartState,
     as_utc,
     execute_abandon_project_shell,
+    execute_begin_vision_revision,
     execute_compile_authority,
     execute_decide_authority,
     execute_decide_backlog,
@@ -36,6 +37,7 @@ from workflow.handlers import (
     execute_decide_initial_spec_draft,
     execute_decide_prd,
     execute_decide_vision,
+    execute_decide_vision_review,
     execute_execution_request,
     execute_open_project_shell,
     execute_planning_request,
@@ -49,6 +51,7 @@ from workflow.handlers import (
     execute_record_repository_baseline,
     execute_record_repository_inventory,
     execute_record_vision_draft,
+    execute_record_vision_interview_turn,
     execute_register_initial_scope,
     execute_repair_authority,
     execute_scope_extension_request,
@@ -67,6 +70,7 @@ from workflow.requests import (
     AbandonProjectShell,
     AbandonScopeExtension,
     ApplyStoryDependencies,
+    BeginVisionRevision,
     CloseSprint,
     CloseStory,
     CompileAuthority,
@@ -82,6 +86,7 @@ from workflow.requests import (
     DecideSprintPlan,
     DecideStory,
     DecideVision,
+    DecideVisionReview,
     FailNodeAttempt,
     OpenProjectShell,
     ReconcileBacklog,
@@ -102,6 +107,7 @@ from workflow.requests import (
     RecordSprintPlan,
     RecordStoryDraft,
     RecordVisionDraft,
+    RecordVisionInterviewTurn,
     RegisterInitialScope,
     RegisterScopeExtension,
     RepairAuthority,
@@ -153,6 +159,9 @@ type _ProductDefinitionRequest = (
     | RecordBacklogDraft
     | DecideBacklog
     | ReconcileBacklog
+    | RecordVisionInterviewTurn
+    | DecideVisionReview
+    | BeginVisionRevision
 )
 type _PlanningRequest = (
     RecordRoadmapDraft
@@ -194,6 +203,9 @@ type _PositionedTransitionRequest = (
     | RecordBacklogDraft
     | DecideBacklog
     | ReconcileBacklog
+    | RecordVisionInterviewTurn
+    | DecideVisionReview
+    | BeginVisionRevision
     | _PlanningRequest
     | _ExecutionRequest
     | _ScopeExtensionRequest
@@ -289,6 +301,8 @@ class WorkflowDomain:
             request,
             DecideAuthority
             | DecideVision
+            | DecideVisionReview
+            | DecideVisionReview
             | DecideBacklog
             | DecideRoadmap
             | DecideStory
@@ -304,6 +318,8 @@ class WorkflowDomain:
                 review_failure = validate_decide_authority_review(session, request)
             elif isinstance(request, DecideVision):
                 review_failure = validate_decide_vision_review(session, request)
+            elif isinstance(request, DecideVisionReview):
+                review_failure = None
             elif isinstance(request, DecideBacklog):
                 review_failure = validate_decide_backlog_review(session, request)
             else:
@@ -831,6 +847,9 @@ class WorkflowDomain:
             request,
             RecordVisionDraft
             | DecideVision
+            | RecordVisionInterviewTurn
+            | DecideVisionReview
+            | BeginVisionRevision
             | RecordBacklogDraft
             | DecideBacklog
             | ReconcileBacklog,
@@ -1012,6 +1031,16 @@ class WorkflowDomain:
         evaluated_at: datetime,
     ) -> TransitionResult:
         """Dispatch the five closed Vision and Backlog transition variants."""
+        if isinstance(
+            request,
+            RecordVisionInterviewTurn | DecideVisionReview | BeginVisionRevision,
+        ):
+            return WorkflowDomain._execute_isolated_vision_request(
+                session,
+                request,
+                decision,
+                evaluated_at,
+            )
         if isinstance(request, RecordVisionDraft):
             return execute_record_vision_draft(
                 session,
@@ -1032,6 +1061,28 @@ class WorkflowDomain:
             return execute_decide_backlog(session, request, decision, evaluated_at)
         if isinstance(request, ReconcileBacklog):
             return execute_reconcile_backlog(session, request, decision, evaluated_at)
+        assert_never(request)
+
+    @staticmethod
+    def _execute_isolated_vision_request(
+        session: Session,
+        request: RecordVisionInterviewTurn | DecideVisionReview | BeginVisionRevision,
+        decision: NodeDecision,
+        evaluated_at: datetime,
+    ) -> TransitionResult:
+        """Dispatch the three commands in the isolated Vision lifecycle."""
+        if isinstance(request, RecordVisionInterviewTurn):
+            return execute_record_vision_interview_turn(
+                session, request, decision, evaluated_at
+            )
+        if isinstance(request, DecideVisionReview):
+            return execute_decide_vision_review(
+                session, request, decision, evaluated_at
+            )
+        if isinstance(request, BeginVisionRevision):
+            return execute_begin_vision_revision(
+                session, request, decision, evaluated_at
+            )
         assert_never(request)
 
     @staticmethod
@@ -1160,6 +1211,7 @@ class WorkflowDomain:
             request,
             DecideAuthority
             | DecideVision
+            | DecideVisionReview
             | DecideBacklog
             | DecideRoadmap
             | DecideStory

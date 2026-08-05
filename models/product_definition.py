@@ -33,6 +33,7 @@ class VisionRevisionIntent(SQLModel, table=True):
                 "vision_artifacts.content_fingerprint",
             ],
             name="fk_vision_revision_intent_source_vision",
+            use_alter=True,
         ),
     )
 
@@ -115,6 +116,100 @@ class VisionInterviewTurn(SQLModel, table=True):
     workflow_node_attempt_id: int = Field(index=True)
     attempt_fingerprint: str = Field(index=True)
     recorded_at: datetime = Field(default_factory=utc_now, nullable=False)
+
+
+class VisionArtifact(SQLModel, table=True):
+    """One immutable Project Vision assembled from a complete interview turn."""
+
+    __tablename__ = "vision_artifacts"
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id",
+            "vision_artifact_id",
+            name="uq_vision_artifact_project_id",
+        ),
+        UniqueConstraint(
+            "project_id",
+            "vision_artifact_id",
+            "content_fingerprint",
+            name="uq_vision_artifact_decision_parent",
+        ),
+        UniqueConstraint(
+            "project_id",
+            "version_number",
+            name="uq_vision_artifact_version",
+        ),
+        UniqueConstraint(
+            "project_id",
+            "content_fingerprint",
+            name="uq_vision_artifact_fingerprint",
+        ),
+        ForeignKeyConstraint(
+            ["project_id", "supersedes_vision_artifact_id"],
+            ["vision_artifacts.project_id", "vision_artifacts.vision_artifact_id"],
+            name="fk_vision_artifact_supersedes",
+        ),
+        ForeignKeyConstraint(
+            ["project_id", "source_interview_turn_id"],
+            [
+                "vision_interview_turns.project_id",
+                "vision_interview_turns.vision_interview_turn_id",
+            ],
+            name="fk_vision_artifact_source_turn",
+        ),
+    )
+
+    vision_artifact_id: int | None = Field(default=None, primary_key=True)
+    project_id: int = Field(foreign_key="projects.project_id", index=True)
+    version_number: int
+    components_json: str = Field(sa_type=Text)
+    statement: str = Field(sa_type=Text)
+    content_fingerprint: str = Field(index=True)
+    supersedes_vision_artifact_id: int | None = Field(default=None, index=True)
+    source_interview_turn_id: int = Field(index=True)
+    created_by: str = Field(index=True)
+    created_at: datetime = Field(default_factory=utc_now, nullable=False)
+
+
+class VisionArtifactDecision(SQLModel, table=True):
+    """One immutable operator decision for one precise Vision artifact."""
+
+    __tablename__ = "vision_artifact_decisions"
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id",
+            "vision_artifact_id",
+            name="uq_vision_artifact_decision",
+        ),
+        UniqueConstraint(
+            "project_id",
+            "idempotency_key",
+            name="uq_vision_artifact_decision_idempotency",
+        ),
+        CheckConstraint(
+            "decision IN ('accepted', 'rejected', 'feedback')",
+            name="ck_vision_artifact_decision",
+        ),
+        ForeignKeyConstraint(
+            ["project_id", "vision_artifact_id", "artifact_fingerprint"],
+            [
+                "vision_artifacts.project_id",
+                "vision_artifacts.vision_artifact_id",
+                "vision_artifacts.content_fingerprint",
+            ],
+            name="fk_vision_artifact_decision_parent",
+        ),
+    )
+
+    vision_artifact_decision_id: int | None = Field(default=None, primary_key=True)
+    project_id: int = Field(index=True)
+    vision_artifact_id: int = Field(index=True)
+    artifact_fingerprint: str = Field(index=True)
+    decision: str = Field(index=True)
+    rationale: str = Field(sa_type=Text)
+    reviewer: str = Field(index=True)
+    idempotency_key: str = Field(index=True)
+    decided_at: datetime = Field(default_factory=utc_now, nullable=False)
 
 
 class ProductGoalInterviewTurn(SQLModel, table=True):

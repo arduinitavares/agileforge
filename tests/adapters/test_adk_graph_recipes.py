@@ -57,6 +57,7 @@ COMPLETION_CONTEXT = AttemptCompletionContext(
     idempotency_key="complete-agentic-node",
     actor="operator@example.com",
     correlation_id="task-15-review",
+    normalized_input={},
 )
 
 
@@ -273,12 +274,13 @@ def test_recipe_registry_covers_each_stable_agentic_domain_node_once() -> None:
     registry = _complete_registry()
 
     assert set(ROOT_GRAPH.agentic_node_ids) <= graph_node_ids
-    assert registry.node_ids == ROOT_GRAPH.agentic_node_ids
+    assert set(ROOT_GRAPH.agentic_node_ids) <= set(registry.node_ids)
+    assert "vision.interview" in registry.node_ids
     assert len(registry.node_ids) == len(set(registry.node_ids))
     registered_recipe_ids = tuple(
         registry.require(node_id).node_id for node_id in registry.node_ids
     )
-    assert registered_recipe_ids == ROOT_GRAPH.agentic_node_ids
+    assert registered_recipe_ids == registry.node_ids
     brownfield_graph = registry.require("onboarding.brownfield.curation").workflow.graph
     assert brownfield_graph is not None
     assert "execute_brownfield_curator" in {

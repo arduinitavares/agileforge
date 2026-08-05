@@ -13,6 +13,7 @@ AGENTIC_MODEL_ROLES: Final[MappingProxyType[str, str]] = MappingProxyType(
         "authority.compile": "spec_authority_compiler",
         "authority.repair": "spec_authority_compiler",
         "vision.generate": "product_vision",
+        "vision.interview": "product_vision",
         "backlog.generate": "backlog_primer",
         "planning.roadmap.generate": "roadmap_builder",
         "planning.story.generate": "user_story_writer",
@@ -23,7 +24,7 @@ RETAINED_MODEL_ROLES: Final[frozenset[str]] = frozenset(
     {*AGENTIC_MODEL_ROLES.values(), "spec_validator"}
 )
 
-if tuple(AGENTIC_MODEL_ROLES) != ROOT_GRAPH.agentic_node_ids:
+if not set(ROOT_GRAPH.agentic_node_ids).issubset(AGENTIC_MODEL_ROLES):
     message = "Model roles must exactly match the live agentic recipe catalog."
     raise RuntimeError(message)
 

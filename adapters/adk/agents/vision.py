@@ -2,15 +2,15 @@
 product_vision_agent.py.
 
 This script defines and runs a Google ADK agent that generates a
-product vision statement. If information is missing, it returns a
-draft and clarifying questions.
+product vision interview turn. If information is missing, it returns a
+draft and one clarifying question or tightly related question set.
 """
 
 from google.adk.agents import Agent
 from google.adk.models.lite_llm import LiteLlm
 
 from adapters.adk.prompts import load_prompt
-from services.contracts.vision import InputSchema, OutputSchema
+from services.contracts.vision import VisionInterviewInput, VisionInterviewOutput
 from utils.model_config import get_model_id, get_openrouter_extra_body
 from utils.runtime_config import (
     get_openrouter_api_key,
@@ -32,14 +32,14 @@ model: LiteLlm = LiteLlm(
 
 # --- Create Agent ---
 root_agent: Agent = Agent(
-    name="product_vision_tool",
+    name="product_vision_interview",
     description=(
-        "An agent that creates a product vision from unstructured "
-        "requirements. Asks questions if info is missing."
+        "An agent that records human product-intent answers into one "
+        "Project Vision interview turn."
     ),
     model=model,
-    input_schema=InputSchema,
-    output_schema=OutputSchema,
+    input_schema=VisionInterviewInput,
+    output_schema=VisionInterviewOutput,
     instruction=instructions,
     output_key="product_vision_assessment",
     disallow_transfer_to_parent=True,

@@ -166,6 +166,33 @@ class VisionInterviewTurnFact(FrozenModel):
     recorded_at: _DATETIME
 
 
+class VisionArtifactFact(FrozenModel):
+    """Immutable Project Vision built from one complete interview turn."""
+
+    vision_artifact_id: int
+    version_number: int
+    components: JsonObject
+    statement: str
+    content_fingerprint: str
+    supersedes_vision_artifact_id: int | None
+    source_interview_turn_id: int
+    created_by: str
+    created_at: _DATETIME
+
+
+class VisionArtifactDecisionFact(FrozenModel):
+    """Append-only review decision bound to one Vision fingerprint."""
+
+    vision_artifact_decision_id: int
+    vision_artifact_id: int
+    artifact_fingerprint: str
+    decision: Literal["accepted", "rejected", "feedback"]
+    rationale: str
+    reviewer: str
+    idempotency_key: str
+    decided_at: _DATETIME
+
+
 class ProductGoalInterviewTurnFact(FrozenModel):
     """Immutable interview turn for one numbered Product Goal revision."""
 
@@ -591,6 +618,8 @@ class WorkflowFactSnapshot(FrozenModel):
     scope_extension_reconciliations: tuple[ScopeExtensionReconciliationFact, ...] = ()
     vision_revision_intents: tuple[VisionRevisionIntentFact, ...] = ()
     vision_interview_turns: tuple[VisionInterviewTurnFact, ...] = ()
+    vision_artifacts: tuple[VisionArtifactFact, ...] = ()
+    vision_artifact_decisions: tuple[VisionArtifactDecisionFact, ...] = ()
     product_goal_interview_turns: tuple[ProductGoalInterviewTurnFact, ...] = ()
     product_goal_artifacts: tuple[ProductGoalArtifactFact, ...] = ()
     product_goal_artifact_decisions: tuple[ProductGoalArtifactDecisionFact, ...] = ()

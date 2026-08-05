@@ -57,6 +57,11 @@ from workflow.requests.scope_extension import (
     ScopeExtensionArtifactReference,
     StartScopeExtension,
 )
+from workflow.requests.vision import (
+    BeginVisionRevision,
+    DecideVisionReview,
+    RecordVisionInterviewTurn,
+)
 
 type TransitionRequest = (
     OpenProjectShell
@@ -77,6 +82,9 @@ type TransitionRequest = (
     | RepairAuthority
     | RecordVisionDraft
     | DecideVision
+    | RecordVisionInterviewTurn
+    | DecideVisionReview
+    | BeginVisionRevision
     | RecordBacklogDraft
     | DecideBacklog
     | ReconcileBacklog
@@ -111,6 +119,7 @@ __all__ = [
     "AbandonProjectShell",
     "AbandonScopeExtension",
     "ApplyStoryDependencies",
+    "BeginVisionRevision",
     "CloseSprint",
     "CloseStory",
     "CompileAuthority",
@@ -126,6 +135,7 @@ __all__ = [
     "DecideSprintPlan",
     "DecideStory",
     "DecideVision",
+    "DecideVisionReview",
     "FailNodeAttempt",
     "OpenProjectShell",
     "ReconcileBacklog",
@@ -146,6 +156,7 @@ __all__ = [
     "RecordSprintPlan",
     "RecordStoryDraft",
     "RecordVisionDraft",
+    "RecordVisionInterviewTurn",
     "RegisterInitialScope",
     "RegisterScopeExtension",
     "RepairAuthority",

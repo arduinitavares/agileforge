@@ -21,6 +21,9 @@ if TYPE_CHECKING:
         AuthorityFact,
         PhaseArtifactFact,
         ReviewDecisionFact,
+        VisionArtifactDecisionFact,
+        VisionArtifactFact,
+        VisionRevisionIntentFact,
         WorkflowFactSnapshot,
     )
 
@@ -301,7 +304,7 @@ def _vision_review_rule(
     )
 
 
-VISION_NODES: tuple[NodeSpec, ...] = (
+LEGACY_VISION_NODES: tuple[NodeSpec, ...] = (
     NodeSpec(
         node_id="vision.generate",
         child_graph_id="vision",
@@ -337,7 +340,298 @@ VISION_NODES: tuple[NodeSpec, ...] = (
 )
 
 
+@dataclass(frozen=True)
+class VisionInterviewState:
+    """Current isolated Vision artifact, decision, and open revision intent."""
+
+    artifact: VisionArtifactFact | None
+    decision: VisionArtifactDecisionFact | None
+    open_revision: VisionRevisionIntentFact | None
+    conflict: bool
+
+
+def _interview_reference(turn: VisionRevisionIntentFact) -> FactReference:
+    return _reference(
+        "vision_revision_intent",
+        turn.vision_revision_intent_id,
+        turn.source_vision_fingerprint,
+    )
+
+
+def _isolated_vision_state(snapshot: WorkflowFactSnapshot) -> VisionInterviewState:
+    """Derive one current Vision chain without consulting authority or ADK traces."""
+    by_id = {item.vision_artifact_id: item for item in snapshot.vision_artifacts}
+    children = {
+        item.supersedes_vision_artifact_id
+        for item in snapshot.vision_artifacts
+        if item.supersedes_vision_artifact_id is not None
+    }
+    current = [
+        item
+        for item in snapshot.vision_artifacts
+        if item.vision_artifact_id not in children
+    ]
+    if len(current) > 1:
+        return VisionInterviewState(None, None, None, True)
+    artifact = current[0] if current else None
+    decisions = {
+        item.vision_artifact_id: item for item in snapshot.vision_artifact_decisions
+    }
+    if len(decisions) != len(snapshot.vision_artifact_decisions):
+        return VisionInterviewState(None, None, None, True)
+    for item in snapshot.vision_artifact_decisions:
+        referenced = by_id.get(item.vision_artifact_id)
+        if (
+            referenced is None
+            or referenced.content_fingerprint != item.artifact_fingerprint
+        ):
+            return VisionInterviewState(None, None, None, True)
+    open_intents = []
+    for intent in snapshot.vision_revision_intents:
+        source = by_id.get(intent.source_vision_artifact_id)
+        if (
+            source is None
+            or source.content_fingerprint != intent.source_vision_fingerprint
+        ):
+            return VisionInterviewState(None, None, None, True)
+        completed = any(
+            turn.mode == "revision"
+            and turn.revision_intent_id == intent.vision_revision_intent_id
+            and any(
+                artifact_item.source_interview_turn_id == turn.vision_interview_turn_id
+                for artifact_item in snapshot.vision_artifacts
+            )
+            for turn in snapshot.vision_interview_turns
+        )
+        if not completed:
+            open_intents.append(intent)
+    if len(open_intents) > 1:
+        return VisionInterviewState(None, None, None, True)
+    return VisionInterviewState(
+        artifact,
+        None if artifact is None else decisions.get(artifact.vision_artifact_id),
+        open_intents[0] if open_intents else None,
+        False,
+    )
+
+
+def _active_goal_exists(snapshot: WorkflowFactSnapshot) -> bool:
+    """Use Task 2 durable Goal facts to gate Vision revision only."""
+    accepted_ids = {
+        item.product_goal_artifact_id
+        for item in snapshot.product_goal_artifact_decisions
+        if item.decision == "accepted"
+    }
+    resolved_ids = {
+        item.product_goal_artifact_id for item in snapshot.product_goal_outcomes
+    }
+    return bool(accepted_ids - resolved_ids)
+
+
+def _interview_instance_key(
+    snapshot: WorkflowFactSnapshot,
+    revision: VisionRevisionIntentFact | None,
+) -> str | None:
+    """Advance the attempt instance after each persisted interview turn."""
+    mode = "revision" if revision is not None else "initial"
+    revision_id = None if revision is None else revision.vision_revision_intent_id
+    turns = tuple(
+        item
+        for item in snapshot.vision_interview_turns
+        if item.mode == mode and item.revision_intent_id == revision_id
+    )
+    if not turns:
+        return None
+    return f"after-turn:{max(item.vision_interview_turn_id for item in turns)}"
+
+
+def _vision_interview_rule(
+    snapshot: WorkflowFactSnapshot,
+    _evaluated_at: datetime,
+) -> tuple[RuleEvaluation, ...]:
+    """Offer only the isolated human Vision interview lifecycle."""
+    state = _isolated_vision_state(snapshot)
+    if state.conflict:
+        return (RuleEvaluation(RuleCategory.INVALID, "WORKFLOW_FACT_CONFLICT"),)
+    if state.open_revision is not None:
+        return (
+            RuleEvaluation(
+                RuleCategory.AVAILABLE,
+                "VISION_REVISION_INTERVIEW_REQUIRED",
+                instance_key=_interview_instance_key(snapshot, state.open_revision),
+                fact_references=(_interview_reference(state.open_revision),),
+            ),
+        )
+    if state.artifact is None:
+        return (
+            RuleEvaluation(
+                RuleCategory.AVAILABLE,
+                "VISION_INTERVIEW_REQUIRED",
+                instance_key=_interview_instance_key(snapshot, None),
+            ),
+        )
+    if state.decision is None:
+        return (RuleEvaluation(RuleCategory.SATISFIED, "VISION_REVIEW_PENDING"),)
+    if state.decision.decision in {"feedback", "rejected"}:
+        return (
+            RuleEvaluation(
+                RuleCategory.AVAILABLE,
+                "VISION_REVISION_REQUIRED",
+                instance_key=_interview_instance_key(snapshot, None),
+                fact_references=(
+                    _reference(
+                        "vision",
+                        state.artifact.vision_artifact_id,
+                        state.artifact.content_fingerprint,
+                    ),
+                ),
+                recommendation_kind=RecommendationKind.RECOVERY,
+            ),
+        )
+    return (RuleEvaluation(RuleCategory.SATISFIED, "VISION_ACCEPTED"),)
+
+
+def _vision_interview_review_rule(
+    snapshot: WorkflowFactSnapshot,
+    _evaluated_at: datetime,
+) -> tuple[RuleEvaluation, ...]:
+    state = _isolated_vision_state(snapshot)
+    if state.conflict:
+        return (RuleEvaluation(RuleCategory.INVALID, "WORKFLOW_FACT_CONFLICT"),)
+    if state.artifact is None or state.decision is not None:
+        return (RuleEvaluation(RuleCategory.SATISFIED, "VISION_REVIEW_NOT_PENDING"),)
+    return (
+        RuleEvaluation(
+            RuleCategory.WAITING,
+            "VISION_REVIEW_REQUIRED",
+            fact_references=(
+                _reference(
+                    "vision",
+                    state.artifact.vision_artifact_id,
+                    state.artifact.content_fingerprint,
+                ),
+            ),
+        ),
+    )
+
+
+def _vision_revision_start_rule(
+    snapshot: WorkflowFactSnapshot,
+    _evaluated_at: datetime,
+) -> tuple[RuleEvaluation, ...]:
+    state = _isolated_vision_state(snapshot)
+    if state.conflict:
+        return (RuleEvaluation(RuleCategory.INVALID, "WORKFLOW_FACT_CONFLICT"),)
+    if (
+        state.artifact is None
+        or state.decision is None
+        or state.decision.decision != "accepted"
+        or state.open_revision is not None
+        or _active_goal_exists(snapshot)
+    ):
+        return (RuleEvaluation(RuleCategory.SATISFIED, "VISION_REVISION_NOT_ELIGIBLE"),)
+    return (
+        RuleEvaluation(
+            RuleCategory.AVAILABLE,
+            "VISION_REVISION_AVAILABLE",
+            fact_references=(
+                _reference(
+                    "vision",
+                    state.artifact.vision_artifact_id,
+                    state.artifact.content_fingerprint,
+                ),
+            ),
+            recommendation_kind=RecommendationKind.OPTIONAL_REENTRY,
+        ),
+    )
+
+
+def _goal_interview_rule(
+    snapshot: WorkflowFactSnapshot,
+    _evaluated_at: datetime,
+) -> tuple[RuleEvaluation, ...]:
+    state = _isolated_vision_state(snapshot)
+    if state.conflict:
+        return (RuleEvaluation(RuleCategory.INVALID, "WORKFLOW_FACT_CONFLICT"),)
+    if (
+        state.artifact is None
+        or state.decision is None
+        or state.decision.decision != "accepted"
+    ):
+        return (RuleEvaluation(RuleCategory.SATISFIED, "PRODUCT_GOAL_NOT_READY"),)
+    return (
+        RuleEvaluation(
+            RuleCategory.AVAILABLE,
+            "PRODUCT_GOAL_INTERVIEW_REQUIRED",
+            fact_references=(
+                _reference(
+                    "vision",
+                    state.artifact.vision_artifact_id,
+                    state.artifact.content_fingerprint,
+                ),
+            ),
+        ),
+    )
+
+
+VISION_INTERVIEW_NODES: tuple[NodeSpec, ...] = (
+    NodeSpec(
+        node_id="vision.interview",
+        child_graph_id="vision",
+        request_kind="record_vision_interview_turn",
+        recommendation_kind=RecommendationKind.REQUIRED,
+        required_inputs=(
+            InputField(name="mode", value_type="string"),
+            InputField(name="user_text", value_type="string"),
+        ),
+        evaluate_rule=_vision_interview_rule,
+        agentic_execution=AgenticExecutionSpec(
+            active_reason="VISION_INTERVIEW_ACTIVE",
+            failure_reason="VISION_INTERVIEW_FAILED",
+            recovery_reason="VISION_INTERVIEW_RECOVERY_REQUIRED",
+        ),
+    ),
+    NodeSpec(
+        node_id="vision.review",
+        child_graph_id="vision",
+        request_kind="decide_vision_review",
+        recommendation_kind=RecommendationKind.REQUIRED,
+        required_inputs=(
+            InputField(name="vision_artifact_id", value_type="integer"),
+            InputField(name="vision_fingerprint", value_type="string"),
+            InputField(name="decision", value_type="string"),
+            InputField(name="rationale", value_type="string"),
+        ),
+        evaluate_rule=_vision_interview_review_rule,
+    ),
+    NodeSpec(
+        node_id="vision.revision.start",
+        child_graph_id="vision",
+        request_kind="begin_vision_revision",
+        recommendation_kind=RecommendationKind.OPTIONAL_REENTRY,
+        required_inputs=(
+            InputField(name="source_vision_artifact_id", value_type="integer"),
+            InputField(name="source_vision_fingerprint", value_type="string"),
+            InputField(name="reason", value_type="string"),
+        ),
+        evaluate_rule=_vision_revision_start_rule,
+    ),
+    NodeSpec(
+        node_id="goal.interview",
+        child_graph_id="product_goal",
+        request_kind="goal_interview_pending_implementation",
+        recommendation_kind=RecommendationKind.REQUIRED,
+        required_inputs=(),
+        evaluate_rule=_goal_interview_rule,
+    ),
+)
+
+# The root graph intentionally retains its legacy nodes until the Task 5 cutover.
+VISION_NODES = LEGACY_VISION_NODES
+
+
 __all__ = [
+    "VISION_INTERVIEW_NODES",
     "VISION_NODES",
     "PhaseArtifactState",
     "accepted_current_artifact",

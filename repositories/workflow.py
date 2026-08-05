@@ -27,6 +27,8 @@ from models.product_definition import (
     ProductGoalOutcome,
     SpecificationCandidate,
     SpecificationDecision,
+    VisionArtifact,
+    VisionArtifactDecision,
     VisionInterviewTurn,
     VisionRevisionIntent,
 )
@@ -61,8 +63,6 @@ from models.workflow import (
     StoryClosure,
     StoryDependencyReview,
     TaskCompletionEvidence,
-    VisionArtifact,
-    VisionArtifactDecision,
     WorkflowNodeAttempt,
     WorkflowNodeAttemptOutcome,
 )
@@ -123,6 +123,8 @@ from workflow.facts import (
     StoryFact,
     TaskCompletionFact,
     TaskFact,
+    VisionArtifactDecisionFact,
+    VisionArtifactFact,
     VisionInterviewTurnFact,
     VisionRevisionIntentFact,
     WorkflowFactSnapshot,
@@ -239,6 +241,8 @@ class _ProductDefinitionFactLoad:
 
     revision_intents: tuple[VisionRevisionIntentFact, ...]
     interview_turns: tuple[VisionInterviewTurnFact, ...]
+    visions: tuple[VisionArtifactFact, ...]
+    vision_decisions: tuple[VisionArtifactDecisionFact, ...]
     goal_interview_turns: tuple[ProductGoalInterviewTurnFact, ...]
     product_goals: tuple[ProductGoalArtifactFact, ...]
     goal_decisions: tuple[ProductGoalArtifactDecisionFact, ...]
@@ -357,7 +361,6 @@ class WorkflowFactRepository:
         node_attempts = self._node_attempts(project_id)
         product_definition = self._product_definition(
             project_id,
-            phase_load.facts,
             spec_versions,
             node_attempts,
         )
@@ -488,6 +491,8 @@ class WorkflowFactRepository:
             ),
             vision_revision_intents=product_definition.revision_intents,
             vision_interview_turns=product_definition.interview_turns,
+            vision_artifacts=product_definition.visions,
+            vision_artifact_decisions=product_definition.vision_decisions,
             product_goal_interview_turns=product_definition.goal_interview_turns,
             product_goal_artifacts=product_definition.product_goals,
             product_goal_artifact_decisions=product_definition.goal_decisions,
@@ -870,25 +875,27 @@ class WorkflowFactRepository:
     def _product_definition(
         self,
         project_id: int,
-        phase_artifacts: tuple[PhaseArtifactFact, ...],
         spec_versions: dict[int, str],
         node_attempts: tuple[NodeAttemptFact, ...],
     ) -> _ProductDefinitionFactLoad:
         """Load staged product-definition records without ADK session state."""
-        visions = {
-            int(item.artifact_id): item.artifact_fingerprint
-            for item in phase_artifacts
-            if (
-                item.artifact_type == "vision"
-                and item.status == "accepted"
-                and isinstance(item.artifact_id, int)
-            )
+        visions, vision_decisions = self._vision_artifacts(project_id)
+        vision_fingerprints = {
+            item_id: item.content_fingerprint for item_id, item in visions.items()
+        }
+        accepted_visions = {
+            item.vision_artifact_id: item.artifact_fingerprint
+            for item in vision_decisions.values()
+            if item.decision == "accepted"
         }
         attempts = {item.attempt_id: item.attempt_fingerprint for item in node_attempts}
-        revisions = self._vision_revision_intents(project_id, visions)
+        revisions = self._vision_revision_intents(project_id, accepted_visions)
         turns = self._vision_interview_turns(project_id, revisions, attempts)
-        goal_turns = self._product_goal_interview_turns(project_id, visions, attempts)
-        goals = self._product_goals(project_id, visions, goal_turns)
+        self._validate_vision_artifact_sources(visions, turns)
+        goal_turns = self._product_goal_interview_turns(
+            project_id, vision_fingerprints, attempts
+        )
+        goals = self._product_goals(project_id, vision_fingerprints, goal_turns)
         decisions = self._product_goal_decisions(project_id, goals)
         outcomes = self._product_goal_outcomes(
             project_id,
@@ -901,18 +908,20 @@ class WorkflowFactRepository:
         )
         discoveries = self._discovery_artifacts(
             project_id,
-            visions,
+            vision_fingerprints,
             goals,
             decisions,
             outcomes,
         )
         candidates = self._specification_candidates(
-            project_id, visions, goals, discoveries, spec_versions
+            project_id, vision_fingerprints, goals, discoveries, spec_versions
         )
         self._specification_decisions(project_id, candidates)
         return _ProductDefinitionFactLoad(
             revision_intents=tuple(revisions.values()),
             interview_turns=tuple(turns.values()),
+            visions=tuple(visions.values()),
+            vision_decisions=tuple(vision_decisions.values()),
             goal_interview_turns=tuple(goal_turns.values()),
             product_goals=tuple(goals.values()),
             goal_decisions=tuple(decisions.values()),
@@ -920,6 +929,111 @@ class WorkflowFactRepository:
             discoveries=tuple(discoveries.values()),
             specification_candidates=tuple(candidates.values()),
         )
+
+    def _vision_artifacts(
+        self,
+        project_id: int,
+    ) -> tuple[
+        dict[int, VisionArtifactFact],
+        dict[int, VisionArtifactDecisionFact],
+    ]:
+        """Load the sole typed source of immutable Vision facts and decisions."""
+        rows = self._session.exec(
+            select(VisionArtifact)
+            .where(col(VisionArtifact.project_id) == project_id)
+            .order_by(col(VisionArtifact.vision_artifact_id)),
+            execution_options=self._query_options(),
+        ).all()
+        facts: dict[int, VisionArtifactFact] = {}
+        children: set[int] = set()
+        for row in rows:
+            identifier = self._required_id(row.vision_artifact_id, "Vision artifact")
+            components = self._canonical_json_object(
+                row.components_json,
+                "Vision artifact components",
+            )
+            self._require_product_condition(
+                canonical_hash({"components": components, "statement": row.statement})
+                == row.content_fingerprint,
+                "Vision artifact fingerprint changed.",
+            )
+            parent_id = row.supersedes_vision_artifact_id
+            self._require_product_condition(
+                parent_id is None or parent_id in facts,
+                "Vision artifact supersedes an unknown or later artifact.",
+            )
+            if parent_id is not None:
+                self._require_product_condition(
+                    parent_id not in children,
+                    "Vision artifact chain branches.",
+                )
+                children.add(parent_id)
+            facts[identifier] = VisionArtifactFact(
+                vision_artifact_id=identifier,
+                version_number=row.version_number,
+                components=components,
+                statement=row.statement,
+                content_fingerprint=row.content_fingerprint,
+                supersedes_vision_artifact_id=parent_id,
+                source_interview_turn_id=row.source_interview_turn_id,
+                created_by=row.created_by,
+                created_at=row.created_at,
+            )
+        decision_rows = self._session.exec(
+            select(VisionArtifactDecision)
+            .where(col(VisionArtifactDecision.project_id) == project_id)
+            .order_by(col(VisionArtifactDecision.vision_artifact_decision_id)),
+            execution_options=self._query_options(),
+        ).all()
+        decisions: dict[int, VisionArtifactDecisionFact] = {}
+        by_vision: set[int] = set()
+        for row in decision_rows:
+            identifier = self._required_id(
+                row.vision_artifact_decision_id,
+                "Vision artifact decision",
+            )
+            artifact = facts.get(row.vision_artifact_id)
+            self._require_product_condition(
+                artifact is not None
+                and artifact.content_fingerprint == row.artifact_fingerprint,
+                "Vision decision does not match its artifact.",
+            )
+            self._require_product_condition(
+                row.vision_artifact_id not in by_vision,
+                "Vision artifact has contradictory decisions.",
+            )
+            self._require_product_condition(
+                row.decision in {"accepted", "rejected", "feedback"},
+                "Vision decision has an invalid value.",
+            )
+            by_vision.add(row.vision_artifact_id)
+            decisions[identifier] = VisionArtifactDecisionFact(
+                vision_artifact_decision_id=identifier,
+                vision_artifact_id=row.vision_artifact_id,
+                artifact_fingerprint=row.artifact_fingerprint,
+                decision=self._product_goal_decision(row.decision),
+                rationale=row.rationale,
+                reviewer=row.reviewer,
+                idempotency_key=row.idempotency_key,
+                decided_at=row.decided_at,
+            )
+        return facts, decisions
+
+    def _validate_vision_artifact_sources(
+        self,
+        visions: dict[int, VisionArtifactFact],
+        turns: dict[int, VisionInterviewTurnFact],
+    ) -> None:
+        """Require every Vision to preserve the exact complete turn that produced it."""
+        for artifact in visions.values():
+            turn = turns.get(artifact.source_interview_turn_id)
+            self._require_product_condition(
+                turn is not None
+                and turn.is_complete
+                and turn.components == artifact.components
+                and turn.vision_statement == artifact.statement,
+                "Vision artifact does not match a complete source interview turn.",
+            )
 
     def _vision_revision_intents(
         self,
@@ -1717,23 +1831,11 @@ class WorkflowFactRepository:
         project_id: int,
         authorities: dict[int, AuthorityFact],
     ) -> _PhaseArtifactLoad:
-        """Load immutable Vision/Backlog versions and append-only decisions."""
-        vision_rows = self._session.exec(
-            select(VisionArtifact)
-            .where(col(VisionArtifact.project_id) == project_id)
-            .order_by(col(VisionArtifact.vision_artifact_id)),
-            execution_options=self._query_options(),
-        ).all()
+        """Load generic authority-derived phase artifacts, excluding Vision."""
         backlog_rows = self._session.exec(
             select(BacklogArtifact)
             .where(col(BacklogArtifact.project_id) == project_id)
             .order_by(col(BacklogArtifact.backlog_artifact_id)),
-            execution_options=self._query_options(),
-        ).all()
-        vision_decisions = self._session.exec(
-            select(VisionArtifactDecision)
-            .where(col(VisionArtifactDecision.project_id) == project_id)
-            .order_by(col(VisionArtifactDecision.vision_artifact_decision_id)),
             execution_options=self._query_options(),
         ).all()
         backlog_decisions = self._session.exec(
@@ -1743,47 +1845,11 @@ class WorkflowFactRepository:
             execution_options=self._query_options(),
         ).all()
 
-        vision_by_id = {
-            self._required_id(row.vision_artifact_id, "Vision artifact"): row
-            for row in vision_rows
-        }
         backlog_by_id = {
             self._required_id(row.backlog_artifact_id, "Backlog artifact"): row
             for row in backlog_rows
         }
-        if set(vision_by_id) & set(backlog_by_id):
-            message = "Vision and Backlog artifact identities overlap."
-            raise self._error(message)
-
-        vision_decisions_by_id: dict[int, VisionArtifactDecision] = {}
         review_facts: list[ReviewDecisionFact] = []
-        for row in vision_decisions:
-            artifact = vision_by_id.get(row.vision_artifact_id)
-            if (
-                artifact is None
-                or artifact.content_fingerprint != row.artifact_fingerprint
-            ):
-                message = "Vision decision does not match its artifact."
-                raise self._error(message)
-            if row.vision_artifact_id in vision_decisions_by_id:
-                message = "Vision artifact has contradictory decisions."
-                raise self._error(message)
-            vision_decisions_by_id[row.vision_artifact_id] = row
-            review_facts.append(
-                self._review_decision_fact(
-                    _ReviewDecisionSource(
-                        decision_id=self._required_id(
-                            row.vision_artifact_decision_id,
-                            "Vision decision",
-                        ),
-                        artifact_type="vision",
-                        artifact_id=row.vision_artifact_id,
-                        artifact_fingerprint=row.artifact_fingerprint,
-                        decision=row.decision,
-                        decided_at=row.decided_at,
-                    )
-                )
-            )
 
         backlog_decisions_by_id: dict[int, BacklogArtifactDecision] = {}
         for row in backlog_decisions:
@@ -1814,44 +1880,12 @@ class WorkflowFactRepository:
                 )
             )
 
-        superseded_vision_ids = {
-            row.supersedes_vision_artifact_id
-            for row in vision_rows
-            if row.supersedes_vision_artifact_id is not None
-        }
         superseded_backlog_ids = {
             row.supersedes_backlog_artifact_id
             for row in backlog_rows
             if row.supersedes_backlog_artifact_id is not None
         }
         facts: list[PhaseArtifactFact] = []
-        for artifact_id, row in vision_by_id.items():
-            self._validate_phase_artifact(
-                artifact_id=artifact_id,
-                canonical_content_json=row.canonical_content_json,
-                content_fingerprint=row.content_fingerprint,
-                authority_id=row.authority_id,
-                authority_fingerprint=row.authority_fingerprint,
-                authorities=authorities,
-                supersedes_artifact_id=row.supersedes_vision_artifact_id,
-                known_artifact_ids=frozenset(vision_by_id),
-                label="Vision",
-            )
-            decision = vision_decisions_by_id.get(artifact_id)
-            facts.append(
-                PhaseArtifactFact(
-                    artifact_type="vision",
-                    artifact_id=artifact_id,
-                    artifact_fingerprint=row.content_fingerprint,
-                    authority_id=row.authority_id,
-                    authority_fingerprint=row.authority_fingerprint,
-                    supersedes_artifact_id=row.supersedes_vision_artifact_id,
-                    status=self._phase_status(
-                        None if decision is None else decision.decision,
-                        superseded=artifact_id in superseded_vision_ids,
-                    ),
-                )
-            )
         for artifact_id, row in backlog_by_id.items():
             self._validate_phase_artifact(
                 artifact_id=artifact_id,

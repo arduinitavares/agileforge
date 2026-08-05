@@ -203,6 +203,7 @@ class AdkWorkflowRunner:
             idempotency_key=f"{start_request.idempotency_key}:completion",
             actor=start_request.actor,
             correlation_id=start_request.correlation_id,
+            normalized_input=start_request.normalized_input,
         )
         try:
             recipe = self._registry.require(request.node_id)

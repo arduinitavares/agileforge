@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from google.adk import Context, Workflow
 from google.adk.workflow import START, JoinNode, RetryConfig, node
@@ -14,6 +14,7 @@ from services.contracts.brownfield import (
     BrownfieldCurationInput,
     BrownfieldCurationOutput,
 )
+from services.contracts.vision import VisionInterviewOutput
 from services.specs.profile_content import normalize_spec_content_for_registry
 from utils.agileforge_spec_profile import canonical_spec_json
 from utils.spec_schemas import (
@@ -23,7 +24,6 @@ from utils.spec_schemas import (
     SpecAuthorityCompilerInput,
 )
 from workflow.contracts import JsonObject
-from workflow.definitions.root import ROOT_GRAPH
 from workflow.requests import (
     CompileAuthority,
     RecordBacklogDraft,
@@ -32,6 +32,7 @@ from workflow.requests import (
     RecordSprintPlan,
     RecordStoryDraft,
     RecordVisionDraft,
+    RecordVisionInterviewTurn,
     RepairAuthority,
 )
 from workflow.requests.base import PositionedRequest
@@ -114,6 +115,7 @@ class AttemptCompletionContext:
     idempotency_key: str
     actor: str
     correlation_id: str | None
+    normalized_input: JsonObject
 
 
 type OutputAdapter = Callable[
@@ -243,6 +245,45 @@ def _request_output_adapter(
         return request_type.model_validate(payload)
 
     return adapt
+
+
+def _vision_interview_output_adapter(
+    output: object,
+    context: AttemptCompletionContext,
+) -> RecordVisionInterviewTurn:
+    """Bind model output to the durable human input captured at attempt start."""
+    envelope = RecipeOutput.model_validate(output)
+    parsed = VisionInterviewOutput.model_validate(envelope.payload)
+    user_text = context.normalized_input.get("user_response")
+    mode = context.normalized_input.get("mode")
+    if not isinstance(user_text, str):
+        message = "Vision attempt input is missing its trusted user response or mode."
+        raise TypeError(message)
+    if mode == "initial":
+        interview_mode: Literal["initial", "revision"] = "initial"
+    elif mode == "revision":
+        interview_mode = "revision"
+    else:
+        message = "Vision attempt input is missing its trusted user response or mode."
+        raise ValueError(message)
+    return RecordVisionInterviewTurn(
+        project_id=context.project_id,
+        graph_version=context.graph_version,
+        fact_fingerprint=context.fact_fingerprint,
+        decision_fingerprint=context.decision_fingerprint,
+        instance_key=context.instance_key,
+        idempotency_key=context.idempotency_key,
+        actor=context.actor,
+        correlation_id=context.correlation_id,
+        mode=interview_mode,
+        user_text=user_text,
+        updated_components=parsed.updated_components.model_dump(mode="json"),
+        project_vision_statement=parsed.project_vision_statement,
+        is_complete=parsed.is_complete,
+        clarifying_questions=tuple(parsed.clarifying_questions),
+        attempt_id=context.attempt_id,
+        attempt_fingerprint=context.attempt_fingerprint,
+    )
 
 
 def _build_single_leaf_workflow(
@@ -540,12 +581,22 @@ def build_agentic_recipe_registry(
             AdkRecipe(
                 node_id="vision.generate",
                 workflow=_build_single_leaf_workflow(
-                    workflow_name="vision_generation",
-                    execution_node_name="execute_vision_generator",
+                    workflow_name="legacy_vision_generation",
+                    execution_node_name="execute_legacy_vision_generator",
                     leaf_agent=nodes.vision_generation,
                     execution_settings=execution_settings,
                 ),
                 output_adapter=_request_output_adapter(RecordVisionDraft),
+            ),
+            AdkRecipe(
+                node_id="vision.interview",
+                workflow=_build_single_leaf_workflow(
+                    workflow_name="vision_interview",
+                    execution_node_name="execute_vision_interviewer",
+                    leaf_agent=nodes.vision_generation,
+                    execution_settings=execution_settings,
+                ),
+                output_adapter=_vision_interview_output_adapter,
             ),
             AdkRecipe(
                 node_id="backlog.generate",
@@ -586,7 +637,6 @@ def build_agentic_recipe_registry(
                 output_adapter=_request_output_adapter(RecordSprintPlan),
             ),
         ),
-        required_node_ids=ROOT_GRAPH.agentic_node_ids,
     )
 
 
