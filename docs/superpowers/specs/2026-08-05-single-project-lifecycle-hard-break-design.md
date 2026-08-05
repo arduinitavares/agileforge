@@ -13,18 +13,33 @@ AgileForge will have one Project lifecycle. A Project is created with a name and
 human-owned Product Goal. A local Git repository may be attached during creation
 or later, but repository attachment does not select a different workflow.
 
-The existing product-discovery sequence remains intact:
+The existing product-definition and delivery sequence remains intact. Expanded,
+the lifecycle is:
 
 ```text
-Create Project
--> Product Goal
+Create Project (Name + concise Product Goal)
+-> Optional Repository Attachment (during creation or later)
 -> Grill Me With Docs
 -> To Spec
--> Human Review
--> Extract And Refine Product Backlog
--> Sprint Planning
--> Execution
+-> Human Specification Review And Acceptance
+-> Specification Authority Compile, Review, And Acceptance
+-> Product Vision Generate, Refine, Review, And Acceptance
+-> Product Backlog Extract/Generate, Refine, Review, And Acceptance
+-> Roadmap Generate, Refine, Review, And Acceptance
+-> User Stories Generate, Refine, Dependency Review, And Acceptance
+-> Sprint Candidate Readiness
+-> Sprint Planning, Human Review, And Start
+-> Task Execution And Evidence
+-> Story Closure
+-> Sprint Review And Closure
+-> Post-Sprint Triage
 ```
+
+The Product Goal entered at creation is the operator's concise initial intent.
+It does not replace the richer reviewed Product Vision artifact. The expanded
+sequence above documents the workflow that this hard break must preserve; this
+design does not authorize deleting, collapsing, or silently reordering those
+downstream artifacts and human decisions.
 
 Repository attachment is an orthogonal capability. It records a small,
 deterministic snapshot without reading repository content, building a complete
@@ -62,8 +77,10 @@ Project must use the same product-development flow.
 - Require a human-owned Product Goal before product discovery starts.
 - Allow one local Git repository to be attached during creation or later.
 - Inspect repository identity and working-tree state without provider calls.
-- Preserve `grill-me-with-docs`, `to spec`, specification review, extraction,
-  Product Backlog refinement, planning, and execution behavior.
+- Preserve `grill-me-with-docs`, `to spec`, specification and authority review,
+  Product Vision, Product Backlog extraction and refinement, Roadmap, User Story
+  generation and refinement, dependency review, Sprint planning and review,
+  execution, closure, and post-Sprint triage behavior.
 - Keep repository inspection behind a small replaceable interface.
 - Support Git worktrees and detached HEADs.
 - Allow dirty repositories while making their state explicit and fingerprinted.
@@ -83,6 +100,8 @@ Project must use the same product-development flow.
 - No remote repository cloning.
 - No multi-repository Project support in this slice.
 - No import or migration of existing AgileForge Project records.
+- No deletion, collapse, or reordering of Product Vision, Product Backlog,
+  Roadmap, User Story refinement, Sprint review, or execution stages.
 - No redesign of the established discovery, specification, extraction,
   planning, or execution stages beyond reconnecting them to one lifecycle.
 
@@ -356,8 +375,10 @@ Provider-free temporary-repository tests cover:
 
 - A whole-tree case-insensitive scan finds neither retired origin label.
 - Package-resource tests prove deleted prompts and agents are absent.
-- `grill-me-with-docs`, `to spec`, review, extraction, backlog, planning, and
-  execution contract tests remain green.
+- `grill-me-with-docs`, `to spec`, specification and authority review, Product
+  Vision, Product Backlog, Roadmap, User Story refinement and dependency review,
+  Sprint planning and review, execution, closure, and post-Sprint triage contract
+  tests remain green.
 - A clean-source wheel and sdist contain no retired modules or resources.
 - `uv run --frozen pyrepo-check --all` passes without typing suppressions.
 - `git diff --check` passes.
@@ -386,7 +407,9 @@ For each of caRtola, ASA Deep Process Control Advisory System, and MyFinance:
   active documentation contain no retired origin vocabulary or specialized
   setup machinery.
 - No compatibility or migration path exists.
-- The established discovery-to-execution behavior remains covered and passing.
+- The established discovery-to-execution behavior, including every named
+  artifact and human review stage in the expanded lifecycle, remains covered
+  and passing.
 - The three named acceptance repositories can be recreated and attached through
   the same operator and agent surfaces.
 
