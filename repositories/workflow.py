@@ -72,7 +72,7 @@ from services.contracts.sprint import (
 from services.specs.authority_selection import pending_authority_fingerprint
 from utils.spec_schemas import SpecAuthorityCompilationSuccess
 from utils.task_metadata import TaskMetadata, serialize_task_metadata
-from workflow.contracts import FactReference, JsonValue
+from workflow.contracts import FactReference, JsonObject, JsonValue
 from workflow.execution_integrity import (
     ExecutionIntegrityError,
     SprintStartAudit,
@@ -874,7 +874,11 @@ class WorkflowFactRepository:
         visions = {
             int(item.artifact_id): item.artifact_fingerprint
             for item in phase_artifacts
-            if item.artifact_type == "vision" and isinstance(item.artifact_id, int)
+            if (
+                item.artifact_type == "vision"
+                and item.status == "accepted"
+                and isinstance(item.artifact_id, int)
+            )
         }
         attempts = {item.attempt_id: item.attempt_fingerprint for item in node_attempts}
         revisions = self._vision_revision_intents(project_id, visions)
@@ -882,12 +886,21 @@ class WorkflowFactRepository:
         goal_turns = self._product_goal_interview_turns(project_id, visions, attempts)
         goals = self._product_goals(project_id, visions, goal_turns)
         accepted_goal_ids = self._product_goal_decisions(project_id, goals)
+        active_goal_ids = self._active_accepted_product_goal_ids(
+            goals,
+            accepted_goal_ids,
+        )
         outcomes = self._product_goal_outcomes(
             project_id,
             goals,
             accepted_goal_ids,
         )
-        discoveries = self._discovery_artifacts(project_id, visions, goals)
+        discoveries = self._discovery_artifacts(
+            project_id,
+            visions,
+            goals,
+            active_goal_ids,
+        )
         candidates = self._specification_candidates(
             project_id, visions, goals, discoveries, spec_versions
         )
@@ -958,37 +971,74 @@ class WorkflowFactRepository:
                 row.mode in {"initial", "revision"},
                 message,
             )
-            self._require_product_condition(
-                row.revision_intent_id is None or row.revision_intent_id in revisions,
-                "Vision turn revision intent is not owned by this Project.",
+            mode = self._vision_mode(row.mode)
+            if mode == "initial":
+                self._require_product_condition(
+                    row.revision_intent_id is None,
+                    "Initial Vision turn cannot have a revision intent.",
+                )
+            else:
+                self._require_product_condition(
+                    row.revision_intent_id in revisions,
+                    "Revision Vision turn requires an exact Project revision intent.",
+                )
+            prior_turn = (
+                None if row.prior_turn_id is None else facts.get(row.prior_turn_id)
             )
             self._require_product_condition(
-                row.prior_turn_id is None or row.prior_turn_id in facts,
+                row.prior_turn_id is None or prior_turn is not None,
                 "Vision turn prior turn is not owned by this Project.",
             )
+            if prior_turn is None:
+                self._require_product_condition(
+                    row.turn_number == 1,
+                    "First Vision interview turn must have turn number one.",
+                )
+            else:
+                self._require_product_condition(
+                    (prior_turn.mode, prior_turn.revision_intent_id)
+                    == (mode, row.revision_intent_id),
+                    "Vision turn prior turn has a different mode or revision chain.",
+                )
+                self._require_product_condition(
+                    prior_turn.turn_number + 1 == row.turn_number,
+                    "Vision turn prior turn is not sequential.",
+                )
             self._require_fingerprint_reference(
                 row.workflow_node_attempt_id,
                 row.attempt_fingerprint,
                 attempts,
                 "Vision turn workflow attempt",
             )
+            components = self._canonical_json_object(
+                row.components_json,
+                "Vision turn components",
+            )
+            clarifying_questions = self._canonical_string_list(
+                row.clarifying_questions_json,
+                "Vision turn clarifying questions",
+            )
+            self._require_product_condition(
+                row.output_fingerprint
+                == self._vision_interview_output_fingerprint(
+                    components,
+                    row.vision_statement,
+                    row.is_complete,
+                    clarifying_questions,
+                ),
+                "Vision turn output fingerprint changed.",
+            )
             facts[identifier] = VisionInterviewTurnFact(
                 vision_interview_turn_id=identifier,
-                mode=self._vision_mode(row.mode),
+                mode=mode,
                 turn_number=row.turn_number,
                 revision_intent_id=row.revision_intent_id,
                 prior_turn_id=row.prior_turn_id,
                 user_text=row.user_text,
-                components=self._canonical_json_object(
-                    row.components_json,
-                    "Vision turn components",
-                ),
+                components=components,
                 vision_statement=row.vision_statement,
                 is_complete=row.is_complete,
-                clarifying_questions=self._canonical_string_list(
-                    row.clarifying_questions_json,
-                    "Vision turn clarifying questions",
-                ),
+                clarifying_questions=clarifying_questions,
                 output_fingerprint=row.output_fingerprint,
                 workflow_node_attempt_id=row.workflow_node_attempt_id,
                 attempt_fingerprint=row.attempt_fingerprint,
@@ -1013,6 +1063,7 @@ class WorkflowFactRepository:
             execution_options=self._query_options(),
         ).all()
         facts: dict[int, ProductGoalInterviewTurnFact] = {}
+        last_turn_by_identity: dict[tuple[int, str, int, int], int] = {}
         for row in rows:
             identifier = self._required_id(
                 row.product_goal_interview_turn_id,
@@ -1024,6 +1075,12 @@ class WorkflowFactRepository:
                 visions,
                 "Product Goal interview Vision",
             )
+            identity = (
+                row.vision_artifact_id,
+                row.vision_fingerprint,
+                row.goal_number,
+                row.revision_number,
+            )
             prior_turn = (
                 None if row.prior_turn_id is None else facts.get(row.prior_turn_id)
             )
@@ -1031,7 +1088,12 @@ class WorkflowFactRepository:
                 row.prior_turn_id is None or prior_turn is not None,
                 "Product Goal interview prior turn is not owned by this Project.",
             )
-            if prior_turn is not None:
+            if prior_turn is None:
+                self._require_product_condition(
+                    identity not in last_turn_by_identity,
+                    "Product Goal interview chain cannot restart.",
+                )
+            else:
                 self._require_product_condition(
                     (
                         prior_turn.vision_artifact_id,
@@ -1047,11 +1109,33 @@ class WorkflowFactRepository:
                     ),
                     "Product Goal interview prior turn has different identity.",
                 )
+                self._require_product_condition(
+                    last_turn_by_identity.get(identity) == row.prior_turn_id,
+                    "Product Goal interview prior turn is not sequential.",
+                )
             self._require_fingerprint_reference(
                 row.workflow_node_attempt_id,
                 row.attempt_fingerprint,
                 attempts,
                 "Product Goal interview workflow attempt",
+            )
+            components = self._canonical_json_object(
+                row.components_json,
+                "Product Goal interview components",
+            )
+            clarifying_questions = self._canonical_string_list(
+                row.clarifying_questions_json,
+                "Product Goal interview clarifying questions",
+            )
+            self._require_product_condition(
+                row.output_fingerprint
+                == self._product_goal_interview_output_fingerprint(
+                    components,
+                    row.goal_statement,
+                    row.is_complete,
+                    clarifying_questions,
+                ),
+                "Product Goal interview output fingerprint changed.",
             )
             facts[identifier] = ProductGoalInterviewTurnFact(
                 product_goal_interview_turn_id=identifier,
@@ -1061,21 +1145,16 @@ class WorkflowFactRepository:
                 revision_number=row.revision_number,
                 prior_turn_id=row.prior_turn_id,
                 user_text=row.user_text,
-                components=self._canonical_json_object(
-                    row.components_json,
-                    "Product Goal interview components",
-                ),
+                components=components,
                 goal_statement=row.goal_statement,
                 is_complete=row.is_complete,
-                clarifying_questions=self._canonical_string_list(
-                    row.clarifying_questions_json,
-                    "Product Goal interview clarifying questions",
-                ),
+                clarifying_questions=clarifying_questions,
                 output_fingerprint=row.output_fingerprint,
                 workflow_node_attempt_id=row.workflow_node_attempt_id,
                 attempt_fingerprint=row.attempt_fingerprint,
                 recorded_at=row.recorded_at,
             )
+            last_turn_by_identity[identity] = identifier
         return facts
 
     def _product_goals(
@@ -1109,6 +1188,10 @@ class WorkflowFactRepository:
                 "Product Goal source turn is not owned by this Project.",
             )
             if source_turn is not None:
+                self._require_product_condition(
+                    row.statement == source_turn.goal_statement,
+                    "Product Goal statement differs from its source interview.",
+                )
                 self._require_product_condition(
                     source_turn.is_complete,
                     "Product Goal source interview must be complete.",
@@ -1155,6 +1238,7 @@ class WorkflowFactRepository:
         project_id: int,
         visions: dict[int, str],
         goals: dict[int, ProductGoalArtifactFact],
+        active_goal_ids: frozenset[int],
     ) -> dict[int, DiscoveryArtifactFact]:
         rows = self._session.exec(
             select(DiscoveryArtifact)
@@ -1180,6 +1264,17 @@ class WorkflowFactRepository:
                 goal_fingerprints,
                 "discovery Product Goal",
             )
+            goal = goals.get(row.product_goal_artifact_id)
+            self._require_product_condition(
+                row.product_goal_artifact_id in active_goal_ids,
+                "Discovery Product Goal is not accepted and active.",
+            )
+            if goal is not None:
+                self._require_product_condition(
+                    (goal.vision_artifact_id, goal.vision_fingerprint)
+                    == (row.vision_artifact_id, row.vision_fingerprint),
+                    "Discovery Vision does not match its Product Goal Vision.",
+                )
             self._canonical_object(
                 row.canonical_content_json,
                 row.content_fingerprint,
@@ -1250,6 +1345,29 @@ class WorkflowFactRepository:
                 discovery_fingerprints,
                 "specification candidate discovery",
             )
+            goal = goals.get(row.product_goal_artifact_id)
+            discovery = discoveries.get(row.discovery_artifact_id)
+            if goal is not None and discovery is not None:
+                self._require_product_condition(
+                    (goal.vision_artifact_id, goal.vision_fingerprint)
+                    == (row.vision_artifact_id, row.vision_fingerprint)
+                    == (
+                        discovery.vision_artifact_id,
+                        discovery.vision_fingerprint,
+                    ),
+                    "Specification candidate Vision does not match its chain.",
+                )
+                self._require_product_condition(
+                    (
+                        row.product_goal_artifact_id,
+                        row.product_goal_fingerprint,
+                    )
+                    == (
+                        discovery.product_goal_artifact_id,
+                        discovery.product_goal_fingerprint,
+                    ),
+                    "Specification candidate Product Goal does not match discovery.",
+                )
             base_is_complete = (
                 row.base_spec_version_id is not None and row.base_spec_hash is not None
             )
@@ -1326,6 +1444,19 @@ class WorkflowFactRepository:
             if row.decision == "accepted":
                 accepted_goal_ids.add(row.product_goal_artifact_id)
         return frozenset(accepted_goal_ids)
+
+    @staticmethod
+    def _active_accepted_product_goal_ids(
+        goals: dict[int, ProductGoalArtifactFact],
+        accepted_goal_ids: frozenset[int],
+    ) -> frozenset[int]:
+        """Return accepted Goals not replaced by a newer immutable version."""
+        superseded_goal_ids = {
+            item.supersedes_product_goal_artifact_id
+            for item in goals.values()
+            if item.supersedes_product_goal_artifact_id is not None
+        }
+        return accepted_goal_ids - superseded_goal_ids
 
     def _product_goal_outcomes(
         self,
@@ -4248,6 +4379,40 @@ class WorkflowFactRepository:
             return "revision"
         message = f"Invalid Vision interview mode {value!r}."
         raise WorkflowFactRepository._error(message)
+
+    @staticmethod
+    def _vision_interview_output_fingerprint(
+        components: JsonObject,
+        vision_statement: str,
+        is_complete: bool,
+        clarifying_questions: tuple[str, ...],
+    ) -> str:
+        """Hash the canonical Vision model output without user-input trace data."""
+        return canonical_hash(
+            {
+                "components_json": components,
+                "vision_statement": vision_statement,
+                "is_complete": is_complete,
+                "clarifying_questions_json": list(clarifying_questions),
+            }
+        )
+
+    @staticmethod
+    def _product_goal_interview_output_fingerprint(
+        components: JsonObject,
+        goal_statement: str,
+        is_complete: bool,
+        clarifying_questions: tuple[str, ...],
+    ) -> str:
+        """Hash the canonical Product Goal model output without trace data."""
+        return canonical_hash(
+            {
+                "components_json": components,
+                "goal_statement": goal_statement,
+                "is_complete": is_complete,
+                "clarifying_questions_json": list(clarifying_questions),
+            }
+        )
 
     @staticmethod
     def _product_goal_outcome(value: str) -> _ProductGoalOutcome:
