@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import os
-from typing import TYPE_CHECKING
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, cast
 
 import pytest
 from git import Repo
@@ -15,6 +16,7 @@ from services.repository_probe import (
     RepositoryProbeErrorCode,
     RepositoryStatusEntry,
 )
+from workflow.fingerprints import canonical_hash
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -169,17 +171,70 @@ def test_zero_one_and_multiple_remote_urls_are_sorted(git_repository: Path) -> N
 
 
 def test_non_ascii_and_surrogateescaped_paths_have_stable_normalization(
-    git_repository: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Keep filesystem-native non-ASCII bytes reversible in status entries."""
-    (git_repository / "cafe\u00e9.txt").write_text("accent\n", encoding="utf-8")
+    """Expose surrogateescaped Git status through the public probe result."""
     raw_name = b"surrogate-\xff.txt"
+    surrogate_path = os.fsdecode(raw_name)
+    unicode_path = "cafe\u00e9.txt"
+    worktree_path = str(tmp_path)
+    common_git_dir = str(tmp_path / ".git")
+    fake_repo = SimpleNamespace(
+        bare=False,
+        head=SimpleNamespace(
+            commit=SimpleNamespace(hexsha="a" * 40),
+            is_detached=False,
+            is_valid=lambda: True,
+        ),
+        index=SimpleNamespace(diff=lambda _other: ()),
+        untracked_files=(unicode_path, surrogate_path),
+        remotes=(),
+        working_tree_dir=worktree_path,
+        common_dir=common_git_dir,
+        active_branch=SimpleNamespace(name="main"),
+    )
 
-    result = GitPythonRepositoryProbe().inspect(git_repository)
+    def repository_factory(*_args: object, **_kwargs: object) -> Repo:
+        return cast("Repo", fake_repo)
 
-    assert "cafe\u00e9.txt" in {entry.path for entry in result.status_entries}
-    normalized_raw_name = adapter_module._normalize_text(os.fsdecode(raw_name))
-    assert normalized_raw_name == os.fsdecode(raw_name)
+    monkeypatch.setattr(adapter_module, "Repo", repository_factory)
+
+    result = GitPythonRepositoryProbe().inspect(tmp_path)
+    expected_entries = tuple(
+        sorted(
+            (
+                RepositoryStatusEntry(
+                    area="untracked",
+                    change="added",
+                    path=unicode_path,
+                ),
+                RepositoryStatusEntry(
+                    area="untracked",
+                    change="added",
+                    path=surrogate_path,
+                ),
+            ),
+            key=lambda entry: os.fsencode(entry.path),
+        )
+    )
+    expected_fingerprint = canonical_hash(
+        {
+            "probe_version": "agileforge.repository-probe.v1",
+            "worktree_path": worktree_path,
+            "common_git_dir": common_git_dir,
+            "head_sha": "a" * 40,
+            "branch_name": "main",
+            "detached_head": False,
+            "status_entries": [
+                entry.model_dump(mode="json") for entry in expected_entries
+            ],
+            "remotes": (),
+        }
+    )
+
+    assert result.status_entries == expected_entries
+    assert result.status_fingerprint == expected_fingerprint
 
 
 def test_regular_file_path_returns_path_not_directory(git_repository: Path) -> None:
