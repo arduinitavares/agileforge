@@ -712,6 +712,7 @@ git commit -m "feat: add vision interview and review"
 - Create: `workflow/handlers/product_discovery.py`
 - Create: `workflow/definitions/product_discovery.py`
 - Create: `services/authority_compilation_input.py`
+- Modify: `models/product_definition.py`
 - Modify: `models/specs.py`
 - Modify: `workflow/facts.py`
 - Modify: `repositories/workflow.py`
@@ -908,6 +909,8 @@ a rejected or feedback specification can be replaced only through exact supersed
 
 Define `RecordDiscoveryArtifact`, `RecordSpecificationCandidate`, and `DecideSpecification`. Discovery input contains canonical JSON, optional content reference, and producer fixed to `grill-me-with-docs`. Specification input contains canonical JSON and optional content reference; the handler derives current base spec identity from durable state. Callers never supply base version or hash.
 
+Task 2 already created `SpecificationDecision`; extend that existing append-only record rather than adding another decision table. Its check constraint and typed fact must permit exactly `accepted|rejected|feedback`. Load decisions into `WorkflowFactSnapshot` so graph rules and read projections can distinguish a pending candidate from terminal rejection or feedback. Each decision binds the exact candidate identity/fingerprint, is causally later than that candidate, and is unique per candidate terminal review. Feedback and rejection require a non-blank rationale.
+
 - [ ] **Step 7: Harden specification lineage and transaction tests**
 
 Make every Task 2 `SpecRegistry` source field non-nullable. Permit only `approved` and `superseded` status. `DecideSpecification(decision="accepted")` inserts one registry row with every exact source identity/fingerprint and supersedes the prior current row in the same transaction.
@@ -956,7 +959,7 @@ git diff --check
 Commit:
 
 ```bash
-git add workflow/requests/product_goal.py workflow/handlers/product_goal.py workflow/definitions/product_goal.py services/product_goal_interview_input.py services/contracts/product_goal.py adapters/adk/agents/product_goal.py adapters/adk/prompts/product_goal.txt workflow/requests/product_discovery.py workflow/handlers/product_discovery.py workflow/definitions/product_discovery.py services/authority_compilation_input.py models/specs.py workflow/facts.py repositories/workflow.py workflow/requests/__init__.py workflow/handlers/__init__.py workflow/domain.py services/application.py services/read_projections.py adapters/adk/recipes.py adapters/adk/runner.py adapters/adk/model_roles.py config/models.yaml config/models.test.yaml utils/agileforge_spec_profile.py tests/services/contracts/test_product_goal.py tests/services/test_product_goal_interview_input.py tests/adapters/test_product_goal.py tests/workflow/test_product_goal_graph.py tests/workflow/test_product_goal_transitions.py tests/workflow/test_product_discovery_graph.py tests/workflow/test_product_discovery_transitions.py tests/services/test_authority_compilation_input.py tests/adapters/test_initial_spec_read.py
+git add workflow/requests/product_goal.py workflow/handlers/product_goal.py workflow/definitions/product_goal.py services/product_goal_interview_input.py services/contracts/product_goal.py adapters/adk/agents/product_goal.py adapters/adk/prompts/product_goal.txt workflow/requests/product_discovery.py workflow/handlers/product_discovery.py workflow/definitions/product_discovery.py services/authority_compilation_input.py models/product_definition.py models/specs.py workflow/facts.py repositories/workflow.py workflow/requests/__init__.py workflow/handlers/__init__.py workflow/domain.py services/application.py services/read_projections.py adapters/adk/recipes.py adapters/adk/runner.py adapters/adk/model_roles.py config/models.yaml config/models.test.yaml utils/agileforge_spec_profile.py tests/services/contracts/test_product_goal.py tests/services/test_product_goal_interview_input.py tests/adapters/test_product_goal.py tests/workflow/test_product_goal_graph.py tests/workflow/test_product_goal_transitions.py tests/workflow/test_product_discovery_graph.py tests/workflow/test_product_discovery_transitions.py tests/services/test_authority_compilation_input.py tests/adapters/test_initial_spec_read.py
 git commit -m "feat: add product goal and discovery cycle"
 ```
 
