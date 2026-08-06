@@ -14,6 +14,7 @@ from models.enums import SprintStatus
 from models.product_definition import (
     DiscoveryArtifact,
     ProductGoalArtifact,
+    ProductGoalArtifactDecision,
     ProductGoalInterviewTurn,
     ProductGoalOutcome,
     SpecificationCandidate,
@@ -40,6 +41,8 @@ from workflow.fingerprints import (
     canonical_hash,
     canonical_json,
     canonical_stored_json_hash,
+    product_goal_artifact_fingerprint,
+    product_goal_interview_output_fingerprint,
 )
 from workflow.graph import ChildGraphSpec, WorkflowGraph
 from workflow.requests import (
@@ -172,6 +175,98 @@ def _seed_accepted_vision(engine: Engine, *, name: str = "Goal reload") -> int:
         )
         session.commit()
         return project.project_id
+
+
+def _add_accepted_goal_chain(
+    session: Session,
+    project_id: int,
+    vision: VisionArtifact,
+    *,
+    goal_number: int,
+) -> None:
+    """Persist one complete accepted Goal chain without a terminal outcome."""
+    recorded_at = NOW + timedelta(minutes=goal_number)
+    attempt = WorkflowNodeAttempt(
+        project_id=project_id,
+        node_id="goal.interview",
+        instance_key=None,
+        graph_version=GRAPH_VERSION,
+        fact_fingerprint=f"sha256:facts-{goal_number}",
+        business_fact_fingerprint=f"sha256:business-{goal_number}",
+        decision_fingerprint=f"sha256:decision-{goal_number}",
+        normalized_input_json="{}",
+        input_fingerprint=f"sha256:input-{goal_number}",
+        model_id="fake/goal",
+        execution_settings_json="{}",
+        idempotency_key=f"ambiguous-goal-{goal_number}-attempt",
+        actor="operator",
+        correlation_id=None,
+        started_at=recorded_at,
+        lease_expires_at=recorded_at + timedelta(minutes=1),
+        attempt_fingerprint=f"sha256:goal-attempt-{goal_number}",
+    )
+    session.add(attempt)
+    session.flush()
+    assert attempt.workflow_node_attempt_id is not None
+
+    components = {
+        "valuable_future_state": f"Reliable decisions {goal_number}",
+        "beneficiary": "Operators",
+        "value": "Confidence",
+        "success_signals": ["Measured outcomes"],
+        "boundaries": ["No implementation"],
+    }
+    statement = f"Operators complete accepted Goal {goal_number}."
+    turn = ProductGoalInterviewTurn(
+        project_id=project_id,
+        vision_artifact_id=vision.vision_artifact_id,
+        vision_fingerprint=vision.content_fingerprint,
+        goal_number=goal_number,
+        revision_number=1,
+        prior_turn_id=None,
+        user_text=f"Define Goal {goal_number}",
+        components_json=canonical_json(components),
+        goal_statement=statement,
+        is_complete=True,
+        clarifying_questions_json="[]",
+        output_fingerprint=product_goal_interview_output_fingerprint(
+            components, statement, True, ()
+        ),
+        workflow_node_attempt_id=attempt.workflow_node_attempt_id,
+        attempt_fingerprint=attempt.attempt_fingerprint,
+        recorded_at=recorded_at + timedelta(seconds=1),
+    )
+    session.add(turn)
+    session.flush()
+    assert turn.product_goal_interview_turn_id is not None
+    goal = ProductGoalArtifact(
+        project_id=project_id,
+        vision_artifact_id=vision.vision_artifact_id,
+        vision_fingerprint=vision.content_fingerprint,
+        goal_number=goal_number,
+        revision_number=1,
+        statement=statement,
+        content_fingerprint=product_goal_artifact_fingerprint(components, statement),
+        supersedes_product_goal_artifact_id=None,
+        source_interview_turn_id=turn.product_goal_interview_turn_id,
+        created_by="operator",
+        created_at=recorded_at + timedelta(seconds=2),
+    )
+    session.add(goal)
+    session.flush()
+    assert goal.product_goal_artifact_id is not None
+    session.add(
+        ProductGoalArtifactDecision(
+            project_id=project_id,
+            product_goal_artifact_id=goal.product_goal_artifact_id,
+            artifact_fingerprint=goal.content_fingerprint,
+            decision="accepted",
+            rationale="Accepted without an outcome.",
+            reviewer="operator",
+            idempotency_key=f"ambiguous-goal-{goal_number}-accepted",
+            decided_at=recorded_at + timedelta(seconds=3),
+        )
+    )
 
 
 def _record_turn(
@@ -552,6 +647,32 @@ def test_goal_input_ignores_unrelated_facts_but_rejects_goal_lineage(
     with pytest.raises(WorkflowFactLoadError):
         ProductGoalInterviewInputService(engine=engine).build(
             project_id, decision, "Reject malformed Goal lineage"
+        )
+
+
+def test_goal_input_rejects_multiple_unresolved_accepted_goals(
+    engine: Engine,
+) -> None:
+    """Contradictory accepted Goal chains cannot authorize host input."""
+    project_id = _seed_accepted_vision(engine)
+    position = _domain(engine).position(project_id)
+    decision = next(
+        item for item in position.decisions if item.node_id == "goal.interview"
+    )
+    with Session(engine) as session:
+        vision = session.exec(
+            select(VisionArtifact).where(VisionArtifact.project_id == project_id)
+        ).one()
+        _add_accepted_goal_chain(session, project_id, vision, goal_number=1)
+        _add_accepted_goal_chain(session, project_id, vision, goal_number=2)
+        session.commit()
+
+    with pytest.raises(
+        WorkflowFactLoadError,
+        match="more than one accepted Product Goal without an outcome",
+    ):
+        ProductGoalInterviewInputService(engine=engine).build(
+            project_id, decision, "Do not prepare from ambiguous Goal state"
         )
 
 

@@ -359,6 +359,7 @@ class WorkflowFactRepository:
             goals = self._product_goals(project_id, vision_fingerprints, turns)
             decisions = self._product_goal_decisions(project_id, goals)
             outcomes = self._product_goal_outcomes(project_id, goals, decisions)
+            self._active_accepted_product_goal_ids(decisions, outcomes)
             return WorkflowFactSnapshot(
                 project=project,
                 vision_artifacts=tuple(visions.values()),
