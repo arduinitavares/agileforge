@@ -10,19 +10,10 @@ from google.adk import Context, Workflow
 from google.adk.workflow import START, JoinNode, RetryConfig, node
 from pydantic import BaseModel, ConfigDict, TypeAdapter
 
-from services.contracts.brownfield import (
-    BrownfieldCurationInput,
-    BrownfieldCurationOutput,
-)
 from services.contracts.product_goal import ProductGoalInterviewOutput
 from services.contracts.vision import (
-    LegacyVisionInput,
-    LegacyVisionOutput,
-    LegacyVisionRecipeInput,
     VisionInterviewOutput,
 )
-from services.specs.profile_content import normalize_spec_content_for_registry
-from utils.agileforge_spec_profile import canonical_spec_json
 from utils.spec_schemas import (
     SpecAuthorityCompilationFailure,
     SpecAuthorityCompilationSuccess,
@@ -30,17 +21,13 @@ from utils.spec_schemas import (
     SpecAuthorityCompilerInput,
 )
 from workflow.contracts import JsonObject
-from workflow.definitions.root import ROOT_GRAPH
-from workflow.fingerprints import canonical_hash
 from workflow.requests import (
     CompileAuthority,
     RecordBacklogDraft,
-    RecordBrownfieldSpecDraft,
     RecordProductGoalInterviewTurn,
     RecordRoadmapDraft,
     RecordSprintPlan,
     RecordStoryDraft,
-    RecordVisionDraft,
     RecordVisionInterviewTurn,
     RepairAuthority,
 )
@@ -50,19 +37,15 @@ if TYPE_CHECKING:
     from google.adk.agents import BaseAgent
 
 _JSON_OBJECT = TypeAdapter(JsonObject)
-_VISION_INTERVIEW_INSERTION_INDEX = ROOT_GRAPH.agentic_node_ids.index(
-    "vision.generate"
-) + 1
-TASK3_AGENTIC_NODE_IDS = (
-    *ROOT_GRAPH.agentic_node_ids[:_VISION_INTERVIEW_INSERTION_INDEX],
+AGENTIC_NODE_IDS = (
+    "authority.compile",
+    "authority.repair",
     "vision.interview",
-    *ROOT_GRAPH.agentic_node_ids[_VISION_INTERVIEW_INSERTION_INDEX:],
-)
-_PRODUCT_GOAL_INSERTION_INDEX = TASK3_AGENTIC_NODE_IDS.index("vision.interview") + 1
-TASK4_AGENTIC_NODE_IDS = (
-    *TASK3_AGENTIC_NODE_IDS[:_PRODUCT_GOAL_INSERTION_INDEX],
     "goal.interview",
-    *TASK3_AGENTIC_NODE_IDS[_PRODUCT_GOAL_INSERTION_INDEX:],
+    "backlog.generate",
+    "planning.roadmap.generate",
+    "planning.story.generate",
+    "planning.sprint.plan",
 )
 
 
@@ -89,15 +72,6 @@ class _JoinedBacklogValidations(BaseModel):
     model_config = ConfigDict(extra="forbid")
     validate_structure: RecipeOutput
     validate_round_trip: RecipeOutput
-
-
-class _BrownfieldRecipePayload(BaseModel):
-    """Trusted host metadata kept outside model-controlled output."""
-
-    model_config = ConfigDict(extra="forbid")
-    curation_input: BrownfieldCurationInput
-    supersedes_spec_draft_id: int | None = None
-    provenance_path: str | None = None
 
 
 class _CompileAuthorityRecipePayload(BaseModel):
@@ -160,16 +134,14 @@ class AdkRecipe:
 class AgenticRecipeNodes:
     """Injected retained execution nodes used to compose the complete registry."""
 
-    brownfield_curator: BaseAgent | Workflow
     authority_compile: BaseAgent | Workflow
     authority_repair: BaseAgent | Workflow
-    vision_generation: BaseAgent | Workflow
+    vision_interview: BaseAgent | Workflow
+    product_goal: BaseAgent | Workflow
     backlog_generation: BaseAgent | Workflow
     roadmap_generation: BaseAgent | Workflow
     story_generation: BaseAgent | Workflow
     sprint_planning: BaseAgent | Workflow
-    vision_interview: BaseAgent | Workflow | None = None
-    product_goal: BaseAgent | Workflow | None = None
 
 
 class UnknownAdkRecipeError(LookupError):
@@ -270,32 +242,6 @@ def _request_output_adapter(
         return request_type.model_validate(payload)
 
     return adapt
-
-
-def _legacy_vision_output_adapter(
-    output: object,
-    context: AttemptCompletionContext,
-) -> RecordVisionDraft:
-    """Bind the retained recipe to its persisted human input and attempt."""
-    payload = dict(RecipeOutput.model_validate(output).payload)
-    user_text = context.normalized_input.get("user_raw_text")
-    if isinstance(user_text, str) and user_text.strip():
-        payload["user_text"] = user_text
-    payload.update(
-        {
-            "project_id": context.project_id,
-            "graph_version": context.graph_version,
-            "fact_fingerprint": context.fact_fingerprint,
-            "decision_fingerprint": context.decision_fingerprint,
-            "instance_key": context.instance_key,
-            "attempt_id": context.attempt_id,
-            "attempt_fingerprint": context.attempt_fingerprint,
-            "idempotency_key": context.idempotency_key,
-            "actor": context.actor,
-            "correlation_id": context.correlation_id,
-        }
-    )
-    return RecordVisionDraft.model_validate(payload)
 
 
 def _vision_interview_output_adapter(
@@ -402,113 +348,6 @@ def _build_single_leaf_workflow(
         input_schema=RecipeInput,
         output_schema=RecipeOutput,
         edges=[(START, execute_leaf)],
-    )
-
-
-def _build_legacy_vision_workflow(
-    *,
-    leaf_agent: BaseAgent | Workflow,
-    execution_settings: JsonObject,
-) -> Workflow:
-    """Bridge the retained legacy Vision output into RecordVisionDraft fields."""
-    timeout_seconds, max_attempts = _execution_limits(execution_settings)
-    retry_config = RetryConfig(max_attempts=max_attempts)
-
-    @node(
-        name="execute_legacy_vision_generator",
-        rerun_on_resume=True,
-        retry_config=retry_config,
-        timeout=timeout_seconds,
-    )
-    async def execute_legacy_vision_generator(
-        context: Context,
-        node_input: RecipeInput,
-    ) -> RecipeOutput:
-        payload = LegacyVisionRecipeInput.model_validate(node_input.payload)
-        legacy_input = LegacyVisionInput(
-            user_raw_text=payload.user_raw_text,
-            specification_content=payload.specification_content,
-            prior_vision_state=payload.prior_vision_state,
-            compiled_authority=payload.compiled_authority,
-        )
-        generated = await context.run_node(
-            leaf_agent,
-            node_input=legacy_input.model_dump(mode="json"),
-        )
-        legacy_output = LegacyVisionOutput.model_validate(generated)
-        canonical_content = legacy_output.model_dump(mode="json")
-        return RecipeOutput(
-            payload={
-                "authority_id": payload.authority_id,
-                "authority_fingerprint": payload.authority_fingerprint,
-                "canonical_content": canonical_content,
-                "content_fingerprint": canonical_hash(canonical_content),
-                "supersedes_vision_artifact_id": (
-                    payload.supersedes_vision_artifact_id
-                ),
-            }
-        )
-
-    return Workflow(
-        name="legacy_vision_generation",
-        retry_config=retry_config,
-        timeout=timeout_seconds,
-        input_schema=RecipeInput,
-        output_schema=RecipeOutput,
-        edges=[(START, execute_legacy_vision_generator)],
-    )
-
-
-def _build_brownfield_curation_workflow(
-    *,
-    leaf_agent: BaseAgent | Workflow,
-    execution_settings: JsonObject,
-) -> Workflow:
-    """Run pre-authority curation and emit one canonical draft payload."""
-    timeout_seconds, max_attempts = _execution_limits(execution_settings)
-    retry_config = RetryConfig(max_attempts=max_attempts)
-
-    @node(
-        name="execute_brownfield_curator",
-        rerun_on_resume=True,
-        retry_config=retry_config,
-        timeout=timeout_seconds,
-    )
-    async def execute_brownfield_curator(
-        context: Context,
-        node_input: RecipeInput,
-    ) -> RecipeOutput:
-        payload = _BrownfieldRecipePayload.model_validate(node_input.payload)
-        generated = await context.run_node(
-            leaf_agent,
-            node_input=payload.curation_input.model_dump(mode="json"),
-        )
-        curated = BrownfieldCurationOutput.model_validate(generated)
-        normalized = normalize_spec_content_for_registry(
-            canonical_spec_json(curated.canonical_spec)
-        )
-        inventory = payload.curation_input.inventory
-        return RecipeOutput(
-            payload={
-                "repository_inventory_id": inventory.repository_inventory_id,
-                "repository_inventory_fingerprint": (
-                    inventory.repository_inventory_fingerprint
-                ),
-                "canonical_content": _JSON_OBJECT.validate_json(
-                    normalized.content
-                ),
-                "supersedes_spec_draft_id": payload.supersedes_spec_draft_id,
-                "provenance_path": payload.provenance_path,
-            }
-        )
-
-    return Workflow(
-        name="brownfield_curation",
-        retry_config=retry_config,
-        timeout=timeout_seconds,
-        input_schema=RecipeInput,
-        output_schema=RecipeOutput,
-        edges=[(START, execute_brownfield_curator)],
     )
 
 
@@ -685,14 +524,6 @@ def build_agentic_recipe_registry(
     return AdkRecipeRegistry(
         (
             AdkRecipe(
-                node_id="onboarding.brownfield.curation",
-                workflow=_build_brownfield_curation_workflow(
-                    leaf_agent=nodes.brownfield_curator,
-                    execution_settings=execution_settings,
-                ),
-                output_adapter=_request_output_adapter(RecordBrownfieldSpecDraft),
-            ),
-            AdkRecipe(
                 node_id="authority.compile",
                 workflow=_build_authority_workflow(
                     workflow_name="authority_compilation",
@@ -715,38 +546,24 @@ def build_agentic_recipe_registry(
                 output_adapter=_request_output_adapter(RepairAuthority),
             ),
             AdkRecipe(
-                node_id="vision.generate",
-                workflow=_build_legacy_vision_workflow(
-                    leaf_agent=nodes.vision_generation,
-                    execution_settings=execution_settings,
-                ),
-                output_adapter=_legacy_vision_output_adapter,
-            ),
-            AdkRecipe(
                 node_id="vision.interview",
                 workflow=_build_single_leaf_workflow(
                     workflow_name="vision_interview",
                     execution_node_name="execute_vision_interviewer",
-                    leaf_agent=_require_vision_interviewer(nodes),
+                    leaf_agent=nodes.vision_interview,
                     execution_settings=execution_settings,
                 ),
                 output_adapter=_vision_interview_output_adapter,
             ),
-            *(
-                (
-                    AdkRecipe(
-                        node_id="goal.interview",
-                        workflow=_build_single_leaf_workflow(
-                            workflow_name="product_goal_interview",
-                            execution_node_name="execute_product_goal_interviewer",
-                            leaf_agent=_require_product_goal_interviewer(nodes),
-                            execution_settings=execution_settings,
-                        ),
-                        output_adapter=_product_goal_interview_output_adapter,
-                    ),
-                )
-                if nodes.product_goal is not None
-                else ()
+            AdkRecipe(
+                node_id="goal.interview",
+                workflow=_build_single_leaf_workflow(
+                    workflow_name="product_goal_interview",
+                    execution_node_name="execute_product_goal_interviewer",
+                    leaf_agent=nodes.product_goal,
+                    execution_settings=execution_settings,
+                ),
+                output_adapter=_product_goal_interview_output_adapter,
             ),
             AdkRecipe(
                 node_id="backlog.generate",
@@ -787,37 +604,12 @@ def build_agentic_recipe_registry(
                 output_adapter=_request_output_adapter(RecordSprintPlan),
             ),
         ),
-        required_node_ids=(
-            TASK4_AGENTIC_NODE_IDS
-            if nodes.product_goal is not None
-            else TASK3_AGENTIC_NODE_IDS
-        ),
+        required_node_ids=AGENTIC_NODE_IDS,
     )
 
 
-def _require_vision_interviewer(
-    nodes: AgenticRecipeNodes,
-) -> BaseAgent | Workflow:
-    """Return the explicitly injected isolated Vision interview agent."""
-    if nodes.vision_interview is None:
-        message = "The isolated Vision interview recipe requires its own agent."
-        raise ValueError(message)
-    return nodes.vision_interview
-
-
-def _require_product_goal_interviewer(
-    nodes: AgenticRecipeNodes,
-) -> BaseAgent | Workflow:
-    """Return the explicitly injected isolated Product Goal interview agent."""
-    if nodes.product_goal is None:
-        message = "The Product Goal interview recipe requires its own agent."
-        raise ValueError(message)
-    return nodes.product_goal
-
-
 __all__ = [
-    "TASK3_AGENTIC_NODE_IDS",
-    "TASK4_AGENTIC_NODE_IDS",
+    "AGENTIC_NODE_IDS",
     "AdkRecipe",
     "AdkRecipeRegistry",
     "AgenticRecipeNodes",

@@ -154,6 +154,13 @@ def _seed_current_spec(engine: Engine, spec_path: Path) -> tuple[int, int, str]:
             status="approved",
             approved_at=EVALUATED_AT,
             approved_by="reviewer",
+            source_specification_candidate_id=1,
+            source_vision_artifact_id=1,
+            source_vision_fingerprint="sha256:vision",
+            source_product_goal_artifact_id=1,
+            source_product_goal_fingerprint="sha256:goal",
+            source_discovery_artifact_id=1,
+            source_discovery_fingerprint="sha256:discovery",
         )
         session.add(spec)
         session.commit()
@@ -878,7 +885,7 @@ def test_post_flush_compile_failure_rolls_back_and_identical_retry_replays(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A post-write exception rolls back authority, cache, and receipt."""
+    """A post-write exception rolls back authority and receipt without a cache."""
     project_id, spec_version_id, spec_hash = _seed_current_spec(
         engine, tmp_path / "compile-rollback.md"
     )
@@ -900,7 +907,7 @@ def test_post_flush_compile_failure_rolls_back_and_identical_retry_replays(
         assert session.exec(select(CompiledSpecAuthority)).one()
         project = session.get(Project, project_id)
         assert project is not None
-        assert project.compiled_authority_json is not None
+        assert project.compiled_authority_json is None
         assert receipt.workflow_transition_receipt_id is not None
         assert result is not None
         msg = "injected after compile writes"

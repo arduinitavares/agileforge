@@ -548,35 +548,6 @@ def _vision_revision_start_rule(
     )
 
 
-def _goal_interview_rule(
-    snapshot: WorkflowFactSnapshot,
-    _evaluated_at: datetime,
-) -> tuple[RuleEvaluation, ...]:
-    state = _isolated_vision_state(snapshot)
-    if state.conflict:
-        return (RuleEvaluation(RuleCategory.INVALID, "WORKFLOW_FACT_CONFLICT"),)
-    if (
-        state.artifact is None
-        or state.decision is None
-        or state.decision.decision != "accepted"
-        or state.open_revision is not None
-    ):
-        return (RuleEvaluation(RuleCategory.SATISFIED, "PRODUCT_GOAL_NOT_READY"),)
-    return (
-        RuleEvaluation(
-            RuleCategory.AVAILABLE,
-            "PRODUCT_GOAL_INTERVIEW_REQUIRED",
-            fact_references=(
-                _reference(
-                    "vision",
-                    state.artifact.vision_artifact_id,
-                    state.artifact.content_fingerprint,
-                ),
-            ),
-        ),
-    )
-
-
 VISION_INTERVIEW_NODES: tuple[NodeSpec, ...] = (
     NodeSpec(
         node_id="vision.interview",
@@ -618,14 +589,6 @@ VISION_INTERVIEW_NODES: tuple[NodeSpec, ...] = (
             InputField(name="reason", value_type="string"),
         ),
         evaluate_rule=_vision_revision_start_rule,
-    ),
-    NodeSpec(
-        node_id="goal.interview",
-        child_graph_id="product_goal",
-        request_kind="goal_interview_pending_implementation",
-        recommendation_kind=RecommendationKind.REQUIRED,
-        required_inputs=(),
-        evaluate_rule=_goal_interview_rule,
     ),
 )
 

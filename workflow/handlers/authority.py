@@ -95,8 +95,6 @@ def _record_authority_decision(
         authority_fingerprint=authority_fingerprint,
         review_token=snapshot.review_token,
         review_fingerprint=request.review_fingerprint,
-        disk_spec_hash=snapshot.disk_spec_hash,
-        resolved_spec_path=snapshot.resolved_spec_path,
         actor_mode="workflow_domain",
         review_completeness=snapshot.omission_assessment,
         terminal_decision_key=key,

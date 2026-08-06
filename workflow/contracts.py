@@ -17,7 +17,7 @@ from pydantic import (
 )
 from pydantic_core import PydanticCustomError
 
-GRAPH_VERSION: str = "agileforge.workflow.v1"
+GRAPH_VERSION: str = "agileforge.workflow.v2"
 _DATETIME = _datetime.datetime
 _INVALID_JSON_KEY_CODE = "invalid_json_key"
 _INVALID_JSON_KEY = "Transition output mappings must use string keys."

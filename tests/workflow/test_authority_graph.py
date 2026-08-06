@@ -165,8 +165,8 @@ def test_pending_authority_derives_human_review_waiting_from_facts() -> None:
     assert "authority.compile" not in position.available_nodes
 
 
-def test_accepted_authority_unlocks_only_the_next_child_boundary() -> None:
-    """Only accepted authority for the current spec exposes Vision."""
+def test_accepted_authority_does_not_expose_a_vision_boundary() -> None:
+    """Accepted authority completes the isolated Authority graph."""
     position = authority_graph().evaluate(
         _snapshot(
             authorities=(_authority(status="accepted"),),
@@ -177,7 +177,7 @@ def test_accepted_authority_unlocks_only_the_next_child_boundary() -> None:
 
     assert "authority.compile" not in position.available_nodes
     assert "authority.review" not in position.waiting_nodes
-    assert position.available_nodes == ("vision.generate",)
+    assert position.available_nodes == ()
 
 
 def test_rejected_authority_routes_to_typed_feedback() -> None:
@@ -303,7 +303,6 @@ def test_conflicting_terminal_decisions_fail_closed() -> None:
         "authority.review",
         "authority.feedback",
         "authority.repair",
-        "vision.generate",
     )
     assert all(
         decision.reason_code == "WORKFLOW_FACT_CONFLICT"

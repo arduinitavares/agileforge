@@ -1004,11 +1004,8 @@ def _stale_vision_revision(position: WorkflowPosition) -> TransitionResult:
 
 @cache
 def production_application() -> AgileForgeApplication:
-    """Compose the production domain and all eight ADK recipe leaves."""
+    """Compose the production domain and exact v2 ADK recipe leaves."""
     from adapters.adk.agents.backlog import root_agent as backlog_agent  # noqa: PLC0415
-    from adapters.adk.agents.brownfield import (  # noqa: PLC0415
-        build_brownfield_curator_agent,
-    )
     from adapters.adk.agents.roadmap import root_agent as roadmap_agent  # noqa: PLC0415
     from adapters.adk.agents.specification import (  # noqa: PLC0415
         build_spec_authority_compiler_agent,
@@ -1017,7 +1014,6 @@ def production_application() -> AgileForgeApplication:
     from adapters.adk.agents.story import (  # noqa: PLC0415
         create_user_story_writer_agent,
     )
-    from adapters.adk.agents.vision import legacy_root_agent  # noqa: PLC0415
     from adapters.adk.agents.vision import (  # noqa: PLC0415
         root_agent as vision_interview_agent,
     )
@@ -1043,10 +1039,8 @@ def production_application() -> AgileForgeApplication:
     graph = project_graph()
     registry = build_agentic_recipe_registry(
         nodes=AgenticRecipeNodes(
-            brownfield_curator=build_brownfield_curator_agent(),
             authority_compile=build_spec_authority_compiler_agent(),
             authority_repair=build_spec_authority_compiler_agent(),
-            vision_generation=legacy_root_agent,
             vision_interview=vision_interview_agent,
             product_goal=product_goal_interview_agent,
             backlog_generation=backlog_agent,

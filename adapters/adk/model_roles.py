@@ -9,10 +9,8 @@ from workflow.definitions.root import ROOT_GRAPH
 
 AGENTIC_MODEL_ROLES: Final[MappingProxyType[str, str]] = MappingProxyType(
     {
-        "onboarding.brownfield.curation": "brownfield_curator",
         "authority.compile": "spec_authority_compiler",
         "authority.repair": "spec_authority_compiler",
-        "vision.generate": "product_vision",
         "vision.interview": "product_vision",
         "goal.interview": "product_goal",
         "backlog.generate": "backlog_primer",

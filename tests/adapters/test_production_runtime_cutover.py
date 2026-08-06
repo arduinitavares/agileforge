@@ -1,13 +1,14 @@
 """Production composition boundary tests for the atomic graph cutover."""
 
+import json
 import os
 import subprocess  # nosec B404
 import sys
 from pathlib import Path
 
 
-def test_production_composition_does_not_load_legacy_authority() -> None:
-    """Build the real eight-leaf application without importing old runtime code."""
+def test_production_composition_does_not_load_retired_runtime_code() -> None:
+    """Build the v2 application without retired authority setup composition."""
     root = Path(__file__).parents[2]
     environment = dict(os.environ)
     environment.update(
@@ -38,7 +39,13 @@ legacy = sorted(
     name for name in sys.modules
     if name == deleted_root or name.startswith(f"{deleted_root}.")
 )
-print(json.dumps(legacy))
+brownfield = sorted(
+    name for name in sys.modules
+    if name == "adapters.adk.agents.brownfield"
+    or name.startswith("adapters.adk.agents.brownfield.")
+)
+print(json.dumps({"legacy": legacy, "brownfield": brownfield,
+                  "recipe_nodes": application._recipe_registry.node_ids}))
 """
 
     result = subprocess.run(  # nosec B603  # noqa: S603
@@ -50,4 +57,17 @@ print(json.dumps(legacy))
         text=True,
     )
 
-    assert result.stdout.strip() == "[]"
+    assert json.loads(result.stdout) == {
+        "legacy": [],
+        "brownfield": [],
+        "recipe_nodes": [
+            "authority.compile",
+            "authority.repair",
+            "vision.interview",
+            "goal.interview",
+            "backlog.generate",
+            "planning.roadmap.generate",
+            "planning.story.generate",
+            "planning.sprint.plan",
+        ],
+    }

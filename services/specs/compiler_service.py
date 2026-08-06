@@ -2927,26 +2927,6 @@ def _load_compile_version_context(
     )
 
 
-def _update_project_compiled_authority_cache(
-    session: Session,
-    *,
-    project: Project | None,
-    compiled_artifact_json: str,
-    lease_guard: Callable[[str], bool] | None = None,
-    record_progress: Callable[[str], bool] | None = None,
-) -> dict[str, Any] | None:
-    """Backfill the project-level compiled authority cache when a project exists."""
-    if project is None:
-        return None
-    boundary = "project_authority_cache_persisted"
-    if lease_guard is not None and not lease_guard(boundary):
-        return _mutation_lease_lost_result()
-    project.compiled_authority_json = compiled_artifact_json
-    session.add(project)
-    session.flush()
-    return _record_mutation_progress(record_progress, boundary)
-
-
 def _mutation_lease_lost_result(boundary: str | None = None) -> dict[str, Any]:
     """Return the canonical mutation lease-loss envelope."""
     result: dict[str, Any] = {
@@ -3055,6 +3035,7 @@ def _cached_compilation_result(
     record_progress: Callable[[str], bool] | None = None,
 ) -> dict[str, Any] | None:
     """Return the cached-authority envelope when a reusable compiled artifact exists."""
+    del session, lease_guard, record_progress
     existing_authority = context.existing_authority
     if existing_authority is None:
         return None
@@ -3077,18 +3058,6 @@ def _cached_compilation_result(
     scope_themes_count = len(artifact.scope_themes)
     invariants_count = len(artifact.invariants)
 
-    cache_error = _update_project_compiled_authority_cache(
-        session,
-        project=context.project,
-        compiled_artifact_json=cast(
-            "str",
-            existing_authority.compiled_artifact_json,
-        ),
-        lease_guard=lease_guard,
-        record_progress=record_progress,
-    )
-    if cache_error is not None:
-        return cache_error
     if tool_context and tool_context.state is not None:
         tool_context.state["compiled_authority_cached"] = (
             existing_authority.compiled_artifact_json
@@ -3733,6 +3702,7 @@ def _persist_compiled_authority(  # noqa: PLR0913
     record_progress: Callable[[str], bool] | None = None,
 ) -> _PersistedCompilation | dict[str, Any]:
     """Append one compiled artifact row."""
+    del context
     success = apply_authority_quality_gate(success)
     compiled_artifact_json = _compiled_authority_artifact_json(success)
     prompt_hash = compute_prompt_hash(SPEC_AUTHORITY_COMPILER_INSTRUCTIONS)
@@ -3764,15 +3734,6 @@ def _persist_compiled_authority(  # noqa: PLR0913
     if progress_error is not None:
         return progress_error
 
-    cache_error = _update_project_compiled_authority_cache(
-        session,
-        project=context.project,
-        compiled_artifact_json=compiled_artifact_json,
-        lease_guard=lease_guard,
-        record_progress=record_progress,
-    )
-    if cache_error is not None:
-        return cache_error
     authority_id = authority.authority_id
     if authority_id is None:
         error_message = "Compiled authority did not receive a primary key"

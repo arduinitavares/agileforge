@@ -8,7 +8,6 @@ import os
 from collections.abc import Iterable, Mapping, Sequence, Set
 from dataclasses import asdict, dataclass
 from json import JSONDecodeError
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, cast
 
 from pydantic import ValidationError
@@ -20,6 +19,7 @@ from models.agent_workbench import (
     DiscoverySpecAmendmentDraft,
 )
 from models.core import Project
+from models.specs import SpecRegistry
 from services.agent_workbench.authority_projection import (
     _iso_z,
     _load_authority_selection,
@@ -71,7 +71,9 @@ from utils.spec_authority_ir import (
 )
 
 if TYPE_CHECKING:
-    from models.specs import CompiledSpecAuthority, SpecRegistry
+    from pathlib import Path
+
+    from models.specs import CompiledSpecAuthority
     from utils.spec_schemas import (
         Invariant,
         SpecAuthorityCompilationSuccess,
@@ -104,12 +106,10 @@ STRUCTURED_SPEC_ITEM_PREFIXES: Final[tuple[str, ...]] = (
 
 @dataclass(frozen=True)
 class _SourceLoad:
-    """Canonical registry content and optional provenance metadata."""
+    """Canonical content loaded from the authoritative spec registry."""
 
     raw_bytes: bytes
     text: str
-    resolved_path: Path | None
-    disk_sha256: str
 
 
 @dataclass(frozen=True)
@@ -122,7 +122,6 @@ class _ReviewInputs:
     spec: SpecRegistry
     authority: CompiledSpecAuthority
     include_spec: str
-    repo_root: Path
 
 
 @dataclass(frozen=True)
@@ -134,8 +133,6 @@ class AuthorityReviewSnapshot:
     pending_authority_id: int | None
     authority_fingerprint: str | None
     source_spec_hash: str
-    disk_spec_hash: str
-    resolved_spec_path: str | None
     compiler_version: str
     prompt_hash: str
     content_included: bool
@@ -143,8 +140,6 @@ class AuthorityReviewSnapshot:
     coverage_summary_fingerprint: str
     project_name: str
     spec_version_id: int | None
-    content_ref: str | None
-    disk_status: str
     size_bytes: int
     review_source_limit_bytes: int
     source_outline: list[JsonDict]
@@ -179,10 +174,6 @@ class AuthorityReviewSnapshot:
                 "spec_version_id": self.spec_version_id,
                 "pending_spec_version_id": self.pending_spec_version_id,
                 "source_spec_hash": self.source_spec_hash,
-                "disk_spec_hash": self.disk_spec_hash,
-                "resolved_spec_path": self.resolved_spec_path,
-                "content_ref": self.content_ref,
-                "disk_status": self.disk_status,
                 "size_bytes": self.size_bytes,
                 "content_included": self.content_included,
                 "content_truncated": self.content_truncated,
@@ -228,14 +219,8 @@ class AuthorityReviewSnapshot:
 
     @property
     def fingerprint_payload(self) -> JsonDict:
-        """Return authoritative review inputs without derived path metadata."""
-        payload = self.payload
-        specification = {
-            key: value
-            for key, value in payload["specification"].items()
-            if key not in {"content_ref", "resolved_spec_path", "disk_status"}
-        }
-        return {**payload, "specification": specification}
+        """Return authoritative review inputs from the registry-backed packet."""
+        return self.payload
 
     @property
     def review_token(self) -> str:
@@ -373,10 +358,8 @@ def _unsupported_compiled_authority_error(
 
 def _authority_source_changed_error(
     *,
-    raw_path: str | None,
-    resolved_path: Path | None,
     registry_hash: str,
-    disk_hash: str,
+    content_hash: str,
 ) -> JsonDict:
     return error_envelope(
         command=AUTHORITY_REVIEW_COMMAND,
@@ -387,33 +370,21 @@ def _authority_source_changed_error(
                 "registry spec hash."
             ),
             details={
-                "path": raw_path,
-                "resolved_path": (
-                    str(resolved_path) if resolved_path is not None else None
-                ),
                 "registry_spec_hash": registry_hash,
-                "disk_spec_hash": disk_hash,
+                "content_spec_hash": content_hash,
             },
             remediation=["Re-register or recompile the specification before review."],
         ),
     )
 
 
-def _spec_file_invalid_error(
-    raw_path: str | None,
-    resolved_path: Path | None,
-    reason: str,
-) -> JsonDict:
+def _spec_file_invalid_error(reason: str) -> JsonDict:
     return error_envelope(
         command=AUTHORITY_REVIEW_COMMAND,
         error=workbench_error(
             ErrorCode.SPEC_FILE_INVALID,
             message="Stored canonical specification content is invalid.",
             details={
-                "path": raw_path,
-                "resolved_path": (
-                    str(resolved_path) if resolved_path is not None else None
-                ),
                 "reason": reason,
             },
             remediation=[
@@ -423,36 +394,23 @@ def _spec_file_invalid_error(
     )
 
 
-def _load_source_from_latest_spec(
-    spec: SpecRegistry,
-    *,
-    repo_root: Path,
-) -> _SourceLoad | JsonDict:
-    raw_path = spec.content_ref
-    resolved_path: Path | None = None
-    if raw_path and raw_path.strip():
-        path = Path(raw_path).expanduser()
-        resolved_path = path if path.is_absolute() else (repo_root / path)
-        resolved_path = resolved_path.expanduser().absolute()
+def _load_source_from_registry(spec: SpecRegistry) -> _SourceLoad | JsonDict:
+    """Normalize the exact approved specification stored in the registry."""
     try:
         normalized = normalize_spec_content_for_registry(spec.content)
     except SpecContentNormalizationError as exc:
-        return _spec_file_invalid_error(raw_path, resolved_path, str(exc))
-    disk_hash = _normalize_sha256_hash(normalized.spec_hash)
+        return _spec_file_invalid_error(str(exc))
+    content_hash = _normalize_sha256_hash(normalized.spec_hash)
     registry_hash = _normalize_sha256_hash(spec.spec_hash)
-    if disk_hash != registry_hash:
+    if content_hash != registry_hash:
         return _authority_source_changed_error(
-            raw_path=raw_path,
-            resolved_path=resolved_path,
             registry_hash=registry_hash,
-            disk_hash=disk_hash,
+            content_hash=content_hash,
         )
     source_bytes = normalized.content.encode("utf-8")
     return _SourceLoad(
         raw_bytes=source_bytes,
         text=normalized.content,
-        resolved_path=resolved_path,
-        disk_sha256=disk_hash,
     )
 
 
@@ -471,13 +429,26 @@ def build_authority_review_snapshot_in_session(
     repo_root: Path | None = None,
 ) -> AuthorityReviewSnapshot | JsonDict:
     """Build a review snapshot using only the caller-owned session."""
+    del repo_root
     project = session.get(Project, project_id)
     if project is None:
         return _project_not_found_error(AUTHORITY_REVIEW_COMMAND, project_id)
+    approved_specs = tuple(
+        session.exec(
+            select(SpecRegistry)
+            .where(
+                SpecRegistry.project_id == project_id,
+                SpecRegistry.status == "approved",
+            )
+            .order_by(col(SpecRegistry.spec_version_id).desc())
+        ).all()
+    )
+    if len(approved_specs) != 1:
+        return _authority_not_pending_error(project_id)
+    spec = approved_specs[0]
     selection = _load_authority_selection(session, project_id=project_id)
-    spec = selection.latest_spec
     authority = selection.pending_authority
-    if spec is None or authority is None:
+    if authority is None or authority.spec_version_id != spec.spec_version_id:
         return _authority_not_pending_error(project_id)
     load_result = load_stored_compiled_artifact(authority)
     if load_result.unsupported:
@@ -494,7 +465,6 @@ def build_authority_review_snapshot_in_session(
             spec=spec,
             authority=authority,
             include_spec=include_spec,
-            repo_root=repo_root or Path(__file__).resolve().parents[1],
         )
     )
 
@@ -509,10 +479,7 @@ def _build_authority_review_snapshot(
     spec = inputs.spec
     authority = inputs.authority
     include_spec = inputs.include_spec
-    source = _load_source_from_latest_spec(
-        spec,
-        repo_root=inputs.repo_root,
-    )
+    source = _load_source_from_registry(spec)
     if not isinstance(source, _SourceLoad):
         return cast("JsonDict", source)
     load_result = load_stored_compiled_artifact(authority)
@@ -601,10 +568,6 @@ def _build_authority_review_snapshot(
         pending_authority_id=pending_authority_id,
         authority_fingerprint=authority_fingerprint,
         source_spec_hash=source_spec_hash,
-        disk_spec_hash=source.disk_sha256,
-        resolved_spec_path=(
-            str(source.resolved_path) if source.resolved_path is not None else None
-        ),
         compiler_version=authority.compiler_version,
         prompt_hash=authority.prompt_hash,
         content_included=content_included,
@@ -612,8 +575,6 @@ def _build_authority_review_snapshot(
         coverage_summary_fingerprint=coverage_fingerprint,
         project_name=project.name,
         spec_version_id=spec.spec_version_id,
-        content_ref=spec.content_ref,
-        disk_status="registry",
         size_bytes=len(source.raw_bytes),
         review_source_limit_bytes=source_limit,
         source_outline=outline,

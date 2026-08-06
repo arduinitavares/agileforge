@@ -14,7 +14,7 @@ from adapters.adk.prompts.specification import (
     SPEC_AUTHORITY_COMPILER_VERSION,
 )
 from adapters.adk.recipes import (
-    TASK3_AGENTIC_NODE_IDS,
+    AGENTIC_NODE_IDS,
     AdkRecipe,
     AdkRecipeRegistry,
     AgenticRecipeNodes,
@@ -24,18 +24,14 @@ from adapters.adk.recipes import (
     build_agentic_recipe_registry,
     build_backlog_generation_workflow,
 )
-from services.contracts.brownfield import BrownfieldCurationOutput
-from utils.agileforge_spec_profile import TechnicalSpecArtifact
 from utils.spec_schemas import SpecAuthorityCompilationSuccess
 from workflow.definitions.root import ROOT_GRAPH
 from workflow.requests import (
     CompileAuthority,
     RecordBacklogDraft,
-    RecordBrownfieldSpecDraft,
     RecordRoadmapDraft,
     RecordSprintPlan,
     RecordStoryDraft,
-    RecordVisionDraft,
     RepairAuthority,
 )
 
@@ -49,7 +45,7 @@ RECIPE_TIMEOUT_SECONDS = 7.0
 RECIPE_MAX_ATTEMPTS = 2
 COMPLETION_CONTEXT = AttemptCompletionContext(
     project_id=17,
-    graph_version="agileforge.workflow.v1",
+    graph_version="agileforge.workflow.v2",
     fact_fingerprint="sha256:facts",
     decision_fingerprint="sha256:decision",
     instance_key=None,
@@ -75,45 +71,10 @@ def _compiled_authority_payload() -> JsonObject:
     ).model_dump(mode="json")
 
 
-def _brownfield_spec_payload() -> JsonObject:
-    return TechnicalSpecArtifact.model_validate(
-        {
-            "schema_version": "agileforge.spec.v1",
-            "artifact_id": "SPEC.brownfield.recipe",
-            "title": "Brownfield Initial Scope",
-            "status": "draft",
-            "version": "0.1",
-            "created_at": "2026-08-03",
-            "updated_at": "2026-08-03",
-            "summary": "Initial scope curated from repository evidence.",
-            "problem_statement": "Existing behavior needs reviewed authority.",
-            "items": [],
-            "relations": [],
-            "controlled_terms": [],
-            "external_references": [],
-            "rendering": {
-                "markdown_profile": "agileforge.spec_markdown.v1",
-                "rendered_markdown_sha256": None,
-            },
-        }
-    ).model_dump(mode="json", by_alias=True)
-
-
 REQUEST_CASES: tuple[
     tuple[str, type[PositionedRequest], JsonObject],
     ...,
 ] = (
-    (
-        "onboarding.brownfield.curation",
-        RecordBrownfieldSpecDraft,
-        {
-            "repository_inventory_id": 2,
-            "repository_inventory_fingerprint": f"sha256:{'b' * 64}",
-            "canonical_content": _brownfield_spec_payload(),
-            "supersedes_spec_draft_id": None,
-            "provenance_path": "repository-inventory:2",
-        },
-    ),
     (
         "authority.compile",
         CompileAuthority,
@@ -131,17 +92,6 @@ REQUEST_CASES: tuple[
             "source_authority_id": 5,
             "source_authority_fingerprint": "sha256:authority",
             "compiled_authority": _compiled_authority_payload(),
-        },
-    ),
-    (
-        "vision.generate",
-        RecordVisionDraft,
-        {
-            "authority_id": 5,
-            "authority_fingerprint": "sha256:authority",
-            "canonical_content": {"vision": "Focused"},
-            "content_fingerprint": "sha256:vision",
-            "supersedes_vision_artifact_id": None,
         },
     ),
     (
@@ -209,21 +159,13 @@ class FakeLeafAgent(BaseAgent):
 def _agentic_nodes() -> AgenticRecipeNodes:
     """Build a complete provider-free retained-node replacement set."""
     return AgenticRecipeNodes(
-        brownfield_curator=FakeLeafAgent(
-            name="fake_brownfield_curator",
-            response=BrownfieldCurationOutput(
-                canonical_spec=TechnicalSpecArtifact.model_validate(
-                    _brownfield_spec_payload()
-                )
-            ).model_dump(mode="json"),
-        ),
         authority_compile=FakeLeafAgent(name="fake_authority_compile", response={}),
         authority_repair=FakeLeafAgent(name="fake_authority_repair", response={}),
-        vision_generation=FakeLeafAgent(name="fake_vision", response={}),
         vision_interview=FakeLeafAgent(
             name="fake_vision_interview",
             response={},
         ),
+        product_goal=FakeLeafAgent(name="fake_product_goal", response={}),
         backlog_generation=FakeLeafAgent(name="fake_backlog", response={}),
         roadmap_generation=FakeLeafAgent(name="fake_roadmap", response={}),
         story_generation=FakeLeafAgent(name="fake_story", response={}),
@@ -278,21 +220,14 @@ def test_recipe_registry_covers_each_stable_agentic_domain_node_once() -> None:
     graph_node_ids = {node.node_id for node in ROOT_GRAPH.root.iter_nodes()}
     registry = _complete_registry()
 
-    assert set(TASK3_AGENTIC_NODE_IDS) == set(ROOT_GRAPH.agentic_node_ids) | {
-        "vision.interview"
-    }
+    assert set(AGENTIC_NODE_IDS) == set(ROOT_GRAPH.agentic_node_ids)
     assert set(ROOT_GRAPH.agentic_node_ids) <= graph_node_ids
-    assert registry.node_ids == TASK3_AGENTIC_NODE_IDS
+    assert registry.node_ids == AGENTIC_NODE_IDS
     assert len(registry.node_ids) == len(set(registry.node_ids))
     registered_recipe_ids = tuple(
         registry.require(node_id).node_id for node_id in registry.node_ids
     )
     assert registered_recipe_ids == registry.node_ids
-    brownfield_graph = registry.require("onboarding.brownfield.curation").workflow.graph
-    assert brownfield_graph is not None
-    assert "execute_brownfield_curator" in {
-        node.name for node in brownfield_graph.nodes
-    }
     for node_id in registry.node_ids:
         recipe = registry.require(node_id)
         assert recipe.workflow.timeout == RECIPE_TIMEOUT_SECONDS
@@ -317,7 +252,7 @@ def test_recipe_registry_rejects_any_domain_catalog_gap() -> None:
     with pytest.raises(ValueError, match="domain agentic catalog"):
         AdkRecipeRegistry(
             (recipe,),
-            required_node_ids=TASK3_AGENTIC_NODE_IDS,
+            required_node_ids=AGENTIC_NODE_IDS,
         )
 
 

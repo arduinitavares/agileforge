@@ -283,35 +283,6 @@ def _repair_rule(
     )
 
 
-def _vision_boundary_rule(
-    snapshot: WorkflowFactSnapshot,
-    _evaluated_at: datetime,
-) -> tuple[RuleEvaluation, ...]:
-    if snapshot.project_abandonments:
-        return _evaluation(RuleCategory.SATISFIED, "PROJECT_ABANDONED")
-    state = _authority_state(snapshot)
-    if state.conflict:
-        return _invalid()
-    if (
-        state.spec is None
-        or state.candidate is None
-        or state.decision is None
-        or state.decision.decision != "accepted"
-    ):
-        return _evaluation(RuleCategory.SATISFIED, "AUTHORITY_NOT_ACCEPTED")
-    return _evaluation(
-        RuleCategory.AVAILABLE,
-        "ACCEPTED_AUTHORITY_UNLOCKS_VISION",
-        fact_references=(
-            _reference(
-                "authority",
-                state.candidate.authority_id,
-                state.candidate.authority_fingerprint,
-            ),
-        ),
-    )
-
-
 AUTHORITY_NODES: tuple[NodeSpec, ...] = (
     NodeSpec(
         node_id="authority.compile",
@@ -374,23 +345,8 @@ AUTHORITY_NODES: tuple[NodeSpec, ...] = (
     ),
 )
 
-VISION_BOUNDARY_NODE = NodeSpec(
-    node_id="vision.generate",
-    child_graph_id="vision",
-    request_kind="record_vision_draft",
-    recommendation_kind=RecommendationKind.REQUIRED,
-    required_inputs=(),
-    evaluate_rule=_vision_boundary_rule,
-    agentic_execution=AgenticExecutionSpec(
-        active_reason="VISION_GENERATION_ACTIVE",
-        failure_reason="VISION_GENERATION_FAILED",
-        recovery_reason="VISION_GENERATION_RECOVERY_REQUIRED",
-    ),
-)
-
-
 def authority_graph() -> WorkflowGraph:
-    """Return the isolated authority graph plus its next child boundary."""
+    """Return the isolated Authority graph."""
     return WorkflowGraph(
         graph_version=GRAPH_VERSION,
         root=ChildGraphSpec(
@@ -398,7 +354,6 @@ def authority_graph() -> WorkflowGraph:
             nodes=(),
             children=(
                 ChildGraphSpec(child_graph_id="authority", nodes=AUTHORITY_NODES),
-                ChildGraphSpec(child_graph_id="vision", nodes=(VISION_BOUNDARY_NODE,)),
             ),
         ),
     )
@@ -406,7 +361,6 @@ def authority_graph() -> WorkflowGraph:
 
 __all__ = [
     "AUTHORITY_NODES",
-    "VISION_BOUNDARY_NODE",
     "accepted_current_authority",
     "authority_graph",
 ]
