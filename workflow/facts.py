@@ -371,6 +371,8 @@ class PhaseArtifactFact(FrozenModel):
     artifact_fingerprint: str
     authority_id: int | None = None
     authority_fingerprint: str | None = None
+    product_goal_artifact_id: int | None = None
+    product_goal_fingerprint: str | None = None
     supersedes_artifact_id: int | None = None
     status: Literal[
         "draft",

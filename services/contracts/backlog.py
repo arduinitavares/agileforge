@@ -108,9 +108,15 @@ class SaveBacklogInput(BaseModel):
 class InputSchema(BaseModel):
     """Schema for the input to the backlog primer agent."""
 
+    model_config = ConfigDict(extra="forbid")
+
     product_vision_statement: Annotated[
         str,
         Field(description="Final approved product vision statement."),
+    ]
+    product_goal_statement: Annotated[
+        str,
+        Field(description="The active accepted Product Goal statement."),
     ]
     technical_spec: Annotated[
         str,
@@ -137,61 +143,12 @@ class InputSchema(BaseModel):
             ),
         ),
     ]
-    as_built_assessment: Annotated[
-        str,
-        Field(
-            description=(
-                "Raw agileforge.as_built_assessment.v1 JSON from "
-                "as_built_assessment_cached or 'NO_AS_BUILT_ASSESSMENT' when no "
-                "fresh assessment cache is available."
-            ),
-        ),
-    ]
-    implementation_evidence: Annotated[
-        str,
-        Field(
-            description=(
-                "Raw ReconciliationReport JSON from implementation_evidence_cached "
-                "or 'NO_EVIDENCE' when no evidence cache is available."
-            ),
-        ),
-    ]
     user_input: Annotated[
         str | None,
         Field(
             description="User-provided notes, requirements, or answers to questions.",
         ),
     ]
-    generation_mode: Annotated[
-        Literal["scope_extension"] | None,
-        Field(
-            default=None,
-            description=(
-                "Optional generation mode. When scope_extension, generate only "
-                "additive backlog items for the accepted amended authority delta."
-            ),
-        ),
-    ] = None
-    scope_extension: Annotated[
-        dict[str, object] | None,
-        Field(
-            default=None,
-            description=(
-                "Read-only scope-extension provenance: base/amended spec ids and "
-                "hashes, added source item ids, and existing backlog count."
-            ),
-        ),
-    ] = None
-    authority_scope_filter: Annotated[
-        dict[str, list[str]] | None,
-        Field(
-            default=None,
-            description=(
-                "Accepted authority delta filter. In scope-extension mode, only "
-                "source_item_ids listed here should produce new backlog items."
-            ),
-        ),
-    ] = None
 
 
 class OutputSchema(BaseModel):

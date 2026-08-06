@@ -18,6 +18,8 @@ from workflow.facts import (
     BacklogRequirementFact,
     PhaseArtifactFact,
     PlanningArtifactFact,
+    ProductGoalArtifactDecisionFact,
+    ProductGoalArtifactFact,
     ProjectFact,
     ReviewDecisionFact,
     SpecVersionFact,
@@ -25,6 +27,8 @@ from workflow.facts import (
     StoryDependencyReviewFact,
     StoryFact,
     TaskFact,
+    VisionArtifactDecisionFact,
+    VisionArtifactFact,
     WorkflowFactSnapshot,
 )
 from workflow.planning_integrity import (
@@ -91,6 +95,8 @@ def _phase_artifact(
             "artifact_fingerprint": options["fingerprint"],
             "authority_id": authority_id,
             "authority_fingerprint": authority_fingerprint,
+            "product_goal_artifact_id": 1,
+            "product_goal_fingerprint": "sha256:goal",
             "status": options["status"],
         }
     )
@@ -337,6 +343,58 @@ def _snapshot(
                 if backlog_authority_id is not None
                 and backlog_authority_id != authority_id
                 else ()
+            ),
+        ),
+        vision_artifacts=(
+            VisionArtifactFact(
+                vision_artifact_id=1,
+                version_number=1,
+                components={},
+                statement="Planning Vision",
+                content_fingerprint="sha256:vision",
+                supersedes_vision_artifact_id=None,
+                source_interview_turn_id=1,
+                created_by="operator@example.com",
+                created_at=EVALUATED_AT,
+            ),
+        ),
+        vision_artifact_decisions=(
+            VisionArtifactDecisionFact(
+                vision_artifact_decision_id=1,
+                vision_artifact_id=1,
+                artifact_fingerprint="sha256:vision",
+                decision="accepted",
+                rationale="Accepted.",
+                reviewer="operator@example.com",
+                idempotency_key="vision-accepted",
+                decided_at=EVALUATED_AT,
+            ),
+        ),
+        product_goal_artifacts=(
+            ProductGoalArtifactFact(
+                product_goal_artifact_id=1,
+                vision_artifact_id=1,
+                vision_fingerprint="sha256:vision",
+                goal_number=1,
+                revision_number=1,
+                statement="Plan current delivery work.",
+                content_fingerprint="sha256:goal",
+                supersedes_product_goal_artifact_id=None,
+                source_interview_turn_id=1,
+                created_by="operator@example.com",
+                created_at=EVALUATED_AT,
+            ),
+        ),
+        product_goal_artifact_decisions=(
+            ProductGoalArtifactDecisionFact(
+                product_goal_artifact_decision_id=1,
+                product_goal_artifact_id=1,
+                artifact_fingerprint="sha256:goal",
+                decision="accepted",
+                rationale="Accepted.",
+                reviewer="operator@example.com",
+                idempotency_key="goal-accepted",
+                decided_at=EVALUATED_AT,
             ),
         ),
         phase_artifacts=backlog,

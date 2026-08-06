@@ -32,6 +32,8 @@ def record_backlog_draft_in_session(  # noqa: PLR0913
     project_id: int,
     authority_id: int,
     authority_fingerprint: str,
+    product_goal_artifact_id: int,
+    product_goal_fingerprint: str,
     canonical_content: JsonObject,
     content_fingerprint: str,
     supersedes_backlog_artifact_id: int | None,
@@ -67,6 +69,14 @@ def record_backlog_draft_in_session(  # noqa: PLR0913
         if parent is None:
             message = "Backlog supersession parent does not belong to this Project."
             raise ValueError(message)
+        if (
+            parent.authority_id != authority_id
+            or parent.authority_fingerprint != authority_fingerprint
+            or parent.product_goal_artifact_id != product_goal_artifact_id
+            or parent.product_goal_fingerprint != product_goal_fingerprint
+        ):
+            message = "Backlog supersession parent has different delivery lineage."
+            raise ValueError(message)
 
     version_number = (
         session.exec(
@@ -81,6 +91,8 @@ def record_backlog_draft_in_session(  # noqa: PLR0913
         project_id=project_id,
         authority_id=authority_id,
         authority_fingerprint=authority_fingerprint,
+        product_goal_artifact_id=product_goal_artifact_id,
+        product_goal_fingerprint=product_goal_fingerprint,
         version_number=version_number,
         canonical_content_json=canonical_json(canonical_content),
         content_fingerprint=content_fingerprint,
@@ -158,9 +170,7 @@ def persist_accepted_backlog_in_session(
         .where(col(UserStory.is_superseded).is_(False))
     ).all()
     blocked = [
-        story
-        for story in active_stories
-        if _blocks_backlog_replacement(session, story)
+        story for story in active_stories if _blocks_backlog_replacement(session, story)
     ]
     if blocked:
         blocked_ids = tuple(

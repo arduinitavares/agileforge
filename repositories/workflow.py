@@ -2052,6 +2052,8 @@ class WorkflowFactRepository:
                     artifact_fingerprint=row.content_fingerprint,
                     authority_id=row.authority_id,
                     authority_fingerprint=row.authority_fingerprint,
+                    product_goal_artifact_id=row.product_goal_artifact_id,
+                    product_goal_fingerprint=row.product_goal_fingerprint,
                     supersedes_artifact_id=row.supersedes_backlog_artifact_id,
                     status=self._phase_status(
                         None if decision is None else decision.decision,

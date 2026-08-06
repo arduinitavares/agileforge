@@ -696,10 +696,8 @@ class _LegacyVisionArtifactDecision(SQLModel, table=False):
     decided_at: datetime = Field(default_factory=utc_now, nullable=False)
 
 
-
-
 class BacklogArtifact(SQLModel, table=True):
-    """Immutable Backlog artifact bound to one accepted authority."""
+    """Immutable Backlog artifact bound to one Goal and accepted authority."""
 
     __tablename__ = "backlog_artifacts"
     __table_args__ = (
@@ -741,6 +739,8 @@ class BacklogArtifact(SQLModel, table=True):
         index=True,
     )
     authority_fingerprint: str = Field(index=True)
+    product_goal_artifact_id: int = Field(index=True)
+    product_goal_fingerprint: str = Field(index=True)
     version_number: int
     canonical_content_json: str = Field(sa_type=Text)
     content_fingerprint: str = Field(index=True)
@@ -1212,9 +1212,7 @@ class SprintReview(SQLModel, table=True):
     """Persisted review of one exact terminal Sprint work set."""
 
     __tablename__ = "sprint_reviews"
-    __table_args__ = (
-        UniqueConstraint("sprint_id", name="uq_sprint_review"),
-    )
+    __table_args__ = (UniqueConstraint("sprint_id", name="uq_sprint_review"),)
 
     sprint_review_id: int | None = Field(default=None, primary_key=True)
     project_id: int = Field(foreign_key="projects.project_id", index=True)
@@ -1228,9 +1226,7 @@ class SprintClosure(SQLModel, table=True):
     """Explicit Sprint close fact bound to its persisted review."""
 
     __tablename__ = "sprint_closures"
-    __table_args__ = (
-        UniqueConstraint("sprint_id", name="uq_sprint_closure"),
-    )
+    __table_args__ = (UniqueConstraint("sprint_id", name="uq_sprint_closure"),)
 
     sprint_closure_id: int | None = Field(default=None, primary_key=True)
     project_id: int = Field(foreign_key="projects.project_id", index=True)

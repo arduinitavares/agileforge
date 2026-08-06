@@ -6,6 +6,11 @@ from typing import TYPE_CHECKING
 
 from sqlmodel import Session, col, func, select
 
+from models.product_definition import (
+    ProductGoalArtifact,
+    ProductGoalArtifactDecision,
+    ProductGoalOutcome,
+)
 from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance, SpecRegistry
 from models.workflow import (
     BacklogArtifact,
@@ -120,6 +125,44 @@ def _expected_parent(decision: NodeDecision, artifact_type: str) -> int | None:
         return max(int(item.fact_id) for item in references)
     except ValueError:
         return None
+
+
+def _accepted_goal(
+    session: Session,
+    *,
+    project_id: int,
+    product_goal_artifact_id: int,
+    product_goal_fingerprint: str,
+) -> ProductGoalArtifact | None:
+    """Return one unresolved Goal accepted with its exact fingerprint."""
+    goal = session.exec(
+        select(ProductGoalArtifact).where(
+            col(ProductGoalArtifact.project_id) == project_id,
+            col(ProductGoalArtifact.product_goal_artifact_id)
+            == product_goal_artifact_id,
+            col(ProductGoalArtifact.content_fingerprint) == product_goal_fingerprint,
+        )
+    ).one_or_none()
+    if goal is None:
+        return None
+    decision = session.exec(
+        select(ProductGoalArtifactDecision).where(
+            col(ProductGoalArtifactDecision.project_id) == project_id,
+            col(ProductGoalArtifactDecision.product_goal_artifact_id)
+            == product_goal_artifact_id,
+            col(ProductGoalArtifactDecision.artifact_fingerprint)
+            == product_goal_fingerprint,
+            col(ProductGoalArtifactDecision.decision) == "accepted",
+        )
+    ).one_or_none()
+    outcome = session.exec(
+        select(ProductGoalOutcome).where(
+            col(ProductGoalOutcome.project_id) == project_id,
+            col(ProductGoalOutcome.product_goal_artifact_id)
+            == product_goal_artifact_id,
+        )
+    ).one_or_none()
+    return goal if decision is not None and outcome is None else None
 
 
 def _next_artifact_id(session: Session) -> int:
@@ -334,14 +377,27 @@ def execute_record_backlog_draft(
         authority_id=request.authority_id,
         authority_fingerprint=request.authority_fingerprint,
     )
+    goal = _accepted_goal(
+        session,
+        project_id=request.project_id,
+        product_goal_artifact_id=request.product_goal_artifact_id,
+        product_goal_fingerprint=request.product_goal_fingerprint,
+    )
     expected_parent = _expected_parent(decision, "backlog")
     if (
         authority is None
+        or goal is None
         or not _matches_reference(
             decision,
             fact_type="authority",
             fact_id=request.authority_id,
             fingerprint=request.authority_fingerprint,
+        )
+        or not _matches_reference(
+            decision,
+            fact_type="product_goal",
+            fact_id=request.product_goal_artifact_id,
+            fingerprint=request.product_goal_fingerprint,
         )
         or request.supersedes_backlog_artifact_id != expected_parent
     ):
@@ -352,6 +408,8 @@ def execute_record_backlog_draft(
             project_id=request.project_id,
             authority_id=request.authority_id,
             authority_fingerprint=request.authority_fingerprint,
+            product_goal_artifact_id=request.product_goal_artifact_id,
+            product_goal_fingerprint=request.product_goal_fingerprint,
             canonical_content=request.canonical_content,
             content_fingerprint=request.content_fingerprint,
             supersedes_backlog_artifact_id=request.supersedes_backlog_artifact_id,
@@ -369,6 +427,7 @@ def execute_record_backlog_draft(
             "backlog_artifact_id": row.backlog_artifact_id,
             "content_fingerprint": row.content_fingerprint,
             "authority_id": row.authority_id,
+            "product_goal_artifact_id": row.product_goal_artifact_id,
         },
     )
 

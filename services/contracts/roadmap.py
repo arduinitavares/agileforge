@@ -1,10 +1,8 @@
 """Input and output schemas for the Roadmap Builder agent."""
 
-from typing import Annotated, Any, Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
-
-from utils.brownfield_annotations import BrownfieldAnnotation
 
 
 class BacklogItem(BaseModel):
@@ -44,13 +42,6 @@ class BacklogItem(BaseModel):
             ),
         ),
     ]
-    as_built_annotation: Annotated[
-        BrownfieldAnnotation | None,
-        Field(
-            default=None,
-            description=("Optional host-derived As-Built annotation for this item."),
-        ),
-    ]
     value_driver: Annotated[
         Literal["Revenue", "Customer Satisfaction", "Strategic"],
         Field(description="Primary value driver for prioritization."),
@@ -78,8 +69,7 @@ class BacklogItem(BaseModel):
 class RoadmapBuilderInput(BaseModel):
     """Input for the Roadmap Builder agent."""
 
-    # We allow extra fields in input because context might add more than we need
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="forbid")
 
     backlog_items: Annotated[
         list[BacklogItem],
@@ -118,48 +108,6 @@ class RoadmapBuilderInput(BaseModel):
         Field(
             default="",
             description="User's specific requests, feedback, or constraints.",
-        ),
-    ]
-    generation_mode: Annotated[
-        Literal["scope_extension", "roadmap_reconciliation"] | None,
-        Field(
-            default=None,
-            description=(
-                "Optional host mode for scope extension or locked-shape reconciliation."
-            ),
-        ),
-    ]
-    locked_roadmap_shape: Annotated[
-        list[dict[str, Any]] | None,
-        Field(
-            default=None,
-            description=(
-                "Read-only roadmap release names and item lists that must be "
-                "preserved during normal reconciliation."
-            ),
-        ),
-    ]
-    existing_roadmap_context: Annotated[
-        list[dict[str, Any]] | None,
-        Field(
-            default=None,
-            description="Read-only existing roadmap releases for append-only planning.",
-        ),
-    ]
-    scope_extension: Annotated[
-        dict[str, Any] | None,
-        Field(
-            default=None,
-            description="Scope extension spec/version/source metadata.",
-        ),
-    ]
-    extension_backlog_items: Annotated[
-        list[dict[str, Any]] | None,
-        Field(
-            default=None,
-            description=(
-                "Extension backlog item references to schedule without duplicates."
-            ),
         ),
     ]
 

@@ -37,12 +37,14 @@ class DecideVision(PositionedRequest):
 
 
 class RecordBacklogDraft(PositionedRequest):
-    """Record canonical Backlog output for the exact accepted authority."""
+    """Record canonical Backlog output for the exact Goal and Authority."""
 
     kind: Literal["record_backlog_draft"] = "record_backlog_draft"
     node_id: ClassVar[str] = "backlog.generate"
     authority_id: int
     authority_fingerprint: str = Field(min_length=1)
+    product_goal_artifact_id: int
+    product_goal_fingerprint: str = Field(min_length=1)
     canonical_content: JsonObject
     content_fingerprint: str = Field(min_length=1)
     supersedes_backlog_artifact_id: int | None = None

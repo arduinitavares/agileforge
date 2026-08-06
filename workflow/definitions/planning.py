@@ -12,13 +12,8 @@ from workflow.contracts import (
     InputField,
     RecommendationKind,
 )
-from workflow.definitions.authority import accepted_current_authority
-from workflow.definitions.vision import (
-    accepted_current_artifact,
-    artifact_reference,
-    authority_reference,
-    phase_artifact_state,
-)
+from workflow.definitions.backlog import current_backlog_lineage
+from workflow.definitions.vision import artifact_reference, authority_reference
 from workflow.fingerprints import canonical_hash
 from workflow.graph import (
     AgenticExecutionSpec,
@@ -42,6 +37,7 @@ if TYPE_CHECKING:
         BacklogRequirementFact,
         PhaseArtifactFact,
         PlanningArtifactFact,
+        ProductGoalArtifactFact,
         StoryDependencyFact,
         StoryFact,
         WorkflowFactSnapshot,
@@ -57,6 +53,7 @@ class _ArtifactState:
 @dataclass(frozen=True)
 class _BacklogLineage:
     authority: AuthorityFact | None
+    goal: ProductGoalArtifactFact | None
     backlog: PhaseArtifactFact | None
     conflict: bool
 
@@ -137,22 +134,12 @@ def _blocked(reason: str, message: str) -> tuple[RuleEvaluation, ...]:
 
 
 def _accepted_backlog(snapshot: WorkflowFactSnapshot) -> _BacklogLineage:
-    authority, authority_conflict = accepted_current_authority(snapshot)
-    if authority_conflict:
-        return _BacklogLineage(None, None, True)
-    if authority is None:
-        return _BacklogLineage(None, None, False)
-    state = phase_artifact_state(
-        snapshot,
-        artifact_type="backlog",
-        authority=authority,
-    )
-    if state.conflict:
-        return _BacklogLineage(authority, None, True)
+    current = current_backlog_lineage(snapshot)
     return _BacklogLineage(
-        authority,
-        accepted_current_artifact(state, authority),
-        False,
+        authority=current.authority,
+        goal=current.goal,
+        backlog=current.backlog,
+        conflict=current.conflict,
     )
 
 
@@ -187,10 +174,15 @@ def _artifact_matches_lineage(
 
 
 def _lineage_references(lineage: _BacklogLineage) -> tuple[FactReference, ...]:
-    if lineage.authority is None or lineage.backlog is None:
+    if lineage.authority is None or lineage.goal is None or lineage.backlog is None:
         return ()
     return (
         artifact_reference(lineage.backlog),
+        FactReference(
+            fact_type="product_goal",
+            fact_id=str(lineage.goal.product_goal_artifact_id),
+            fingerprint=lineage.goal.content_fingerprint,
+        ),
         authority_reference(lineage.authority),
     )
 
@@ -235,11 +227,8 @@ def _artifact_state(
     for decision in decisions:
         decisions_by_artifact.setdefault(decision.artifact_id, []).append(decision)
         artifact = by_id[decision.artifact_id]
-        if (
-            artifact.artifact_fingerprint != decision.artifact_fingerprint
-            or (
-                artifact.status not in {"superseded", decision.decision}
-            )
+        if artifact.artifact_fingerprint != decision.artifact_fingerprint or (
+            artifact.status not in {"superseded", decision.decision}
         ):
             conflict = True
     if any(len(items) > 1 for items in decisions_by_artifact.values()):
@@ -501,11 +490,15 @@ def _story_review_rule(
                     instance_key=f"requirement:{requirement_id}",
                 )
             )
-        elif latest is not None and latest.status == "pending_review" and (
-            roadmap is None
-            or not _artifact_matches_lineage(latest, lineage, roadmap=roadmap)
-            or requirement_id
-            not in {item.requirement_id for item in _current_requirements(snapshot)}
+        elif (
+            latest is not None
+            and latest.status == "pending_review"
+            and (
+                roadmap is None
+                or not _artifact_matches_lineage(latest, lineage, roadmap=roadmap)
+                or requirement_id
+                not in {item.requirement_id for item in _current_requirements(snapshot)}
+            )
         ):
             evaluations.append(
                 RuleEvaluation(
@@ -581,8 +574,7 @@ def _story_lineage_problem(
             or story.authority_id != authority.authority_id
             or story.authority_fingerprint != authority.authority_fingerprint
             or story.backlog_artifact_id != backlog.artifact_id
-            or story.backlog_artifact_fingerprint
-            != backlog.artifact_fingerprint
+            or story.backlog_artifact_fingerprint != backlog.artifact_fingerprint
             or story.roadmap_artifact_id != roadmap.artifact_id
             or story.roadmap_artifact_fingerprint != roadmap.artifact_fingerprint
             or artifact is None
@@ -613,9 +605,7 @@ def _dependency_review_evaluation(
     if matching:
         review = matching[0]
         try:
-            current_edges = active_dependency_review_edges(
-                snapshot.story_dependencies
-            )
+            current_edges = active_dependency_review_edges(snapshot.story_dependencies)
         except ValueError:
             return RuleEvaluation(
                 RuleCategory.INVALID,
