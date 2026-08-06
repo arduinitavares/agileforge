@@ -24,8 +24,10 @@ from models.product_definition import (
 )
 from models.specs import SpecRegistry
 from models.workflow import WorkflowNodeAttempt
+from repositories.workflow import WorkflowFactRepository
 from services.read_projections import DurableReadProjectionService
 from workflow.contracts import GRAPH_VERSION, JsonObject, JsonValue
+from workflow.definitions.product_discovery import select_product_definition_state
 from workflow.fingerprints import (
     canonical_hash,
     canonical_json,
@@ -39,6 +41,24 @@ if TYPE_CHECKING:
 
 NOW = datetime(2026, 8, 5, 14, tzinfo=UTC)
 _JSON_OBJECT = TypeAdapter(JsonObject)
+
+
+def test_public_product_definition_selection_retains_projection_state(
+    engine: Engine,
+) -> None:
+    """Read projections share one stable selection interface with graph rules."""
+    seeded = _seed_lineage(engine)
+    project_id = seeded["project_id"]
+    assert isinstance(project_id, int)
+    with Session(engine) as session:
+        snapshot = WorkflowFactRepository(session).load(project_id)
+
+    selection = select_product_definition_state(snapshot)
+
+    assert selection.discovery is not None
+    assert selection.specification_candidate is not None
+    assert selection.accepted_spec is None
+    assert not selection.has_conflict
 
 
 def _seed_lineage(

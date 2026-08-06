@@ -339,6 +339,36 @@ class WorkflowFactRepository:
         with self._session.no_autoflush:
             return self._load(project_id)
 
+    def load_product_goal_interview_snapshot(
+        self, project_id: int
+    ) -> WorkflowFactSnapshot:
+        """Load only the durable facts needed to prepare a Goal interview."""
+        self._identity_token = object()
+        with self._session.no_autoflush:
+            project = self._project(project_id)
+            visions, vision_decisions = self._vision_artifacts(project_id)
+            vision_fingerprints = {
+                identifier: item.content_fingerprint
+                for identifier, item in visions.items()
+            }
+            turns = self._product_goal_interview_turns(
+                project_id,
+                vision_fingerprints,
+                attempts=None,
+            )
+            goals = self._product_goals(project_id, vision_fingerprints, turns)
+            decisions = self._product_goal_decisions(project_id, goals)
+            outcomes = self._product_goal_outcomes(project_id, goals, decisions)
+            return WorkflowFactSnapshot(
+                project=project,
+                vision_artifacts=tuple(visions.values()),
+                vision_artifact_decisions=tuple(vision_decisions.values()),
+                product_goal_interview_turns=tuple(turns.values()),
+                product_goal_artifacts=tuple(goals.values()),
+                product_goal_artifact_decisions=tuple(decisions.values()),
+                product_goal_outcomes=tuple(outcomes.values()),
+            )
+
     def _load(self, project_id: int) -> WorkflowFactSnapshot:
         """Build one snapshot inside the read-only session query boundary."""
         project = self._project(project_id)

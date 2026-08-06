@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Literal
 
 import pytest
+from sqlalchemy import event
 from sqlmodel import Session, col, select
 
 from models.core import Project, Sprint, Team
@@ -22,8 +23,9 @@ from models.product_definition import (
     VisionInterviewTurn,
 )
 from models.specs import SpecRegistry
-from models.workflow import WorkflowNodeAttempt
-from repositories.workflow import WorkflowFactRepository
+from models.workflow import WorkflowNodeAttempt, WorkflowTransitionReceipt
+from repositories.workflow import WorkflowFactLoadError, WorkflowFactRepository
+from services.product_goal_interview_input import ProductGoalInterviewInputService
 from workflow.clock import FixedClock
 from workflow.contracts import GRAPH_VERSION, FactReference, WorkflowPosition
 from workflow.definitions.product_discovery import (
@@ -58,6 +60,10 @@ NOW = datetime(2026, 8, 5, 12, tzinfo=UTC)
 _TURN_COUNT = 2
 _ARTIFACT_COUNT = 1
 _SECOND_GOAL_NUMBER = 2
+_STAGED_SPEC_REGISTRY_COUNT = 2
+_FORCED_SPECIFICATION_ACCEPTANCE_FLUSH_FAILURE = (
+    "forced specification acceptance flush failure"
+)
 
 
 class _Registry:
@@ -475,10 +481,84 @@ def test_goal_turns_reload_after_incomplete_and_complete_transitions(
         assert len(session.exec(select(ProductGoalArtifact)).all()) == _ARTIFACT_COUNT
 
 
+def test_goal_input_ignores_unrelated_facts_but_rejects_goal_lineage(
+    engine: Engine,
+) -> None:
+    """Goal preparation has a narrow durable boundary and validates its lineage."""
+    project_id = _seed_accepted_vision(engine)
+    domain = _domain(engine)
+    position = domain.position(project_id)
+    decision = next(
+        item for item in position.decisions if item.node_id == "goal.interview"
+    )
+    with Session(engine) as session:
+        session.add(
+            SpecRegistry(
+                project_id=project_id,
+                spec_hash="not-a-canonical-hash",
+                content="{",
+                content_ref=None,
+                status="approved",
+                source_specification_candidate_id=999,
+                source_vision_artifact_id=999,
+                source_vision_fingerprint="wrong",
+                source_product_goal_artifact_id=999,
+                source_product_goal_fingerprint="wrong",
+                source_discovery_artifact_id=999,
+                source_discovery_fingerprint="wrong",
+            )
+        )
+        session.commit()
+    with Session(engine) as session, pytest.raises(WorkflowFactLoadError):
+        WorkflowFactRepository(session).load(project_id)
+
+    payload = ProductGoalInterviewInputService(engine=engine).build(
+        project_id, decision, "Prepare the Goal interview"
+    )
+    assert payload["accepted_vision_statement"] == "A durable Vision."
+
+    with Session(engine) as session:
+        attempt = session.exec(
+            select(WorkflowNodeAttempt).where(
+                WorkflowNodeAttempt.project_id == project_id
+            )
+        ).one()
+        vision = session.exec(
+            select(VisionArtifact).where(VisionArtifact.project_id == project_id)
+        ).one()
+        assert attempt.workflow_node_attempt_id is not None
+        assert vision.vision_artifact_id is not None
+        session.add(
+            ProductGoalInterviewTurn(
+                project_id=project_id,
+                vision_artifact_id=vision.vision_artifact_id,
+                vision_fingerprint=vision.content_fingerprint,
+                goal_number=1,
+                revision_number=1,
+                prior_turn_id=None,
+                user_text="Malformed",
+                components_json="{",
+                goal_statement="Malformed",
+                is_complete=False,
+                clarifying_questions_json="[]",
+                output_fingerprint="wrong",
+                workflow_node_attempt_id=attempt.workflow_node_attempt_id,
+                attempt_fingerprint=attempt.attempt_fingerprint,
+                recorded_at=NOW + timedelta(seconds=1),
+            )
+        )
+        session.commit()
+
+    with pytest.raises(WorkflowFactLoadError):
+        ProductGoalInterviewInputService(engine=engine).build(
+            project_id, decision, "Reject malformed Goal lineage"
+        )
+
+
 def test_goal_feedback_revision_and_outcome_are_exact_and_durable(
     engine: Engine,
 ) -> None:
-    """Feedback stays in one Goal number and creates a valid next revision."""
+    """A resolved accepted feedback replacement opens the next Goal number."""
     project_id = _seed_accepted_vision(engine)
     domain = _domain(engine)
     _record_turn(domain, project_id, complete=True, key="first")
@@ -514,7 +594,36 @@ def test_goal_feedback_revision_and_outcome_are_exact_and_durable(
             goals[1].supersedes_product_goal_artifact_id
             == goals[0].product_goal_artifact_id
         )
-    assert "goal.review" in review_domain.position(project_id).waiting_nodes
+    acceptance_domain = _domain(engine, at=NOW + timedelta(seconds=2))
+    replacement_position, _ = _review(
+        acceptance_domain,
+        project_id,
+        decision="accepted",
+        rationale="",
+        key="revision-accepted",
+    )
+    assert "discovery.record" in acceptance_domain.position(project_id).available_nodes
+
+    outcome_domain = _domain(engine, at=NOW + timedelta(seconds=3))
+    assert outcome_domain.transition(
+        _fulfill_request(
+            outcome_domain,
+            project_id,
+            key="replacement-fulfilled",
+            rationale="The replacement Goal was delivered.",
+        )
+    ).ok
+    assert "goal.interview" in outcome_domain.position(project_id).available_nodes
+    _record_turn(outcome_domain, project_id, complete=True, key="next-goal")
+
+    with Session(engine) as session:
+        snapshot = WorkflowFactRepository(session).load(project_id)
+    assert [
+        (goal.goal_number, goal.revision_number)
+        for goal in snapshot.product_goal_artifacts
+    ] == [(1, 1), (1, 2), (2, 1)]
+    assert len(snapshot.product_goal_outcomes) == 1
+    assert "goal.review" in replacement_position.waiting_nodes
 
 
 def test_accepted_goal_outcome_replays_and_opposite_writes_nothing(
@@ -785,6 +894,100 @@ def test_discovery_specification_acceptance_is_atomic_and_exact(
         assert len(specs) == 1
         assert specs[0].status == "approved"
         assert specs[0].source_specification_candidate_id == int(candidate.fact_id)
+
+
+def test_specification_acceptance_rolls_back_all_staged_rows_on_flush_failure(
+    engine: Engine,
+) -> None:
+    """A database fault after staging acceptance leaves no partial durable state."""
+    project_id = _seed_accepted_vision(engine)
+    domain = _accept_active_goal(engine, project_id, key="first-goal")
+    domain = _domain(engine, at=NOW + timedelta(seconds=3))
+    _record_discovery(domain, project_id, key="first-discovery")
+    domain = _domain(engine, at=NOW + timedelta(seconds=4))
+    _record_specification(domain, project_id, key="first-specification")
+    domain = _domain(engine, at=NOW + timedelta(seconds=5))
+    _decide_specification(
+        domain,
+        project_id,
+        key="first-specification-accepted",
+        decision="accepted",
+    )
+    outcome_domain = _domain(engine, at=NOW + timedelta(seconds=6))
+    assert outcome_domain.transition(
+        _fulfill_request(
+            outcome_domain,
+            project_id,
+            key="first-goal-fulfilled",
+            rationale="Delivered.",
+        )
+    ).ok
+    _accept_active_goal(
+        engine,
+        project_id,
+        key="second-goal",
+        at=NOW + timedelta(seconds=7),
+    )
+    domain = _domain(engine, at=NOW + timedelta(seconds=10))
+    _record_discovery(domain, project_id, key="second-discovery")
+    domain = _domain(engine, at=NOW + timedelta(seconds=11))
+    _record_specification(domain, project_id, key="second-specification")
+    position = domain.position(project_id)
+    review = next(
+        item for item in position.decisions if item.node_id == "specification.review"
+    )
+    candidate = next(
+        item
+        for item in review.fact_references
+        if item.fact_type == "specification_candidate"
+    )
+    request = DecideSpecification(
+        project_id=project_id,
+        graph_version=position.graph_version,
+        fact_fingerprint=position.fact_fingerprint,
+        decision_fingerprint=review.decision_fingerprint,
+        idempotency_key="second-specification-accepted-fails",
+        actor="operator",
+        specification_candidate_id=int(candidate.fact_id),
+        specification_fingerprint=candidate.fingerprint,
+        decision="accepted",
+        rationale="",
+    )
+
+    def fail_after_acceptance_stage(session: Session, _context: object) -> None:
+        rows = (*session.identity_map.values(), *session.new)
+        staged_review = any(
+            isinstance(row, SpecificationDecision)
+            and row.idempotency_key == request.idempotency_key
+            for row in rows
+        )
+        staged_specs = [row for row in rows if isinstance(row, SpecRegistry)]
+        if staged_review and len(staged_specs) == _STAGED_SPEC_REGISTRY_COUNT:
+            raise RuntimeError(_FORCED_SPECIFICATION_ACCEPTANCE_FLUSH_FAILURE)
+
+    event.listen(Session, "after_flush", fail_after_acceptance_stage)
+    try:
+        failing_domain = _domain(engine, at=NOW + timedelta(seconds=12))
+        with pytest.raises(
+            RuntimeError, match=_FORCED_SPECIFICATION_ACCEPTANCE_FLUSH_FAILURE
+        ):
+            failing_domain.transition(request)
+    finally:
+        event.remove(Session, "after_flush", fail_after_acceptance_stage)
+
+    with Session(engine) as session:
+        decisions = session.exec(select(SpecificationDecision)).all()
+        specs = session.exec(select(SpecRegistry)).all()
+        receipts = session.exec(
+            select(WorkflowTransitionReceipt).where(
+                WorkflowTransitionReceipt.idempotency_key == request.idempotency_key
+            )
+        ).all()
+    assert len(decisions) == 1
+    assert [(spec.status, spec.supersedes_spec_version_id) for spec in specs] == [
+        ("approved", None)
+    ]
+    assert receipts == []
 
 
 def test_discovery_and_pending_specification_follow_exact_active_lineage(

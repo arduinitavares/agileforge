@@ -100,9 +100,20 @@ def execute_record_product_goal_interview_turn(
             )
         ).all()
     }
-    prior_goal = next(
-        (item for item in goals if item.product_goal_artifact_id in feedback), None
-    )
+    superseded_goal_ids = {
+        item.supersedes_product_goal_artifact_id
+        for item in goals
+        if item.supersedes_product_goal_artifact_id is not None
+    }
+    revision_candidates = [
+        item
+        for item in goals
+        if item.product_goal_artifact_id in feedback
+        and item.product_goal_artifact_id not in superseded_goal_ids
+    ]
+    if len(revision_candidates) > 1:
+        return _fail("Product Goal revision lineage is ambiguous.")
+    prior_goal = revision_candidates[0] if revision_candidates else None
     goal_number = (
         prior_goal.goal_number
         if prior_goal is not None

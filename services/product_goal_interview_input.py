@@ -58,7 +58,9 @@ class ProductGoalInterviewInputService:
             message = "Product Goal input requires goal.interview."
             raise ValueError(message)
         with Session(self.engine) as session:
-            snapshot = WorkflowFactRepository(session).load(project_id)
+            snapshot = WorkflowFactRepository(
+                session
+            ).load_product_goal_interview_snapshot(project_id)
         vision = accepted_current_vision(snapshot)
         if vision is None or accepted_current_goal(snapshot) is not None:
             message = "Product Goal interview facts are not eligible."

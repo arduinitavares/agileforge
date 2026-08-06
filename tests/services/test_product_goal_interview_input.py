@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal
 
+import pytest
+
 from services.contracts.product_goal import ProductGoalInterviewInput
 from services.product_goal_interview_input import ProductGoalInterviewInputService
 from workflow.contracts import (
@@ -25,10 +27,10 @@ from workflow.facts import (
 )
 
 if TYPE_CHECKING:
-    import pytest
     from sqlalchemy.engine import Engine
 
 NOW = datetime(2026, 8, 5, tzinfo=UTC)
+_GOAL_VISION_LINEAGE_ERROR = "Product Goal interview Vision lineage is invalid."
 
 
 def test_builds_from_the_exact_accepted_vision(
@@ -70,7 +72,7 @@ def test_builds_from_the_exact_accepted_vision(
         ),
     )
     monkeypatch.setattr(
-        "services.product_goal_interview_input.WorkflowFactRepository.load",
+        "services.product_goal_interview_input.WorkflowFactRepository.load_product_goal_interview_snapshot",
         lambda _self, _project_id: snapshot,
     )
     decision = NodeDecision(
@@ -101,7 +103,7 @@ def test_resolved_goal_does_not_leak_components_into_next_goal(
     """A new goal number starts fresh even when the accepted Vision is unchanged."""
     snapshot = _goal_snapshot(review="accepted", resolved=True)
     monkeypatch.setattr(
-        "services.product_goal_interview_input.WorkflowFactRepository.load",
+        "services.product_goal_interview_input.WorkflowFactRepository.load_product_goal_interview_snapshot",
         lambda _self, _project_id: snapshot,
     )
 
@@ -119,7 +121,7 @@ def test_feedback_revision_reuses_only_its_exact_goal_components(
     """Feedback resumes the reviewed Goal chain rather than any Vision turn."""
     snapshot = _goal_snapshot(review="feedback", resolved=False)
     monkeypatch.setattr(
-        "services.product_goal_interview_input.WorkflowFactRepository.load",
+        "services.product_goal_interview_input.WorkflowFactRepository.load_product_goal_interview_snapshot",
         lambda _self, _project_id: snapshot,
     )
 
@@ -130,6 +132,55 @@ def test_feedback_revision_reuses_only_its_exact_goal_components(
     prepared = ProductGoalInterviewInput.model_validate(payload)
     assert prepared.prior_components is not None
     assert prepared.prior_components.beneficiary == "Operators"
+
+
+def test_build_ignores_malformed_unrelated_workflow_facts(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Goal preparation uses only its narrow durable projection."""
+    snapshot = _goal_snapshot(review="feedback", resolved=False)
+
+    def fail_full_snapshot(_self: object, _project_id: int) -> WorkflowFactSnapshot:
+        message = "Malformed specification, Authority, repository, and planning facts."
+        raise AssertionError(message)
+
+    monkeypatch.setattr(
+        "services.product_goal_interview_input.WorkflowFactRepository.load",
+        fail_full_snapshot,
+    )
+    monkeypatch.setattr(
+        "services.product_goal_interview_input.WorkflowFactRepository.load_product_goal_interview_snapshot",
+        lambda _self, _project_id: snapshot,
+    )
+
+    payload = ProductGoalInterviewInputService(engine=engine).build(
+        1, _goal_interview_decision(), "Refine the current Goal"
+    )
+
+    assert ProductGoalInterviewInput.model_validate(
+        payload
+    ).prior_components is not None
+
+
+def test_build_propagates_malformed_goal_or_vision_lineage(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The narrow projection remains fail-closed for its own lineage."""
+
+    def fail_goal_lineage(_self: object, _project_id: int) -> WorkflowFactSnapshot:
+        raise ValueError(_GOAL_VISION_LINEAGE_ERROR)
+
+    monkeypatch.setattr(
+        "services.product_goal_interview_input.WorkflowFactRepository.load_product_goal_interview_snapshot",
+        fail_goal_lineage,
+    )
+
+    with pytest.raises(ValueError, match=_GOAL_VISION_LINEAGE_ERROR):
+        ProductGoalInterviewInputService(engine=engine).build(
+            1, _goal_interview_decision(), "Refine the current Goal"
+        )
 
 
 def _goal_interview_decision() -> NodeDecision:

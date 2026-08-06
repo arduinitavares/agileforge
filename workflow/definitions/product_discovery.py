@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from workflow.contracts import FactReference, InputField, RecommendationKind
@@ -80,6 +81,27 @@ def current_discovery(snapshot: WorkflowFactSnapshot) -> DiscoveryArtifactFact |
     """Return the sole exact discovery leaf or ``None`` on conflict."""
     discovery, _conflict = _current_discovery_state(snapshot)
     return discovery
+
+
+@dataclass(frozen=True)
+class ProductDefinitionSelection:
+    """Stable current-state selection shared by graph rules and projections."""
+
+    discovery: DiscoveryArtifactFact | None
+    discovery_conflict: bool
+    specification_candidate: SpecificationCandidateFact | None
+    specification_candidate_conflict: bool
+    accepted_spec: SpecVersionFact | None
+    accepted_spec_conflict: bool
+
+    @property
+    def has_conflict(self) -> bool:
+        """Return whether any current product-definition chain is invalid."""
+        return (
+            self.discovery_conflict
+            or self.specification_candidate_conflict
+            or self.accepted_spec_conflict
+        )
 
 
 def _current_specification_candidate_state(
@@ -221,12 +243,26 @@ def accepted_current_spec(snapshot: WorkflowFactSnapshot) -> SpecVersionFact | N
     return spec
 
 
+def select_product_definition_state(
+    snapshot: WorkflowFactSnapshot,
+) -> ProductDefinitionSelection:
+    """Select durable discovery, specification, and registry state once."""
+    discovery, discovery_conflict = _current_discovery_state(snapshot)
+    candidate, candidate_conflict = _current_specification_candidate_state(snapshot)
+    spec, spec_conflict = _accepted_current_spec_state(snapshot)
+    return ProductDefinitionSelection(
+        discovery=discovery,
+        discovery_conflict=discovery_conflict,
+        specification_candidate=candidate,
+        specification_candidate_conflict=candidate_conflict,
+        accepted_spec=spec,
+        accepted_spec_conflict=spec_conflict,
+    )
+
+
 def _fact_conflict(snapshot: WorkflowFactSnapshot) -> bool:
     """Report malformed current product-definition lineage for graph rules."""
-    _discovery, discovery_conflict = _current_discovery_state(snapshot)
-    _candidate, candidate_conflict = _current_specification_candidate_state(snapshot)
-    _spec, spec_conflict = _accepted_current_spec_state(snapshot)
-    return discovery_conflict or candidate_conflict or spec_conflict
+    return select_product_definition_state(snapshot).has_conflict
 
 
 def _candidate_decision(

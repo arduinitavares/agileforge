@@ -31,11 +31,7 @@ from services.packets.canonical import (
 )
 from services.specs.compiler_service import load_compiled_artifact
 from workflow.contracts import JsonObject, JsonValue
-from workflow.definitions.product_discovery import (
-    _accepted_current_spec_state,
-    _current_discovery_state,
-    _current_specification_candidate_state,
-)
+from workflow.definitions.product_discovery import select_product_definition_state
 from workflow.definitions.product_goal import (
     accepted_current_goal,
     accepted_current_vision,
@@ -754,14 +750,15 @@ class DurableReadProjectionService:
         snapshot = self._snapshot(project_id)
         if isinstance(snapshot, dict):
             return snapshot
-        discovery, conflict = _current_discovery_state(snapshot)
+        selection = select_product_definition_state(snapshot)
+        discovery = selection.discovery
         if discovery is None:
             return _success(
                 {
                     "current": None,
                     "stale_reason": (
                         "DISCOVERY_FACT_CONFLICT"
-                        if conflict
+                        if selection.discovery_conflict
                         else "DISCOVERY_NOT_CURRENT"
                     ),
                 }
@@ -778,8 +775,9 @@ class DurableReadProjectionService:
         snapshot = self._snapshot(project_id)
         if isinstance(snapshot, dict):
             return snapshot
-        candidate, candidate_conflict = _current_specification_candidate_state(snapshot)
-        spec, spec_conflict = _accepted_current_spec_state(snapshot)
+        selection = select_product_definition_state(snapshot)
+        candidate = selection.specification_candidate
+        spec = selection.accepted_spec
         if candidate is None:
             return _success(
                 {
@@ -788,7 +786,10 @@ class DurableReadProjectionService:
                     "review": None,
                     "stale_reason": (
                         "SPECIFICATION_FACT_CONFLICT"
-                        if candidate_conflict or spec_conflict
+                        if (
+                            selection.specification_candidate_conflict
+                            or selection.accepted_spec_conflict
+                        )
                         else "SPECIFICATION_NOT_CURRENT"
                     ),
                 }
@@ -819,7 +820,7 @@ class DurableReadProjectionService:
                 "review": review,
                 "stale_reason": (
                     "SPECIFICATION_FACT_CONFLICT"
-                    if spec_conflict
+                    if selection.accepted_spec_conflict
                     else (
                         None
                         if spec is not None
@@ -834,7 +835,8 @@ class DurableReadProjectionService:
         snapshot = self._snapshot(project_id)
         if isinstance(snapshot, dict):
             return snapshot
-        candidate, conflict = _current_specification_candidate_state(snapshot)
+        selection = select_product_definition_state(snapshot)
+        candidate = selection.specification_candidate
         if candidate is None:
             return _success(
                 {
@@ -842,7 +844,7 @@ class DurableReadProjectionService:
                     "review": None,
                     "stale_reason": (
                         "SPECIFICATION_FACT_CONFLICT"
-                        if conflict
+                        if selection.specification_candidate_conflict
                         else "NO_CURRENT_CANDIDATE"
                     ),
                 }
