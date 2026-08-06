@@ -32,9 +32,9 @@ from services.packets.canonical import (
 from services.specs.compiler_service import load_compiled_artifact
 from workflow.contracts import JsonObject, JsonValue
 from workflow.definitions.product_discovery import (
-    accepted_current_spec,
-    current_discovery,
-    current_specification_candidate,
+    _accepted_current_spec_state,
+    _current_discovery_state,
+    _current_specification_candidate_state,
 )
 from workflow.definitions.product_goal import (
     accepted_current_goal,
@@ -48,6 +48,8 @@ if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
 
     from workflow.facts import (
+        DiscoveryArtifactFact,
+        SpecificationCandidateFact,
         SpecificationDecisionFact,
         SprintFact,
         WorkflowFactSnapshot,
@@ -138,15 +140,50 @@ def _latest_resolved_goal(
 def _specification_review_data(
     decisions: list[SpecificationDecisionFact],
 ) -> JsonObject | None:
-    """Project one terminal candidate decision only when it is unambiguous."""
+    """Project pending or one terminal candidate decision without ordering by time."""
+    if not decisions:
+        return {"state": "pending"}
     if len(decisions) != 1:
         return None
     decision = decisions[0]
     return {
+        "state": decision.decision,
         "specification_decision_id": decision.specification_decision_id,
         "decision": decision.decision,
         "rationale": decision.rationale,
         "reviewer": decision.reviewer,
+    }
+
+
+def _discovery_data(discovery: DiscoveryArtifactFact) -> JsonObject:
+    """Render an exact selected discovery fact without mutable Project state."""
+    return {
+        "discovery_artifact_id": discovery.discovery_artifact_id,
+        "fingerprint": discovery.content_fingerprint,
+        "content_ref": discovery.content_ref,
+        "vision_artifact_id": discovery.vision_artifact_id,
+        "vision_fingerprint": discovery.vision_fingerprint,
+        "product_goal_artifact_id": discovery.product_goal_artifact_id,
+        "product_goal_fingerprint": discovery.product_goal_fingerprint,
+        "canonical_content": discovery.canonical_content,
+    }
+
+
+def _specification_candidate_data(candidate: SpecificationCandidateFact) -> JsonObject:
+    """Render one exact immutable specification candidate and complete lineage."""
+    return {
+        "specification_candidate_id": candidate.specification_candidate_id,
+        "fingerprint": candidate.content_fingerprint,
+        "canonical_content": candidate.canonical_content,
+        "content_ref": candidate.content_ref,
+        "vision_artifact_id": candidate.vision_artifact_id,
+        "vision_fingerprint": candidate.vision_fingerprint,
+        "product_goal_artifact_id": candidate.product_goal_artifact_id,
+        "product_goal_fingerprint": candidate.product_goal_fingerprint,
+        "discovery_artifact_id": candidate.discovery_artifact_id,
+        "discovery_fingerprint": candidate.discovery_fingerprint,
+        "base_spec_version_id": candidate.base_spec_version_id,
+        "base_spec_hash": candidate.base_spec_hash,
     }
 
 
@@ -717,37 +754,43 @@ class DurableReadProjectionService:
         snapshot = self._snapshot(project_id)
         if isinstance(snapshot, dict):
             return snapshot
-        discovery = current_discovery(snapshot)
+        discovery, conflict = _current_discovery_state(snapshot)
         if discovery is None:
-            return _success({"current": None, "stale_reason": "DISCOVERY_NOT_CURRENT"})
+            return _success(
+                {
+                    "current": None,
+                    "stale_reason": (
+                        "DISCOVERY_FACT_CONFLICT"
+                        if conflict
+                        else "DISCOVERY_NOT_CURRENT"
+                    ),
+                }
+            )
         return _success(
             {
-                "current": {
-                    "discovery_artifact_id": discovery.discovery_artifact_id,
-                    "fingerprint": discovery.content_fingerprint,
-                    "content_ref": discovery.content_ref,
-                    "vision_artifact_id": discovery.vision_artifact_id,
-                    "product_goal_artifact_id": discovery.product_goal_artifact_id,
-                    "canonical_content": discovery.canonical_content,
-                },
+                "current": _discovery_data(discovery),
                 "stale_reason": None,
             }
         )
 
     def specification_status(self, *, project_id: int) -> JsonObject:
-        """Project the graph-selected approved registry identity only."""
+        """Project the current candidate, review, and graph-selected registry row."""
         snapshot = self._snapshot(project_id)
         if isinstance(snapshot, dict):
             return snapshot
-        candidate = current_specification_candidate(snapshot)
-        spec = accepted_current_spec(snapshot)
+        candidate, candidate_conflict = _current_specification_candidate_state(snapshot)
+        spec, spec_conflict = _accepted_current_spec_state(snapshot)
         if candidate is None:
             return _success(
                 {
                     "current": None,
                     "candidate": None,
                     "review": None,
-                    "stale_reason": "SPECIFICATION_NOT_CURRENT",
+                    "stale_reason": (
+                        "SPECIFICATION_FACT_CONFLICT"
+                        if candidate_conflict or spec_conflict
+                        else "SPECIFICATION_NOT_CURRENT"
+                    ),
                 }
             )
         decisions = [
@@ -772,16 +815,17 @@ class DurableReadProjectionService:
                         "canonical_content": candidate.canonical_content,
                     }
                 ),
-                "candidate": {
-                    "specification_candidate_id": candidate.specification_candidate_id,
-                    "fingerprint": candidate.content_fingerprint,
-                    "canonical_content": candidate.canonical_content,
-                    "content_ref": candidate.content_ref,
-                },
+                "candidate": _specification_candidate_data(candidate),
                 "review": review,
-                "stale_reason": None
-                if spec is not None
-                else "SPECIFICATION_NOT_APPROVED",
+                "stale_reason": (
+                    "SPECIFICATION_FACT_CONFLICT"
+                    if spec_conflict
+                    else (
+                        None
+                        if spec is not None
+                        else "SPECIFICATION_NOT_APPROVED"
+                    )
+                ),
             }
         )
 
@@ -790,13 +834,17 @@ class DurableReadProjectionService:
         snapshot = self._snapshot(project_id)
         if isinstance(snapshot, dict):
             return snapshot
-        candidate = current_specification_candidate(snapshot)
+        candidate, conflict = _current_specification_candidate_state(snapshot)
         if candidate is None:
             return _success(
                 {
                     "candidate": None,
                     "review": None,
-                    "stale_reason": "NO_CURRENT_CANDIDATE",
+                    "stale_reason": (
+                        "SPECIFICATION_FACT_CONFLICT"
+                        if conflict
+                        else "NO_CURRENT_CANDIDATE"
+                    ),
                 }
             )
         decisions = [
@@ -810,14 +858,17 @@ class DurableReadProjectionService:
         review = _specification_review_data(decisions)
         return _success(
             {
-                "candidate": {
-                    "specification_candidate_id": candidate.specification_candidate_id,
-                    "fingerprint": candidate.content_fingerprint,
-                    "canonical_content": candidate.canonical_content,
-                    "content_ref": candidate.content_ref,
-                },
+                "candidate": _specification_candidate_data(candidate),
                 "review": review,
-                "stale_reason": None if review is None else "CANDIDATE_REVIEWED",
+                "stale_reason": (
+                    "SPECIFICATION_REVIEW_CONFLICT"
+                    if review is None
+                    else (
+                        None
+                        if review["state"] == "pending"
+                        else "CANDIDATE_REVIEWED"
+                    )
+                ),
             }
         )
 
