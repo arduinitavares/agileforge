@@ -96,6 +96,64 @@ def execute_record_discovery_artifact(
     )
 
 
+def _replacement_validation_error(
+    session: Session,
+    request: RecordSpecificationCandidate,
+    discovery: DiscoveryArtifact,
+) -> str | None:
+    """Return an error unless a replacement supersedes the exact terminal leaf."""
+    candidates = session.exec(
+        select(SpecificationCandidate).where(
+            col(SpecificationCandidate.project_id) == request.project_id,
+        )
+    ).all()
+    superseded_candidate_ids = {
+        candidate.supersedes_specification_candidate_id
+        for candidate in candidates
+        if candidate.supersedes_specification_candidate_id is not None
+    }
+    decisions_by_candidate_id = {
+        row.specification_candidate_id: row
+        for row in session.exec(
+            select(SpecificationDecision).where(
+                col(SpecificationDecision.project_id) == request.project_id,
+            )
+        ).all()
+    }
+    terminal_leaves = [
+        candidate
+        for candidate in candidates
+        if candidate.specification_candidate_id not in superseded_candidate_ids
+        and (
+            candidate.vision_artifact_id,
+            candidate.vision_fingerprint,
+            candidate.product_goal_artifact_id,
+            candidate.product_goal_fingerprint,
+            candidate.discovery_artifact_id,
+            candidate.discovery_fingerprint,
+        )
+        == (
+            discovery.vision_artifact_id,
+            discovery.vision_fingerprint,
+            discovery.product_goal_artifact_id,
+            discovery.product_goal_fingerprint,
+            discovery.discovery_artifact_id,
+            discovery.content_fingerprint,
+        )
+        and candidate.specification_candidate_id in decisions_by_candidate_id
+        and decisions_by_candidate_id[candidate.specification_candidate_id].decision
+        in {"rejected", "feedback"}
+    ]
+    if len(terminal_leaves) > 1:
+        return "Specification replacement lineage is ambiguous."
+    expected_supersedes = (
+        None if not terminal_leaves else terminal_leaves[0].specification_candidate_id
+    )
+    if request.supersedes_specification_candidate_id != expected_supersedes:
+        return "Specification replacement must supersede exact rejected feedback."
+    return None
+
+
 def execute_record_specification_candidate(
     session: Session,
     request: RecordSpecificationCandidate,
@@ -120,28 +178,9 @@ def execute_record_specification_candidate(
     if len(current_specs) > 1:
         return _failure("Approved specification lineage is ambiguous.")
     base = current_specs[0] if current_specs else None
-    supersedes = request.supersedes_specification_candidate_id
-    if supersedes is not None:
-        previous = session.get(SpecificationCandidate, supersedes)
-        decision_row = (
-            None
-            if previous is None
-            else session.exec(
-                select(SpecificationDecision).where(
-                    col(SpecificationDecision.project_id) == request.project_id,
-                    col(SpecificationDecision.specification_candidate_id) == supersedes,
-                )
-            ).one_or_none()
-        )
-        if (
-            previous is None
-            or decision_row is None
-            or decision_row.decision not in {"rejected", "feedback"}
-            or previous.discovery_artifact_id != discovery.discovery_artifact_id
-        ):
-            return _failure(
-                "Specification replacement must supersede exact rejected feedback."
-            )
+    replacement_error = _replacement_validation_error(session, request, discovery)
+    if replacement_error is not None:
+        return _failure(replacement_error)
     candidate = SpecificationCandidate(
         project_id=request.project_id,
         vision_artifact_id=discovery.vision_artifact_id,
@@ -155,7 +194,9 @@ def execute_record_specification_candidate(
         canonical_content_json=canonical_json(request.canonical_content),
         content_fingerprint=canonical_hash(request.canonical_content),
         content_ref=request.content_ref,
-        supersedes_specification_candidate_id=supersedes,
+        supersedes_specification_candidate_id=(
+            request.supersedes_specification_candidate_id
+        ),
         recorded_by=request.actor,
         recorded_at=evaluated_at,
     )

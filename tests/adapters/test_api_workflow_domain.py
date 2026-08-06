@@ -23,6 +23,7 @@ from cli.workflow_commands import AGENTIC_REQUEST_KINDS, COMMAND_PREFIXES
 from services.application import AgenticActionRequest, AgileForgeApplication
 from tests.adapters.test_command_renderer import position_fixture
 from workflow.contracts import (
+    JsonObject,
     NodeCategory,
     NodeDecision,
     RecommendationKind,
@@ -331,6 +332,19 @@ def test_agentic_application_retry_reaches_durable_start_receipt_when_stale() ->
         def transition(self, request: TransitionRequest) -> TransitionResult:
             self.requests.append(request)
             return prior_result
+
+        def load_persisted_attempt_input(
+            self,
+            *,
+            project_id: int,
+            attempt_id: int,
+            attempt_fingerprint: str,
+        ) -> JsonObject:
+            pytest.fail(
+                "replayed action unexpectedly loaded persisted attempt input "
+                f"{project_id}:{attempt_id}:{attempt_fingerprint}"
+            )
+
 
     class NoRecipeRegistry:
         def require(self, node_id: str) -> None:

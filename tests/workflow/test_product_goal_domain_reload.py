@@ -5,7 +5,8 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Literal
 
-from sqlmodel import Session, select
+import pytest
+from sqlmodel import Session, col, select
 
 from models.core import Project, Sprint, Team
 from models.enums import SprintStatus
@@ -25,10 +26,19 @@ from models.workflow import WorkflowNodeAttempt
 from repositories.workflow import WorkflowFactRepository
 from workflow.clock import FixedClock
 from workflow.contracts import GRAPH_VERSION, FactReference, WorkflowPosition
-from workflow.definitions.product_discovery import PRODUCT_DISCOVERY_NODES
+from workflow.definitions.product_discovery import (
+    PRODUCT_DISCOVERY_NODES,
+    accepted_current_spec,
+    current_discovery,
+    current_specification_candidate,
+)
 from workflow.definitions.product_goal import PRODUCT_GOAL_NODES
 from workflow.domain import WorkflowDomain
-from workflow.fingerprints import canonical_hash, canonical_json
+from workflow.fingerprints import (
+    canonical_hash,
+    canonical_json,
+    canonical_stored_json_hash,
+)
 from workflow.graph import ChildGraphSpec, WorkflowGraph
 from workflow.requests import (
     AbandonProductGoal,
@@ -300,6 +310,144 @@ def _activate_goal(
         key=f"{key}-fulfill",
         rationale="Delivered.",
     )
+
+
+def _accept_active_goal(
+    engine: Engine,
+    project_id: int,
+    *,
+    key: str,
+    at: datetime = NOW,
+) -> WorkflowDomain:
+    """Create and accept one complete Goal, returning its current domain."""
+    interview_domain = _domain(engine, at=at)
+    _record_turn(interview_domain, project_id, complete=True, key=f"{key}-goal")
+    review_domain = _domain(engine, at=at + timedelta(seconds=1))
+    _review(
+        review_domain,
+        project_id,
+        decision="accepted",
+        rationale="",
+        key=f"{key}-accepted",
+    )
+    return _domain(engine, at=at + timedelta(seconds=2))
+
+
+def _record_discovery(
+    domain: WorkflowDomain,
+    project_id: int,
+    *,
+    key: str,
+) -> FactReference:
+    """Record the graph-selected discovery and return its exact reference."""
+    position = domain.position(project_id)
+    decision = next(
+        item for item in position.decisions if item.node_id == "discovery.record"
+    )
+    assert domain.transition(
+        RecordDiscoveryArtifact(
+            project_id=project_id,
+            graph_version=position.graph_version,
+            fact_fingerprint=position.fact_fingerprint,
+            decision_fingerprint=decision.decision_fingerprint,
+            idempotency_key=key,
+            actor="operator",
+            canonical_content={"discovery": key},
+            content_ref=None,
+        )
+    ).ok
+    recorded = domain.position(project_id)
+    specification = next(
+        item
+        for item in recorded.decisions
+        if item.node_id == "specification.record"
+    )
+    reference = specification.fact_references[0]
+    assert reference.fact_type == "discovery"
+    return reference
+
+
+def _record_specification(
+    domain: WorkflowDomain,
+    project_id: int,
+    *,
+    key: str,
+    supersedes: int | None = None,
+) -> FactReference:
+    """Record one graph-selected candidate and return its pending review reference."""
+    position = domain.position(project_id)
+    decision = next(
+        item for item in position.decisions if item.node_id == "specification.record"
+    )
+    result = domain.transition(
+        RecordSpecificationCandidate(
+            project_id=project_id,
+            graph_version=position.graph_version,
+            fact_fingerprint=position.fact_fingerprint,
+            decision_fingerprint=decision.decision_fingerprint,
+            idempotency_key=key,
+            actor="operator",
+            canonical_content={"specification": key},
+            content_ref=None,
+            supersedes_specification_candidate_id=supersedes,
+        )
+    )
+    assert result.ok
+    pending = domain.position(project_id)
+    review = next(
+        item for item in pending.decisions if item.node_id == "specification.review"
+    )
+    return next(
+        item
+        for item in review.fact_references
+        if item.fact_type == "specification_candidate"
+    )
+
+
+def _decide_specification(
+    domain: WorkflowDomain,
+    project_id: int,
+    *,
+    key: str,
+    decision: Literal["accepted", "rejected", "feedback"],
+    rationale: str = "",
+) -> FactReference:
+    """Apply the exact graph-selected review and return its candidate reference."""
+    position = domain.position(project_id)
+    review = next(
+        item for item in position.decisions if item.node_id == "specification.review"
+    )
+    candidate = next(
+        item
+        for item in review.fact_references
+        if item.fact_type == "specification_candidate"
+    )
+    assert domain.transition(
+        DecideSpecification(
+            project_id=project_id,
+            graph_version=position.graph_version,
+            fact_fingerprint=position.fact_fingerprint,
+            decision_fingerprint=review.decision_fingerprint,
+            idempotency_key=key,
+            actor="operator",
+            specification_candidate_id=int(candidate.fact_id),
+            specification_fingerprint=candidate.fingerprint,
+            decision=decision,
+            rationale=rationale,
+        )
+    ).ok
+    return candidate
+
+
+def _product_definition_counts(engine: Engine) -> tuple[int, int, int, int]:
+    """Read append-only discovery/specification record counts for rollback checks."""
+    with Session(engine) as session:
+        return (
+            len(session.exec(select(DiscoveryArtifact)).all()),
+            len(session.exec(select(SpecificationCandidate)).all()),
+            len(session.exec(select(SpecificationDecision)).all()),
+            len(session.exec(select(SpecRegistry)).all()),
+        )
 
 
 def test_goal_turns_reload_after_incomplete_and_complete_transitions(
@@ -637,3 +785,243 @@ def test_discovery_specification_acceptance_is_atomic_and_exact(
         assert len(specs) == 1
         assert specs[0].status == "approved"
         assert specs[0].source_specification_candidate_id == int(candidate.fact_id)
+
+
+def test_discovery_and_pending_specification_follow_exact_active_lineage(
+    engine: Engine,
+) -> None:
+    """Discovery and its pending candidate bind only the accepted Vision and Goal."""
+    project_id = _seed_accepted_vision(engine)
+    domain = _accept_active_goal(engine, project_id, key="lineage")
+
+    discovery_position = domain.position(project_id)
+    discovery_decision = next(
+        item
+        for item in discovery_position.decisions
+        if item.node_id == "discovery.record"
+    )
+    assert {item.fact_type for item in discovery_decision.fact_references} == {
+        "vision",
+        "product_goal",
+    }
+    discovery = _record_discovery(domain, project_id, key="lineage-discovery")
+    candidate = _record_specification(domain, project_id, key="lineage-specification")
+
+    pending = domain.position(project_id)
+    required = {
+        item.node_id
+        for item in pending.decisions
+        if item.recommendation_kind.value == "required"
+        and item.category.value in {"available", "waiting"}
+    }
+    assert required == {"specification.review"}
+    assert all("prd" not in item.node_id for item in pending.decisions)
+    with Session(engine) as session:
+        stored_discovery = session.get(DiscoveryArtifact, int(discovery.fact_id))
+        stored_candidate = session.get(SpecificationCandidate, int(candidate.fact_id))
+        assert stored_discovery is not None
+        assert stored_candidate is not None
+        assert (
+            stored_candidate.discovery_artifact_id,
+            stored_candidate.discovery_fingerprint,
+        ) == (int(discovery.fact_id), discovery.fingerprint)
+        assert stored_candidate.base_spec_version_id is None
+        assert stored_candidate.base_spec_hash is None
+        snapshot = WorkflowFactRepository(session).load(project_id)
+    assert snapshot.prd_versions == ()
+
+
+@pytest.mark.parametrize("terminal_decision", ["rejected", "feedback"])
+def test_specification_replacement_requires_exact_terminal_supersedes(
+    engine: Engine,
+    terminal_decision: Literal["rejected", "feedback"],
+) -> None:
+    """A reviewed candidate cannot be bypassed by a new unsuperseded candidate."""
+    project_id = _seed_accepted_vision(engine)
+    domain = _accept_active_goal(engine, project_id, key=terminal_decision)
+    domain = _domain(engine, at=NOW + timedelta(seconds=3))
+    _record_discovery(domain, project_id, key=f"{terminal_decision}-discovery")
+    domain = _domain(engine, at=NOW + timedelta(seconds=4))
+    first = _record_specification(domain, project_id, key=f"{terminal_decision}-first")
+    domain = _domain(engine, at=NOW + timedelta(seconds=5))
+    _decide_specification(
+        domain,
+        project_id,
+        key=f"{terminal_decision}-decision",
+        decision=terminal_decision,
+        rationale="Revise this candidate.",
+    )
+    replacement_position = domain.position(project_id)
+    replacement = next(
+        item
+        for item in replacement_position.decisions
+        if item.node_id == "specification.record"
+    )
+    invalid = RecordSpecificationCandidate(
+        project_id=project_id,
+        graph_version=replacement_position.graph_version,
+        fact_fingerprint=replacement_position.fact_fingerprint,
+        decision_fingerprint=replacement.decision_fingerprint,
+        idempotency_key=f"{terminal_decision}-missing-supersedes",
+        actor="operator",
+        canonical_content={"specification": "missing supersedes"},
+        content_ref=None,
+        supersedes_specification_candidate_id=None,
+    )
+    before = _product_definition_counts(engine)
+    assert not domain.transition(invalid).ok
+    assert _product_definition_counts(engine) == before
+
+    wrong = invalid.model_copy(
+        update={
+            "idempotency_key": f"{terminal_decision}-wrong-supersedes",
+            "supersedes_specification_candidate_id": int(first.fact_id) + 100,
+        }
+    )
+    assert not domain.transition(wrong).ok
+    assert _product_definition_counts(engine) == before
+
+    domain = _domain(engine, at=NOW + timedelta(seconds=6))
+    replacement_candidate = _record_specification(
+        domain,
+        project_id,
+        key=f"{terminal_decision}-replacement",
+        supersedes=int(first.fact_id),
+    )
+    with Session(engine) as session:
+        stored = session.get(SpecificationCandidate, int(replacement_candidate.fact_id))
+        assert stored is not None
+        assert stored.supersedes_specification_candidate_id == int(first.fact_id)
+
+
+def test_stale_discovery_and_candidate_requests_write_nothing(engine: Engine) -> None:
+    """Wrong positioned discovery or candidate fingerprints cannot append records."""
+    project_id = _seed_accepted_vision(engine)
+    domain = _accept_active_goal(engine, project_id, key="stale")
+    discovery_position = domain.position(project_id)
+    discovery = next(
+        item
+        for item in discovery_position.decisions
+        if item.node_id == "discovery.record"
+    )
+    stale_discovery = RecordDiscoveryArtifact(
+        project_id=project_id,
+        graph_version=discovery_position.graph_version,
+        fact_fingerprint="sha256:wrong-vision-or-goal",
+        decision_fingerprint=discovery.decision_fingerprint,
+        idempotency_key="stale-discovery",
+        actor="operator",
+        canonical_content={"discovery": "stale"},
+        content_ref=None,
+    )
+    before = _product_definition_counts(engine)
+    assert not domain.transition(stale_discovery).ok
+    assert _product_definition_counts(engine) == before
+
+    _record_discovery(domain, project_id, key="current-discovery")
+    specification_position = domain.position(project_id)
+    specification = next(
+        item
+        for item in specification_position.decisions
+        if item.node_id == "specification.record"
+    )
+    before_candidate = _product_definition_counts(engine)
+    stale_candidate = RecordSpecificationCandidate(
+        project_id=project_id,
+        graph_version=specification_position.graph_version,
+        fact_fingerprint="sha256:wrong-discovery",
+        decision_fingerprint=specification.decision_fingerprint,
+        idempotency_key="stale-candidate",
+        actor="operator",
+        canonical_content={"specification": "stale"},
+        content_ref=None,
+        supersedes_specification_candidate_id=None,
+    )
+    assert not domain.transition(stale_candidate).ok
+    assert _product_definition_counts(engine) == before_candidate
+
+
+def test_later_goal_replaces_the_registered_specification_atomically(
+    engine: Engine,
+) -> None:
+    """A second Goal starts with the exact current spec base and retires prior facts."""
+    project_id = _seed_accepted_vision(engine)
+    domain = _accept_active_goal(engine, project_id, key="first-goal")
+    domain = _domain(engine, at=NOW + timedelta(seconds=3))
+    _record_discovery(domain, project_id, key="first-discovery")
+    domain = _domain(engine, at=NOW + timedelta(seconds=4))
+    first_candidate = _record_specification(
+        domain, project_id, key="first-specification"
+    )
+    domain = _domain(engine, at=NOW + timedelta(seconds=5))
+    _decide_specification(
+        domain,
+        project_id,
+        key="first-specification-accepted",
+        decision="accepted",
+    )
+    with Session(engine) as session:
+        first_spec = session.exec(select(SpecRegistry)).one()
+        assert first_spec.status == "approved"
+        assert (
+            first_spec.source_specification_candidate_id == int(first_candidate.fact_id)
+        )
+        assert first_spec.spec_hash == canonical_stored_json_hash(first_spec.content)
+        first_spec_id = first_spec.spec_version_id
+        first_spec_hash = first_spec.spec_hash
+    assert first_spec_id is not None
+
+    outcome_domain = _domain(engine, at=NOW + timedelta(seconds=6))
+    assert outcome_domain.transition(
+        _fulfill_request(
+            outcome_domain,
+            project_id,
+            key="first-goal-fulfilled",
+            rationale="Delivered.",
+        )
+    ).ok
+    _accept_active_goal(
+        engine,
+        project_id,
+        key="second-goal",
+        at=NOW + timedelta(seconds=7),
+    )
+    with Session(engine) as session:
+        snapshot = WorkflowFactRepository(session).load(project_id)
+    assert current_discovery(snapshot) is None
+    assert current_specification_candidate(snapshot) is None
+    assert accepted_current_spec(snapshot) is None
+
+    domain = _domain(engine, at=NOW + timedelta(seconds=10))
+    _record_discovery(domain, project_id, key="second-discovery")
+    domain = _domain(engine, at=NOW + timedelta(seconds=11))
+    second_candidate = _record_specification(
+        domain, project_id, key="second-specification"
+    )
+    with Session(engine) as session:
+        stored_candidate = session.get(
+            SpecificationCandidate, int(second_candidate.fact_id)
+        )
+        assert stored_candidate is not None
+        assert (
+            stored_candidate.base_spec_version_id,
+            stored_candidate.base_spec_hash,
+        ) == (first_spec_id, first_spec_hash)
+
+    domain = _domain(engine, at=NOW + timedelta(seconds=12))
+    _decide_specification(
+        domain,
+        project_id,
+        key="second-specification-accepted",
+        decision="accepted",
+    )
+    with Session(engine) as session:
+        specs = session.exec(
+            select(SpecRegistry).order_by(col(SpecRegistry.spec_version_id))
+        ).all()
+    assert [(spec.status, spec.supersedes_spec_version_id) for spec in specs] == [
+        ("superseded", None),
+        ("approved", first_spec_id),
+    ]
+    assert specs[1].source_specification_candidate_id == int(second_candidate.fact_id)
+    assert specs[1].spec_hash == canonical_stored_json_hash(specs[1].content)

@@ -43,6 +43,7 @@ from workflow.facts import (
     ScopeExtensionRegistrationFact,
     SpecDraftFact,
     SpecificationCandidateFact,
+    SpecificationDecisionFact,
     SpecVersionFact,
     SprintClosureFact,
     SprintFact,
@@ -54,6 +55,8 @@ from workflow.facts import (
     StoryFact,
     TaskCompletionFact,
     TaskFact,
+    VisionArtifactDecisionFact,
+    VisionArtifactFact,
     VisionInterviewTurnFact,
     VisionRevisionIntentFact,
     WorkflowFactSnapshot,
@@ -245,6 +248,37 @@ AUTHORITATIVE_SNAPSHOT_VARIANTS: tuple[tuple[str, object], ...] = (
         ),
     ),
     (
+        "vision_artifacts",
+        (
+            VisionArtifactFact(
+                vision_artifact_id=83,
+                version_number=1,
+                components={"constraint": "durable"},
+                statement="A durable workflow.",
+                content_fingerprint="sha256:vision",
+                supersedes_vision_artifact_id=None,
+                source_interview_turn_id=84,
+                created_by="operator",
+                created_at=EVALUATED_AT,
+            ),
+        ),
+    ),
+    (
+        "vision_artifact_decisions",
+        (
+            VisionArtifactDecisionFact(
+                vision_artifact_decision_id=85,
+                vision_artifact_id=83,
+                artifact_fingerprint="sha256:vision",
+                decision="accepted",
+                rationale="",
+                reviewer="reviewer",
+                idempotency_key="vision-review-85",
+                decided_at=EVALUATED_AT,
+            ),
+        ),
+    ),
+    (
         "product_goal_interview_turns",
         (
             ProductGoalInterviewTurnFact(
@@ -360,6 +394,28 @@ AUTHORITATIVE_SNAPSHOT_VARIANTS: tuple[tuple[str, object], ...] = (
                 spec_hash="sha256:spec-version",
                 status="approved",
                 approved_at=EVALUATED_AT,
+                source_specification_candidate_id=91,
+                source_vision_artifact_id=83,
+                source_vision_fingerprint="sha256:vision",
+                source_product_goal_artifact_id=88,
+                source_product_goal_fingerprint="sha256:goal",
+                source_discovery_artifact_id=90,
+                source_discovery_fingerprint="sha256:discovery",
+            ),
+        ),
+    ),
+    (
+        "specification_decisions",
+        (
+            SpecificationDecisionFact(
+                specification_decision_id=92,
+                specification_candidate_id=91,
+                artifact_fingerprint="sha256:candidate",
+                decision="accepted",
+                rationale="",
+                reviewer="reviewer",
+                idempotency_key="specification-review-92",
+                decided_at=EVALUATED_AT,
             ),
         ),
     ),

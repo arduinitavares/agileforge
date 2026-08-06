@@ -308,6 +308,29 @@ def test_rejects_registered_content_that_no_longer_matches_its_hash(
         )
 
 
+def test_rejects_a_graph_decision_for_a_superseded_registry_row(
+    engine: Engine,
+) -> None:
+    """Authority input reads only the graph-selected approved registry version."""
+    spec = _seed_spec(engine)
+    with Session(engine) as session:
+        stored = session.get(SpecRegistry, spec.spec_version_id)
+        assert stored is not None
+        stored.status = "superseded"
+        session.add(stored)
+        session.commit()
+
+    with pytest.raises(
+        AuthorityCompilationInputError,
+        match="does not match an approved spec",
+    ):
+        AuthorityCompilationInputService(engine=engine).build(
+            project_id=PROJECT_ID,
+            decision=_compile_decision(spec),
+            compiler_model=COMPILER_MODEL,
+        )
+
+
 def test_builds_from_graph_registered_spec_with_escaped_unicode(
     engine: Engine,
 ) -> None:

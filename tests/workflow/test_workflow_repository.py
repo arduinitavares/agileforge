@@ -17,6 +17,17 @@ import repositories.workflow as workflow_repository_module
 from models.core import Project, Sprint, SprintStory, Task, Team, UserStory
 from models.db import set_sqlite_pragma
 from models.enums import SprintStatus, StoryStatus, TaskStatus
+from models.product_definition import (
+    DiscoveryArtifact,
+    ProductGoalArtifact,
+    ProductGoalArtifactDecision,
+    ProductGoalInterviewTurn,
+    SpecificationCandidate,
+    SpecificationDecision,
+    VisionArtifact,
+    VisionArtifactDecision,
+    VisionInterviewTurn,
+)
 from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance, SpecRegistry
 from models.workflow import (
     ChallengeArtifact,
@@ -57,6 +68,12 @@ from workflow.facts import (
     SprintFact,
     StoryFact,
     TaskFact,
+)
+from workflow.fingerprints import (
+    canonical_hash,
+    canonical_json,
+    product_goal_artifact_fingerprint,
+    product_goal_interview_output_fingerprint,
 )
 
 if TYPE_CHECKING:
@@ -133,6 +150,221 @@ def _replace_first_authority_artifact(
     acceptance.authority_fingerprint = _required_authority_fingerprint(authority)
     session.add(acceptance)
     session.commit()
+
+
+def _seed_approved_specification_lineage(
+    session: Session,
+    *,
+    project_id: int,
+    recorded_at: datetime,
+    content: dict[str, str],
+) -> SpecRegistry:
+    """Seed one complete accepted product-definition chain for a registry row."""
+    attempt = WorkflowNodeAttempt(
+        project_id=project_id,
+        node_id="goal.interview",
+        instance_key=None,
+        graph_version="agileforge.workflow.v1",
+        fact_fingerprint="sha256:product-definition-facts",
+        business_fact_fingerprint="sha256:product-definition-business",
+        decision_fingerprint="sha256:product-definition-decision",
+        normalized_input_json="{}",
+        input_fingerprint="sha256:product-definition-input",
+        model_id="test-model",
+        execution_settings_json="{}",
+        idempotency_key="product-definition-attempt",
+        actor="test",
+        correlation_id=None,
+        started_at=recorded_at,
+        lease_expires_at=recorded_at + timedelta(minutes=5),
+        attempt_fingerprint="sha256:product-definition-attempt",
+    )
+    session.add(attempt)
+    session.flush()
+    attempt_id = _id(attempt.workflow_node_attempt_id)
+
+    vision_components = {"purpose": "Repository snapshot"}
+    vision_statement = "Preserve complete specification provenance."
+    vision_turn = VisionInterviewTurn(
+        project_id=project_id,
+        mode="initial",
+        turn_number=1,
+        revision_intent_id=None,
+        prior_turn_id=None,
+        user_text="Define Vision",
+        components_json=canonical_json(vision_components),
+        vision_statement=vision_statement,
+        is_complete=True,
+        clarifying_questions_json="[]",
+        output_fingerprint=canonical_hash(
+            {
+                "components_json": vision_components,
+                "vision_statement": vision_statement,
+                "is_complete": True,
+                "clarifying_questions_json": [],
+            }
+        ),
+        workflow_node_attempt_id=attempt_id,
+        attempt_fingerprint=attempt.attempt_fingerprint,
+        recorded_at=recorded_at + timedelta(seconds=1),
+    )
+    session.add(vision_turn)
+    session.flush()
+    vision = VisionArtifact(
+        project_id=project_id,
+        version_number=1,
+        components_json=canonical_json(vision_components),
+        statement=vision_statement,
+        content_fingerprint=canonical_hash(
+            {"components": vision_components, "statement": vision_statement}
+        ),
+        supersedes_vision_artifact_id=None,
+        source_interview_turn_id=_id(vision_turn.vision_interview_turn_id),
+        created_by="test",
+        created_at=recorded_at + timedelta(seconds=2),
+    )
+    session.add(vision)
+    session.flush()
+    vision_id = _id(vision.vision_artifact_id)
+    session.add(
+        VisionArtifactDecision(
+            project_id=project_id,
+            vision_artifact_id=vision_id,
+            artifact_fingerprint=vision.content_fingerprint,
+            decision="accepted",
+            rationale="",
+            reviewer="test",
+            idempotency_key="product-definition-vision-accepted",
+            decided_at=recorded_at + timedelta(seconds=3),
+        )
+    )
+
+    goal_components = {"beneficiary": "Repository readers"}
+    goal_statement = "Keep the registry traceable."
+    goal_turn = ProductGoalInterviewTurn(
+        project_id=project_id,
+        vision_artifact_id=vision_id,
+        vision_fingerprint=vision.content_fingerprint,
+        goal_number=1,
+        revision_number=1,
+        prior_turn_id=None,
+        user_text="Define Goal",
+        components_json=canonical_json(goal_components),
+        goal_statement=goal_statement,
+        is_complete=True,
+        clarifying_questions_json="[]",
+        output_fingerprint=product_goal_interview_output_fingerprint(
+            goal_components, goal_statement, True, ()
+        ),
+        workflow_node_attempt_id=attempt_id,
+        attempt_fingerprint=attempt.attempt_fingerprint,
+        recorded_at=recorded_at + timedelta(seconds=4),
+    )
+    session.add(goal_turn)
+    session.flush()
+    goal = ProductGoalArtifact(
+        project_id=project_id,
+        vision_artifact_id=vision_id,
+        vision_fingerprint=vision.content_fingerprint,
+        goal_number=1,
+        revision_number=1,
+        statement=goal_statement,
+        content_fingerprint=product_goal_artifact_fingerprint(
+            goal_components, goal_statement
+        ),
+        supersedes_product_goal_artifact_id=None,
+        source_interview_turn_id=_id(goal_turn.product_goal_interview_turn_id),
+        created_by="test",
+        created_at=recorded_at + timedelta(seconds=5),
+    )
+    session.add(goal)
+    session.flush()
+    goal_id = _id(goal.product_goal_artifact_id)
+    session.add(
+        ProductGoalArtifactDecision(
+            project_id=project_id,
+            product_goal_artifact_id=goal_id,
+            artifact_fingerprint=goal.content_fingerprint,
+            decision="accepted",
+            rationale="",
+            reviewer="test",
+            idempotency_key="product-definition-goal-accepted",
+            decided_at=recorded_at + timedelta(seconds=6),
+        )
+    )
+
+    discovery_content = {"discovery": "repository fixture"}
+    discovery = DiscoveryArtifact(
+        project_id=project_id,
+        vision_artifact_id=vision_id,
+        vision_fingerprint=vision.content_fingerprint,
+        product_goal_artifact_id=goal_id,
+        product_goal_fingerprint=goal.content_fingerprint,
+        canonical_content_json=canonical_json(discovery_content),
+        content_fingerprint=canonical_hash(discovery_content),
+        content_ref=None,
+        producer="grill-me-with-docs",
+        supersedes_discovery_artifact_id=None,
+        recorded_by="test",
+        recorded_at=recorded_at + timedelta(seconds=7),
+    )
+    session.add(discovery)
+    session.flush()
+
+    content_json = canonical_json(content)
+    candidate = SpecificationCandidate(
+        project_id=project_id,
+        vision_artifact_id=vision_id,
+        vision_fingerprint=vision.content_fingerprint,
+        product_goal_artifact_id=goal_id,
+        product_goal_fingerprint=goal.content_fingerprint,
+        discovery_artifact_id=_id(discovery.discovery_artifact_id),
+        discovery_fingerprint=discovery.content_fingerprint,
+        base_spec_version_id=None,
+        base_spec_hash=None,
+        canonical_content_json=content_json,
+        content_fingerprint=canonical_hash(content),
+        content_ref=None,
+        supersedes_specification_candidate_id=None,
+        recorded_by="test",
+        recorded_at=recorded_at + timedelta(seconds=8),
+    )
+    session.add(candidate)
+    session.flush()
+    candidate_id = _id(candidate.specification_candidate_id)
+    session.add(
+        SpecificationDecision(
+            project_id=project_id,
+            specification_candidate_id=candidate_id,
+            artifact_fingerprint=candidate.content_fingerprint,
+            decision="accepted",
+            rationale="",
+            reviewer="test",
+            idempotency_key="product-definition-specification-accepted",
+            decided_at=recorded_at + timedelta(seconds=9),
+        )
+    )
+    spec = SpecRegistry(
+        project_id=project_id,
+        spec_hash=candidate.content_fingerprint,
+        content=content_json,
+        content_ref=None,
+        status="approved",
+        approved_at=recorded_at + timedelta(seconds=10),
+        approved_by="test",
+        approval_notes=None,
+        source_specification_candidate_id=candidate_id,
+        source_vision_artifact_id=vision_id,
+        source_vision_fingerprint=vision.content_fingerprint,
+        source_product_goal_artifact_id=goal_id,
+        source_product_goal_fingerprint=goal.content_fingerprint,
+        source_discovery_artifact_id=_id(discovery.discovery_artifact_id),
+        source_discovery_fingerprint=discovery.content_fingerprint,
+        supersedes_spec_version_id=None,
+    )
+    session.add(spec)
+    session.flush()
+    return spec
 
 
 @dataclass(frozen=True)
@@ -356,16 +588,16 @@ def seed_complete_project(engine: Engine, *, name: str = "Repository Test") -> i
             supersedes_spec_draft_id=None,
             provenance_path="/missing/spec.md",
         )
-        spec = SpecRegistry(
-            project_id=project_id,
-            spec_hash="sha256:spec",
-            content="# Canonical spec",
-            status="approved",
-        )
-        session.add_all([second_challenge, prd, draft, spec])
+        session.add_all([second_challenge, prd, draft])
         session.flush()
         prd_id = _id(prd.prd_version_id)
         draft_id = _id(draft.spec_draft_id)
+        spec = _seed_approved_specification_lineage(
+            session,
+            project_id=project_id,
+            recorded_at=recorded_at,
+            content={"specification": "repository fixture"},
+        )
         spec_id = _id(spec.spec_version_id)
         session.add(
             DiscoveryRun(
@@ -1023,7 +1255,7 @@ def test_load_maps_complete_canonical_snapshot_in_deterministic_order(
             snapshot.discovery_runs[0].discovery_run_id,
             snapshot.spec_drafts[0].spec_draft_id,
             snapshot.authorities[0].spec_version_id,
-            "sha256:spec",
+            canonical_hash({"specification": "repository fixture"}),
         ),
     )
     assert tuple(type(item) for item in snapshot.authorities) == (
@@ -1084,6 +1316,7 @@ def test_load_maps_complete_canonical_snapshot_in_deterministic_order(
     assert tuple(type(item) for item in snapshot.node_attempts) == (
         NodeAttemptFact,
         NodeAttemptFact,
+        NodeAttemptFact,
     )
     assert tuple(
         (
@@ -1107,6 +1340,16 @@ def test_load_maps_complete_canonical_snapshot_in_deterministic_order(
             "sha256:decision:earlier",
             "sha256:attempt:earlier",
             "obsolete",
+        ),
+        (
+            "goal.interview",
+            "agileforge.workflow.v1",
+            "sha256:product-definition-input",
+            "sha256:product-definition-facts",
+            "sha256:product-definition-business",
+            "sha256:product-definition-decision",
+            "sha256:product-definition-attempt",
+            None,
         ),
         (
             "authority.compile",
@@ -1133,14 +1376,12 @@ def test_load_populates_abandonment_collections_in_deterministic_order(
         session.add(project)
         session.flush()
         project_id = _id(project.project_id)
-        base_spec = SpecRegistry(
+        base_spec = _seed_approved_specification_lineage(
+            session,
             project_id=project_id,
-            spec_hash="sha256:abandoned-base",
-            content="# Abandoned base",
-            status="approved",
+            recorded_at=recorded_at,
+            content={"specification": "abandoned fixture"},
         )
-        session.add(base_spec)
-        session.flush()
         base_spec_id = _id(base_spec.spec_version_id)
         initial = DiscoveryRun(
             project_id=project_id,
