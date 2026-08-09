@@ -592,7 +592,7 @@ VISION_INTERVIEW_NODES: tuple[NodeSpec, ...] = (
     ),
 )
 
-# The root graph intentionally retains its legacy nodes until the Task 5 cutover.
+# Retain the isolated legacy alias only until Task 9 physical cleanup.
 VISION_NODES = LEGACY_VISION_NODES
 
 

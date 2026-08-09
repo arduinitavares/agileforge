@@ -164,7 +164,7 @@ def _seed_approved_specification_lineage(
         project_id=project_id,
         node_id="goal.interview",
         instance_key=None,
-        graph_version="agileforge.workflow.v1",
+        graph_version="agileforge.workflow.v2",
         fact_fingerprint="sha256:product-definition-facts",
         business_fact_fingerprint="sha256:product-definition-business",
         decision_fingerprint="sha256:product-definition-decision",
@@ -496,7 +496,7 @@ def _seed_additional_ordering_rows(
         project_id=seed.project_id,
         node_id="discovery.challenge",
         instance_key="earlier",
-        graph_version="agileforge.workflow.v1",
+        graph_version="agileforge.workflow.v2",
         fact_fingerprint="sha256:facts:earlier",
         business_fact_fingerprint="sha256:business:earlier",
         decision_fingerprint="sha256:decision:earlier",
@@ -710,7 +710,7 @@ def seed_complete_project(engine: Engine, *, name: str = "Repository Test") -> i
             project_id=project_id,
             node_id="authority.compile",
             instance_key=None,
-            graph_version="agileforge.workflow.v1",
+            graph_version="agileforge.workflow.v2",
             fact_fingerprint="sha256:facts",
             business_fact_fingerprint="sha256:business",
             decision_fingerprint="sha256:decision",
@@ -1333,7 +1333,7 @@ def test_load_maps_complete_canonical_snapshot_in_deterministic_order(
     ) == (
         (
             "discovery.challenge",
-            "agileforge.workflow.v1",
+            "agileforge.workflow.v2",
             "sha256:input:earlier",
             "sha256:facts:earlier",
             "sha256:business:earlier",
@@ -1343,7 +1343,7 @@ def test_load_maps_complete_canonical_snapshot_in_deterministic_order(
         ),
         (
             "goal.interview",
-            "agileforge.workflow.v1",
+            "agileforge.workflow.v2",
             "sha256:product-definition-input",
             "sha256:product-definition-facts",
             "sha256:product-definition-business",
@@ -1353,7 +1353,7 @@ def test_load_maps_complete_canonical_snapshot_in_deterministic_order(
         ),
         (
             "authority.compile",
-            "agileforge.workflow.v1",
+            "agileforge.workflow.v2",
             "sha256:input",
             "sha256:facts",
             "sha256:business",

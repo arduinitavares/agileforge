@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
-import hashlib
 import json
 import threading
 from dataclasses import dataclass
@@ -32,27 +31,26 @@ from adapters.adk.recipes import (
 )
 from adapters.adk.runner import AdkExecutionConfig, AdkRunGuards, AdkWorkflowRunner
 from models.core import Project
-from models.product_definition import VisionArtifact, VisionInterviewTurn
-from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance, SpecRegistry
+from models.product_definition import (
+    ProductGoalArtifact,
+    ProductGoalInterviewTurn,
+    ProductGoalOutcome,
+    VisionInterviewTurn,
+)
+from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance
 from models.workflow import (
     BacklogArtifact,
-    RepositoryInventory,
-    SpecDraft,
     WorkflowNodeAttempt,
     WorkflowNodeAttemptOutcome,
     WorkflowTransitionReceipt,
 )
-from services.contracts.brownfield import (
-    BrownfieldCurationInput,
-    BrownfieldCurationOutput,
+from services.contracts.product_goal import (
+    ProductGoalInterviewInput,
+    ProductGoalInterviewOutput,
 )
 from services.specs import compiler_service
 from services.specs.authority_selection import pending_authority_fingerprint
-from services.specs.profile_content import normalize_spec_content_for_registry
-from utils.agileforge_spec_profile import (
-    TechnicalSpecArtifact,
-    canonical_spec_json,
-)
+from tests.workflow.lifecycle_fixtures import seed_accepted_specification
 from utils.runtime_config import ADK_EXECUTION_TRACE_IDENTITY
 from utils.spec_schemas import (
     SpecAuthorityCompilationSuccess,
@@ -71,16 +69,9 @@ from workflow.definitions.authority import authority_graph
 from workflow.definitions.product_definition import product_definition_graph
 from workflow.definitions.root import ROOT_GRAPH
 from workflow.domain import WorkflowDomain
-from workflow.fingerprints import canonical_hash, canonical_json
-from workflow.repository_inventory import (
-    canonical_inventory_payload,
-    inventory_binding_fingerprint,
-)
+from workflow.fingerprints import canonical_hash
 from workflow.requests import (
-    OpenProjectShell,
     RecordBacklogDraft,
-    RecordRepositoryBaseline,
-    RecordRepositoryInventory,
     StartNodeAttempt,
     TransitionRequest,
 )
@@ -93,6 +84,7 @@ if TYPE_CHECKING:
 EVALUATED_AT = datetime(2026, 8, 3, 12, tzinfo=UTC)
 LEASE_SECONDS = 60
 EXPECTED_RECOVERY_ATTEMPT_COUNT = 2
+NEXT_GOAL_NUMBER = 2
 EXECUTION_SETTINGS: JsonObject = {"timeout_seconds": 5.0, "max_attempts": 1}
 JSON_OBJECT = TypeAdapter(JsonObject)
 
@@ -222,7 +214,16 @@ class TrackingSessionService(InMemorySessionService):
         )
 
 
-def _seed(engine: Engine) -> tuple[int, int, str]:
+@dataclass(frozen=True)
+class _BacklogLineage:
+    project_id: int
+    product_goal_artifact_id: int
+    product_goal_fingerprint: str
+    authority_id: int
+    authority_fingerprint: str
+
+
+def _seed(engine: Engine) -> _BacklogLineage:
     artifact = SpecAuthorityCompilationSuccess(
         scope_themes=["Runner"],
         invariants=[],
@@ -234,23 +235,20 @@ def _seed(engine: Engine) -> tuple[int, int, str]:
         prompt_hash="a" * 64,
     )
     with Session(engine) as session:
-        project = Project(name="Runner", origin="greenfield")
+        project = Project(name="Runner")
         session.add(project)
-        session.flush()
+        session.commit()
         assert project.project_id is not None
-        spec = SpecRegistry(
+        lineage = seed_accepted_specification(
+            session,
             project_id=project.project_id,
-            spec_hash="sha256:runner-spec",
             content='{"scope":"runner"}',
-            status="approved",
-            approved_at=EVALUATED_AT,
-            approved_by="operator@example.com",
+            recorded_at=EVALUATED_AT - timedelta(minutes=1),
         )
-        session.add(spec)
-        session.flush()
-        assert spec.spec_version_id is not None
+        spec_version_id = lineage.spec.spec_version_id
+        assert spec_version_id is not None
         authority = CompiledSpecAuthority(
-            spec_version_id=spec.spec_version_id,
+            spec_version_id=spec_version_id,
             compiler_version=artifact.compiler_version,
             prompt_hash=artifact.prompt_hash,
             compiled_at=EVALUATED_AT,
@@ -269,7 +267,7 @@ def _seed(engine: Engine) -> tuple[int, int, str]:
         session.add(
             SpecAuthorityAcceptance(
                 project_id=project.project_id,
-                spec_version_id=spec.spec_version_id,
+                spec_version_id=spec_version_id,
                 status="accepted",
                 policy="manual",
                 decided_by="operator@example.com",
@@ -277,7 +275,7 @@ def _seed(engine: Engine) -> tuple[int, int, str]:
                 rationale="Accepted.",
                 compiler_version=authority.compiler_version,
                 prompt_hash=authority.prompt_hash,
-                spec_hash=spec.spec_hash,
+                spec_hash=lineage.spec.spec_hash,
                 pending_authority_id=authority.authority_id,
                 authority_fingerprint=fingerprint,
                 review_fingerprint="sha256:review",
@@ -285,7 +283,13 @@ def _seed(engine: Engine) -> tuple[int, int, str]:
             )
         )
         session.commit()
-        return project.project_id, authority.authority_id, fingerprint
+        return _BacklogLineage(
+            project_id=project.project_id,
+            product_goal_artifact_id=lineage.product_goal_artifact_id,
+            product_goal_fingerprint=lineage.product_goal_fingerprint,
+            authority_id=authority.authority_id,
+            authority_fingerprint=fingerprint,
+        )
 
 
 def _backlog_payload() -> JsonObject:
@@ -307,6 +311,16 @@ def _backlog_payload() -> JsonObject:
     }
 
 
+def _backlog_response(lineage: _BacklogLineage) -> JsonObject:
+    return {
+        "product_goal_artifact_id": lineage.product_goal_artifact_id,
+        "product_goal_fingerprint": lineage.product_goal_fingerprint,
+        "authority_id": lineage.authority_id,
+        "authority_fingerprint": lineage.authority_fingerprint,
+        "content": _backlog_payload(),
+    }
+
+
 def _authority_artifact() -> SpecAuthorityCompilationSuccess:
     return SpecAuthorityCompilationSuccess(
         scope_themes=["Runner authority"],
@@ -324,98 +338,78 @@ def _authority_artifact() -> SpecAuthorityCompilationSuccess:
 
 def _seed_authority_compile_target(engine: Engine) -> tuple[int, int, str]:
     with Session(engine) as session:
-        project = Project(name="Runner compile", origin="greenfield")
+        project = Project(name="Runner compile")
         session.add(project)
-        session.flush()
-        assert project.project_id is not None
-        spec = SpecRegistry(
-            project_id=project.project_id,
-            spec_hash="sha256:runner-compile-spec",
-            content='{"scope":"runner compile"}',
-            status="approved",
-            approved_at=EVALUATED_AT,
-            approved_by="operator@example.com",
-        )
-        session.add(spec)
         session.commit()
-        assert spec.spec_version_id is not None
-        return project.project_id, spec.spec_version_id, spec.spec_hash
+        assert project.project_id is not None
+        lineage = seed_accepted_specification(
+            session,
+            project_id=project.project_id,
+            content='{"scope":"runner compile"}',
+            recorded_at=EVALUATED_AT - timedelta(minutes=1),
+        )
+        assert lineage.spec.spec_version_id is not None
+        return (
+            project.project_id,
+            lineage.spec.spec_version_id,
+            lineage.spec.spec_hash,
+        )
 
 
 def _unused_leaf(name: str) -> FakeLeafAgent:
     return FakeLeafAgent(name=name, response={})
 
 
-def _brownfield_spec_artifact() -> TechnicalSpecArtifact:
-    return TechnicalSpecArtifact.model_validate(
+def _goal_output() -> ProductGoalInterviewOutput:
+    return ProductGoalInterviewOutput.model_validate(
         {
-            "schema_version": "agileforge.spec.v1",
-            "artifact_id": "SPEC.brownfield.runner",
-            "title": "Brownfield Initial Scope",
-            "status": "draft",
-            "version": "0.1",
-            "created_at": "2026-08-03",
-            "updated_at": "2026-08-03",
-            "summary": "Initial scope curated from selected repository evidence.",
-            "problem_statement": "Existing behavior needs reviewed authority.",
-            "items": [
-                {
-                    "id": "REQ.brownfield.runner",
-                    "type": "REQ",
-                    "status": "proposed",
-                    "title": "Preserve reviewed behavior",
-                    "statement": "The system MUST preserve reviewed behavior.",
-                    "level": "MUST",
-                    "verification": "system-test",
-                    "acceptance": ["The reviewed behavior remains available."],
-                }
-            ],
-            "relations": [],
-            "controlled_terms": [],
-            "external_references": [],
-            "rendering": {
-                "markdown_profile": "agileforge.spec_markdown.v1",
-                "rendered_markdown_sha256": None,
+            "updated_components": {
+                "valuable_future_state": "A second increment is accepted",
+                "beneficiary": "Operators",
+                "value": "Predictable delivery",
+                "success_signals": ["The second increment reaches triage"],
+                "boundaries": ["No provider calls"],
             },
+            "product_goal_statement": "Complete a second accepted increment.",
+            "is_complete": True,
+            "clarifying_questions": [],
         }
     )
 
 
-def _validating_brownfield_leaf(
-    observations: list[BrownfieldCurationInput],
+def _validating_goal_leaf(
+    observations: list[ProductGoalInterviewInput],
 ) -> AdkWorkflow:
-    """Build a provider-free leaf that consumes only pre-authority evidence."""
+    """Build a provider-free leaf that consumes only prepared Goal context."""
 
-    @node(name="validate_brownfield_input", rerun_on_resume=True)
-    async def validate_brownfield_input(
-        node_input: BrownfieldCurationInput,
-    ) -> BrownfieldCurationOutput:
+    @node(name="validate_product_goal_input", rerun_on_resume=True)
+    async def validate_product_goal_input(
+        node_input: ProductGoalInterviewInput,
+    ) -> ProductGoalInterviewOutput:
         dumped = node_input.model_dump(mode="json")
         assert "compiled_authority" not in dumped
-        assert "accepted_authority" not in dumped
-        assert node_input.inventory.selected_for_model == ("README.md",)
-        assert node_input.selected_evidence[0].path == "README.md"
+        assert "specification" not in dumped
+        assert node_input.accepted_vision_statement
         observations.append(node_input)
-        return BrownfieldCurationOutput(canonical_spec=_brownfield_spec_artifact())
+        return _goal_output()
 
     return AdkWorkflow(
-        name="fake_brownfield_curator",
-        input_schema=BrownfieldCurationInput,
-        output_schema=BrownfieldCurationOutput,
-        edges=[(START, validate_brownfield_input)],
+        name="fake_product_goal_interviewer",
+        input_schema=ProductGoalInterviewInput,
+        output_schema=ProductGoalInterviewOutput,
+        edges=[(START, validate_product_goal_input)],
     )
 
 
-def _brownfield_registry(
+def _goal_registry(
     leaf: BaseAgent | AdkWorkflow,
 ) -> AdkRecipeRegistry:
     return build_agentic_recipe_registry(
         nodes=AgenticRecipeNodes(
-            brownfield_curator=leaf,
             authority_compile=_unused_leaf("unused_authority_compile"),
             authority_repair=_unused_leaf("unused_authority_repair"),
-            vision_generation=_unused_leaf("unused_vision"),
             vision_interview=_unused_leaf("unused_vision_interview"),
+            product_goal=leaf,
             backlog_generation=_unused_leaf("unused_backlog"),
             roadmap_generation=_unused_leaf("unused_roadmap"),
             story_generation=_unused_leaf("unused_story"),
@@ -425,183 +419,75 @@ def _brownfield_registry(
     )
 
 
-def _positioned_guards(
-    domain: WorkflowDomain,
-    *,
-    project_id: int,
-    node_id: str,
-    idempotency_key: str,
-) -> dict[str, object]:
-    position = domain.position(project_id)
-    decision = next(item for item in position.decisions if item.node_id == node_id)
-    assert decision.category is NodeCategory.AVAILABLE
-    return {
-        "project_id": project_id,
-        "graph_version": position.graph_version,
-        "fact_fingerprint": position.fact_fingerprint,
-        "decision_fingerprint": decision.decision_fingerprint,
-        "instance_key": decision.instance_key,
-        "idempotency_key": idempotency_key,
-        "actor": "operator@example.com",
-        "correlation_id": "task-15-brownfield",
-    }
-
-
-def _brownfield_inventory_fingerprint() -> str:
-    inventory = canonical_inventory_payload(
-        git_available=True,
-        commit="b" * 40,
-        dirty=False,
-        files=(
-            (".env", 8, None, "secret"),
-            ("README.md", 64, f"sha256:{'c' * 64}", "hashable"),
-        ),
-        total_bytes=72,
-    )
-    return inventory_binding_fingerprint(inventory, ("README.md",))
-
-
-def _seed_brownfield(domain: WorkflowDomain) -> tuple[int, int, str]:
-    opened = domain.transition(
-        OpenProjectShell(
-            name="Runner Brownfield",
-            origin="brownfield",
-            idempotency_key="open-runner-brownfield",
-            actor="operator@example.com",
-        )
-    )
-    project_id = opened.output.get("project_id")
-    assert opened.ok is True
-    assert isinstance(project_id, int)
-    baseline_fingerprint = canonical_hash(
-        {
-            "repository_path": "/evidence/runner-brownfield",
-            "git_commit": "b" * 40,
-            "dirty": False,
-        }
-    )
-    baseline = domain.transition(
-        RecordRepositoryBaseline.model_validate(
-            {
-                **_positioned_guards(
-                    domain,
-                    project_id=project_id,
-                    node_id=RecordRepositoryBaseline.node_id,
-                    idempotency_key="runner-brownfield-baseline",
-                ),
-                "repository_path": "/evidence/runner-brownfield",
-                "git_commit": "b" * 40,
-                "dirty": False,
-                "baseline_fingerprint": baseline_fingerprint,
-            }
-        )
-    )
-    baseline_id = baseline.output.get("repository_baseline_id")
-    assert baseline.ok is True
-    assert isinstance(baseline_id, int)
-    inventory_fingerprint = _brownfield_inventory_fingerprint()
-    inventory = domain.transition(
-        RecordRepositoryInventory.model_validate(
-            {
-                **_positioned_guards(
-                    domain,
-                    project_id=project_id,
-                    node_id=RecordRepositoryInventory.node_id,
-                    idempotency_key="runner-brownfield-inventory",
-                ),
-                "repository_baseline_id": baseline_id,
-                "git_available": True,
-                "files": [
-                    {
-                        "path": ".env",
-                        "size_bytes": 8,
-                        "sha256": None,
-                        "content_status": "secret",
-                    },
-                    {
-                        "path": "README.md",
-                        "size_bytes": 64,
-                        "sha256": f"sha256:{'c' * 64}",
-                        "content_status": "hashable",
-                    },
-                ],
-                "selected_for_model": ["README.md"],
-                "total_bytes": 72,
-                "inventory_fingerprint": inventory_fingerprint,
-            }
-        )
-    )
-    inventory_id = inventory.output.get("repository_inventory_id")
-    assert inventory.ok is True
-    assert isinstance(inventory_id, int)
-    return project_id, inventory_id, inventory_fingerprint
-
-
-def _brownfield_runner_system(
+def _goal_runner_system(
     engine: Engine,
     leaf: BaseAgent | AdkWorkflow,
-) -> tuple[AdkWorkflowRunner, WorkflowDomain, int, int, str]:
-    registry = _brownfield_registry(leaf)
+) -> tuple[AdkWorkflowRunner, WorkflowDomain, int]:
+    with Session(engine) as session:
+        project = Project(name="Runner Goal")
+        session.add(project)
+        session.commit()
+        assert project.project_id is not None
+        project_id = project.project_id
+        lineage = seed_accepted_specification(
+            session,
+            project_id=project_id,
+            content='{"scope":"resolved first goal"}',
+            recorded_at=EVALUATED_AT - timedelta(minutes=1),
+        )
+        session.add(
+            ProductGoalOutcome(
+                project_id=project_id,
+                product_goal_artifact_id=lineage.product_goal_artifact_id,
+                artifact_fingerprint=lineage.product_goal_fingerprint,
+                outcome="fulfilled",
+                rationale="The first Goal is complete.",
+                decided_by="operator@example.com",
+                idempotency_key="runner-first-goal-fulfilled",
+                decided_at=EVALUATED_AT,
+            )
+        )
+        session.commit()
+    registry = _goal_registry(leaf)
     domain = WorkflowDomain(
         engine=engine,
         graph=ROOT_GRAPH,
         clock=FixedClock(now_value=EVALUATED_AT),
         adk_recipe_registry=registry,
     )
-    project_id, inventory_id, inventory_fingerprint = _seed_brownfield(domain)
     runner = AdkWorkflowRunner(
         domain=domain,
         registry=registry,
         session_service=TrackingSessionService(),
         config=AdkExecutionConfig(
             project_id=project_id,
-            model_id="fake/brownfield-curator",
+            model_id="fake/product-goal",
             execution_settings=EXECUTION_SETTINGS,
             lease_seconds=LEASE_SECONDS,
             actor="operator@example.com",
-            correlation_id="task-15-brownfield",
+            correlation_id="task-15-product-goal",
         ),
     )
-    return runner, domain, project_id, inventory_id, inventory_fingerprint
+    return runner, domain, project_id
 
 
-def _brownfield_runner_input(
-    *,
-    inventory_id: int,
-    inventory_fingerprint: str,
-) -> JsonObject:
-    content = "# Existing product\n\nThe service preserves reviewed behavior.\n"
-    content_digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+def _goal_runner_input() -> JsonObject:
     return {
-        "curation_input": {
-            "inventory": {
-                "repository_inventory_id": inventory_id,
-                "repository_inventory_fingerprint": inventory_fingerprint,
-                "file_count": 2,
-                "total_bytes": 72,
-                "selected_for_model": ["README.md"],
-            },
-            "selected_evidence": [
-                {
-                    "path": "README.md",
-                    "content": content,
-                    "content_sha256": f"sha256:{content_digest}",
-                }
-            ],
-        },
-        "supersedes_spec_draft_id": None,
-        "provenance_path": f"repository-inventory:{inventory_id}",
+        "project_name": "Runner Goal",
+        "accepted_vision_statement": "Deliver one verified product increment.",
+        "user_response": "Define the next valuable Product Goal.",
+        "prior_components": None,
     }
 
 
-def _brownfield_decision(
+def _goal_decision(
     domain: WorkflowDomain,
     project_id: int,
 ) -> NodeDecision:
     return next(
         item
         for item in domain.position(project_id).decisions
-        if item.node_id == "onboarding.brownfield.curation"
+        if item.node_id == "goal.interview"
     )
 
 
@@ -611,9 +497,13 @@ def _adapter(
 ) -> RecordBacklogDraft:
     recipe_output = RecipeOutput.model_validate(output)
     payload = JSON_OBJECT.validate_python(recipe_output.payload)
+    product_goal_artifact_id = payload.pop("product_goal_artifact_id")
+    product_goal_fingerprint = payload.pop("product_goal_fingerprint")
     authority_id = payload.pop("authority_id")
     authority_fingerprint = payload.pop("authority_fingerprint")
     content = JSON_OBJECT.validate_python(payload.pop("content"))
+    assert isinstance(product_goal_artifact_id, int)
+    assert isinstance(product_goal_fingerprint, str)
     assert isinstance(authority_id, int)
     assert isinstance(authority_fingerprint, str)
     return RecordBacklogDraft(
@@ -627,6 +517,8 @@ def _adapter(
         idempotency_key=context.idempotency_key,
         actor=context.actor,
         correlation_id=context.correlation_id,
+        product_goal_artifact_id=product_goal_artifact_id,
+        product_goal_fingerprint=product_goal_fingerprint,
         authority_id=authority_id,
         authority_fingerprint=authority_fingerprint,
         canonical_content=content,
@@ -681,6 +573,32 @@ def _decision(domain: WorkflowDomain, project_id: int) -> NodeDecision:
     )
 
 
+def _node_attempts(session: Session, node_id: str) -> list[WorkflowNodeAttempt]:
+    return list(
+        session.exec(
+            select(WorkflowNodeAttempt)
+            .where(col(WorkflowNodeAttempt.node_id) == node_id)
+            .order_by(col(WorkflowNodeAttempt.workflow_node_attempt_id))
+        ).all()
+    )
+
+
+def _node_outcomes(
+    session: Session,
+    node_id: str,
+) -> list[WorkflowNodeAttemptOutcome]:
+    attempt_ids = {
+        attempt.workflow_node_attempt_id
+        for attempt in _node_attempts(session, node_id)
+        if attempt.workflow_node_attempt_id is not None
+    }
+    return [
+        outcome
+        for outcome in session.exec(select(WorkflowNodeAttemptOutcome)).all()
+        if outcome.workflow_node_attempt_id in attempt_ids
+    ]
+
+
 def test_runner_loads_vision_input_from_persisted_attempt(
     engine: Engine,
     monkeypatch: pytest.MonkeyPatch,
@@ -708,14 +626,13 @@ def test_runner_loads_vision_input_from_persisted_attempt(
     }
     registry = build_agentic_recipe_registry(
         nodes=AgenticRecipeNodes(
-            brownfield_curator=_unused_leaf("unused_brownfield_curator"),
             authority_compile=_unused_leaf("unused_authority_compile"),
             authority_repair=_unused_leaf("unused_authority_repair"),
-            vision_generation=_unused_leaf("unused_legacy_vision"),
             vision_interview=FakeLeafAgent(
                 name="vision_interview",
                 response=vision_response,
             ),
+            product_goal=_unused_leaf("unused_product_goal"),
             backlog_generation=_unused_leaf("unused_backlog"),
             roadmap_generation=_unused_leaf("unused_roadmap"),
             story_generation=_unused_leaf("unused_story"),
@@ -767,109 +684,59 @@ def test_runner_loads_vision_input_from_persisted_attempt(
         assert turn.user_text == "Trusted persisted answer."
 
 
-def test_runner_executes_legacy_vision_recipe_through_record_vision_draft(
+def test_runner_executes_product_goal_recipe_through_record_goal_turn(
     engine: Engine,
 ) -> None:
-    """The temporary root recipe adapts real legacy agent output end to end."""
-    project_id, authority_id, authority_fingerprint = _seed(engine)
-    legacy_output: JsonObject = {
-        "updated_components": {
-            "project_name": "Runner",
-            "target_user": "Operators",
-            "problem": "State drift",
-            "product_category": "Tool",
-            "key_benefit": "Trust",
-            "competitors": "Spreadsheets",
-            "differentiator": "Durable facts",
-        },
-        "product_vision_statement": "A trusted workflow tool.",
-        "is_complete": True,
-        "clarifying_questions": [],
-    }
-    registry = build_agentic_recipe_registry(
-        nodes=AgenticRecipeNodes(
-            brownfield_curator=_unused_leaf("unused_brownfield_curator"),
-            authority_compile=_unused_leaf("unused_authority_compile"),
-            authority_repair=_unused_leaf("unused_authority_repair"),
-            vision_generation=FakeLeafAgent(
-                name="legacy_vision", response=legacy_output
-            ),
-            vision_interview=_unused_leaf("unused_vision_interview"),
-            backlog_generation=_unused_leaf("unused_backlog"),
-            roadmap_generation=_unused_leaf("unused_roadmap"),
-            story_generation=_unused_leaf("unused_story"),
-            sprint_planning=_unused_leaf("unused_sprint"),
+    """The v2 root recipe adapts trusted Goal output end to end."""
+    runner, domain, project_id = _goal_runner_system(
+        engine,
+        FakeLeafAgent(
+            name="product_goal",
+            response=_goal_output().model_dump(mode="json"),
         ),
-        execution_settings=EXECUTION_SETTINGS,
-    )
-    domain = WorkflowDomain(
-        engine=engine,
-        graph=ROOT_GRAPH,
-        clock=FixedClock(now_value=EVALUATED_AT),
-        adk_recipe_registry=registry,
-    )
-    runner = AdkWorkflowRunner(
-        domain=domain,
-        registry=registry,
-        session_service=TrackingSessionService(),
-        config=AdkExecutionConfig(
-            project_id=project_id,
-            model_id="fake/legacy-vision",
-            execution_settings=EXECUTION_SETTINGS,
-            lease_seconds=LEASE_SECONDS,
-            actor="operator@example.com",
-        ),
-    )
-    payload: JsonObject = {
-        "user_raw_text": "Build a durable workflow tool.",
-        "specification_content": "",
-        "prior_vision_state": "NO_HISTORY",
-        "compiled_authority": "{}",
-        "authority_id": authority_id,
-        "authority_fingerprint": authority_fingerprint,
-        "supersedes_vision_artifact_id": None,
-    }
-    decision = next(
-        item
-        for item in domain.position(project_id).decisions
-        if item.node_id == "vision.generate"
     )
 
-    result = runner.run(decision, payload)
+    result = runner.run(_goal_decision(domain, project_id), _goal_runner_input())
 
     assert result.ok
     with Session(engine) as session:
-        turn = session.exec(select(VisionInterviewTurn)).one()
-        artifact = session.exec(select(VisionArtifact)).one()
-        assert turn.user_text == "Build a durable workflow tool."
-        assert artifact.components_json == canonical_json(
-            legacy_output["updated_components"]
-        )
-        assert artifact.statement == legacy_output["product_vision_statement"]
+        turn = session.exec(
+            select(ProductGoalInterviewTurn).order_by(
+                col(ProductGoalInterviewTurn.product_goal_interview_turn_id).desc()
+            )
+        ).first()
+        artifact = session.exec(
+            select(ProductGoalArtifact).order_by(
+                col(ProductGoalArtifact.product_goal_artifact_id).desc()
+            )
+        ).first()
+        assert turn is not None
+        assert artifact is not None
+        assert turn.user_text == "Define the next valuable Product Goal."
+        assert artifact.goal_number == NEXT_GOAL_NUMBER
+        assert artifact.statement == _goal_output().product_goal_statement
 
 
 def test_runner_executes_fake_leaf_and_commits_validated_output(engine: Engine) -> None:
     """Run a provider-free recipe and commit its fact and success outcome."""
-    project_id, authority_id, authority_fingerprint = _seed(engine)
-    response: JsonObject = {
-        "authority_id": authority_id,
-        "authority_fingerprint": authority_fingerprint,
-        "content": _backlog_payload(),
-    }
+    lineage = _seed(engine)
     sessions = TrackingSessionService()
     runner, domain = _build_runner(
         engine,
-        project_id=project_id,
-        leaf=FakeLeafAgent(name="fake_backlog", response=response),
+        project_id=lineage.project_id,
+        leaf=FakeLeafAgent(name="fake_backlog", response=_backlog_response(lineage)),
         sessions=sessions,
     )
 
-    result = runner.run(_decision(domain, project_id), {"prompt": "build backlog"})
+    result = runner.run(
+        _decision(domain, lineage.project_id),
+        {"prompt": "build backlog"},
+    )
 
     assert result.ok is True
     with Session(engine) as session:
-        attempt = session.exec(select(WorkflowNodeAttempt)).one()
-        outcome = session.exec(select(WorkflowNodeAttemptOutcome)).one()
+        attempt = _node_attempts(session, "backlog.generate")[0]
+        outcome = _node_outcomes(session, "backlog.generate")[0]
         assert outcome.status == "success"
         assert session.exec(select(BacklogArtifact)).one() is not None
         assert sessions.created_session_ids == [str(attempt.workflow_node_attempt_id)]
@@ -879,26 +746,21 @@ def test_sequential_transport_retry_replays_terminal_result_without_provider(
     engine: Engine,
 ) -> None:
     """Return the completed command receipt for the same transport key."""
-    project_id, authority_id, authority_fingerprint = _seed(engine)
-    response: JsonObject = {
-        "authority_id": authority_id,
-        "authority_fingerprint": authority_fingerprint,
-        "content": _backlog_payload(),
-    }
+    lineage = _seed(engine)
     calls: list[str] = []
     leaf = CountingLeafAgent(
         name="counting_backlog",
-        response=response,
+        response=_backlog_response(lineage),
         calls=calls,
     )
     runner, domain = _build_runner(
         engine,
-        project_id=project_id,
+        project_id=lineage.project_id,
         leaf=leaf,
         sessions=TrackingSessionService(),
     )
-    position = domain.position(project_id)
-    decision = _decision(domain, project_id)
+    position = domain.position(lineage.project_id)
+    decision = _decision(domain, lineage.project_id)
     guards = AdkRunGuards(
         position=position,
         idempotency_key="dashboard-retry-41",
@@ -913,38 +775,33 @@ def test_sequential_transport_retry_replays_terminal_result_without_provider(
     assert replay == first.model_copy(update={"replayed": True})
     assert leaf.calls == ["provider"]
     with Session(engine) as session:
-        assert len(session.exec(select(WorkflowNodeAttempt)).all()) == 1
-        assert len(session.exec(select(WorkflowNodeAttemptOutcome)).all()) == 1
+        assert len(_node_attempts(session, "backlog.generate")) == 1
+        assert len(_node_outcomes(session, "backlog.generate")) == 1
 
 
 def test_concurrent_duplicate_start_never_enters_provider_twice(
     engine: Engine,
 ) -> None:
     """Short-circuit a replay while the live attempt is outside its transaction."""
-    project_id, authority_id, authority_fingerprint = _seed(engine)
-    response: JsonObject = {
-        "authority_id": authority_id,
-        "authority_fingerprint": authority_fingerprint,
-        "content": _backlog_payload(),
-    }
+    lineage = _seed(engine)
     calls: list[str] = []
     started = threading.Event()
     release = threading.Event()
     leaf = BlockingLeafAgent(
         name="blocking_backlog",
-        response=response,
+        response=_backlog_response(lineage),
         calls=calls,
         started=started,
         release=release,
     )
     runner, domain = _build_runner(
         engine,
-        project_id=project_id,
+        project_id=lineage.project_id,
         leaf=leaf,
         sessions=TrackingSessionService(),
     )
-    position = domain.position(project_id)
-    decision = _decision(domain, project_id)
+    position = domain.position(lineage.project_id)
+    decision = _decision(domain, lineage.project_id)
     guards = AdkRunGuards(
         position=position,
         idempotency_key="dashboard-concurrent-41",
@@ -976,18 +833,18 @@ def test_concurrent_duplicate_start_never_enters_provider_twice(
 
     assert first.ok is True
     with Session(engine) as session:
-        assert len(session.exec(select(WorkflowNodeAttempt)).all()) == 1
-        assert len(session.exec(select(WorkflowNodeAttemptOutcome)).all()) == 1
+        assert len(_node_attempts(session, "backlog.generate")) == 1
+        assert len(_node_outcomes(session, "backlog.generate")) == 1
 
 
 def test_provider_failure_records_failure_and_returns_external_error(
     engine: Engine,
 ) -> None:
     """Translate a fake provider failure after recording its durable outcome."""
-    project_id, _authority_id, _authority_fingerprint = _seed(engine)
+    lineage = _seed(engine)
     runner, domain = _build_runner(
         engine,
-        project_id=project_id,
+        project_id=lineage.project_id,
         leaf=FakeLeafAgent(
             name="fake_backlog",
             response={},
@@ -996,13 +853,16 @@ def test_provider_failure_records_failure_and_returns_external_error(
         sessions=TrackingSessionService(),
     )
 
-    result = runner.run(_decision(domain, project_id), {"prompt": "build backlog"})
+    result = runner.run(
+        _decision(domain, lineage.project_id),
+        {"prompt": "build backlog"},
+    )
 
     assert result.ok is False
     assert result.error is not None
     assert result.error.code is WorkflowErrorCode.EXTERNAL_EXECUTION_FAILED
     with Session(engine) as session:
-        outcome = session.exec(select(WorkflowNodeAttemptOutcome)).one()
+        outcome = _node_outcomes(session, "backlog.generate")[0]
         assert outcome.status == "failure"
         assert session.exec(select(BacklogArtifact)).all() == []
 
@@ -1011,110 +871,100 @@ def test_output_validation_failure_records_failure_without_business_fact(
     engine: Engine,
 ) -> None:
     """Reject scalar leaf output and persist no downstream artifact."""
-    project_id, _authority_id, _authority_fingerprint = _seed(engine)
+    lineage = _seed(engine)
     runner, domain = _build_runner(
         engine,
-        project_id=project_id,
+        project_id=lineage.project_id,
         leaf=FakeLeafAgent(name="fake_backlog", response="not-an-object"),
         sessions=TrackingSessionService(),
     )
 
-    result = runner.run(_decision(domain, project_id), {"prompt": "build backlog"})
+    result = runner.run(
+        _decision(domain, lineage.project_id),
+        {"prompt": "build backlog"},
+    )
 
     assert result.ok is False
     assert result.error is not None
     assert result.error.code is WorkflowErrorCode.EXTERNAL_EXECUTION_FAILED
     with Session(engine) as session:
         assert session.exec(select(BacklogArtifact)).all() == []
-        outcome = session.exec(select(WorkflowNodeAttemptOutcome)).one()
+        outcome = _node_outcomes(session, "backlog.generate")[0]
         assert outcome.status == "failure"
 
 
-def test_brownfield_runner_persists_exact_inventory_bound_canonical_spec(
+def test_goal_runner_persists_exact_vision_bound_goal(
     engine: Engine,
 ) -> None:
-    """Execute one pre-authority curator and persist its canonical draft."""
-    observations: list[BrownfieldCurationInput] = []
-    runner, domain, project_id, inventory_id, inventory_fingerprint = (
-        _brownfield_runner_system(
-            engine,
-            _validating_brownfield_leaf(observations),
-        )
+    """Execute one Goal interview and persist its trusted Vision-bound output."""
+    observations: list[ProductGoalInterviewInput] = []
+    runner, domain, project_id = _goal_runner_system(
+        engine,
+        _validating_goal_leaf(observations),
     )
-    normalized_input = _brownfield_runner_input(
-        inventory_id=inventory_id,
-        inventory_fingerprint=inventory_fingerprint,
-    )
+    normalized_input = _goal_runner_input()
 
     result = runner.run(
-        _brownfield_decision(domain, project_id),
+        _goal_decision(domain, project_id),
         normalized_input,
     )
 
     assert result.ok is True
     assert len(observations) == 1
     observed = observations[0]
-    assert observed.inventory.repository_inventory_id == inventory_id
-    assert observed.inventory.repository_inventory_fingerprint == inventory_fingerprint
+    assert observed.accepted_vision_statement == (
+        "Deliver one verified product increment."
+    )
+    assert observed.user_response == "Define the next valuable Product Goal."
     with Session(engine) as session:
-        inventory = session.exec(select(RepositoryInventory)).one()
-        draft = session.exec(select(SpecDraft)).one()
-        attempt = session.exec(select(WorkflowNodeAttempt)).one()
-        outcome = session.exec(select(WorkflowNodeAttemptOutcome)).one()
+        attempt = session.exec(
+            select(WorkflowNodeAttempt)
+            .where(col(WorkflowNodeAttempt.node_id) == "goal.interview")
+            .order_by(col(WorkflowNodeAttempt.workflow_node_attempt_id).desc())
+        ).first()
+        assert attempt is not None
+        attempt_id = attempt.workflow_node_attempt_id
+        assert attempt_id is not None
+        outcome = session.exec(
+            select(WorkflowNodeAttemptOutcome).where(
+                col(WorkflowNodeAttemptOutcome.workflow_node_attempt_id) == attempt_id
+            )
+        ).one()
         receipts = session.exec(select(WorkflowTransitionReceipt)).all()
         completion_receipt = next(
             receipt
             for receipt in receipts
-            if receipt.request_kind == "record_brownfield_spec_draft"
+            if receipt.request_kind == "record_product_goal_interview_turn"
         )
         completion_request = json.loads(completion_receipt.request_json)
         attempt_input = json.loads(attempt.normalized_input_json)
-        normalized = normalize_spec_content_for_registry(draft.canonical_content_json)
-        expected = normalize_spec_content_for_registry(
-            canonical_spec_json(_brownfield_spec_artifact())
-        )
-
-        assert inventory.repository_inventory_id == inventory_id
-        assert inventory.content_fingerprint == inventory_fingerprint
-        assert completion_request["repository_inventory_id"] == inventory_id
-        assert (
-            completion_request["repository_inventory_fingerprint"]
-            == inventory_fingerprint
-        )
-        assert (
-            attempt_input["curation_input"]["inventory"][
-                "repository_inventory_fingerprint"
-            ]
-            == inventory_fingerprint
-        )
-        assert normalized.content == expected.content
-        assert normalized.spec_hash == expected.spec_hash
+        latest_goal = session.exec(
+            select(ProductGoalArtifact).order_by(
+                col(ProductGoalArtifact.product_goal_artifact_id).desc()
+            )
+        ).first()
+        assert latest_goal is not None
+        assert completion_request["user_text"] == normalized_input["user_response"]
+        assert attempt_input == normalized_input
+        assert latest_goal.goal_number == NEXT_GOAL_NUMBER
+        assert latest_goal.statement == _goal_output().product_goal_statement
         assert outcome.status == "success"
 
 
-def test_brownfield_runner_rejects_missing_inventory_binding_before_leaf(
+def test_goal_runner_rejects_missing_vision_binding_before_leaf(
     engine: Engine,
 ) -> None:
-    """Record failure without invoking the curator when trusted input is incomplete."""
-    observations: list[BrownfieldCurationInput] = []
-    runner, domain, project_id, inventory_id, inventory_fingerprint = (
-        _brownfield_runner_system(
-            engine,
-            _validating_brownfield_leaf(observations),
-        )
+    """Record failure without invoking the Goal leaf for incomplete host input."""
+    observations: list[ProductGoalInterviewInput] = []
+    runner, domain, project_id = _goal_runner_system(
+        engine,
+        _validating_goal_leaf(observations),
     )
-    normalized_input = _brownfield_runner_input(
-        inventory_id=inventory_id,
-        inventory_fingerprint=inventory_fingerprint,
-    )
-    curation_input = normalized_input["curation_input"]
-    assert isinstance(curation_input, dict)
-    inventory = curation_input["inventory"]
-    assert isinstance(inventory, dict)
-    inventory.pop("repository_inventory_fingerprint")
+    normalized_input = _goal_runner_input()
+    normalized_input.pop("accepted_vision_statement")
 
     result = runner.run(
-        _brownfield_decision(domain, project_id),
+        _goal_decision(domain, project_id),
         normalized_input,
     )
 
@@ -1123,52 +973,53 @@ def test_brownfield_runner_rejects_missing_inventory_binding_before_leaf(
     assert result.error.code is WorkflowErrorCode.EXTERNAL_EXECUTION_FAILED
     assert observations == []
     with Session(engine) as session:
-        assert session.exec(select(SpecDraft)).all() == []
-        assert session.exec(select(WorkflowNodeAttemptOutcome)).one().status == (
-            "failure"
-        )
+        assert len(session.exec(select(ProductGoalArtifact)).all()) == 1
+        outcomes = session.exec(
+            select(WorkflowNodeAttemptOutcome).order_by(
+                col(WorkflowNodeAttemptOutcome.workflow_node_attempt_outcome_id).desc()
+            )
+        ).all()
+        assert outcomes[0].status == "failure"
 
 
 @pytest.mark.parametrize(
     "generated",
     [
-        {"assessment_summary": "post-authority As-Built output"},
+        {"assessment_summary": "not a Product Goal output"},
         {
-            "canonical_spec": {
-                "schema_version": "agileforge.spec.v0",
-                "title": "Noncanonical",
-            }
+            "updated_components": {},
+            "product_goal_statement": "Incomplete Goal.",
+            "is_complete": True,
+            "clarifying_questions": [],
         },
     ],
 )
-def test_brownfield_runner_rejects_noncanonical_leaf_output(
+def test_goal_runner_rejects_invalid_leaf_output(
     engine: Engine,
     generated: dict[str, object],
 ) -> None:
-    """Persist a failed attempt and no draft for invalid model output."""
-    runner, domain, project_id, inventory_id, inventory_fingerprint = (
-        _brownfield_runner_system(
-            engine,
-            FakeLeafAgent(name="invalid_brownfield_curator", response=generated),
-        )
+    """Persist a failed attempt and no new Goal for invalid model output."""
+    runner, domain, project_id = _goal_runner_system(
+        engine,
+        FakeLeafAgent(name="invalid_product_goal", response=generated),
     )
 
     result = runner.run(
-        _brownfield_decision(domain, project_id),
-        _brownfield_runner_input(
-            inventory_id=inventory_id,
-            inventory_fingerprint=inventory_fingerprint,
-        ),
+        _goal_decision(domain, project_id),
+        _goal_runner_input(),
     )
 
     assert result.ok is False
     assert result.error is not None
     assert result.error.code is WorkflowErrorCode.EXTERNAL_EXECUTION_FAILED
     with Session(engine) as session:
-        assert session.exec(select(SpecDraft)).all() == []
-        assert session.exec(select(WorkflowNodeAttemptOutcome)).one().status == (
-            "failure"
-        )
+        assert len(session.exec(select(ProductGoalArtifact)).all()) == 1
+        outcomes = session.exec(
+            select(WorkflowNodeAttemptOutcome).order_by(
+                col(WorkflowNodeAttemptOutcome.workflow_node_attempt_outcome_id).desc()
+            )
+        ).all()
+        assert outcomes[0].status == "failure"
 
 
 async def _create_then_delete_old_trace(
@@ -1202,27 +1053,22 @@ def test_runner_replaces_expired_crash_attempt_after_old_trace_deletion(
     engine: Engine,
 ) -> None:
     """Recover at least once after expiry without relying on old ADK trace."""
-    project_id, authority_id, authority_fingerprint = _seed(engine)
-    response: JsonObject = {
-        "authority_id": authority_id,
-        "authority_fingerprint": authority_fingerprint,
-        "content": _backlog_payload(),
-    }
+    lineage = _seed(engine)
     normalized_input: JsonObject = {"prompt": "build backlog"}
     clock = MutableClock(EVALUATED_AT)
     sessions = TrackingSessionService()
     runner, domain = _build_runner(
         engine,
-        project_id=project_id,
-        leaf=FakeLeafAgent(name="fake_backlog", response=response),
+        project_id=lineage.project_id,
+        leaf=FakeLeafAgent(name="fake_backlog", response=_backlog_response(lineage)),
         sessions=sessions,
         clock=clock,
     )
-    position = domain.position(project_id)
-    initial_decision = _decision(domain, project_id)
+    position = domain.position(lineage.project_id)
+    initial_decision = _decision(domain, lineage.project_id)
     crashed = domain.transition(
         StartNodeAttempt(
-            project_id=project_id,
+            project_id=lineage.project_id,
             graph_version=position.graph_version,
             fact_fingerprint=position.fact_fingerprint,
             decision_fingerprint=initial_decision.decision_fingerprint,
@@ -1240,13 +1086,13 @@ def test_runner_replaces_expired_crash_attempt_after_old_trace_deletion(
     old_attempt_id = crashed.output.get("attempt_id")
     assert crashed.ok is True
     assert isinstance(old_attempt_id, int)
-    waiting = _decision(domain, project_id)
+    waiting = _decision(domain, lineage.project_id)
     assert waiting.category is NodeCategory.WAITING
     assert waiting.valid_until == EVALUATED_AT + timedelta(seconds=LEASE_SECONDS)
     asyncio.run(_create_then_delete_old_trace(sessions, attempt_id=old_attempt_id))
     clock.now_value += timedelta(seconds=LEASE_SECONDS)
 
-    recovery = _decision(domain, project_id)
+    recovery = _decision(domain, lineage.project_id)
     old_reference = next(
         item for item in recovery.fact_references if item.fact_type == "node_attempt"
     )
@@ -1257,12 +1103,8 @@ def test_runner_replaces_expired_crash_attempt_after_old_trace_deletion(
     assert old_reference.fact_id == str(old_attempt_id)
     assert result.ok is True
     with Session(engine) as session:
-        attempts = session.exec(
-            select(WorkflowNodeAttempt).order_by(
-                col(WorkflowNodeAttempt.workflow_node_attempt_id)
-            )
-        ).all()
-        outcomes = session.exec(select(WorkflowNodeAttemptOutcome)).all()
+        attempts = _node_attempts(session, "backlog.generate")
+        outcomes = _node_outcomes(session, "backlog.generate")
         assert len(attempts) == EXPECTED_RECOVERY_ATTEMPT_COUNT
         replacement_id = attempts[1].workflow_node_attempt_id
         assert replacement_id is not None
@@ -1291,11 +1133,10 @@ def test_authority_runner_executes_provider_once_before_completion_transaction(
     )
     registry = build_agentic_recipe_registry(
         nodes=AgenticRecipeNodes(
-            brownfield_curator=_unused_leaf("unused_brownfield_curator"),
             authority_compile=compiler_leaf,
             authority_repair=_unused_leaf("unused_authority_repair"),
-            vision_generation=_unused_leaf("unused_vision"),
             vision_interview=_unused_leaf("unused_vision_interview"),
+            product_goal=_unused_leaf("unused_product_goal"),
             backlog_generation=_unused_leaf("unused_backlog"),
             roadmap_generation=_unused_leaf("unused_roadmap"),
             story_generation=_unused_leaf("unused_story"),
@@ -1372,8 +1213,8 @@ def test_authority_runner_executes_provider_once_before_completion_transaction(
     ]
     with Session(engine) as session:
         authority = session.exec(select(CompiledSpecAuthority)).one()
-        attempt = session.exec(select(WorkflowNodeAttempt)).one()
-        outcome = session.exec(select(WorkflowNodeAttemptOutcome)).one()
+        attempt = _node_attempts(session, "authority.compile")[0]
+        outcome = _node_outcomes(session, "authority.compile")[0]
         receipts = session.exec(select(WorkflowTransitionReceipt)).all()
         assert authority.spec_version_id == spec_version_id
         assert outcome.workflow_node_attempt_id == attempt.workflow_node_attempt_id

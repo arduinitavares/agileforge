@@ -70,12 +70,10 @@ def record_backlog_draft_in_session(  # noqa: PLR0913
             message = "Backlog supersession parent does not belong to this Project."
             raise ValueError(message)
         if (
-            parent.authority_id != authority_id
-            or parent.authority_fingerprint != authority_fingerprint
-            or parent.product_goal_artifact_id != product_goal_artifact_id
+            parent.product_goal_artifact_id != product_goal_artifact_id
             or parent.product_goal_fingerprint != product_goal_fingerprint
         ):
-            message = "Backlog supersession parent has different delivery lineage."
+            message = "Backlog supersession parent has different Product Goal lineage."
             raise ValueError(message)
 
     version_number = (

@@ -279,20 +279,7 @@ def build_roadmap_input_context(
     vision_assessment = state.get("product_vision_assessment") or {}
     vision_stmt = vision_assessment.get("product_vision_statement") or ""
 
-    # backlog_items comes from session state; strip refinement lineage metadata
-    # before passing nested items into RoadmapBuilderInput(extra="forbid").
-    scope_extension = _saved_scope_extension_context(state)
-    extension_backlog_items = (
-        _extension_backlog_items(state, scope_extension)
-        if scope_extension is not None
-        else []
-    )
-    raw_backlog_items: object = (
-        _extension_backlog_item_rows(state, scope_extension)
-        if scope_extension is not None
-        else state.get("backlog_items")
-    )
-    backlog_items = _project_roadmap_backlog_items(raw_backlog_items)
+    backlog_items = _project_roadmap_backlog_items(state.get("backlog_items"))
 
     input_context: RoadmapInputContext = {
         "backlog_items": backlog_items,
@@ -305,25 +292,6 @@ def build_roadmap_input_context(
         ),
         "user_input": user_input or "",
     }
-    if scope_extension is not None:
-        input_context.update(
-            {
-                "generation_mode": "scope_extension",
-                "prior_roadmap_state": "NO_HISTORY",
-                "existing_roadmap_context": _scope_extension_base_releases(state),
-                "scope_extension": dict(scope_extension),
-                "extension_backlog_items": extension_backlog_items,
-            }
-        )
-    else:
-        locked_shape = _locked_roadmap_shape(state.get("roadmap_releases"))
-        if locked_shape:
-            input_context.update(
-                {
-                    "generation_mode": "roadmap_reconciliation",
-                    "locked_roadmap_shape": locked_shape,
-                }
-            )
     return input_context
 
 

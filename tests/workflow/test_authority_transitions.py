@@ -32,6 +32,7 @@ from services.specs import compiler_service
 from services.specs.compiler_service import (
     compile_spec_authority_for_version_in_session,
 )
+from tests.workflow.lifecycle_fixtures import seed_accepted_specification
 from utils.spec_schemas import (
     Invariant,
     InvariantType,
@@ -142,29 +143,20 @@ def _seed_current_spec(engine: Engine, spec_path: Path) -> tuple[int, int, str]:
     content = normalized.content
     spec_path.write_text(content, encoding="utf-8")
     with Session(engine) as session:
-        project = Project(name=f"Authority {spec_path.stem}", origin="greenfield")
+        project = Project(name=f"Authority {spec_path.stem}")
         session.add(project)
         session.flush()
         assert project.project_id is not None
-        spec = SpecRegistry(
+        lineage = seed_accepted_specification(
+            session,
             project_id=project.project_id,
-            spec_hash=normalized.spec_hash,
             content=content,
             content_ref=str(spec_path),
-            status="approved",
-            approved_at=EVALUATED_AT,
-            approved_by="reviewer",
-            source_specification_candidate_id=1,
-            source_vision_artifact_id=1,
-            source_vision_fingerprint="sha256:vision",
-            source_product_goal_artifact_id=1,
-            source_product_goal_fingerprint="sha256:goal",
-            source_discovery_artifact_id=1,
-            source_discovery_fingerprint="sha256:discovery",
+            recorded_at=EVALUATED_AT - timedelta(minutes=1),
         )
-        session.add(spec)
-        session.commit()
+        spec = lineage.spec
         assert spec.spec_version_id is not None
+        assert spec.spec_hash == normalized.spec_hash
         return project.project_id, spec.spec_version_id, spec.spec_hash
 
 
@@ -265,7 +257,6 @@ def _approve_replacement_spec(
 ) -> tuple[int, str]:
     old_spec = session.get(SpecRegistry, old_spec_version_id)
     assert old_spec is not None
-    old_spec.status = "superseded"
     payload = json.loads(old_spec.content)
     payload["artifact_id"] = "SPEC.authority.replacement"
     payload["version"] = "0.2"
@@ -273,18 +264,16 @@ def _approve_replacement_spec(
     normalized = compiler_service.normalize_spec_content_for_registry(
         json.dumps(payload)
     )
-    replacement = SpecRegistry(
+    lineage = seed_accepted_specification(
+        session,
         project_id=project_id,
-        spec_hash=normalized.spec_hash,
         content=normalized.content,
         content_ref=None,
-        status="approved",
-        approved_at=EVALUATED_AT + timedelta(minutes=2),
-        approved_by="replacement-reviewer",
+        recorded_at=EVALUATED_AT + timedelta(minutes=2),
     )
-    session.add_all([old_spec, replacement])
-    session.commit()
+    replacement = lineage.spec
     assert replacement.spec_version_id is not None
+    assert replacement.spec_hash == normalized.spec_hash
     return replacement.spec_version_id, replacement.spec_hash
 
 
@@ -662,7 +651,10 @@ def test_decision_binds_exact_pending_authority_and_review_fingerprint(
     )
     assert accepted.ok is True
     assert accepted.position is not None
-    assert accepted.position.available_nodes == ("vision.generate",)
+    assert accepted.position.available_nodes == ()
+    assert "vision.generate" not in {
+        item.node_id for item in accepted.position.decisions
+    }
     with Session(engine) as session:
         row = session.exec(select(SpecAuthorityAcceptance)).one()
         assert row.review_fingerprint == review.review_fingerprint

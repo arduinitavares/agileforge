@@ -4025,14 +4025,13 @@ def _load_update_spec_content(
         }
 
 
-def _resolve_or_create_spec_version(
+def _resolve_accepted_spec_version(
     session: Session,
     *,
     parsed: UpdateSpecAndCompileAuthorityInput,
-    spec_content: str,
     spec_hash: str,
 ) -> int | dict[str, Any]:
-    """Return the latest matching approved spec version, creating one if needed."""
+    """Return the current accepted specification when its content matches."""
     project = session.get(Project, parsed.project_id)
     if not project:
         return {
@@ -4045,7 +4044,11 @@ def _resolve_or_create_spec_version(
         .where(SpecRegistry.project_id == parsed.project_id)
         .order_by(cast("Any", SpecRegistry.spec_version_id).desc())
     ).first()
-    if latest_spec and latest_spec.spec_hash == spec_hash:
+    if (
+        latest_spec
+        and latest_spec.status == "approved"
+        and latest_spec.spec_hash == spec_hash
+    ):
         spec_version_id = latest_spec.spec_version_id
         if spec_version_id is None:
             return {
@@ -4054,26 +4057,14 @@ def _resolve_or_create_spec_version(
             }
         return spec_version_id
 
-    new_spec = SpecRegistry(
-        project_id=parsed.project_id,
-        spec_hash=spec_hash,
-        content=spec_content,
-        content_ref=parsed.content_ref,
-        status="approved",
-        approved_at=datetime.now(UTC),
-        approved_by="implicit",
-        approval_notes="Implicit approval",
-    )
-    session.add(new_spec)
-    session.commit()
-    session.refresh(new_spec)
-    spec_version_id = new_spec.spec_version_id
-    if spec_version_id is None:
-        return {
-            "success": False,
-            "error": "New spec did not receive a primary key",
-        }
-    return spec_version_id
+    return {
+        "success": False,
+        "error_code": "SPECIFICATION_NOT_ACCEPTED",
+        "error": (
+            "Specification must be accepted through specification.review "
+            "before Authority compilation."
+        ),
+    }
 
 
 def _load_compiled_authority_or_error(
@@ -4127,7 +4118,7 @@ def update_spec_and_compile_authority(  # noqa: PLR0911
     params: dict[str, Any] | UpdateSpecAndCompileAuthorityInput,
     tool_context: ToolContext | None = None,
 ) -> dict[str, Any]:
-    """Persist spec content and compile an authority candidate for review."""
+    """Compile the matching accepted specification into an Authority candidate."""
     parsed = UpdateSpecAndCompileAuthorityInput.model_validate(
         _normalize_input_params(params)
     )
@@ -4150,10 +4141,9 @@ def update_spec_and_compile_authority(  # noqa: PLR0911
     spec_hash = normalized_spec.spec_hash
 
     with Session(_resolve_engine()) as session:
-        spec_version_result = _resolve_or_create_spec_version(
+        spec_version_result = _resolve_accepted_spec_version(
             session,
             parsed=parsed,
-            spec_content=spec_content,
             spec_hash=spec_hash,
         )
         if isinstance(spec_version_result, dict):

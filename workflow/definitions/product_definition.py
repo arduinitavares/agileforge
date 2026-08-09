@@ -1,29 +1,12 @@
-"""Isolated Vision/Backlog graph used by Task 10 transition tests."""
+"""Compatibility access to the complete Project lifecycle graph."""
 
-from workflow.contracts import GRAPH_VERSION
-from workflow.definitions.backlog import BACKLOG_NODES
-from workflow.definitions.planning import PLANNING_NODES
-from workflow.definitions.vision import VISION_INTERVIEW_NODES
-from workflow.graph import ChildGraphSpec, WorkflowGraph
+from workflow.definitions.root import project_graph
+from workflow.graph import WorkflowGraph
 
 
 def product_definition_graph() -> WorkflowGraph:
-    """Return Vision, Backlog, and their explicit planning boundary join."""
-    return WorkflowGraph(
-        graph_version=GRAPH_VERSION,
-        root=ChildGraphSpec(
-            child_graph_id="product_lifecycle",
-            nodes=(),
-            children=(
-                ChildGraphSpec(child_graph_id="vision", nodes=VISION_INTERVIEW_NODES),
-                ChildGraphSpec(child_graph_id="backlog", nodes=BACKLOG_NODES),
-                ChildGraphSpec(
-                    child_graph_id="planning",
-                    nodes=(PLANNING_NODES[0],),
-                ),
-            ),
-        ),
-    )
+    """Return the authoritative version-2 Project lifecycle graph."""
+    return project_graph()
 
 
 __all__ = ["product_definition_graph"]

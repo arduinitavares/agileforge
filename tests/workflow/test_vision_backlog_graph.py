@@ -238,7 +238,7 @@ def test_backlog_attempt_waits_on_the_durable_generation_lease() -> None:
         attempt_id=1,
         node_id="backlog.generate",
         instance_key=None,
-        graph_version="agileforge.workflow.v1",
+        graph_version="agileforge.workflow.v2",
         input_fingerprint="sha256:input",
         fact_fingerprint="sha256:facts",
         business_fact_fingerprint="sha256:business",

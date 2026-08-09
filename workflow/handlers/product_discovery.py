@@ -65,8 +65,30 @@ def execute_record_discovery_artifact(
     goals = [
         item for item in decision.fact_references if item.fact_type == "product_goal"
     ]
+    prior_discoveries = [
+        item for item in decision.fact_references if item.fact_type == "discovery"
+    ]
     if len(visions) != 1 or len(goals) != 1:
         return _failure("Discovery requires exact accepted Vision and Product Goal.")
+    if len(prior_discoveries) > 1:
+        return _failure("Discovery replacement lineage is ambiguous.")
+    supersedes_discovery_artifact_id: int | None = None
+    if prior_discoveries:
+        prior = session.get(DiscoveryArtifact, int(prior_discoveries[0].fact_id))
+        if (
+            prior is None
+            or prior.project_id != request.project_id
+            or prior.content_fingerprint != prior_discoveries[0].fingerprint
+            or (prior.vision_artifact_id, prior.vision_fingerprint)
+            != (int(visions[0].fact_id), visions[0].fingerprint)
+            or (
+                prior.product_goal_artifact_id,
+                prior.product_goal_fingerprint,
+            )
+            != (int(goals[0].fact_id), goals[0].fingerprint)
+        ):
+            return _failure("Discovery replacement reference is stale.")
+        supersedes_discovery_artifact_id = prior.discovery_artifact_id
     content = canonical_json(request.canonical_content)
     artifact = DiscoveryArtifact(
         project_id=request.project_id,
@@ -78,7 +100,7 @@ def execute_record_discovery_artifact(
         content_fingerprint=canonical_hash(request.canonical_content),
         content_ref=request.content_ref,
         producer="grill-me-with-docs",
-        supersedes_discovery_artifact_id=None,
+        supersedes_discovery_artifact_id=supersedes_discovery_artifact_id,
         recorded_by=request.actor,
         recorded_at=evaluated_at,
     )

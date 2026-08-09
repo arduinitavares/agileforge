@@ -65,7 +65,7 @@ def _decision(
 def _position(*decisions: NodeDecision) -> WorkflowPosition:
     return WorkflowPosition(
         project_id=PROJECT_ID,
-        graph_version="agileforge.workflow.v1",
+        graph_version="agileforge.workflow.v2",
         fact_fingerprint="sha256:facts",
         evaluated_at=NOW,
         available_nodes=tuple(
@@ -177,7 +177,7 @@ class _Application(AgileForgeApplication):
 def _goal_interview_request() -> ProductGoalInterviewRequest:
     return ProductGoalInterviewRequest(
         project_id=PROJECT_ID,
-        graph_version="agileforge.workflow.v1",
+        graph_version="agileforge.workflow.v2",
         fact_fingerprint="sha256:facts",
         decision_fingerprint="sha256:goal.interview",
         user_text="Operators need reliable lifecycle evidence.",

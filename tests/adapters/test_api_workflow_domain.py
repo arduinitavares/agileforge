@@ -98,7 +98,7 @@ def _all_request_kinds_position() -> WorkflowPosition:
     )
     return WorkflowPosition(
         project_id=41,
-        graph_version="agileforge.workflow.v1",
+        graph_version="agileforge.workflow.v2",
         fact_fingerprint="facts-all",
         evaluated_at=datetime(2026, 8, 3, 12, tzinfo=UTC),
         available_nodes=tuple(item.node_id for item in decisions),
@@ -134,7 +134,7 @@ def test_api_project_shell_request_uses_explicit_origin() -> None:
 def test_api_authority_decision_copies_all_guards() -> None:
     """Copy all API guards into DecideAuthority."""
     payload = AuthorityDecisionApiRequest(
-        graph_version="agileforge.workflow.v1",
+        graph_version="agileforge.workflow.v2",
         expected_fact_fingerprint="facts-41",
         expected_decision_fingerprint="decision-review",
         idempotency_key="accept-api-41",
@@ -153,7 +153,7 @@ def test_api_authority_decision_copies_all_guards() -> None:
     assert request.model_dump() == {
         "kind": "decide_authority",
         "project_id": 41,
-        "graph_version": "agileforge.workflow.v1",
+        "graph_version": "agileforge.workflow.v2",
         "fact_fingerprint": "facts-41",
         "decision_fingerprint": "decision-review",
         "idempotency_key": "accept-api-41",
@@ -188,7 +188,7 @@ def test_task_specific_api_routes_cover_every_rendered_mutation() -> None:
 def test_positioned_api_builder_uses_fixed_kind_and_all_guards() -> None:
     """Build one non-agentic request without accepting an action string."""
     payload = PositionedTransitionApiRequest(
-        graph_version="agileforge.workflow.v1",
+        graph_version="agileforge.workflow.v2",
         expected_fact_fingerprint="facts-41",
         expected_decision_fingerprint="decision-vision-review",
         idempotency_key="vision-review-41",
@@ -278,7 +278,7 @@ def test_structured_conflict_advertises_actions_for_returned_position(
     response = client.post(
         "/api/projects/41/vision/decide",
         json={
-            "graph_version": "agileforge.workflow.v1",
+            "graph_version": "agileforge.workflow.v2",
             "expected_fact_fingerprint": "facts-old",
             "expected_decision_fingerprint": "decision-old",
             "idempotency_key": "stale-api-41",
@@ -303,7 +303,7 @@ def test_agentic_application_retry_reaches_durable_start_receipt_when_stale() ->
     """Bypass fresh-position preflight for an exact transport replay key."""
     stale_position = WorkflowPosition(
         project_id=41,
-        graph_version="agileforge.workflow.v1",
+        graph_version="agileforge.workflow.v2",
         fact_fingerprint="facts-after-completion",
         evaluated_at=datetime(2026, 8, 3, 12, tzinfo=UTC),
         available_nodes=(),
@@ -359,7 +359,7 @@ def test_agentic_application_retry_reaches_durable_start_receipt_when_stale() ->
     result = application.run_agentic_action(
         AgenticActionRequest(
             project_id=41,
-            graph_version="agileforge.workflow.v1",
+            graph_version="agileforge.workflow.v2",
             fact_fingerprint="facts-before-completion",
             decision_fingerprint="decision-vision",
             node_id="vision.generate",
@@ -386,7 +386,7 @@ def test_authority_endpoint_submits_exact_typed_request(
     response = client.post(
         "/api/projects/41/authority/decision",
         json={
-            "graph_version": "agileforge.workflow.v1",
+            "graph_version": "agileforge.workflow.v2",
             "expected_fact_fingerprint": "facts-41",
             "expected_decision_fingerprint": "decision-review",
             "idempotency_key": "accept-api-41",

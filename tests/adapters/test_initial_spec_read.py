@@ -14,46 +14,24 @@ from models.core import Project
 from models.workflow import DiscoveryRun, SpecDraft
 from services.application import AgileForgeApplication
 from services.read_projections import DurableReadProjectionService
-from workflow import (
-    DecideBrownfieldInitialSpec,
-    OpenProjectShell,
-    RecordBrownfieldSpecDraft,
-    RecordRepositoryBaseline,
-    RecordRepositoryInventory,
-    WorkflowDomain,
-)
+from tests.workflow.lifecycle_fixtures import seed_accepted_specification
+from workflow import WorkflowDomain
 from workflow.clock import FixedClock
-from workflow.contracts import JsonObject, NodeCategory, NodeDecision
 from workflow.definitions.root import ROOT_GRAPH
 from workflow.fingerprints import canonical_hash, canonical_json
-from workflow.repository_inventory import (
-    canonical_inventory_payload,
-    inventory_binding_fingerprint,
-)
 
 if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
     from sqlmodel import Session
 
+    from workflow.contracts import JsonObject
+
 EVALUATED_AT = datetime(2026, 8, 3, 16, tzinfo=UTC)
-ACTOR = "operator@example.com"
-REPOSITORY_PATH = "/operator-selected/repository"
-GIT_COMMIT = "c" * 40
 SPEC_CONTENT: JsonObject = {
     "schema_version": "agileforge.spec.v1",
     "title": "Reviewed initial specification",
     "summary": "Canonical content visible before the human decision.",
 }
-INVENTORY_FILES = (
-    {
-        "path": "README.md",
-        "size_bytes": 12,
-        "sha256": "sha256:readme",
-        "content_status": "hashable",
-    },
-)
-
-
 @pytest.fixture
 def domain(engine: Engine) -> WorkflowDomain:
     """Build a deterministic workflow domain over the test database."""
@@ -64,131 +42,46 @@ def domain(engine: Engine) -> WorkflowDomain:
     )
 
 
-def _decision(domain: WorkflowDomain, project_id: int, node_id: str) -> NodeDecision:
-    position = domain.position(project_id)
-    decision = next(item for item in position.decisions if item.node_id == node_id)
-    assert decision.category is NodeCategory.AVAILABLE
-    return decision
-
-
-def _guards(
-    domain: WorkflowDomain,
-    project_id: int,
-    node_id: str,
-    idempotency_key: str,
-) -> dict[str, object]:
-    position = domain.position(project_id)
-    decision = _decision(domain, project_id, node_id)
-    return {
-        "project_id": project_id,
-        "graph_version": position.graph_version,
-        "fact_fingerprint": position.fact_fingerprint,
-        "decision_fingerprint": decision.decision_fingerprint,
-        "instance_key": decision.instance_key,
-        "idempotency_key": idempotency_key,
-        "actor": ACTOR,
-    }
-
-
 def _required_int(value: object) -> int:
     assert isinstance(value, int)
     return value
 
 
-def _open_project(domain: WorkflowDomain, *, key: str = "open-project") -> int:
-    result = domain.transition(
-        OpenProjectShell(
-            name="Initial spec read",
-            origin="brownfield",
-            idempotency_key=key,
-            actor=ACTOR,
-        )
-    )
-    assert result.ok is True
-    return _required_int(result.output.get("project_id"))
-
-
-def _inventory_fingerprint() -> str:
-    payload = canonical_inventory_payload(
-        git_available=True,
-        commit=GIT_COMMIT,
-        dirty=False,
-        files=(("README.md", 12, "sha256:readme", "hashable"),),
-        total_bytes=12,
-    )
-    return inventory_binding_fingerprint(payload, ("README.md",))
+def _create_project(session: Session, *, name: str = "Initial spec read") -> int:
+    project = Project(name=name)
+    session.add(project)
+    session.commit()
+    return _required_int(project.project_id)
 
 
 def _seed_active_draft(
-    domain: WorkflowDomain,
+    session: Session,
 ) -> tuple[int, int, str]:
-    project_id = _open_project(domain)
-    baseline_fingerprint = canonical_hash(
-        {
-            "repository_path": REPOSITORY_PATH,
-            "git_commit": GIT_COMMIT,
-            "dirty": False,
-        }
+    project_id = _create_project(session)
+    seed_accepted_specification(
+        session,
+        project_id=project_id,
+        content=canonical_json(SPEC_CONTENT),
+        recorded_at=EVALUATED_AT,
     )
-    baseline = domain.transition(
-        RecordRepositoryBaseline.model_validate(
-            {
-                **_guards(
-                    domain,
-                    project_id,
-                    RecordRepositoryBaseline.node_id,
-                    "record-baseline",
-                ),
-                "repository_path": REPOSITORY_PATH,
-                "git_commit": GIT_COMMIT,
-                "dirty": False,
-                "baseline_fingerprint": baseline_fingerprint,
-            }
-        )
+    run = DiscoveryRun(project_id=project_id, purpose="initial", ordinal=1)
+    session.add(run)
+    session.flush()
+    run_id = _required_int(run.discovery_run_id)
+    fingerprint = canonical_hash(SPEC_CONTENT)
+    draft = SpecDraft(
+        project_id=project_id,
+        discovery_run_id=run_id,
+        kind="initial",
+        version_number=1,
+        canonical_content_json=canonical_json(SPEC_CONTENT),
+        content_fingerprint=fingerprint,
+        provenance_path="v2-specification:accepted",
+        created_at=EVALUATED_AT,
     )
-    assert baseline.ok is True
-    baseline_id = _required_int(baseline.output.get("repository_baseline_id"))
-    inventory_fingerprint = _inventory_fingerprint()
-    inventory = domain.transition(
-        RecordRepositoryInventory.model_validate(
-            {
-                **_guards(
-                    domain,
-                    project_id,
-                    RecordRepositoryInventory.node_id,
-                    "record-inventory",
-                ),
-                "repository_baseline_id": baseline_id,
-                "git_available": True,
-                "files": INVENTORY_FILES,
-                "selected_for_model": ["README.md"],
-                "total_bytes": 12,
-                "inventory_fingerprint": inventory_fingerprint,
-            }
-        )
-    )
-    assert inventory.ok is True
-    inventory_id = _required_int(inventory.output.get("repository_inventory_id"))
-    draft = domain.transition(
-        RecordBrownfieldSpecDraft.model_validate(
-            {
-                **_guards(
-                    domain,
-                    project_id,
-                    RecordBrownfieldSpecDraft.node_id,
-                    "record-spec-draft",
-                ),
-                "repository_inventory_id": inventory_id,
-                "repository_inventory_fingerprint": inventory_fingerprint,
-                "canonical_content": SPEC_CONTENT,
-                "provenance_path": "repository-inventory:reviewed",
-            }
-        )
-    )
-    assert draft.ok is True
-    draft_id = _required_int(draft.output.get("spec_draft_id"))
-    fingerprint = draft.output.get("content_fingerprint")
-    assert isinstance(fingerprint, str)
+    session.add(draft)
+    session.commit()
+    draft_id = _required_int(draft.spec_draft_id)
     return project_id, draft_id, fingerprint
 
 
@@ -203,12 +96,13 @@ def _error_code(result: JsonObject) -> str:
     return code
 
 
-def test_initial_spec_read_matches_available_human_decision(
+def test_initial_spec_read_uses_v2_lineage_without_setup_decision(
     domain: WorkflowDomain,
     engine: Engine,
+    session: Session,
 ) -> None:
-    """Return the canonical draft identity bound to the available decision."""
-    project_id, draft_id, fingerprint = _seed_active_draft(domain)
+    """Return canonical draft identity without restoring retired setup routing."""
+    project_id, draft_id, fingerprint = _seed_active_draft(session)
     projection = DurableReadProjectionService(engine=engine)
     read = getattr(projection, "project_initial_spec", None)
 
@@ -227,38 +121,13 @@ def test_initial_spec_read_matches_available_human_decision(
         "version_number": 1,
         "canonical_content": SPEC_CONTENT,
         "content_fingerprint": fingerprint,
-        "provenance_path": "repository-inventory:reviewed",
+        "provenance_path": "v2-specification:accepted",
         "created_at": EVALUATED_AT.isoformat(),
         "updated_at": EVALUATED_AT.isoformat(),
     }
-    decision = _decision(
-        domain,
-        project_id,
-        DecideBrownfieldInitialSpec.node_id,
-    )
-    draft_reference = next(
-        item for item in decision.fact_references if item.fact_type == "spec_draft"
-    )
-    assert draft_reference.fact_id == str(draft_id)
-    assert draft_reference.fingerprint == fingerprint
-
-    accepted = domain.transition(
-        DecideBrownfieldInitialSpec.model_validate(
-            {
-                **_guards(
-                    domain,
-                    project_id,
-                    DecideBrownfieldInitialSpec.node_id,
-                    "accept-reviewed-draft",
-                ),
-                "spec_draft_id": draft["spec_draft_id"],
-                "artifact_fingerprint": draft["content_fingerprint"],
-                "decision": "accepted",
-                "notes": "Reviewed through the supported facts-only read.",
-            }
-        )
-    )
-    assert accepted.ok is True
+    position = domain.position(project_id)
+    assert all("brownfield" not in item.node_id for item in position.decisions)
+    assert all("setup" not in item.node_id for item in position.decisions)
     serialized = json.dumps(result, sort_keys=True)
     for forbidden in ("command", "recommendation", "routing", "session"):
         assert forbidden not in serialized.lower()
@@ -275,19 +144,15 @@ def test_initial_spec_read_matches_available_human_decision(
 def test_initial_spec_read_returns_typed_failures(
     scenario: str,
     expected_code: str,
-    domain: WorkflowDomain,
     engine: Engine,
     session: Session,
 ) -> None:
     """Fail closed for missing ownership, no draft, or an ambiguous chain."""
     project_id = 999
     if scenario == "missing_draft":
-        project_id = _open_project(domain, key="open-without-draft")
+        project_id = _create_project(session, name="Missing draft")
     elif scenario == "ambiguous_draft":
-        project = Project(name="Ambiguous", origin="brownfield")
-        session.add(project)
-        session.flush()
-        project_id = _required_int(project.project_id)
+        project_id = _create_project(session, name="Ambiguous")
         run = DiscoveryRun(project_id=project_id, purpose="initial", ordinal=1)
         session.add(run)
         session.flush()
@@ -319,12 +184,11 @@ def test_initial_spec_read_returns_typed_failures(
 @pytest.mark.parametrize("corruption", ["malformed_content", "fingerprint_mismatch"])
 def test_initial_spec_read_returns_typed_failure_for_corrupt_active_draft(
     corruption: str,
-    domain: WorkflowDomain,
     engine: Engine,
     session: Session,
 ) -> None:
     """Return the typed invalid-draft failure for both persisted corruption modes."""
-    project_id, draft_id, _fingerprint = _seed_active_draft(domain)
+    project_id, draft_id, _fingerprint = _seed_active_draft(session)
     draft = session.get(SpecDraft, draft_id)
     assert draft is not None
     if corruption == "malformed_content":
@@ -349,10 +213,11 @@ def test_initial_spec_read_returns_typed_failure_for_corrupt_active_draft(
 def test_project_initial_spec_cli_is_a_supported_read(
     domain: WorkflowDomain,
     engine: Engine,
+    session: Session,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Route the parser command to the non-routing production projection."""
-    project_id, draft_id, fingerprint = _seed_active_draft(domain)
+    project_id, draft_id, fingerprint = _seed_active_draft(session)
     argv = ["project", "initial-spec", "--project-id", str(project_id)]
 
     try:

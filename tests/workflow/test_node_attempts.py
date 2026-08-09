@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 from google.adk import Context, Workflow
 from google.adk.workflow import node
-from sqlmodel import Session, select
+from sqlmodel import Session, col, select
 
 from adapters.adk.recipes import (
     AdkRecipe,
@@ -18,7 +18,7 @@ from adapters.adk.recipes import (
     RecipeOutput,
 )
 from models.core import Project
-from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance, SpecRegistry
+from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance
 from models.workflow import (
     BacklogArtifact,
     WorkflowNodeAttempt,
@@ -30,6 +30,7 @@ from services.node_attempt_replay import (
     NodeAttemptReplayQuery,
 )
 from services.specs.authority_selection import pending_authority_fingerprint
+from tests.workflow.lifecycle_fixtures import seed_accepted_specification
 from utils.spec_schemas import SpecAuthorityCompilationSuccess
 from workflow.contracts import (
     JsonObject,
@@ -78,23 +79,20 @@ def _authority_artifact() -> SpecAuthorityCompilationSuccess:
 def _seed_accepted_authority(engine: Engine) -> tuple[int, int, str]:
     artifact = _authority_artifact()
     with Session(engine) as session:
-        project = Project(name="Task 15", origin="greenfield")
+        project = Project(name="Task 15")
         session.add(project)
-        session.flush()
+        session.commit()
         assert project.project_id is not None
-        spec = SpecRegistry(
+        lineage = seed_accepted_specification(
+            session,
             project_id=project.project_id,
-            spec_hash="sha256:task-15-spec",
             content='{"scope":"task-15"}',
-            status="approved",
-            approved_at=EVALUATED_AT,
-            approved_by="operator@example.com",
+            recorded_at=EVALUATED_AT - timedelta(minutes=1),
         )
-        session.add(spec)
-        session.flush()
-        assert spec.spec_version_id is not None
+        spec_version_id = lineage.spec.spec_version_id
+        assert spec_version_id is not None
         authority = CompiledSpecAuthority(
-            spec_version_id=spec.spec_version_id,
+            spec_version_id=spec_version_id,
             compiler_version=artifact.compiler_version,
             prompt_hash=artifact.prompt_hash,
             compiled_at=EVALUATED_AT,
@@ -113,7 +111,7 @@ def _seed_accepted_authority(engine: Engine) -> tuple[int, int, str]:
         session.add(
             SpecAuthorityAcceptance(
                 project_id=project.project_id,
-                spec_version_id=spec.spec_version_id,
+                spec_version_id=spec_version_id,
                 status="accepted",
                 policy="manual",
                 decided_by="operator@example.com",
@@ -121,7 +119,7 @@ def _seed_accepted_authority(engine: Engine) -> tuple[int, int, str]:
                 rationale="Accepted for attempt tests.",
                 compiler_version=authority.compiler_version,
                 prompt_hash=authority.prompt_hash,
-                spec_hash=spec.spec_hash,
+                spec_hash=lineage.spec.spec_hash,
                 pending_authority_id=authority.authority_id,
                 authority_fingerprint=authority_fingerprint,
                 review_fingerprint="sha256:review",
@@ -194,6 +192,14 @@ def _start_request(
     decision = next(
         item for item in position.decisions if item.node_id == "backlog.generate"
     )
+    goal_reference = next(
+        item
+        for item in decision.fact_references
+        if item.fact_type == "product_goal"
+    )
+    authority_reference = next(
+        item for item in decision.fact_references if item.fact_type == "authority"
+    )
     return StartNodeAttempt(
         project_id=project_id,
         graph_version=position.graph_version,
@@ -204,7 +210,12 @@ def _start_request(
         correlation_id="task-15",
         target_node_id=decision.node_id,
         target_instance_key=decision.instance_key,
-        normalized_input={"authority_id": 1},
+        normalized_input={
+            "product_goal_artifact_id": int(goal_reference.fact_id),
+            "product_goal_fingerprint": goal_reference.fingerprint,
+            "authority_id": int(authority_reference.fact_id),
+            "authority_fingerprint": authority_reference.fingerprint,
+        },
         model_id=MODEL_ID,
         execution_settings=EXECUTION_SETTINGS,
         lease_seconds=LEASE_SECONDS,
@@ -243,6 +254,14 @@ def _completion_request(
     idempotency_key: str = "complete-backlog",
 ) -> RecordBacklogDraft:
     authority_id, authority_fingerprint = authority
+    product_goal_artifact_id = start_request.normalized_input.get(
+        "product_goal_artifact_id"
+    )
+    product_goal_fingerprint = start_request.normalized_input.get(
+        "product_goal_fingerprint"
+    )
+    assert isinstance(product_goal_artifact_id, int)
+    assert isinstance(product_goal_fingerprint, str)
     content: JsonObject = {
         "backlog_items": [
             {
@@ -270,11 +289,36 @@ def _completion_request(
         idempotency_key=idempotency_key,
         actor=start_request.actor,
         correlation_id=start_request.correlation_id,
+        product_goal_artifact_id=product_goal_artifact_id,
+        product_goal_fingerprint=product_goal_fingerprint,
         authority_id=authority_id,
         authority_fingerprint=authority_fingerprint,
         canonical_content=content,
         content_fingerprint=canonical_hash(content),
     )
+
+
+def _backlog_attempts(session: Session) -> list[WorkflowNodeAttempt]:
+    return list(
+        session.exec(
+            select(WorkflowNodeAttempt)
+            .where(col(WorkflowNodeAttempt.node_id) == "backlog.generate")
+            .order_by(col(WorkflowNodeAttempt.workflow_node_attempt_id))
+        ).all()
+    )
+
+
+def _backlog_outcomes(session: Session) -> list[WorkflowNodeAttemptOutcome]:
+    attempt_ids = {
+        attempt.workflow_node_attempt_id
+        for attempt in _backlog_attempts(session)
+        if attempt.workflow_node_attempt_id is not None
+    }
+    return [
+        outcome
+        for outcome in session.exec(select(WorkflowNodeAttemptOutcome)).all()
+        if outcome.workflow_node_attempt_id in attempt_ids
+    ]
 
 
 def test_start_persists_attempt_and_returns_minimal_receipt(engine: Engine) -> None:
@@ -283,7 +327,8 @@ def test_start_persists_attempt_and_returns_minimal_receipt(engine: Engine) -> N
     clock = MutableClock(EVALUATED_AT)
     domain = _domain(engine, clock, _registry())
 
-    result = domain.transition(_start_request(domain, project_id))
+    start_request = _start_request(domain, project_id)
+    result = domain.transition(start_request)
 
     assert result.ok is True
     assert set(result.output) == {
@@ -292,9 +337,11 @@ def test_start_persists_attempt_and_returns_minimal_receipt(engine: Engine) -> N
         "lease_expires_at",
     }
     with Session(engine) as session:
-        attempt = session.exec(select(WorkflowNodeAttempt)).one()
+        attempt = _backlog_attempts(session)[0]
         assert attempt.node_id == "backlog.generate"
-        assert attempt.normalized_input_json == '{"authority_id":1}'
+        assert attempt.normalized_input_json == canonical_json(
+            start_request.normalized_input
+        )
         assert attempt.execution_settings_json == (
             '{"max_attempts":1,"timeout_seconds":5.0}'
         )
@@ -313,7 +360,7 @@ def test_duplicate_start_replays_without_second_attempt(engine: Engine) -> None:
     assert first.ok is True
     assert replay == first.model_copy(update={"replayed": True})
     with Session(engine) as session:
-        assert len(session.exec(select(WorkflowNodeAttempt)).all()) == 1
+        assert len(_backlog_attempts(session)) == 1
 
 
 def test_replay_query_returns_in_flight_start_before_external_work(
@@ -429,7 +476,7 @@ def test_expired_attempt_is_obsoleted_when_recovery_starts(engine: Engine) -> No
     second_id, _second_fingerprint = _attempt_identity(second)
     assert second_id != first_id
     with Session(engine) as session:
-        outcomes = session.exec(select(WorkflowNodeAttemptOutcome)).all()
+        outcomes = _backlog_outcomes(session)
         assert [(item.workflow_node_attempt_id, item.status) for item in outcomes] == [
             (first_id, "obsolete")
         ]
@@ -457,7 +504,7 @@ def test_completion_writes_business_fact_and_success_outcome_atomically(
     assert completed.ok is True
     with Session(engine) as session:
         assert session.exec(select(BacklogArtifact)).one() is not None
-        outcome = session.exec(select(WorkflowNodeAttemptOutcome)).one()
+        outcome = _backlog_outcomes(session)[0]
         assert outcome.status == "success"
         assert outcome.output_json is not None
         assert outcome.output_fingerprint is not None
@@ -513,7 +560,7 @@ def test_process_crash_before_outcome_leaves_recoverable_active_attempt(
     restarted = _domain(engine, MutableClock(EVALUATED_AT), registry)
     assert _decision(restarted, project_id).category.value == "waiting"
     with Session(engine) as session:
-        assert session.exec(select(WorkflowNodeAttemptOutcome)).all() == []
+        assert _backlog_outcomes(session) == []
 
 
 def test_failure_records_terminal_failure_without_business_fact(engine: Engine) -> None:
@@ -540,7 +587,7 @@ def test_failure_records_terminal_failure_without_business_fact(engine: Engine) 
     assert failed.ok is True
     with Session(engine) as session:
         assert session.exec(select(BacklogArtifact)).all() == []
-        outcome = session.exec(select(WorkflowNodeAttemptOutcome)).one()
+        outcome = _backlog_outcomes(session)[0]
         assert outcome.status == "failure"
         assert outcome.failure_code == "PROVIDER_UNAVAILABLE"
 
@@ -574,6 +621,6 @@ def test_late_model_result_is_recorded_obsolete_without_authority_fact(
     assert result.error is not None
     assert result.error.code is WorkflowErrorCode.ATTEMPT_OBSOLETE
     with Session(engine) as session:
-        outcome = session.exec(select(WorkflowNodeAttemptOutcome)).one()
+        outcome = _backlog_outcomes(session)[0]
         assert outcome.status == "obsolete"
         assert session.exec(select(BacklogArtifact)).all() == []

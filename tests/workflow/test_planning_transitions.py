@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import ast
 import inspect
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, NoReturn, TypedDict, Unpack, get_args
 
 import pytest
@@ -27,7 +27,7 @@ from models.core import (
 )
 from models.enums import SprintStatus, WorkflowEventType
 from models.events import WorkflowEvent
-from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance, SpecRegistry
+from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance
 from models.workflow import (
     BacklogArtifact,
     BacklogArtifactDecision,
@@ -42,6 +42,7 @@ from models.workflow import (
 )
 from repositories.workflow import WorkflowFactLoadError, WorkflowFactRepository
 from services.specs.authority_selection import pending_authority_fingerprint
+from tests.workflow.lifecycle_fixtures import seed_accepted_specification
 from utils.spec_schemas import SpecAuthorityCompilationSuccess
 from utils.task_metadata import TaskMetadata, serialize_task_metadata
 from workflow.clock import FixedClock
@@ -80,7 +81,7 @@ if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
 
 EVALUATED_AT = datetime(2026, 8, 2, 12, tzinfo=UTC)
-EXPECTED_REQUEST_VARIANT_COUNT = 46
+EXPECTED_REQUEST_VARIANT_COUNT = 56
 EXPECTED_PLANNING_REQUEST_COUNT = 9
 REPAIRED_STORY_POINTS = 3
 EXPECTED_DEPENDENCY_STORY_COUNT = 3
@@ -187,20 +188,17 @@ def _seed_accepted_backlog(
 ) -> int:
     authority_artifact = _authority_artifact()
     with Session(engine) as session:
-        project = Project(name=f"Task 11 {requirements!r}", origin="greenfield")
+        project = Project(name=f"Task 11 {requirements!r}")
         session.add(project)
         session.flush()
         assert project.project_id is not None
-        spec = SpecRegistry(
+        lineage = seed_accepted_specification(
+            session,
             project_id=project.project_id,
-            spec_hash="sha256:task-11-spec",
-            content='{"scope":"task-11"}',
-            status="approved",
-            approved_at=EVALUATED_AT,
-            approved_by="operator@example.com",
+            content=canonical_json({"scope": "task-11"}),
+            recorded_at=EVALUATED_AT - timedelta(minutes=20),
         )
-        session.add(spec)
-        session.flush()
+        spec = lineage.spec
         assert spec.spec_version_id is not None
         authority = CompiledSpecAuthority(
             spec_version_id=spec.spec_version_id,
@@ -243,6 +241,8 @@ def _seed_accepted_backlog(
             project_id=project.project_id,
             authority_id=authority.authority_id,
             authority_fingerprint=authority_fingerprint,
+            product_goal_artifact_id=lineage.product_goal_artifact_id,
+            product_goal_fingerprint=lineage.product_goal_fingerprint,
             version_number=1,
             canonical_content_json=canonical_json(content),
             content_fingerprint=fingerprint,
@@ -272,24 +272,13 @@ def _replace_authority_and_backlog(engine: Engine, project_id: int) -> None:
     """Accept a replacement authority and Backlog, obsoleting prior lineage."""
     authority_artifact = _authority_artifact()
     with Session(engine) as session:
-        current_spec = session.exec(
-            select(SpecRegistry).where(
-                col(SpecRegistry.project_id) == project_id,
-                col(SpecRegistry.status) == "approved",
-            )
-        ).one()
-        current_spec.status = "superseded"
-        session.add(current_spec)
-        replacement_spec = SpecRegistry(
+        lineage = seed_accepted_specification(
+            session,
             project_id=project_id,
-            spec_hash="sha256:task-11-replacement-spec",
-            content='{"scope":"task-11-replacement"}',
-            status="approved",
-            approved_at=EVALUATED_AT,
-            approved_by="operator@example.com",
+            content=canonical_json({"scope": "task-11-replacement"}),
+            recorded_at=EVALUATED_AT - timedelta(minutes=10),
         )
-        session.add(replacement_spec)
-        session.flush()
+        replacement_spec = lineage.spec
         assert replacement_spec.spec_version_id is not None
         replacement_authority = CompiledSpecAuthority(
             spec_version_id=replacement_spec.spec_version_id,
@@ -341,6 +330,8 @@ def _replace_authority_and_backlog(engine: Engine, project_id: int) -> None:
             project_id=project_id,
             authority_id=replacement_authority.authority_id,
             authority_fingerprint=authority_fingerprint,
+            product_goal_artifact_id=lineage.product_goal_artifact_id,
+            product_goal_fingerprint=lineage.product_goal_fingerprint,
             version_number=old_backlog.version_number + 1,
             canonical_content_json=canonical_json(replacement_content),
             content_fingerprint=replacement_fingerprint,

@@ -14,11 +14,13 @@ from workflow.definitions.product_discovery import (
 )
 from workflow.facts import (
     DiscoveryArtifactFact,
+    PostSprintTriageFact,
     ProductGoalArtifactDecisionFact,
     ProductGoalArtifactFact,
     ProjectFact,
     SpecificationCandidateFact,
     SpecificationDecisionFact,
+    SprintFact,
     VisionArtifactDecisionFact,
     VisionArtifactFact,
     WorkflowFactSnapshot,
@@ -230,3 +232,60 @@ def test_duplicate_unsuperseded_discovery_leaf_fails_closed() -> None:
     )
 
     assert _discovery_rule(conflicted, NOW)[0].reason_code == "WORKFLOW_FACT_CONFLICT"
+
+
+def test_triaged_later_sprint_reopens_discovery_once_under_same_goal() -> None:
+    """A completed increment exposes one superseding discovery opportunity."""
+    current = _snapshot(candidate_decision="accepted")
+    old_discovery = current.discovery_artifacts[0].model_copy(
+        update={"recorded_at": NOW}
+    )
+    after_triage = current.model_copy(
+        update={
+            "discovery_artifacts": (old_discovery,),
+            "sprints": (
+                SprintFact(
+                    sprint_id=8,
+                    status="completed",
+                    completed_at=NOW.replace(hour=1),
+                ),
+            ),
+            "post_sprint_triage": (
+                PostSprintTriageFact(
+                    triage_id=9,
+                    sprint_id=8,
+                    impact="none",
+                    canonical_payload={},
+                    payload_fingerprint="triage-fingerprint",
+                ),
+            ),
+        }
+    )
+
+    decision = _discovery_rule(after_triage, NOW.replace(hour=2))[0]
+
+    assert decision.reason_code == "DISCOVERY_INCREMENT_AVAILABLE"
+    assert {
+        (reference.fact_type, reference.fact_id, reference.fingerprint)
+        for reference in decision.fact_references
+    } == {
+        ("vision", "1", "vision"),
+        ("product_goal", "3", "goal"),
+        ("discovery", "5", "discovery"),
+    }
+
+    replacement = old_discovery.model_copy(
+        update={
+            "discovery_artifact_id": 10,
+            "content_fingerprint": "next-discovery",
+            "supersedes_discovery_artifact_id": 5,
+            "recorded_at": NOW.replace(hour=2),
+        }
+    )
+    reopened = after_triage.model_copy(
+        update={"discovery_artifacts": (old_discovery, replacement)}
+    )
+
+    assert _discovery_rule(reopened, NOW.replace(hour=2))[0].reason_code == (
+        "DISCOVERY_RECORDED"
+    )

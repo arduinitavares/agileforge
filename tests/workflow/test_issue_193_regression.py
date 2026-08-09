@@ -712,10 +712,8 @@ def test_extension_authority_review_uses_registered_content_without_source_file(
 
     assert context.review.source_content == context.replacement.content
     assert context.review.source_spec_hash == context.replacement.spec_hash
-    assert context.review.disk_spec_hash == context.replacement.spec_hash
-    if provenance_path is None:
-        assert context.review.content_ref is None
-    else:
+    assert context.review.source_content_sha256 == context.replacement.spec_hash
+    if provenance_path is not None:
         assert not provenance_path.exists()
     reconciled = context.domain.transition(
         _reconcile_request(

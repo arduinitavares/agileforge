@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import cast
 
 from services.contracts.roadmap import (
@@ -50,10 +51,7 @@ def test_build_roadmap_input_context_strips_refinement_metadata() -> None:
     assert isinstance(backlog_items, list)
     item = cast("dict[str, object]", backlog_items[0])
     assert isinstance(item, dict)
-    raw_annotation = item.get("as_built_annotation")
-    assert isinstance(raw_annotation, dict)
-    annotation = cast("dict[str, object]", raw_annotation)
-    assert annotation.get("match_tier") == "exact"
+    assert "as_built_annotation" not in item
     assert "item_id" not in item
     assert "item_fingerprint" not in item
     assert "classification" not in item
@@ -65,8 +63,8 @@ def test_build_roadmap_input_context_strips_refinement_metadata() -> None:
     )
 
 
-def test_build_roadmap_input_context_marks_reconciliation_shape_locked() -> None:
-    """Normal roadmap reconciliation must tell the builder the shape is locked."""
+def test_build_roadmap_input_context_retains_prior_roadmap_without_mode_flags() -> None:
+    """Prior Roadmap state remains context without reconciliation control fields."""
     existing_roadmap = [
         {
             "release_name": "Milestone 1",
@@ -110,14 +108,17 @@ def test_build_roadmap_input_context_marks_reconciliation_shape_locked() -> None
 
     input_context = build_roadmap_input_context(
         state,
-        user_input="Reconcile sprint evidence without moving items.",
+        user_input="Refine the prior Roadmap without moving accepted items.",
     )
     parsed = RoadmapBuilderInput.model_validate(input_context)
 
-    assert input_context["generation_mode"] == "roadmap_reconciliation"
-    assert input_context["locked_roadmap_shape"] == [
-        {"release_name": "Milestone 1", "items": ["Requirement A"]},
-        {"release_name": "Milestone 2", "items": ["Requirement B"]},
-    ]
-    assert parsed.generation_mode == "roadmap_reconciliation"
-    assert parsed.locked_roadmap_shape == input_context["locked_roadmap_shape"]
+    assert "generation_mode" not in input_context
+    assert "locked_roadmap_shape" not in input_context
+    assert "scope_extension" not in input_context
+    assert parsed.prior_roadmap_state == json.dumps(
+        existing_roadmap,
+        ensure_ascii=False,
+    )
+    assert parsed.user_input == (
+        "Refine the prior Roadmap without moving accepted items."
+    )

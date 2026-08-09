@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
-from adapters.adk.agents.vision import legacy_root_agent, root_agent
+import pytest
+
+from adapters.adk.agents.vision import root_agent
 from adapters.adk.recipes import (
     AgenticRecipeNodes,
     AttemptCompletionContext,
     RecipeOutput,
+    UnknownAdkRecipeError,
     _vision_interview_output_adapter,
     build_agentic_recipe_registry,
 )
@@ -17,33 +20,32 @@ from services.application import (
     VisionRevisionRequest,
 )
 from services.contracts.vision import (
-    InputSchema,
-    OutputSchema,
     VisionInterviewInput,
     VisionInterviewOutput,
 )
 from services.node_attempt_replay import NodeAttemptReplayQuery, TransitionReplayQuery
-from workflow.contracts import TransitionResult, WorkflowError, WorkflowErrorCode
-from workflow.requests import RecordVisionDraft
+from workflow.contracts import (
+    GRAPH_VERSION,
+    TransitionResult,
+    WorkflowError,
+    WorkflowErrorCode,
+)
 
 
-def test_legacy_and_interview_agents_keep_separate_contracts() -> None:
-    """Keep the live root recipe separate from the isolated interview recipe."""
-    assert legacy_root_agent.input_schema is InputSchema
-    assert legacy_root_agent.output_schema is OutputSchema
+def test_vision_interview_agent_uses_the_strict_v2_contract() -> None:
+    """Keep the active Vision recipe bound to its interview contract."""
     assert root_agent.input_schema is VisionInterviewInput
     assert root_agent.output_schema is VisionInterviewOutput
 
 
-def test_legacy_and_interview_recipes_keep_separate_output_adapters() -> None:
-    """The live root and isolated graph cannot adapt each other's output shape."""
+def test_recipe_catalog_excludes_legacy_vision_and_adapts_interview_output() -> None:
+    """Expose only the v2 Vision interview recipe and its output adapter."""
     registry = build_agentic_recipe_registry(
         nodes=AgenticRecipeNodes(
-            brownfield_curator=root_agent,
             authority_compile=root_agent,
             authority_repair=root_agent,
-            vision_generation=legacy_root_agent,
             vision_interview=root_agent,
+            product_goal=root_agent,
             backlog_generation=root_agent,
             roadmap_generation=root_agent,
             story_generation=root_agent,
@@ -53,7 +55,7 @@ def test_legacy_and_interview_recipes_keep_separate_output_adapters() -> None:
     )
     context = AttemptCompletionContext(
         project_id=1,
-        graph_version="agileforge.workflow.v1",
+        graph_version=GRAPH_VERSION,
         fact_fingerprint="sha256:facts",
         decision_fingerprint="sha256:decision",
         instance_key=None,
@@ -65,17 +67,8 @@ def test_legacy_and_interview_recipes_keep_separate_output_adapters() -> None:
         normalized_input={"mode": "initial", "user_response": "Build a tool."},
     )
 
-    legacy = registry.require("vision.generate").output_adapter(
-        RecipeOutput(
-            payload={
-                "authority_id": 3,
-                "authority_fingerprint": "sha256:authority",
-                "canonical_content": {},
-                "content_fingerprint": "sha256:legacy-vision",
-            }
-        ),
-        context,
-    )
+    with pytest.raises(UnknownAdkRecipeError):
+        registry.require("vision.generate")
     interview = registry.require("vision.interview").output_adapter(
         RecipeOutput(
             payload={
@@ -96,7 +89,6 @@ def test_legacy_and_interview_recipes_keep_separate_output_adapters() -> None:
         context,
     )
 
-    assert isinstance(legacy, RecordVisionDraft)
     assert interview.kind == "record_vision_interview_turn"
 
 
@@ -121,7 +113,7 @@ def test_vision_adapter_uses_trusted_attempt_input_for_human_turn() -> None:
         ),
         AttemptCompletionContext(
             project_id=1,
-            graph_version="agileforge.workflow.v1",
+            graph_version=GRAPH_VERSION,
             fact_fingerprint="sha256:facts",
             decision_fingerprint="sha256:decision",
             instance_key=None,
@@ -208,7 +200,7 @@ def test_review_and_revision_replay_before_position_reads() -> None:
     interview = app.run_vision_interview(
         VisionInterviewRequest(
             project_id=7,
-            graph_version="agileforge.workflow.v1",
+            graph_version="agileforge.workflow.v2",
             fact_fingerprint="sha256:facts",
             decision_fingerprint="sha256:decision",
             user_text="Same answer.",
@@ -257,7 +249,7 @@ def test_replay_rejects_changed_vision_operator_input_before_position_reads() ->
     interview = app.run_vision_interview(
         VisionInterviewRequest(
             project_id=7,
-            graph_version="agileforge.workflow.v1",
+            graph_version="agileforge.workflow.v2",
             fact_fingerprint="sha256:facts",
             decision_fingerprint="sha256:decision",
             user_text="Changed answer.",

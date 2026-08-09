@@ -9,6 +9,7 @@ from workflow.contracts import FactReference, InputField, RecommendationKind
 from workflow.definitions.product_goal import (
     accepted_current_goal,
     accepted_current_vision,
+    lifecycle_is_quiescent,
 )
 from workflow.graph import NodeSpec, RuleCategory, RuleEvaluation
 
@@ -287,7 +288,33 @@ def _discovery_rule(
     goal = accepted_current_goal(snapshot)
     if vision is None or goal is None:
         return (RuleEvaluation(RuleCategory.SATISFIED, "DISCOVERY_NOT_READY"),)
-    if current_discovery(snapshot) is not None:
+    discovery = current_discovery(snapshot)
+    if discovery is not None and _increment_is_available(snapshot, discovery):
+        return (
+            RuleEvaluation(
+                RuleCategory.AVAILABLE,
+                "DISCOVERY_INCREMENT_AVAILABLE",
+                recommendation_kind=RecommendationKind.OPTIONAL_REENTRY,
+                fact_references=(
+                    _reference(
+                        "vision",
+                        vision.vision_artifact_id,
+                        vision.content_fingerprint,
+                    ),
+                    _reference(
+                        "product_goal",
+                        goal.product_goal_artifact_id,
+                        goal.content_fingerprint,
+                    ),
+                    _reference(
+                        "discovery",
+                        discovery.discovery_artifact_id,
+                        discovery.content_fingerprint,
+                    ),
+                ),
+            ),
+        )
+    if discovery is not None:
         return (RuleEvaluation(RuleCategory.SATISFIED, "DISCOVERY_RECORDED"),)
     return (
         RuleEvaluation(
@@ -306,6 +333,21 @@ def _discovery_rule(
                 ),
             ),
         ),
+    )
+
+
+def _increment_is_available(
+    snapshot: WorkflowFactSnapshot,
+    discovery: DiscoveryArtifactFact,
+) -> bool:
+    """Allow one new discovery after a later fully triaged Sprint."""
+    if not lifecycle_is_quiescent(snapshot):
+        return False
+    return any(
+        sprint.status == "completed"
+        and sprint.completed_at is not None
+        and sprint.completed_at > discovery.recorded_at
+        for sprint in snapshot.sprints
     )
 
 

@@ -88,6 +88,35 @@ def accepted_current_goal(
     return accepted[0] if len(accepted) == 1 else None
 
 
+def lifecycle_is_quiescent(snapshot: WorkflowFactSnapshot) -> bool:
+    """Return whether delivery has no active work or unresolved review."""
+    if any(sprint.status == "active" for sprint in snapshot.sprints):
+        return False
+    completed_sprint_ids = {
+        sprint.sprint_id
+        for sprint in snapshot.sprints
+        if sprint.status == "completed"
+    }
+    triaged_sprint_ids = {triage.sprint_id for triage in snapshot.post_sprint_triage}
+    if not completed_sprint_ids <= triaged_sprint_ids:
+        return False
+    if any(
+        artifact.status == "pending_review"
+        for artifact in (*snapshot.phase_artifacts, *snapshot.planning_artifacts)
+    ):
+        return False
+    if any(authority.status == "pending_review" for authority in snapshot.authorities):
+        return False
+    reviewed_candidate_ids = {
+        decision.specification_candidate_id
+        for decision in snapshot.specification_decisions
+    }
+    return all(
+        candidate.specification_candidate_id in reviewed_candidate_ids
+        for candidate in snapshot.specification_candidates
+    )
+
+
 def _pending_goal(
     snapshot: WorkflowFactSnapshot,
     vision: VisionArtifactFact,
@@ -197,17 +226,7 @@ def _outcome_rule(
         _at: datetime,
     ) -> tuple[RuleEvaluation, ...]:
         goal = accepted_current_goal(snapshot)
-        active_sprint = any(sprint.status == "active" for sprint in snapshot.sprints)
-        completed_sprint_ids = {
-            sprint.sprint_id
-            for sprint in snapshot.sprints
-            if sprint.status == "completed"
-        }
-        triaged_sprint_ids = {
-            triage.sprint_id for triage in snapshot.post_sprint_triage
-        }
-        triage_complete = completed_sprint_ids <= triaged_sprint_ids
-        if goal is None or active_sprint or not triage_complete:
+        if goal is None or not lifecycle_is_quiescent(snapshot):
             return (
                 RuleEvaluation(
                     RuleCategory.SATISFIED,

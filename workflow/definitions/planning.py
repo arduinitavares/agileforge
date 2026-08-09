@@ -13,6 +13,7 @@ from workflow.contracts import (
     RecommendationKind,
 )
 from workflow.definitions.backlog import current_backlog_lineage
+from workflow.definitions.product_goal import lifecycle_is_quiescent
 from workflow.definitions.vision import artifact_reference, authority_reference
 from workflow.fingerprints import canonical_hash
 from workflow.graph import (
@@ -892,6 +893,29 @@ def _existing_sprint_plan_evaluation(
     latest: PlanningArtifactFact,
     stories: tuple[StoryFact, ...],
 ) -> tuple[RuleEvaluation, ...]:
+    completed = any(
+        sprint.sprint_id == latest.sprint_id and sprint.status == "completed"
+        for sprint in snapshot.sprints
+    )
+    if latest.status == "accepted" and completed:
+        if not lifecycle_is_quiescent(snapshot):
+            return (
+                RuleEvaluation(
+                    RuleCategory.SATISFIED,
+                    "NEXT_SPRINT_AWAITS_QUIESCENT_LIFECYCLE",
+                ),
+            )
+        return (
+            RuleEvaluation(
+                RuleCategory.AVAILABLE,
+                "NEXT_SPRINT_PLANNING_REQUIRED",
+                fact_references=_sprint_plan_references(
+                    snapshot,
+                    stories,
+                    plan=latest,
+                ),
+            ),
+        )
     stale_reason = _sprint_plan_freshness_reason(
         snapshot,
         latest,

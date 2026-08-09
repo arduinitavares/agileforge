@@ -92,7 +92,7 @@ def _seed_open_revision(session: Session, project: Project) -> None:
         project_id=project.project_id,
         node_id="vision.interview",
         instance_key=None,
-        graph_version="agileforge.workflow.v1",
+        graph_version="agileforge.workflow.v2",
         fact_fingerprint="sha256:facts",
         business_fact_fingerprint="sha256:business",
         decision_fingerprint="sha256:decision",

@@ -166,7 +166,7 @@ def _attempt(
         project_id=project_id,
         node_id=node_id,
         instance_key=None,
-        graph_version="agileforge.workflow.v1",
+        graph_version="agileforge.workflow.v2",
         fact_fingerprint="sha256:facts",
         business_fact_fingerprint="sha256:business",
         decision_fingerprint="sha256:decision",

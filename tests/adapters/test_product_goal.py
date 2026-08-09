@@ -7,7 +7,7 @@ from pydantic import ValidationError
 
 from adapters.adk.agents.product_goal import root_agent
 from adapters.adk.recipes import (
-    TASK4_AGENTIC_NODE_IDS,
+    AGENTIC_NODE_IDS,
     AgenticRecipeNodes,
     AttemptCompletionContext,
     RecipeOutput,
@@ -58,7 +58,7 @@ def test_product_goal_recipe_adapter_uses_the_persisted_human_response() -> None
         ),
         AttemptCompletionContext(
             project_id=7,
-            graph_version="agileforge.workflow.v1",
+            graph_version="agileforge.workflow.v2",
             fact_fingerprint="sha256:facts",
             decision_fingerprint="sha256:decision",
             instance_key=None,
@@ -77,13 +77,11 @@ def test_product_goal_recipe_adapter_uses_the_persisted_human_response() -> None
 
 
 def test_product_goal_recipe_is_registered_without_provider_execution() -> None:
-    """The isolated Task 4 catalog exposes the Goal recipe and output adapter."""
+    """The v2 catalog exposes the Goal recipe and output adapter."""
     registry = build_agentic_recipe_registry(
         nodes=AgenticRecipeNodes(
-            brownfield_curator=root_agent,
             authority_compile=root_agent,
             authority_repair=root_agent,
-            vision_generation=root_agent,
             vision_interview=root_agent,
             product_goal=root_agent,
             backlog_generation=root_agent,
@@ -94,7 +92,7 @@ def test_product_goal_recipe_is_registered_without_provider_execution() -> None:
         execution_settings={"timeout_seconds": 5.0, "max_attempts": 1},
     )
 
-    assert registry.node_ids == TASK4_AGENTIC_NODE_IDS
+    assert registry.node_ids == AGENTIC_NODE_IDS
     assert registry.require("goal.interview").output_adapter is (
         _product_goal_interview_output_adapter
     )

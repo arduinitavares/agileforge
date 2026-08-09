@@ -12,6 +12,7 @@ from workflow.definitions.product_goal import (
     accepted_current_goal,
 )
 from workflow.facts import (
+    PhaseArtifactFact,
     PostSprintTriageFact,
     ProductGoalArtifactDecisionFact,
     ProductGoalArtifactFact,
@@ -196,5 +197,29 @@ def test_goal_outcome_is_blocked_by_active_sprint_but_not_no_sprints() -> None:
         }
     )
     assert _outcome_rule("abandoned")(active, NOW)[0].reason_code == (
+        "PRODUCT_GOAL_OUTCOME_NOT_READY"
+    )
+
+
+def test_goal_outcome_requires_every_artifact_review_to_be_quiescent() -> None:
+    """An unresolved delivery review blocks fulfillment and abandonment."""
+    pending_backlog = PhaseArtifactFact(
+        artifact_type="backlog",
+        artifact_id=30,
+        artifact_fingerprint="backlog-fingerprint",
+        authority_id=40,
+        authority_fingerprint="authority-fingerprint",
+        product_goal_artifact_id=20,
+        product_goal_fingerprint="goal-fingerprint",
+        status="pending_review",
+    )
+    snapshot = _snapshot(goal_decision="accepted").model_copy(
+        update={"phase_artifacts": (pending_backlog,)}
+    )
+
+    assert _outcome_rule("fulfilled")(snapshot, NOW)[0].reason_code == (
+        "PRODUCT_GOAL_OUTCOME_NOT_READY"
+    )
+    assert _outcome_rule("abandoned")(snapshot, NOW)[0].reason_code == (
         "PRODUCT_GOAL_OUTCOME_NOT_READY"
     )

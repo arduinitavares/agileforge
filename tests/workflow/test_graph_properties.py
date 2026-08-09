@@ -1012,7 +1012,10 @@ def test_decision_fingerprint_covers_complete_decision_payload() -> None:
 
     variants = (
         (
-            _graph(baseline_node, graph_version="agileforge.workflow.v2"),
+            _graph(
+                baseline_node,
+                graph_version="agileforge.workflow.fingerprint-variant",
+            ),
             _snapshot(),
         ),
         (_graph(baseline_node), _snapshot(name="Changed Facts")),

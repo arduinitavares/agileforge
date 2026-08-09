@@ -95,7 +95,7 @@ def _attempt(*, outcome: str | None, lease_delta: timedelta) -> NodeAttemptFact:
             "attempt_id": 401,
             "node_id": "authority.compile",
             "instance_key": COMPILE_INSTANCE_KEY,
-            "graph_version": "agileforge.workflow.v1",
+            "graph_version": "agileforge.workflow.v2",
             "input_fingerprint": "sha256:input",
             "fact_fingerprint": "sha256:facts",
             "business_fact_fingerprint": "sha256:business",

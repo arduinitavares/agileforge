@@ -100,6 +100,8 @@ REQUEST_CASES: tuple[
         {
             "authority_id": 5,
             "authority_fingerprint": "sha256:authority",
+            "product_goal_artifact_id": 3,
+            "product_goal_fingerprint": "sha256:goal",
             "canonical_content": {"backlog_items": []},
             "content_fingerprint": "sha256:backlog",
             "supersedes_backlog_artifact_id": None,

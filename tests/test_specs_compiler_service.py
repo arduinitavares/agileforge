@@ -32,6 +32,7 @@ from tests.authority_assumption_fixtures import (
     historical_v2_compiled_authority,
 )
 from tests.typing_helpers import make_tool_context, require_id
+from tests.workflow.lifecycle_fixtures import seed_accepted_specification
 from utils import failure_artifacts
 from utils.agileforge_spec_profile import TechnicalSpecArtifact
 from utils.failure_artifacts import AgentInvocationError
@@ -662,23 +663,18 @@ def _create_spec_version(
     *,
     project_id: int,
     content: str | None = None,
+    content_ref: str | None = None,
 ) -> SpecRegistry:
     if content is None:
         content = _canonical_agileforge_spec_profile_json()
-    spec_row = SpecRegistry(
+    content = normalize_spec_content_for_registry(content).content
+    lineage = seed_accepted_specification(
+        session,
         project_id=project_id,
-        spec_hash=f"{project_id:064d}"[-64:],
         content=content,
-        content_ref=None,
-        status="approved",
-        approved_at=datetime.now(UTC),
-        approved_by="tester",
-        approval_notes="approved",
+        content_ref=content_ref,
     )
-    session.add(spec_row)
-    session.commit()
-    session.refresh(spec_row)
-    return spec_row
+    return lineage.spec
 
 
 def _create_compiled_authority(
@@ -2101,7 +2097,7 @@ def test_compile_spec_authority_for_version_persists_authority(
     )
     assert result["content_source"] == "content"
     assert result["compiler_version"] is not None
-    assert sample_project.compiled_authority_json is not None
+    assert sample_project.compiled_authority_json is None
     assert tool_context.state["compiled_authority_cached"] is not None
 
     authority = session.exec(
@@ -2111,7 +2107,6 @@ def test_compile_spec_authority_for_version_persists_authority(
         )
     ).first()
     assert authority is not None
-    assert authority.compiled_artifact_json == sample_project.compiled_authority_json
     load_result = compiler_service.load_compiled_artifact(authority)
     assert load_result.status == "success"
     assert load_result.artifact is not None
@@ -2135,18 +2130,13 @@ def test_compile_spec_authority_for_version_persists_quality_report(
         session.add(project)
         session.commit()
         session.refresh(project)
-        spec = SpecRegistry(
+        lineage = seed_accepted_specification(
+            session,
             project_id=require_id(project.project_id, "project_id"),
-            spec_hash="sha256:" + "1" * 64,
             content=_agileforge_spec_profile_json(),
             content_ref="specs/spec.json",
-            status="approved",
-            approved_at=datetime.now(UTC),
-            approved_by="test",
         )
-        session.add(spec)
-        session.commit()
-        session.refresh(spec)
+        spec = lineage.spec
         spec_version_id = require_id(spec.spec_version_id, "spec_version_id")
 
     def fake_compile(**_: object) -> object:
@@ -3315,9 +3305,14 @@ def test_compile_spec_authority_for_version_iteratively_persists_must_coverage(
     )
 
     assert result["success"] is True
-    assert sample_project.compiled_authority_json is not None
+    authority = session.exec(
+        select(CompiledSpecAuthority).where(
+            CompiledSpecAuthority.spec_version_id
+            == require_id(spec_row.spec_version_id, "spec_version_id")
+        )
+    ).one()
     load_result = compiler_service.load_compiled_artifact(
-        SimpleNamespace(compiled_artifact_json=sample_project.compiled_authority_json)
+        authority
     )
     assert load_result.status == "success"
     assert load_result.artifact is not None
@@ -3344,6 +3339,10 @@ def test_update_spec_and_compile_authority_suppresses_auto_accept_for_vacant_aut
         compiler_service,
         "_invoke_spec_authority_compiler",
         lambda **_: _vacant_success_json(),
+    )
+    _create_spec_version(
+        session,
+        project_id=require_id(sample_project.project_id, "project_id"),
     )
 
     result = compiler_service.update_spec_and_compile_authority(
@@ -3533,16 +3532,13 @@ def test_compile_spec_authority_for_version_with_engine_runs_lease_guard_before_
 
     assert result["success"] is True
     assert "compiled_authority_persisted" in boundaries
-    assert "project_authority_cache_persisted" in boundaries
     assert "progress:compiled_authority_persisted" in boundaries
-    assert "progress:project_authority_cache_persisted" in boundaries
 
 
 @pytest.mark.parametrize(
-    ("blocked_boundary", "expect_authority", "expect_project_cache"),
+    ("blocked_boundary", "expect_authority"),
     [
-        ("compiled_authority_persisted", False, False),
-        ("project_authority_cache_persisted", False, False),
+        ("compiled_authority_persisted", False),
     ],
 )
 def test_compile_spec_authority_for_version_with_engine_lease_loss_blocks_write(  # noqa: PLR0913
@@ -3552,7 +3548,6 @@ def test_compile_spec_authority_for_version_with_engine_lease_loss_blocks_write(
     monkeypatch: pytest.MonkeyPatch,
     blocked_boundary: str,
     expect_authority: bool,
-    expect_project_cache: bool,
 ) -> None:
     """A lost lease should roll back every guarded compiler write atomically."""
     from services.specs import compiler_service  # noqa: PLC0415
@@ -3584,16 +3579,13 @@ def test_compile_spec_authority_for_version_with_engine_lease_loss_blocks_write(
             CompiledSpecAuthority.spec_version_id == spec_version_id
         )
     ).first()
-    session.refresh(sample_project)
     assert (authority is not None) is expect_authority
-    assert (sample_project.compiled_authority_json is not None) is expect_project_cache
 
 
 @pytest.mark.parametrize(
     ("failed_boundary", "mode"),
     [
         ("compiled_authority_persisted", "false"),
-        ("project_authority_cache_persisted", "raise"),
     ],
 )
 def test_compile_spec_authority_for_version_with_engine_progress_failure_recovers(  # noqa: PLR0913
@@ -3778,7 +3770,7 @@ def test_compile_spec_authority_for_version_returns_cached_authority(
         == existing.compiled_artifact_json
     )
     session.refresh(sample_project)
-    assert sample_project.compiled_authority_json == existing.compiled_artifact_json
+    assert sample_project.compiled_authority_json is None
 
 
 def test_force_recompile_inserts_without_mutating_existing_history(
@@ -3857,7 +3849,7 @@ def test_force_recompile_inserts_without_mutating_existing_history(
     assert preserved_acceptance is not None
     assert preserved_acceptance.model_dump() == before_acceptance
     assert result["authority_id"] == rows[1].authority_id
-    assert sample_project.compiled_authority_json == rows[1].compiled_artifact_json
+    assert sample_project.compiled_authority_json is None
 
 
 def test_force_recompile_inserts_when_existing_row_has_no_terminal_decision(
@@ -4047,9 +4039,9 @@ def test_compile_spec_authority_for_version_uses_content_ref_when_content_empty(
     spec_row = _create_spec_version(
         session,
         project_id=require_id(sample_project.project_id, "project_id"),
-        content="",
+        content_ref=str(spec_path),
     )
-    spec_row.content_ref = str(spec_path)
+    spec_row.content = ""
     session.add(spec_row)
     session.commit()
     session.refresh(spec_row)
@@ -4481,10 +4473,10 @@ def test_check_spec_authority_status_returns_not_compiled_when_no_spec_versions(
     }
 
 
-def test_check_spec_authority_status_prefers_pending_review_over_stale(
+def test_check_spec_authority_status_reports_stale_for_newer_approved_lineage(
     session: Session, sample_project: Project, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Verify check spec authority status prefers pending review over stale."""
+    """A newer accepted spec makes an older compiled authority stale."""
     from services.specs import compiler_service  # noqa: PLC0415
 
     monkeypatch.setattr(
@@ -4496,7 +4488,7 @@ def test_check_spec_authority_status_prefers_pending_review_over_stale(
     approved_spec = _create_spec_version(
         session,
         project_id=require_id(sample_project.project_id, "project_id"),
-        content="Approved Spec",
+        content=_canonical_agileforge_spec_profile_json(),
     )
     _create_compiled_authority(
         session,
@@ -4504,34 +4496,32 @@ def test_check_spec_authority_status_prefers_pending_review_over_stale(
         artifact_json=_stored_compiled_success_json(),
     )
 
-    draft_spec = SpecRegistry(
+    replacement_spec = _create_spec_version(
+        session,
         project_id=require_id(sample_project.project_id, "project_id"),
-        spec_hash="d" * 64,
-        content="Draft Spec",
-        content_ref=None,
-        status="draft",
-        approved_at=None,
-        approved_by=None,
-        approval_notes=None,
+        content=_accepted_multi_item_spec_profile_json(),
     )
-    session.add(draft_spec)
-    session.commit()
-    session.refresh(draft_spec)
 
     result = compiler_service.check_spec_authority_status(
         {"project_id": require_id(sample_project.project_id, "project_id")},
         tool_context=None,
     )
 
-    draft_spec_version_id = require_id(draft_spec.spec_version_id, "spec_version_id")
+    approved_spec_version_id = require_id(
+        approved_spec.spec_version_id,
+        "spec_version_id",
+    )
+    replacement_spec_version_id = require_id(
+        replacement_spec.spec_version_id,
+        "spec_version_id",
+    )
     assert result == {
         "success": True,
-        "status": SpecAuthorityStatus.PENDING_REVIEW.value,
-        "status_details": (
-            f"Latest spec version {draft_spec_version_id} is {draft_spec.status}"
-        ),
-        "latest_spec_version_id": draft_spec_version_id,
-        "message": "Status: PENDING_REVIEW (latest spec not approved)",
+        "status": SpecAuthorityStatus.STALE.value,
+        "status_details": "Compiled authority is stale (newer approved spec exists)",
+        "compiled_spec_version_id": approved_spec_version_id,
+        "latest_approved_spec_version_id": replacement_spec_version_id,
+        "message": "Status: STALE (compiled for older spec)",
     }
 
 
@@ -4801,10 +4791,10 @@ def sample_project(session: Session) -> Project:
     return project
 
 
-def test_update_spec_and_compile_authority_creates_spec_and_delegates_compile(
+def test_update_spec_and_compile_authority_requires_accepted_specification(
     session: Session, sample_project: Project, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Verify update spec and compile authority creates spec and delegates compile."""
+    """The legacy entry point cannot create or implicitly approve a specification."""
     from services.specs import compiler_service  # noqa: PLC0415
 
     monkeypatch.setattr(
@@ -4813,47 +4803,12 @@ def test_update_spec_and_compile_authority_creates_spec_and_delegates_compile(
         session.get_bind,
     )
 
-    compile_calls: dict[str, object] = {}
-
-    def fake_compile(
-        *,
-        spec_version_id: int,
-        force_recompile: bool,
-        tool_context: object,
-        compiler_model: str | None = None,
-    ) -> object:
-        del compiler_model
-        compile_calls["spec_version_id"] = spec_version_id
-        compile_calls["force_recompile"] = force_recompile
-        compile_calls["tool_context"] = tool_context
-
-        authority = CompiledSpecAuthority(
-            spec_version_id=spec_version_id,
-            compiler_version="3.0.0",
-            prompt_hash="b" * 64,
-            compiled_at=datetime.now(UTC),
-            compiled_artifact_json=_stored_compiled_success_json(),
-            scope_themes='["Payments"]',
-            invariants='["REQUIRED_FIELD:email"]',
-            eligible_feature_ids="[]",
-            rejected_features="[]",
-            spec_gaps="[]",
-        )
-        session.add(authority)
-        session.commit()
-        session.refresh(authority)
-
-        return {
-            "success": True,
-            "cached": False,
-            "authority_id": require_id(authority.authority_id, "authority_id"),
-        }
-
     monkeypatch.setattr(
         compiler_service,
         "compile_spec_authority_for_version",
-        fake_compile,
-        raising=False,
+        lambda **_: (_ for _ in ()).throw(
+            AssertionError("compile must not run without accepted specification")
+        ),
     )
     spec_content = _agileforge_spec_profile_json()
     result = compiler_service.update_spec_and_compile_authority(
@@ -4864,19 +4819,16 @@ def test_update_spec_and_compile_authority_creates_spec_and_delegates_compile(
         tool_context=None,
     )
 
-    assert result["success"] is True
-    assert result["project_id"] == require_id(sample_project.project_id, "project_id")
-    assert result["cache_hit"] is False
-    assert result["accepted"] is False
-    assert result["authority_status"] == "pending_acceptance"
-    assert compile_calls["force_recompile"] is False
+    assert result == {
+        "success": False,
+        "error_code": "SPECIFICATION_NOT_ACCEPTED",
+        "error": (
+            "Specification must be accepted through specification.review "
+            "before Authority compilation."
+        ),
+    }
+    assert session.exec(select(SpecRegistry)).all() == []
     assert session.exec(select(SpecAuthorityAcceptance)).all() == []
-
-    spec_row = session.get(SpecRegistry, result["spec_version_id"])
-    assert spec_row is not None
-    assert spec_row.content == _canonical_agileforge_spec_profile_json()
-    assert spec_row.status == "approved"
-    assert spec_row.approved_by == "implicit"
 
 
 def test_update_spec_and_compile_authority_honors_tool_compile_override(
@@ -4935,6 +4887,11 @@ def test_update_spec_and_compile_authority_honors_tool_compile_override(
         fake_tool_compile,
     )
     spec_content = _agileforge_spec_profile_json()
+    accepted_spec = _create_spec_version(
+        session,
+        project_id=require_id(sample_project.project_id, "project_id"),
+        content=spec_content,
+    )
     result = compiler_service.update_spec_and_compile_authority(
         {
             "project_id": require_id(sample_project.project_id, "project_id"),
@@ -4944,7 +4901,10 @@ def test_update_spec_and_compile_authority_honors_tool_compile_override(
     )
 
     assert result["success"] is True
-    assert compile_params["spec_version_id"] == result["spec_version_id"]
+    assert compile_params["spec_version_id"] == require_id(
+        accepted_spec.spec_version_id,
+        "spec_version_id",
+    )
     assert compile_params["force_recompile"] is False
 
 
@@ -4996,6 +4956,11 @@ def test_update_spec_and_compile_authority_never_persists_acceptance(
     )
 
     spec_content = _agileforge_spec_profile_json()
+    _create_spec_version(
+        session,
+        project_id=require_id(sample_project.project_id, "project_id"),
+        content=spec_content,
+    )
     result = compiler_service.update_spec_and_compile_authority(
         {
             "project_id": require_id(sample_project.project_id, "project_id"),
@@ -5052,6 +5017,11 @@ def test_update_spec_and_compile_authority_rejects_malformed_postcompile_row(
         fake_compile,
     )
 
+    _create_spec_version(
+        session,
+        project_id=require_id(sample_project.project_id, "project_id"),
+        content=_agileforge_spec_profile_json(),
+    )
     result = compiler_service.update_spec_and_compile_authority(
         {
             "project_id": require_id(sample_project.project_id, "project_id"),
@@ -5083,6 +5053,12 @@ def test_update_spec_and_compile_authority_loads_content_ref(
     spec_path = tmp_path / "service_spec.json"
     spec_content = _agileforge_spec_profile_json()
     spec_path.write_text(spec_content, encoding="utf-8")
+    accepted_spec = _create_spec_version(
+        session,
+        project_id=require_id(sample_project.project_id, "project_id"),
+        content=spec_content,
+        content_ref=str(spec_path),
+    )
 
     def fake_compile(
         *,
@@ -5129,7 +5105,10 @@ def test_update_spec_and_compile_authority_loads_content_ref(
 
     assert result["success"] is True
 
-    spec_row = session.get(SpecRegistry, result["spec_version_id"])
+    spec_row = session.get(
+        SpecRegistry,
+        require_id(accepted_spec.spec_version_id, "spec_version_id"),
+    )
     assert spec_row is not None
     assert spec_row.content == _canonical_agileforge_spec_profile_json()
     assert spec_row.content_ref == str(spec_path)
@@ -5202,6 +5181,11 @@ def test_update_spec_and_compile_authority_reuses_existing_version_for_same_hash
         raising=False,
     )
     spec_content = _agileforge_spec_profile_json()
+    _create_spec_version(
+        session,
+        project_id=require_id(sample_project.project_id, "project_id"),
+        content=spec_content,
+    )
     first = compiler_service.update_spec_and_compile_authority(
         {
             "project_id": require_id(sample_project.project_id, "project_id"),
@@ -5286,6 +5270,11 @@ def test_update_spec_and_compile_authority_treats_recompile_none_as_false(
         raising=False,
     )
     spec_content = _agileforge_spec_profile_json()
+    _create_spec_version(
+        session,
+        project_id=require_id(sample_project.project_id, "project_id"),
+        content=spec_content,
+    )
     result = compiler_service.update_spec_and_compile_authority(
         {
             "project_id": require_id(sample_project.project_id, "project_id"),

@@ -95,7 +95,19 @@ def _selected_backlog_lineage(
         for artifact in artifacts
         if artifact.supersedes_artifact_id is not None
     }
-    missing_parent = any(parent_id not in by_id for parent_id in superseded_ids)
+    known_backlogs = {
+        artifact.artifact_id: artifact
+        for artifact in snapshot.phase_artifacts
+        if artifact.artifact_type == "backlog"
+    }
+    invalid_parent = any(
+        parent_id not in known_backlogs
+        or known_backlogs[parent_id].product_goal_artifact_id
+        != goal.product_goal_artifact_id
+        or known_backlogs[parent_id].product_goal_fingerprint
+        != goal.content_fingerprint
+        for parent_id in superseded_ids
+    )
     current = tuple(
         artifact
         for artifact in artifacts
@@ -116,7 +128,7 @@ def _selected_backlog_lineage(
             goal,
             None,
             None,
-            invalid_identifiers or missing_parent or duplicate_decision,
+            invalid_identifiers or invalid_parent or duplicate_decision,
         )
     decision = decisions_by_id.get(int(latest.artifact_id))
     fingerprint_mismatch = (
@@ -125,7 +137,7 @@ def _selected_backlog_lineage(
     )
     conflict = (
         invalid_identifiers
-        or missing_parent
+        or invalid_parent
         or len(current) > 1
         or duplicate_decision
         or fingerprint_mismatch
@@ -157,6 +169,56 @@ def _references(lineage: BacklogLineage) -> tuple[FactReference, ...]:
     )
 
 
+def _prior_accepted_goal_backlog(
+    snapshot: WorkflowFactSnapshot,
+    goal: ProductGoalArtifactFact,
+) -> tuple[PhaseArtifactFact | None, bool]:
+    """Select the accepted same-Goal Backlog leaf across historical Authorities."""
+    artifacts = tuple(
+        artifact
+        for artifact in snapshot.phase_artifacts
+        if artifact.artifact_type == "backlog"
+        and artifact.product_goal_artifact_id == goal.product_goal_artifact_id
+        and artifact.product_goal_fingerprint == goal.content_fingerprint
+    )
+    by_id = {artifact.artifact_id: artifact for artifact in artifacts}
+    superseded_ids = {
+        artifact.supersedes_artifact_id
+        for artifact in artifacts
+        if artifact.supersedes_artifact_id is not None
+    }
+    leaves = tuple(
+        artifact
+        for artifact in artifacts
+        if artifact.artifact_id not in superseded_ids
+        and artifact.status != "superseded"
+    )
+    if (
+        len(by_id) != len(artifacts)
+        or any(not isinstance(item_id, int) for item_id in by_id)
+        or any(parent_id not in by_id for parent_id in superseded_ids)
+        or len(leaves) > 1
+    ):
+        return None, True
+    if not leaves:
+        return None, False
+    leaf = leaves[0]
+    decisions = tuple(
+        decision
+        for decision in snapshot.review_decisions
+        if decision.artifact_type == "backlog"
+        and decision.artifact_id == leaf.artifact_id
+    )
+    if len(decisions) != 1:
+        return None, len(decisions) > 1 or leaf.status == "pending_review"
+    decision = decisions[0]
+    if decision.artifact_fingerprint != leaf.artifact_fingerprint:
+        return None, True
+    if decision.decision == "accepted" and leaf.status == "accepted":
+        return leaf, False
+    return None, False
+
+
 def _backlog_generate_rule(
     snapshot: WorkflowFactSnapshot,
     _evaluated_at: datetime,
@@ -175,13 +237,36 @@ def _backlog_generate_rule(
             "Backlog generation requires accepted current authority.",
         )
     if lineage.latest is None:
-        return (
-            RuleEvaluation(
+        prior, conflict = _prior_accepted_goal_backlog(snapshot, lineage.goal)
+        if conflict:
+            evaluation = RuleEvaluation(
+                RuleCategory.INVALID,
+                "WORKFLOW_FACT_CONFLICT",
+            )
+        else:
+            evaluation = RuleEvaluation(
                 RuleCategory.AVAILABLE,
-                "BACKLOG_GENERATION_REQUIRED",
-                fact_references=_references(lineage),
-            ),
-        )
+                (
+                    "BACKLOG_REPLACEMENT_REQUIRED"
+                    if prior is not None
+                    else "BACKLOG_GENERATION_REQUIRED"
+                ),
+                fact_references=(
+                    *_references(lineage),
+                    *(
+                        (
+                            _reference(
+                                "backlog",
+                                int(prior.artifact_id),
+                                prior.artifact_fingerprint,
+                            ),
+                        )
+                        if prior is not None
+                        else ()
+                    ),
+                ),
+            )
+        return (evaluation,)
     if lineage.latest.status == "pending_review":
         return (RuleEvaluation(RuleCategory.SATISFIED, "BACKLOG_REVIEW_PENDING"),)
     return (
