@@ -68,6 +68,7 @@ _ACTION_ENDPOINTS = {
     "decide_product_goal_review": "goals/review",
     "decide_specification": "specifications/review",
     "decide_vision_review": "vision/review",
+    "generate_vision_bootstrap": "vision/bootstrap",
     "record_authority_feedback": "authority/feedback",
     "record_backlog_draft": "backlog/generate",
     "record_discovery_artifact": "discovery",
@@ -83,6 +84,7 @@ _ACTION_CHILDREN = {
     "decide_product_goal_review": "product_goal",
     "decide_specification": "product_discovery",
     "decide_vision_review": "vision",
+    "generate_vision_bootstrap": "vision",
     "record_authority_feedback": "authority",
     "record_backlog_draft": "backlog",
     "record_discovery_artifact": "product_discovery",
@@ -110,6 +112,7 @@ class FakeLifecycle:
     project: JsonObject | None = None
     repository: JsonObject | None = None
     vision_transcript: list[JsonValue] = field(default_factory=list)
+    vision_draft: JsonObject | None = None
     vision_candidate: JsonObject | None = None
     vision_accepted: bool = False
     goal_transcript: list[JsonValue] = field(default_factory=list)
@@ -239,6 +242,7 @@ class FakeLifecycle:
             "/repository/refresh": self._refresh_repository,
             "/specifications": self._record_specification,
             "/specifications/review": self._review_specification,
+            "/vision/bootstrap": self._bootstrap_vision,
             "/vision/respond": self._record_vision_turn,
             "/vision/review": self._review_vision,
         }
@@ -263,7 +267,7 @@ class FakeLifecycle:
             "/vision/review": (
                 None
                 if self.vision_candidate is None
-                else self.vision_candidate.get("fingerprint")
+                else self.vision_candidate.get("review_fingerprint")
             ),
         }
         value = candidates.get(suffix)
@@ -298,19 +302,63 @@ class FakeLifecycle:
             self.repository = self.repositories[repository_path]
         return _HTTP_CREATED, self._success({"output": {"project_id": _PROJECT_ID}})
 
+    def _bootstrap_vision(self, body: JsonObject) -> None:
+        self._assert_fields(body, set())
+        self.vision_draft = {
+            "statement": "Product teams need durable lifecycle review.",
+            "components": [
+                {
+                    "name": "target_user",
+                    "value": "Product teams",
+                    "source_kinds": ["evidence"],
+                },
+                {
+                    "name": "differentiator",
+                    "value": None,
+                    "source_kinds": [],
+                },
+            ],
+            "assumptions": [
+                {
+                    "text": "Teams can adopt one review workflow.",
+                    "affected_components": ["key_benefit"],
+                }
+            ],
+            "conflicts": [],
+            "questions": [
+                {
+                    "question_id": "q-target-team",
+                    "text": "Which product team should benefit first?",
+                    "affected_components": ["target_user"],
+                }
+            ],
+        }
+
     def _record_vision_turn(self, body: JsonObject) -> None:
         self._assert_fields(body, {"text"})
         text = body["text"]
         assert isinstance(text, str)
         assert text
         self.vision_transcript.append({"turn_number": 1, "user_text": text})
+        self.vision_draft = None
         self.vision_candidate = {
             "statement": "Give product teams a durable, reviewable lifecycle.",
-            "components": {
-                "beneficiaries": "Product teams",
-                "principle": "Decisions remain reviewable",
-            },
-            "fingerprint": "sha256:hidden-vision",
+            "components": [
+                {
+                    "name": "target_user",
+                    "value": "Product teams",
+                    "source_kinds": ["human", "evidence"],
+                },
+                {
+                    "name": "differentiator",
+                    "value": "Decisions remain reviewable",
+                    "source_kinds": ["human"],
+                },
+            ],
+            "assumptions": [],
+            "conflicts": [],
+            "questions": [],
+            "review_fingerprint": "sha256:hidden-vision",
         }
 
     def _review_vision(self, body: JsonObject) -> None:
@@ -453,23 +501,25 @@ class FakeLifecycle:
 
     def _vision_projection(self) -> JsonObject:
         current: JsonObject | None = (
-            {"statement": self._vision_statement(), "fingerprint": "sha256:hidden"}
+            {"statement": self._vision_statement()}
             if self.vision_accepted
             else None
         )
         candidate = None if self.vision_accepted else self.vision_candidate
-        latest_questions: list[JsonValue] = (
-            ["Which product team should benefit first?", "What changes for them?"]
-            if self.vision_candidate is None
-            else []
-        )
         review: JsonObject | None = (
-            {"state": "pending"} if candidate is not None else None
+            {"state": "pending", "rationale": None}
+            if candidate is not None
+            else None
         )
         return {
+            "bootstrap_available": (
+                not self.vision_accepted
+                and self.vision_draft is None
+                and self.vision_candidate is None
+            ),
             "current": current,
+            "draft": self.vision_draft,
             "transcript": self.vision_transcript,
-            "latest_questions": latest_questions,
             "candidate": candidate,
             "review": review,
             "stale_reason": None if self.vision_accepted else "VISION_NOT_ACCEPTED",
@@ -555,6 +605,10 @@ class FakeLifecycle:
 
     def _phase_action(self) -> str:
         phases = (
+            (
+                self.vision_draft is None and self.vision_candidate is None,
+                "generate_vision_bootstrap",
+            ),
             (self.vision_candidate is None, "record_vision_interview_turn"),
             (not self.vision_accepted, "decide_vision_review"),
             (self.goal_candidate is None, "record_product_goal_interview_turn"),
@@ -843,13 +897,16 @@ def _complete_vision_and_goal(
     *,
     replace_vision_during_review: bool = False,
 ) -> None:
+    expect(page.locator("#vision-response")).not_to_be_visible()
+    expect(page.get_by_role("button", name="Generate Vision draft")).to_be_visible()
+    page.get_by_role("button", name="Generate Vision draft").click()
     expect(page.locator("#vision-response")).to_be_visible()
     expect(page.get_by_text("Which product team should benefit first?")).to_be_visible()
     page.locator("#vision-response").fill(
         "Product teams need one durable place to review lifecycle decisions."
     )
     page.locator('form[data-interview-scope="vision"] button[type="submit"]').click()
-    expect(page.get_by_text("Exact Vision candidate")).to_be_visible()
+    expect(page.get_by_text("Vision candidate", exact=True)).to_be_visible()
     expect(
         page.get_by_text("Give product teams a durable, reviewable lifecycle.")
     ).to_be_visible()
@@ -860,8 +917,17 @@ def _complete_vision_and_goal(
         expect(page.locator("#human-action-dialog")).to_be_visible()
         fake.vision_candidate = {
             "statement": "Give product teams a replacement lifecycle candidate.",
-            "components": {"beneficiaries": "Replacement pilot team"},
-            "fingerprint": "sha256:hidden-vision-replacement",
+            "components": [
+                {
+                    "name": "target_user",
+                    "value": "Replacement pilot team",
+                    "source_kinds": ["human"],
+                }
+            ],
+            "assumptions": [],
+            "conflicts": [],
+            "questions": [],
+            "review_fingerprint": "sha256:hidden-vision-replacement",
         }
         page.locator("#human-action-submit").click()
         expect(page.locator("#human-action-error")).to_contain_text("candidate changed")
@@ -1109,7 +1175,7 @@ def test_mobile_dirty_repository_wraps_without_overflow(
         description="Narrow viewport repository verification.",
         repository_path=str(repository_path),
     )
-    expect(page.locator("#vision-response")).to_be_visible()
+    expect(page.get_by_role("button", name="Generate Vision draft")).to_be_visible()
     expect(page.get_by_text("Dirty", exact=True)).to_be_visible()
     warning = page.get_by_text(
         "Working tree has uncommitted changes in a deliberately long nested "
