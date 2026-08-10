@@ -151,9 +151,204 @@ type VisionComponentName = Literal[
 
 Define structured basis, assumptions, conflicts, and questions. `VisionDraftOutput` exposes only `schema_version`, `components`, `component_basis`, `draft_statement`, `assumptions`, `conflicts`, `clarifying_questions`, and `is_complete`.
 
+Use these exact evidence literals and shapes:
+
+```python
+type VisionEvidenceKind = Literal[
+    "project_metadata",
+    "repository_provenance",
+    "readme",
+    "context",
+    "package_metadata",
+    "technical_specification",
+]
+type VisionEvidenceTrust = Literal[
+    "operator_provided",
+    "observed_provenance",
+    "unreviewed_repository_evidence",
+]
+
+
+class VisionEvidenceItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    evidence_id: str
+    kind: VisionEvidenceKind
+    relative_path: str | None
+    content_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    trust: VisionEvidenceTrust
+    content: str | JsonObject
+    truncated: bool
+
+
+class VisionEvidenceWarning(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    code: str
+    source: str
+    message: str
+
+
+class VisionEvidenceBundle(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["agileforge.vision-evidence.v1"]
+    items: tuple[VisionEvidenceItem, ...] = Field(max_length=8)
+    warnings: tuple[VisionEvidenceWarning, ...]
+    evidence_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+```
+
+Strip and reject blank IDs/text. `relative_path` is `None` only for Project metadata and repository provenance; otherwise it is a non-absolute POSIX path with no `..` segment. Require the declared content fingerprint to equal `canonical_hash(content)` and the bundle fingerprint to equal `canonical_hash({"schema_version": schema_version, "items": items, "warnings": warnings})`.
+
+Use these exact input fields:
+
+```python
+class VisionBootstrapInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["agileforge.vision-input.v1"]
+    operation: Literal["bootstrap"]
+    project_name: str
+    project_description: str | None
+    evidence: VisionEvidenceBundle
+
+
+class VisionClarificationInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["agileforge.vision-input.v1"]
+    operation: Literal["clarification"]
+    project_name: str
+    project_description: str | None
+    vision_evidence_snapshot_id: int = Field(gt=0)
+    evidence: VisionEvidenceBundle
+    current_components: VisionComponents
+    current_statement: str
+    current_component_basis: tuple[VisionComponentBasis, ...]
+    current_assumptions: tuple[VisionAssumption, ...]
+    current_conflicts: tuple[VisionConflict, ...]
+    current_questions: tuple[VisionClarifyingQuestion, ...]
+    human_response: str
+    addressed_question_ids: tuple[str, ...]
+
+
+class VisionRevisionInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["agileforge.vision-input.v1"]
+    operation: Literal["revision"]
+    project_name: str
+    project_description: str | None
+    evidence: VisionEvidenceBundle
+    accepted_components: VisionComponents
+    accepted_statement: str
+    accepted_vision_fingerprint: str
+    revision_reason: str
+    active_product_goal_status: Literal["none"]
+    prior_review_feedback: str | None
+
+
+class VisionPreflight(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_evidence_fingerprint: str
+    observed_evidence_fingerprint: str
+
+
+class VisionAgentInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request: VisionOperationInput
+    preflight: VisionPreflight | None = None
+```
+
+Bootstrap/revision contain a new evidence bundle but no snapshot ID; the successful graph transition creates the snapshot. Clarification contains the existing snapshot identity and exact persisted bundle. `VisionPreflight` is present only when an existing lineage is checked against freshly recollected evidence.
+
+Use these exact output and repair fields:
+
+```python
+type VisionBasisSource = Literal["human", "evidence", "inference"]
+
+
+class VisionComponentBasis(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    component: VisionComponentName
+    source_kinds: tuple[VisionBasisSource, ...] = Field(min_length=1)
+    evidence_ids: tuple[str, ...] = ()
+    assumption_ids: tuple[str, ...] = ()
+
+
+class VisionAssumption(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    assumption_id: str
+    text: str
+    affected_components: tuple[VisionComponentName, ...] = Field(min_length=1)
+
+
+class VisionConflict(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    conflict_id: str
+    text: str
+    status: Literal["unresolved", "resolved"]
+    affected_components: tuple[VisionComponentName, ...] = Field(min_length=1)
+    evidence_ids: tuple[str, ...] = ()
+    assumption_ids: tuple[str, ...] = ()
+    resolution: str | None = None
+
+
+class VisionClarifyingQuestion(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    question_id: str
+    text: str
+    affected_components: tuple[VisionComponentName, ...] = Field(min_length=1)
+    conflict_ids: tuple[str, ...] = ()
+
+
+class VisionDraftOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["agileforge.vision-draft.v1"]
+    components: VisionComponents
+    component_basis: tuple[VisionComponentBasis, ...]
+    draft_statement: str
+    assumptions: tuple[VisionAssumption, ...]
+    conflicts: tuple[VisionConflict, ...]
+    clarifying_questions: tuple[VisionClarifyingQuestion, ...]
+    is_complete: bool
+
+
+class VisionRepairInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["agileforge.vision-repair.v1"]
+    operation: Literal["repair"]
+    validation_findings: tuple[str, ...] = Field(min_length=1)
+    invalid_output: VisionDraftOutput
+    allowed_evidence_ids: tuple[str, ...]
+    human_input_available: bool
+```
+
+Strip/reject blank statement, IDs, question text, assumption text, conflict text, and revision/human text. Reject duplicate source kinds and duplicate references within one object. A resolved conflict requires nonblank `resolution`; an unresolved conflict requires `resolution=None`.
+
 - [ ] **Step 5: Implement deterministic semantic validation**
 
-`validate_vision_draft` collects all findings and raises one `VisionDraftValidationError(findings: tuple[str, ...])`. Validate the eleven design invariants without model calls or database reads. Treat human input as available only for clarification or a revision reason. Do not implement a text classifier for feature leakage; strict output fields plus the prompt are the enforceable boundary.
+`validate_vision_draft` collects all findings and raises one `VisionDraftValidationError(findings: tuple[str, ...])`. Enforce these exact invariants without model calls or database reads:
+
+1. Assumption, conflict, and output-question IDs are unique within their collections; evidence IDs are unique in the input bundle.
+2. Every basis/conflict evidence ID exists in the input bundle; every basis/conflict assumption ID exists in the output assumptions; every question conflict ID exists in output conflicts; every clarification `addressed_question_id` exists in `current_questions`.
+3. Every non-null component has exactly one basis row, and a null component has none.
+4. A basis containing `evidence` has at least one evidence ID; evidence IDs are empty when `evidence` is absent.
+5. A basis containing `inference` has at least one assumption ID; assumption IDs are empty when `inference` is absent.
+6. A basis containing `human` is valid only for clarification or revision input; no bootstrap result may claim human basis.
+7. `is_complete` is true exactly when all components are substantive, every conflict is resolved, and no clarifying question remains.
+8. An incomplete result contains at least one clarifying question.
+9. Every unresolved conflict ID appears in at least one output question's `conflict_ids`.
+10. A complete result may retain disclosed assumptions; assumptions alone do not force incompleteness.
+11. Product Goal, feature, requirement, Story, Task, and implementation-plan fields are rejected by strict Pydantic schemas; do not add a probabilistic text classifier.
 
 - [ ] **Step 6: Run tests and commit**
 

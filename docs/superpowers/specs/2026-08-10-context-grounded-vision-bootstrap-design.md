@@ -249,8 +249,11 @@ union. Callers never construct these inputs; the host does.
 - `schema_version`
 - `operation = "bootstrap"`
 - Project name and optional description
-- Evidence snapshot ID and fingerprint
-- Evidence items and warnings
+- Evidence bundle, including its fingerprint, items, and warnings
+
+Bootstrap has no evidence snapshot ID yet. The successful graph transition
+creates that durable identity after output validation; failed attempts retain
+only their normalized input and create no Vision business fact.
 
 It contains no required human response.
 
@@ -262,6 +265,7 @@ It contains no required human response.
 - The same persisted evidence snapshot used by the draft lineage
 - Current draft components and statement
 - Current component basis, assumptions, and conflicts
+- The current structured clarifying questions
 - Human response as ordinary text
 - IDs of the questions that response addresses, derived by the host
 
@@ -274,7 +278,7 @@ response to the currently active draft and its open questions.
 - `schema_version`
 - `operation = "revision"`
 - Project identity
-- Current evidence snapshot
+- Current evidence bundle, including its fingerprint
 - Accepted Vision and fingerprint
 - Human-provided revision reason
 - Eligible active Product Goal status
