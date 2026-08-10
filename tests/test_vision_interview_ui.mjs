@@ -128,6 +128,48 @@ test('initial Vision state offers one generation action without fallback input',
     assert.equal(fetchCalls, 0);
 });
 
+test('stale initial Vision lineage keeps the graph-advertised generation action', () => {
+    const context = loadFrontend();
+    const markup = context.visionPanelMarkup(
+        {
+            bootstrap_available: false,
+            current: null,
+            draft: reviewMaterial(),
+            transcript: [{ turn_number: 1, user_text: 'Retained stale answer.' }],
+            candidate: null,
+            review: null,
+        },
+        [bootstrapAction],
+    );
+
+    assert.equal((markup.match(/Generate Vision draft/g) ?? []).length, 1);
+    assert.match(markup, /data-direct-action="generate_vision_bootstrap"/);
+    assert.doesNotMatch(markup, /<textarea\b/);
+    assert.doesNotMatch(markup, /Who should benefit|What problem should|What principles should/);
+    assert.doesNotMatch(markup, /Vision is waiting/);
+});
+
+test('stale accepted-Vision revision lineage keeps the graph-advertised generation action', () => {
+    const context = loadFrontend();
+    const markup = context.visionPanelMarkup(
+        {
+            bootstrap_available: false,
+            current: { statement: 'Accepted <Vision>.' },
+            draft: null,
+            transcript: [{ turn_number: 1, user_text: 'Retained stale revision answer.' }],
+            candidate: null,
+            review: { state: 'accepted', rationale: 'Reviewed.' },
+        },
+        [bootstrapAction],
+    );
+
+    assert.equal((markup.match(/Generate Vision draft/g) ?? []).length, 1);
+    assert.match(markup, /data-direct-action="generate_vision_bootstrap"/);
+    assert.doesNotMatch(markup, /<textarea\b/);
+    assert.doesNotMatch(markup, /Who should benefit|What problem should|What principles should/);
+    assert.doesNotMatch(markup, /Vision is waiting/);
+});
+
 test('incomplete Vision draft shows safe provenance, questions, and one response field', () => {
     const context = loadFrontend();
     assert.equal(typeof context.visionPanelMarkup, 'function');

@@ -438,7 +438,7 @@ function visionPanelMarkup(projection, actions = [], context = {}) {
     }
 
     const bootstrapAction = findAction(actions, 'generate_vision_bootstrap');
-    if (bootstrapAction && projection?.bootstrap_available) {
+    if (bootstrapAction) {
         const current = projection?.current
             ? `<div class="mb-5 border-l-4 border-emerald-500 pl-4">
                 <p class="text-xs font-semibold uppercase text-emerald-700">Accepted Vision</p>
