@@ -444,6 +444,7 @@ def test_attachment_is_orthogonal_and_refresh_appends_observation(
     assert attached.ok is True
     after = domain.position(project_id)
     assert after.fact_fingerprint == before.fact_fingerprint
+    assert after.available_nodes == before.available_nodes
     assert after.decisions == before.decisions
 
     active_fingerprint = str(attached.output["repository_binding_fingerprint"])
@@ -457,6 +458,9 @@ def test_attachment_is_orthogonal_and_refresh_appends_observation(
         )
     )
     assert refreshed.ok is True
+    after_refresh = domain.position(project_id)
+    assert after_refresh.fact_fingerprint == before.fact_fingerprint
+    assert after_refresh.available_nodes == before.available_nodes
     refreshed_fingerprint = str(refreshed.output["repository_binding_fingerprint"])
     assert refreshed_fingerprint != active_fingerprint
     with Session(engine) as session:

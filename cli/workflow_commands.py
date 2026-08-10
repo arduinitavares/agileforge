@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol, TypedDict
@@ -357,8 +358,8 @@ def _decision_payload(
 
 def render_workflow_next(position: WorkflowPosition) -> WorkflowNextPayload:
     """Render only available required and recovery decisions."""
-    commands = [
-        _decision_payload(position, decision)
+    candidates = tuple(
+        decision
         for decision in position.decisions
         if (
             decision.category is NodeCategory.AVAILABLE
@@ -375,6 +376,19 @@ def render_workflow_next(position: WorkflowPosition) -> WorkflowNextPayload:
         )
         and decision.recommendation_kind
         in {RecommendationKind.REQUIRED, RecommendationKind.RECOVERY}
+    )
+    semantic_counts = Counter(
+        decision.request_kind
+        for decision in candidates
+        if decision.request_kind in _SEMANTIC_ARGUMENTS
+    )
+    commands = [
+        _decision_payload(position, decision)
+        for decision in candidates
+        if (
+            decision.request_kind not in _SEMANTIC_ARGUMENTS
+            or semantic_counts[decision.request_kind] == 1
+        )
     ]
     return {
         "project_id": position.project_id,

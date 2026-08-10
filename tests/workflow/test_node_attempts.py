@@ -193,9 +193,7 @@ def _start_request(
         item for item in position.decisions if item.node_id == "backlog.generate"
     )
     goal_reference = next(
-        item
-        for item in decision.fact_references
-        if item.fact_type == "product_goal"
+        item for item in decision.fact_references if item.fact_type == "product_goal"
     )
     authority_reference = next(
         item for item in decision.fact_references if item.fact_type == "authority"
@@ -377,6 +375,61 @@ def test_replay_query_returns_in_flight_start_before_external_work(
     )
 
     assert replay == started.model_copy(update={"replayed": True})
+
+
+def test_semantic_replay_uses_stored_guards_and_conflicts_on_changed_text(
+    engine: Engine,
+) -> None:
+    """Ignore host guards for semantic retry while retaining operator input identity."""
+    project_id, _authority_id, _authority_fingerprint = _seed_accepted_authority(engine)
+    domain = _domain(engine, MutableClock(EVALUATED_AT), _registry())
+    request = _start_request(
+        domain,
+        project_id,
+        idempotency_key="semantic-replay",
+    )
+    request = request.model_copy(
+        update={
+            "normalized_input": {
+                **request.normalized_input,
+                "user_response": "Original response.",
+            }
+        }
+    )
+    started = domain.transition(request)
+    service = DurableNodeAttemptReplayService(engine=engine)
+
+    replay = service.replay(
+        NodeAttemptReplayQuery(
+            project_id=project_id,
+            graph_version=None,
+            fact_fingerprint=None,
+            decision_fingerprint=None,
+            node_id=request.target_node_id,
+            idempotency_key=request.idempotency_key,
+            actor=request.actor,
+            correlation_id=request.correlation_id,
+            user_text="Original response.",
+        )
+    )
+    conflict = service.replay(
+        NodeAttemptReplayQuery(
+            project_id=project_id,
+            graph_version=None,
+            fact_fingerprint=None,
+            decision_fingerprint=None,
+            node_id=request.target_node_id,
+            idempotency_key=request.idempotency_key,
+            actor=request.actor,
+            correlation_id=request.correlation_id,
+            user_text="Changed response.",
+        )
+    )
+
+    assert replay == started.model_copy(update={"replayed": True})
+    assert conflict is not None
+    assert conflict.error is not None
+    assert conflict.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
 
 
 def test_replay_query_returns_terminal_result_after_position_advanced(

@@ -22,10 +22,14 @@ from cli.workflow_commands import COMMAND_PREFIXES
 from services.application import (
     AgenticActionRequest,
     AgileForgeApplication,
+    AuthorityCompileRequest,
     AuthorityReviewRequest,
     CreateProjectCommand,
+    ProductGoalLifecycleServices,
+    ProductGoalResponseRequest,
     VisionResponseRequest,
 )
+from services.node_attempt_replay import NodeAttemptReplayQuery, TransitionReplayQuery
 from tests.adapters.test_command_renderer import position_fixture
 from workflow.contracts import (
     JsonObject,
@@ -173,6 +177,37 @@ def test_semantic_api_models_reject_internal_fields(
     assert response.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
 
 
+@pytest.mark.parametrize(
+    ("path", "decision"),
+    [
+        ("/api/projects/41/vision/review", "accepted"),
+        ("/api/projects/41/goals/review", "accepted"),
+        ("/api/projects/41/specifications/review", "accepted"),
+        ("/api/projects/41/authority/decision", "accepted"),
+        ("/api/projects/41/goals/complete", None),
+        ("/api/projects/41/goals/abandon", None),
+    ],
+)
+@pytest.mark.parametrize("rationale", ["", "   \t"])
+def test_semantic_decision_api_rejects_blank_rationale(
+    path: str,
+    decision: str | None,
+    rationale: str,
+) -> None:
+    """Reject empty semantic decision reasons at the HTTP validation boundary."""
+    payload = {
+        "rationale": rationale,
+        "idempotency_key": "decision-41",
+        "actor": "operator",
+    }
+    if decision is not None:
+        payload["decision"] = decision
+
+    response = TestClient(api_module.app).post(path, json=payload)
+
+    assert response.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+
+
 class _FakeApiApplication:
     def __init__(
         self,
@@ -230,10 +265,15 @@ class _BoundaryDomain:
 
 
 class _VisionInput:
-    def replay(self, query: object) -> None:
-        del query
+    def __init__(self, replay: TransitionResult | None = None) -> None:
+        self.replay_result = replay
+        self.replay_queries: list[NodeAttemptReplayQuery] = []
 
-    def replay_transition(self, query: object) -> None:
+    def replay(self, query: NodeAttemptReplayQuery) -> TransitionResult | None:
+        self.replay_queries.append(query)
+        return self.replay_result
+
+    def replay_transition(self, query: TransitionReplayQuery) -> None:
         del query
 
     def build(
@@ -247,6 +287,53 @@ class _VisionInput:
             "decision": decision.decision_fingerprint,
             "user_response": user_text,
         }
+
+
+class _ProductGoalInput:
+    def __init__(self, replay: TransitionResult) -> None:
+        self.replay_result = replay
+        self.replay_queries: list[NodeAttemptReplayQuery] = []
+
+    def replay(self, query: NodeAttemptReplayQuery) -> TransitionResult:
+        self.replay_queries.append(query)
+        return self.replay_result
+
+    def replay_transition(self, query: TransitionReplayQuery) -> None:
+        del query
+
+    def build(
+        self,
+        project_id: int,
+        decision: NodeDecision,
+        user_text: str,
+    ) -> JsonObject:
+        del project_id, decision, user_text
+        pytest.fail("replayed Goal response rebuilt current input")
+
+
+class _DiscoverySelection:
+    def resolve_specification_supersedes(self, project_id: int) -> None:
+        del project_id
+
+
+class _AuthorityInput:
+    def __init__(self, replay: TransitionResult) -> None:
+        self.replay_result = replay
+        self.replay_queries: list[NodeAttemptReplayQuery] = []
+
+    def replay(self, query: NodeAttemptReplayQuery) -> TransitionResult:
+        self.replay_queries.append(query)
+        return self.replay_result
+
+    def build(
+        self,
+        *,
+        project_id: int,
+        decision: NodeDecision,
+        compiler_model: str,
+    ) -> JsonObject:
+        del project_id, decision, compiler_model
+        pytest.fail("replayed Authority compile rebuilt current input")
 
 
 class _CapturingApplication(AgileForgeApplication):
@@ -331,6 +418,90 @@ def test_semantic_application_rejects_ambiguous_vision_decisions() -> None:
     assert result.error.code is WorkflowErrorCode.TRANSITION_NOT_AVAILABLE
     assert domain.position_calls == [PROJECT_ID]
     assert application.agent_requests == []
+
+
+def test_semantic_vision_response_replays_before_advanced_position() -> None:
+    """Recover a Vision receipt before rejecting its now-advanced position."""
+    replayed = TransitionResult(
+        ok=True, replayed=True, applied_node_id="vision.interview"
+    )
+    domain = _BoundaryDomain(_vision_position())
+    vision_input = _VisionInput(replay=replayed)
+    application = AgileForgeApplication(
+        workflow_domain=domain,
+        vision_interview_input=vision_input,
+    )
+
+    result = application.respond_to_vision(
+        VisionResponseRequest(
+            project_id=PROJECT_ID,
+            text="  A durable product direction.  ",
+            idempotency_key="vision-41",
+            actor="operator",
+        )
+    )
+
+    assert result == replayed
+    assert domain.position_calls == []
+    assert vision_input.replay_queries[0].user_text == "A durable product direction."
+    assert vision_input.replay_queries[0].graph_version is None
+
+
+def test_semantic_product_goal_response_replays_before_advanced_position() -> None:
+    """Recover a Goal receipt before rejecting its now-advanced position."""
+    replayed = TransitionResult(
+        ok=True, replayed=True, applied_node_id="goal.interview"
+    )
+    domain = _BoundaryDomain(_vision_position())
+    goal_input = _ProductGoalInput(replayed)
+    application = AgileForgeApplication(
+        workflow_domain=domain,
+        product_goal_services=ProductGoalLifecycleServices(
+            interview_input=goal_input,
+            discovery_selection=_DiscoverySelection(),
+        ),
+    )
+
+    result = application.respond_to_product_goal(
+        ProductGoalResponseRequest(
+            project_id=PROJECT_ID,
+            text="  A measurable future state.  ",
+            idempotency_key="goal-41",
+            actor="operator",
+        )
+    )
+
+    assert result == replayed
+    assert domain.position_calls == []
+    assert goal_input.replay_queries[0].user_text == "A measurable future state."
+    assert goal_input.replay_queries[0].fact_fingerprint is None
+
+
+def test_semantic_authority_compile_replays_before_advanced_position() -> None:
+    """Recover a compile receipt before rejecting its now-advanced position."""
+    replayed = TransitionResult(
+        ok=True,
+        replayed=True,
+        applied_node_id="authority.compile",
+    )
+    domain = _BoundaryDomain(_vision_position())
+    authority_input = _AuthorityInput(replayed)
+    application = AgileForgeApplication(
+        workflow_domain=domain,
+        authority_compilation_input=authority_input,
+    )
+
+    result = application.compile_authority(
+        AuthorityCompileRequest(
+            project_id=PROJECT_ID,
+            idempotency_key="compile-41",
+            actor="operator",
+        )
+    )
+
+    assert result == replayed
+    assert domain.position_calls == []
+    assert authority_input.replay_queries[0].decision_fingerprint is None
 
 
 _AGENTIC_NODE_IDS = {

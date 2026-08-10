@@ -30,12 +30,12 @@ if TYPE_CHECKING:
 
 
 class NodeAttemptReplayQuery(FrozenModel):
-    """Identity and operator input of a host-prepared attempt."""
+    """Attempt identity; omitted host guards select semantic adapter replay."""
 
     project_id: int
-    graph_version: str
-    fact_fingerprint: str
-    decision_fingerprint: str
+    graph_version: str | None
+    fact_fingerprint: str | None
+    decision_fingerprint: str | None
     node_id: str
     instance_key: str | None = None
     idempotency_key: str
@@ -76,9 +76,21 @@ class DurableNodeAttemptReplayService:
             stored = StartNodeAttempt.model_validate_json(receipt.request_json)
             expected = StartNodeAttempt(
                 project_id=query.project_id,
-                graph_version=query.graph_version,
-                fact_fingerprint=query.fact_fingerprint,
-                decision_fingerprint=query.decision_fingerprint,
+                graph_version=(
+                    stored.graph_version
+                    if query.graph_version is None
+                    else query.graph_version
+                ),
+                fact_fingerprint=(
+                    stored.fact_fingerprint
+                    if query.fact_fingerprint is None
+                    else query.fact_fingerprint
+                ),
+                decision_fingerprint=(
+                    stored.decision_fingerprint
+                    if query.decision_fingerprint is None
+                    else query.decision_fingerprint
+                ),
                 idempotency_key=query.idempotency_key,
                 actor=query.actor,
                 correlation_id=query.correlation_id,

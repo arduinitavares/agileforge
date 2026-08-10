@@ -747,6 +747,25 @@ class AgileForgeApplication:
         request: VisionResponseRequest,
     ) -> TransitionResult:
         """Resolve the current Vision interview guards from one position read."""
+        input_service = self._vision_interview_input
+        if input_service is None:
+            message = "Vision interview requires an injected input builder."
+            raise RuntimeError(message)
+        replay = input_service.replay(
+            NodeAttemptReplayQuery(
+                project_id=request.project_id,
+                graph_version=None,
+                fact_fingerprint=None,
+                decision_fingerprint=None,
+                node_id="vision.interview",
+                idempotency_key=request.idempotency_key,
+                actor=request.actor,
+                correlation_id=request.correlation_id,
+                user_text=VisionInterviewInput.normalize_user_response(request.text),
+            )
+        )
+        if replay is not None:
+            return replay
         position = self.position(project_id=request.project_id)
         decision = _unique_available_decision(position, "vision.interview")
         if decision is None or decision.category is not NodeCategory.AVAILABLE:
@@ -763,6 +782,7 @@ class AgileForgeApplication:
                 correlation_id=request.correlation_id,
             ),
             position,
+            check_replay=False,
         )
 
     def run_vision_interview(
@@ -929,6 +949,27 @@ class AgileForgeApplication:
         request: ProductGoalResponseRequest,
     ) -> TransitionResult:
         """Resolve current Product Goal interview guards from one position read."""
+        services = self._product_goal_services
+        if services is None:
+            message = "Product Goal interview requires an injected input builder."
+            raise RuntimeError(message)
+        replay = services.interview_input.replay(
+            NodeAttemptReplayQuery(
+                project_id=request.project_id,
+                graph_version=None,
+                fact_fingerprint=None,
+                decision_fingerprint=None,
+                node_id="goal.interview",
+                idempotency_key=request.idempotency_key,
+                actor=request.actor,
+                correlation_id=request.correlation_id,
+                user_text=ProductGoalInterviewInput.normalize_user_response(
+                    request.text
+                ),
+            )
+        )
+        if replay is not None:
+            return replay
         position = self.position(project_id=request.project_id)
         decision = _unique_available_decision(position, "goal.interview")
         if decision is None or decision.category is not NodeCategory.AVAILABLE:
@@ -945,6 +986,7 @@ class AgileForgeApplication:
                 correlation_id=request.correlation_id,
             ),
             position,
+            check_replay=False,
         )
 
     def run_product_goal_interview(
@@ -1254,23 +1296,17 @@ class AgileForgeApplication:
         request: AuthorityCompileRequest,
     ) -> TransitionResult:
         """Prepare current guards and compiler input from durable facts once."""
-        position = self.position(project_id=request.project_id)
-        decision = _unique_available_decision(position, "authority.compile")
-        if decision is None or decision.category is not NodeCategory.AVAILABLE:
-            return _transition_not_available(position, "authority.compile")
         input_service = self._authority_compilation_input
         if input_service is None:
             message = "Authority compilation requires an injected input builder."
             raise RuntimeError(message)
-        model_id = get_model_id(AGENTIC_MODEL_ROLES["authority.compile"])
         replay = input_service.replay(
             NodeAttemptReplayQuery(
                 project_id=request.project_id,
-                graph_version=position.graph_version,
-                fact_fingerprint=position.fact_fingerprint,
-                decision_fingerprint=decision.decision_fingerprint,
+                graph_version=None,
+                fact_fingerprint=None,
+                decision_fingerprint=None,
                 node_id="authority.compile",
-                instance_key=decision.instance_key,
                 idempotency_key=request.idempotency_key,
                 actor=request.actor,
                 correlation_id=request.correlation_id,
@@ -1278,6 +1314,11 @@ class AgileForgeApplication:
         )
         if replay is not None:
             return replay
+        position = self.position(project_id=request.project_id)
+        decision = _unique_available_decision(position, "authority.compile")
+        if decision is None or decision.category is not NodeCategory.AVAILABLE:
+            return _transition_not_available(position, "authority.compile")
+        model_id = get_model_id(AGENTIC_MODEL_ROLES["authority.compile"])
         return self.run_agentic_action(
             AgenticActionRequest(
                 project_id=request.project_id,

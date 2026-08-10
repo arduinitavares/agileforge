@@ -177,3 +177,50 @@ def test_lifecycle_positions_render_semantic_commands() -> None:
 
         assert len(payload["commands"]) == 1
         assert payload["commands"][0]["command"].startswith(command_prefix)
+
+
+def test_ambiguous_semantic_decisions_do_not_render_an_unusable_command() -> None:
+    """Advertise a semantic action only when the parser needs no hidden selector."""
+    parser = build_parser()
+    decisions = tuple(
+        NodeDecision(
+            node_id="vision.interview",
+            instance_key=f"after-turn:{index}",
+            child_graph_id="vision",
+            request_kind="record_vision_interview_turn",
+            category=NodeCategory.AVAILABLE,
+            recommendation_kind=RecommendationKind.REQUIRED,
+            reason_code="VISION_INTERVIEW_REQUIRED",
+            decision_fingerprint=f"decision-vision-{index}",
+        )
+        for index in range(2)
+    )
+    unique_position = position_fixture().model_copy(
+        update={
+            "decisions": decisions[:1],
+            "available_nodes": ("vision.interview",),
+            "waiting_nodes": (),
+            "blocked_nodes": (),
+            "invalid_nodes": (),
+        }
+    )
+    unique_command = render_workflow_next(unique_position)["commands"][0]["command"]
+
+    parsed = parser.parse_args(
+        [
+            _PLACEHOLDERS.get(argument, argument)
+            for argument in shlex.split(unique_command)[1:]
+        ]
+    )
+    ambiguous_position = unique_position.model_copy(
+        update={
+            "decisions": decisions,
+            "blocked_nodes": ("vision.interview.ambiguity",),
+        }
+    )
+
+    payload = render_workflow_next(ambiguous_position)
+
+    assert parsed.project_id == unique_position.project_id
+    assert payload["commands"] == []
+    assert payload["blocked_nodes"] == ["vision.interview.ambiguity"]

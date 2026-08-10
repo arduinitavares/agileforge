@@ -7,14 +7,14 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from importlib.resources import files
 from pathlib import Path
-from typing import Literal, TypedDict, cast
+from typing import Annotated, Literal, TypedDict, cast
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from git import Git
 from git.exc import GitCommandError
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, TypeAdapter
 
 from adapters.adk.model_roles import AGENTIC_MODEL_ROLES
 from repositories.project import ProjectRepository
@@ -72,6 +72,11 @@ app.mount(
     name="frontend",
 )
 
+type DecisionRationale = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1),
+]
+
 
 class CreateProjectRequest(BaseModel):
     """Exact semantic request body for creating a Project."""
@@ -111,7 +116,7 @@ class ReviewApiRequest(MutationApiRequest):
     """One semantic review choice."""
 
     decision: Literal["accepted", "rejected", "feedback"]
-    rationale: str
+    rationale: DecisionRationale
 
 
 class RevisionApiRequest(MutationApiRequest):
@@ -123,7 +128,7 @@ class RevisionApiRequest(MutationApiRequest):
 class GoalOutcomeApiRequest(MutationApiRequest):
     """One semantic Product Goal outcome rationale."""
 
-    rationale: str = Field(min_length=1)
+    rationale: DecisionRationale
 
 
 class ArtifactRecordApiRequest(MutationApiRequest):
@@ -143,7 +148,7 @@ class AuthorityDecisionApiRequest(MutationApiRequest):
     """Semantic authority review choice without derived identities."""
 
     decision: Literal["accepted", "rejected"]
-    rationale: str = Field(min_length=1)
+    rationale: DecisionRationale
 
 
 class AgenticActionApiRequest(MutationApiRequest):
