@@ -87,6 +87,11 @@ _SEMANTIC_TEXT_COMMANDS = (
     "command",
     [
         (
+            "agileforge vision bootstrap --project-id 1"
+            " --idempotency-key vision-bootstrap-myfinance-1"
+            " --actor acceptance-agent"
+        ),
+        (
             "agileforge project create --name MyFinance"
             ' --description "Local household finance"'
             " --repository-path /Users/aaat/myfinance"

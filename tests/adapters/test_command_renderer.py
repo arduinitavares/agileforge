@@ -203,6 +203,7 @@ def test_story_commands_preserve_punctuated_requirement_selector_token(
 def test_lifecycle_positions_render_semantic_commands() -> None:
     """Render each new lifecycle boundary with task language only."""
     expected = {
+        "generate_vision_bootstrap": "agileforge vision bootstrap",
         "record_vision_interview_turn": "agileforge vision respond",
         "record_product_goal_interview_turn": "agileforge goal respond",
         "record_discovery_artifact": "agileforge discovery record",
@@ -237,6 +238,66 @@ def test_lifecycle_positions_render_semantic_commands() -> None:
 
         assert len(payload["commands"]) == 1
         assert payload["commands"][0]["command"].startswith(command_prefix)
+
+
+def test_vision_bootstrap_command_contains_only_transport_metadata() -> None:
+    """Render bootstrap without caller-owned graph, evidence, or repository state."""
+    decision = NodeDecision(
+        node_id="vision.bootstrap",
+        child_graph_id="vision",
+        request_kind="generate_vision_bootstrap",
+        category=NodeCategory.AVAILABLE,
+        recommendation_kind=RecommendationKind.REQUIRED,
+        reason_code="VISION_BOOTSTRAP_REQUIRED",
+        decision_fingerprint="sha256:decision",
+        fact_references=(
+            FactReference(
+                fact_type="vision_evidence_snapshot",
+                fact_id="7",
+                fingerprint="sha256:evidence",
+            ),
+        ),
+    )
+    position = position_fixture().model_copy(
+        update={
+            "decisions": (decision,),
+            "available_nodes": (decision.node_id,),
+            "waiting_nodes": (),
+            "blocked_nodes": (),
+            "invalid_nodes": (),
+        }
+    )
+
+    commands = render_workflow_next(position)["commands"]
+
+    assert commands == [
+        {
+            "node_id": "vision.bootstrap",
+            "instance_key": None,
+            "child_graph_id": "vision",
+            "request_kind": "generate_vision_bootstrap",
+            "recommendation_kind": "required",
+            "reason_code": "VISION_BOOTSTRAP_REQUIRED",
+            "command": (
+                "agileforge vision bootstrap --project-id 41 "
+                "--idempotency-key '<idempotency-key>' --actor '<actor>'"
+            ),
+        }
+    ]
+    command = commands[0]["command"]
+    for forbidden in (
+        "graph-version",
+        "fingerprint",
+        "evidence",
+        "snapshot",
+        "binding",
+        "supersession",
+        "mode",
+        "operation",
+        "repository",
+        "model-id",
+    ):
+        assert forbidden not in command
 
 
 def test_delivery_reviews_render_fingerprint_free_semantic_commands() -> None:

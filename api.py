@@ -57,6 +57,7 @@ from services.application import (
     StoryReadinessRepair,
     StoryReadinessRepairRequest,
     StoryReviewRequest,
+    VisionBootstrapRequest,
     VisionResponseRequest,
     VisionReviewRequest,
     VisionRevisionRequest,
@@ -364,6 +365,7 @@ SEMANTIC_API_PATHS: dict[str, str] = {
     "decide_specification": "specifications/review",
     "decide_vision_review": "vision/review",
     "fulfill_product_goal": "goals/complete",
+    "generate_vision_bootstrap": "vision/bootstrap",
     "record_discovery_artifact": "discovery",
     "record_product_goal_interview_turn": "goals/respond",
     "record_specification_candidate": "specifications",
@@ -633,6 +635,22 @@ def get_project_position(project_id: int) -> dict[str, object]:
         "data": position.model_dump(mode="json"),
         "actions": _workflow_actions(position),
     }
+
+
+@app.post("/api/projects/{project_id}/vision/bootstrap")
+def bootstrap_project_vision(
+    project_id: int,
+    req: MutationApiRequest,
+) -> dict[str, object]:
+    """Generate one replay-safe Project Vision draft from host evidence."""
+    return _result_payload(
+        _application().bootstrap_vision(
+            VisionBootstrapRequest(
+                project_id=project_id,
+                **_metadata(req),
+            )
+        )
+    )
 
 
 @app.post("/api/projects/{project_id}/vision/respond")

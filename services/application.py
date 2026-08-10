@@ -82,6 +82,7 @@ from services.sprint_selection import (
 from services.story_linkage import normalize_requirement_key
 from services.story_rank import parse_story_rank, story_rank_is_valid
 from services.story_runtime import build_story_input_context
+from services.vision_evidence import VisionEvidenceCollectionError
 from services.vision_input import VisionInputService
 from utils.model_config import get_model_id
 from utils.spec_schemas import ValidationEvidence
@@ -2723,7 +2724,17 @@ class AgileForgeApplication:
         decision = _unique_available_decision(position, "vision.bootstrap")
         if decision is None or decision.category is not NodeCategory.AVAILABLE:
             return _transition_not_available(position, "vision.bootstrap")
-        input_payload = input_service.build_bootstrap(request.project_id, decision)
+        try:
+            input_payload = input_service.build_bootstrap(request.project_id, decision)
+        except VisionEvidenceCollectionError as error:
+            return TransitionResult(
+                ok=False,
+                position=position,
+                error=WorkflowError(
+                    code=WorkflowErrorCode(error.code.value),
+                    message=str(error),
+                ),
+            )
         return self.run_agentic_action(
             AgenticActionRequest(
                 project_id=request.project_id,

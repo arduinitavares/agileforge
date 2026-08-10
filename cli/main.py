@@ -46,6 +46,7 @@ from services.application import (
     StoryReadinessRepair,
     StoryReadinessRepairRequest,
     StoryReviewRequest,
+    VisionBootstrapRequest,
     VisionResponseRequest,
     VisionReviewRequest,
     VisionRevisionRequest,
@@ -162,6 +163,8 @@ class _Application(Protocol):
         ...
 
     def create_project(self, request: CreateProjectCommand) -> TransitionResult: ...
+
+    def bootstrap_vision(self, request: VisionBootstrapRequest) -> TransitionResult: ...
 
     def respond_to_vision(self, request: VisionResponseRequest) -> TransitionResult: ...
 
@@ -619,6 +622,7 @@ def _install_execution_action_mutations(
 def _install_lifecycle_mutations(
     branches: dict[tuple[str, ...], argparse._SubParsersAction],
 ) -> None:
+    _semantic_leaf(branches[("vision",)], "bootstrap", _vision_bootstrap)
     vision_respond = _semantic_leaf(branches[("vision",)], "respond", _vision_respond)
     vision_respond.add_argument("--text", required=True)
     vision_review = _semantic_leaf(branches[("vision",)], "review", _vision_review)
@@ -942,6 +946,19 @@ def _create_project(args: argparse.Namespace, application: _Application) -> int:
                 repository_path=args.repository_path,
                 idempotency_key=args.idempotency_key,
                 actor=args.actor,
+            )
+        )
+    )
+
+
+def _vision_bootstrap(args: argparse.Namespace, application: _Application) -> int:
+    return _emit_result(
+        application.bootstrap_vision(
+            VisionBootstrapRequest(
+                project_id=args.project_id,
+                idempotency_key=args.idempotency_key,
+                actor=args.actor,
+                correlation_id=args.correlation_id,
             )
         )
     )
