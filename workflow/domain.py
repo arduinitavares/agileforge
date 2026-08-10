@@ -288,6 +288,23 @@ class WorkflowDomain:
         with Session(self._engine) as session:
             return self._position_in_session(session, project_id, evaluated_at)
 
+    def replay_project_transition(
+        self,
+        *,
+        request_kind: str,
+        idempotency_key: str,
+        request_fingerprint: str,
+    ) -> TransitionResult | None:
+        """Replay or conflict on a claimed Project lifecycle key before probing."""
+        with Session(self._engine) as session:
+            claim = self._existing_receipt_claim_for_fingerprint(
+                session,
+                request_kind=request_kind,
+                idempotency_key=idempotency_key,
+                request_fingerprint=request_fingerprint,
+            )
+        return None if claim is None else claim.immediate_result
+
     def load_persisted_attempt_input(
         self,
         *,
@@ -436,7 +453,7 @@ class WorkflowDomain:
             return existing
         request_payload = request.model_dump(mode="json")
         request_json = canonical_json(request_payload)
-        request_hash = canonical_hash(request_payload)
+        request_hash = self._request_fingerprint(request)
 
         receipt = WorkflowTransitionReceipt(
             request_kind=request.kind,
@@ -449,23 +466,39 @@ class WorkflowDomain:
         session.flush()
         return _ReceiptClaim(receipt=receipt)
 
-    @staticmethod
+    @classmethod
     def _existing_receipt_claim(
+        cls,
         session: Session,
         request: TransitionRequest,
     ) -> _ReceiptClaim | None:
         """Return the immutable result for an existing idempotency key."""
-        request_hash = canonical_hash(request.model_dump(mode="json"))
+        return cls._existing_receipt_claim_for_fingerprint(
+            session,
+            request_kind=request.kind,
+            idempotency_key=request.idempotency_key,
+            request_fingerprint=cls._request_fingerprint(request),
+        )
+
+    @staticmethod
+    def _existing_receipt_claim_for_fingerprint(
+        session: Session,
+        *,
+        request_kind: str,
+        idempotency_key: str,
+        request_fingerprint: str,
+    ) -> _ReceiptClaim | None:
+        """Return one stored result for an exact semantic request identity."""
         receipt = session.exec(
             select(WorkflowTransitionReceipt).where(
-                col(WorkflowTransitionReceipt.request_kind) == request.kind,
+                col(WorkflowTransitionReceipt.request_kind) == request_kind,
                 col(WorkflowTransitionReceipt.idempotency_key)
-                == request.idempotency_key,
+                == idempotency_key,
             )
         ).one_or_none()
         if receipt is None:
             return None
-        if receipt.request_fingerprint != request_hash:
+        if receipt.request_fingerprint != request_fingerprint:
             return _ReceiptClaim(
                 immediate_result=WorkflowDomain._fact_conflict(
                     "The idempotency key was already used for different input."
@@ -481,6 +514,13 @@ class WorkflowDomain:
         return _ReceiptClaim(
             immediate_result=persisted.model_copy(update={"replayed": True})
         )
+
+    @staticmethod
+    def _request_fingerprint(request: TransitionRequest) -> str:
+        """Hash semantic Project input and exact payloads for all other requests."""
+        if isinstance(request, CreateProject | RecordRepositoryBinding):
+            return request.semantic_fingerprint()
+        return canonical_hash(request.model_dump(mode="json"))
 
     def _execute_request(
         self,

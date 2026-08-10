@@ -49,6 +49,7 @@ from models.product_definition import (
 )
 from models.repository import RepositoryBinding
 from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance, SpecRegistry
+from models.workflow import WorkflowNodeAttempt, WorkflowNodeAttemptOutcome
 
 logger: logging.Logger = logging.getLogger(name=__name__)
 
@@ -426,11 +427,19 @@ def _delete_project_lifecycle_rows(session: Session, project: Project) -> None:
         ProductGoalArtifact,
         ProductGoalInterviewTurn,
         VisionArtifactDecision,
-        VisionRevisionIntent,
-        VisionArtifact,
-        VisionInterviewTurn,
     ):
         session.exec(delete(model).where(col(model.project_id) == project_id))
+    _delete_project_vision_rows(session, project_id)
+    session.exec(
+        delete(WorkflowNodeAttemptOutcome).where(
+            col(WorkflowNodeAttemptOutcome.project_id) == project_id
+        )
+    )
+    session.exec(
+        delete(WorkflowNodeAttempt).where(
+            col(WorkflowNodeAttempt.project_id) == project_id
+        )
+    )
     project.active_repository_binding_id = None
     session.add(project)
     session.flush()
@@ -439,6 +448,65 @@ def _delete_project_lifecycle_rows(session: Session, project: Project) -> None:
             col(RepositoryBinding.project_id) == project_id
         )
     )
+
+
+def _delete_project_vision_rows(session: Session, project_id: int) -> None:
+    """Delete revision chains before their source Vision artifacts and turns."""
+    intents = session.exec(
+        select(VisionRevisionIntent)
+        .where(col(VisionRevisionIntent.project_id) == project_id)
+        .order_by(col(VisionRevisionIntent.vision_revision_intent_id).desc())
+    ).all()
+    for intent in intents:
+        turns = session.exec(
+            select(VisionInterviewTurn)
+            .where(
+                col(VisionInterviewTurn.project_id) == project_id,
+                col(VisionInterviewTurn.revision_intent_id)
+                == intent.vision_revision_intent_id,
+            )
+            .order_by(col(VisionInterviewTurn.vision_interview_turn_id).desc())
+        ).all()
+        turn_ids = [
+            turn.vision_interview_turn_id
+            for turn in turns
+            if turn.vision_interview_turn_id is not None
+        ]
+        if turn_ids:
+            artifacts = session.exec(
+                select(VisionArtifact)
+                .where(
+                    col(VisionArtifact.project_id) == project_id,
+                    col(VisionArtifact.source_interview_turn_id).in_(turn_ids),
+                )
+                .order_by(col(VisionArtifact.version_number).desc())
+            ).all()
+            for artifact in artifacts:
+                session.delete(artifact)
+            session.flush()
+        for turn in turns:
+            session.delete(turn)
+        session.flush()
+        session.delete(intent)
+        session.flush()
+
+    remaining_artifacts = session.exec(
+        select(VisionArtifact)
+        .where(col(VisionArtifact.project_id) == project_id)
+        .order_by(col(VisionArtifact.version_number).desc())
+    ).all()
+    for artifact in remaining_artifacts:
+        session.delete(artifact)
+    session.flush()
+
+    remaining_turns = session.exec(
+        select(VisionInterviewTurn)
+        .where(col(VisionInterviewTurn.project_id) == project_id)
+        .order_by(col(VisionInterviewTurn.vision_interview_turn_id).desc())
+    ).all()
+    for turn in remaining_turns:
+        session.delete(turn)
+    session.flush()
 
 
 class ProjectRepository:

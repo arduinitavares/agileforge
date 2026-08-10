@@ -933,7 +933,7 @@ class AuthorityProjectionService:
 
             selection = _load_authority_selection(session, project_id=project_id)
             disk_spec = self._resolve_spec_path(
-                _status_spec_path(project=project, selection=selection),
+                _status_spec_path(selection=selection),
                 accepted_hash=(
                     selection.accepted.spec_hash
                     if selection.accepted is not None
@@ -1180,12 +1180,9 @@ class AuthorityProjectionService:
 
 def _status_spec_path(
     *,
-    project: Project,
     selection: _AuthoritySelection,
 ) -> str | None:
     """Return the disk path to inspect for status drift."""
-    if project.spec_file_path:
-        return project.spec_file_path
     if selection.accepted_spec is not None and selection.accepted_spec.content_ref:
         return selection.accepted_spec.content_ref
     if selection.latest_spec is not None:

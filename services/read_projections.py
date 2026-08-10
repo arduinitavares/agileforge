@@ -12,7 +12,7 @@ from sqlmodel import Session, col, select
 
 from models.core import Project, Sprint, UserStory
 from models.events import TaskExecutionLog
-from models.repository import RepositoryBinding
+from models.repository import RepositoryBinding, repository_binding_fingerprint
 from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance, SpecRegistry
 from models.workflow import (
     DiscoveryRun,
@@ -681,15 +681,22 @@ class DurableReadProjectionService:
         if binding is None:
             return None
         try:
+            status_entries = json.loads(binding.status_entries_json)
             remotes = json.loads(binding.remotes_json)
             warnings = json.loads(binding.warnings_json)
         except json.JSONDecodeError:
             return None
-        if not isinstance(remotes, list) or not isinstance(warnings, list):
+        if (
+            not isinstance(status_entries, list)
+            or not isinstance(remotes, list)
+            or not isinstance(warnings, list)
+        ):
             return None
         return {
             "repository_binding_id": binding.repository_binding_id,
-            "fingerprint": binding.status_fingerprint,
+            "binding_fingerprint": repository_binding_fingerprint(binding),
+            "status_fingerprint": binding.status_fingerprint,
+            "status_entries": status_entries,
             "worktree_path": binding.worktree_path,
             "common_git_dir": binding.common_git_dir,
             "head_sha": binding.head_sha,

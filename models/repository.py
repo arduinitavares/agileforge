@@ -8,6 +8,8 @@ from sqlalchemy.schema import ForeignKeyConstraint, UniqueConstraint
 from sqlalchemy.types import Text
 from sqlmodel import Field, SQLModel
 
+from workflow.fingerprints import canonical_hash
+
 
 class RepositoryBinding(SQLModel, table=True):
     """One immutable repository probe bound to a single Project."""
@@ -44,9 +46,42 @@ class RepositoryBinding(SQLModel, table=True):
     detached_head: bool
     dirty: bool
     status_fingerprint: str = Field(index=True)
+    status_entries_json: str = Field(default="[]", sa_type=Text)
     remotes_json: str = Field(sa_type=Text)
     warnings_json: str = Field(sa_type=Text)
     probe_version: str
     inspected_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     supersedes_repository_binding_id: int | None = Field(default=None, index=True)
     recorded_by: str = Field(index=True)
+
+
+def repository_binding_fingerprint(binding: RepositoryBinding) -> str:
+    """Fingerprint one exact durable immutable repository observation."""
+    if binding.repository_binding_id is None:
+        message = "Repository binding fingerprint requires a durable identity."
+        raise ValueError(message)
+    return canonical_hash(
+        {
+            "repository_binding_id": binding.repository_binding_id,
+            "project_id": binding.project_id,
+            "worktree_path": binding.worktree_path,
+            "common_git_dir": binding.common_git_dir,
+            "head_sha": binding.head_sha,
+            "branch_name": binding.branch_name,
+            "detached_head": binding.detached_head,
+            "dirty": binding.dirty,
+            "status_fingerprint": binding.status_fingerprint,
+            "status_entries_json": binding.status_entries_json,
+            "remotes_json": binding.remotes_json,
+            "warnings_json": binding.warnings_json,
+            "probe_version": binding.probe_version,
+            "inspected_at": binding.inspected_at,
+            "supersedes_repository_binding_id": (
+                binding.supersedes_repository_binding_id
+            ),
+            "recorded_by": binding.recorded_by,
+        }
+    )
+
+
+__all__ = ["RepositoryBinding", "repository_binding_fingerprint"]

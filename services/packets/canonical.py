@@ -350,7 +350,7 @@ def _project_payload(project: Project) -> JsonObject:
     return {
         "project_id": project.project_id,
         "name": project.name,
-        "vision_excerpt": _vision_excerpt(project.vision),
+        "vision_excerpt": None,
     }
 
 

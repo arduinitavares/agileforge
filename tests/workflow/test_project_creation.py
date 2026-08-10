@@ -5,7 +5,8 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from pydantic import TypeAdapter
+import pytest
+from pydantic import TypeAdapter, ValidationError
 from sqlmodel import Session
 
 from models.core import Project
@@ -32,6 +33,19 @@ def test_create_project_is_a_closed_non_positioned_request() -> None:
     )
 
     assert isinstance(request, CreateProject)
+
+
+def test_create_project_requires_probe_input_for_a_requested_repository() -> None:
+    """Reject an under-prepared repository-backed creation request."""
+    with pytest.raises(ValidationError):
+        CreateProject(
+            name="Under-prepared",
+            description=None,
+            requested_repository_path="repository",
+            repository_binding=None,
+            idempotency_key="create-under-prepared",
+            actor="operator@example.com",
+        )
 
 
 def test_project_model_has_only_current_identity_state() -> None:

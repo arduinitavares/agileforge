@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import pytest
+from pydantic import ValidationError
+
 from services.repository_probe import RepositoryProbeResult
 from workflow.requests import RecordRepositoryBinding, RepositoryBindingInput
 
@@ -33,6 +36,8 @@ def test_repository_binding_request_has_no_decision_fingerprint() -> None:
     )
     request = RecordRepositoryBinding(
         project_id=1,
+        operation="attach",
+        requested_repository_path=_REPOSITORY_PATH,
         graph_version="agileforge.workflow.v2",
         fact_fingerprint="fact-1",
         expected_active_binding_fingerprint=None,
@@ -43,3 +48,12 @@ def test_repository_binding_request_has_no_decision_fingerprint() -> None:
 
     assert "decision_fingerprint" not in request.model_dump()
     assert request.binding.worktree_path == _REPOSITORY_PATH
+
+    payload = request.model_dump()
+    payload["requested_repository_path"] = None
+    with pytest.raises(ValidationError):
+        RecordRepositoryBinding.model_validate(payload)
+
+    payload["operation"] = "refresh"
+    with pytest.raises(ValidationError):
+        RecordRepositoryBinding.model_validate(payload)

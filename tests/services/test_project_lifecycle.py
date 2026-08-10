@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import pytest
+from pydantic import ValidationError
 from sqlmodel import Session, select
 
 from models.core import Project
@@ -17,6 +18,7 @@ from services.project_lifecycle import (
     RepositoryAttachmentCommand,
     RepositoryRefreshCommand,
 )
+from services.read_projections import DurableReadProjectionService
 from services.repository_probe import (
     RepositoryProbeError,
     RepositoryProbeErrorCode,
@@ -217,6 +219,62 @@ def test_create_replays_same_idempotency_and_conflicts_on_changed_input(
         assert len(session.exec(select(Project)).all()) == 1
 
 
+def test_repository_backed_create_replays_before_a_fresh_probe(
+    engine: Engine,
+) -> None:
+    """Replay the first stored result without hashing volatile probe metadata."""
+    probe = _Probe(_probe_result())
+    service, _domain = _service(engine, probe)
+    command = _create_command(repository_path=REPOSITORY_PATH)
+
+    first = service.create_project(command)
+    probe.result = _probe_result(inspected_at=NOW + timedelta(minutes=1))
+    replay = service.create_project(command)
+
+    assert replay == first.model_copy(update={"replayed": True})
+    assert probe.paths == [REPOSITORY_PATH]
+    with Session(engine) as session:
+        assert len(session.exec(select(Project)).all()) == 1
+        assert len(session.exec(select(RepositoryBinding)).all()) == 1
+
+
+def test_repository_backed_create_conflicts_on_changed_semantic_input(
+    engine: Engine,
+) -> None:
+    """Reject reuse of a create key for a different requested repository path."""
+    probe = _Probe(_probe_result())
+    service, _domain = _service(engine, probe)
+    first = service.create_project(_create_command(repository_path=REPOSITORY_PATH))
+
+    conflict = service.create_project(
+        _create_command(repository_path="different-repository")
+    )
+
+    assert first.ok is True
+    assert conflict.ok is False
+    assert conflict.error is not None
+    assert conflict.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
+    assert probe.paths == [REPOSITORY_PATH]
+
+
+def test_project_name_is_normalized_and_whitespace_only_is_rejected_before_write(
+    engine: Engine,
+) -> None:
+    """Persist the normalized identity and reject an empty normalized name."""
+    service, _domain = _service(engine, _Probe(_probe_result()))
+
+    created = service.create_project(_create_command(name="  Normalized Name  "))
+
+    with pytest.raises(ValidationError):
+        _create_command(name="   ")
+    with Session(engine) as session:
+        project = session.get(Project, _project_id(created))
+        assert project is not None
+        assert project.name == "Normalized Name"
+        assert len(session.exec(select(Project)).all()) == 1
+        assert len(session.exec(select(WorkflowTransitionReceipt)).all()) == 1
+
+
 def test_attachment_is_orthogonal_and_refresh_appends_observation(
     engine: Engine,
 ) -> None:
@@ -252,6 +310,8 @@ def test_attachment_is_orthogonal_and_refresh_appends_observation(
         )
     )
     assert refreshed.ok is True
+    refreshed_fingerprint = str(refreshed.output["repository_binding_fingerprint"])
+    assert refreshed_fingerprint != active_fingerprint
     with Session(engine) as session:
         bindings = session.exec(select(RepositoryBinding)).all()
         assert len(bindings) == EXPECTED_BINDING_COUNT
@@ -259,6 +319,149 @@ def test_attachment_is_orthogonal_and_refresh_appends_observation(
             bindings[-1].supersedes_repository_binding_id
             == bindings[0].repository_binding_id
         )
+
+
+def test_repository_binding_replay_ignores_a_fresh_probe_observation(
+    engine: Engine,
+) -> None:
+    """Replay an attach key without appending a timestamp-only observation."""
+    probe = _Probe(_probe_result())
+    service, _domain = _service(engine, probe)
+    project_id = _project_id(service.create_project(_create_command()))
+    command = RepositoryAttachmentCommand(
+        project_id=project_id,
+        path=REPOSITORY_PATH,
+        expected_active_binding_fingerprint=None,
+        idempotency_key="attach-replay",
+        actor="operator@example.com",
+    )
+
+    first = service.attach_repository(command)
+    probe.result = _probe_result(inspected_at=NOW + timedelta(minutes=1))
+    replay = service.attach_repository(command)
+
+    assert replay == first.model_copy(update={"replayed": True})
+    assert probe.paths == [REPOSITORY_PATH]
+    with Session(engine) as session:
+        assert len(session.exec(select(RepositoryBinding)).all()) == 1
+
+
+def test_repository_binding_key_conflicts_on_changed_semantic_input(
+    engine: Engine,
+) -> None:
+    """Reject an attach key reused for a different caller path."""
+    probe = _Probe(_probe_result())
+    service, _domain = _service(engine, probe)
+    project_id = _project_id(service.create_project(_create_command()))
+    first = service.attach_repository(
+        RepositoryAttachmentCommand(
+            project_id=project_id,
+            path=REPOSITORY_PATH,
+            expected_active_binding_fingerprint=None,
+            idempotency_key="attach-conflict",
+            actor="operator@example.com",
+        )
+    )
+
+    conflict = service.attach_repository(
+        RepositoryAttachmentCommand(
+            project_id=project_id,
+            path="different-repository",
+            expected_active_binding_fingerprint=None,
+            idempotency_key="attach-conflict",
+            actor="operator@example.com",
+        )
+    )
+
+    assert first.ok is True
+    assert conflict.ok is False
+    assert conflict.error is not None
+    assert conflict.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
+    assert probe.paths == [REPOSITORY_PATH]
+
+
+def test_same_status_refresh_invalidates_stale_replace_and_refresh_guards(
+    engine: Engine,
+) -> None:
+    """Guard the durable binding observation, not only repository status."""
+    probe = _Probe(_probe_result())
+    service, _domain = _service(engine, probe)
+    project_id = _project_id(service.create_project(_create_command()))
+    attached = service.attach_repository(
+        RepositoryAttachmentCommand(
+            project_id=project_id,
+            path=REPOSITORY_PATH,
+            expected_active_binding_fingerprint=None,
+            idempotency_key="attach-guard",
+            actor="operator@example.com",
+        )
+    )
+    stale_fingerprint = str(attached.output["repository_binding_fingerprint"])
+    probe.result = _probe_result(inspected_at=NOW + timedelta(seconds=1))
+    refreshed = service.refresh_repository(
+        RepositoryRefreshCommand(
+            project_id=project_id,
+            expected_active_binding_fingerprint=stale_fingerprint,
+            idempotency_key="refresh-guard",
+            actor="operator@example.com",
+        )
+    )
+    current_fingerprint = str(refreshed.output["repository_binding_fingerprint"])
+    current_binding_id = refreshed.output["repository_binding_id"]
+
+    stale_replace = service.attach_repository(
+        RepositoryAttachmentCommand(
+            project_id=project_id,
+            path="replacement",
+            expected_active_binding_fingerprint=stale_fingerprint,
+            idempotency_key="stale-replace",
+            actor="operator@example.com",
+        )
+    )
+    stale_refresh = service.refresh_repository(
+        RepositoryRefreshCommand(
+            project_id=project_id,
+            expected_active_binding_fingerprint=stale_fingerprint,
+            idempotency_key="stale-refresh",
+            actor="operator@example.com",
+        )
+    )
+
+    assert current_fingerprint != stale_fingerprint
+    assert stale_replace.ok is False
+    assert stale_refresh.ok is False
+    with Session(engine) as session:
+        project = session.get(Project, project_id)
+        assert project is not None
+        assert project.active_repository_binding_id == current_binding_id
+
+
+def test_project_and_repository_reads_expose_the_active_binding_guard(
+    engine: Engine,
+) -> None:
+    """Project both repository provenance and its exact replacement guard."""
+    probe = _Probe(_probe_result())
+    service, _domain = _service(engine, probe)
+    created = service.create_project(_create_command(repository_path=REPOSITORY_PATH))
+    project_id = _project_id(created)
+    fingerprint = created.output["repository_binding_fingerprint"]
+    reads = DurableReadProjectionService(engine=engine)
+
+    shown = reads.project_show(project_id=project_id)
+    status = reads.repository_status(project_id=project_id)
+
+    assert shown["ok"] is True
+    assert status["ok"] is True
+    shown_data = shown["data"]
+    status_data = status["data"]
+    assert isinstance(shown_data, dict)
+    assert isinstance(status_data, dict)
+    assert shown_data["repository"] == status_data["repository"]
+    repository = status_data["repository"]
+    assert isinstance(repository, dict)
+    assert repository["binding_fingerprint"] == fingerprint
+    assert repository["status_fingerprint"] == "status-1"
+    assert repository["status_entries"] == []
 
 
 def test_failed_attachment_preserves_active_binding_pointer(engine: Engine) -> None:
@@ -300,3 +503,33 @@ def test_failed_attachment_preserves_active_binding_pointer(engine: Engine) -> N
         project = session.get(Project, project_id)
         assert project is not None
         assert project.active_repository_binding_id == original_pointer
+
+
+def test_failed_refresh_preserves_active_binding_pointer(engine: Engine) -> None:
+    """Preserve the active pointer when refreshing the active path fails."""
+    probe = _Probe(_probe_result())
+    service, _domain = _service(engine, probe)
+    created = service.create_project(_create_command(repository_path=REPOSITORY_PATH))
+    project_id = _project_id(created)
+    binding_id = created.output["repository_binding_id"]
+    fingerprint = str(created.output["repository_binding_fingerprint"])
+    probe.result = RepositoryProbeError(
+        RepositoryProbeErrorCode.PATH_MISSING,
+        REPOSITORY_PATH,
+    )
+
+    with pytest.raises(RepositoryProbeError):
+        service.refresh_repository(
+            RepositoryRefreshCommand(
+                project_id=project_id,
+                expected_active_binding_fingerprint=fingerprint,
+                idempotency_key="refresh-failure",
+                actor="operator@example.com",
+            )
+        )
+
+    with Session(engine) as session:
+        project = session.get(Project, project_id)
+        assert project is not None
+        assert project.active_repository_binding_id == binding_id
+        assert len(session.exec(select(RepositoryBinding)).all()) == 1

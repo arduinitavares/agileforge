@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from models.core import Project
-from models.repository import RepositoryBinding
+from models.repository import RepositoryBinding, repository_binding_fingerprint
 from repositories.workflow import WorkflowFactRepository
 from workflow.contracts import (
     TransitionResult,
@@ -53,6 +53,7 @@ def _binding(
         detached_head=input.detached_head,
         dirty=input.dirty,
         status_fingerprint=input.status_fingerprint,
+        status_entries_json=canonical_json(list(input.status_entries)),
         remotes_json=canonical_json(list(input.remotes)),
         warnings_json=canonical_json(list(input.warnings)),
         probe_version=input.probe_version,
@@ -104,7 +105,7 @@ def execute_create_project(
         session.add(project)
         output.update(
             repository_binding_id=binding.repository_binding_id,
-            repository_binding_fingerprint=binding.status_fingerprint,
+            repository_binding_fingerprint=repository_binding_fingerprint(binding),
         )
     session.flush()
     return _result(
@@ -131,7 +132,9 @@ def execute_record_repository_binding(
         if project.active_repository_binding_id is None
         else session.get(RepositoryBinding, project.active_repository_binding_id)
     )
-    active_fingerprint = None if active is None else active.status_fingerprint
+    active_fingerprint = (
+        None if active is None else repository_binding_fingerprint(active)
+    )
     if active_fingerprint != request.expected_active_binding_fingerprint:
         return _conflict("The active repository binding changed.")
 
@@ -156,7 +159,7 @@ def execute_record_repository_binding(
         output={
             "project_id": request.project_id,
             "repository_binding_id": binding.repository_binding_id,
-            "repository_binding_fingerprint": binding.status_fingerprint,
+            "repository_binding_fingerprint": repository_binding_fingerprint(binding),
         },
         evaluated_at=evaluated_at,
     )

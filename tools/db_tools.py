@@ -686,7 +686,7 @@ def _build_project_structure(
         "project": {
             "id": _require_project_id(project),
             "name": project.name,
-            "vision": project.vision,
+            "vision": None,
         },
         "themes": theme_entries,
     }

@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Literal, Protocol, cast
 from pydantic import Field
 
 from adapters.adk.model_roles import AGENTIC_MODEL_ROLES
+from adapters.git.repository_probe import GitPythonRepositoryProbe
 from services.contracts.product_goal import ProductGoalInterviewInput
 from services.contracts.vision import VisionInterviewInput
 from services.node_attempt_replay import NodeAttemptReplayQuery, TransitionReplayQuery
@@ -1059,7 +1060,6 @@ def production_application() -> AgileForgeApplication:
         AgenticRecipeNodes,
         build_agentic_recipe_registry,
     )
-    from adapters.git.repository_probe import GitPythonRepositoryProbe  # noqa: PLC0415
     from models.db import ensure_business_db_ready, get_engine  # noqa: PLC0415
     from services.product_discovery_selection import (  # noqa: PLC0415
         ProductDiscoverySelectionService,

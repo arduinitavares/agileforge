@@ -22,7 +22,6 @@ from services.agent_workbench.version import agileforge_version
 from services.application import (
     AgenticActionRequest,
     AgileForgeApplication,
-    CreateProjectCommand,
     production_application,
 )
 from utils.api_schemas import WorkflowPositionGuards
@@ -34,7 +33,7 @@ from workflow.contracts import (
     TransitionResult,
     WorkflowPosition,
 )
-from workflow.requests import DecideAuthority, TransitionRequest
+from workflow.requests import DecideAuthority, OpenProjectShell, TransitionRequest
 
 _TRANSITION_REQUEST = TypeAdapter(TransitionRequest)
 _FRONTEND_ROOT = files("frontend")
@@ -58,12 +57,11 @@ app.mount(
 
 
 class CreateProjectRequest(BaseModel):
-    """Business input for creating one Project."""
+    """Request body for opening a Project Shell."""
 
     model_config = ConfigDict(extra="forbid")
     name: str = Field(min_length=1, max_length=200)
-    description: str | None = Field(default=None, max_length=4000)
-    repository_path: str | None = None
+    origin: Literal["greenfield", "brownfield"]
     idempotency_key: str = Field(min_length=1, max_length=200)
     changed_by: str = Field(default="dashboard-ui", min_length=1, max_length=200)
     correlation_id: str | None = Field(default=None, min_length=1)
@@ -161,12 +159,11 @@ def _application() -> AgileForgeApplication:
     return production_application()
 
 
-def build_create_project_command(req: CreateProjectRequest) -> CreateProjectCommand:
-    """Translate transport metadata and semantic Project input at the boundary."""
-    return CreateProjectCommand(
+def build_project_shell_request(req: CreateProjectRequest) -> OpenProjectShell:
+    """Translate one API payload into the exact Project Shell request."""
+    return OpenProjectShell(
         name=req.name,
-        description=req.description,
-        repository_path=req.repository_path,
+        origin=req.origin,
         idempotency_key=req.idempotency_key,
         actor=req.changed_by,
         correlation_id=req.correlation_id,
@@ -335,9 +332,8 @@ def get_dashboard_config() -> DashboardConfig:
 
 @app.post("/api/projects")
 def create_project(req: CreateProjectRequest) -> dict[str, object]:
-    """Create a Project and optional local repository provenance."""
-    command = build_create_project_command(req)
-    return _result_payload(_application().create_project(command))
+    """Open a greenfield or Brownfield Project Shell."""
+    return _result_payload(_application().transition(build_project_shell_request(req)))
 
 
 @app.get("/api/projects")
