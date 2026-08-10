@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
 import tomllib
 from dataclasses import dataclass
 from enum import StrEnum
@@ -235,12 +236,39 @@ class VisionEvidenceCollector:
         warnings: list[VisionEvidenceWarning],
     ) -> list[_CandidateEvidence]:
         """Read only the allowlisted repository files in declared priority order."""
-        root = Path(binding.worktree_path).resolve()
         candidates = [self._repository_candidate(probe, warnings)]
-        valid_specs = self._structured_spec_candidates(root, warnings)
-        candidates.extend(candidate for _path, candidate in valid_specs)
-        candidates.extend(self._supplemental_candidates(root, valid_specs, warnings))
+        root_descriptor = self._open_worktree_descriptor(binding.worktree_path)
+        try:
+            valid_specs = self._structured_spec_candidates(root_descriptor, warnings)
+            candidates.extend(candidate for _path, candidate in valid_specs)
+            candidates.extend(
+                self._supplemental_candidates(
+                    root_descriptor,
+                    valid_specs,
+                    warnings,
+                )
+            )
+        finally:
+            os.close(root_descriptor)
         return candidates
+
+    @staticmethod
+    def _open_worktree_descriptor(worktree_path: str) -> int:
+        """Retain the verified worktree directory as the traversal anchor."""
+        no_follow = getattr(os, "O_NOFOLLOW", None)
+        directory = getattr(os, "O_DIRECTORY", None)
+        if not isinstance(no_follow, int) or not isinstance(directory, int):
+            raise VisionEvidenceCollectionError(
+                VisionEvidenceErrorCode.REPOSITORY_CHANGED_DURING_EVIDENCE_COLLECTION,
+                "Platform cannot safely open the repository worktree.",
+            )
+        try:
+            return os.open(worktree_path, os.O_RDONLY | no_follow | directory)
+        except OSError as exc:
+            raise VisionEvidenceCollectionError(
+                VisionEvidenceErrorCode.REPOSITORY_CHANGED_DURING_EVIDENCE_COLLECTION,
+                "Repository worktree changed before evidence files were read.",
+            ) from exc
 
     def _repository_candidate(
         self,
@@ -275,13 +303,17 @@ class VisionEvidenceCollector:
 
     def _structured_spec_candidates(
         self,
-        root: Path,
+        root_descriptor: int,
         warnings: list[VisionEvidenceWarning],
     ) -> list[tuple[str, _CandidateEvidence]]:
         """Collect valid JSON specs and emit their conflict warning when needed."""
         valid_specs: list[tuple[str, _CandidateEvidence]] = []
         for relative_path in _ALLOWED_PATHS[:2]:
-            candidate = self._json_spec_candidate(root, relative_path, warnings)
+            candidate = self._json_spec_candidate(
+                root_descriptor,
+                relative_path,
+                warnings,
+            )
             if candidate is not None:
                 valid_specs.append((relative_path, candidate))
         if self._specifications_conflict(valid_specs):
@@ -307,7 +339,7 @@ class VisionEvidenceCollector:
 
     def _supplemental_candidates(
         self,
-        root: Path,
+        root_descriptor: int,
         valid_specs: list[tuple[str, _CandidateEvidence]],
         warnings: list[VisionEvidenceWarning],
     ) -> list[_CandidateEvidence]:
@@ -317,16 +349,21 @@ class VisionEvidenceCollector:
             ("CONTEXT.md", "context"),
             ("README.md", "readme"),
         ):
-            candidate = self._text_candidate(root, relative_path, kind, warnings)
+            candidate = self._text_candidate(
+                root_descriptor,
+                relative_path,
+                kind,
+                warnings,
+            )
             if candidate is not None:
                 candidates.append(candidate)
-        package = self._package_candidate(root, warnings)
+        package = self._package_candidate(root_descriptor, warnings)
         if package is not None:
             candidates.append(package)
         if not valid_specs:
             for relative_path in _ALLOWED_PATHS[-2:]:
                 candidate = self._text_candidate(
-                    root,
+                    root_descriptor,
                     relative_path,
                     "technical_specification",
                     warnings,
@@ -338,12 +375,12 @@ class VisionEvidenceCollector:
 
     def _json_spec_candidate(
         self,
-        root: Path,
+        root_descriptor: int,
         relative_path: str,
         warnings: list[VisionEvidenceWarning],
     ) -> _CandidateEvidence | None:
         """Validate one optional structured specification file."""
-        text = self._read_text(root, relative_path, warnings)
+        text = self._read_text(root_descriptor, relative_path, warnings)
         if text is None:
             return None
         try:
@@ -370,12 +407,12 @@ class VisionEvidenceCollector:
 
     def _package_candidate(
         self,
-        root: Path,
+        root_descriptor: int,
         warnings: list[VisionEvidenceWarning],
     ) -> _CandidateEvidence | None:
         """Extract selected package metadata without exposing the full TOML source."""
         relative_path = "pyproject.toml"
-        text = self._read_text(root, relative_path, warnings)
+        text = self._read_text(root_descriptor, relative_path, warnings)
         if text is None:
             return None
         try:
@@ -420,13 +457,13 @@ class VisionEvidenceCollector:
 
     def _text_candidate(
         self,
-        root: Path,
+        root_descriptor: int,
         relative_path: str,
         kind: VisionEvidenceKind,
         warnings: list[VisionEvidenceWarning],
     ) -> _CandidateEvidence | None:
         """Read one optional UTF-8 text file through a verified descriptor."""
-        text = self._read_text(root, relative_path, warnings)
+        text = self._read_text(root_descriptor, relative_path, warnings)
         if text is None or not text.strip():
             return None
         return _CandidateEvidence(
@@ -439,46 +476,35 @@ class VisionEvidenceCollector:
 
     def _read_text(
         self,
-        root: Path,
+        root_descriptor: int,
         relative_path: str,
         warnings: list[VisionEvidenceWarning],
     ) -> str | None:
         """Read one optional source safely and reject changed or escaping files."""
-        candidate = root / relative_path
+        opened = self._open_descriptor(root_descriptor, relative_path, warnings)
+        if opened is None:
+            return None
+        descriptor, parent_descriptor, leaf_name = opened
         try:
-            resolved = candidate.resolve(strict=True)
-        except FileNotFoundError:
-            return None
-        except OSError:
-            warnings.append(
-                self._warning(
-                    code="EVIDENCE_UNREADABLE",
-                    source=relative_path,
-                    message="Approved evidence file could not be resolved.",
+            try:
+                before = os.fstat(descriptor)
+                chunks: list[bytes] = []
+                while chunk := os.read(descriptor, 64 * 1024):
+                    chunks.append(chunk)
+                after = os.fstat(descriptor)
+                current = os.stat(
+                    leaf_name,
+                    dir_fd=parent_descriptor,
+                    follow_symlinks=False,
                 )
-            )
-            return None
-        if not resolved.is_relative_to(root):
-            warnings.append(
-                self._warning(
-                    code="SYMLINK_ESCAPE",
-                    source=relative_path,
-                    message="Approved evidence path resolves outside the repository.",
-                )
-            )
-            return None
-        descriptor = self._open_descriptor(resolved, relative_path, warnings)
-        if descriptor is None:
-            return None
-        try:
-            before = os.fstat(descriptor)
-            chunks: list[bytes] = []
-            while chunk := os.read(descriptor, 64 * 1024):
-                chunks.append(chunk)
-            after = os.fstat(descriptor)
-            current = resolved.stat()
+            except OSError as exc:
+                raise VisionEvidenceCollectionError(
+                    VisionEvidenceErrorCode.REPOSITORY_CHANGED_DURING_EVIDENCE_COLLECTION,
+                    "Approved evidence file changed while it was read.",
+                ) from exc
         finally:
             os.close(descriptor)
+            os.close(parent_descriptor)
         if not (
             self._file_identity(before) == self._file_identity(after)
             and self._file_identity(before) == self._file_identity(current)
@@ -501,13 +527,14 @@ class VisionEvidenceCollector:
 
     def _open_descriptor(
         self,
-        resolved: Path,
+        root_descriptor: int,
         relative_path: str,
         warnings: list[VisionEvidenceWarning],
-    ) -> int | None:
-        """Open a resolved file without following a swapped final symlink."""
+    ) -> tuple[int, int, str] | None:
+        """Open every relative path component without following symbolic links."""
         no_follow = getattr(os, "O_NOFOLLOW", None)
-        if not isinstance(no_follow, int):
+        directory = getattr(os, "O_DIRECTORY", None)
+        if not isinstance(no_follow, int) or not isinstance(directory, int):
             warnings.append(
                 self._warning(
                     code="EVIDENCE_UNREADABLE",
@@ -516,9 +543,45 @@ class VisionEvidenceCollector:
                 )
             )
             return None
+        relative = Path(relative_path)
+        parts = relative.parts
+        if relative.is_absolute() or not parts or any(
+            part in {"", ".", ".."} for part in parts
+        ):
+            warnings.append(
+                self._warning(
+                    code="EVIDENCE_UNREADABLE",
+                    source=relative_path,
+                    message="Approved evidence path is not repository-relative.",
+                )
+            )
+            return None
+        parent_descriptor = self._open_parent_descriptor(
+            root_descriptor,
+            parts[:-1],
+            relative_path,
+            no_follow | directory,
+            warnings,
+        )
+        if parent_descriptor is None:
+            return None
+        leaf_name = parts[-1]
+        if not self._component_is_safe(
+            parent_descriptor,
+            leaf_name,
+            relative_path,
+            warnings,
+        ):
+            os.close(parent_descriptor)
+            return None
         try:
-            return os.open(resolved, os.O_RDONLY | no_follow)
+            descriptor = os.open(
+                leaf_name,
+                os.O_RDONLY | no_follow,
+                dir_fd=parent_descriptor,
+            )
         except OSError:
+            os.close(parent_descriptor)
             warnings.append(
                 self._warning(
                     code="EVIDENCE_UNREADABLE",
@@ -527,6 +590,92 @@ class VisionEvidenceCollector:
                 )
             )
             return None
+        return descriptor, parent_descriptor, leaf_name
+
+    def _open_parent_descriptor(
+        self,
+        root_descriptor: int,
+        components: tuple[str, ...],
+        relative_path: str,
+        directory_flags: int,
+        warnings: list[VisionEvidenceWarning],
+    ) -> int | None:
+        """Traverse intermediate directories relative to the retained root."""
+        try:
+            parent_descriptor = os.dup(root_descriptor)
+        except OSError:
+            warnings.append(
+                self._warning(
+                    code="EVIDENCE_UNREADABLE",
+                    source=relative_path,
+                    message="Approved evidence traversal could not be started.",
+                )
+            )
+            return None
+        for component in components:
+            if not self._component_is_safe(
+                parent_descriptor,
+                component,
+                relative_path,
+                warnings,
+            ):
+                os.close(parent_descriptor)
+                return None
+            try:
+                next_descriptor = os.open(
+                    component,
+                    os.O_RDONLY | directory_flags,
+                    dir_fd=parent_descriptor,
+                )
+            except OSError:
+                os.close(parent_descriptor)
+                warnings.append(
+                    self._warning(
+                        code="EVIDENCE_UNREADABLE",
+                        source=relative_path,
+                        message="Approved evidence directory could not be opened.",
+                    )
+                )
+                return None
+            os.close(parent_descriptor)
+            parent_descriptor = next_descriptor
+        return parent_descriptor
+
+    def _component_is_safe(
+        self,
+        parent_descriptor: int,
+        component: str,
+        relative_path: str,
+        warnings: list[VisionEvidenceWarning],
+    ) -> bool:
+        """Reject missing, unreadable, and symbolic-link path components."""
+        try:
+            component_stat = os.stat(
+                component,
+                dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            return False
+        except OSError:
+            warnings.append(
+                self._warning(
+                    code="EVIDENCE_UNREADABLE",
+                    source=relative_path,
+                    message="Approved evidence path could not be inspected.",
+                )
+            )
+            return False
+        if not stat.S_ISLNK(component_stat.st_mode):
+            return True
+        warnings.append(
+            self._warning(
+                code="SYMLINK_ESCAPE",
+                source=relative_path,
+                message="Approved evidence path contains a symbolic link.",
+            )
+        )
+        return False
 
     @staticmethod
     def _file_identity(stat_result: os.stat_result) -> tuple[int, int, int, int]:
@@ -556,7 +705,7 @@ class VisionEvidenceCollector:
         """Normalize one network remote and omit local, malformed, or file URLs."""
         scp_match = _SCP_REMOTE_RE.fullmatch(remote)
         if scp_match is not None and "://" not in remote:
-            return f"ssh://{scp_match.group('host')}/{scp_match.group('path')}"
+            remote = f"ssh://{scp_match.group('host')}/{scp_match.group('path')}"
         parsed = urlsplit(remote)
         if parsed.scheme == "file" or not parsed.scheme or parsed.hostname is None:
             return None
@@ -629,7 +778,7 @@ class VisionEvidenceCollector:
                         message="Evidence byte limit reached.",
                     )
                 )
-                break
+                continue
             item = VisionEvidenceItem(
                 evidence_id=candidate.evidence_id,
                 kind=candidate.kind,

@@ -229,6 +229,26 @@ def test_local_and_scp_remotes_are_omitted_or_normalized(
     assert [warning.code for warning in bundle.warnings] == ["REMOTE_OMITTED"]
 
 
+def test_scp_remote_credentials_query_and_fragment_are_removed(
+    collector: VisionEvidenceCollector,
+    engine: Engine,
+    repository: Path,
+) -> None:
+    """Apply parsed-URL sanitization rules to SCP-style network remotes."""
+    Repo(repository).create_remote(
+        "origin",
+        "git@example.test:team/repo.git?token=x#fragment",
+    )
+    project_id = _add_project(engine)
+    _bind_repository(engine, project_id=project_id, repository=repository)
+
+    bundle = collector.collect(project_id)
+
+    provenance = bundle.items[1]
+    assert isinstance(provenance.content, dict)
+    assert provenance.content["remotes"] == ["ssh://example.test/team/repo.git"]
+
+
 def test_invalid_optional_inputs_warn_and_markdown_fallback_has_priority(
     collector: VisionEvidenceCollector,
     engine: Engine,
@@ -328,11 +348,17 @@ def test_descriptor_read_rejects_a_symlink_swapped_after_resolution(
     _bind_repository(engine, project_id=project_id, repository=repository)
     original_open = vision_evidence_module.os.open
 
-    def swap_then_open(path: Path | str, flags: int) -> int:
-        if str(path) == str(readme):
+    def swap_then_open(
+        path: Path | str,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        if str(path) in {str(readme), readme.name}:
             readme.unlink()
             readme.symlink_to(outside)
-        return original_open(path, flags)
+        return original_open(path, flags, mode, dir_fd=dir_fd)
 
     monkeypatch.setattr(vision_evidence_module.os, "open", swap_then_open)
 
@@ -340,6 +366,52 @@ def test_descriptor_read_rejects_a_symlink_swapped_after_resolution(
 
     assert "outside" not in bundle.model_dump_json()
     assert [warning.code for warning in bundle.warnings] == ["EVIDENCE_UNREADABLE"]
+
+
+def test_descriptor_read_never_follows_a_swapped_intermediate_directory(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    tmp_path: Path,
+) -> None:
+    """Keep traversal anchored when an intermediate directory is replaced."""
+    inside = repository / "docs/spec/spec.md"
+    inside.parent.mkdir(parents=True)
+    inside.write_text("inside\n", encoding="utf-8")
+    outside_docs = tmp_path / "outside-docs"
+    (outside_docs / "spec").mkdir(parents=True)
+    (outside_docs / "spec/spec.md").write_text("outside\n", encoding="utf-8")
+    project_id = _add_project(engine)
+    _bind_repository(engine, project_id=project_id, repository=repository)
+    observed = GitPythonRepositoryProbe().inspect(repository)
+    collector = VisionEvidenceCollector(
+        engine=engine,
+        repository_probe=_ChangingProbe(observed, observed),
+    )
+    original_open = vision_evidence_module.os.open
+    swapped = False
+
+    def swap_then_open(
+        path: Path | str,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal swapped
+        if not swapped and str(path) in {str(inside), inside.name}:
+            swapped = True
+            (repository / "docs").rename(repository / "docs-original")
+            (repository / "docs").symlink_to(outside_docs, target_is_directory=True)
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(vision_evidence_module.os, "open", swap_then_open)
+
+    bundle = collector.collect(project_id)
+
+    assert bundle.items[-1].evidence_id == "file:docs/spec/spec.md"
+    assert bundle.items[-1].content == "inside"
+    assert "outside" not in bundle.model_dump_json()
 
 
 def test_text_is_truncated_at_utf8_boundaries_and_bundle_is_reproducible(
@@ -424,6 +496,59 @@ def test_total_byte_limit_truncates_late_text_without_exceeding_96_kib(
     assert bundle.items[-1].evidence_id == "file:docs/spec/spec.md"
     assert bundle.items[-1].truncated is True
     assert [warning.code for warning in bundle.warnings] == ["TEXT_EVIDENCE_TRUNCATED"]
+
+
+def test_structured_candidate_over_remaining_budget_does_not_stop_later_items(
+    collector: VisionEvidenceCollector,
+) -> None:
+    """Omit one structured candidate while evaluating later candidates that fit."""
+    candidate = vision_evidence_module._CandidateEvidence
+    large_text_size = 32 * 1024
+    candidates = [
+        candidate(
+            "file:CONTEXT.md",
+            "context",
+            "CONTEXT.md",
+            "unreviewed_repository_evidence",
+            "A" * large_text_size,
+        ),
+        candidate(
+            "file:README.md",
+            "readme",
+            "README.md",
+            "unreviewed_repository_evidence",
+            "B" * large_text_size,
+        ),
+        candidate(
+            "file:docs/spec/spec.md",
+            "technical_specification",
+            "docs/spec/spec.md",
+            "unreviewed_repository_evidence",
+            "C" * (MAX_EVIDENCE_TOTAL_BYTES - (2 * large_text_size) - 128),
+        ),
+        candidate(
+            "file:pyproject.toml",
+            "package_metadata",
+            "pyproject.toml",
+            "unreviewed_repository_evidence",
+            {"description": "D" * 200},
+        ),
+        candidate(
+            "file:specs/spec.md",
+            "technical_specification",
+            "specs/spec.md",
+            "unreviewed_repository_evidence",
+            "small",
+        ),
+    ]
+
+    bundle = collector._bounded_bundle(candidates, [])
+
+    assert [item.evidence_id for item in bundle.items][-1] == "file:specs/spec.md"
+    assert "file:pyproject.toml" not in {item.evidence_id for item in bundle.items}
+    assert [warning.code for warning in bundle.warnings] == [
+        "EVIDENCE_TOTAL_LIMIT_REACHED"
+    ]
 
 
 def test_item_limit_caps_defensive_candidate_input_at_eight_items(
@@ -517,6 +642,54 @@ def test_change_during_collection_discards_partial_evidence(
 
     with pytest.raises(VisionEvidenceCollectionError) as caught:
         changing_collector.collect(project_id)
+
+    assert (
+        caught.value.code
+        is VisionEvidenceErrorCode.REPOSITORY_CHANGED_DURING_EVIDENCE_COLLECTION
+    )
+
+
+@pytest.mark.parametrize("operation", ["read", "stat"])
+def test_post_open_races_fail_with_the_closed_repository_changed_error(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+    repository: Path,
+) -> None:
+    """Translate post-open read and path replacement failures to the closed error."""
+    readme = repository / "README.md"
+    readme.write_text("inside\n", encoding="utf-8")
+    project_id = _add_project(engine)
+    _bind_repository(engine, project_id=project_id, repository=repository)
+    observed = GitPythonRepositoryProbe().inspect(repository)
+    collector = VisionEvidenceCollector(
+        engine=engine,
+        repository_probe=_ChangingProbe(observed, observed),
+    )
+
+    if operation == "read":
+
+        def failed_read(descriptor: int, size: int) -> bytes:
+            del descriptor, size
+            raise OSError
+
+        monkeypatch.setattr(vision_evidence_module.os, "read", failed_read)
+    else:
+        original_read = vision_evidence_module.os.read
+        deleted = False
+
+        def delete_after_read(descriptor: int, size: int) -> bytes:
+            nonlocal deleted
+            content = original_read(descriptor, size)
+            if content and not deleted:
+                readme.unlink()
+                deleted = True
+            return content
+
+        monkeypatch.setattr(vision_evidence_module.os, "read", delete_after_read)
+
+    with pytest.raises(VisionEvidenceCollectionError) as caught:
+        collector.collect(project_id)
 
     assert (
         caught.value.code
