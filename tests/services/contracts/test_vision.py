@@ -6,10 +6,17 @@ import pytest
 from pydantic import ValidationError
 
 from services.contracts.vision import (
+    VisionAgentInput,
+    VisionBootstrapInput,
     VisionComponents,
+    VisionDraftOutput,
     VisionInterviewInput,
     VisionInterviewOutput,
+    VisionPreflight,
+    VisionRevisionInput,
 )
+from services.contracts.vision_evidence import VisionEvidenceBundle, VisionEvidenceItem
+from workflow.fingerprints import canonical_hash
 
 
 def _components(**overrides: str | None) -> VisionComponents:
@@ -97,4 +104,108 @@ def test_output_completion_matches_components() -> None:
             project_vision_statement="A durable workflow tool.",
             is_complete=True,
             clarifying_questions=["Which alternatives exist?"],
+        )
+
+
+def _evidence_bundle() -> VisionEvidenceBundle:
+    content = "Repository context"
+    item = VisionEvidenceItem(
+        evidence_id="file:README.md",
+        kind="readme",
+        relative_path="README.md",
+        content_fingerprint=canonical_hash(content),
+        trust="unreviewed_repository_evidence",
+        content=content,
+        truncated=False,
+    )
+    return VisionEvidenceBundle(
+        schema_version="agileforge.vision-evidence.v1",
+        items=(item,),
+        warnings=(),
+        evidence_fingerprint=canonical_hash(
+            {
+                "schema_version": "agileforge.vision-evidence.v1",
+                "items": [item.model_dump(mode="json")],
+                "warnings": [],
+            }
+        ),
+    )
+
+
+def test_bootstrap_input_and_agent_envelope_are_strict() -> None:
+    """Bootstrap has no snapshot or preflight lineage."""
+    bootstrap = VisionBootstrapInput(
+        schema_version="agileforge.vision-input.v1",
+        operation="bootstrap",
+        project_name="AgileForge",
+        project_description=None,
+        evidence=_evidence_bundle(),
+    )
+    parsed = VisionAgentInput(request=bootstrap, preflight=None)
+
+    assert parsed.request.operation == "bootstrap"
+    with pytest.raises(ValidationError, match="extra"):
+        VisionBootstrapInput(
+            **(bootstrap.model_dump() | {"vision_evidence_snapshot_id": 1})
+        )
+    with pytest.raises(ValidationError, match="preflight"):
+        VisionAgentInput(
+            request=bootstrap,
+            preflight=VisionPreflight(
+                expected_evidence_fingerprint="sha256:" + "0" * 64,
+                observed_evidence_fingerprint="sha256:" + "1" * 64,
+            ),
+        )
+
+
+def test_revision_contract_prohibits_active_product_goal() -> None:
+    """Revisions cannot proceed after Product Goal activation."""
+    values: dict[str, object] = {
+        "schema_version": "agileforge.vision-input.v1",
+        "operation": "revision",
+        "project_name": "AgileForge",
+        "project_description": None,
+        "evidence": _evidence_bundle(),
+        "accepted_components": _components(),
+        "accepted_statement": "A durable workflow tool.",
+        "accepted_vision_fingerprint": "sha256:" + "0" * 64,
+        "revision_reason": "Clarify the target user.",
+        "active_product_goal_status": "none",
+        "prior_review_feedback": None,
+    }
+
+    assert VisionRevisionInput(**values).active_product_goal_status == "none"
+    with pytest.raises(ValidationError, match="active_product_goal_status"):
+        VisionRevisionInput.model_validate(
+            values | {"active_product_goal_status": "accepted"}
+        )
+
+
+def test_draft_output_exposes_only_vision_fields() -> None:
+    """Drafts exclude Product Goal and delivery-plan fields."""
+    expected = {
+        "schema_version",
+        "components",
+        "component_basis",
+        "draft_statement",
+        "assumptions",
+        "conflicts",
+        "clarifying_questions",
+        "is_complete",
+    }
+
+    assert set(VisionDraftOutput.model_fields) == expected
+    with pytest.raises(ValidationError, match="extra"):
+        VisionDraftOutput.model_validate(
+            {
+                "schema_version": "agileforge.vision-draft.v1",
+                "components": _components(),
+                "component_basis": (),
+                "draft_statement": "A durable workflow tool.",
+                "assumptions": (),
+                "conflicts": (),
+                "clarifying_questions": (),
+                "is_complete": True,
+                "product_goal": "Forbidden downstream field.",
+            }
         )
