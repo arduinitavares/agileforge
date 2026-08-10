@@ -169,6 +169,14 @@ def test_zero_one_and_multiple_remote_urls_are_sorted(git_repository: Path) -> N
         "ssh://example.test/zulu.git",
     )
 
+    repo.create_remote("local", str(git_repository / "private-source"))
+
+    assert probe.inspect(git_repository).remotes == (
+        str(git_repository / "private-source"),
+        "ssh://example.test/alpha.git",
+        "ssh://example.test/zulu.git",
+    )
+
 
 def test_non_ascii_and_surrogateescaped_paths_have_stable_normalization(
     tmp_path: Path,
