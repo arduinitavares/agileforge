@@ -77,9 +77,10 @@ Current checkout UI: `./agileforge-dev ui --profile local --port auto`
 
 Provenance: `./agileforge-dev info --profile local --json`
 
-Execute the command template returned by `workflow next`. Preserve its graph,
-fact, decision, and instance guards. Use a new idempotency key for each distinct
-request.
+Execute the command template returned by `workflow next`. AgileForge derives and
+validates internal guards from the current durable position. Operators provide
+only task-specific semantic fields and transport metadata such as idempotency key
+and actor. Use a new idempotency key for each distinct request.
 
 Start the checkout-local dashboard:
 

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import io
 import os
+import re
 import shutil
 import subprocess  # nosec B404
 import sys
@@ -25,6 +27,7 @@ from scripts.verify_distribution import (
     isolated_environment,
     tool_install_command,
     verify_archive_resources,
+    verify_archive_retired_labels_absent,
 )
 from services.agent_workbench.version import agileforge_version
 
@@ -347,6 +350,78 @@ def test_archive_resource_verification_requires_models_and_frontend(
         match=r"frontend/project\.js",
     ):
         verify_archive_resources(archive)
+
+
+def _write_archive_member(
+    archive: Path,
+    *,
+    archive_kind: str,
+    member_name: str,
+    content: bytes | None,
+) -> None:
+    """Write one directory or regular-file member to a distribution fixture."""
+    if archive_kind == "wheel":
+        with zipfile.ZipFile(archive, "w") as package:
+            package.writestr(member_name, b"" if content is None else content)
+        return
+
+    rooted_name = f"agileforge-0.1.0/{member_name}"
+    with tarfile.open(archive, "w:gz") as package:
+        member = tarfile.TarInfo(rooted_name)
+        if content is None:
+            member.type = tarfile.DIRTYPE
+            package.addfile(member)
+            return
+        member.size = len(content)
+        package.addfile(member, io.BytesIO(content))
+
+
+@pytest.mark.parametrize("archive_kind", ["wheel", "sdist"])
+def test_archive_retired_label_scan_rejects_directory_member_paths(
+    tmp_path: Path,
+    archive_kind: str,
+) -> None:
+    """Reject case-insensitive retired labels in directory-only members."""
+    retired_label = "BrOwN" + "FiElD"
+    archive = tmp_path / (
+        "agileforge.whl" if archive_kind == "wheel" else "agileforge.tar.gz"
+    )
+    _write_archive_member(
+        archive,
+        archive_kind=archive_kind,
+        member_name=f"package/{retired_label}/",
+        content=None,
+    )
+
+    with pytest.raises(
+        DistributionVerificationError,
+        match=re.escape(retired_label),
+    ):
+        verify_archive_retired_labels_absent(archive)
+
+
+@pytest.mark.parametrize("archive_kind", ["wheel", "sdist"])
+def test_archive_retired_label_scan_rejects_utf8_file_content(
+    tmp_path: Path,
+    archive_kind: str,
+) -> None:
+    """Reject case-insensitive retired labels in UTF-8 regular-file content."""
+    retired_label = "GrEeN" + "FiElD"
+    archive = tmp_path / (
+        "agileforge.whl" if archive_kind == "wheel" else "agileforge.tar.gz"
+    )
+    _write_archive_member(
+        archive,
+        archive_kind=archive_kind,
+        member_name="package/marker.txt",
+        content=f"retired label: {retired_label}\n".encode(),
+    )
+
+    with pytest.raises(
+        DistributionVerificationError,
+        match=r"package/marker\.txt",
+    ):
+        verify_archive_retired_labels_absent(archive)
 
 
 def test_clean_snapshot_build_excludes_ignored_stale_state_and_preserves_checkout(

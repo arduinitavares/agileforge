@@ -63,7 +63,6 @@ templates. A decision includes:
 
 - node and optional instance identity
 - request kind and reason code
-- graph, fact, and decision guards
 - required operator inputs
 - exact command template
 
@@ -72,13 +71,10 @@ position.
 
 ## Mutation Contract
 
-A positioned command carries the guards selected by the graph:
+A positioned command carries semantic inputs and transport metadata:
 
 ```text
 --project-id
---graph-version
---expected-fact-fingerprint
---expected-decision-fingerprint
 --instance-key
 --idempotency-key
 --actor
@@ -87,7 +83,9 @@ A positioned command carries the guards selected by the graph:
 
 Use `--instance-key` only when the returned template includes it. Model-backed
 commands take normalized input. Deterministic commands take their declared
-semantic fields. Preserve every graph-authored guard.
+semantic fields. AgileForge derives and validates internal guards from the
+current durable position. Operators provide only task-specific semantic fields
+and transport metadata such as idempotency key and actor.
 
 Use a new idempotency key for each distinct request. Reuse a key only to retry
 the exact same request after an uncertain transport result.

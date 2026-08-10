@@ -114,7 +114,6 @@ def patch_get_engine_globally(
         "repositories.story",
         "tools.story_query_tools",
         "tools.db_tools",
-        "tools.spec_tools",
         "services.read_projections",
     ]
 

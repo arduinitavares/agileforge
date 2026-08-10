@@ -337,10 +337,13 @@ def _archive_text_members(archive: Path) -> tuple[tuple[str, bytes], ...]:
 
 def verify_archive_retired_labels_absent(archive: Path) -> None:
     """Reject retired labels in archive paths and UTF-8 text members."""
-    offenders: list[str] = []
+    offenders = [
+        member_name
+        for member_name in _archive_members(archive)
+        if any(label in member_name.casefold() for label in _RETIRED_LABELS)
+    ]
     for member_name, raw_content in _archive_text_members(archive):
-        if any(label in member_name.casefold() for label in _RETIRED_LABELS):
-            offenders.append(member_name)
+        if member_name in offenders:
             continue
         try:
             content = raw_content.decode("utf-8")

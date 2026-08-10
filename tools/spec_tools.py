@@ -9,7 +9,6 @@ from pydantic import BaseModel, Field
 from sqlmodel import Session
 
 from models.core import Feature, UserStory
-from models.db import engine, get_engine
 from models.specs import CompiledSpecAuthority
 from services.specs.compiler_service import (
     CheckSpecAuthorityStatusInput as _service_CheckSpecAuthorityStatusInput,
@@ -120,8 +119,6 @@ from utils.spec_schemas import (
 )
 
 logger: logging.Logger = logging.getLogger(name=__name__)
-_LEGACY_DB_EXPORTS = (engine, get_engine)
-
 # --- Input Schemas ---
 
 PreviewSpecAuthorityInput = _service_PreviewSpecAuthorityInput

@@ -5,7 +5,6 @@ import json
 from pathlib import Path
 
 import pytest
-from sqlalchemy.engine import Engine
 from sqlmodel import Session, select
 
 from adapters.adk.prompts.specification import (
@@ -90,10 +89,8 @@ def _assert_v3_instruction_contract(instructions: str) -> None:
 
 
 @pytest.fixture
-def sample_project(session: Session, engine: Engine) -> Project:
+def sample_project(session: Session) -> Project:
     """Create a project without spec."""
-    spec_tools.engine = engine
-
     project = Project(
         name="Compile Tool Project",
         description="Project for compile tool tests",

@@ -282,7 +282,7 @@ def _run_async_task[T](coro: Coroutine[Any, Any, T]) -> T:
 
 
 def _resolve_engine() -> Engine | Connection | None:
-    """Preserve the legacy spec_tools.engine monkeypatch seam for tests."""
+    """Resolve the service override or current application engine."""
     return cast(
         "Engine | Connection | None",
         resolve_spec_engine(

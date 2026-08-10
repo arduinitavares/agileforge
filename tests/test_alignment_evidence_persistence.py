@@ -6,7 +6,6 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
-from sqlalchemy.engine import Engine
 from sqlmodel import Session
 
 from agile_sqlmodel import (
@@ -19,7 +18,6 @@ from agile_sqlmodel import (
 from models.core import Epic, Feature, Theme
 from services.specs.authority_selection import pending_authority_fingerprint
 from tests.workflow.lifecycle_fixtures import seed_accepted_specification
-from tools import spec_tools
 from tools.spec_tools import (
     validate_story_with_spec_authority,
 )
@@ -34,10 +32,8 @@ from utils.spec_schemas import (
 
 
 @pytest.fixture
-def project_with_spec(session: Session, engine: Engine) -> tuple[Project, int]:
+def project_with_spec(session: Session) -> tuple[Project, int]:
     """Create project with a pre-compiled spec authority."""
-    spec_tools.engine = engine
-
     project = Project(name="Alignment Project", vision="Test")
     session.add(project)
     session.commit()
@@ -167,12 +163,10 @@ def _create_story(session: Session, project_id: int, title: str) -> UserStory:
 
 
 def test_alignment_failure_persisted(
-    engine: Engine,
     session: Session,
     project_with_spec: tuple[Project, int],
 ) -> None:
     """Alignment rejection persists alignment_failures in evidence."""
-    spec_tools.engine: Engine = engine
     project, spec_version_id = project_with_spec
 
     story: UserStory = _create_story(
@@ -196,10 +190,8 @@ def test_alignment_failure_persisted(
     )
 
 
-def test_alignment_warning_persisted(engine: Engine, session: Session) -> None:
+def test_alignment_warning_persisted(session: Session) -> None:
     """Alignment warning persists alignment_warnings in evidence."""
-    spec_tools.engine = engine
-
     project = Project(name="Warn Project", vision="Test")
     session.add(project)
     session.commit()
@@ -280,12 +272,10 @@ def test_alignment_warning_persisted(engine: Engine, session: Session) -> None:
 
 
 def test_alignment_evidence_includes_spec_and_hash(
-    engine: Engine,
     session: Session,
     project_with_spec: tuple[Project, int],
 ) -> None:
     """Evidence includes spec_version_id and input_hash without vision access."""
-    spec_tools.engine = engine
     project, spec_version_id = project_with_spec
 
     story: UserStory = _create_story(

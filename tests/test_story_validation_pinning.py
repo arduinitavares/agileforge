@@ -19,7 +19,6 @@ from unittest.mock import patch
 
 import pytest
 from pydantic import ValidationError
-from sqlalchemy.engine import Engine
 from sqlmodel import Session
 
 from agile_sqlmodel import (
@@ -151,10 +150,8 @@ def _create_feature_hierarchy(
 
 
 @pytest.fixture
-def sample_project(session: Session, engine: Engine) -> Project:
+def sample_project(session: Session) -> Project:
     """Create a project for testing."""
-    spec_tools.engine = engine
-
     project = Project(
         name="Validation Test Project",
         description="Project for validation pinning tests",
@@ -408,11 +405,9 @@ class TestFailFastIfNotCompiled:
     """Tests that validation fails if spec is not compiled."""
 
     def test_validation_fails_for_nonexistent_spec_version(
-        self, sample_story: UserStory, engine: Engine
+        self, sample_story: UserStory
     ) -> None:
         """Clear error when spec_version_id doesn't exist."""
-        spec_tools.engine = engine
-
         result = validate_story_with_spec_authority(
             {"story_id": sample_story.story_id, "spec_version_id": 99999},
             tool_context=None,
@@ -426,11 +421,8 @@ class TestFailFastIfNotCompiled:
         session: Session,
         sample_project: Project,
         sample_story: UserStory,
-        engine: Engine,
     ) -> None:
         """Approved but uncompiled spec fails with clear message."""
-        spec_tools.engine = engine
-
         spec = _accepted_spec(
             session,
             project_id=_require_id(sample_project.project_id, "project_id"),
@@ -455,11 +447,8 @@ class TestEvidencePersistence:
         session: Session,
         sample_story: UserStory,
         compiled_spec: SpecRegistry,
-        engine: Engine,
     ) -> None:
         """Evidence is stored when validation passes."""
-        spec_tools.engine = engine
-
         result = validate_story_with_spec_authority(
             {
                 "story_id": sample_story.story_id,
@@ -488,11 +477,8 @@ class TestEvidencePersistence:
         session: Session,
         sample_project: Project,
         compiled_spec: SpecRegistry,
-        engine: Engine,
     ) -> None:
         """Evidence is stored even when validation fails."""
-        spec_tools.engine = engine
-
         feature = _create_feature_hierarchy(
             session,
             project_id=_require_id(
@@ -540,11 +526,8 @@ class TestEvidencePersistence:
         session: Session,
         sample_story: UserStory,
         compiled_spec: SpecRegistry,
-        engine: Engine,
     ) -> None:
         """Evidence contains all required fields per schema."""
-        spec_tools.engine = engine
-
         validate_story_with_spec_authority(
             {
                 "story_id": sample_story.story_id,
@@ -581,11 +564,8 @@ class TestDeterministicInputHashing:
         session: Session,
         sample_project: Project,
         compiled_spec: SpecRegistry,
-        engine: Engine,
     ) -> None:
         """Identical story content produces identical input_hash."""
-        spec_tools.engine = engine
-
         project_id = _require_id(sample_project.project_id, "sample_project.project_id")
         feature = _create_feature_hierarchy(
             session,
@@ -652,11 +632,8 @@ class TestDeterministicInputHashing:
         session: Session,
         sample_project: Project,
         compiled_spec: SpecRegistry,
-        engine: Engine,
     ) -> None:
         """Different story content produces different input_hash."""
-        spec_tools.engine = engine
-
         project_id = _require_id(sample_project.project_id, "sample_project.project_id")
         feature = _create_feature_hierarchy(
             session,
@@ -722,11 +699,9 @@ class TestWrongSpecVersionIdFails:
         sample_project: Project,
         sample_story: UserStory,
         compiled_spec: SpecRegistry,
-        engine: Engine,
     ) -> None:
         """Validation fails if spec belongs to different project."""
         del sample_project, compiled_spec
-        spec_tools.engine = engine
 
         other_project = Project(
             name="Other Project",
@@ -782,11 +757,8 @@ class TestValidatorVersion:
         session: Session,
         sample_story: UserStory,
         compiled_spec: SpecRegistry,
-        engine: Engine,
     ) -> None:
         """validator_version is stored in evidence."""
-        spec_tools.engine = engine
-
         validate_story_with_spec_authority(
             {
                 "story_id": sample_story.story_id,

@@ -5,7 +5,6 @@ from datetime import UTC, datetime
 from typing import Never
 
 import pytest
-from sqlalchemy.engine import Engine
 from sqlmodel import Session
 
 from agile_sqlmodel import (
@@ -175,9 +174,8 @@ def _build_authority_for_alignment(
 
 
 @pytest.fixture
-def setup_validation_case(session: Session, engine: Engine) -> tuple[UserStory, int]:
+def setup_validation_case(session: Session) -> tuple[UserStory, int]:
     """Create one project/spec/story tuple for mode tests."""
-    spec_tools.engine = engine
     project = Project(name="Validation Modes", vision="Test")
     session.add(project)
     session.commit()
@@ -729,10 +727,9 @@ def test_deterministic_alignment_no_invariants() -> None:
 
 
 def test_hybrid_mode_ignores_policy_boilerplate_when_llm_passes(
-    session: Session, engine: Engine, monkeypatch: pytest.MonkeyPatch
+    session: Session, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Verify hybrid mode ignores policy boilerplate when llm passes."""
-    spec_tools.engine = engine
     project = Project(name="Policy Context", vision="Test")
     session.add(project)
     session.commit()

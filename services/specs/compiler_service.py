@@ -2596,7 +2596,7 @@ def _render_invariant_summary(invariant: Invariant) -> str:
 
 
 def _resolve_engine() -> Engine | Connection | None:
-    """Preserve the legacy spec_tools.engine monkeypatch seam for tests."""
+    """Resolve the service override or current application engine."""
     return cast(
         "Engine | Connection | None",
         resolve_spec_engine(

@@ -90,10 +90,13 @@ For every advertised command:
 
 1. Record the original command template.
 2. Substitute only declared operator inputs.
-3. Preserve project, graph, fact, decision, and instance guards.
-4. Record the final argv without secrets.
-5. Execute through the same launcher and profile.
-6. Record the result and the next facts-only position.
+3. Record the final argv without secrets.
+4. Execute through the same launcher and profile.
+5. Record the result and the next facts-only position.
+
+AgileForge derives and validates internal guards from the current durable
+position. Operators provide only task-specific semantic fields and transport
+metadata such as idempotency key and actor.
 
 Use a distinct idempotency key for each distinct request. Stop when a fully
 instantiated advertised command cannot parse or when unchanged current guards

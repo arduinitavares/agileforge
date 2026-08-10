@@ -23,6 +23,11 @@ CURRENT_OPERATING_DOCS = (
     CLI_MANUAL_PATH,
     ACCEPTANCE_CHECKLIST_PATH,
 )
+SEMANTIC_MUTATION_DOCS = (
+    README_PATH,
+    CLI_MANUAL_PATH,
+    ACCEPTANCE_CHECKLIST_PATH,
+)
 
 
 def _read(path: Path) -> str:
@@ -60,6 +65,35 @@ def test_current_operating_docs_exclude_removed_runtime_guidance() -> None:
         text = _read(path)
         assert removed_session_db_variable not in text
         assert old_user_shim not in text
+
+
+def test_operator_docs_expose_only_semantic_mutation_inputs() -> None:
+    """Keep internal graph guards out of the public operator contract."""
+    forbidden_flags = (
+        "--graph-version",
+        "--expected-fact-fingerprint",
+        "--expected-decision-fingerprint",
+    )
+    internal_guard_instruction = re.compile(
+        r"\bpreserv\w*\b[^.\n]{0,120}"
+        r"\b(?:graph|fact|decision|instance)(?:-[a-z]+)?\b"
+        r"[^.\n]{0,80}\bguard",
+        flags=re.IGNORECASE,
+    )
+
+    for path in SEMANTIC_MUTATION_DOCS:
+        text = " ".join(_read(path).split())
+        for flag in forbidden_flags:
+            assert flag not in text
+        assert internal_guard_instruction.search(text) is None
+        assert (
+            "AgileForge derives and validates internal guards from the current "
+            "durable position."
+        ) in text
+        assert (
+            "Operators provide only task-specific semantic fields and transport "
+            "metadata such as idempotency key and actor."
+        ) in text
 
 
 def test_docs_separate_stable_and_checkout_local_commands() -> None:
