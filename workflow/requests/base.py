@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
-from typing import ClassVar, Literal, Self, get_args, get_origin
+from typing import Annotated, ClassVar, Literal, Self, get_args, get_origin
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, StringConstraints, model_validator
+
+type ReviewRationale = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1),
+]
 
 
 class GuardedRequest(BaseModel):

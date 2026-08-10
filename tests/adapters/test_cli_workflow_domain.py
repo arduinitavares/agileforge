@@ -1,5 +1,6 @@
 """CLI adapter tests for the WorkflowDomain cutover."""
 
+import argparse
 import importlib
 import shlex
 from pathlib import Path
@@ -59,6 +60,27 @@ _SEMANTIC_TEXT_COMMANDS = (
     (
         "authority decide --project-id 41 --decision accepted --rationale {value} "
         "--idempotency-key authority-review-41 --actor operator",
+        "rationale",
+    ),
+    (
+        "backlog decide --project-id 41 --decision accepted --rationale {value} "
+        "--idempotency-key backlog-review-41 --actor operator",
+        "rationale",
+    ),
+    (
+        "roadmap decide --project-id 41 --decision accepted --rationale {value} "
+        "--idempotency-key roadmap-review-41 --actor operator",
+        "rationale",
+    ),
+    (
+        "story decide --project-id 41 --instance-key requirement:req-7 "
+        "--decision accepted --rationale {value} "
+        "--idempotency-key story-review-41 --actor operator",
+        "rationale",
+    ),
+    (
+        "sprint decide --project-id 41 --decision accepted --rationale {value} "
+        "--idempotency-key sprint-review-41 --actor operator",
         "rationale",
     ),
 )
@@ -229,6 +251,10 @@ class _SemanticTextApplication:
             "review_product_goal",
             "review_specification",
             "review_vision",
+            "decide_backlog",
+            "decide_roadmap",
+            "decide_sprint_plan",
+            "decide_story",
         }
     )
 
@@ -347,6 +373,111 @@ def test_removed_agentic_cli_flags_fail_parser_validation(flag: str) -> None:
                 flag,
                 "caller-owned",
             ]
+        )
+
+
+@pytest.mark.parametrize(
+    ("group", "extra"),
+    [
+        ("backlog", []),
+        ("roadmap", []),
+        ("story", ["--instance-key", "requirement:req-7"]),
+        ("sprint", []),
+    ],
+)
+def test_delivery_review_commands_use_semantic_flags_without_request_file(
+    group: str,
+    extra: list[str],
+) -> None:
+    """Parse four task-specific reviews without artifact request files."""
+    parsed = cli_main.build_parser().parse_args(
+        [
+            group,
+            "decide",
+            "--project-id",
+            "41",
+            *extra,
+            "--decision",
+            "accepted",
+            "--rationale",
+            "Reviewed current artifact.",
+            "--idempotency-key",
+            f"{group}-review-41",
+            "--actor",
+            "operator",
+        ]
+    )
+
+    assert parsed.decision == "accepted"
+    assert parsed.rationale == "Reviewed current artifact."
+    assert not hasattr(parsed, "request_file")
+
+
+@pytest.mark.parametrize("group", ["backlog", "roadmap", "story", "sprint"])
+def test_delivery_review_commands_reject_request_file(group: str) -> None:
+    """Remove the generic request-file contract from all delivery reviews."""
+    extra = ["--instance-key", "requirement:req-7"] if group == "story" else []
+    with pytest.raises(ValueError, match="unrecognized arguments"):
+        cli_main.build_parser().parse_args(
+            [
+                group,
+                "decide",
+                "--project-id",
+                "41",
+                *extra,
+                "--decision",
+                "accepted",
+                "--rationale",
+                "Reviewed current artifact.",
+                "--idempotency-key",
+                f"{group}-review-41",
+                "--actor",
+                "operator",
+                "--request-file",
+                "review.json",
+            ]
+        )
+
+
+def test_story_review_requires_exact_instance_selector() -> None:
+    """Refuse to choose between repeated Story review decisions implicitly."""
+    with pytest.raises(ValueError, match="--instance-key"):
+        cli_main.build_parser().parse_args(
+            [
+                "story",
+                "decide",
+                "--project-id",
+                "41",
+                "--decision",
+                "accepted",
+                "--rationale",
+                "Reviewed current artifact.",
+                "--idempotency-key",
+                "story-review-41",
+                "--actor",
+                "operator",
+            ]
+        )
+
+
+@pytest.mark.parametrize("field", ["artifact_fingerprint", "plan_fingerprint"])
+def test_guarded_payload_rejects_artifact_guards(field: str) -> None:
+    """Keep review fingerprints out of retained generic request files."""
+    position = position_fixture()
+    args = argparse.Namespace(
+        request_kind="apply_story_dependencies",
+        project_id=41,
+        idempotency_key="generic-41",
+        actor="operator",
+        correlation_id=None,
+    )
+
+    with pytest.raises(ValueError, match="semantic fields only"):
+        cli_main._guarded_payload(
+            args,
+            {field: "caller-owned"},
+            position,
+            position.decisions[0],
         )
 
 

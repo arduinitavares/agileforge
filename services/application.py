@@ -35,6 +35,7 @@ from models.workflow import (
     BacklogArtifactDecision,
     RoadmapArtifact,
     RoadmapArtifactDecision,
+    SprintPlanArtifact,
     StoryArtifact,
     StoryArtifactDecision,
 )
@@ -100,8 +101,12 @@ from workflow.requests import (
     AbandonProductGoal,
     BeginVisionRevision,
     DecideAuthority,
+    DecideBacklog,
     DecideProductGoalReview,
+    DecideRoadmap,
     DecideSpecification,
+    DecideSprintPlan,
+    DecideStory,
     DecideVisionReview,
     FulfillProductGoal,
     RecordAuthorityFeedback,
@@ -118,6 +123,12 @@ if TYPE_CHECKING:
     from workflow.requests import TransitionRequest
 
 _JSON_OBJECT = TypeAdapter(JsonObject)
+type DeliveryReviewFactType = Literal[
+    "backlog",
+    "roadmap",
+    "story",
+    "sprint_plan",
+]
 
 
 class WorkflowDomainPort(Protocol):
@@ -224,6 +235,23 @@ class _AuthorityRepairInputPort(Protocol):
         project_id: int,
         decision: NodeDecision,
     ) -> JsonObject | None: ...
+
+
+class _DeliveryReviewSelectionPort(Protocol):
+    """Resolve replay and durable artifact identity for delivery reviews."""
+
+    def replay_transition(
+        self,
+        query: TransitionReplayQuery,
+    ) -> TransitionResult | None: ...
+
+    def review_identity(
+        self,
+        *,
+        project_id: int,
+        decision: NodeDecision,
+        fact_type: DeliveryReviewFactType,
+    ) -> tuple[int, str] | None: ...
 
 
 class _DeliveryActionInputPort(Protocol):
@@ -350,6 +378,69 @@ class AuthorityRepairInputService:
             "source_authority_fingerprint": reference.fingerprint,
             "compiler_input": compiler_input,
         }
+
+
+@dataclass(frozen=True)
+class DeliveryReviewSelectionService:
+    """Verify graph-selected delivery artifacts against durable rows."""
+
+    engine: Engine
+
+    def replay_transition(
+        self,
+        query: TransitionReplayQuery,
+    ) -> TransitionResult | None:
+        """Replay one delivery review before reading its current position."""
+        return DurableTransitionReplayService(engine=self.engine).replay(query)
+
+    def review_identity(
+        self,
+        *,
+        project_id: int,
+        decision: NodeDecision,
+        fact_type: DeliveryReviewFactType,
+    ) -> tuple[int, str] | None:
+        """Return an exact artifact identity only when its durable row matches."""
+        target = _integer_fact_reference(decision, fact_type)
+        if target is None:
+            return None
+        artifact_id, reference = target
+        with Session(self.engine) as session:
+            if fact_type == "backlog":
+                artifact = session.get(BacklogArtifact, artifact_id)
+                valid = (
+                    artifact is not None
+                    and artifact.project_id == project_id
+                    and artifact.backlog_artifact_id == artifact_id
+                    and artifact.content_fingerprint == reference.fingerprint
+                )
+            elif fact_type == "roadmap":
+                artifact = session.get(RoadmapArtifact, artifact_id)
+                valid = (
+                    artifact is not None
+                    and artifact.project_id == project_id
+                    and artifact.roadmap_artifact_id == artifact_id
+                    and artifact.content_fingerprint == reference.fingerprint
+                )
+            elif fact_type == "story":
+                artifact = session.get(StoryArtifact, artifact_id)
+                valid = (
+                    artifact is not None
+                    and artifact.project_id == project_id
+                    and artifact.story_artifact_id == artifact_id
+                    and artifact.content_fingerprint == reference.fingerprint
+                    and decision.instance_key
+                    == f"requirement:{artifact.requirement_id}"
+                )
+            else:
+                artifact = session.get(SprintPlanArtifact, artifact_id)
+                valid = (
+                    artifact is not None
+                    and artifact.project_id == project_id
+                    and artifact.sprint_plan_artifact_id == artifact_id
+                    and artifact.plan_fingerprint == reference.fingerprint
+                )
+        return (artifact_id, reference.fingerprint) if valid else None
 
 
 @dataclass(frozen=True)
@@ -530,6 +621,7 @@ class _LifecycleServiceOptions(TypedDict, total=False):
     authority_compilation_input: _AuthorityCompilationInputPort | None
     authority_review_selection: _AuthorityReviewSelectionPort | None
     authority_repair_input: _AuthorityRepairInputPort | None
+    delivery_review_selection: _DeliveryReviewSelectionPort | None
     delivery_action_input: _DeliveryActionInputPort | None
     sprint_planning_input: _SprintPlanningInputPort | None
 
@@ -684,6 +776,35 @@ class DeliveryActionRequest(FrozenModel):
     idempotency_key: str = Field(min_length=1)
     actor: str = Field(min_length=1)
     correlation_id: str | None = None
+
+
+class _DeliveryReviewRequest(FrozenModel):
+    """Semantic operator input shared by task-specific delivery reviews."""
+
+    project_id: int
+    decision: Literal["accepted", "rejected", "feedback"]
+    rationale: SemanticText
+    idempotency_key: str = Field(min_length=1)
+    actor: str = Field(min_length=1)
+    correlation_id: str | None = None
+
+
+class BacklogReviewRequest(_DeliveryReviewRequest):
+    """Operator choice for the graph-selected pending Backlog."""
+
+
+class RoadmapReviewRequest(_DeliveryReviewRequest):
+    """Operator choice for the graph-selected pending Roadmap."""
+
+
+class StoryReviewRequest(_DeliveryReviewRequest):
+    """Operator choice for one exact repeated Story review instance."""
+
+    instance_key: SemanticText
+
+
+class SprintPlanReviewRequest(_DeliveryReviewRequest):
+    """Operator choice for the graph-selected pending Sprint plan."""
 
 
 class SprintPlanningRequest(FrozenModel):
@@ -915,6 +1036,9 @@ class AgileForgeApplication:
             "authority_review_selection"
         )
         self._authority_repair_input = lifecycle_services.get("authority_repair_input")
+        self._delivery_review_selection = lifecycle_services.get(
+            "delivery_review_selection"
+        )
         self._delivery_action_input = lifecycle_services.get("delivery_action_input")
         self._sprint_planning_input = lifecycle_services.get("sprint_planning_input")
         self._project_lifecycle: ProjectLifecycleService | None = None
@@ -1144,6 +1268,218 @@ class AgileForgeApplication:
                 idempotency_key=request.idempotency_key,
                 actor=request.actor,
                 correlation_id=request.correlation_id,
+            )
+        )
+
+    def decide_backlog(self, request: BacklogReviewRequest) -> TransitionResult:
+        """Resolve and review the unique current Backlog artifact internally."""
+        selection = self._delivery_review_selection
+        if selection is None:
+            return _transition_not_available(None, "backlog.review")
+        replay = self._replay_delivery_review(
+            request_kind="decide_backlog",
+            request=request,
+        )
+        if replay is not None:
+            return replay
+        position = self.position(project_id=request.project_id)
+        decision = _unique_available_decision(position, "backlog.review")
+        identity = (
+            None
+            if decision is None
+            else selection.review_identity(
+                project_id=request.project_id,
+                decision=decision,
+                fact_type="backlog",
+            )
+        )
+        if decision is None or identity is None:
+            return _transition_not_available(position, "backlog.review")
+        artifact_id, fingerprint = identity
+        return self.transition(
+            DecideBacklog(
+                project_id=request.project_id,
+                graph_version=position.graph_version,
+                fact_fingerprint=position.fact_fingerprint,
+                decision_fingerprint=decision.decision_fingerprint,
+                instance_key=decision.instance_key,
+                idempotency_key=request.idempotency_key,
+                actor=request.actor,
+                correlation_id=request.correlation_id,
+                backlog_artifact_id=artifact_id,
+                artifact_fingerprint=fingerprint,
+                decision=request.decision,
+                rationale=request.rationale,
+            )
+        )
+
+    def decide_roadmap(self, request: RoadmapReviewRequest) -> TransitionResult:
+        """Resolve and review the unique current Roadmap artifact internally."""
+        selection = self._delivery_review_selection
+        if selection is None:
+            return _transition_not_available(None, "planning.roadmap.review")
+        replay = self._replay_delivery_review(
+            request_kind="decide_roadmap",
+            request=request,
+        )
+        if replay is not None:
+            return replay
+        position = self.position(project_id=request.project_id)
+        decision = _unique_available_decision(position, "planning.roadmap.review")
+        identity = (
+            None
+            if decision is None
+            else selection.review_identity(
+                project_id=request.project_id,
+                decision=decision,
+                fact_type="roadmap",
+            )
+        )
+        if decision is None or identity is None:
+            return _transition_not_available(position, "planning.roadmap.review")
+        artifact_id, fingerprint = identity
+        return self.transition(
+            DecideRoadmap(
+                project_id=request.project_id,
+                graph_version=position.graph_version,
+                fact_fingerprint=position.fact_fingerprint,
+                decision_fingerprint=decision.decision_fingerprint,
+                instance_key=decision.instance_key,
+                idempotency_key=request.idempotency_key,
+                actor=request.actor,
+                correlation_id=request.correlation_id,
+                roadmap_artifact_id=artifact_id,
+                artifact_fingerprint=fingerprint,
+                decision=request.decision,
+                rationale=request.rationale,
+            )
+        )
+
+    def decide_story(self, request: StoryReviewRequest) -> TransitionResult:
+        """Resolve and review one exact current Story artifact instance."""
+        selection = self._delivery_review_selection
+        if selection is None:
+            return _transition_not_available(None, "planning.story.review")
+        replay = self._replay_delivery_review(
+            request_kind="decide_story",
+            request=request,
+            instance_key=request.instance_key,
+        )
+        if replay is not None:
+            return replay
+        position = self.position(project_id=request.project_id)
+        decision = _unique_available_decision(
+            position,
+            "planning.story.review",
+            instance_key=request.instance_key,
+        )
+        identity = (
+            None
+            if decision is None
+            else selection.review_identity(
+                project_id=request.project_id,
+                decision=decision,
+                fact_type="story",
+            )
+        )
+        instance_key = None if decision is None else decision.instance_key
+        prefix = "requirement:"
+        if (
+            decision is None
+            or identity is None
+            or instance_key is None
+            or not instance_key.startswith(prefix)
+            or not instance_key.removeprefix(prefix)
+        ):
+            return _transition_not_available(position, "planning.story.review")
+        artifact_id, fingerprint = identity
+        return self.transition(
+            DecideStory(
+                project_id=request.project_id,
+                graph_version=position.graph_version,
+                fact_fingerprint=position.fact_fingerprint,
+                decision_fingerprint=decision.decision_fingerprint,
+                instance_key=instance_key,
+                idempotency_key=request.idempotency_key,
+                actor=request.actor,
+                correlation_id=request.correlation_id,
+                requirement_id=instance_key.removeprefix(prefix),
+                story_artifact_id=artifact_id,
+                artifact_fingerprint=fingerprint,
+                decision=request.decision,
+                rationale=request.rationale,
+            )
+        )
+
+    def decide_sprint_plan(
+        self,
+        request: SprintPlanReviewRequest,
+    ) -> TransitionResult:
+        """Resolve and review the unique current Sprint plan internally."""
+        selection = self._delivery_review_selection
+        if selection is None:
+            return _transition_not_available(None, "planning.sprint.review")
+        replay = self._replay_delivery_review(
+            request_kind="decide_sprint_plan",
+            request=request,
+        )
+        if replay is not None:
+            return replay
+        position = self.position(project_id=request.project_id)
+        decision = _unique_available_decision(position, "planning.sprint.review")
+        identity = (
+            None
+            if decision is None
+            else selection.review_identity(
+                project_id=request.project_id,
+                decision=decision,
+                fact_type="sprint_plan",
+            )
+        )
+        if decision is None or identity is None:
+            return _transition_not_available(position, "planning.sprint.review")
+        artifact_id, fingerprint = identity
+        return self.transition(
+            DecideSprintPlan(
+                project_id=request.project_id,
+                graph_version=position.graph_version,
+                fact_fingerprint=position.fact_fingerprint,
+                decision_fingerprint=decision.decision_fingerprint,
+                instance_key=decision.instance_key,
+                idempotency_key=request.idempotency_key,
+                actor=request.actor,
+                correlation_id=request.correlation_id,
+                sprint_plan_artifact_id=artifact_id,
+                plan_fingerprint=fingerprint,
+                decision=request.decision,
+                rationale=request.rationale,
+            )
+        )
+
+    def _replay_delivery_review(
+        self,
+        *,
+        request_kind: str,
+        request: _DeliveryReviewRequest,
+        instance_key: str | None = None,
+    ) -> TransitionResult | None:
+        selection = self._delivery_review_selection
+        if selection is None:
+            return None
+        operator_input: JsonObject = {
+            "decision": request.decision,
+            "rationale": request.rationale,
+        }
+        if instance_key is not None:
+            operator_input["instance_key"] = instance_key
+        return selection.replay_transition(
+            TransitionReplayQuery(
+                request_kind=request_kind,
+                project_id=request.project_id,
+                idempotency_key=request.idempotency_key,
+                actor=request.actor,
+                correlation_id=request.correlation_id,
+                operator_input=operator_input,
             )
         )
 
@@ -2759,6 +3095,7 @@ def production_application() -> AgileForgeApplication:
         authority_compilation_input=AuthorityCompilationInputService(engine=engine),
         authority_review_selection=AuthorityReviewSelectionService(engine=engine),
         authority_repair_input=AuthorityRepairInputService(engine=engine),
+        delivery_review_selection=DeliveryReviewSelectionService(engine=engine),
         delivery_action_input=DeliveryActionInputService(engine=engine),
         sprint_planning_input=SprintPlanningInputService(engine=engine),
     )
@@ -2781,9 +3118,11 @@ __all__ = [
     "AuthorityRepairRequest",
     "AuthorityReviewRequest",
     "AuthorityReviewSelectionService",
+    "BacklogReviewRequest",
     "CreateProjectCommand",
     "DeliveryActionInputService",
     "DeliveryActionRequest",
+    "DeliveryReviewSelectionService",
     "DiscoveryArtifactRequest",
     "ProductGoalInterviewRequest",
     "ProductGoalLifecycleServices",
@@ -2794,10 +3133,13 @@ __all__ = [
     "RepositoryAttachmentCommand",
     "RepositoryRefreshCommand",
     "RepositoryRefreshRequest",
+    "RoadmapReviewRequest",
     "SpecificationCandidateRequest",
     "SpecificationReviewRequest",
+    "SprintPlanReviewRequest",
     "SprintPlanningInputService",
     "SprintPlanningRequest",
+    "StoryReviewRequest",
     "VisionInterviewRequest",
     "VisionResponseRequest",
     "VisionReviewRequest",

@@ -7,7 +7,7 @@ from typing import ClassVar, Literal, Self
 from pydantic import Field, TypeAdapter, model_validator
 
 from workflow.contracts import JsonObject
-from workflow.requests.base import PositionedRequest
+from workflow.requests.base import PositionedRequest, ReviewRationale
 
 _JSON_OBJECT = TypeAdapter(JsonObject)
 
@@ -58,7 +58,7 @@ class DecideBacklog(PositionedRequest):
     backlog_artifact_id: int
     artifact_fingerprint: str = Field(min_length=1)
     decision: Literal["accepted", "rejected", "feedback"]
-    rationale: str = Field(min_length=1)
+    rationale: ReviewRationale
 
 
 class ReconcileBacklog(PositionedRequest):

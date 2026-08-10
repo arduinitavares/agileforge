@@ -205,6 +205,79 @@ def test_lifecycle_positions_render_semantic_commands() -> None:
         assert payload["commands"][0]["command"].startswith(command_prefix)
 
 
+def test_delivery_reviews_render_fingerprint_free_semantic_commands() -> None:
+    """Render all four waiting reviews without request files or artifact guards."""
+    decisions = (
+        NodeDecision(
+            node_id="backlog.review",
+            child_graph_id="backlog",
+            request_kind="decide_backlog",
+            category=NodeCategory.WAITING,
+            recommendation_kind=RecommendationKind.REQUIRED,
+            reason_code="BACKLOG_REVIEW_REQUIRED",
+            decision_fingerprint="decision-backlog",
+        ),
+        NodeDecision(
+            node_id="planning.roadmap.review",
+            child_graph_id="planning",
+            request_kind="decide_roadmap",
+            category=NodeCategory.WAITING,
+            recommendation_kind=RecommendationKind.REQUIRED,
+            reason_code="ROADMAP_REVIEW_REQUIRED",
+            decision_fingerprint="decision-roadmap",
+        ),
+        NodeDecision(
+            node_id="planning.story.review",
+            instance_key="requirement:req-7",
+            child_graph_id="planning",
+            request_kind="decide_story",
+            category=NodeCategory.WAITING,
+            recommendation_kind=RecommendationKind.REQUIRED,
+            reason_code="STORY_REVIEW_REQUIRED",
+            decision_fingerprint="decision-story",
+        ),
+        NodeDecision(
+            node_id="planning.sprint.review",
+            child_graph_id="planning",
+            request_kind="decide_sprint_plan",
+            category=NodeCategory.WAITING,
+            recommendation_kind=RecommendationKind.REQUIRED,
+            reason_code="SPRINT_REVIEW_REQUIRED",
+            decision_fingerprint="decision-sprint",
+        ),
+    )
+    position = position_fixture().model_copy(
+        update={
+            "decisions": decisions,
+            "available_nodes": (),
+            "waiting_nodes": tuple(item.node_id for item in decisions),
+            "blocked_nodes": (),
+            "invalid_nodes": (),
+        }
+    )
+
+    commands = render_workflow_next(position)["commands"]
+
+    assert len(commands) == len(decisions)
+    for item in commands:
+        command = item["command"]
+        assert "--decision <decision>" in command
+        assert "--rationale <rationale>" in command
+        assert "--request-file" not in command
+        assert "fingerprint" not in command
+        parsed = build_parser().parse_args(
+            [
+                _PLACEHOLDERS.get(argument, argument)
+                for argument in shlex.split(command)[1:]
+            ]
+        )
+        assert parsed.decision == "accepted"
+    story_command = next(
+        item["command"] for item in commands if item["request_kind"] == "decide_story"
+    )
+    assert "--instance-key requirement:req-7" in story_command
+
+
 def test_sprint_generation_advertises_parser_valid_capacity_remediation() -> None:
     """Emit one callable semantic command with an explicit capacity placeholder."""
     decision = NodeDecision(

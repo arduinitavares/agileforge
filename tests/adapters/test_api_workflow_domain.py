@@ -1,5 +1,6 @@
 """API adapter tests for exact typed workflow requests."""
 
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from http import HTTPStatus
 from pathlib import Path
@@ -7,8 +8,8 @@ from typing import TYPE_CHECKING, cast
 
 import pytest
 from fastapi.testclient import TestClient
-from pydantic import ValidationError
-from sqlmodel import Session
+from pydantic import BaseModel, ValidationError
+from sqlmodel import Session, select
 
 import api as api_module
 from api import (
@@ -21,7 +22,13 @@ from api import (
     build_create_project_command,
 )
 from cli.workflow_commands import COMMAND_PREFIXES
-from models.workflow import WorkflowTransitionReceipt
+from models.workflow import (
+    BacklogArtifact,
+    RoadmapArtifact,
+    SprintPlanArtifact,
+    StoryArtifact,
+    WorkflowTransitionReceipt,
+)
 from repositories.workflow import WorkflowFactRepository
 from services.application import (
     AgenticActionRequest,
@@ -32,15 +39,20 @@ from services.application import (
     AuthorityRepairRequest,
     AuthorityReviewRequest,
     AuthorityReviewSelectionService,
+    BacklogReviewRequest,
     CreateProjectCommand,
     DeliveryActionInputService,
     DeliveryActionRequest,
+    DeliveryReviewSelectionService,
     DiscoveryArtifactRequest,
     ProductGoalLifecycleServices,
     ProductGoalResponseRequest,
+    RoadmapReviewRequest,
     SpecificationCandidateRequest,
     SprintPlanningInputService,
     SprintPlanningRequest,
+    SprintPlanReviewRequest,
+    StoryReviewRequest,
     VisionResponseRequest,
     WorkflowDomainPort,
 )
@@ -58,6 +70,7 @@ from tests.workflow.test_planning_transitions import (
     _apply_current_dependencies,
     _record_and_accept_roadmap,
     _record_and_accept_story,
+    _record_sprint_plan_draft,
     _seed_accepted_backlog,
 )
 from tests.workflow.test_planning_transitions import (
@@ -78,6 +91,10 @@ from workflow.definitions.planning import candidate_set_fingerprint
 from workflow.fingerprints import canonical_hash, canonical_json
 from workflow.requests import (
     DecideAuthority,
+    DecideBacklog,
+    DecideRoadmap,
+    DecideSprintPlan,
+    DecideStory,
     RecordAuthorityFeedback,
     RecordDiscoveryArtifact,
     RecordSpecificationCandidate,
@@ -89,8 +106,17 @@ if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
 
     from adapters.adk.recipes import AdkRecipeRegistry
+    from workflow.requests.base import PositionedRequest
 
 PROJECT_ID = 41
+DELIVERY_ARTIFACT_ID = 7
+DELIVERY_ARTIFACT_FINGERPRINT = "sha256:artifact-7"
+type DeliveryReviewRequest = (
+    BacklogReviewRequest
+    | RoadmapReviewRequest
+    | SprintPlanReviewRequest
+    | StoryReviewRequest
+)
 
 
 def test_create_project_request_accepts_only_semantic_fields() -> None:
@@ -252,6 +278,37 @@ def test_semantic_decision_api_rejects_blank_rationale(
     assert response.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
 
 
+@pytest.mark.parametrize(
+    ("path", "extra"),
+    [
+        ("/api/projects/41/backlog/decide", {}),
+        ("/api/projects/41/roadmap/decide", {}),
+        (
+            "/api/projects/41/story/decide",
+            {"instance_key": "requirement:req-7"},
+        ),
+        ("/api/projects/41/sprint/decide", {}),
+    ],
+)
+def test_delivery_review_api_rejects_whitespace_rationale(
+    path: str,
+    extra: dict[str, object],
+) -> None:
+    """Reject normalized-empty reasons at every delivery review route."""
+    response = TestClient(api_module.app).post(
+        path,
+        json={
+            "decision": "accepted",
+            "rationale": "  \t",
+            "idempotency_key": "delivery-review-41",
+            "actor": "operator",
+            **extra,
+        },
+    )
+
+    assert response.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+
+
 @pytest.mark.parametrize("selected_story_ids", [(0,), (-1,), (7, 7)])
 def test_sprint_request_model_rejects_invalid_story_ids(
     selected_story_ids: tuple[int, ...],
@@ -330,6 +387,18 @@ class _FakeApiApplication:
         return self._record_delivery_request(request)
 
     def generate_sprint(self, request: object) -> TransitionResult:
+        return self._record_delivery_request(request)
+
+    def decide_backlog(self, request: object) -> TransitionResult:
+        return self._record_delivery_request(request)
+
+    def decide_roadmap(self, request: object) -> TransitionResult:
+        return self._record_delivery_request(request)
+
+    def decide_story(self, request: object) -> TransitionResult:
+        return self._record_delivery_request(request)
+
+    def decide_sprint_plan(self, request: object) -> TransitionResult:
         return self._record_delivery_request(request)
 
     def _record_delivery_request(self, request: object) -> TransitionResult:
@@ -480,6 +549,49 @@ class _DeliveryInput:
         return self.payload
 
 
+class _DeliveryReviewSelection:
+    def __init__(
+        self,
+        *,
+        identity: tuple[int, str] | None,
+        replay: TransitionResult | None = None,
+    ) -> None:
+        self.identity = identity
+        self.replay_result = replay
+        self.replay_queries: list[TransitionReplayQuery] = []
+        self.identity_calls: list[tuple[int, str, str]] = []
+
+    def replay_transition(
+        self,
+        query: TransitionReplayQuery,
+    ) -> TransitionResult | None:
+        self.replay_queries.append(query)
+        return self.replay_result
+
+    def review_identity(
+        self,
+        *,
+        project_id: int,
+        decision: NodeDecision,
+        fact_type: str,
+    ) -> tuple[int, str] | None:
+        self.identity_calls.append(
+            (project_id, decision.decision_fingerprint, fact_type)
+        )
+        return self.identity
+
+
+class _CapturingTransitionDomain(_BoundaryDomain):
+    def __init__(self, position: WorkflowPosition) -> None:
+        super().__init__(position)
+        self.requests: list[TransitionRequest] = []
+
+    def transition(self, request: TransitionRequest) -> TransitionResult:
+        self.requests.append(request)
+        positioned = cast("PositionedRequest", request)
+        return TransitionResult(ok=True, applied_node_id=positioned.decision_node_id())
+
+
 class _CapturingApplication(AgileForgeApplication):
     def __init__(self, domain: _BoundaryDomain) -> None:
         super().__init__(workflow_domain=domain, vision_interview_input=_VisionInput())
@@ -567,6 +679,134 @@ def _delivery_decision(
         reason_code="DELIVERY_REQUIRED",
         decision_fingerprint=f"decision-{node_id}",
     )
+
+
+@dataclass(frozen=True)
+class _DeliveryReviewCase:
+    method_name: str
+    request_type: type[BaseModel]
+    internal_type: type[object]
+    node_id: str
+    request_kind: str
+    fact_type: str
+    identity_field: str
+    fingerprint_field: str
+    instance_key: str | None = None
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        _DeliveryReviewCase(
+            method_name="decide_backlog",
+            request_type=BacklogReviewRequest,
+            internal_type=DecideBacklog,
+            node_id="backlog.review",
+            request_kind="decide_backlog",
+            fact_type="backlog",
+            identity_field="backlog_artifact_id",
+            fingerprint_field="artifact_fingerprint",
+        ),
+        _DeliveryReviewCase(
+            method_name="decide_roadmap",
+            request_type=RoadmapReviewRequest,
+            internal_type=DecideRoadmap,
+            node_id="planning.roadmap.review",
+            request_kind="decide_roadmap",
+            fact_type="roadmap",
+            identity_field="roadmap_artifact_id",
+            fingerprint_field="artifact_fingerprint",
+        ),
+        _DeliveryReviewCase(
+            method_name="decide_story",
+            request_type=StoryReviewRequest,
+            internal_type=DecideStory,
+            node_id="planning.story.review",
+            request_kind="decide_story",
+            fact_type="story",
+            identity_field="story_artifact_id",
+            fingerprint_field="artifact_fingerprint",
+            instance_key="requirement:req-7",
+        ),
+        _DeliveryReviewCase(
+            method_name="decide_sprint_plan",
+            request_type=SprintPlanReviewRequest,
+            internal_type=DecideSprintPlan,
+            node_id="planning.sprint.review",
+            request_kind="decide_sprint_plan",
+            fact_type="sprint_plan",
+            identity_field="sprint_plan_artifact_id",
+            fingerprint_field="plan_fingerprint",
+        ),
+    ],
+)
+def test_semantic_delivery_reviews_derive_internal_guards(
+    case: _DeliveryReviewCase,
+) -> None:
+    """Build each retained internal review from one exact semantic selection."""
+    decision = NodeDecision(
+        node_id=case.node_id,
+        instance_key=case.instance_key,
+        child_graph_id="delivery",
+        request_kind=case.request_kind,
+        category=NodeCategory.WAITING,
+        recommendation_kind=RecommendationKind.REQUIRED,
+        reason_code="DELIVERY_REVIEW_REQUIRED",
+        decision_fingerprint=f"decision-{case.request_kind}",
+        fact_references=(
+            FactReference(
+                fact_type=case.fact_type,
+                fact_id=str(DELIVERY_ARTIFACT_ID),
+                fingerprint=DELIVERY_ARTIFACT_FINGERPRINT,
+            ),
+        ),
+    )
+    domain = _CapturingTransitionDomain(_vision_position(decision))
+    selection = _DeliveryReviewSelection(
+        identity=(DELIVERY_ARTIFACT_ID, DELIVERY_ARTIFACT_FINGERPRINT)
+    )
+    application = AgileForgeApplication(
+        workflow_domain=domain,
+        delivery_review_selection=selection,
+    )
+    request_values: dict[str, object] = {
+        "project_id": PROJECT_ID,
+        "decision": "accepted",
+        "rationale": "  Reviewed current artifact.  ",
+        "idempotency_key": f"{case.request_kind}-41",
+        "actor": "operator",
+    }
+    if case.instance_key is not None:
+        request_values["instance_key"] = case.instance_key
+
+    result = getattr(application, case.method_name)(
+        case.request_type.model_validate(request_values)
+    )
+
+    assert result.ok is True
+    assert domain.position_calls == [PROJECT_ID]
+    assert len(domain.requests) == 1
+    guarded = domain.requests[0]
+    assert isinstance(guarded, case.internal_type)
+    assert getattr(guarded, case.identity_field) == DELIVERY_ARTIFACT_ID
+    assert getattr(guarded, case.fingerprint_field) == DELIVERY_ARTIFACT_FINGERPRINT
+    assert (
+        cast(
+            "DecideBacklog | DecideRoadmap | DecideStory | DecideSprintPlan",
+            guarded,
+        ).rationale
+        == "Reviewed current artifact."
+    )
+    assert selection.identity_calls == [
+        (PROJECT_ID, f"decision-{case.request_kind}", case.fact_type)
+    ]
+    assert selection.replay_queries[0].operator_input == {
+        "decision": "accepted",
+        "rationale": "Reviewed current artifact.",
+        **(
+            {"instance_key": case.instance_key} if case.instance_key is not None else {}
+        ),
+    }
 
 
 def test_semantic_application_resolves_vision_guards_once() -> None:
@@ -1021,6 +1261,191 @@ def _store_completed_receipt(
 
 
 @pytest.mark.parametrize(
+    ("method_name", "request_type", "stored", "instance_key"),
+    [
+        (
+            "decide_backlog",
+            BacklogReviewRequest,
+            DecideBacklog(
+                project_id=PROJECT_ID,
+                graph_version="agileforge.workflow.v2",
+                fact_fingerprint="facts-backlog-review",
+                decision_fingerprint="decision-backlog-review",
+                idempotency_key="backlog-review-replay",
+                actor="operator",
+                backlog_artifact_id=7,
+                artifact_fingerprint="sha256:backlog-7",
+                decision="accepted",
+                rationale="Reviewed artifact.",
+            ),
+            None,
+        ),
+        (
+            "decide_roadmap",
+            RoadmapReviewRequest,
+            DecideRoadmap(
+                project_id=PROJECT_ID,
+                graph_version="agileforge.workflow.v2",
+                fact_fingerprint="facts-roadmap-review",
+                decision_fingerprint="decision-roadmap-review",
+                idempotency_key="roadmap-review-replay",
+                actor="operator",
+                roadmap_artifact_id=8,
+                artifact_fingerprint="sha256:roadmap-8",
+                decision="accepted",
+                rationale="Reviewed artifact.",
+            ),
+            None,
+        ),
+        (
+            "decide_story",
+            StoryReviewRequest,
+            DecideStory(
+                project_id=PROJECT_ID,
+                graph_version="agileforge.workflow.v2",
+                fact_fingerprint="facts-story-review",
+                decision_fingerprint="decision-story-review",
+                instance_key="requirement:req-a",
+                idempotency_key="story-review-replay",
+                actor="operator",
+                requirement_id="req-a",
+                story_artifact_id=9,
+                artifact_fingerprint="sha256:story-9",
+                decision="accepted",
+                rationale="Reviewed artifact.",
+            ),
+            "requirement:req-a",
+        ),
+        (
+            "decide_sprint_plan",
+            SprintPlanReviewRequest,
+            DecideSprintPlan(
+                project_id=PROJECT_ID,
+                graph_version="agileforge.workflow.v2",
+                fact_fingerprint="facts-sprint-review",
+                decision_fingerprint="decision-sprint-review",
+                idempotency_key="sprint-review-replay",
+                actor="operator",
+                sprint_plan_artifact_id=10,
+                plan_fingerprint="sha256:sprint-10",
+                decision="accepted",
+                rationale="Reviewed artifact.",
+            ),
+            None,
+        ),
+    ],
+)
+def test_semantic_delivery_review_replays_before_advanced_position(
+    engine: "Engine",
+    method_name: str,
+    request_type: type[BaseModel],
+    stored: TransitionRequest,
+    instance_key: str | None,
+) -> None:
+    """Replay all four exact semantic review retries before position reads."""
+    persisted = TransitionResult(
+        ok=True,
+        applied_node_id=cast("PositionedRequest", stored).decision_node_id(),
+    )
+    _store_completed_receipt(engine, stored, persisted)
+    domain = _BoundaryDomain(_vision_position())
+    application = AgileForgeApplication(
+        workflow_domain=domain,
+        delivery_review_selection=DeliveryReviewSelectionService(engine=engine),
+    )
+    request_values: dict[str, object] = {
+        "project_id": PROJECT_ID,
+        "decision": "accepted",
+        "rationale": "  Reviewed artifact.  ",
+        "idempotency_key": stored.idempotency_key,
+        "actor": "operator",
+    }
+    if instance_key is not None:
+        request_values["instance_key"] = instance_key
+
+    result = getattr(application, method_name)(
+        request_type.model_validate(request_values)
+    )
+
+    assert result == persisted.model_copy(update={"replayed": True})
+    assert domain.position_calls == []
+
+
+def test_semantic_delivery_review_changed_operator_input_conflicts(
+    engine: "Engine",
+) -> None:
+    """Bind same-key reuse to decision, rationale, and exact Story selector."""
+    backlog = DecideBacklog(
+        project_id=PROJECT_ID,
+        graph_version="agileforge.workflow.v2",
+        fact_fingerprint="facts-backlog-review",
+        decision_fingerprint="decision-backlog-review",
+        idempotency_key="backlog-review-conflict",
+        actor="operator",
+        backlog_artifact_id=7,
+        artifact_fingerprint="sha256:backlog-7",
+        decision="accepted",
+        rationale="Reviewed artifact.",
+    )
+    story = DecideStory(
+        project_id=PROJECT_ID,
+        graph_version="agileforge.workflow.v2",
+        fact_fingerprint="facts-story-review",
+        decision_fingerprint="decision-story-review",
+        instance_key="requirement:req-a",
+        idempotency_key="story-review-conflict",
+        actor="operator",
+        requirement_id="req-a",
+        story_artifact_id=9,
+        artifact_fingerprint="sha256:story-9",
+        decision="accepted",
+        rationale="Reviewed artifact.",
+    )
+    persisted = TransitionResult(ok=True)
+    _store_completed_receipt(engine, backlog, persisted)
+    _store_completed_receipt(engine, story, persisted)
+    domain = _BoundaryDomain(_vision_position())
+    application = AgileForgeApplication(
+        workflow_domain=domain,
+        delivery_review_selection=DeliveryReviewSelectionService(engine=engine),
+    )
+
+    changed_decision = application.decide_backlog(
+        BacklogReviewRequest(
+            project_id=PROJECT_ID,
+            decision="rejected",
+            rationale="Reviewed artifact.",
+            idempotency_key=backlog.idempotency_key,
+            actor="operator",
+        )
+    )
+    changed_rationale = application.decide_backlog(
+        BacklogReviewRequest(
+            project_id=PROJECT_ID,
+            decision="accepted",
+            rationale="Different rationale.",
+            idempotency_key=backlog.idempotency_key,
+            actor="operator",
+        )
+    )
+    changed_selector = application.decide_story(
+        StoryReviewRequest(
+            project_id=PROJECT_ID,
+            instance_key="requirement:req-b",
+            decision="accepted",
+            rationale="Reviewed artifact.",
+            idempotency_key=story.idempotency_key,
+            actor="operator",
+        )
+    )
+
+    for result in (changed_decision, changed_rationale, changed_selector):
+        assert result.error is not None
+        assert result.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
+    assert domain.position_calls == []
+
+
+@pytest.mark.parametrize(
     ("method_name", "node_id", "request_kind", "instance_key"),
     [
         ("generate_backlog", "backlog.generate", "record_backlog_draft", None),
@@ -1137,6 +1562,104 @@ def _sprint_ready_project(
         idempotency_key="review-sprint-dependencies",
     )
     return domain, project_id, story_id
+
+
+def test_delivery_review_selection_verifies_each_durable_artifact(
+    engine: "Engine",
+) -> None:
+    """Resolve graph references only when their durable artifact rows match."""
+    project_id = _seed_accepted_backlog(engine)
+    domain = planning_domain(engine)
+    roadmap_id = _record_and_accept_roadmap(domain, project_id)
+    story_artifact_id, story_id = _record_and_accept_story(domain, project_id)
+    sprint_plan_id, _sprint_id, _candidate_fingerprint, _plan = (
+        _record_sprint_plan_draft(
+            engine,
+            domain,
+            project_id,
+            story_id,
+            team_name="Delivery Review Team",
+            idempotency_key="record-delivery-review-sprint",
+        )
+    )
+    with Session(engine) as session:
+        backlog = session.exec(
+            select(BacklogArtifact).where(BacklogArtifact.project_id == project_id)
+        ).one()
+        roadmap = session.get(RoadmapArtifact, roadmap_id)
+        story = session.get(StoryArtifact, story_artifact_id)
+        sprint_plan = session.get(SprintPlanArtifact, sprint_plan_id)
+    assert backlog.backlog_artifact_id is not None
+    assert roadmap is not None
+    assert story is not None
+    assert sprint_plan is not None
+    rows = (
+        (
+            "backlog",
+            backlog.backlog_artifact_id,
+            backlog.content_fingerprint,
+            None,
+        ),
+        ("roadmap", roadmap_id, roadmap.content_fingerprint, None),
+        (
+            "story",
+            story_artifact_id,
+            story.content_fingerprint,
+            f"requirement:{story.requirement_id}",
+        ),
+        ("sprint_plan", sprint_plan_id, sprint_plan.plan_fingerprint, None),
+    )
+    selection = DeliveryReviewSelectionService(engine=engine)
+
+    for fact_type, artifact_id, fingerprint, instance_key in rows:
+        decision = NodeDecision(
+            node_id=f"test.{fact_type}",
+            instance_key=instance_key,
+            child_graph_id="delivery",
+            request_kind=f"decide_{fact_type}",
+            category=NodeCategory.WAITING,
+            recommendation_kind=RecommendationKind.REQUIRED,
+            reason_code="DELIVERY_REVIEW_REQUIRED",
+            decision_fingerprint=f"decision-{fact_type}",
+            fact_references=(
+                FactReference(
+                    fact_type=fact_type,
+                    fact_id=str(artifact_id),
+                    fingerprint=fingerprint,
+                ),
+            ),
+        )
+        assert selection.review_identity(
+            project_id=project_id,
+            decision=decision,
+            fact_type=fact_type,
+        ) == (artifact_id, fingerprint)
+
+    story_decision = NodeDecision(
+        node_id="planning.story.review",
+        instance_key="requirement:wrong",
+        child_graph_id="planning",
+        request_kind="decide_story",
+        category=NodeCategory.WAITING,
+        recommendation_kind=RecommendationKind.REQUIRED,
+        reason_code="STORY_REVIEW_REQUIRED",
+        decision_fingerprint="decision-story-wrong",
+        fact_references=(
+            FactReference(
+                fact_type="story",
+                fact_id=str(story_artifact_id),
+                fingerprint=story.content_fingerprint,
+            ),
+        ),
+    )
+    assert (
+        selection.review_identity(
+            project_id=project_id,
+            decision=story_decision,
+            fact_type="story",
+        )
+        is None
+    )
 
 
 def test_explicit_sprint_capacity_locks_exact_durable_cohort(
@@ -1600,31 +2123,114 @@ def test_retained_delivery_api_calls_host_prepared_application_method(
     assert method_name.startswith("generate_")
 
 
-def test_retained_non_agentic_delivery_api_uses_semantic_input(
+@pytest.mark.parametrize(
+    ("path", "request_type_name", "extra"),
+    [
+        ("/api/projects/41/backlog/decide", "BacklogReviewRequest", {}),
+        ("/api/projects/41/roadmap/decide", "RoadmapReviewRequest", {}),
+        (
+            "/api/projects/41/story/decide",
+            "StoryReviewRequest",
+            {"instance_key": "requirement:req-7"},
+        ),
+        ("/api/projects/41/sprint/decide", "SprintPlanReviewRequest", {}),
+    ],
+)
+def test_delivery_review_api_uses_task_specific_semantic_request(
+    path: str,
+    request_type_name: str,
+    extra: dict[str, object],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Keep retained review commands callable without an input_payload envelope."""
+    """Route each review without exposing artifact identity or fingerprints."""
     application = _FakeApiApplication(position=_all_request_kinds_position())
     monkeypatch.setattr(api_module, "_application", lambda: application)
 
     response = TestClient(api_module.app).post(
-        "/api/projects/41/backlog/decide",
+        path,
         json={
-            "idempotency_key": "backlog-review-41",
+            "decision": "accepted",
+            "rationale": "  Reviewed current artifact.  ",
+            "idempotency_key": "delivery-review-41",
             "actor": "operator",
-            "semantic_input": {
-                "backlog_artifact_id": 7,
-                "artifact_fingerprint": "backlog-7",
-                "decision": "accepted",
-                "rationale": "Reviewed",
-            },
+            **extra,
         },
     )
 
     assert response.status_code == HTTPStatus.OK
     assert len(application.requests) == 1
-    request = cast("TransitionRequest", application.requests[0])
-    assert request.kind == "decide_backlog"
+    request = application.requests[0]
+    assert type(request).__name__ == request_type_name
+    review_request = cast("DeliveryReviewRequest", request)
+    assert review_request.rationale == "Reviewed current artifact."
+    assert not hasattr(request, "artifact_fingerprint")
+    assert not hasattr(request, "plan_fingerprint")
+
+
+@pytest.mark.parametrize(
+    ("path", "base_payload", "internal_field"),
+    [
+        (
+            "/api/projects/41/backlog/decide",
+            {},
+            "backlog_artifact_id",
+        ),
+        (
+            "/api/projects/41/backlog/decide",
+            {},
+            "artifact_fingerprint",
+        ),
+        (
+            "/api/projects/41/roadmap/decide",
+            {},
+            "roadmap_artifact_id",
+        ),
+        (
+            "/api/projects/41/story/decide",
+            {"instance_key": "requirement:req-7"},
+            "story_artifact_id",
+        ),
+        (
+            "/api/projects/41/story/decide",
+            {"instance_key": "requirement:req-7"},
+            "semantic_input",
+        ),
+        (
+            "/api/projects/41/sprint/decide",
+            {},
+            "sprint_plan_artifact_id",
+        ),
+        (
+            "/api/projects/41/sprint/decide",
+            {},
+            "plan_fingerprint",
+        ),
+        (
+            "/api/projects/41/sprint/decide",
+            {},
+            "decision_fingerprint",
+        ),
+    ],
+)
+def test_delivery_review_api_rejects_caller_owned_guards(
+    path: str,
+    base_payload: dict[str, object],
+    internal_field: str,
+) -> None:
+    """Reject artifact IDs, all fingerprints, and generic semantic envelopes."""
+    response = TestClient(api_module.app).post(
+        path,
+        json={
+            "decision": "accepted",
+            "rationale": "Reviewed current artifact.",
+            "idempotency_key": "delivery-review-41",
+            "actor": "operator",
+            **base_payload,
+            internal_field: "caller-owned",
+        },
+    )
+
+    assert response.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
 
 
 def test_semantic_sprint_generation_api_is_strict(
@@ -1689,6 +2295,27 @@ def test_retained_non_agentic_delivery_api_rejects_input_payload(
     )
 
     assert response.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+
+
+@pytest.mark.parametrize("field", ["artifact_fingerprint", "plan_fingerprint"])
+def test_positioned_api_builder_rejects_artifact_guards(field: str) -> None:
+    """Keep artifact review fingerprints out of every generic semantic envelope."""
+    position = _all_request_kinds_position()
+    decision = position.decisions[0]
+    request = api_module.PositionedTransitionApiRequest(
+        idempotency_key="positioned-41",
+        actor="operator",
+        semantic_input={field: "caller-owned"},
+    )
+
+    with pytest.raises(ValueError, match="host-owned workflow guards"):
+        api_module.build_positioned_transition_request(
+            PROJECT_ID,
+            decision.request_kind,
+            request,
+            position,
+            decision,
+        )
 
 
 def test_position_endpoint_delegates_once_and_state_endpoint_is_absent(

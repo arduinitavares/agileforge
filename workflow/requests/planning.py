@@ -8,7 +8,7 @@ from pydantic import Field, model_validator
 
 from workflow.contracts import FrozenModel, JsonObject
 from workflow.facts import StoryDependencyReviewEdgeFact
-from workflow.requests.base import PositionedRequest
+from workflow.requests.base import PositionedRequest, ReviewRationale
 
 ReviewedDependencyEdge = StoryDependencyReviewEdgeFact
 
@@ -41,7 +41,7 @@ class DecideRoadmap(PositionedRequest):
     roadmap_artifact_id: int
     artifact_fingerprint: str = Field(min_length=1)
     decision: Literal["accepted", "rejected", "feedback"]
-    rationale: str = Field(min_length=1)
+    rationale: ReviewRationale
 
 
 class _RequirementPositionedRequest(PositionedRequest):
@@ -80,7 +80,7 @@ class DecideStory(_RequirementPositionedRequest):
     story_artifact_id: int
     artifact_fingerprint: str = Field(min_length=1)
     decision: Literal["accepted", "rejected", "feedback"]
-    rationale: str = Field(min_length=1)
+    rationale: ReviewRationale
 
 
 class ApplyStoryDependencies(PositionedRequest):
@@ -164,7 +164,7 @@ class DecideSprintPlan(PositionedRequest):
     sprint_plan_artifact_id: int
     plan_fingerprint: str = Field(min_length=1)
     decision: Literal["accepted", "rejected", "feedback"]
-    rationale: str = Field(min_length=1)
+    rationale: ReviewRationale
 
 
 class StartSprint(PositionedRequest):

@@ -22,6 +22,7 @@ from services.application import (
     AuthorityFeedbackRequest,
     AuthorityRepairRequest,
     AuthorityReviewRequest,
+    BacklogReviewRequest,
     CreateProjectCommand,
     DeliveryActionRequest,
     DiscoveryArtifactRequest,
@@ -30,9 +31,12 @@ from services.application import (
     ProductGoalReviewRequest,
     RepositoryAttachRequest,
     RepositoryRefreshRequest,
+    RoadmapReviewRequest,
     SpecificationCandidateRequest,
     SpecificationReviewRequest,
     SprintPlanningRequest,
+    SprintPlanReviewRequest,
+    StoryReviewRequest,
     VisionResponseRequest,
     VisionReviewRequest,
     VisionRevisionRequest,
@@ -59,6 +63,10 @@ _SEMANTIC_REQUEST_KINDS = frozenset(
         "begin_vision_revision",
         "compile_authority",
         "decide_authority",
+        "decide_backlog",
+        "decide_roadmap",
+        "decide_sprint_plan",
+        "decide_story",
         "record_authority_feedback",
         "decide_product_goal_review",
         "decide_specification",
@@ -253,6 +261,17 @@ class _Application(Protocol):
     def generate_story(self, request: DeliveryActionRequest) -> TransitionResult: ...
 
     def generate_sprint(self, request: SprintPlanningRequest) -> TransitionResult: ...
+
+    def decide_backlog(self, request: BacklogReviewRequest) -> TransitionResult: ...
+
+    def decide_roadmap(self, request: RoadmapReviewRequest) -> TransitionResult: ...
+
+    def decide_story(self, request: StoryReviewRequest) -> TransitionResult: ...
+
+    def decide_sprint_plan(
+        self,
+        request: SprintPlanReviewRequest,
+    ) -> TransitionResult: ...
 
 
 type CommandHandler = Callable[[argparse.Namespace, _Application], int]
@@ -566,6 +585,27 @@ def _install_lifecycle_mutations(
     ):
         generate = _semantic_leaf(branches[(group,)], "generate", handler)
         generate.add_argument("--instance-key")
+
+    for group, handler in (
+        ("backlog", _backlog_decide),
+        ("roadmap", _roadmap_decide),
+        ("sprint", _sprint_decide),
+    ):
+        review = _semantic_leaf(branches[(group,)], "decide", handler)
+        review.add_argument(
+            "--decision",
+            choices=("accepted", "rejected", "feedback"),
+            required=True,
+        )
+        review.add_argument("--rationale", required=True)
+    story_review = _semantic_leaf(branches[("story",)], "decide", _story_decide)
+    story_review.add_argument("--instance-key", required=True)
+    story_review.add_argument(
+        "--decision",
+        choices=("accepted", "rejected", "feedback"),
+        required=True,
+    )
+    story_review.add_argument("--rationale", required=True)
 
     sprint_generate = _semantic_leaf(
         branches[("sprint",)],
@@ -1071,6 +1111,71 @@ def _sprint_generate(args: argparse.Namespace, application: _Application) -> int
     )
 
 
+def _backlog_decide(args: argparse.Namespace, application: _Application) -> int:
+    decision = cast("Literal['accepted', 'rejected', 'feedback']", args.decision)
+    return _emit_result(
+        application.decide_backlog(
+            BacklogReviewRequest(
+                project_id=args.project_id,
+                decision=decision,
+                rationale=args.rationale,
+                idempotency_key=args.idempotency_key,
+                actor=args.actor,
+                correlation_id=args.correlation_id,
+            )
+        )
+    )
+
+
+def _roadmap_decide(args: argparse.Namespace, application: _Application) -> int:
+    decision = cast("Literal['accepted', 'rejected', 'feedback']", args.decision)
+    return _emit_result(
+        application.decide_roadmap(
+            RoadmapReviewRequest(
+                project_id=args.project_id,
+                decision=decision,
+                rationale=args.rationale,
+                idempotency_key=args.idempotency_key,
+                actor=args.actor,
+                correlation_id=args.correlation_id,
+            )
+        )
+    )
+
+
+def _story_decide(args: argparse.Namespace, application: _Application) -> int:
+    decision = cast("Literal['accepted', 'rejected', 'feedback']", args.decision)
+    return _emit_result(
+        application.decide_story(
+            StoryReviewRequest(
+                project_id=args.project_id,
+                instance_key=args.instance_key,
+                decision=decision,
+                rationale=args.rationale,
+                idempotency_key=args.idempotency_key,
+                actor=args.actor,
+                correlation_id=args.correlation_id,
+            )
+        )
+    )
+
+
+def _sprint_decide(args: argparse.Namespace, application: _Application) -> int:
+    decision = cast("Literal['accepted', 'rejected', 'feedback']", args.decision)
+    return _emit_result(
+        application.decide_sprint_plan(
+            SprintPlanReviewRequest(
+                project_id=args.project_id,
+                decision=decision,
+                rationale=args.rationale,
+                idempotency_key=args.idempotency_key,
+                actor=args.actor,
+                correlation_id=args.correlation_id,
+            )
+        )
+    )
+
+
 def _workflow_next(args: argparse.Namespace, application: _Application) -> int:
     _write_json(workflow_next(application=application, project_id=args.project_id))
     return 0
@@ -1132,6 +1237,8 @@ def _guarded_payload(
         "idempotency_key",
         "instance_key",
         "kind",
+        "artifact_fingerprint",
+        "plan_fingerprint",
         "project_id",
     }
     if forbidden.intersection(payload):

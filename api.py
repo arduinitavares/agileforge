@@ -33,6 +33,7 @@ from services.application import (
     AuthorityFeedbackRequest,
     AuthorityRepairRequest,
     AuthorityReviewRequest,
+    BacklogReviewRequest,
     CreateProjectCommand,
     DeliveryActionRequest,
     DiscoveryArtifactRequest,
@@ -41,9 +42,12 @@ from services.application import (
     ProductGoalReviewRequest,
     RepositoryAttachRequest,
     RepositoryRefreshRequest,
+    RoadmapReviewRequest,
     SpecificationCandidateRequest,
     SpecificationReviewRequest,
     SprintPlanningRequest,
+    SprintPlanReviewRequest,
+    StoryReviewRequest,
     VisionResponseRequest,
     VisionReviewRequest,
     VisionRevisionRequest,
@@ -126,6 +130,24 @@ class ReviewApiRequest(MutationApiRequest):
 
     decision: Literal["accepted", "rejected", "feedback"]
     rationale: SemanticText
+
+
+class BacklogReviewApiRequest(ReviewApiRequest):
+    """Semantic Backlog review without caller-owned artifact identity."""
+
+
+class RoadmapReviewApiRequest(ReviewApiRequest):
+    """Semantic Roadmap review without caller-owned artifact identity."""
+
+
+class StoryReviewApiRequest(ReviewApiRequest):
+    """Semantic Story review with one exact repeated instance selector."""
+
+    instance_key: SemanticText
+
+
+class SprintPlanReviewApiRequest(ReviewApiRequest):
+    """Semantic Sprint-plan review without caller-owned artifact identity."""
 
 
 class RevisionApiRequest(MutationApiRequest):
@@ -226,10 +248,6 @@ POSITIONED_API_PATHS: dict[str, str] = {
     "close_sprint": "sprint/close",
     "close_story": "story/close",
     "complete_task": "sprint/task/complete",
-    "decide_backlog": "backlog/decide",
-    "decide_roadmap": "roadmap/decide",
-    "decide_sprint_plan": "sprint/decide",
-    "decide_story": "story/decide",
     "reconcile_backlog": "backlog/reconcile",
     "record_post_sprint_triage": "sprint/triage",
     "repair_story_readiness": "story/readiness/repair",
@@ -242,6 +260,10 @@ SEMANTIC_API_PATHS: dict[str, str] = {
     "begin_vision_revision": "vision/revision",
     "compile_authority": "authority/compile",
     "decide_authority": "authority/decision",
+    "decide_backlog": "backlog/decide",
+    "decide_roadmap": "roadmap/decide",
+    "decide_sprint_plan": "sprint/decide",
+    "decide_story": "story/decide",
     "record_authority_feedback": "authority/feedback",
     "decide_product_goal_review": "goals/review",
     "decide_specification": "specifications/review",
@@ -258,12 +280,18 @@ SEMANTIC_API_PATHS: dict[str, str] = {
 _ACTIONABLE_WAITING_REQUEST_KINDS = frozenset(
     {
         "decide_authority",
+        "decide_backlog",
         "decide_product_goal_review",
+        "decide_roadmap",
+        "decide_sprint_plan",
         "decide_specification",
+        "decide_story",
         "decide_vision_review",
     }
 )
-_SELECTOR_API_REQUEST_KINDS = frozenset(DELIVERY_API_PATHS | POSITIONED_API_PATHS)
+_SELECTOR_API_REQUEST_KINDS = (
+    frozenset(DELIVERY_API_PATHS) | frozenset(POSITIONED_API_PATHS) | {"decide_story"}
+)
 
 _TRANSITION_REQUEST = TypeAdapter(TransitionRequest)
 
@@ -329,6 +357,8 @@ def build_positioned_transition_request(
         "idempotency_key",
         "instance_key",
         "kind",
+        "artifact_fingerprint",
+        "plan_fingerprint",
         "project_id",
     }
     if forbidden.intersection(req.semantic_input):
@@ -1142,6 +1172,79 @@ def generate_project_sprint(
                 max_story_points=req.max_story_points,
                 include_task_decomposition=req.include_task_decomposition,
                 team_name=req.team_name,
+                **_metadata(req),
+            )
+        )
+    )
+
+
+@app.post("/api/projects/{project_id}/backlog/decide")
+def decide_project_backlog(
+    project_id: int,
+    req: BacklogReviewApiRequest,
+) -> dict[str, object]:
+    """Review the graph-selected Backlog from semantic operator input."""
+    return _result_payload(
+        _application().decide_backlog(
+            BacklogReviewRequest(
+                project_id=project_id,
+                decision=req.decision,
+                rationale=req.rationale,
+                **_metadata(req),
+            )
+        )
+    )
+
+
+@app.post("/api/projects/{project_id}/roadmap/decide")
+def decide_project_roadmap(
+    project_id: int,
+    req: RoadmapReviewApiRequest,
+) -> dict[str, object]:
+    """Review the graph-selected Roadmap from semantic operator input."""
+    return _result_payload(
+        _application().decide_roadmap(
+            RoadmapReviewRequest(
+                project_id=project_id,
+                decision=req.decision,
+                rationale=req.rationale,
+                **_metadata(req),
+            )
+        )
+    )
+
+
+@app.post("/api/projects/{project_id}/story/decide")
+def decide_project_story(
+    project_id: int,
+    req: StoryReviewApiRequest,
+) -> dict[str, object]:
+    """Review one exact graph-selected Story artifact instance."""
+    return _result_payload(
+        _application().decide_story(
+            StoryReviewRequest(
+                project_id=project_id,
+                instance_key=req.instance_key,
+                decision=req.decision,
+                rationale=req.rationale,
+                **_metadata(req),
+            )
+        )
+    )
+
+
+@app.post("/api/projects/{project_id}/sprint/decide")
+def decide_project_sprint_plan(
+    project_id: int,
+    req: SprintPlanReviewApiRequest,
+) -> dict[str, object]:
+    """Review the graph-selected Sprint plan from semantic operator input."""
+    return _result_payload(
+        _application().decide_sprint_plan(
+            SprintPlanReviewRequest(
+                project_id=project_id,
+                decision=req.decision,
+                rationale=req.rationale,
                 **_metadata(req),
             )
         )

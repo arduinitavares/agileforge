@@ -156,13 +156,37 @@ _SEMANTIC_ARGUMENTS: dict[str, tuple[str, ...]] = {
         "--rationale",
         "<rationale>",
     ),
+    "decide_backlog": (
+        "--decision",
+        "<decision>",
+        "--rationale",
+        "<rationale>",
+    ),
     "decide_product_goal_review": (
         "--decision",
         "<decision>",
         "--rationale",
         "<rationale>",
     ),
+    "decide_roadmap": (
+        "--decision",
+        "<decision>",
+        "--rationale",
+        "<rationale>",
+    ),
     "decide_specification": (
+        "--decision",
+        "<decision>",
+        "--rationale",
+        "<rationale>",
+    ),
+    "decide_sprint_plan": (
+        "--decision",
+        "<decision>",
+        "--rationale",
+        "<rationale>",
+    ),
+    "decide_story": (
         "--decision",
         "<decision>",
         "--rationale",
@@ -199,6 +223,7 @@ _DELIVERY_REQUEST_KINDS = frozenset(
         "record_story_draft",
     }
 )
+_INSTANCE_SELECTOR_REQUEST_KINDS = _DELIVERY_REQUEST_KINDS | {"decide_story"}
 
 
 def _render_semantic_command(
@@ -215,7 +240,7 @@ def _render_semantic_command(
             str(position.project_id),
         ]
         if (
-            request_kind in _DELIVERY_REQUEST_KINDS
+            request_kind in _INSTANCE_SELECTOR_REQUEST_KINDS
             and decision.instance_key is not None
         ):
             command.extend(("--instance-key", decision.instance_key))
@@ -276,8 +301,12 @@ def render_workflow_next(position: WorkflowPosition) -> WorkflowNextPayload:
                 and decision.request_kind
                 in {
                     "decide_authority",
+                    "decide_backlog",
                     "decide_product_goal_review",
+                    "decide_roadmap",
+                    "decide_sprint_plan",
                     "decide_specification",
+                    "decide_story",
                     "decide_vision_review",
                 }
             )
@@ -289,14 +318,14 @@ def render_workflow_next(position: WorkflowPosition) -> WorkflowNextPayload:
         decision.request_kind
         for decision in candidates
         if decision.request_kind in _SEMANTIC_ARGUMENTS
-        and decision.request_kind not in _DELIVERY_REQUEST_KINDS
+        and decision.request_kind not in _INSTANCE_SELECTOR_REQUEST_KINDS
     )
     commands = [
         _decision_payload(position, decision)
         for decision in candidates
         if (
             decision.request_kind not in _SEMANTIC_ARGUMENTS
-            or decision.request_kind in _DELIVERY_REQUEST_KINDS
+            or decision.request_kind in _INSTANCE_SELECTOR_REQUEST_KINDS
             or semantic_counts[decision.request_kind] == 1
         )
     ]
