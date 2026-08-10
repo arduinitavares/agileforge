@@ -213,6 +213,7 @@ def test_review_and_revision_replay_before_position_reads() -> None:
             project_id=7,
             decision="feedback",
             rationale="Clarify the audience.",
+            expected_candidate_fingerprint="sha256:vision-replaced-after-review",
             idempotency_key="review-retry",
             actor="operator@example.com",
         )

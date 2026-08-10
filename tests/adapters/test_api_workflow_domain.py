@@ -49,13 +49,16 @@ from services.application import (
     DiscoveryArtifactRequest,
     ProductGoalLifecycleServices,
     ProductGoalResponseRequest,
+    ProductGoalReviewRequest,
     RoadmapReviewRequest,
     SpecificationCandidateRequest,
+    SpecificationReviewRequest,
     SprintPlanningInputService,
     SprintPlanningRequest,
     SprintPlanReviewRequest,
     StoryReviewRequest,
     VisionResponseRequest,
+    VisionReviewRequest,
     WorkflowDomainPort,
 )
 from services.contracts.backlog import InputSchema as BacklogInput
@@ -514,6 +517,21 @@ class _FakeApiApplication:
             ok=True,
             position=self._position,
         )
+
+    def review_vision(self, request: VisionReviewRequest) -> TransitionResult:
+        return self._record_delivery_request(request)
+
+    def review_product_goal(
+        self,
+        request: ProductGoalReviewRequest,
+    ) -> TransitionResult:
+        return self._record_delivery_request(request)
+
+    def review_specification(
+        self,
+        request: SpecificationReviewRequest,
+    ) -> TransitionResult:
+        return self._record_delivery_request(request)
 
     def record_authority_feedback(
         self,
@@ -2338,6 +2356,7 @@ def test_semantic_authority_review_replays_or_conflicts_before_advanced_position
             project_id=PROJECT_ID,
             decision="accepted",
             rationale="Authority is complete.",
+            expected_candidate_fingerprint="sha256:authority-replaced-after-review",
             idempotency_key="authority-review-41",
             actor="operator",
         )
@@ -2356,6 +2375,189 @@ def test_semantic_authority_review_replays_or_conflicts_before_advanced_position
     assert conflict.error is not None
     assert conflict.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
     assert domain.position_calls == []
+
+
+def test_semantic_vision_review_rejects_a_replaced_candidate() -> None:
+    """A browser review cannot decide the replacement for the Vision it saw."""
+    current_fingerprint = "sha256:vision-current"
+    decision = NodeDecision(
+        node_id="vision.review",
+        child_graph_id="vision",
+        request_kind="decide_vision_review",
+        category=NodeCategory.WAITING,
+        recommendation_kind=RecommendationKind.REQUIRED,
+        reason_code="VISION_REVIEW_REQUIRED",
+        decision_fingerprint="decision-vision-review",
+        fact_references=(
+            FactReference(
+                fact_type="vision",
+                fact_id="17",
+                fingerprint=current_fingerprint,
+            ),
+        ),
+    )
+    domain = _CapturingTransitionDomain(_vision_position(decision))
+    application = AgileForgeApplication(
+        workflow_domain=domain,
+        vision_interview_input=_VisionInput(),
+    )
+
+    result = application.review_vision(
+        VisionReviewRequest(
+            project_id=PROJECT_ID,
+            decision="accepted",
+            rationale="Reviewed the candidate shown in the browser.",
+            expected_candidate_fingerprint="sha256:vision-replaced",
+            idempotency_key="vision-review-stale-41",
+            actor="dashboard-ui",
+        )
+    )
+
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.code is WorkflowErrorCode.STALE_POSITION
+    assert domain.requests == []
+
+
+def test_semantic_product_goal_review_rejects_a_replaced_candidate() -> None:
+    """A stale Product Goal review fails without deciding the current candidate."""
+    decision = NodeDecision(
+        node_id="goal.review",
+        child_graph_id="product_goal",
+        request_kind="decide_product_goal_review",
+        category=NodeCategory.WAITING,
+        recommendation_kind=RecommendationKind.REQUIRED,
+        reason_code="PRODUCT_GOAL_REVIEW_REQUIRED",
+        decision_fingerprint="decision-goal-review",
+        fact_references=(
+            FactReference(
+                fact_type="product_goal",
+                fact_id="21",
+                fingerprint="sha256:goal-current",
+            ),
+        ),
+    )
+    domain = _CapturingTransitionDomain(_vision_position(decision))
+    application = AgileForgeApplication(
+        workflow_domain=domain,
+        product_goal_services=ProductGoalLifecycleServices(
+            interview_input=_ProductGoalInput(TransitionResult(ok=True)),
+            discovery_selection=_DiscoverySelection(),
+        ),
+    )
+
+    result = application.review_product_goal(
+        ProductGoalReviewRequest(
+            project_id=PROJECT_ID,
+            decision="accepted",
+            rationale="Reviewed the candidate shown in the browser.",
+            expected_candidate_fingerprint="sha256:goal-replaced",
+            idempotency_key="goal-review-stale-41",
+            actor="dashboard-ui",
+        )
+    )
+
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.code is WorkflowErrorCode.STALE_POSITION
+    assert domain.requests == []
+
+
+def test_semantic_specification_review_rejects_a_replaced_candidate() -> None:
+    """A stale Specification review cannot select a newer candidate."""
+    decision = NodeDecision(
+        node_id="specification.review",
+        child_graph_id="product_discovery",
+        request_kind="decide_specification",
+        category=NodeCategory.WAITING,
+        recommendation_kind=RecommendationKind.REQUIRED,
+        reason_code="SPECIFICATION_REVIEW_REQUIRED",
+        decision_fingerprint="decision-specification-review",
+        fact_references=(
+            FactReference(
+                fact_type="specification_candidate",
+                fact_id="31",
+                fingerprint="sha256:specification-current",
+            ),
+        ),
+    )
+    domain = _CapturingTransitionDomain(_vision_position(decision))
+    application = AgileForgeApplication(
+        workflow_domain=domain,
+        product_goal_services=ProductGoalLifecycleServices(
+            interview_input=_ProductGoalInput(TransitionResult(ok=True)),
+            discovery_selection=_DiscoverySelection(),
+        ),
+    )
+
+    result = application.review_specification(
+        SpecificationReviewRequest(
+            project_id=PROJECT_ID,
+            decision="accepted",
+            rationale="Reviewed the candidate shown in the browser.",
+            expected_candidate_fingerprint="sha256:specification-replaced",
+            idempotency_key="specification-review-stale-41",
+            actor="dashboard-ui",
+        )
+    )
+
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.code is WorkflowErrorCode.STALE_POSITION
+    assert domain.requests == []
+
+
+def test_semantic_authority_review_rejects_a_replaced_candidate() -> None:
+    """A stale Authority review fails before the replacement is decided."""
+
+    class Selection:
+        def replay_transition(
+            self,
+            query: TransitionReplayQuery,
+        ) -> None:
+            del query
+
+        def review_identity(self, *, project_id: int) -> tuple[int, str, str]:
+            assert project_id == PROJECT_ID
+            return 43, "sha256:authority-current", "sha256:review-current"
+
+    decision = NodeDecision(
+        node_id="authority.review",
+        child_graph_id="authority",
+        request_kind="decide_authority",
+        category=NodeCategory.WAITING,
+        recommendation_kind=RecommendationKind.REQUIRED,
+        reason_code="AUTHORITY_REVIEW_REQUIRED",
+        decision_fingerprint="decision-authority-review",
+        fact_references=(
+            FactReference(
+                fact_type="authority",
+                fact_id="43",
+                fingerprint="sha256:authority-current",
+            ),
+        ),
+    )
+    domain = _CapturingTransitionDomain(_vision_position(decision))
+    application = AgileForgeApplication(
+        workflow_domain=domain,
+        authority_review_selection=Selection(),
+    )
+
+    result = application.decide_authority(
+        AuthorityReviewRequest(
+            project_id=PROJECT_ID,
+            decision="accepted",
+            rationale="Reviewed the Authority shown in the browser.",
+            expected_candidate_fingerprint="sha256:authority-replaced",
+            idempotency_key="authority-review-stale-41",
+            actor="dashboard-ui",
+        )
+    )
+
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.code is WorkflowErrorCode.STALE_POSITION
+    assert domain.requests == []
 
 
 def test_semantic_authority_feedback_replays_or_conflicts_before_advanced_position(
@@ -4664,6 +4866,73 @@ def test_authority_endpoint_submits_exact_typed_request(
     request = cast("AuthorityReviewRequest", application.requests[0])
     assert isinstance(request, AuthorityReviewRequest)
     assert request.actor == "dashboard-user"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/projects/41/vision/review",
+        "/api/projects/41/goals/review",
+        "/api/projects/41/specifications/review",
+        "/api/projects/41/authority/decision",
+    ],
+)
+def test_browser_review_header_forwards_hidden_candidate_expectation(
+    path: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Forward browser review identity without adding it to semantic JSON."""
+    application = _FakeApiApplication()
+    monkeypatch.setattr(api_module, "_application", lambda: application)
+    client = TestClient(api_module.app)
+
+    response = client.post(
+        path,
+        headers={"X-AgileForge-Expected-Candidate": "sha256:candidate-shown"},
+        json={
+            "idempotency_key": "review-api-41",
+            "actor": "dashboard-ui",
+            "decision": "accepted",
+            "rationale": "Reviewed the candidate shown in the browser.",
+        },
+    )
+
+    assert response.status_code == HTTPStatus.OK
+    request = application.requests[0]
+    assert isinstance(
+        request,
+        (
+            VisionReviewRequest,
+            ProductGoalReviewRequest,
+            SpecificationReviewRequest,
+            AuthorityReviewRequest,
+        ),
+    )
+    assert request.expected_candidate_fingerprint == "sha256:candidate-shown"
+
+
+def test_browser_review_expectation_is_absent_from_public_api_schema() -> None:
+    """Keep the browser-only guard out of semantic JSON and API documentation."""
+    schema = api_module.app.openapi()
+    for path in (
+        "/api/projects/{project_id}/vision/review",
+        "/api/projects/{project_id}/goals/review",
+        "/api/projects/{project_id}/specifications/review",
+        "/api/projects/{project_id}/authority/decision",
+    ):
+        operation = schema["paths"][path]["post"]
+        parameters = operation.get("parameters", [])
+        assert all(
+            item.get("name") != "X-AgileForge-Expected-Candidate" for item in parameters
+        )
+    review_properties = schema["components"]["schemas"]["ReviewApiRequest"][
+        "properties"
+    ]
+    authority_properties = schema["components"]["schemas"][
+        "AuthorityDecisionApiRequest"
+    ]["properties"]
+    assert "expected_candidate_fingerprint" not in review_properties
+    assert "expected_candidate_fingerprint" not in authority_properties
 
 
 def test_authority_feedback_endpoint_submits_exact_typed_request(

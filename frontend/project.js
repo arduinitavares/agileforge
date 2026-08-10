@@ -60,6 +60,8 @@ const BUTTON_DANGER = 'inline-flex min-h-10 items-center justify-center gap-2 ro
 
 let selectedProjectId = null;
 let pendingHumanAction = null;
+let dashboardLoadSequence = 0;
+let activeDashboardLoadController = null;
 let lifecycleState = {
     project: {},
     position: {},
@@ -470,6 +472,18 @@ function authorityPacketMarkup(authority, findings) {
 }
 
 function authorityPanelMarkup(projection, actions = []) {
+    const feedbackAction = findAction(actions, 'record_authority_feedback');
+    if (feedbackAction) {
+        return `<p class="mb-4 text-sm leading-6 text-slate-600">The Authority was rejected. Record the feedback needed for a corrected review.</p>
+            <button type="button" data-authority-feedback="true" class="${BUTTON_PRIMARY}"><span class="material-symbols-outlined" aria-hidden="true">rate_review</span><span>Record feedback</span></button>`;
+    }
+
+    const repairAction = findAction(actions, 'repair_authority');
+    if (repairAction) {
+        return `<p class="mb-4 text-sm leading-6 text-slate-600">Feedback is recorded. Recompile the Authority for review.</p>
+            <button type="button" data-direct-action="repair_authority" class="${BUTTON_PRIMARY}"><span class="material-symbols-outlined" aria-hidden="true">build</span><span>Recompile</span></button>`;
+    }
+
     const pending = projection?.pending_authority;
     if (pending) {
         const reviewAction = findAction(actions, 'decide_authority');
@@ -487,12 +501,6 @@ function authorityPanelMarkup(projection, actions = []) {
     if (compileAction) {
         return `<p class="mb-4 text-sm leading-6 text-slate-600">Compile the accepted Specification into reviewable rules.</p>
             <button type="button" data-direct-action="compile_authority" class="${BUTTON_PRIMARY}"><span class="material-symbols-outlined" aria-hidden="true">build</span><span>Compile</span></button>`;
-    }
-
-    const repairAction = findAction(actions, 'repair_authority');
-    if (repairAction) {
-        return `<p class="mb-4 text-sm leading-6 text-slate-600">Feedback is recorded. Recompile the Authority for review.</p>
-            <button type="button" data-direct-action="repair_authority" class="${BUTTON_PRIMARY}"><span class="material-symbols-outlined" aria-hidden="true">build</span><span>Recompile</span></button>`;
     }
 
     return '<p class="text-sm text-slate-600">Authority follows an accepted Specification.</p>';
@@ -613,8 +621,22 @@ function renderDashboard() {
     setMarkup('delivery-panel', deliveryPanelMarkup(lifecycleState.position));
 }
 
+function validationIssueMessage(issue) {
+    if (!issue || typeof issue.msg !== 'string') return null;
+    const location = (Array.isArray(issue.loc) ? issue.loc : [])
+        .filter((part) => part !== 'body')
+        .map((part) => humanizeKey(part))
+        .join(' > ');
+    const message = issue.msg.trim().replace(/[.]+$/, '');
+    return `${location ? `${location}: ` : ''}${message}.`;
+}
+
 function responseErrorMessage(payload, fallback) {
     const detail = payload?.detail;
+    if (Array.isArray(detail)) {
+        const validation = detail.map(validationIssueMessage).filter(Boolean).join(' ');
+        if (validation) return validation;
+    }
     const nestedErrors = detail?.errors;
     return detail?.error?.message
         ?? detail?.message
@@ -641,37 +663,57 @@ async function requestJson(path, options = {}) {
 }
 
 async function loadDashboard() {
+    const sequence = ++dashboardLoadSequence;
+    activeDashboardLoadController?.abort();
+    const controller = new AbortController();
+    activeDashboardLoadController = controller;
     const base = `/api/projects/${selectedProjectId}`;
-    const [project, position, vision, goal, discovery, specification, authority, repository] = await Promise.all([
-        requestJson(base),
-        requestJson(`${base}/position`),
-        requestJson(`${base}/vision/status`),
-        requestJson(`${base}/goals/status`),
-        requestJson(`${base}/discovery`),
-        requestJson(`${base}/specifications/review`),
-        requestJson(`${base}/authority/review?include_spec=auto`),
-        requestJson(`${base}/repository`),
-    ]);
-    lifecycleState = {
-        project: project.data ?? {},
-        position: position.data ?? {},
-        actions: position.actions ?? [],
-        vision: vision.data ?? {},
-        goal: goal.data ?? {},
-        discovery: discovery.data ?? {},
-        specification: specification.data ?? {},
-        authority: authority.data ?? {},
-        repository: repository.data ?? {},
-    };
-    setProjectError('');
-    renderDashboard();
+    try {
+        const options = { signal: controller.signal };
+        const [project, position, vision, goal, discovery, specification, authority, repository] = await Promise.all([
+            requestJson(base, options),
+            requestJson(`${base}/position`, options),
+            requestJson(`${base}/vision/status`, options),
+            requestJson(`${base}/goals/status`, options),
+            requestJson(`${base}/discovery`, options),
+            requestJson(`${base}/specifications/review`, options),
+            requestJson(`${base}/authority/review?include_spec=auto`, options),
+            requestJson(`${base}/repository`, options),
+        ]);
+        if (sequence !== dashboardLoadSequence || controller.signal.aborted) return false;
+        lifecycleState = {
+            project: project.data ?? {},
+            position: position.data ?? {},
+            actions: position.actions ?? [],
+            vision: vision.data ?? {},
+            goal: goal.data ?? {},
+            discovery: discovery.data ?? {},
+            specification: specification.data ?? {},
+            authority: authority.data ?? {},
+            repository: repository.data ?? {},
+        };
+        setProjectError('');
+        renderDashboard();
+        return true;
+    } catch (error) {
+        if (sequence !== dashboardLoadSequence || controller.signal.aborted) return false;
+        throw error;
+    } finally {
+        if (activeDashboardLoadController === controller) {
+            activeDashboardLoadController = null;
+        }
+    }
 }
 
-async function postAction(action, fields = {}) {
+async function postAction(action, fields = {}, options = {}) {
     if (!action) throw new Error('This action is not available in the current lifecycle state.');
+    const headers = { 'Content-Type': 'application/json' };
+    if (options.expectedCandidate) {
+        headers['X-AgileForge-Expected-Candidate'] = options.expectedCandidate;
+    }
     return requestJson(`/api/projects/${selectedProjectId}/${action.endpoint}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify(semanticMutationPayload(fields)),
     });
 }
@@ -687,6 +729,53 @@ function closeHumanDialog() {
     document.getElementById('human-action-dialog')?.close();
     pendingHumanAction = null;
     setDialogError('');
+}
+
+function captureAction(action) {
+    if (!action?.request_kind || !action?.endpoint) return null;
+    return { ...action };
+}
+
+function reviewCandidateFingerprint(state, scope) {
+    return {
+        authority: state?.authority?.pending_authority?.authority_fingerprint,
+        goal: state?.goal?.candidate?.fingerprint,
+        specification: state?.specification?.candidate?.fingerprint,
+        vision: state?.vision?.candidate?.fingerprint,
+    }[scope] ?? null;
+}
+
+function captureReviewBinding(state, scope, decision) {
+    const requestKind = {
+        authority: 'decide_authority',
+        goal: 'decide_product_goal_review',
+        specification: 'decide_specification',
+        vision: 'decide_vision_review',
+    }[scope];
+    const action = captureAction(findAction(state?.actions, requestKind));
+    const expectedCandidate = reviewCandidateFingerprint(state, scope);
+    if (!action || typeof expectedCandidate !== 'string' || !expectedCandidate) return null;
+    return {
+        kind: 'review',
+        scope,
+        decision,
+        action,
+        expectedCandidate,
+    };
+}
+
+function reviewSubmission(binding, rationale) {
+    const decision = binding.scope === 'authority' && binding.decision === 'feedback'
+        ? 'rejected'
+        : binding.decision;
+    return {
+        action: binding.action,
+        expectedCandidate: binding.expectedCandidate,
+        fields: {
+            decision,
+            rationale: rationale || 'Accepted in the dashboard.',
+        },
+    };
 }
 
 function openHumanDialog(config) {
@@ -747,10 +836,12 @@ function reviewDialogCopy(scope, decision) {
     };
 }
 
-async function refreshPositionActions() {
+async function readPositionActions() {
     const payload = await requestJson(`/api/projects/${selectedProjectId}/position`);
-    lifecycleState.position = payload.data ?? {};
-    lifecycleState.actions = payload.actions ?? [];
+    return {
+        position: payload.data ?? {},
+        actions: payload.actions ?? [],
+    };
 }
 
 async function submitHumanAction() {
@@ -767,25 +858,33 @@ async function submitHumanAction() {
     }
 
     if (pending.kind === 'review') {
-        const requestKinds = {
-            authority: 'decide_authority',
-            goal: 'decide_product_goal_review',
-            specification: 'decide_specification',
-            vision: 'decide_vision_review',
-        };
-        const action = findAction(lifecycleState.actions, requestKinds[pending.scope]);
-        const decision = pending.scope === 'authority' && pending.decision === 'feedback'
-            ? 'rejected'
-            : pending.decision;
-        await postAction(action, {
-            decision,
-            rationale: rationale || 'Accepted in the dashboard.',
+        const submission = reviewSubmission(pending, rationale);
+        await postAction(submission.action, submission.fields, {
+            expectedCandidate: submission.expectedCandidate,
         });
         if (pending.scope === 'authority' && pending.decision === 'feedback') {
-            await refreshPositionActions();
-            const feedbackAction = findAction(lifecycleState.actions, 'record_authority_feedback');
-            await postAction(feedbackAction, { feedback: rationale });
+            const recovery = await readPositionActions();
+            const feedbackAction = captureAction(
+                findAction(recovery.actions, 'record_authority_feedback'),
+            );
+            lifecycleState.position = recovery.position;
+            lifecycleState.actions = recovery.actions;
+            renderDashboard();
+            try {
+                await postAction(feedbackAction, { feedback: rationale });
+            } catch (error) {
+                closeHumanDialog();
+                try {
+                    await loadDashboard();
+                } catch (_loadError) {
+                    // The captured recovery action remains rendered from the position read.
+                }
+                setProjectError(`Authority was rejected, but feedback was not recorded. ${error.message}`);
+                return;
+            }
         }
+    } else if (pending.kind === 'authority-feedback') {
+        await postAction(pending.action, { feedback: rationale });
     } else if (pending.kind === 'goal-outcome') {
         const requestKind = pending.outcome === 'fulfilled'
             ? 'fulfill_product_goal'
@@ -858,11 +957,37 @@ function installInteractions() {
         if (!button) return;
         if (button.dataset.reviewScope) {
             const copy = reviewDialogCopy(button.dataset.reviewScope, button.dataset.reviewDecision);
+            const binding = captureReviewBinding(
+                lifecycleState,
+                button.dataset.reviewScope,
+                button.dataset.reviewDecision,
+            );
+            if (!binding) {
+                setProjectError('This review changed. Refresh and review the current candidate.');
+                return;
+            }
             openHumanDialog({
                 ...copy,
-                kind: 'review',
-                scope: button.dataset.reviewScope,
-                decision: button.dataset.reviewDecision,
+                ...binding,
+            });
+            return;
+        }
+        if (button.dataset.authorityFeedback) {
+            const action = captureAction(
+                findAction(lifecycleState.actions, 'record_authority_feedback'),
+            );
+            if (!action) {
+                setProjectError('Authority feedback changed. Refresh and continue from the current state.');
+                return;
+            }
+            openHumanDialog({
+                kind: 'authority-feedback',
+                action,
+                title: 'Record Authority feedback',
+                description: 'Record the specific correction needed before the Authority is recompiled.',
+                label: 'Authority feedback',
+                submitLabel: 'Record feedback',
+                required: true,
             });
             return;
         }
@@ -914,6 +1039,10 @@ function installInteractions() {
 
     document.getElementById('human-action-cancel')?.addEventListener('click', closeHumanDialog);
     document.getElementById('human-action-close')?.addEventListener('click', closeHumanDialog);
+    document.getElementById('human-action-dialog')?.addEventListener('close', () => {
+        pendingHumanAction = null;
+        setDialogError('');
+    });
     document.getElementById('refresh-project')?.addEventListener('click', async (event) => {
         const button = event.currentTarget;
         button.disabled = true;

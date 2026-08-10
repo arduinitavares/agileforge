@@ -1518,6 +1518,12 @@ class VisionReviewRequest(FrozenModel):
     project_id: int
     decision: Literal["accepted", "rejected", "feedback"]
     rationale: SemanticText
+    expected_candidate_fingerprint: str | None = Field(
+        default=None,
+        min_length=1,
+        exclude=True,
+        repr=False,
+    )
     idempotency_key: str = Field(min_length=1)
     actor: str = Field(min_length=1)
     correlation_id: str | None = None
@@ -1562,6 +1568,12 @@ class ProductGoalReviewRequest(FrozenModel):
     project_id: int
     decision: Literal["accepted", "rejected", "feedback"]
     rationale: SemanticText
+    expected_candidate_fingerprint: str | None = Field(
+        default=None,
+        min_length=1,
+        exclude=True,
+        repr=False,
+    )
     idempotency_key: str = Field(min_length=1)
     actor: str = Field(min_length=1)
     correlation_id: str | None = None
@@ -1606,6 +1618,12 @@ class SpecificationReviewRequest(FrozenModel):
     project_id: int
     decision: Literal["accepted", "rejected", "feedback"]
     rationale: SemanticText
+    expected_candidate_fingerprint: str | None = Field(
+        default=None,
+        min_length=1,
+        exclude=True,
+        repr=False,
+    )
     idempotency_key: str = Field(min_length=1)
     actor: str = Field(min_length=1)
     correlation_id: str | None = None
@@ -1640,11 +1658,17 @@ class AuthorityCompileRequest(FrozenModel):
 
 
 class AuthorityReviewRequest(FrozenModel):
-    """Semantic authority decision without caller-owned review identity."""
+    """Semantic authority decision with an optional browser review expectation."""
 
     project_id: int
     decision: Literal["accepted", "rejected"]
     rationale: SemanticText
+    expected_candidate_fingerprint: str | None = Field(
+        default=None,
+        min_length=1,
+        exclude=True,
+        repr=False,
+    )
     idempotency_key: str = Field(min_length=1)
     actor: str = Field(min_length=1)
     correlation_id: str | None = None
@@ -2841,6 +2865,11 @@ class AgileForgeApplication:
         reference = _single_fact_reference(decision, "vision")
         if reference is None:
             return _transition_not_available(position, "vision.review")
+        if not _review_candidate_matches(
+            expected=request.expected_candidate_fingerprint,
+            current=reference.fingerprint,
+        ):
+            return _stale_review_candidate(position, "Vision")
         return self.transition(
             DecideVisionReview(
                 project_id=request.project_id,
@@ -3049,6 +3078,11 @@ class AgileForgeApplication:
         )
         if decision is None or reference is None:
             return _transition_not_available(position, "goal.review")
+        if not _review_candidate_matches(
+            expected=request.expected_candidate_fingerprint,
+            current=reference.fingerprint,
+        ):
+            return _stale_review_candidate(position, "Product Goal")
         return self.transition(
             DecideProductGoalReview(
                 project_id=request.project_id,
@@ -3229,6 +3263,11 @@ class AgileForgeApplication:
         )
         if decision is None or reference is None:
             return _transition_not_available(position, "specification.review")
+        if not _review_candidate_matches(
+            expected=request.expected_candidate_fingerprint,
+            current=reference.fingerprint,
+        ):
+            return _stale_review_candidate(position, "Specification")
         return self.transition(
             DecideSpecification(
                 project_id=request.project_id,
@@ -3333,6 +3372,11 @@ class AgileForgeApplication:
             or authority_fingerprint != reference.fingerprint
         ):
             return _transition_not_available(position, "authority.review")
+        if not _review_candidate_matches(
+            expected=request.expected_candidate_fingerprint,
+            current=authority_fingerprint,
+        ):
+            return _stale_review_candidate(position, "Authority")
         return self.transition(
             DecideAuthority(
                 project_id=request.project_id,
@@ -4422,6 +4466,29 @@ def _transition_not_available(
         error=WorkflowError(
             code=WorkflowErrorCode.TRANSITION_NOT_AVAILABLE,
             message=f"No unique {node_id} transition is currently available.",
+        ),
+    )
+
+
+def _review_candidate_matches(*, expected: str | None, current: str) -> bool:
+    """Allow semantic callers to omit a guard while binding browser reviews."""
+    return expected is None or expected == current
+
+
+def _stale_review_candidate(
+    position: WorkflowPosition,
+    subject: str,
+) -> TransitionResult:
+    """Fail closed when the browser reviewed a replaced candidate."""
+    return TransitionResult(
+        ok=False,
+        position=position,
+        error=WorkflowError(
+            code=WorkflowErrorCode.STALE_POSITION,
+            message=(
+                f"The {subject} candidate changed after this review opened. "
+                "Reload and review the current candidate."
+            ),
         ),
     )
 

@@ -10,7 +10,7 @@ from importlib.resources import files
 from pathlib import Path
 from typing import Annotated, Literal, Self, TypedDict, cast
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from git import Git
@@ -422,8 +422,9 @@ def build_create_project_command(req: CreateProjectRequest) -> CreateProjectComm
 def build_authority_decision_request(
     project_id: int,
     req: AuthorityDecisionApiRequest,
+    expected_candidate_fingerprint: str | None = None,
 ) -> AuthorityReviewRequest:
-    """Translate one API choice without accepting derived review identity."""
+    """Translate one API choice plus an optional hidden browser expectation."""
     return AuthorityReviewRequest(
         project_id=project_id,
         idempotency_key=req.idempotency_key,
@@ -431,6 +432,7 @@ def build_authority_decision_request(
         correlation_id=req.correlation_id,
         decision=req.decision,
         rationale=req.rationale,
+        expected_candidate_fingerprint=expected_candidate_fingerprint,
     )
 
 
@@ -666,6 +668,10 @@ def get_vision_status(project_id: int) -> dict[str, object]:
 def review_project_vision(
     project_id: int,
     req: ReviewApiRequest,
+    expected_candidate_fingerprint: Annotated[
+        str | None,
+        Header(alias="X-AgileForge-Expected-Candidate", include_in_schema=False),
+    ] = None,
 ) -> dict[str, object]:
     """Record one semantic Project Vision review decision."""
     return _result_payload(
@@ -674,6 +680,7 @@ def review_project_vision(
                 project_id=project_id,
                 decision=req.decision,
                 rationale=req.rationale,
+                expected_candidate_fingerprint=expected_candidate_fingerprint,
                 **_metadata(req),
             )
         )
@@ -726,6 +733,10 @@ def get_product_goal_status(project_id: int) -> dict[str, object]:
 def review_product_goal(
     project_id: int,
     req: ReviewApiRequest,
+    expected_candidate_fingerprint: Annotated[
+        str | None,
+        Header(alias="X-AgileForge-Expected-Candidate", include_in_schema=False),
+    ] = None,
 ) -> dict[str, object]:
     """Record one semantic Product Goal review decision."""
     return _result_payload(
@@ -734,6 +745,7 @@ def review_product_goal(
                 project_id=project_id,
                 decision=req.decision,
                 rationale=req.rationale,
+                expected_candidate_fingerprint=expected_candidate_fingerprint,
                 **_metadata(req),
             )
         )
@@ -829,6 +841,10 @@ def get_specification_review(project_id: int) -> dict[str, object]:
 def review_specification(
     project_id: int,
     req: ReviewApiRequest,
+    expected_candidate_fingerprint: Annotated[
+        str | None,
+        Header(alias="X-AgileForge-Expected-Candidate", include_in_schema=False),
+    ] = None,
 ) -> dict[str, object]:
     """Record one semantic specification review decision."""
     return _result_payload(
@@ -837,6 +853,7 @@ def review_specification(
                 project_id=project_id,
                 decision=req.decision,
                 rationale=req.rationale,
+                expected_candidate_fingerprint=expected_candidate_fingerprint,
                 **_metadata(req),
             )
         )
@@ -1100,11 +1117,19 @@ def get_story_packet(
 def decide_project_authority(
     project_id: int,
     req: AuthorityDecisionApiRequest,
+    expected_candidate_fingerprint: Annotated[
+        str | None,
+        Header(alias="X-AgileForge-Expected-Candidate", include_in_schema=False),
+    ] = None,
 ) -> dict[str, object]:
     """Record one human choice with server-derived authority identity."""
     return _result_payload(
         _application().decide_authority(
-            build_authority_decision_request(project_id, req)
+            build_authority_decision_request(
+                project_id,
+                req,
+                expected_candidate_fingerprint,
+            )
         )
     )
 

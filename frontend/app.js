@@ -1,4 +1,5 @@
 let projects = [];
+let createModalOpener = null;
 
 function escapeText(value) {
     const element = document.createElement('span');
@@ -39,6 +40,28 @@ function renderProjects() {
     `).join('');
 }
 
+function validationIssueMessage(issue) {
+    if (!issue || typeof issue.msg !== 'string') return null;
+    const location = (Array.isArray(issue.loc) ? issue.loc : [])
+        .filter((part) => part !== 'body')
+        .map((part) => String(part).replaceAll('_', ' ').replace(/\b\w/g, (letter) => letter.toUpperCase()))
+        .join(' > ');
+    const message = issue.msg.trim().replace(/[.]+$/, '');
+    return `${location ? `${location}: ` : ''}${message}.`;
+}
+
+function responseErrorMessage(payload, fallback) {
+    const detail = payload?.detail;
+    if (Array.isArray(detail)) {
+        const validation = detail.map(validationIssueMessage).filter(Boolean).join(' ');
+        if (validation) return validation;
+    }
+    return detail?.error?.message
+        || detail?.message
+        || (typeof detail === 'string' ? detail : null)
+        || fallback;
+}
+
 async function readResponse(response, fallback) {
     let payload = {};
     try {
@@ -47,12 +70,7 @@ async function readResponse(response, fallback) {
         throw new Error(fallback);
     }
     if (response.ok) return payload;
-    const detail = payload.detail;
-    const message = detail?.error?.message
-        || detail?.message
-        || (typeof detail === 'string' ? detail : null)
-        || fallback;
-    throw new Error(message);
+    throw new Error(responseErrorMessage(payload, fallback));
 }
 
 async function fetchProjects() {
@@ -79,6 +97,9 @@ function setCreateError(message) {
 function openCreateProjectModal() {
     const modal = document.getElementById('create-project-modal');
     if (!modal) return;
+    createModalOpener = document.activeElement;
+    const content = document.getElementById('dashboard-content');
+    if (content) content.inert = true;
     modal.classList.remove('hidden');
     modal.classList.add('flex');
     setCreateError('');
@@ -87,10 +108,48 @@ function openCreateProjectModal() {
 
 function closeCreateProjectModal() {
     const modal = document.getElementById('create-project-modal');
-    if (!modal) return;
+    if (!modal || modal.classList.contains('hidden')) return;
     modal.classList.add('hidden');
     modal.classList.remove('flex');
+    const content = document.getElementById('dashboard-content');
+    if (content) content.inert = false;
     setCreateError('');
+    const opener = createModalOpener;
+    createModalOpener = null;
+    opener?.focus();
+}
+
+function createModalFocusableElements() {
+    const form = document.getElementById('create-project-form');
+    if (!form) return [];
+    return [...form.querySelectorAll(
+        'button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    )].filter((element) => element.getAttribute?.('aria-hidden') !== 'true');
+}
+
+function handleCreateModalKeydown(event) {
+    const modal = document.getElementById('create-project-modal');
+    if (!modal || modal.classList.contains('hidden')) return;
+    if (event.key === 'Escape') {
+        event.preventDefault();
+        closeCreateProjectModal();
+        return;
+    }
+    if (event.key !== 'Tab') return;
+    const focusable = createModalFocusableElements();
+    if (focusable.length === 0) return;
+    const first = focusable[0];
+    const last = focusable.at(-1);
+    if (!focusable.includes(document.activeElement)) {
+        event.preventDefault();
+        (event.shiftKey ? last : first).focus();
+    } else if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+    }
 }
 
 async function submitNewProject() {
@@ -138,9 +197,7 @@ function installCreateProjectModal() {
         event.preventDefault();
         submitNewProject();
     });
-    window.addEventListener('keydown', (event) => {
-        if (event.key === 'Escape') closeCreateProjectModal();
-    });
+    window.addEventListener('keydown', handleCreateModalKeydown);
 }
 
 window.addEventListener('DOMContentLoaded', () => {

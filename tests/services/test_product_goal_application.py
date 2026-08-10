@@ -236,6 +236,7 @@ def test_product_goal_commands_replay_before_any_state_read() -> None:
             project_id=PROJECT_ID,
             decision="feedback",
             rationale="Clarify the success signal.",
+            expected_candidate_fingerprint="sha256:goal-replaced-after-review",
             idempotency_key="goal-review",
             actor="operator@example.com",
         )
@@ -270,6 +271,7 @@ def test_product_goal_commands_replay_before_any_state_read() -> None:
             project_id=PROJECT_ID,
             decision="accepted",
             rationale="Reviewed.",
+            expected_candidate_fingerprint="sha256:specification-replaced-after-review",
             idempotency_key="specification-review",
             actor="operator@example.com",
         )

@@ -46,6 +46,8 @@ _ARTIFACT_ROOT = _PROJECT_ROOT / "artifacts" / "ui" / "single-project-lifecycle"
 _PROJECT_ID = 1
 _HTTP_OK = 200
 _HTTP_CREATED = 201
+_HTTP_CONFLICT = 409
+_HTTP_SERVICE_UNAVAILABLE = 503
 _UI_SETTLE_MS = 150
 _DESKTOP_VIEWPORT: ViewportSize = {"width": 1440, "height": 900}
 _MOBILE_VIEWPORT: ViewportSize = {"width": 390, "height": 844}
@@ -56,6 +58,7 @@ _PNG_HEIGHT_END = 24
 _FORBIDDEN_BODY_FIELDS = {
     "expected_fact_fingerprint",
     "expected_decision_fingerprint",
+    "expected_candidate_fingerprint",
     "graph_version",
     "model_id",
 }
@@ -66,11 +69,13 @@ _ACTION_ENDPOINTS = {
     "decide_product_goal_review": "goals/review",
     "decide_specification": "specifications/review",
     "decide_vision_review": "vision/review",
+    "record_authority_feedback": "authority/feedback",
     "record_backlog_draft": "backlog/generate",
     "record_discovery_artifact": "discovery",
     "record_product_goal_interview_turn": "goals/respond",
     "record_specification_candidate": "specifications",
     "record_vision_interview_turn": "vision/respond",
+    "repair_authority": "authority/repair",
 }
 
 _ACTION_CHILDREN = {
@@ -79,11 +84,13 @@ _ACTION_CHILDREN = {
     "decide_product_goal_review": "product_goal",
     "decide_specification": "product_discovery",
     "decide_vision_review": "vision",
+    "record_authority_feedback": "authority",
     "record_backlog_draft": "backlog",
     "record_discovery_artifact": "product_discovery",
     "record_product_goal_interview_turn": "product_goal",
     "record_specification_candidate": "product_discovery",
     "record_vision_interview_turn": "vision",
+    "repair_authority": "authority",
 }
 
 
@@ -114,6 +121,10 @@ class FakeLifecycle:
     specification_accepted: bool = False
     authority_pending: JsonObject | None = None
     authority_accepted: JsonObject | None = None
+    authority_rejected: bool = False
+    authority_feedback: str | None = None
+    authority_generation: int = 0
+    fail_next_authority_feedback: bool = False
     refresh_count: int = 0
     api_errors: list[str] = field(default_factory=list)
 
@@ -153,7 +164,11 @@ class FakeLifecycle:
                 return _HTTP_OK, self.position_envelope()
             return _HTTP_OK, self._success(self._read(suffix))
         assert request.method == "POST", f"Unexpected method: {request.method}"
-        return _HTTP_OK, self._mutate(suffix, self._request_body(route))
+        return self._mutate(
+            suffix,
+            self._request_body(route),
+            dict(request.headers),
+        )
 
     @staticmethod
     def _request_body(route: Route) -> JsonObject:
@@ -183,10 +198,41 @@ class FakeLifecycle:
         assert reader is not None, f"Unexpected read path: {suffix}"
         return reader()
 
-    def _mutate(self, suffix: str, body: JsonObject) -> JsonObject:
+    def _mutate(
+        self,
+        suffix: str,
+        body: JsonObject,
+        headers: dict[str, str],
+    ) -> tuple[int, JsonObject]:
+        review_fingerprint = self._review_fingerprint(suffix)
+        if review_fingerprint is not None:
+            expected = headers.get("x-agileforge-expected-candidate")
+            assert expected is not None, (
+                "Browser review omitted its hidden expectation."
+            )
+            if expected != review_fingerprint:
+                return _HTTP_CONFLICT, {
+                    "detail": {
+                        "error": {
+                            "code": "STALE_POSITION",
+                            "message": (
+                                "The candidate changed after this review opened. "
+                                "Reload and review the current candidate."
+                            ),
+                        }
+                    }
+                }
+        if suffix == "/authority/feedback" and self.fail_next_authority_feedback:
+            self._assert_fields(body, {"feedback"})
+            self.fail_next_authority_feedback = False
+            return _HTTP_SERVICE_UNAVAILABLE, {
+                "detail": {"message": "Feedback storage was interrupted."}
+            }
         handlers: dict[str, Callable[[JsonObject], None]] = {
             "/authority/compile": self._compile_authority,
             "/authority/decision": self._review_authority,
+            "/authority/feedback": self._record_authority_feedback,
+            "/authority/repair": self._repair_authority,
             "/discovery": self._record_discovery,
             "/goals/respond": self._record_goal_turn,
             "/goals/review": self._review_goal,
@@ -200,7 +246,29 @@ class FakeLifecycle:
         handler = handlers.get(suffix)
         assert handler is not None, f"Unexpected mutation path: {suffix}"
         handler(body)
-        return self._mutation_result()
+        return _HTTP_OK, self._mutation_result()
+
+    def _review_fingerprint(self, suffix: str) -> str | None:
+        candidates = {
+            "/authority/decision": (
+                None
+                if self.authority_pending is None
+                else self.authority_pending.get("authority_fingerprint")
+            ),
+            "/goals/review": (
+                None
+                if self.goal_candidate is None
+                else self.goal_candidate.get("fingerprint")
+            ),
+            "/specifications/review": "sha256:hidden-specification",
+            "/vision/review": (
+                None
+                if self.vision_candidate is None
+                else self.vision_candidate.get("fingerprint")
+            ),
+        }
+        value = candidates.get(suffix)
+        return value if isinstance(value, str) else None
 
     def _assert_fields(self, body: JsonObject, business_fields: set[str]) -> None:
         expected = {"actor", "idempotency_key", *business_fields}
@@ -295,9 +363,12 @@ class FakeLifecycle:
 
     def _compile_authority(self, body: JsonObject) -> None:
         self._assert_fields(body, set())
+        self.authority_generation += 1
         self.authority_pending = {
             "authority_id": 91,
-            "authority_fingerprint": "sha256:hidden-authority",
+            "authority_fingerprint": (
+                f"sha256:hidden-authority-{self.authority_generation}"
+            ),
             "compiler_version": "hidden-compiler",
             "invariants": [
                 {
@@ -318,13 +389,32 @@ class FakeLifecycle:
                 }
             ],
         }
+        self.authority_rejected = False
+        self.authority_feedback = None
 
     def _review_authority(self, body: JsonObject) -> None:
         self._assert_fields(body, {"decision", "rationale"})
-        assert body["decision"] == "accepted"
         assert isinstance(body["rationale"], str)
-        self.authority_accepted = self.authority_pending
-        self.authority_pending = None
+        if body["decision"] == "accepted":
+            self.authority_accepted = self.authority_pending
+            self.authority_pending = None
+            self.authority_rejected = False
+            return
+        assert body["decision"] == "rejected"
+        self.authority_rejected = True
+
+    def _record_authority_feedback(self, body: JsonObject) -> None:
+        self._assert_fields(body, {"feedback"})
+        feedback = body["feedback"]
+        assert isinstance(feedback, str)
+        assert feedback
+        assert self.authority_rejected is True
+        self.authority_feedback = feedback
+
+    def _repair_authority(self, body: JsonObject) -> None:
+        self._assert_fields(body, set())
+        assert self.authority_feedback is not None
+        self._compile_authority(body)
 
     def _attach_repository(self, body: JsonObject) -> None:
         self._assert_fields(body, {"path"})
@@ -436,7 +526,7 @@ class FakeLifecycle:
             if self.specification is None
             else {
                 "canonical_content": self.specification,
-                "fingerprint": "sha256:hidden",
+                "fingerprint": "sha256:hidden-specification",
             }
         )
         review: JsonObject | None = None
@@ -476,6 +566,14 @@ class FakeLifecycle:
             (
                 self.authority_pending is None and self.authority_accepted is None,
                 "compile_authority",
+            ),
+            (
+                self.authority_rejected and self.authority_feedback is None,
+                "record_authority_feedback",
+            ),
+            (
+                self.authority_rejected and self.authority_feedback is not None,
+                "repair_authority",
             ),
             (self.authority_pending is not None, "decide_authority"),
             (True, "record_backlog_draft"),
@@ -741,7 +839,12 @@ def _assert_screenshot_size(path: Path, expected: ViewportSize) -> None:
     assert (width, height) == (expected["width"], expected["height"])
 
 
-def _complete_vision_and_goal(page: Page) -> None:
+def _complete_vision_and_goal(
+    page: Page,
+    fake: FakeLifecycle,
+    *,
+    replace_vision_during_review: bool = False,
+) -> None:
     expect(page.locator("#vision-response")).to_be_visible()
     expect(page.get_by_text("Which product team should benefit first?")).to_be_visible()
     page.locator("#vision-response").fill(
@@ -752,6 +855,24 @@ def _complete_vision_and_goal(page: Page) -> None:
     expect(
         page.get_by_text("Give product teams a durable, reviewable lifecycle.")
     ).to_be_visible()
+    if replace_vision_during_review:
+        page.locator(
+            '[data-review-scope="vision"][data-review-decision="accepted"]'
+        ).click()
+        expect(page.locator("#human-action-dialog")).to_be_visible()
+        fake.vision_candidate = {
+            "statement": "Give product teams a replacement lifecycle candidate.",
+            "components": {"beneficiaries": "Replacement pilot team"},
+            "fingerprint": "sha256:hidden-vision-replacement",
+        }
+        page.locator("#human-action-submit").click()
+        expect(page.locator("#human-action-error")).to_contain_text("candidate changed")
+        assert fake.vision_accepted is False
+        page.locator("#human-action-close").click()
+        page.locator("#refresh-project").click()
+        expect(
+            page.get_by_text("Give product teams a replacement lifecycle candidate.")
+        ).to_be_visible()
     _accept_review(page, "vision")
     expect(page.locator("#goal-response")).to_be_visible()
     page.locator("#goal-response").fill(
@@ -797,8 +918,77 @@ def _compile_and_review_authority(page: Page) -> None:
     expect(
         page.get_by_text("Confirm pilot team ownership before delivery begins.")
     ).to_be_visible()
+    page.locator(
+        '[data-review-scope="authority"][data-review-decision="rejected"]'
+    ).click()
+    page.locator("#human-action-rationale").fill(
+        "Clarify the ownership invariant before acceptance."
+    )
+    page.locator("#human-action-submit").click()
+    expect(page.get_by_text("Record feedback", exact=True)).to_be_visible()
+    page.locator('[data-authority-feedback="true"]').click()
+    page.locator("#human-action-rationale").fill(
+        "Require one named owner for lifecycle review."
+    )
+    page.locator("#human-action-submit").click()
+    expect(page.get_by_text("Recompile", exact=True)).to_be_visible()
+    page.locator('[data-direct-action="repair_authority"]').click()
+    expect(page.get_by_text("Exact Authority review packet")).to_be_visible()
     _accept_review(page, "authority")
     expect(page.get_by_text("Authority accepted")).to_be_visible()
+
+
+def _authority_ready_fake() -> FakeLifecycle:
+    fake = FakeLifecycle(repositories={})
+    fake.project = {
+        "project_id": _PROJECT_ID,
+        "name": "Authority recovery",
+        "description": "Interrupted feedback recovery.",
+        "user_stories_count": 0,
+        "sprint_count": 0,
+    }
+    fake.vision_candidate = {
+        "statement": "A durable recovery lifecycle.",
+        "fingerprint": "sha256:recovery-vision",
+    }
+    fake.vision_accepted = True
+    fake.goal_candidate = {
+        "statement": "Recover every interrupted human review.",
+        "fingerprint": "sha256:recovery-goal",
+    }
+    fake.goal_accepted = True
+    fake.discovery = {"summary": "Feedback can be interrupted."}
+    fake.specification = {"title": "Recoverable Authority feedback"}
+    fake.specification_accepted = True
+    fake._compile_authority(
+        {
+            "actor": "dashboard-ui",
+            "idempotency_key": "dashboard-seed-authority",
+        }
+    )
+    return fake
+
+
+def _assert_create_modal_keyboard_contract(page: Page) -> None:
+    opener = page.locator("#open-create-project")
+    opener.click()
+    expect(page.locator("#create-project-modal")).to_be_visible()
+    assert page.locator("#dashboard-content").evaluate("element => element.inert")
+    page.keyboard.press("Escape")
+    expect(page.locator("#create-project-modal")).not_to_be_visible()
+    assert opener.evaluate("element => element === document.activeElement")
+
+    opener.click()
+    page.locator("#close-create-project").focus()
+    page.keyboard.press("Shift+Tab")
+    assert page.locator("#btn-submit-project").evaluate(
+        "element => element === document.activeElement"
+    )
+    page.keyboard.press("Tab")
+    assert page.locator("#close-create-project").evaluate(
+        "element => element === document.activeElement"
+    )
+    page.keyboard.press("Escape")
 
 
 def _attach_and_refresh_repository(
@@ -831,6 +1021,7 @@ def test_desktop_human_single_lifecycle(
     context.route("**/api/**", fake.handle)
     page = context.new_page()
     page.goto(dashboard_harness.url, wait_until="networkidle")
+    _assert_create_modal_keyboard_contract(page)
 
     _create_project(
         page,
@@ -838,7 +1029,11 @@ def test_desktop_human_single_lifecycle(
         description="One durable product definition lifecycle.",
         repository_path=None,
     )
-    _complete_vision_and_goal(page)
+    _complete_vision_and_goal(
+        page,
+        fake,
+        replace_vision_during_review=True,
+    )
     _record_and_review_definition(page)
     _compile_and_review_authority(page)
     _attach_and_refresh_repository(page, fake, repository_path)
@@ -850,6 +1045,49 @@ def test_desktop_human_single_lifecycle(
     screenshot = _ARTIFACT_ROOT / "desktop-1440x900.png"
     page.screenshot(path=screenshot, full_page=False, animations="disabled")
     _assert_screenshot_size(screenshot, _DESKTOP_VIEWPORT)
+    assert fake.api_errors == []
+    context.close()
+
+
+def test_interrupted_authority_feedback_recovers_without_a_dead_end(
+    dashboard_harness: DashboardHarness,
+) -> None:
+    """Resume feedback after rejection succeeded but feedback storage failed."""
+    fake = _authority_ready_fake()
+    fake.fail_next_authority_feedback = True
+    context = dashboard_harness.browser.new_context(viewport=_DESKTOP_VIEWPORT)
+    context.route("**/api/**", fake.handle)
+    page = context.new_page()
+    page.goto(
+        f"{dashboard_harness.url}/project.html?id={_PROJECT_ID}",
+        wait_until="networkidle",
+    )
+
+    expect(page.get_by_text("Exact Authority review packet")).to_be_visible()
+    page.locator(
+        '[data-review-scope="authority"][data-review-decision="feedback"]'
+    ).click()
+    page.locator("#human-action-rationale").fill(
+        "Require explicit ownership before delivery."
+    )
+    page.locator("#human-action-submit").click()
+
+    expect(page.locator("#human-action-dialog")).not_to_be_visible()
+    expect(page.locator("#project-error")).to_contain_text("feedback was not recorded")
+    expect(page.get_by_text("Record feedback", exact=True)).to_be_visible()
+    page.locator('[data-authority-feedback="true"]').click()
+    page.locator("#human-action-rationale").fill(
+        "Require explicit ownership before delivery."
+    )
+    page.locator("#human-action-submit").click()
+    expect(page.get_by_text("Recompile", exact=True)).to_be_visible()
+    page.locator('[data-direct-action="repair_authority"]').click()
+    expect(page.get_by_text("Exact Authority review packet")).to_be_visible()
+    _accept_review(page, "authority")
+    expect(page.get_by_text("Authority accepted")).to_be_visible()
+
+    _assert_human_only_surface(page)
+    _assert_no_horizontal_overflow(page)
     assert fake.api_errors == []
     context.close()
 
