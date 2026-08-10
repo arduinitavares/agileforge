@@ -74,9 +74,7 @@ def _position(*decisions: NodeDecision) -> WorkflowPosition:
             if item.category is NodeCategory.AVAILABLE
         ),
         waiting_nodes=tuple(
-            item.node_id
-            for item in decisions
-            if item.category is NodeCategory.WAITING
+            item.node_id for item in decisions if item.category is NodeCategory.WAITING
         ),
         blocked_nodes=(),
         invalid_nodes=(),
@@ -271,7 +269,7 @@ def test_product_goal_commands_replay_before_any_state_read() -> None:
         SpecificationReviewRequest(
             project_id=PROJECT_ID,
             decision="accepted",
-            rationale="",
+            rationale="Reviewed.",
             idempotency_key="specification-review",
             actor="operator@example.com",
         )
@@ -284,9 +282,7 @@ def test_product_goal_commands_replay_before_any_state_read() -> None:
     assert domain.calls == []
     assert len(prepared.calls) == PRODUCT_GOAL_COMMAND_COUNT
     assert isinstance(prepared.calls[0], NodeAttemptReplayQuery)
-    assert all(
-        isinstance(item, TransitionReplayQuery) for item in prepared.calls[1:]
-    )
+    assert all(isinstance(item, TransitionReplayQuery) for item in prepared.calls[1:])
 
 
 def test_public_goal_review_and_outcome_resolve_exact_identities() -> None:
@@ -381,9 +377,7 @@ def test_public_discovery_and_specification_methods_resolve_lineage() -> None:
         workflow_domain=domain,
         product_goal_services=ProductGoalLifecycleServices(
             interview_input=_GoalInput(),
-            discovery_selection=_DiscoverySelection(
-                supersedes=SUPERSEDED_CANDIDATE_ID
-            ),
+            discovery_selection=_DiscoverySelection(supersedes=SUPERSEDED_CANDIDATE_ID),
         ),
     )
 

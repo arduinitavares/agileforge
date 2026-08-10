@@ -19,6 +19,49 @@ if TYPE_CHECKING:
     from services.application import AuthorityFeedbackRequest
 
 SPRINT_CAPACITY_POINTS = 8
+_SEMANTIC_TEXT_COMMANDS = (
+    (
+        "vision respond --project-id 41 --text {value} "
+        "--idempotency-key vision-text-41 --actor operator",
+        "text",
+    ),
+    (
+        "vision review --project-id 41 --decision accepted --rationale {value} "
+        "--idempotency-key vision-review-41 --actor operator",
+        "rationale",
+    ),
+    (
+        "vision revision --project-id 41 --reason {value} "
+        "--idempotency-key vision-revision-41 --actor operator",
+        "reason",
+    ),
+    (
+        "goal respond --project-id 41 --text {value} "
+        "--idempotency-key goal-text-41 --actor operator",
+        "text",
+    ),
+    (
+        "goal review --project-id 41 --decision accepted --rationale {value} "
+        "--idempotency-key goal-review-41 --actor operator",
+        "rationale",
+    ),
+    (
+        "goal complete --project-id 41 --rationale {value} "
+        "--idempotency-key goal-complete-41 --actor operator",
+        "rationale",
+    ),
+    (
+        "specification review --project-id 41 --decision accepted "
+        "--rationale {value} --idempotency-key specification-review-41 "
+        "--actor operator",
+        "rationale",
+    ),
+    (
+        "authority decide --project-id 41 --decision accepted --rationale {value} "
+        "--idempotency-key authority-review-41 --actor operator",
+        "rationale",
+    ),
+)
 
 
 @pytest.mark.parametrize(
@@ -165,6 +208,76 @@ def test_authority_feedback_cli_returns_structured_invalid_input(
             "--actor",
             "operator",
         ],
+        application=application,
+    )
+
+    assert exit_code == invalid_input_exit_code
+    assert application.requests == []
+    assert '"ok": false' in capsys.readouterr().out
+
+
+class _SemanticTextApplication:
+    """Capture any semantic text mutation without durable side effects."""
+
+    _METHODS = frozenset(
+        {
+            "begin_vision_revision",
+            "decide_authority",
+            "respond_to_product_goal",
+            "respond_to_vision",
+            "resolve_product_goal",
+            "review_product_goal",
+            "review_specification",
+            "review_vision",
+        }
+    )
+
+    def __init__(self) -> None:
+        self.requests: list[object] = []
+
+    def __getattr__(self, name: str) -> object:
+        if name not in self._METHODS:
+            raise AttributeError(name)
+
+        def capture(request: object) -> object:
+            self.requests.append(request)
+            return cli_main.TransitionResult(ok=True)
+
+        return capture
+
+
+@pytest.mark.parametrize(("command", "field"), _SEMANTIC_TEXT_COMMANDS)
+def test_semantic_text_cli_strips_before_application_call(
+    command: str,
+    field: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Persist canonical human text from every Task 7 CLI mutation."""
+    application = _SemanticTextApplication()
+
+    exit_code = cli_main.main(
+        shlex.split(command.format(value=shlex.quote("  Canonical text.  "))),
+        application=application,
+    )
+
+    assert exit_code == 0
+    assert getattr(application.requests[0], field) == "Canonical text."
+    assert '"ok": true' in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(("command", "field"), _SEMANTIC_TEXT_COMMANDS)
+def test_semantic_text_cli_rejects_whitespace_before_application_call(
+    command: str,
+    field: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Reject normalized-empty human text before invoking the application."""
+    del field
+    application = _SemanticTextApplication()
+    invalid_input_exit_code = 2
+
+    exit_code = cli_main.main(
+        shlex.split(command.format(value=shlex.quote("  \t"))),
         application=application,
     )
 

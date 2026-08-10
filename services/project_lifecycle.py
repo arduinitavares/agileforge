@@ -67,6 +67,17 @@ class RepositoryRefreshCommand(FrozenModel):
     correlation_id: str | None = None
 
 
+class RepositoryBindingReplayCommand(FrozenModel):
+    """Stable public identity for repository binding receipt replay."""
+
+    project_id: int
+    operation: Literal["attach", "refresh"]
+    requested_repository_path: str | None
+    idempotency_key: str = Field(min_length=1, max_length=200)
+    actor: str = Field(min_length=1, max_length=200)
+    correlation_id: str | None = None
+
+
 class _WorkflowDomainPort(Protocol):
     def position(self, project_id: int) -> WorkflowPosition: ...
 
@@ -199,6 +210,23 @@ class ProjectLifecycleService:
         )
         return self._record_binding(operation, binding)
 
+    def replay_repository_binding(
+        self,
+        command: RepositoryBindingReplayCommand,
+    ) -> TransitionResult | None:
+        """Resolve caller-owned binding semantics before deriving current guards."""
+        return self._binding_replay(
+            _RepositoryBindingOperation(
+                project_id=command.project_id,
+                operation=command.operation,
+                requested_repository_path=command.requested_repository_path,
+                expected_active_binding_fingerprint=None,
+                idempotency_key=command.idempotency_key,
+                actor=command.actor,
+                correlation_id=command.correlation_id,
+            )
+        )
+
     def _record_binding(
         self,
         operation: _RepositoryBindingOperation,
@@ -231,9 +259,6 @@ class ProjectLifecycleService:
                 project_id=operation.project_id,
                 operation=operation.operation,
                 requested_repository_path=operation.requested_repository_path,
-                expected_active_binding_fingerprint=(
-                    operation.expected_active_binding_fingerprint
-                ),
                 actor=operation.actor,
                 correlation_id=operation.correlation_id,
             )
@@ -284,5 +309,6 @@ __all__ = [
     "CreateProjectCommand",
     "ProjectLifecycleService",
     "RepositoryAttachmentCommand",
+    "RepositoryBindingReplayCommand",
     "RepositoryRefreshCommand",
 ]

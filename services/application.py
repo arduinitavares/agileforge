@@ -5,13 +5,22 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import cache
 from importlib import import_module
-from typing import TYPE_CHECKING, Any, Literal, Protocol, TypedDict, Unpack, cast
+from typing import (
+    TYPE_CHECKING,
+    Annotated,
+    Any,
+    Literal,
+    Protocol,
+    TypedDict,
+    Unpack,
+    cast,
+)
 
 from pydantic import (
     Field,
+    StringConstraints,
     TypeAdapter,
     ValidationError,
-    field_validator,
     model_validator,
 )
 from sqlmodel import Session, col, select
@@ -58,6 +67,7 @@ from services.project_lifecycle import (
     CreateProjectCommand,
     ProjectLifecycleService,
     RepositoryAttachmentCommand,
+    RepositoryBindingReplayCommand,
     RepositoryRefreshCommand,
 )
 from services.roadmap_runtime import build_roadmap_input_context
@@ -644,6 +654,10 @@ _EXECUTION_SETTINGS: JsonObject = {
     "max_attempts": 2,
 }
 _LEASE_SECONDS = 300
+type SemanticText = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1),
+]
 
 
 class AgenticActionRequest(FrozenModel):
@@ -704,7 +718,7 @@ class VisionInterviewRequest(FrozenModel):
     graph_version: str
     fact_fingerprint: str
     decision_fingerprint: str
-    user_text: str = Field(min_length=1)
+    user_text: SemanticText
     idempotency_key: str = Field(min_length=1)
     actor: str = Field(min_length=1)
     correlation_id: str | None = None
@@ -714,7 +728,7 @@ class VisionResponseRequest(FrozenModel):
     """Semantic caller input for one Project Vision interview turn."""
 
     project_id: int
-    text: str = Field(min_length=1)
+    text: SemanticText
     idempotency_key: str = Field(min_length=1)
     actor: str = Field(min_length=1)
     correlation_id: str | None = None
@@ -725,7 +739,7 @@ class VisionReviewRequest(FrozenModel):
 
     project_id: int
     decision: Literal["accepted", "rejected", "feedback"]
-    rationale: str
+    rationale: SemanticText
     idempotency_key: str = Field(min_length=1)
     actor: str = Field(min_length=1)
     correlation_id: str | None = None
@@ -735,7 +749,7 @@ class VisionRevisionRequest(FrozenModel):
     """Transport request to open an eligible Vision replacement interview."""
 
     project_id: int
-    reason: str = Field(min_length=1)
+    reason: SemanticText
     idempotency_key: str = Field(min_length=1)
     actor: str = Field(min_length=1)
     correlation_id: str | None = None
@@ -748,7 +762,7 @@ class ProductGoalInterviewRequest(FrozenModel):
     graph_version: str
     fact_fingerprint: str
     decision_fingerprint: str
-    user_text: str = Field(min_length=1)
+    user_text: SemanticText
     idempotency_key: str = Field(min_length=1)
     actor: str = Field(min_length=1)
     correlation_id: str | None = None
@@ -758,7 +772,7 @@ class ProductGoalResponseRequest(FrozenModel):
     """Semantic caller input for one Product Goal interview turn."""
 
     project_id: int
-    text: str = Field(min_length=1)
+    text: SemanticText
     idempotency_key: str = Field(min_length=1)
     actor: str = Field(min_length=1)
     correlation_id: str | None = None
@@ -769,7 +783,7 @@ class ProductGoalReviewRequest(FrozenModel):
 
     project_id: int
     decision: Literal["accepted", "rejected", "feedback"]
-    rationale: str
+    rationale: SemanticText
     idempotency_key: str = Field(min_length=1)
     actor: str = Field(min_length=1)
     correlation_id: str | None = None
@@ -780,7 +794,7 @@ class ProductGoalOutcomeRequest(FrozenModel):
 
     project_id: int
     outcome: Literal["fulfilled", "abandoned"]
-    rationale: str = Field(min_length=1)
+    rationale: SemanticText
     idempotency_key: str = Field(min_length=1)
     actor: str = Field(min_length=1)
     correlation_id: str | None = None
@@ -813,7 +827,7 @@ class SpecificationReviewRequest(FrozenModel):
 
     project_id: int
     decision: Literal["accepted", "rejected", "feedback"]
-    rationale: str
+    rationale: SemanticText
     idempotency_key: str = Field(min_length=1)
     actor: str = Field(min_length=1)
     correlation_id: str | None = None
@@ -852,7 +866,7 @@ class AuthorityReviewRequest(FrozenModel):
 
     project_id: int
     decision: Literal["accepted", "rejected"]
-    rationale: str = Field(min_length=1)
+    rationale: SemanticText
     idempotency_key: str = Field(min_length=1)
     actor: str = Field(min_length=1)
     correlation_id: str | None = None
@@ -862,20 +876,10 @@ class AuthorityFeedbackRequest(FrozenModel):
     """Semantic feedback for the graph-selected rejected authority."""
 
     project_id: int
-    feedback: str = Field(min_length=1)
+    feedback: SemanticText
     idempotency_key: str = Field(min_length=1)
     actor: str = Field(min_length=1)
     correlation_id: str | None = None
-
-    @field_validator("feedback")
-    @classmethod
-    def normalize_feedback(cls, value: str) -> str:
-        """Strip transport whitespace and reject an empty human response."""
-        normalized = value.strip()
-        if not normalized:
-            message = "feedback must not be blank."
-            raise ValueError(message)
-        return normalized
 
 
 class AuthorityRepairRequest(FrozenModel):
@@ -944,13 +948,26 @@ class AgileForgeApplication:
         request: RepositoryAttachRequest,
     ) -> TransitionResult:
         """Resolve the active binding once, then attach or replace by path."""
+        service = self._project_lifecycle_service()
+        replay = service.replay_repository_binding(
+            RepositoryBindingReplayCommand(
+                project_id=request.project_id,
+                operation="attach",
+                requested_repository_path=request.path,
+                idempotency_key=request.idempotency_key,
+                actor=request.actor,
+                correlation_id=request.correlation_id,
+            )
+        )
+        if replay is not None:
+            return replay
         available, fingerprint = self._active_repository_binding(
             project_id=request.project_id,
             require_active=False,
         )
         if not available:
             return _transition_not_available(None, "repository.attach")
-        return self._project_lifecycle_service().attach_repository(
+        return service.attach_repository(
             RepositoryAttachmentCommand(
                 project_id=request.project_id,
                 path=request.path,
@@ -966,13 +983,26 @@ class AgileForgeApplication:
         request: RepositoryRefreshRequest,
     ) -> TransitionResult:
         """Resolve the active binding once, then refresh its provenance."""
+        service = self._project_lifecycle_service()
+        replay = service.replay_repository_binding(
+            RepositoryBindingReplayCommand(
+                project_id=request.project_id,
+                operation="refresh",
+                requested_repository_path=None,
+                idempotency_key=request.idempotency_key,
+                actor=request.actor,
+                correlation_id=request.correlation_id,
+            )
+        )
+        if replay is not None:
+            return replay
         available, fingerprint = self._active_repository_binding(
             project_id=request.project_id,
             require_active=True,
         )
         if not available or fingerprint is None:
             return _transition_not_available(None, "repository.refresh")
-        return self._project_lifecycle_service().refresh_repository(
+        return service.refresh_repository(
             RepositoryRefreshCommand(
                 project_id=request.project_id,
                 expected_active_binding_fingerprint=fingerprint,

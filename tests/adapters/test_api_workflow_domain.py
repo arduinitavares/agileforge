@@ -15,6 +15,7 @@ from api import (
     AuthorityDecisionApiRequest,
     AuthorityFeedbackApiRequest,
     CreateProjectRequest,
+    SprintPlanningApiRequest,
     build_authority_decision_request,
     build_authority_feedback_request,
     build_create_project_command,
@@ -34,8 +35,10 @@ from services.application import (
     CreateProjectCommand,
     DeliveryActionInputService,
     DeliveryActionRequest,
+    DiscoveryArtifactRequest,
     ProductGoalLifecycleServices,
     ProductGoalResponseRequest,
+    SpecificationCandidateRequest,
     SprintPlanningInputService,
     SprintPlanningRequest,
     VisionResponseRequest,
@@ -46,6 +49,7 @@ from services.contracts.roadmap import RoadmapBuilderInput
 from services.contracts.sprint import SprintPlannerInput
 from services.contracts.story import UserStoryWriterInput
 from services.node_attempt_replay import NodeAttemptReplayQuery, TransitionReplayQuery
+from services.product_goal_interview_input import ProductGoalInterviewInputService
 from tests.adapters.test_command_renderer import position_fixture
 from tests.workflow.test_execution_transitions import (
     _complete_execution_sprint_with_unselected_story,
@@ -75,6 +79,8 @@ from workflow.fingerprints import canonical_hash, canonical_json
 from workflow.requests import (
     DecideAuthority,
     RecordAuthorityFeedback,
+    RecordDiscoveryArtifact,
+    RecordSpecificationCandidate,
     StartNodeAttempt,
     TransitionRequest,
 )
@@ -242,6 +248,41 @@ def test_semantic_decision_api_rejects_blank_rationale(
         payload["decision"] = decision
 
     response = TestClient(api_module.app).post(path, json=payload)
+
+    assert response.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+
+
+@pytest.mark.parametrize("selected_story_ids", [(0,), (-1,), (7, 7)])
+def test_sprint_request_model_rejects_invalid_story_ids(
+    selected_story_ids: tuple[int, ...],
+) -> None:
+    """Reject non-positive and duplicate Story IDs in the HTTP request model."""
+    with pytest.raises(ValidationError):
+        SprintPlanningApiRequest(
+            selected_story_ids=list(selected_story_ids),
+            team_name="Platform",
+            idempotency_key="sprint-41",
+            actor="operator",
+        )
+
+
+@pytest.mark.parametrize("selected_story_ids", [[0], [-1], [7, 7]])
+def test_sprint_api_returns_422_for_invalid_story_ids(
+    selected_story_ids: list[int],
+) -> None:
+    """Keep invalid manual Story selection out of application execution."""
+    response = TestClient(
+        api_module.app,
+        raise_server_exceptions=False,
+    ).post(
+        "/api/projects/41/sprint/generate",
+        json={
+            "selected_story_ids": selected_story_ids,
+            "team_name": "Platform",
+            "idempotency_key": "sprint-41",
+            "actor": "operator",
+        },
+    )
 
     assert response.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
 
@@ -808,6 +849,107 @@ def test_semantic_authority_feedback_derives_rejected_identity_from_position() -
     assert request.pending_authority_id == expected_authority_id
     assert request.authority_fingerprint == "sha256:authority-17"
     assert request.feedback == {"text": "Narrow the identity invariant."}
+
+
+def test_discovery_content_replays_or_conflicts_before_advanced_position(
+    engine: "Engine",
+) -> None:
+    """Bind replay identity to submitted content, not its file reference."""
+    stored = RecordDiscoveryArtifact(
+        project_id=PROJECT_ID,
+        graph_version="agileforge.workflow.v2",
+        fact_fingerprint="facts-discovery",
+        decision_fingerprint="decision-discovery",
+        idempotency_key="discovery-41",
+        actor="operator",
+        canonical_content={"research": "interviews"},
+        content_ref="fixtures/discovery.json",
+    )
+    persisted = TransitionResult(ok=True, applied_node_id="discovery.record")
+    _store_completed_receipt(engine, stored, persisted)
+    domain = _BoundaryDomain(_vision_position())
+    application = AgileForgeApplication(
+        workflow_domain=domain,
+        product_goal_services=ProductGoalLifecycleServices(
+            interview_input=ProductGoalInterviewInputService(engine=engine),
+            discovery_selection=_DiscoverySelection(),
+        ),
+    )
+
+    replay = application.record_discovery(
+        DiscoveryArtifactRequest(
+            project_id=PROJECT_ID,
+            canonical_content={"research": "interviews"},
+            content_ref="fixtures/discovery.json",
+            idempotency_key="discovery-41",
+            actor="operator",
+        )
+    )
+    conflict = application.record_discovery(
+        DiscoveryArtifactRequest(
+            project_id=PROJECT_ID,
+            canonical_content={"research": "changed content"},
+            content_ref="fixtures/discovery.json",
+            idempotency_key="discovery-41",
+            actor="operator",
+        )
+    )
+
+    assert replay == persisted.model_copy(update={"replayed": True})
+    assert conflict.error is not None
+    assert conflict.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
+    assert domain.position_calls == []
+
+
+def test_specification_content_replays_or_conflicts_before_advanced_position(
+    engine: "Engine",
+) -> None:
+    """Resolve canonical specification content before current lineage lookup."""
+    stored = RecordSpecificationCandidate(
+        project_id=PROJECT_ID,
+        graph_version="agileforge.workflow.v2",
+        fact_fingerprint="facts-specification",
+        decision_fingerprint="decision-specification",
+        idempotency_key="specification-41",
+        actor="operator",
+        canonical_content={"title": "Accepted candidate"},
+        content_ref="fixtures/specification.json",
+        supersedes_specification_candidate_id=17,
+    )
+    persisted = TransitionResult(ok=True, applied_node_id="specification.record")
+    _store_completed_receipt(engine, stored, persisted)
+    domain = _BoundaryDomain(_vision_position())
+    application = AgileForgeApplication(
+        workflow_domain=domain,
+        product_goal_services=ProductGoalLifecycleServices(
+            interview_input=ProductGoalInterviewInputService(engine=engine),
+            discovery_selection=_DiscoverySelection(),
+        ),
+    )
+
+    replay = application.record_specification_candidate(
+        SpecificationCandidateRequest(
+            project_id=PROJECT_ID,
+            canonical_content={"title": "Accepted candidate"},
+            content_ref="fixtures/specification.json",
+            idempotency_key="specification-41",
+            actor="operator",
+        )
+    )
+    conflict = application.record_specification_candidate(
+        SpecificationCandidateRequest(
+            project_id=PROJECT_ID,
+            canonical_content={"title": "Changed candidate"},
+            content_ref="fixtures/specification.json",
+            idempotency_key="specification-41",
+            actor="operator",
+        )
+    )
+
+    assert replay == persisted.model_copy(update={"replayed": True})
+    assert conflict.error is not None
+    assert conflict.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
+    assert domain.position_calls == []
 
 
 def test_semantic_authority_repair_replays_or_conflicts_before_advanced_position(

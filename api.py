@@ -22,6 +22,7 @@ from pydantic import (
     StringConstraints,
     TypeAdapter,
     ValidationError,
+    field_validator,
 )
 
 from repositories.project import ProjectRepository
@@ -80,7 +81,7 @@ app.mount(
     name="frontend",
 )
 
-type DecisionRationale = Annotated[
+type SemanticText = Annotated[
     str,
     StringConstraints(strip_whitespace=True, min_length=1),
 ]
@@ -117,26 +118,26 @@ class MutationMetadata(TypedDict):
 class TextResponseApiRequest(MutationApiRequest):
     """One semantic interview response."""
 
-    text: str = Field(min_length=1)
+    text: SemanticText
 
 
 class ReviewApiRequest(MutationApiRequest):
     """One semantic review choice."""
 
     decision: Literal["accepted", "rejected", "feedback"]
-    rationale: DecisionRationale
+    rationale: SemanticText
 
 
 class RevisionApiRequest(MutationApiRequest):
     """One semantic Vision revision reason."""
 
-    reason: str = Field(min_length=1)
+    reason: SemanticText
 
 
 class GoalOutcomeApiRequest(MutationApiRequest):
     """One semantic Product Goal outcome rationale."""
 
-    rationale: DecisionRationale
+    rationale: SemanticText
 
 
 class ArtifactRecordApiRequest(MutationApiRequest):
@@ -156,13 +157,13 @@ class AuthorityDecisionApiRequest(MutationApiRequest):
     """Semantic authority review choice without derived identities."""
 
     decision: Literal["accepted", "rejected"]
-    rationale: DecisionRationale
+    rationale: SemanticText
 
 
 class AuthorityFeedbackApiRequest(MutationApiRequest):
     """Semantic human feedback without caller-owned authority identity."""
 
-    feedback: DecisionRationale
+    feedback: SemanticText
 
 
 class DeliveryActionApiRequest(MutationApiRequest):
@@ -179,6 +180,18 @@ class SprintPlanningApiRequest(MutationApiRequest):
     max_story_points: int | None = Field(default=None, gt=0)
     include_task_decomposition: bool = True
     team_name: str = Field(min_length=1)
+
+    @field_validator("selected_story_ids")
+    @classmethod
+    def validate_selected_story_ids(cls, value: list[int]) -> list[int]:
+        """Reject invalid manual Story identities at the HTTP boundary."""
+        if any(story_id <= 0 for story_id in value):
+            message = "selected_story_ids must contain positive Story IDs."
+            raise ValueError(message)
+        if len(set(value)) != len(value):
+            message = "selected_story_ids must not contain duplicates."
+            raise ValueError(message)
+        return value
 
 
 class PositionedTransitionApiRequest(MutationApiRequest):

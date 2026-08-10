@@ -16,6 +16,11 @@ from models.core import Project
 from models.db import set_sqlite_pragma
 from models.repository import RepositoryBinding
 from models.workflow import WorkflowTransitionReceipt
+from services.application import (
+    AgileForgeApplication,
+    RepositoryAttachRequest,
+    RepositoryRefreshRequest,
+)
 from services.project_lifecycle import (
     CreateProjectCommand,
     ProjectLifecycleService,
@@ -529,6 +534,72 @@ def test_repository_binding_key_conflicts_on_changed_semantic_input(
     assert conflict.error is not None
     assert conflict.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
     assert probe.paths == [REPOSITORY_PATH]
+
+
+def test_application_attachment_replays_before_reading_changed_binding(
+    engine: Engine,
+) -> None:
+    """Replay caller semantics before deriving the post-attach binding guard."""
+    probe = _Probe(_probe_result())
+    service, domain = _service(engine, probe)
+    project_id = _project_id(service.create_project(_create_command()))
+    application = AgileForgeApplication(
+        workflow_domain=domain,
+        read_projection=DurableReadProjectionService(engine=engine),
+    )
+    application.set_project_lifecycle(service)
+    request = RepositoryAttachRequest(
+        project_id=project_id,
+        path=REPOSITORY_PATH,
+        idempotency_key="application-attach-replay",
+        actor="operator@example.com",
+    )
+
+    first = application.attach_repository(request)
+    replay = application.attach_repository(request)
+    conflict = application.attach_repository(
+        request.model_copy(update={"path": "different-repository"})
+    )
+
+    assert first.ok is True
+    assert replay == first.model_copy(update={"replayed": True})
+    assert conflict.error is not None
+    assert conflict.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
+    assert probe.paths == [REPOSITORY_PATH]
+
+
+def test_application_refresh_replays_before_reading_changed_binding(
+    engine: Engine,
+) -> None:
+    """Replay stable refresh semantics before deriving the new active guard."""
+    probe = _Probe(_probe_result())
+    service, domain = _service(engine, probe)
+    project_id = _project_id(
+        service.create_project(_create_command(repository_path=REPOSITORY_PATH))
+    )
+    application = AgileForgeApplication(
+        workflow_domain=domain,
+        read_projection=DurableReadProjectionService(engine=engine),
+    )
+    application.set_project_lifecycle(service)
+    probe.result = _probe_result(inspected_at=NOW + timedelta(seconds=1))
+    request = RepositoryRefreshRequest(
+        project_id=project_id,
+        idempotency_key="application-refresh-replay",
+        actor="operator@example.com",
+    )
+
+    first = application.refresh_repository(request)
+    replay = application.refresh_repository(request)
+    conflict = application.refresh_repository(
+        request.model_copy(update={"actor": "different-operator@example.com"})
+    )
+
+    assert first.ok is True
+    assert replay == first.model_copy(update={"replayed": True})
+    assert conflict.error is not None
+    assert conflict.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
+    assert probe.paths == [REPOSITORY_PATH, REPOSITORY_PATH]
 
 
 def test_same_status_refresh_invalidates_stale_replace_and_refresh_guards(

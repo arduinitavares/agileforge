@@ -113,7 +113,6 @@ class RepositoryBindingSemanticInput(FrozenModel):
     project_id: int
     operation: Literal["attach", "refresh"]
     requested_repository_path: str | None
-    expected_active_binding_fingerprint: str | None
     actor: str
     correlation_id: str | None
 
@@ -159,9 +158,6 @@ class RecordRepositoryBinding(FrozenModel):
                 "project_id": input.project_id,
                 "operation": input.operation,
                 "requested_repository_path": input.requested_repository_path,
-                "expected_active_binding_fingerprint": (
-                    input.expected_active_binding_fingerprint
-                ),
                 "actor": input.actor,
                 "correlation_id": input.correlation_id,
             }
@@ -174,9 +170,6 @@ class RecordRepositoryBinding(FrozenModel):
                 project_id=self.project_id,
                 operation=self.operation,
                 requested_repository_path=self.requested_repository_path,
-                expected_active_binding_fingerprint=(
-                    self.expected_active_binding_fingerprint
-                ),
                 actor=self.actor,
                 correlation_id=self.correlation_id,
             )
