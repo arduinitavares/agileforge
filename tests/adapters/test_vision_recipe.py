@@ -40,6 +40,7 @@ from models.product_definition import (
     VisionInterviewTurn,
     VisionRevisionIntent,
 )
+from services.application import AgileForgeApplication, VisionResponseRequest
 from services.contracts.vision import (
     VisionAgentInput,
     VisionDraftOutput,
@@ -49,7 +50,12 @@ from services.vision_input import VisionInputService
 from tests.adapters.test_adk_workflow_runner import TrackingSessionService
 from tests.services.test_vision_evidence import _bind_repository
 from workflow.clock import FixedClock
-from workflow.contracts import GRAPH_VERSION, JsonObject, WorkflowErrorCode
+from workflow.contracts import (
+    GRAPH_VERSION,
+    JsonObject,
+    RecommendationKind,
+    WorkflowErrorCode,
+)
 from workflow.definitions.root import ROOT_GRAPH
 from workflow.domain import WorkflowDomain
 from workflow.fingerprints import canonical_hash
@@ -66,9 +72,16 @@ if TYPE_CHECKING:
     from google.adk.models.llm_request import LlmRequest
     from sqlalchemy.engine import Engine
 
+    from workflow.contracts import (
+        NodeDecision,
+        TransitionResult,
+        WorkflowPosition,
+    )
+
 EXECUTION_SETTINGS: JsonObject = {"timeout_seconds": 5.0, "max_attempts": 3}
 NOW = datetime(2026, 8, 10, 12, tzinfo=UTC)
 TRUSTED_SNAPSHOT_ID = 4
+EXPECTED_INITIAL_RETRY_PROVIDER_CALLS = 2
 _JSON_OBJECT = TypeAdapter(JsonObject)
 
 
@@ -85,7 +98,18 @@ class SequenceLeaf(BaseAgent):
         del ctx
         output = self.outputs[len(self.calls)]
         self.calls.append(self.name)
+        if isinstance(output, Exception):
+            raise output
         yield Event(author=self.name, output=output)
+
+
+type _StaleRecipeRuntime = tuple[
+    int,
+    SequenceLeaf,
+    WorkflowDomain,
+    AdkWorkflowRunner,
+    VisionInputService,
+]
 
 
 class CapturingLlm(BaseLlm):
@@ -537,7 +561,9 @@ def _prepare_recipe_revision(
 def _stale_recipe_runtime(
     engine: Engine,
     lineage: Literal["initial", "revision"],
-) -> tuple[int, SequenceLeaf, WorkflowDomain, AdkWorkflowRunner, VisionInputService]:
+    *,
+    fail_recovery: bool = True,
+) -> _StaleRecipeRuntime:
     """Build one provider-free runtime at the stale-preflight boundary."""
     project = Project(name=f"Stale {lineage} Vision", description="Original")
     with Session(engine) as session:
@@ -545,14 +571,22 @@ def _stale_recipe_runtime(
         session.commit()
         assert project.project_id is not None
         project_id = project.project_id
-    outputs = (
-        [_draft(complete=False), _draft(complete=False)]
-        if lineage == "initial"
-        else [
-            _draft(),
-            _draft(complete=False),
-            _draft(statement="A revised trusted workflow tool."),
-        ]
+    outputs: list[object]
+    if lineage == "initial":
+        outputs = [_draft(complete=False)]
+    else:
+        outputs = [_draft(), _draft(complete=False)]
+    if fail_recovery:
+        outputs.append(RuntimeError("replacement generation failed"))
+    outputs.append(
+        _draft(
+            complete=lineage == "revision",
+            statement=(
+                "A revised trusted workflow tool."
+                if lineage == "revision"
+                else "A trusted workflow tool."
+            ),
+        )
     )
     primary = _leaf("primary", outputs, input_schema=VisionModelInput)
     registry = _registry(primary, _leaf("repair", [_draft()]))
@@ -583,17 +617,22 @@ def _stale_recipe_runtime(
     return project_id, primary, domain, runner, service
 
 
-@pytest.mark.parametrize("lineage", ["initial", "revision"])
-def test_stale_preflight_persists_explicit_replacement_lineage(
+def _vision_business_fact_counts(engine: Engine) -> tuple[int, int, int]:
+    with Session(engine) as session:
+        return (
+            len(session.exec(select(VisionEvidenceSnapshot)).all()),
+            len(session.exec(select(VisionInterviewTurn)).all()),
+            len(session.exec(select(VisionArtifact)).all()),
+        )
+
+
+def _reach_stale_recovery(
     engine: Engine,
     lineage: Literal["initial", "revision"],
-) -> None:
-    """Recover stale initial and revision drafts through a replacement snapshot."""
-    project_id, primary, domain, runner, service = _stale_recipe_runtime(
-        engine,
-        lineage,
-    )
-
+    runtime: _StaleRecipeRuntime,
+) -> tuple[WorkflowPosition, NodeDecision, int]:
+    """Seed a draft, persist stale preflight failure, and return recovery state."""
+    project_id, primary, domain, runner, service = runtime
     position = domain.position(project_id)
     bootstrap = next(
         item for item in position.decisions if item.node_id == "vision.bootstrap"
@@ -621,7 +660,6 @@ def test_stale_preflight_persists_explicit_replacement_lineage(
         stored_project.description = "Changed"
         session.add(stored_project)
         session.commit()
-
     position = domain.position(project_id)
     interview = next(
         item for item in position.decisions if item.node_id == "vision.interview"
@@ -632,20 +670,29 @@ def test_stale_preflight_persists_explicit_replacement_lineage(
         "Keep the intended direction.",
     )
     calls_before_stale = len(primary.calls)
+    business_fact_counts = _vision_business_fact_counts(engine)
+    stale_guards = AdkRunGuards(
+        position=position,
+        idempotency_key=f"stale-{lineage}-preflight",
+        actor="operator@example.com",
+    )
     stale = runner.run(
         interview,
         stale_payload,
-        guards=AdkRunGuards(
-            position=position,
-            idempotency_key=f"stale-{lineage}-preflight",
-            actor="operator@example.com",
-        ),
+        guards=stale_guards,
     )
 
     assert stale.ok is False
     assert stale.error is not None
     assert stale.error.code is WorkflowErrorCode.VISION_EVIDENCE_STALE
     assert len(primary.calls) == calls_before_stale
+    replayed_stale = runner.run(interview, stale_payload, guards=stale_guards)
+    assert replayed_stale.replayed is True
+    assert replayed_stale.error is not None
+    assert replayed_stale.error.code is stale.error.code
+    assert replayed_stale.error.message == stale.error.message
+    assert len(primary.calls) == calls_before_stale
+    assert _vision_business_fact_counts(engine) == business_fact_counts
     recovery_position = domain.position(project_id)
     recovery = next(
         item
@@ -653,17 +700,70 @@ def test_stale_preflight_persists_explicit_replacement_lineage(
         if item.node_id == "vision.bootstrap"
     )
     assert recovery.reason_code == "VISION_EVIDENCE_STALE"
+    return recovery_position, recovery, stale_snapshot_id
 
-    recovered = runner.run(
+
+def _fail_recovery_then_retry(
+    lineage: Literal["initial", "revision"],
+    runtime: _StaleRecipeRuntime,
+    recovery_position: WorkflowPosition,
+    recovery: NodeDecision,
+) -> TransitionResult:
+    """Fail one replacement generation, then retry it under a fresh key."""
+    project_id, _primary, domain, runner, service = runtime
+    failed_recovery_payload = service.build_bootstrap(project_id, recovery)
+    failed_recovery = runner.run(
         recovery,
-        service.build_bootstrap(project_id, recovery),
+        failed_recovery_payload,
         guards=AdkRunGuards(
             position=recovery_position,
-            idempotency_key=f"stale-{lineage}-recovery",
+            idempotency_key=f"stale-{lineage}-recovery-failed",
             actor="operator@example.com",
         ),
     )
 
+    assert failed_recovery.ok is False
+    assert failed_recovery.error is not None
+    assert failed_recovery.error.code is WorkflowErrorCode.EXTERNAL_EXECUTION_FAILED
+    retry_position = domain.position(project_id)
+    retry = next(
+        item for item in retry_position.decisions if item.node_id == "vision.bootstrap"
+    )
+    assert retry.reason_code == "VISION_BOOTSTRAP_FAILED"
+    assert retry.recommendation_kind is RecommendationKind.RECOVERY
+    return runner.run(
+        retry,
+        service.build_bootstrap(project_id, retry),
+        guards=AdkRunGuards(
+            position=retry_position,
+            idempotency_key=f"stale-{lineage}-recovery-retry",
+            actor="operator@example.com",
+        ),
+    )
+
+
+@pytest.mark.parametrize("lineage", ["initial", "revision"])
+def test_stale_preflight_persists_explicit_replacement_lineage(
+    engine: Engine,
+    lineage: Literal["initial", "revision"],
+) -> None:
+    """Recover stale initial and revision drafts after one failed replacement."""
+    runtime = _stale_recipe_runtime(
+        engine,
+        lineage,
+    )
+    project_id, _primary, domain, _runner, _service = runtime
+    recovery_position, recovery, stale_snapshot_id = _reach_stale_recovery(
+        engine,
+        lineage,
+        runtime,
+    )
+    recovered = _fail_recovery_then_retry(
+        lineage,
+        runtime,
+        recovery_position,
+        recovery,
+    )
     assert recovered.ok
     with Session(engine) as session:
         snapshots = session.exec(
@@ -690,6 +790,146 @@ def test_stale_preflight_persists_explicit_replacement_lineage(
             for intent in session.exec(select(VisionRevisionIntent)).all():
                 session.delete(intent)
             session.commit()
+
+
+def test_completed_clarification_replays_nested_human_response_durably(
+    engine: Engine,
+) -> None:
+    """Replay identical ordinary text and conflict on changed text after advancement."""
+    project_id, primary, domain, runner, service = _stale_recipe_runtime(
+        engine,
+        "initial",
+        fail_recovery=False,
+    )
+    position = domain.position(project_id)
+    bootstrap = next(
+        item for item in position.decisions if item.node_id == "vision.bootstrap"
+    )
+    assert runner.run(
+        bootstrap,
+        service.build_bootstrap(project_id, bootstrap),
+        guards=AdkRunGuards(
+            position=position,
+            idempotency_key="clarification-replay-seed",
+            actor="operator@example.com",
+        ),
+    ).ok
+    position = domain.position(project_id)
+    interview = next(
+        item for item in position.decisions if item.node_id == "vision.interview"
+    )
+    user_text = "Keep the durable direction."
+    idempotency_key = "clarification-replay"
+    assert runner.run(
+        interview,
+        service.build_clarification(project_id, interview, user_text),
+        guards=AdkRunGuards(
+            position=position,
+            idempotency_key=idempotency_key,
+            actor="operator@example.com",
+        ),
+    ).ok
+    calls_after_completion = len(primary.calls)
+    application = AgileForgeApplication(
+        workflow_domain=domain,
+        vision_input=service,
+    )
+
+    replayed = application.respond_to_vision(
+        VisionResponseRequest(
+            project_id=project_id,
+            text=user_text,
+            idempotency_key=idempotency_key,
+            actor="operator@example.com",
+        )
+    )
+    conflict = application.respond_to_vision(
+        VisionResponseRequest(
+            project_id=project_id,
+            text="Changed direction.",
+            idempotency_key=idempotency_key,
+            actor="operator@example.com",
+        )
+    )
+
+    assert replayed.ok is True
+    assert replayed.replayed is True
+    assert conflict.error is not None
+    assert conflict.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
+    assert len(primary.calls) == calls_after_completion
+
+
+def test_initial_bootstrap_failure_retries_without_a_prior_snapshot(
+    engine: Engine,
+) -> None:
+    """Keep ordinary first-generation failure retryable with a new key."""
+    project = Project(name="Initial retry Vision")
+    with Session(engine) as session:
+        session.add(project)
+        session.commit()
+        assert project.project_id is not None
+        project_id = project.project_id
+    primary = _leaf(
+        "primary",
+        [RuntimeError("initial generation failed"), _draft(complete=False)],
+        input_schema=VisionModelInput,
+    )
+    registry = _registry(primary, _leaf("repair", [_draft()]))
+    domain = WorkflowDomain(
+        engine=engine,
+        graph=ROOT_GRAPH,
+        clock=FixedClock(now_value=NOW),
+        adk_recipe_registry=registry,
+    )
+    runner = AdkWorkflowRunner(
+        domain=domain,
+        registry=registry,
+        session_service=TrackingSessionService(),
+        config=AdkExecutionConfig(
+            project_id=project_id,
+            model_id="fake/vision",
+            execution_settings=EXECUTION_SETTINGS,
+            lease_seconds=60,
+            actor="operator@example.com",
+        ),
+    )
+    service = VisionInputService(
+        engine=engine,
+        repository_probe=GitPythonRepositoryProbe(),
+    )
+    position = domain.position(project_id)
+    bootstrap = next(
+        item for item in position.decisions if item.node_id == "vision.bootstrap"
+    )
+    first = runner.run(
+        bootstrap,
+        service.build_bootstrap(project_id, bootstrap),
+        guards=AdkRunGuards(
+            position=position,
+            idempotency_key="initial-bootstrap-failed",
+            actor="operator@example.com",
+        ),
+    )
+    assert first.ok is False
+    with Session(engine) as session:
+        assert session.exec(select(VisionEvidenceSnapshot)).all() == []
+
+    retry_position = domain.position(project_id)
+    retry = next(
+        item for item in retry_position.decisions if item.node_id == "vision.bootstrap"
+    )
+    second = runner.run(
+        retry,
+        service.build_bootstrap(project_id, retry),
+        guards=AdkRunGuards(
+            position=retry_position,
+            idempotency_key="initial-bootstrap-retry",
+            actor="operator@example.com",
+        ),
+    )
+
+    assert second.ok is True
+    assert len(primary.calls) == EXPECTED_INITIAL_RETRY_PROVIDER_CALLS
 
 
 def test_repository_bootstrap_persists_exact_binding_without_model_exposure(

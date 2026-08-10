@@ -93,7 +93,7 @@ def _binding(session: Session, project_id: int) -> RepositoryBinding:
 def _evidence_bundle(project_name: str) -> VisionEvidenceBundle:
     content: JsonObject = {"project_name": project_name}
     item = VisionEvidenceItem(
-        evidence_id="project-metadata",
+        evidence_id="project:metadata",
         kind="project_metadata",
         relative_path=None,
         content_fingerprint=canonical_hash(content),

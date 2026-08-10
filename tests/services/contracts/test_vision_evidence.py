@@ -118,7 +118,14 @@ def test_evidence_item_accepts_each_approved_model_path(
     kind: str,
 ) -> None:
     """Each explicitly allowed path retains its declared evidence kind."""
-    assert _item(relative_path=relative_path, kind=kind).relative_path == relative_path
+    assert (
+        _item(
+            evidence_id=f"file:{relative_path}",
+            relative_path=relative_path,
+            kind=kind,
+        ).relative_path
+        == relative_path
+    )
 
 
 def test_evidence_item_allows_pathless_metadata_only() -> None:
@@ -133,6 +140,33 @@ def test_evidence_item_allows_pathless_metadata_only() -> None:
     assert metadata.relative_path is None
     with pytest.raises(ValidationError, match="relative_path"):
         _item(relative_path=None)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {
+            "evidence_id": "project:other",
+            "kind": "project_metadata",
+            "relative_path": None,
+            "trust": "operator_provided",
+        },
+        {
+            "evidence_id": "repository:other",
+            "kind": "repository_provenance",
+            "relative_path": None,
+            "trust": "observed_provenance",
+        },
+        {"evidence_id": "file:CONTEXT.md"},
+        {"evidence_id": "file:.git/config"},
+    ],
+)
+def test_evidence_item_rejects_noncanonical_source_identity(
+    overrides: dict[str, object],
+) -> None:
+    """Bind every evidence ID to its exact metadata or allowlisted file source."""
+    with pytest.raises(ValidationError, match="evidence_id"):
+        _item(**overrides)
 
 
 def test_bundle_requires_canonical_fingerprint_and_item_limit() -> None:

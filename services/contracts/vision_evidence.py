@@ -126,6 +126,17 @@ class VisionEvidenceItem(BaseModel):
             if self.kind != expected_kind:
                 msg = "kind must match the approved relative_path."
                 raise ValueError(msg)
+        expected_evidence_id = (
+            f"file:{self.relative_path}"
+            if self.relative_path is not None
+            else {
+                "project_metadata": "project:metadata",
+                "repository_provenance": "repository:provenance",
+            }[self.kind]
+        )
+        if self.evidence_id != expected_evidence_id:
+            msg = "evidence_id must match the exact approved source identity."
+            raise ValueError(msg)
         if self.content_fingerprint != canonical_hash(self.content):
             msg = "content_fingerprint must equal canonical_hash(content)."
             raise ValueError(msg)

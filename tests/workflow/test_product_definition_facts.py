@@ -157,7 +157,7 @@ def _vision_evidence_snapshot(
 ) -> int:
     """Persist deterministic Vision evidence used by direct test fixtures."""
     evidence_item = {
-        "evidence_id": f"project:{key}",
+        "evidence_id": "project:metadata",
         "kind": "project_metadata",
         "relative_path": None,
         "content_fingerprint": canonical_hash({"project_id": project_id, "key": key}),

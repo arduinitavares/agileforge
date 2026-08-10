@@ -29,7 +29,12 @@ from adapters.adk.recipes import (
     build_agentic_recipe_registry,
     build_backlog_generation_workflow,
 )
-from adapters.adk.runner import AdkExecutionConfig, AdkRunGuards, AdkWorkflowRunner
+from adapters.adk.runner import (
+    AdkExecutionConfig,
+    AdkRunGuards,
+    AdkRunRequest,
+    AdkWorkflowRunner,
+)
 from models.core import Project
 from models.product_definition import (
     ProductGoalArtifact,
@@ -48,6 +53,7 @@ from services.contracts.product_goal import (
     ProductGoalInterviewInput,
     ProductGoalInterviewOutput,
 )
+from services.contracts.vision import VisionDraftOutput, VisionModelInput
 from services.specs import compiler_service
 from services.specs.authority_selection import pending_authority_fingerprint
 from tests.workflow.lifecycle_fixtures import seed_accepted_specification
@@ -400,6 +406,27 @@ def _validating_goal_leaf(
     )
 
 
+def _observing_vision_leaf(
+    observations: list[VisionModelInput],
+    response: JsonObject,
+) -> AdkWorkflow:
+    """Build a provider-free Vision leaf that records its exact prepared input."""
+
+    @node(name="observe_vision_input", rerun_on_resume=True)
+    async def observe_vision_input(
+        node_input: VisionModelInput,
+    ) -> VisionDraftOutput:
+        observations.append(node_input)
+        return VisionDraftOutput.model_validate(response)
+
+    return AdkWorkflow(
+        name="fake_vision_interviewer",
+        input_schema=VisionModelInput,
+        output_schema=VisionDraftOutput,
+        edges=[(START, observe_vision_input)],
+    )
+
+
 def _goal_registry(
     leaf: BaseAgent | AdkWorkflow,
 ) -> AdkRecipeRegistry:
@@ -660,14 +687,12 @@ def test_runner_loads_vision_input_from_persisted_attempt(
         "is_complete": True,
         "clarifying_questions": [],
     }
+    observations: list[VisionModelInput] = []
     registry = build_agentic_recipe_registry(
         nodes=AgenticRecipeNodes(
             authority_compile=_unused_leaf("unused_authority_compile"),
             authority_repair=_unused_leaf("unused_authority_repair"),
-            vision_interview=FakeLeafAgent(
-                name="vision_interview",
-                response=vision_response,
-            ),
+            vision_interview=_observing_vision_leaf(observations, vision_response),
             vision_repair=_unused_leaf("unused_vision_repair"),
             product_goal=_unused_leaf("unused_product_goal"),
             backlog_generation=_unused_leaf("unused_backlog"),
@@ -697,26 +722,17 @@ def test_runner_loads_vision_input_from_persisted_attempt(
     )
     transition = domain.transition
 
-    def persist_then_tamper(request: TransitionRequest) -> TransitionResult:
-        result = transition(request)
-        if isinstance(request, StartNodeAttempt):
-            normalized_request = request.normalized_input.get("request")
-            if not isinstance(normalized_request, dict):
-                message = "Vision attempt input did not include a request object."
-                raise TypeError(message)
-            normalized_request["project_name"] = "Tampered"
-        return result
-
-    monkeypatch.setattr(domain, "transition", persist_then_tamper)
+    position = domain.position(project_id)
     decision = next(
-        item
-        for item in domain.position(project_id).decisions
-        if item.node_id == "vision.bootstrap"
+        item for item in position.decisions if item.node_id == "vision.bootstrap"
     )
-
-    result = runner.run(
-        decision,
-        {
+    caller_request = AdkRunRequest(
+        graph_version=position.graph_version,
+        fact_fingerprint=position.fact_fingerprint,
+        decision_fingerprint=decision.decision_fingerprint,
+        node_id=decision.node_id,
+        instance_key=decision.instance_key,
+        input_payload={
             "request": {
                 "schema_version": "agileforge.vision-input.v1",
                 "operation": "bootstrap",
@@ -726,9 +742,27 @@ def test_runner_loads_vision_input_from_persisted_attempt(
             },
             "preflight": None,
         },
+        idempotency_key="persisted-vision-input",
+        actor="operator@example.com",
     )
 
+    def persist_then_tamper(request: TransitionRequest) -> TransitionResult:
+        result = transition(request)
+        if isinstance(request, StartNodeAttempt):
+            normalized_request = caller_request.input_payload.get("request")
+            if not isinstance(normalized_request, dict):
+                message = "Vision attempt input did not include a request object."
+                raise TypeError(message)
+            normalized_request["project_name"] = "Tampered"
+        return result
+
+    monkeypatch.setattr(domain, "transition", persist_then_tamper)
+
+    result = runner.run_request(caller_request)
+
     assert result.ok
+    assert len(observations) == 1
+    assert observations[0].request.project_name == "Persisted Vision"
     with Session(engine) as session:
         turn = session.exec(select(VisionInterviewTurn)).one()
         assert turn.operation == "bootstrap"

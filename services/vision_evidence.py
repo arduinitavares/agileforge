@@ -7,6 +7,7 @@ import os
 import re
 import stat
 import tomllib
+from codecs import getincrementaldecoder
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -90,6 +91,7 @@ class _CandidateEvidence:
     relative_path: str | None
     trust: VisionEvidenceTrust
     content: str | JsonObject
+    truncated: bool = False
 
 
 @dataclass(frozen=True)
@@ -288,13 +290,25 @@ class VisionEvidenceCollector:
     ) -> list[_CandidateEvidence]:
         """Read only the allowlisted repository files in declared priority order."""
         candidates = [self._repository_candidate(probe, warnings)]
-        root_descriptor = self._open_worktree_descriptor(binding.worktree_path)
         try:
-            valid_specs = self._structured_spec_candidates(root_descriptor, warnings)
+            worktree = Path(binding.worktree_path).resolve(strict=True)
+        except OSError as exc:
+            raise VisionEvidenceCollectionError(
+                VisionEvidenceErrorCode.REPOSITORY_CHANGED_DURING_EVIDENCE_COLLECTION,
+                "Repository worktree changed before evidence files were read.",
+            ) from exc
+        root_descriptor = self._open_worktree_descriptor(str(worktree))
+        try:
+            valid_specs = self._structured_spec_candidates(
+                root_descriptor,
+                worktree,
+                warnings,
+            )
             candidates.extend(candidate for _path, candidate in valid_specs)
             candidates.extend(
                 self._supplemental_candidates(
                     root_descriptor,
+                    worktree,
                     valid_specs,
                     warnings,
                 )
@@ -355,6 +369,7 @@ class VisionEvidenceCollector:
     def _structured_spec_candidates(
         self,
         root_descriptor: int,
+        worktree: Path,
         warnings: list[VisionEvidenceWarning],
     ) -> list[tuple[str, _CandidateEvidence]]:
         """Collect valid JSON specs and emit their conflict warning when needed."""
@@ -362,6 +377,7 @@ class VisionEvidenceCollector:
         for relative_path in _ALLOWED_PATHS[:2]:
             candidate = self._json_spec_candidate(
                 root_descriptor,
+                worktree,
                 relative_path,
                 warnings,
             )
@@ -391,6 +407,7 @@ class VisionEvidenceCollector:
     def _supplemental_candidates(
         self,
         root_descriptor: int,
+        worktree: Path,
         valid_specs: list[tuple[str, _CandidateEvidence]],
         warnings: list[VisionEvidenceWarning],
     ) -> list[_CandidateEvidence]:
@@ -402,19 +419,21 @@ class VisionEvidenceCollector:
         ):
             candidate = self._text_candidate(
                 root_descriptor,
+                worktree,
                 relative_path,
                 kind,
                 warnings,
             )
             if candidate is not None:
                 candidates.append(candidate)
-        package = self._package_candidate(root_descriptor, warnings)
+        package = self._package_candidate(root_descriptor, worktree, warnings)
         if package is not None:
             candidates.append(package)
         if not valid_specs:
             for relative_path in _ALLOWED_PATHS[-2:]:
                 candidate = self._text_candidate(
                     root_descriptor,
+                    worktree,
                     relative_path,
                     "technical_specification",
                     warnings,
@@ -427,13 +446,21 @@ class VisionEvidenceCollector:
     def _json_spec_candidate(
         self,
         root_descriptor: int,
+        worktree: Path,
         relative_path: str,
         warnings: list[VisionEvidenceWarning],
     ) -> _CandidateEvidence | None:
         """Validate one optional structured specification file."""
-        text = self._read_text(root_descriptor, relative_path, warnings)
-        if text is None:
+        source = self._read_text(
+            root_descriptor,
+            worktree,
+            relative_path,
+            warnings,
+            structured=True,
+        )
+        if source is None:
             return None
+        text, _truncated = source
         try:
             artifact = TechnicalSpecArtifact.model_validate_json(text)
         except ValueError:
@@ -459,13 +486,21 @@ class VisionEvidenceCollector:
     def _package_candidate(
         self,
         root_descriptor: int,
+        worktree: Path,
         warnings: list[VisionEvidenceWarning],
     ) -> _CandidateEvidence | None:
         """Extract selected package metadata without exposing the full TOML source."""
         relative_path = "pyproject.toml"
-        text = self._read_text(root_descriptor, relative_path, warnings)
-        if text is None:
+        source = self._read_text(
+            root_descriptor,
+            worktree,
+            relative_path,
+            warnings,
+            structured=True,
+        )
+        if source is None:
             return None
+        text, _truncated = source
         try:
             parsed = tomllib.loads(text)
         except tomllib.TOMLDecodeError:
@@ -509,13 +544,23 @@ class VisionEvidenceCollector:
     def _text_candidate(
         self,
         root_descriptor: int,
+        worktree: Path,
         relative_path: str,
         kind: VisionEvidenceKind,
         warnings: list[VisionEvidenceWarning],
     ) -> _CandidateEvidence | None:
         """Read one optional UTF-8 text file through a verified descriptor."""
-        text = self._read_text(root_descriptor, relative_path, warnings)
-        if text is None or not text.strip():
+        source = self._read_text(
+            root_descriptor,
+            worktree,
+            relative_path,
+            warnings,
+            structured=False,
+        )
+        if source is None:
+            return None
+        text, truncated = source
+        if not text.strip():
             return None
         return _CandidateEvidence(
             evidence_id=f"file:{relative_path}",
@@ -523,25 +568,45 @@ class VisionEvidenceCollector:
             relative_path=relative_path,
             trust="unreviewed_repository_evidence",
             content=text.strip(),
+            truncated=truncated,
         )
 
     def _read_text(
         self,
         root_descriptor: int,
+        worktree: Path,
         relative_path: str,
         warnings: list[VisionEvidenceWarning],
-    ) -> str | None:
+        *,
+        structured: bool,
+    ) -> tuple[str, bool] | None:
         """Read one optional source safely and reject changed or escaping files."""
-        opened = self._open_descriptor(root_descriptor, relative_path, warnings)
+        resolved_path = self._resolve_internal_path(
+            worktree,
+            relative_path,
+            warnings,
+        )
+        if resolved_path is None:
+            return None
+        opened = self._open_descriptor(
+            root_descriptor,
+            resolved_path,
+            relative_path,
+            warnings,
+        )
         if opened is None:
             return None
         descriptor, parent_descriptor, leaf_name = opened
         try:
             try:
                 before = os.fstat(descriptor)
-                chunks: list[bytes] = []
-                while chunk := os.read(descriptor, 64 * 1024):
-                    chunks.append(chunk)
+                source_limit = MAX_EVIDENCE_ITEM_BYTES + 1
+                content = bytearray()
+                while len(content) < source_limit:
+                    chunk = os.read(descriptor, source_limit - len(content))
+                    if not chunk:
+                        break
+                    content.extend(chunk)
                 after = os.fstat(descriptor)
                 current = os.stat(
                     leaf_name,
@@ -564,8 +629,20 @@ class VisionEvidenceCollector:
                 VisionEvidenceErrorCode.REPOSITORY_CHANGED_DURING_EVIDENCE_COLLECTION,
                 "Approved evidence file changed while it was read.",
             )
+        truncated = len(content) > MAX_EVIDENCE_ITEM_BYTES
+        if truncated and structured:
+            warnings.append(
+                self._warning(
+                    code="STRUCTURED_EVIDENCE_TOO_LARGE",
+                    source=relative_path,
+                    message="Structured evidence exceeded the per-item byte limit.",
+                )
+            )
+            return None
+        bounded_content = bytes(content[:MAX_EVIDENCE_ITEM_BYTES])
         try:
-            return b"".join(chunks).decode("utf-8")
+            decoder = getincrementaldecoder("utf-8")()
+            text = decoder.decode(bounded_content, final=not truncated)
         except UnicodeDecodeError:
             warnings.append(
                 self._warning(
@@ -575,11 +652,53 @@ class VisionEvidenceCollector:
                 )
             )
             return None
+        if truncated:
+            warnings.append(
+                self._warning(
+                    code="TEXT_EVIDENCE_TRUNCATED",
+                    source=relative_path,
+                    message="Text evidence exceeded the configured byte limit.",
+                )
+            )
+        return text, truncated
+
+    @staticmethod
+    def _resolve_internal_path(
+        worktree: Path,
+        relative_path: str,
+        warnings: list[VisionEvidenceWarning],
+    ) -> str | None:
+        """Resolve one allowlisted source and retain only internal targets."""
+        try:
+            resolved = (worktree / relative_path).resolve(strict=True)
+        except FileNotFoundError:
+            return None
+        except OSError:
+            warnings.append(
+                VisionEvidenceCollector._warning(
+                    code="EVIDENCE_UNREADABLE",
+                    source=relative_path,
+                    message="Approved evidence path could not be resolved.",
+                )
+            )
+            return None
+        try:
+            return resolved.relative_to(worktree).as_posix()
+        except ValueError:
+            warnings.append(
+                VisionEvidenceCollector._warning(
+                    code="SYMLINK_ESCAPE",
+                    source=relative_path,
+                    message="Approved evidence path resolves outside the worktree.",
+                )
+            )
+            return None
 
     def _open_descriptor(
         self,
         root_descriptor: int,
-        relative_path: str,
+        resolved_path: str,
+        source_path: str,
         warnings: list[VisionEvidenceWarning],
     ) -> tuple[int, int, str] | None:
         """Open every relative path component without following symbolic links."""
@@ -589,12 +708,12 @@ class VisionEvidenceCollector:
             warnings.append(
                 self._warning(
                     code="EVIDENCE_UNREADABLE",
-                    source=relative_path,
+                    source=source_path,
                     message="Platform cannot safely open approved evidence files.",
                 )
             )
             return None
-        relative = Path(relative_path)
+        relative = Path(resolved_path)
         parts = relative.parts
         if relative.is_absolute() or not parts or any(
             part in {"", ".", ".."} for part in parts
@@ -602,7 +721,7 @@ class VisionEvidenceCollector:
             warnings.append(
                 self._warning(
                     code="EVIDENCE_UNREADABLE",
-                    source=relative_path,
+                    source=source_path,
                     message="Approved evidence path is not repository-relative.",
                 )
             )
@@ -610,7 +729,7 @@ class VisionEvidenceCollector:
         parent_descriptor = self._open_parent_descriptor(
             root_descriptor,
             parts[:-1],
-            relative_path,
+            source_path,
             no_follow | directory,
             warnings,
         )
@@ -620,28 +739,73 @@ class VisionEvidenceCollector:
         if not self._component_is_safe(
             parent_descriptor,
             leaf_name,
-            relative_path,
+            source_path,
             warnings,
         ):
             os.close(parent_descriptor)
             return None
+        descriptor = self._open_regular_leaf(
+            parent_descriptor,
+            leaf_name,
+            source_path,
+            no_follow,
+            warnings,
+        )
+        if descriptor is None:
+            os.close(parent_descriptor)
+            return None
+        return descriptor, parent_descriptor, leaf_name
+
+    def _open_regular_leaf(
+        self,
+        parent_descriptor: int,
+        leaf_name: str,
+        source_path: str,
+        no_follow: int,
+        warnings: list[VisionEvidenceWarning],
+    ) -> int | None:
+        """Open one nonblocking leaf and retain only regular files."""
+        nonblock = getattr(os, "O_NONBLOCK", 0)
+        if not isinstance(nonblock, int):
+            nonblock = 0
         try:
             descriptor = os.open(
                 leaf_name,
-                os.O_RDONLY | no_follow,
+                os.O_RDONLY | no_follow | nonblock,
                 dir_fd=parent_descriptor,
             )
         except OSError:
-            os.close(parent_descriptor)
             warnings.append(
                 self._warning(
                     code="EVIDENCE_UNREADABLE",
-                    source=relative_path,
+                    source=source_path,
                     message="Approved evidence file could not be opened.",
                 )
             )
             return None
-        return descriptor, parent_descriptor, leaf_name
+        try:
+            opened_stat = os.fstat(descriptor)
+        except OSError:
+            os.close(descriptor)
+            warnings.append(
+                self._warning(
+                    code="EVIDENCE_UNREADABLE",
+                    source=source_path,
+                    message="Approved evidence file could not be inspected.",
+                )
+            )
+            return None
+        if not stat.S_ISREG(opened_stat.st_mode):
+            os.close(descriptor)
+            warnings.append(
+                self._warning(
+                    code="EVIDENCE_UNREADABLE",
+                    source=source_path,
+                    message="Approved evidence source is not a regular file.",
+                )
+            )
+            return None
+        return descriptor
 
     def _open_parent_descriptor(
         self,
@@ -788,7 +952,7 @@ class VisionEvidenceCollector:
                 break
             remaining = MAX_EVIDENCE_TOTAL_BYTES - total_bytes
             content = candidate.content
-            truncated = False
+            truncated = candidate.truncated
             size = self._content_size(content)
             if isinstance(content, str):
                 target = min(MAX_EVIDENCE_ITEM_BYTES, remaining)
@@ -803,15 +967,19 @@ class VisionEvidenceCollector:
                     break
                 if size > target:
                     content = self._truncate_utf8(content, target)
+                    was_truncated = truncated
                     truncated = True
                     size = self._content_size(content)
-                    warnings.append(
-                        self._warning(
-                            code="TEXT_EVIDENCE_TRUNCATED",
-                            source=candidate.relative_path or "bundle",
-                            message="Text evidence exceeded the configured byte limit.",
+                    if not was_truncated:
+                        warnings.append(
+                            self._warning(
+                                code="TEXT_EVIDENCE_TRUNCATED",
+                                source=candidate.relative_path or "bundle",
+                                message=(
+                                    "Text evidence exceeded the configured byte limit."
+                                ),
+                            )
                         )
-                    )
             elif size > MAX_EVIDENCE_ITEM_BYTES:
                 warnings.append(
                     self._warning(

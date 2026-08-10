@@ -103,7 +103,7 @@ def _add_vision_evidence_snapshot(
         "schema_version": "agileforge.vision-evidence.v1",
         "items": [
             {
-                "evidence_id": f"project:{key}",
+                "evidence_id": "project:metadata",
                 "kind": "project_metadata",
                 "relative_path": None,
                 "content_fingerprint": canonical_hash(

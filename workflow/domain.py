@@ -744,13 +744,21 @@ class WorkflowDomain:
             request.project_id,
             evaluated_at,
         )
+        error = (
+            WorkflowError(
+                code=WorkflowErrorCode.VISION_EVIDENCE_STALE,
+                message=request.failure_message,
+            )
+            if request.failure_code == WorkflowErrorCode.VISION_EVIDENCE_STALE.value
+            else WorkflowError(
+                code=WorkflowErrorCode.EXTERNAL_EXECUTION_FAILED,
+                message="ADK recipe execution or output validation failed.",
+            )
+        )
         command_result = TransitionResult(
             ok=False,
             position=position,
-            error=WorkflowError(
-                code=WorkflowErrorCode.EXTERNAL_EXECUTION_FAILED,
-                message="ADK recipe execution or output validation failed.",
-            ),
+            error=error,
         )
         self._complete_attempt_start_receipt(
             session,

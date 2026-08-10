@@ -89,7 +89,7 @@ def _vision_evidence_snapshot(
     """Create one valid immutable snapshot bound to the deletion fixture."""
     content: JsonObject = {"project_name": "Populated lineage"}
     item = VisionEvidenceItem(
-        evidence_id="project-metadata",
+        evidence_id="project:metadata",
         kind="project_metadata",
         relative_path=None,
         content_fingerprint=canonical_hash(content),

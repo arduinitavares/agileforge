@@ -14,6 +14,7 @@ from adapters.git.repository_probe import GitPythonRepositoryProbe
 from models.core import Project
 from models.repository import RepositoryBinding
 from services.contracts.vision_evidence import (
+    MAX_EVIDENCE_ITEM_BYTES,
     MAX_EVIDENCE_ITEMS,
     MAX_EVIDENCE_TOTAL_BYTES,
 )
@@ -339,6 +340,138 @@ def test_unreadable_and_escape_paths_warn_without_becoming_evidence(
         "SYMLINK_ESCAPE",
         "INVALID_UTF8",
     ]
+
+
+def test_stable_in_worktree_symlink_uses_the_approved_source_identity(
+    collector: VisionEvidenceCollector,
+    engine: Engine,
+    repository: Path,
+) -> None:
+    """Allow a stable internal target while retaining the allowlisted source path."""
+    target = repository / "docs/README-source.md"
+    target.parent.mkdir()
+    target.write_text("Internal repository overview.\n", encoding="utf-8")
+    (repository / "README.md").symlink_to(target.relative_to(repository))
+    project_id = _add_project(engine)
+    _bind_repository(engine, project_id=project_id, repository=repository)
+
+    bundle = collector.collect(project_id)
+
+    readme = next(item for item in bundle.items if item.kind == "readme")
+    assert readme.evidence_id == "file:README.md"
+    assert readme.relative_path == "README.md"
+    assert readme.content == "Internal repository overview."
+    assert bundle.warnings == ()
+
+
+def test_materially_large_source_reads_only_the_item_limit_plus_sentinel(
+    collector: VisionEvidenceCollector,
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+) -> None:
+    """Apply the source ceiling before buffering a materially large file."""
+    readme = repository / "README.md"
+    readme.write_text("A" * (2 * 1024 * 1024), encoding="utf-8")
+    project_id = _add_project(engine)
+    _bind_repository(engine, project_id=project_id, repository=repository)
+    identity = (readme.stat().st_dev, readme.stat().st_ino)
+    original_read = vision_evidence_module.os.read
+    bytes_read = 0
+
+    def counting_read(descriptor: int, size: int) -> bytes:
+        nonlocal bytes_read
+        content = original_read(descriptor, size)
+        observed = vision_evidence_module.os.fstat(descriptor)
+        if (observed.st_dev, observed.st_ino) == identity:
+            bytes_read += len(content)
+        return content
+
+    monkeypatch.setattr(vision_evidence_module.os, "read", counting_read)
+
+    bundle = collector.collect(project_id)
+
+    assert bytes_read <= MAX_EVIDENCE_ITEM_BYTES + 1
+    readme_item = next(item for item in bundle.items if item.kind == "readme")
+    assert readme_item.truncated is True
+    assert len(str(readme_item.content).encode("utf-8")) == MAX_EVIDENCE_ITEM_BYTES
+
+
+def test_growth_during_bounded_read_fails_closed_without_reading_past_sentinel(
+    collector: VisionEvidenceCollector,
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+) -> None:
+    """Retain identity checks while keeping a growing source read bounded."""
+    readme = repository / "README.md"
+    readme.write_text("A" * (2 * MAX_EVIDENCE_ITEM_BYTES), encoding="utf-8")
+    project_id = _add_project(engine)
+    _bind_repository(engine, project_id=project_id, repository=repository)
+    identity = (readme.stat().st_dev, readme.stat().st_ino)
+    original_read = vision_evidence_module.os.read
+    bytes_read = 0
+    grew = False
+
+    def grow_after_read(descriptor: int, size: int) -> bytes:
+        nonlocal bytes_read, grew
+        content = original_read(descriptor, size)
+        observed = vision_evidence_module.os.fstat(descriptor)
+        if (observed.st_dev, observed.st_ino) == identity:
+            bytes_read += len(content)
+            if content and not grew:
+                with readme.open("a", encoding="utf-8") as stream:
+                    stream.write("B")
+                grew = True
+        return content
+
+    monkeypatch.setattr(vision_evidence_module.os, "read", grow_after_read)
+
+    with pytest.raises(VisionEvidenceCollectionError) as caught:
+        collector.collect(project_id)
+
+    assert (
+        caught.value.code
+        is VisionEvidenceErrorCode.REPOSITORY_CHANGED_DURING_EVIDENCE_COLLECTION
+    )
+    assert bytes_read <= MAX_EVIDENCE_ITEM_BYTES + 1
+
+
+def test_allowlisted_fifo_is_rejected_without_a_blocking_open(
+    collector: VisionEvidenceCollector,
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+) -> None:
+    """Open a special leaf nonblocking and reject it before any read."""
+    if not hasattr(vision_evidence_module.os, "mkfifo"):
+        pytest.skip("FIFO creation is unavailable on this platform.")
+    nonblock = getattr(vision_evidence_module.os, "O_NONBLOCK", None)
+    if not isinstance(nonblock, int):
+        pytest.skip("Nonblocking file opens are unavailable on this platform.")
+    fifo = repository / "README.md"
+    vision_evidence_module.os.mkfifo(fifo)
+    project_id = _add_project(engine)
+    _bind_repository(engine, project_id=project_id, repository=repository)
+    original_open = vision_evidence_module.os.open
+
+    def require_nonblocking_leaf(
+        path: Path | str,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        if str(path) == fifo.name and dir_fd is not None:
+            assert flags & nonblock
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(vision_evidence_module.os, "open", require_nonblocking_leaf)
+
+    bundle = collector.collect(project_id)
+
+    assert "file:README.md" not in {item.evidence_id for item in bundle.items}
+    assert [warning.code for warning in bundle.warnings] == ["EVIDENCE_UNREADABLE"]
 
 
 def test_descriptor_read_rejects_a_symlink_swapped_after_resolution(

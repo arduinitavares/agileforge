@@ -227,7 +227,7 @@ class AdkWorkflowRunner:
                 self._run_recipe(
                     recipe,
                     attempt_id=attempt_id,
-                    input_payload=request.input_payload,
+                    input_payload=persisted_input,
                 )
             )
             completion = recipe.output_adapter(output, context)

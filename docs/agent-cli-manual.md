@@ -46,10 +46,22 @@ Inspect the reported provenance before any manual mutation. Invoke the
 grounded Vision lifecycle through semantic CLI commands only:
 
 ```sh
-./agileforge-dev cli --profile vision-bootstrap-manual -- vision bootstrap
-./agileforge-dev cli --profile vision-bootstrap-manual -- vision respond
-./agileforge-dev cli --profile vision-bootstrap-manual -- vision status
-./agileforge-dev cli --profile vision-bootstrap-manual -- vision review
+./agileforge-dev cli --profile vision-bootstrap-manual -- vision bootstrap \
+  --project-id 1 \
+  --idempotency-key vision-bootstrap-1 \
+  --actor operator
+./agileforge-dev cli --profile vision-bootstrap-manual -- vision respond \
+  --project-id 1 \
+  --text "Keep the evidence-grounded direction." \
+  --idempotency-key vision-respond-1 \
+  --actor operator
+./agileforge-dev cli --profile vision-bootstrap-manual -- vision status --project-id 1
+./agileforge-dev cli --profile vision-bootstrap-manual -- vision review \
+  --project-id 1 \
+  --decision accepted \
+  --rationale "The evidence and direction are correct." \
+  --idempotency-key vision-review-1 \
+  --actor operator
 ```
 
 The operator owns manual acceptance and makes the acceptance decision. Automated
@@ -156,6 +168,7 @@ The production recipe catalog contains:
 ```text
 authority.compile
 authority.repair
+vision.bootstrap
 vision.interview
 goal.interview
 backlog.generate

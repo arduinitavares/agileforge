@@ -176,7 +176,16 @@ def _replay_normalized_input(
     """Replace only current human input before checking stored attempt identity."""
     normalized_input = dict(stored.normalized_input)
     if query.user_text is not None:
-        normalized_input["user_response"] = query.user_text
+        if stored.target_node_id == "vision.interview":
+            request = normalized_input.get("request")
+            if isinstance(request, dict):
+                nested_request = dict(request)
+                nested_request["human_response"] = query.user_text
+                normalized_input["request"] = nested_request
+            else:
+                normalized_input["user_response"] = query.user_text
+        else:
+            normalized_input["user_response"] = query.user_text
     if query.semantic_input is not None:
         normalized_input.update(query.semantic_input)
     return normalized_input

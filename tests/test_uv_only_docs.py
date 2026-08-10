@@ -121,6 +121,39 @@ def test_docs_separate_stable_and_checkout_local_commands() -> None:
         assert "./agileforge-dev init --profile local --json" in text
 
 
+def test_vision_manual_examples_are_executable_and_catalogued() -> None:
+    """Keep the manual Vision handoff aligned with required CLI arguments."""
+    text = _read(CLI_MANUAL_PATH)
+    required_examples = (
+        (
+            "vision bootstrap \\\n"
+            "  --project-id 1 \\\n"
+            "  --idempotency-key vision-bootstrap-1 \\\n"
+            "  --actor operator"
+        ),
+        (
+            "vision respond \\\n"
+            "  --project-id 1 \\\n"
+            '  --text "Keep the evidence-grounded direction." \\\n'
+            "  --idempotency-key vision-respond-1 \\\n"
+            "  --actor operator"
+        ),
+        "vision status --project-id 1",
+        (
+            "vision review \\\n"
+            "  --project-id 1 \\\n"
+            "  --decision accepted \\\n"
+            '  --rationale "The evidence and direction are correct." \\\n'
+            "  --idempotency-key vision-review-1 \\\n"
+            "  --actor operator"
+        ),
+    )
+
+    for example in required_examples:
+        assert example in text
+    assert "vision.bootstrap\nvision.interview" in text
+
+
 def test_environment_example_names_separate_runtime_inputs() -> None:
     """Expose business, trace, and model configuration without legacy roots."""
     text = _read(ENV_EXAMPLE_PATH)

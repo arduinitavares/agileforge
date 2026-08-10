@@ -35,6 +35,7 @@ from services.node_attempt_replay import (
     TransitionReplayQuery,
 )
 from services.vision_evidence import VisionEvidenceCollection, VisionEvidenceCollector
+from workflow.contracts import RecommendationKind
 
 if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
@@ -71,11 +72,14 @@ class VisionInputService:
                 facts = VisionInputFactRepository(session)
                 context = facts.load_context(project_id)
                 selection = select_vision_input(context)
-                recovery = decision.reason_code == "VISION_EVIDENCE_STALE"
-                if selection.prior_turn is not None and not recovery:
+                replacement_recovery = (
+                    selection.prior_turn is not None
+                    and decision.recommendation_kind is RecommendationKind.RECOVERY
+                )
+                if selection.prior_turn is not None and not replacement_recovery:
                     message = "Vision bootstrap is not current for this lineage."
                     raise ValueError(message)
-                if recovery and selection.evidence_snapshot is None:
+                if replacement_recovery and selection.evidence_snapshot is None:
                     message = "Vision recovery requires an active stale snapshot."
                     raise ValueError(message)
                 if (
@@ -133,7 +137,7 @@ class VisionInputService:
             host=VisionHostMetadata(
                 repository_binding_id=collection.repository_binding_id,
                 supersedes_vision_evidence_snapshot_id=(
-                    supersedes_snapshot_id if recovery else None
+                    supersedes_snapshot_id if replacement_recovery else None
                 ),
             ),
         ).model_dump(mode="json")

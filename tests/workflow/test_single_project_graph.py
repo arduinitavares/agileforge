@@ -397,7 +397,7 @@ def _new_journey(engine: Engine) -> _Journey:
 
 def _vision_evidence(project_id: int) -> JsonObject:
     item = {
-        "evidence_id": "project:journey",
+        "evidence_id": "project:metadata",
         "kind": "project_metadata",
         "relative_path": None,
         "content_fingerprint": canonical_hash({"project_id": project_id}),
@@ -421,7 +421,7 @@ def _component_basis(components: JsonObject) -> tuple[JsonObject, ...]:
         {
             "component": component,
             "source_kinds": ["evidence"],
-            "evidence_ids": ["project:journey"],
+            "evidence_ids": ["project:metadata"],
             "assumption_ids": [],
         }
         for component in components
