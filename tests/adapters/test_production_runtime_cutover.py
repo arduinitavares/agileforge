@@ -64,6 +64,7 @@ print(json.dumps({"legacy": legacy, "retired_agent": retired_agent,
         "recipe_nodes": [
             "authority.compile",
             "authority.repair",
+            "vision.bootstrap",
             "vision.interview",
             "goal.interview",
             "backlog.generate",

@@ -57,6 +57,7 @@ from services.application import (
     SprintPlanningRequest,
     SprintPlanReviewRequest,
     StoryReviewRequest,
+    VisionBootstrapRequest,
     VisionResponseRequest,
     VisionReviewRequest,
     WorkflowDomainPort,
@@ -577,7 +578,18 @@ class _VisionInput:
     def replay_transition(self, query: TransitionReplayQuery) -> None:
         del query
 
-    def build(
+    def build_bootstrap(
+        self,
+        project_id: int,
+        decision: NodeDecision,
+    ) -> JsonObject:
+        return {
+            "project_id": project_id,
+            "decision": decision.decision_fingerprint,
+            "operation": "bootstrap",
+        }
+
+    def build_clarification(
         self,
         project_id: int,
         decision: NodeDecision,
@@ -840,7 +852,7 @@ class _CapturingTransitionDomain(_BoundaryDomain):
 
 class _CapturingApplication(AgileForgeApplication):
     def __init__(self, domain: _BoundaryDomain) -> None:
-        super().__init__(workflow_domain=domain, vision_interview_input=_VisionInput())
+        super().__init__(workflow_domain=domain, vision_input=_VisionInput())
         self.agent_requests: list[AgenticActionRequest] = []
 
     def run_agentic_action(self, request: AgenticActionRequest) -> TransitionResult:
@@ -905,6 +917,18 @@ def _vision_decision(fingerprint: str) -> NodeDecision:
         category=NodeCategory.AVAILABLE,
         recommendation_kind=RecommendationKind.REQUIRED,
         reason_code="VISION_INTERVIEW_REQUIRED",
+        decision_fingerprint=fingerprint,
+    )
+
+
+def _vision_bootstrap_decision(fingerprint: str) -> NodeDecision:
+    return NodeDecision(
+        node_id="vision.bootstrap",
+        child_graph_id="vision",
+        request_kind="generate_vision_bootstrap",
+        category=NodeCategory.AVAILABLE,
+        recommendation_kind=RecommendationKind.REQUIRED,
+        reason_code="VISION_BOOTSTRAP_REQUIRED",
         decision_fingerprint=fingerprint,
     )
 
@@ -2109,16 +2133,15 @@ def test_semantic_delivery_reviews_derive_internal_guards(
     }
 
 
-def test_semantic_application_resolves_vision_guards_once() -> None:
-    """Prepare one exact guarded attempt from one current position read."""
-    decision = _vision_decision("decision-vision")
+def test_semantic_application_resolves_bootstrap_guards_once() -> None:
+    """Prepare a zero-input bootstrap attempt from one position read."""
+    decision = _vision_bootstrap_decision("decision-vision")
     domain = _BoundaryDomain(_vision_position(decision))
     application = _CapturingApplication(domain)
 
-    result = application.respond_to_vision(
-        VisionResponseRequest(
+    result = application.bootstrap_vision(
+        VisionBootstrapRequest(
             project_id=PROJECT_ID,
-            text="A durable product direction.",
             idempotency_key="vision-41",
             actor="operator",
         )
@@ -2131,19 +2154,23 @@ def test_semantic_application_resolves_vision_guards_once() -> None:
     assert guarded.graph_version == "agileforge.workflow.v2"
     assert guarded.fact_fingerprint == "facts-vision"
     assert guarded.decision_fingerprint == "decision-vision"
+    assert guarded.node_id == "vision.bootstrap"
+    assert guarded.input_payload["operation"] == "bootstrap"
 
 
-def test_semantic_application_rejects_ambiguous_vision_decisions() -> None:
+def test_semantic_application_rejects_ambiguous_bootstrap_decisions() -> None:
     """Return a structured conflict instead of choosing between decisions."""
     domain = _BoundaryDomain(
-        _vision_position(_vision_decision("decision-a"), _vision_decision("decision-b"))
+        _vision_position(
+            _vision_bootstrap_decision("decision-a"),
+            _vision_bootstrap_decision("decision-b"),
+        )
     )
     application = _CapturingApplication(domain)
 
-    result = application.respond_to_vision(
-        VisionResponseRequest(
+    result = application.bootstrap_vision(
+        VisionBootstrapRequest(
             project_id=PROJECT_ID,
-            text="A durable product direction.",
             idempotency_key="vision-41",
             actor="operator",
         )
@@ -2165,7 +2192,7 @@ def test_semantic_vision_response_replays_before_advanced_position() -> None:
     vision_input = _VisionInput(replay=replayed)
     application = AgileForgeApplication(
         workflow_domain=domain,
-        vision_interview_input=vision_input,
+        vision_input=vision_input,
     )
 
     result = application.respond_to_vision(
@@ -2314,7 +2341,7 @@ def test_semantic_vision_review_rejects_a_replaced_candidate() -> None:
     domain = _CapturingTransitionDomain(_vision_position(decision))
     application = AgileForgeApplication(
         workflow_domain=domain,
-        vision_interview_input=_VisionInput(),
+        vision_input=_VisionInput(),
     )
 
     result = application.review_vision(
