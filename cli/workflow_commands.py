@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Literal, Protocol, TypedDict
+from typing import Protocol, TypedDict
 
 from workflow.contracts import (
     JsonObject,
@@ -13,7 +13,6 @@ from workflow.contracts import (
     RecommendationKind,
     WorkflowPosition,
 )
-from workflow.requests import DecideAuthority, OpenProjectShell
 
 
 class WorkflowPositionApplication(Protocol):
@@ -33,7 +32,6 @@ class RenderedCommand(TypedDict):
     request_kind: str
     recommendation_kind: str
     reason_code: str
-    decision_fingerprint: str
     command: str
 
 
@@ -41,8 +39,6 @@ class WorkflowNextPayload(TypedDict):
     """Workflow-next CLI response."""
 
     project_id: int
-    graph_version: str
-    fact_fingerprint: str
     evaluated_at: str
     commands: list[RenderedCommand]
     terminal: bool
@@ -87,7 +83,7 @@ class CommandRendererRegistry:
 
 
 COMMAND_PREFIXES: dict[str, tuple[str, ...]] = {
-    "abandon_project_shell": ("agileforge", "project", "abandon"),
+    "abandon_product_goal": ("agileforge", "goal", "abandon"),
     "abandon_scope_extension": (
         "agileforge",
         "scope",
@@ -132,7 +128,10 @@ COMMAND_PREFIXES: dict[str, tuple[str, ...]] = {
     "decide_sprint_plan": ("agileforge", "sprint", "decide"),
     "decide_story": ("agileforge", "story", "decide"),
     "decide_vision": ("agileforge", "vision", "decide"),
-    "reconcile_backlog": ("agileforge", "backlog", "reconcile"),
+    "decide_product_goal_review": ("agileforge", "goal", "review"),
+    "decide_specification": ("agileforge", "specification", "review"),
+    "decide_vision_review": ("agileforge", "vision", "review"),
+    "begin_vision_revision": ("agileforge", "vision", "revision"),
     "reconcile_scope_extension": (
         "agileforge",
         "scope",
@@ -180,6 +179,7 @@ COMMAND_PREFIXES: dict[str, tuple[str, ...]] = {
         "record",
     ),
     "record_post_sprint_triage": ("agileforge", "sprint", "triage"),
+    "record_product_goal_interview_turn": ("agileforge", "goal", "respond"),
     "record_prd_version": ("agileforge", "discovery", "prd", "record"),
     "record_repository_baseline": (
         "agileforge",
@@ -194,9 +194,12 @@ COMMAND_PREFIXES: dict[str, tuple[str, ...]] = {
         "record",
     ),
     "record_roadmap_draft": ("agileforge", "roadmap", "generate"),
+    "record_discovery_artifact": ("agileforge", "discovery", "record"),
+    "record_specification_candidate": ("agileforge", "specification", "record"),
     "record_sprint_plan": ("agileforge", "sprint", "generate"),
     "record_story_draft": ("agileforge", "story", "generate"),
     "record_vision_draft": ("agileforge", "vision", "generate"),
+    "record_vision_interview_turn": ("agileforge", "vision", "respond"),
     "register_initial_scope": ("agileforge", "scope", "register"),
     "register_scope_extension": (
         "agileforge",
@@ -209,6 +212,7 @@ COMMAND_PREFIXES: dict[str, tuple[str, ...]] = {
     "review_sprint": ("agileforge", "sprint", "review"),
     "start_scope_extension": ("agileforge", "scope", "extension", "start"),
     "start_sprint": ("agileforge", "sprint", "start"),
+    "fulfill_product_goal": ("agileforge", "goal", "complete"),
 }
 
 AGENTIC_REQUEST_KINDS = frozenset(
@@ -242,12 +246,6 @@ def _render_command(
             *prefix,
             "--project-id",
             str(position.project_id),
-            "--graph-version",
-            position.graph_version,
-            "--expected-fact-fingerprint",
-            position.fact_fingerprint,
-            "--expected-decision-fingerprint",
-            decision.decision_fingerprint,
         ]
         if decision.instance_key is not None:
             command.extend(("--instance-key", decision.instance_key))
@@ -259,7 +257,7 @@ def _render_command(
             (
                 "--idempotency-key",
                 "<idempotency-key>",
-                "--changed-by",
+                "--actor",
                 "<actor>",
             )
         )
@@ -268,44 +266,78 @@ def _render_command(
     return render
 
 
+_SEMANTIC_ARGUMENTS: dict[str, tuple[str, ...]] = {
+    "abandon_product_goal": ("--rationale", "<rationale>"),
+    "begin_vision_revision": ("--reason", "<reason>"),
+    "compile_authority": (),
+    "decide_authority": (
+        "--decision",
+        "<decision>",
+        "--rationale",
+        "<rationale>",
+    ),
+    "decide_product_goal_review": (
+        "--decision",
+        "<decision>",
+        "--rationale",
+        "<rationale>",
+    ),
+    "decide_specification": (
+        "--decision",
+        "<decision>",
+        "--rationale",
+        "<rationale>",
+    ),
+    "decide_vision_review": (
+        "--decision",
+        "<decision>",
+        "--rationale",
+        "<rationale>",
+    ),
+    "fulfill_product_goal": ("--rationale", "<rationale>"),
+    "record_discovery_artifact": ("--file", "<file>"),
+    "record_product_goal_interview_turn": ("--text", "<text>"),
+    "record_specification_candidate": ("--file", "<file>"),
+    "record_vision_interview_turn": ("--text", "<text>"),
+    "repair_authority": (),
+}
+
+
+def _render_semantic_command(
+    prefix: tuple[str, ...],
+    request_kind: str,
+) -> CommandRender:
+    def render(
+        position: WorkflowPosition,
+        _decision: NodeDecision,
+    ) -> tuple[str, ...]:
+        return (
+            *prefix,
+            "--project-id",
+            str(position.project_id),
+            *_SEMANTIC_ARGUMENTS[request_kind],
+            "--idempotency-key",
+            "<idempotency-key>",
+            "--actor",
+            "<actor>",
+        )
+
+    return render
+
+
 COMMAND_RENDERERS = CommandRendererRegistry(
     tuple(
         CommandRenderer(
             request_kind=kind,
-            render=_render_command(prefix, request_kind=kind),
+            render=(
+                _render_semantic_command(prefix, kind)
+                if kind in _SEMANTIC_ARGUMENTS
+                else _render_command(prefix, request_kind=kind)
+            ),
         )
         for kind, prefix in COMMAND_PREFIXES.items()
     )
 )
-
-
-@dataclass(frozen=True)
-class ProjectShellArguments:
-    """CLI fields for one Project Shell request."""
-
-    name: str
-    origin: Literal["greenfield", "brownfield"]
-    idempotency_key: str
-    changed_by: str
-    correlation_id: str | None = None
-
-
-@dataclass(frozen=True)
-class AuthorityDecisionArguments:
-    """CLI fields for one exact authority decision request."""
-
-    project_id: int
-    graph_version: str
-    expected_fact_fingerprint: str
-    expected_decision_fingerprint: str
-    idempotency_key: str
-    changed_by: str
-    correlation_id: str | None
-    pending_authority_id: int
-    authority_fingerprint: str
-    review_fingerprint: str
-    decision: Literal["accepted", "rejected"]
-    rationale: str
 
 
 def _decision_payload(
@@ -319,7 +351,6 @@ def _decision_payload(
         "request_kind": decision.request_kind,
         "recommendation_kind": decision.recommendation_kind.value,
         "reason_code": decision.reason_code,
-        "decision_fingerprint": decision.decision_fingerprint,
         "command": " ".join(COMMAND_RENDERERS.command_for(position, decision)),
     }
 
@@ -329,14 +360,24 @@ def render_workflow_next(position: WorkflowPosition) -> WorkflowNextPayload:
     commands = [
         _decision_payload(position, decision)
         for decision in position.decisions
-        if decision.category is NodeCategory.AVAILABLE
+        if (
+            decision.category is NodeCategory.AVAILABLE
+            or (
+                decision.category is NodeCategory.WAITING
+                and decision.request_kind
+                in {
+                    "decide_authority",
+                    "decide_product_goal_review",
+                    "decide_specification",
+                    "decide_vision_review",
+                }
+            )
+        )
         and decision.recommendation_kind
         in {RecommendationKind.REQUIRED, RecommendationKind.RECOVERY}
     ]
     return {
         "project_id": position.project_id,
-        "graph_version": position.graph_version,
-        "fact_fingerprint": position.fact_fingerprint,
         "evaluated_at": position.evaluated_at.isoformat(),
         "commands": commands,
         "terminal": position.terminal,
@@ -373,49 +414,12 @@ def workflow_position(
     return payload
 
 
-def build_open_project_shell_request(
-    args: ProjectShellArguments,
-) -> OpenProjectShell:
-    """Build the pre-position Project Shell request."""
-    return OpenProjectShell(
-        name=args.name,
-        origin=args.origin,
-        idempotency_key=args.idempotency_key,
-        actor=args.changed_by,
-        correlation_id=args.correlation_id,
-    )
-
-
-def build_decide_authority_request(
-    args: AuthorityDecisionArguments,
-) -> DecideAuthority:
-    """Build one exact guarded authority decision request."""
-    return DecideAuthority(
-        project_id=args.project_id,
-        graph_version=args.graph_version,
-        fact_fingerprint=args.expected_fact_fingerprint,
-        decision_fingerprint=args.expected_decision_fingerprint,
-        idempotency_key=args.idempotency_key,
-        actor=args.changed_by,
-        correlation_id=args.correlation_id,
-        pending_authority_id=args.pending_authority_id,
-        authority_fingerprint=args.authority_fingerprint,
-        review_fingerprint=args.review_fingerprint,
-        decision=args.decision,
-        rationale=args.rationale,
-    )
-
-
 __all__ = [
     "AGENTIC_REQUEST_KINDS",
     "COMMAND_PREFIXES",
     "COMMAND_RENDERERS",
-    "AuthorityDecisionArguments",
     "CommandRenderer",
     "CommandRendererRegistry",
-    "ProjectShellArguments",
-    "build_decide_authority_request",
-    "build_open_project_shell_request",
     "render_workflow_next",
     "workflow_next",
     "workflow_position",

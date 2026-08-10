@@ -15,10 +15,11 @@ from fastapi.testclient import TestClient
 import api as api_module
 from cli.main import main
 from models.core import Project
-from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance, SpecRegistry
+from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance
 from repositories.workflow import WorkflowFactLoadError, WorkflowFactRepository
 from services.agent_workbench.authority_projection import pending_authority_fingerprint
 from services.read_projections import DurableReadProjectionService
+from tests.workflow.lifecycle_fixtures import seed_accepted_specification
 from utils.spec_schemas import (
     Invariant,
     InvariantType,
@@ -353,27 +354,20 @@ def _compiled_authority_json(*, theme: str, gap: str) -> str:
 
 def _seed_authority_review_project(session: Session) -> tuple[int, int, int]:
     project_id = _seed_project(session, name="Authority review")
-    accepted_spec = SpecRegistry(
+    accepted_lineage = seed_accepted_specification(
+        session,
         project_id=project_id,
-        spec_hash="sha256:accepted",
-        content="# Accepted\nAccepted authority source.",
-        status="superseded",
-        approved_at=datetime(2026, 8, 1, tzinfo=UTC),
-        approved_by="reviewer",
+        content=json.dumps({"title": "Accepted authority source"}),
+        recorded_at=datetime(2026, 8, 1, tzinfo=UTC),
     )
-    pending_spec = SpecRegistry(
+    pending_lineage = seed_accepted_specification(
+        session,
         project_id=project_id,
-        spec_hash="sha256:pending",
-        content="# Pending\nPending authority source.",
-        status="approved",
-        approved_at=datetime(2026, 8, 2, tzinfo=UTC),
-        approved_by="reviewer",
+        content=json.dumps({"title": "Pending authority source"}),
+        recorded_at=datetime(2026, 8, 2, tzinfo=UTC),
     )
-    session.add(accepted_spec)
-    session.add(pending_spec)
-    session.commit()
-    session.refresh(accepted_spec)
-    session.refresh(pending_spec)
+    accepted_spec = accepted_lineage.spec
+    pending_spec = pending_lineage.spec
     assert accepted_spec.spec_version_id is not None
     assert pending_spec.spec_version_id is not None
 
@@ -479,6 +473,44 @@ def test_production_api_registers_retained_read_routes() -> None:
             "/api/projects/{project_id}/sprints/{sprint_id}/stories/{story_id}/packet",
         ),
     }
+    assert expected <= routes
+
+
+def test_production_api_registers_semantic_lifecycle_routes() -> None:
+    """Expose the complete task-specific lifecycle transport surface."""
+    routes = {
+        (method, route.path)
+        for route in api_module.app.routes
+        if isinstance(route, APIRoute)
+        for method in route.methods or set()
+    }
+    expected = {
+        ("POST", "/api/projects"),
+        ("GET", "/api/projects/{project_id}"),
+        ("DELETE", "/api/projects/{project_id}"),
+        ("GET", "/api/projects/{project_id}/position"),
+        ("POST", "/api/projects/{project_id}/vision/respond"),
+        ("GET", "/api/projects/{project_id}/vision/status"),
+        ("POST", "/api/projects/{project_id}/vision/review"),
+        ("POST", "/api/projects/{project_id}/vision/revision"),
+        ("POST", "/api/projects/{project_id}/goals/respond"),
+        ("GET", "/api/projects/{project_id}/goals/status"),
+        ("POST", "/api/projects/{project_id}/goals/review"),
+        ("POST", "/api/projects/{project_id}/goals/complete"),
+        ("POST", "/api/projects/{project_id}/goals/abandon"),
+        ("POST", "/api/projects/{project_id}/discovery"),
+        ("GET", "/api/projects/{project_id}/discovery"),
+        ("POST", "/api/projects/{project_id}/specifications"),
+        ("GET", "/api/projects/{project_id}/specifications/review"),
+        ("POST", "/api/projects/{project_id}/specifications/review"),
+        ("POST", "/api/projects/{project_id}/repository"),
+        ("GET", "/api/projects/{project_id}/repository"),
+        ("POST", "/api/projects/{project_id}/repository/refresh"),
+        ("POST", "/api/projects/{project_id}/authority/compile"),
+        ("GET", "/api/projects/{project_id}/authority/review"),
+        ("POST", "/api/projects/{project_id}/authority/decision"),
+    }
+
     assert expected <= routes
 
 

@@ -2,15 +2,27 @@
 
 import json
 import shlex
+from datetime import UTC, datetime
 from pathlib import Path
 
 from cli.main import build_parser
 from cli.workflow_commands import COMMAND_PREFIXES, render_workflow_next
-from workflow.contracts import WorkflowPosition
+from workflow.contracts import (
+    NodeCategory,
+    NodeDecision,
+    RecommendationKind,
+    WorkflowPosition,
+)
 
 FIXTURE_PATH = Path(__file__).parents[1] / "fixtures" / "workflow_position.json"
 _PLACEHOLDERS = {
     "<input-file>": "input.json",
+    "<request-file>": "request.json",
+    "<file>": "artifact.json",
+    "<text>": "response",
+    "<decision>": "accepted",
+    "<rationale>": "reviewed",
+    "<reason>": "changed",
     "<idempotency-key>": "run-41",
     "<actor>": "cli-user",
 }
@@ -30,11 +42,12 @@ def test_workflow_next_renders_required_and_recovery_only() -> None:
         "authority.repair",
     ]
     serialized = json.dumps(payload)
-    assert "--graph-version agileforge.workflow.v1" in serialized
-    assert "--expected-fact-fingerprint facts-41" in serialized
-    assert "--expected-decision-fingerprint decision-compile" in serialized
+    assert "--graph-version" not in serialized
+    assert "--expected-fact-fingerprint" not in serialized
+    assert "--expected-decision-fingerprint" not in serialized
     assert "--idempotency-key <idempotency-key>" in serialized
-    assert "--changed-by <actor>" in serialized
+    assert "--actor <actor>" in serialized
+    assert "decision_fingerprint" not in serialized
     assert "--expected-" + "state" not in serialized
     assert "--expected-setup-status" not in serialized
 
@@ -91,9 +104,76 @@ def test_renderer_covers_every_graph_request_kind() -> None:
 def test_rendered_commands_are_accepted_by_the_cli_parser() -> None:
     """Ensure advertised commands and the executable parser share one contract."""
     parser = build_parser()
+    decisions = tuple(
+        NodeDecision(
+            node_id=f"test.{index}",
+            instance_key=f"instance:{index}",
+            child_graph_id="test",
+            request_kind=request_kind,
+            category=NodeCategory.AVAILABLE,
+            recommendation_kind=RecommendationKind.REQUIRED,
+            reason_code="TEST_AVAILABLE",
+            decision_fingerprint=f"decision-{index}",
+        )
+        for index, request_kind in enumerate(COMMAND_PREFIXES)
+    )
+    position = WorkflowPosition(
+        project_id=41,
+        graph_version="agileforge.workflow.v2",
+        fact_fingerprint="facts-41",
+        evaluated_at=datetime(2026, 8, 9, tzinfo=UTC),
+        available_nodes=tuple(item.node_id for item in decisions),
+        waiting_nodes=(),
+        blocked_nodes=(),
+        invalid_nodes=(),
+        terminal=False,
+        decisions=decisions,
+    )
 
-    for item in render_workflow_next(position_fixture())["commands"]:
+    for item in render_workflow_next(position)["commands"]:
         argv = shlex.split(item["command"])[1:]
         argv = [_PLACEHOLDERS.get(argument, argument) for argument in argv]
         parsed = parser.parse_args(argv)
-        assert parsed.project_id == position_fixture().project_id
+        assert parsed.project_id == position.project_id
+        assert not hasattr(parsed, "graph_version")
+        assert not hasattr(parsed, "expected_fact_fingerprint")
+        assert not hasattr(parsed, "expected_decision_fingerprint")
+        assert not hasattr(parsed, "changed_by")
+
+
+def test_lifecycle_positions_render_semantic_commands() -> None:
+    """Render each new lifecycle boundary with task language only."""
+    expected = {
+        "record_vision_interview_turn": "agileforge vision respond",
+        "record_product_goal_interview_turn": "agileforge goal respond",
+        "record_discovery_artifact": "agileforge discovery record",
+        "record_specification_candidate": "agileforge specification record",
+        "compile_authority": "agileforge authority compile",
+        "fulfill_product_goal": "agileforge goal complete",
+        "abandon_product_goal": "agileforge goal abandon",
+    }
+    for request_kind, command_prefix in expected.items():
+        decision = NodeDecision(
+            node_id=f"test.{request_kind}",
+            child_graph_id="test",
+            request_kind=request_kind,
+            category=NodeCategory.AVAILABLE,
+            recommendation_kind=RecommendationKind.REQUIRED,
+            reason_code="TEST_AVAILABLE",
+            decision_fingerprint=f"decision-{request_kind}",
+        )
+        position = position_fixture().model_copy(
+            update={
+                "graph_version": "agileforge.workflow.v2",
+                "decisions": (decision,),
+                "available_nodes": (decision.node_id,),
+                "waiting_nodes": (),
+                "blocked_nodes": (),
+                "invalid_nodes": (),
+            }
+        )
+
+        payload = render_workflow_next(position)
+
+        assert len(payload["commands"]) == 1
+        assert payload["commands"][0]["command"].startswith(command_prefix)

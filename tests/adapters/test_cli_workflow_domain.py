@@ -1,6 +1,7 @@
 """CLI adapter tests for the WorkflowDomain cutover."""
 
 import importlib
+import shlex
 from pathlib import Path
 from typing import cast
 
@@ -8,16 +9,91 @@ import pytest
 
 from cli import main as cli_main
 from cli.workflow_commands import (
-    AuthorityDecisionArguments,
-    ProjectShellArguments,
-    build_decide_authority_request,
-    build_open_project_shell_request,
     workflow_next,
     workflow_position,
 )
 from tests.adapters.test_command_renderer import position_fixture
 from workflow.contracts import WorkflowPosition
-from workflow.requests import DecideAuthority, OpenProjectShell
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        (
+            "agileforge project create --name MyFinance"
+            ' --description "Local household finance"'
+            " --repository-path /Users/aaat/myfinance"
+            " --idempotency-key create-myfinance-1 --actor acceptance-agent"
+        ),
+        (
+            "agileforge vision respond --project-id 1"
+            ' --text "The target user manages household finances and needs reliable'
+            ' movement reconciliation." --idempotency-key vision-myfinance-1'
+            " --actor acceptance-agent"
+        ),
+        "agileforge vision status --project-id 1",
+        (
+            "agileforge vision review --project-id 1 --decision accepted"
+            ' --rationale "The product direction is accurate."'
+            " --idempotency-key vision-review-myfinance-1"
+            " --actor acceptance-agent"
+        ),
+        (
+            "agileforge goal respond --project-id 1"
+            ' --text "The first valuable future state is reliable Beobank statement'
+            ' reconciliation for the household operator."'
+            " --idempotency-key goal-myfinance-1 --actor acceptance-agent"
+        ),
+        "agileforge goal status --project-id 1",
+        (
+            "agileforge goal review --project-id 1 --decision accepted"
+            ' --rationale "The outcome and success signals are correct."'
+            " --idempotency-key goal-review-myfinance-1 --actor acceptance-agent"
+        ),
+        (
+            "agileforge repository attach --project-id 1"
+            " --path /Users/aaat/myfinance"
+            " --idempotency-key attach-myfinance-1 --actor acceptance-agent"
+        ),
+        "agileforge repository status --project-id 1",
+        (
+            "agileforge repository refresh --project-id 1"
+            " --idempotency-key refresh-myfinance-1 --actor acceptance-agent"
+        ),
+        (
+            "agileforge discovery record --project-id 1"
+            " --file /tmp/agileforge-acceptance/discovery.json"
+            " --idempotency-key discovery-myfinance-1 --actor acceptance-agent"
+        ),
+        (
+            "agileforge specification record --project-id 1"
+            " --file /tmp/agileforge-acceptance/specification.json"
+            " --idempotency-key spec-myfinance-1 --actor acceptance-agent"
+        ),
+        (
+            "agileforge specification review --project-id 1 --decision accepted"
+            ' --rationale "Desired behavior is correct."'
+            " --idempotency-key spec-review-myfinance-1 --actor acceptance-agent"
+        ),
+        (
+            "agileforge goal complete --project-id 1"
+            ' --rationale "The accepted success signals were achieved."'
+            " --idempotency-key goal-complete-myfinance-1 --actor acceptance-agent"
+        ),
+        (
+            "agileforge goal abandon --project-id 1"
+            ' --rationale "The outcome is no longer worth pursuing."'
+            " --idempotency-key goal-abandon-myfinance-1 --actor acceptance-agent"
+        ),
+    ],
+)
+def test_semantic_lifecycle_commands_parse(command: str) -> None:
+    """Accept every concrete Task 7 lifecycle command without hidden guards."""
+    parsed = cli_main.build_parser().parse_args(shlex.split(command)[1:])
+
+    assert not hasattr(parsed, "graph_version")
+    assert not hasattr(parsed, "expected_fact_fingerprint")
+    assert not hasattr(parsed, "changed_by")
 
 
 def test_version_does_not_compose_production_application(
@@ -78,55 +154,6 @@ def test_workflow_position_can_include_optional_decisions() -> None:
     assert "scope_extension.start" in {
         cast("str", item["node_id"]) for item in decisions
     }
-
-
-def test_project_create_builds_open_project_shell() -> None:
-    """Require explicit origin when opening a Project Shell."""
-    request = build_open_project_shell_request(
-        ProjectShellArguments(
-            name="Example",
-            origin="brownfield",
-            idempotency_key="open-41",
-            changed_by="cli-user",
-            correlation_id="corr-41",
-        )
-    )
-
-    assert request == OpenProjectShell(
-        name="Example",
-        origin="brownfield",
-        idempotency_key="open-41",
-        actor="cli-user",
-        correlation_id="corr-41",
-    )
-
-
-def test_mutation_builder_copies_all_position_guards() -> None:
-    """Copy every advertised position guard into the exact request."""
-    request = build_decide_authority_request(
-        AuthorityDecisionArguments(
-            project_id=41,
-            graph_version="agileforge.workflow.v1",
-            expected_fact_fingerprint="facts-41",
-            expected_decision_fingerprint="decision-review",
-            idempotency_key="accept-41",
-            changed_by="cli-user",
-            correlation_id="corr-41",
-            pending_authority_id=23,
-            authority_fingerprint="authority-23",
-            review_fingerprint="review-23",
-            decision="accepted",
-            rationale="Reviewed",
-        )
-    )
-
-    assert isinstance(request, DecideAuthority)
-    assert request.graph_version == "agileforge.workflow.v1"
-    assert request.fact_fingerprint == "facts-41"
-    assert request.decision_fingerprint == "decision-review"
-    assert request.idempotency_key == "accept-41"
-    assert request.actor == "cli-user"
-    assert request.correlation_id == "corr-41"
 
 
 def test_cli_adapter_has_no_repository_or_legacy_routing_imports() -> None:

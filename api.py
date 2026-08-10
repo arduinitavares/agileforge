@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from importlib.resources import files
 from pathlib import Path
-from typing import Literal, cast
+from typing import Literal, TypedDict, cast
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import RedirectResponse
@@ -22,18 +22,35 @@ from services.agent_workbench.version import agileforge_version
 from services.application import (
     AgenticActionRequest,
     AgileForgeApplication,
+    AuthorityCompileRequest,
+    AuthorityRepairRequest,
+    AuthorityReviewRequest,
+    CreateProjectCommand,
+    DiscoveryArtifactRequest,
+    ProductGoalOutcomeRequest,
+    ProductGoalResponseRequest,
+    ProductGoalReviewRequest,
+    RepositoryAttachRequest,
+    RepositoryRefreshRequest,
+    SpecificationCandidateRequest,
+    SpecificationReviewRequest,
+    VisionResponseRequest,
+    VisionReviewRequest,
+    VisionRevisionRequest,
     production_application,
 )
-from utils.api_schemas import WorkflowPositionGuards
 from utils.model_config import get_model_id
 from utils.runtime_controls import UI_LAUNCH_NONCE_ENV
 from workflow.contracts import (
     JsonObject,
     NodeCategory,
+    NodeDecision,
     TransitionResult,
+    WorkflowError,
+    WorkflowErrorCode,
     WorkflowPosition,
 )
-from workflow.requests import DecideAuthority, OpenProjectShell, TransitionRequest
+from workflow.requests import TransitionRequest
 
 _TRANSITION_REQUEST = TypeAdapter(TransitionRequest)
 _FRONTEND_ROOT = files("frontend")
@@ -57,36 +74,88 @@ app.mount(
 
 
 class CreateProjectRequest(BaseModel):
-    """Request body for opening a Project Shell."""
+    """Exact semantic request body for creating a Project."""
 
     model_config = ConfigDict(extra="forbid")
     name: str = Field(min_length=1, max_length=200)
-    origin: Literal["greenfield", "brownfield"]
+    description: str | None = Field(default=None, max_length=4000)
+    repository_path: str | None = None
     idempotency_key: str = Field(min_length=1, max_length=200)
-    changed_by: str = Field(default="dashboard-ui", min_length=1, max_length=200)
+    actor: str = Field(min_length=1, max_length=200)
+
+
+class MutationApiRequest(BaseModel):
+    """Strict transport metadata shared by semantic mutations."""
+
+    model_config = ConfigDict(extra="forbid")
+    idempotency_key: str = Field(min_length=1, max_length=200)
+    actor: str = Field(min_length=1, max_length=200)
     correlation_id: str | None = Field(default=None, min_length=1)
 
 
-class AuthorityDecisionApiRequest(WorkflowPositionGuards):
-    """Exact guarded authority decision payload."""
+class MutationMetadata(TypedDict):
+    """Validated transport metadata forwarded to application requests."""
 
-    pending_authority_id: int
-    authority_fingerprint: str = Field(min_length=1)
-    review_fingerprint: str = Field(min_length=1)
+    idempotency_key: str
+    actor: str
+    correlation_id: str | None
+
+
+class TextResponseApiRequest(MutationApiRequest):
+    """One semantic interview response."""
+
+    text: str = Field(min_length=1)
+
+
+class ReviewApiRequest(MutationApiRequest):
+    """One semantic review choice."""
+
+    decision: Literal["accepted", "rejected", "feedback"]
+    rationale: str
+
+
+class RevisionApiRequest(MutationApiRequest):
+    """One semantic Vision revision reason."""
+
+    reason: str = Field(min_length=1)
+
+
+class GoalOutcomeApiRequest(MutationApiRequest):
+    """One semantic Product Goal outcome rationale."""
+
+    rationale: str = Field(min_length=1)
+
+
+class ArtifactRecordApiRequest(MutationApiRequest):
+    """Caller-owned discovery or specification content only."""
+
+    canonical_content: JsonObject
+    content_ref: str | None = None
+
+
+class RepositoryAttachApiRequest(MutationApiRequest):
+    """Repository path plus transport metadata only."""
+
+    path: str = Field(min_length=1)
+
+
+class AuthorityDecisionApiRequest(MutationApiRequest):
+    """Semantic authority review choice without derived identities."""
+
     decision: Literal["accepted", "rejected"]
     rationale: str = Field(min_length=1)
 
 
-class AgenticActionApiRequest(WorkflowPositionGuards):
-    """Exact position guards and normalized input for one task-specific leaf."""
+class AgenticActionApiRequest(MutationApiRequest):
+    """Semantic input for one retained agentic delivery leaf."""
 
     instance_key: str | None = None
     input_payload: JsonObject
     model_id: str | None = Field(default=None, min_length=1)
 
 
-class PositionedTransitionApiRequest(WorkflowPositionGuards):
-    """Exact guards plus task-specific fields for one fixed API route."""
+class PositionedTransitionApiRequest(MutationApiRequest):
+    """Semantic fields for one retained fixed delivery route."""
 
     instance_key: str | None = None
     input_payload: JsonObject
@@ -115,6 +184,17 @@ AGENTIC_API_PATHS: dict[str, str] = {
     "record_roadmap_draft": "roadmap/generate",
     "record_story_draft": "story/generate",
     "record_sprint_plan": "sprint/generate",
+}
+
+_AGENTIC_NODE_IDS: dict[str, str] = {
+    "record_brownfield_spec_draft": "onboarding.brownfield.curation",
+    "compile_authority": "authority.compile",
+    "repair_authority": "authority.repair",
+    "record_vision_draft": "vision.generate",
+    "record_backlog_draft": "backlog.generate",
+    "record_roadmap_draft": "planning.roadmap.generate",
+    "record_story_draft": "planning.story.generate",
+    "record_sprint_plan": "planning.sprint.plan",
 }
 
 POSITIONED_API_PATHS: dict[str, str] = {
@@ -154,38 +234,48 @@ POSITIONED_API_PATHS: dict[str, str] = {
     "start_sprint": "sprint/start",
 }
 
+SEMANTIC_API_PATHS: dict[str, str] = {
+    "abandon_product_goal": "goals/abandon",
+    "begin_vision_revision": "vision/revision",
+    "compile_authority": "authority/compile",
+    "decide_authority": "authority/decision",
+    "decide_product_goal_review": "goals/review",
+    "decide_specification": "specifications/review",
+    "decide_vision_review": "vision/review",
+    "fulfill_product_goal": "goals/complete",
+    "record_discovery_artifact": "discovery",
+    "record_product_goal_interview_turn": "goals/respond",
+    "record_specification_candidate": "specifications",
+    "record_vision_interview_turn": "vision/respond",
+    "repair_authority": "authority/repair",
+}
+
 
 def _application() -> AgileForgeApplication:
     return production_application()
 
 
-def build_project_shell_request(req: CreateProjectRequest) -> OpenProjectShell:
-    """Translate one API payload into the exact Project Shell request."""
-    return OpenProjectShell(
+def build_create_project_command(req: CreateProjectRequest) -> CreateProjectCommand:
+    """Translate exact API business input into the Project lifecycle command."""
+    return CreateProjectCommand(
         name=req.name,
-        origin=req.origin,
+        description=req.description,
+        repository_path=req.repository_path,
         idempotency_key=req.idempotency_key,
-        actor=req.changed_by,
-        correlation_id=req.correlation_id,
+        actor=req.actor,
     )
 
 
 def build_authority_decision_request(
     project_id: int,
     req: AuthorityDecisionApiRequest,
-) -> DecideAuthority:
-    """Translate one API payload into the exact guarded decision request."""
-    return DecideAuthority(
+) -> AuthorityReviewRequest:
+    """Translate one API choice without accepting derived review identity."""
+    return AuthorityReviewRequest(
         project_id=project_id,
-        graph_version=req.graph_version,
-        fact_fingerprint=req.expected_fact_fingerprint,
-        decision_fingerprint=req.expected_decision_fingerprint,
         idempotency_key=req.idempotency_key,
-        actor=req.changed_by,
+        actor=req.actor,
         correlation_id=req.correlation_id,
-        pending_authority_id=req.pending_authority_id,
-        authority_fingerprint=req.authority_fingerprint,
-        review_fingerprint=req.review_fingerprint,
         decision=req.decision,
         rationale=req.rationale,
     )
@@ -195,6 +285,8 @@ def build_positioned_transition_request(
     project_id: int,
     request_kind: str,
     req: PositionedTransitionApiRequest,
+    position: WorkflowPosition,
+    decision: NodeDecision,
 ) -> TransitionRequest:
     """Build an exact typed request for one route-fixed request kind."""
     payload = dict(req.input_payload)
@@ -202,12 +294,12 @@ def build_positioned_transition_request(
         {
             "kind": request_kind,
             "project_id": project_id,
-            "graph_version": req.graph_version,
-            "fact_fingerprint": req.expected_fact_fingerprint,
-            "decision_fingerprint": req.expected_decision_fingerprint,
-            "instance_key": req.instance_key,
+            "graph_version": position.graph_version,
+            "fact_fingerprint": position.fact_fingerprint,
+            "decision_fingerprint": decision.decision_fingerprint,
+            "instance_key": decision.instance_key,
             "idempotency_key": req.idempotency_key,
-            "actor": req.changed_by,
+            "actor": req.actor,
             "correlation_id": req.correlation_id,
         }
     )
@@ -229,6 +321,38 @@ def _result_payload(result: TransitionResult) -> dict[str, object]:
     return {"status": "success", "data": result.model_dump(mode="json")}
 
 
+def _current_decision(
+    application: AgileForgeApplication,
+    *,
+    project_id: int,
+    request_kind: str,
+    instance_key: str | None,
+) -> tuple[WorkflowPosition, NodeDecision | None]:
+    position = application.position(project_id=project_id)
+    candidates = tuple(
+        decision
+        for decision in position.decisions
+        if decision.request_kind == request_kind
+        and decision.category in {NodeCategory.AVAILABLE, NodeCategory.WAITING}
+        and (instance_key is None or decision.instance_key == instance_key)
+    )
+    return position, candidates[0] if len(candidates) == 1 else None
+
+
+def _transition_not_available(
+    position: WorkflowPosition,
+    request_kind: str,
+) -> TransitionResult:
+    return TransitionResult(
+        ok=False,
+        position=position,
+        error=WorkflowError(
+            code=WorkflowErrorCode.TRANSITION_NOT_AVAILABLE,
+            message=f"No unique {request_kind} transition is currently available.",
+        ),
+    )
+
+
 def _workflow_actions(position: WorkflowPosition) -> list[JsonObject]:
     """Advertise one fixed API route for each exact available decision."""
     actions: list[JsonObject] = []
@@ -236,9 +360,9 @@ def _workflow_actions(position: WorkflowPosition) -> list[JsonObject]:
         if decision.category is not NodeCategory.AVAILABLE:
             continue
         request_kind = decision.request_kind
-        if request_kind == "decide_authority":
-            endpoint = "authority/decision"
-            transport = "authority"
+        if request_kind in SEMANTIC_API_PATHS:
+            endpoint = SEMANTIC_API_PATHS[request_kind]
+            transport = "semantic"
         elif request_kind in AGENTIC_API_PATHS:
             endpoint = AGENTIC_API_PATHS[request_kind]
             transport = "agentic"
@@ -251,7 +375,6 @@ def _workflow_actions(position: WorkflowPosition) -> list[JsonObject]:
             {
                 "node_id": decision.node_id,
                 "instance_key": decision.instance_key,
-                "decision_fingerprint": decision.decision_fingerprint,
                 "request_kind": request_kind,
                 "endpoint": endpoint,
                 "transport": transport,
@@ -272,6 +395,14 @@ def _read_payload(result: JsonObject) -> dict[str, object]:
         "status": "success",
         "data": result.get("data", {}),
         "warnings": result.get("warnings", []),
+    }
+
+
+def _metadata(request: MutationApiRequest) -> MutationMetadata:
+    return {
+        "idempotency_key": request.idempotency_key,
+        "actor": request.actor,
+        "correlation_id": request.correlation_id,
     }
 
 
@@ -332,8 +463,10 @@ def get_dashboard_config() -> DashboardConfig:
 
 @app.post("/api/projects")
 def create_project(req: CreateProjectRequest) -> dict[str, object]:
-    """Open a greenfield or Brownfield Project Shell."""
-    return _result_payload(_application().transition(build_project_shell_request(req)))
+    """Create one Project from semantic business input only."""
+    return _result_payload(
+        _application().create_project(build_create_project_command(req))
+    )
 
 
 @app.get("/api/projects")
@@ -365,6 +498,246 @@ def get_project_position(project_id: int) -> dict[str, object]:
         "data": position.model_dump(mode="json"),
         "actions": _workflow_actions(position),
     }
+
+
+@app.post("/api/projects/{project_id}/vision/respond")
+def respond_to_project_vision(
+    project_id: int,
+    req: TextResponseApiRequest,
+) -> dict[str, object]:
+    """Record one semantic Project Vision interview response."""
+    return _result_payload(
+        _application().respond_to_vision(
+            VisionResponseRequest(
+                project_id=project_id,
+                text=req.text,
+                **_metadata(req),
+            )
+        )
+    )
+
+
+@app.get("/api/projects/{project_id}/vision/status")
+def get_vision_status(project_id: int) -> dict[str, object]:
+    """Return the current durable Project Vision projection."""
+    return _read_payload(_application().reads.vision_status(project_id=project_id))
+
+
+@app.post("/api/projects/{project_id}/vision/review")
+def review_project_vision(
+    project_id: int,
+    req: ReviewApiRequest,
+) -> dict[str, object]:
+    """Record one semantic Project Vision review decision."""
+    return _result_payload(
+        _application().review_vision(
+            VisionReviewRequest(
+                project_id=project_id,
+                decision=req.decision,
+                rationale=req.rationale,
+                **_metadata(req),
+            )
+        )
+    )
+
+
+@app.post("/api/projects/{project_id}/vision/revision")
+def revise_project_vision(
+    project_id: int,
+    req: RevisionApiRequest,
+) -> dict[str, object]:
+    """Begin one eligible semantic Project Vision revision."""
+    return _result_payload(
+        _application().begin_vision_revision(
+            VisionRevisionRequest(
+                project_id=project_id,
+                reason=req.reason,
+                **_metadata(req),
+            )
+        )
+    )
+
+
+@app.post("/api/projects/{project_id}/goals/respond")
+def respond_to_product_goal(
+    project_id: int,
+    req: TextResponseApiRequest,
+) -> dict[str, object]:
+    """Record one semantic Product Goal interview response."""
+    return _result_payload(
+        _application().respond_to_product_goal(
+            ProductGoalResponseRequest(
+                project_id=project_id,
+                text=req.text,
+                **_metadata(req),
+            )
+        )
+    )
+
+
+@app.get("/api/projects/{project_id}/goals/status")
+def get_product_goal_status(project_id: int) -> dict[str, object]:
+    """Return the current durable Product Goal projection."""
+    return _read_payload(
+        _application().reads.product_goal_status(project_id=project_id)
+    )
+
+
+@app.post("/api/projects/{project_id}/goals/review")
+def review_product_goal(
+    project_id: int,
+    req: ReviewApiRequest,
+) -> dict[str, object]:
+    """Record one semantic Product Goal review decision."""
+    return _result_payload(
+        _application().review_product_goal(
+            ProductGoalReviewRequest(
+                project_id=project_id,
+                decision=req.decision,
+                rationale=req.rationale,
+                **_metadata(req),
+            )
+        )
+    )
+
+
+def _product_goal_outcome(
+    project_id: int,
+    req: GoalOutcomeApiRequest,
+    outcome: Literal["fulfilled", "abandoned"],
+) -> dict[str, object]:
+    return _result_payload(
+        _application().resolve_product_goal(
+            ProductGoalOutcomeRequest(
+                project_id=project_id,
+                outcome=outcome,
+                rationale=req.rationale,
+                **_metadata(req),
+            )
+        )
+    )
+
+
+@app.post("/api/projects/{project_id}/goals/complete")
+def complete_product_goal(
+    project_id: int,
+    req: GoalOutcomeApiRequest,
+) -> dict[str, object]:
+    """Record fulfillment of the current Product Goal."""
+    return _product_goal_outcome(project_id, req, "fulfilled")
+
+
+@app.post("/api/projects/{project_id}/goals/abandon")
+def abandon_product_goal(
+    project_id: int,
+    req: GoalOutcomeApiRequest,
+) -> dict[str, object]:
+    """Record abandonment of the current Product Goal."""
+    return _product_goal_outcome(project_id, req, "abandoned")
+
+
+@app.post("/api/projects/{project_id}/discovery")
+def record_discovery(
+    project_id: int,
+    req: ArtifactRecordApiRequest,
+) -> dict[str, object]:
+    """Record caller-owned discovery content under host-derived lineage."""
+    return _result_payload(
+        _application().record_discovery(
+            DiscoveryArtifactRequest(
+                project_id=project_id,
+                canonical_content=req.canonical_content,
+                content_ref=req.content_ref,
+                **_metadata(req),
+            )
+        )
+    )
+
+
+@app.get("/api/projects/{project_id}/discovery")
+def get_discovery(project_id: int) -> dict[str, object]:
+    """Return current durable discovery content."""
+    return _read_payload(_application().reads.discovery_status(project_id=project_id))
+
+
+@app.post("/api/projects/{project_id}/specifications")
+def record_specification(
+    project_id: int,
+    req: ArtifactRecordApiRequest,
+) -> dict[str, object]:
+    """Record a specification candidate under host-derived lineage."""
+    return _result_payload(
+        _application().record_specification_candidate(
+            SpecificationCandidateRequest(
+                project_id=project_id,
+                canonical_content=req.canonical_content,
+                content_ref=req.content_ref,
+                **_metadata(req),
+            )
+        )
+    )
+
+
+@app.get("/api/projects/{project_id}/specifications/review")
+def get_specification_review(project_id: int) -> dict[str, object]:
+    """Return current durable specification review content."""
+    return _read_payload(
+        _application().reads.specification_review(project_id=project_id)
+    )
+
+
+@app.post("/api/projects/{project_id}/specifications/review")
+def review_specification(
+    project_id: int,
+    req: ReviewApiRequest,
+) -> dict[str, object]:
+    """Record one semantic specification review decision."""
+    return _result_payload(
+        _application().review_specification(
+            SpecificationReviewRequest(
+                project_id=project_id,
+                decision=req.decision,
+                rationale=req.rationale,
+                **_metadata(req),
+            )
+        )
+    )
+
+
+@app.post("/api/projects/{project_id}/repository")
+def attach_repository(
+    project_id: int,
+    req: RepositoryAttachApiRequest,
+) -> dict[str, object]:
+    """Attach a repository path with server-derived active binding guard."""
+    return _result_payload(
+        _application().attach_repository(
+            RepositoryAttachRequest(
+                project_id=project_id,
+                path=req.path,
+                **_metadata(req),
+            )
+        )
+    )
+
+
+@app.get("/api/projects/{project_id}/repository")
+def get_repository(project_id: int) -> dict[str, object]:
+    """Return current immutable repository provenance."""
+    return _read_payload(_application().reads.repository_status(project_id=project_id))
+
+
+@app.post("/api/projects/{project_id}/repository/refresh")
+def refresh_repository(
+    project_id: int,
+    req: MutationApiRequest,
+) -> dict[str, object]:
+    """Refresh repository provenance with a server-derived binding guard."""
+    return _result_payload(
+        _application().refresh_repository(
+            RepositoryRefreshRequest(project_id=project_id, **_metadata(req))
+        )
+    )
 
 
 @app.get("/api/projects/{project_id}/authority/status")
@@ -589,9 +962,11 @@ def decide_project_authority(
     project_id: int,
     req: AuthorityDecisionApiRequest,
 ) -> dict[str, object]:
-    """Record one exact human authority decision."""
+    """Record one human choice with server-derived authority identity."""
     return _result_payload(
-        _application().transition(build_authority_decision_request(project_id, req))
+        _application().decide_authority(
+            build_authority_decision_request(project_id, req)
+        )
     )
 
 
@@ -601,18 +976,32 @@ def _run_agentic(
     node_id: str,
     req: AgenticActionApiRequest,
 ) -> dict[str, object]:
-    result = _application().run_agentic_action(
+    application = _application()
+    request_kind = next(
+        kind
+        for kind, mapped_node_id in _AGENTIC_NODE_IDS.items()
+        if mapped_node_id == node_id
+    )
+    position, decision = _current_decision(
+        application,
+        project_id=project_id,
+        request_kind=request_kind,
+        instance_key=req.instance_key,
+    )
+    if decision is None:
+        return _result_payload(_transition_not_available(position, request_kind))
+    result = application.run_agentic_action(
         AgenticActionRequest(
             project_id=project_id,
-            graph_version=req.graph_version,
-            fact_fingerprint=req.expected_fact_fingerprint,
-            decision_fingerprint=req.expected_decision_fingerprint,
+            graph_version=position.graph_version,
+            fact_fingerprint=position.fact_fingerprint,
+            decision_fingerprint=decision.decision_fingerprint,
             node_id=node_id,
-            instance_key=req.instance_key,
+            instance_key=decision.instance_key,
             input_payload=req.input_payload,
             model_id=req.model_id or get_model_id(AGENTIC_MODEL_ROLES[node_id]),
             idempotency_key=req.idempotency_key,
-            actor=req.changed_by,
+            actor=req.actor,
             correlation_id=req.correlation_id,
         )
     )
@@ -635,19 +1024,27 @@ def curate_brownfield_project(
 @app.post("/api/projects/{project_id}/authority/compile")
 def compile_project_authority(
     project_id: int,
-    req: AgenticActionApiRequest,
+    req: MutationApiRequest,
 ) -> dict[str, object]:
-    """Compile authority through the graph recipe."""
-    return _run_agentic(project_id=project_id, node_id="authority.compile", req=req)
+    """Compile authority from host-prepared current specification input."""
+    return _result_payload(
+        _application().compile_authority(
+            AuthorityCompileRequest(project_id=project_id, **_metadata(req))
+        )
+    )
 
 
 @app.post("/api/projects/{project_id}/authority/repair")
 def repair_project_authority(
     project_id: int,
-    req: AgenticActionApiRequest,
+    req: MutationApiRequest,
 ) -> dict[str, object]:
-    """Repair rejected authority through the graph recipe."""
-    return _run_agentic(project_id=project_id, node_id="authority.repair", req=req)
+    """Repair rejected authority from host-prepared compiler input."""
+    return _result_payload(
+        _application().repair_authority(
+            AuthorityRepairRequest(project_id=project_id, **_metadata(req))
+        )
+    )
 
 
 @app.post("/api/projects/{project_id}/vision/generate")
@@ -720,8 +1117,23 @@ def _positioned_route(request_kind: str) -> PositionedRoute:
         project_id: int,
         req: PositionedTransitionApiRequest,
     ) -> dict[str, object]:
-        request = build_positioned_transition_request(project_id, request_kind, req)
-        return _result_payload(_application().transition(request))
+        application = _application()
+        position, decision = _current_decision(
+            application,
+            project_id=project_id,
+            request_kind=request_kind,
+            instance_key=req.instance_key,
+        )
+        if decision is None:
+            return _result_payload(_transition_not_available(position, request_kind))
+        request = build_positioned_transition_request(
+            project_id,
+            request_kind,
+            req,
+            position,
+            decision,
+        )
+        return _result_payload(application.transition(request))
 
     route.__name__ = f"transition_{request_kind}"
     route.__doc__ = f"Apply the exact {request_kind} workflow request."
