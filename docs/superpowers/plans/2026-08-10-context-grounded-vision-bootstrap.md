@@ -198,7 +198,7 @@ class VisionEvidenceBundle(BaseModel):
     evidence_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
 ```
 
-Strip and reject blank IDs/text. `relative_path` is `None` only for Project metadata and repository provenance; otherwise it is a non-absolute POSIX path with no `..` segment. Require the declared content fingerprint to equal `canonical_hash(content)` and the bundle fingerprint to equal `canonical_hash({"schema_version": schema_version, "items": items, "warnings": warnings})`.
+Strip and reject blank IDs/text. `relative_path` is `None` only for Project metadata and repository provenance. Every non-null path must equal one of `README.md`, `CONTEXT.md`, `pyproject.toml`, `specs/spec.json`, `specs/spec.md`, `docs/spec/spec.json`, or `docs/spec/spec.md`; this contract-level allowlist rejects `.git` paths as well as arbitrary repository files. Enforce kind/path consistency (`README.md` is `readme`, `CONTEXT.md` is `context`, `pyproject.toml` is `package_metadata`, and all four spec paths are `technical_specification`). Require the declared content fingerprint to equal `canonical_hash(content)` and the bundle fingerprint to equal `canonical_hash({"schema_version": schema_version, "items": items, "warnings": warnings})`.
 
 Use these exact input fields:
 
@@ -252,7 +252,7 @@ class VisionPreflight(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     expected_evidence_fingerprint: str
-    observed_evidence_fingerprint: str
+    observed_evidence: VisionEvidenceBundle
 
 
 class VisionAgentInput(BaseModel):
@@ -262,7 +262,7 @@ class VisionAgentInput(BaseModel):
     preflight: VisionPreflight | None = None
 ```
 
-Bootstrap/revision contain a new evidence bundle but no snapshot ID; the successful graph transition creates the snapshot. Clarification contains the existing snapshot identity and exact persisted bundle. `VisionPreflight` is present only when an existing lineage is checked against freshly recollected evidence.
+Bootstrap/revision contain a new evidence bundle but no snapshot ID; the successful graph transition creates the snapshot. Clarification contains the existing snapshot identity and exact persisted bundle. `VisionPreflight` is required only for clarification: its expected fingerprint must equal `request.evidence.evidence_fingerprint`, while `observed_evidence` is the freshly recollected sanitized bundle. Bootstrap/revision reject preflight. The recipe compares expected with `observed_evidence.evidence_fingerprint` before invoking a leaf and passes only `request`, never `preflight`, to the model.
 
 Use these exact output and repair fields:
 
@@ -740,13 +740,13 @@ Expected: missing `VisionInputService` and typed preflight handling.
 
 - [ ] **Step 4: Implement host input preparation**
 
-`build_bootstrap` collects the current bundle and returns `VisionAgentInput` with operation `bootstrap` or `revision` selected from graph facts. `build_clarification` loads the exact lineage snapshot, derives addressed question IDs from the latest turn, preserves stored evidence as model input, recollects current evidence for comparison, and includes only expected/observed fingerprints in a host-owned preflight envelope.
+`build_bootstrap` collects the current bundle and returns `VisionAgentInput` with operation `bootstrap` or `revision` selected from graph facts. `build_clarification` loads the exact lineage snapshot, derives addressed question IDs from the latest turn, preserves stored evidence as model input, recollects current sanitized evidence, and puts that observed bundle in the host-owned preflight envelope. The envelope validates that its expected fingerprint equals the persisted request bundle; the recipe compares expected with the observed bundle fingerprint before any model call and sends only the request union to the model.
 
 The caller supplies only ordinary response text. It never supplies mode, question IDs, snapshot IDs, fingerprints, or repository-derived values.
 
 - [ ] **Step 5: Preserve typed preflight failures durably**
 
-Add `failure_code: str | None` to `NodeAttemptFact` from `WorkflowNodeAttemptOutcome`. Define `VisionAgenticPreflightError(code: WorkflowErrorCode, message: str)` in `adapters/adk/errors.py`. The Vision recipe raises it before `context.run_node` when expected/observed evidence differ. Update `AdkWorkflowRunner` to catch it before the generic execution block, record its exact `failure_code`, and return that typed `WorkflowError`.
+Add `failure_code: str | None` to `NodeAttemptFact` from `WorkflowNodeAttemptOutcome`. Define `VisionAgenticPreflightError(code: WorkflowErrorCode, message: str)` in `adapters/adk/errors.py`. The Vision recipe raises it before `context.run_node` when the expected fingerprint differs from `observed_evidence.evidence_fingerprint`. Update `AdkWorkflowRunner` to catch it before the generic execution block, record its exact `failure_code`, and return that typed `WorkflowError`.
 
 The graph treats the latest `VISION_EVIDENCE_STALE` failure for the current clarification instance as recovery evidence and advertises `vision.bootstrap`. This uses the existing append-only attempt/outcome system; do not add mutable session state. An unchanged recollected fingerprint proceeds with the existing snapshot even after repository refresh.
 

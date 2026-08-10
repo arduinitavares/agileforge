@@ -41,7 +41,7 @@ The central authority rule is:
 - Automatically accepting a Vision.
 - Generating a Product Goal, backlog item, feature list, specification, or task
   during Vision work.
-- Restoring greenfield or brownfield lifecycle branches.
+- Restoring retired project-origin lifecycle branches.
 - Performing repository inventory, source-code analysis, GitHub research, or
   network calls during Vision evidence collection.
 - Reading arbitrary documentation or source files.
@@ -159,6 +159,10 @@ The collector does not traverse directories and does not follow a symlink whose
 resolved target leaves the repository worktree. Environment files, arbitrary
 documents, source code, Git history, issues, pull requests, generated outputs,
 and secret files are outside the boundary.
+
+The model-facing evidence contract repeats this exact allowlist. A caller
+cannot construct an evidence item for `.git`, another repository-relative
+path, or a path whose declared kind does not match its allowlisted location.
 
 `pyproject.toml` is parsed with `tomllib`; only Project name, description,
 keywords, and declared console scripts are exposed. A JSON specification is
@@ -286,6 +290,13 @@ response to the currently active draft and its open questions.
 
 All inputs forbid extra fields. Absolute local paths never enter any model
 input.
+
+Clarification execution also carries one host-only preflight envelope. It
+contains the expected persisted evidence fingerprint and a freshly recollected,
+sanitized evidence bundle. The envelope validates that the expected fingerprint
+belongs to the clarification request's persisted bundle. The recipe compares it
+with the observed bundle fingerprint before any provider call, then passes only
+the clarification request, never the preflight envelope, to the model.
 
 ## Model Output Contract
 
