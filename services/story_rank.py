@@ -17,4 +17,13 @@ def parse_story_rank(value: str | None) -> int:
     return int(value)
 
 
-__all__ = ["parse_story_rank"]
+def story_rank_is_valid(value: str | None) -> bool:
+    """Return whether a Story rank uses the canonical persisted form."""
+    try:
+        parse_story_rank(value)
+    except ValueError:
+        return False
+    return True
+
+
+__all__ = ["parse_story_rank", "story_rank_is_valid"]

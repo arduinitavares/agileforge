@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
-from services.story_rank import parse_story_rank
+from services.story_rank import story_rank_is_valid
 from workflow.contracts import (
     GRAPH_VERSION,
     Blocker,
@@ -58,14 +58,6 @@ class _BacklogLineage:
     goal: ProductGoalArtifactFact | None
     backlog: PhaseArtifactFact | None
     conflict: bool
-
-
-def _story_rank_is_valid(rank: str | None) -> bool:
-    try:
-        parse_story_rank(rank)
-    except ValueError:
-        return False
-    return True
 
 
 def candidate_set_fingerprint(
@@ -734,7 +726,7 @@ def _story_readiness_rule(
     missing = tuple(
         item
         for item in stories
-        if item.story_points is None or not _story_rank_is_valid(item.rank)
+        if item.story_points is None or not story_rank_is_valid(item.rank)
     )
     if not missing:
         return (RuleEvaluation(RuleCategory.SATISFIED, "STORY_READINESS_COMPLETE"),)
@@ -795,8 +787,7 @@ def _sprint_candidate_problem(
             Blocker(code="STORY_RANK_MISSING", message="Story rank is required.")
         )
     if any(
-        item.rank is not None and not _story_rank_is_valid(item.rank)
-        for item in stories
+        item.rank is not None and not story_rank_is_valid(item.rank) for item in stories
     ):
         blockers.append(
             Blocker(

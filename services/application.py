@@ -81,7 +81,7 @@ from services.sprint_selection import (
     select_sprint_story_rows,
 )
 from services.story_linkage import normalize_requirement_key
-from services.story_rank import parse_story_rank
+from services.story_rank import parse_story_rank, story_rank_is_valid
 from services.story_runtime import build_story_input_context
 from services.vision_interview_input import VisionInterviewInputService
 from utils.model_config import get_model_id
@@ -650,7 +650,7 @@ class PlanningActionSelectionService:
                 item.story_id
                 for item in snapshot.stories
                 if item.sprint_candidate
-                and (item.story_points is None or item.rank is None)
+                and (item.story_points is None or not story_rank_is_valid(item.rank))
             )
         )
         fingerprint = readiness_fingerprint(snapshot.stories)

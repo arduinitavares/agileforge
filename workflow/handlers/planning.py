@@ -45,7 +45,7 @@ from services.story_dependencies import (
     StoryDependencyGraphError,
     apply_story_dependencies_in_session,
 )
-from services.story_rank import parse_story_rank
+from services.story_rank import story_rank_is_valid
 from workflow.contracts import (
     NodeDecision,
     TransitionResult,
@@ -100,13 +100,7 @@ type PlanningRequest = (
 
 
 def _story_needs_readiness_repair(story: StoryFact) -> bool:
-    if story.story_points is None:
-        return True
-    try:
-        parse_story_rank(story.rank)
-    except ValueError:
-        return True
-    return False
+    return story.story_points is None or not story_rank_is_valid(story.rank)
 
 
 type PlanningReviewRequest = DecideRoadmap | DecideStory | DecideSprintPlan

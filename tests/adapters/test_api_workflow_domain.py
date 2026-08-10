@@ -1864,6 +1864,69 @@ def test_planning_selection_derives_dependency_and_readiness_guards(
     )
 
 
+def test_application_repairs_durable_invalid_story_rank_and_replays(
+    engine: "Engine",
+) -> None:
+    """Repair a non-null invalid rank through the public application boundary."""
+    project_id = _seed_accepted_backlog(engine)
+    domain = planning_domain(engine)
+    _record_and_accept_roadmap(domain, project_id)
+    _story_artifact_id, story_id = _record_and_accept_story(domain, project_id)
+    _apply_current_dependencies(
+        engine,
+        domain,
+        project_id,
+        idempotency_key="application-readiness-dependencies",
+    )
+    with Session(engine) as session:
+        story = session.get(UserStory, story_id)
+        assert story is not None
+        story.story_points = 3
+        story.rank = "0"
+        session.add(story)
+        session.commit()
+
+    application = AgileForgeApplication(
+        workflow_domain=domain,
+        planning_action_selection=application_module.PlanningActionSelectionService(
+            engine=engine
+        ),
+    )
+    request = application_module.StoryReadinessRepairRequest(
+        project_id=project_id,
+        idempotency_key="application-repair-invalid-rank",
+        actor="operator",
+        repairs=(
+            application_module.StoryReadinessRepair(
+                story_id=story_id,
+                story_points=5,
+                rank="101",
+            ),
+        ),
+    )
+
+    applied = application.repair_story_readiness(request)
+
+    assert applied.ok is True
+    with Session(engine) as session:
+        repaired_story = session.get(UserStory, story_id)
+        assert repaired_story is not None
+        assert (repaired_story.story_points, repaired_story.rank) == (5, "101")
+        repaired_at = repaired_story.updated_at
+
+    replayed = application.repair_story_readiness(request)
+
+    assert replayed == applied.model_copy(update={"replayed": True})
+    with Session(engine) as session:
+        replayed_story = session.get(UserStory, story_id)
+        assert replayed_story is not None
+        assert (
+            replayed_story.story_points,
+            replayed_story.rank,
+            replayed_story.updated_at,
+        ) == (5, "101", repaired_at)
+
+
 def test_planning_selection_derives_sprint_start_from_accepted_current_plan(
     engine: "Engine",
 ) -> None:
