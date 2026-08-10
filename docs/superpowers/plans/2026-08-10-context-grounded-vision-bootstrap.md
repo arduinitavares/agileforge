@@ -651,9 +651,17 @@ git commit -m "feat: persist vision evidence snapshots"
 
 ---
 
-### Task 4: Bootstrap And Clarification Graph Transitions
+### Task 4-6 Atomic Batch, Phase 1: Vision Lineage And Graph Hard Break
+
+Tasks 4, 5, and 6 are one implementation task with one implementer, one
+review cycle, and one final commit. Do not commit or expose an intermediate
+phase. The graph must never advertise `vision.bootstrap` without its host input
+builder, registered ADK recipe, trusted output adapter, and persistence path.
 
 **Files:**
+- Modify: `models/product_definition.py`
+- Modify: `workflow/facts.py`
+- Modify: `repositories/workflow.py`
 - Modify: `workflow/requests/vision.py`
 - Modify: `workflow/requests/__init__.py`
 - Modify: `workflow/domain.py`
@@ -663,10 +671,13 @@ git commit -m "feat: persist vision evidence snapshots"
 - Create: `tests/workflow/test_vision_bootstrap_graph.py`
 - Create: `tests/workflow/test_vision_bootstrap_transitions.py`
 - Modify: `tests/workflow/test_vision_interview_graph.py`
+- Modify: `tests/workflow/test_vision_interview_transitions.py`
+- Modify: all direct Vision turn/artifact fixtures and fact tests identified by
+  the scoped `mode` consumer scan.
 
 **Interfaces:**
-- Consumes: Task 3 snapshot/turn/artifact facts and Task 1 output structures.
-- Produces: positioned `GenerateVisionBootstrap` and revised `RecordVisionInterviewTurn`; graph node `vision.bootstrap`; atomic `_persist_vision_generation(session, request, decision, evaluated_at) -> TransitionResult` handler.
+- Consumes: Task 3 snapshot foundation and Task 1 output structures.
+- Produces: expanded Vision turn/artifact persistence and facts, positioned `GenerateVisionBootstrap`, revised `RecordVisionInterviewTurn`, graph node `vision.bootstrap`, and atomic `_persist_vision_generation(session, request, decision, evaluated_at) -> TransitionResult` handler.
 
 - [ ] **Step 1: Write failing graph-route tests**
 
@@ -698,11 +709,21 @@ uv run --frozen pytest \
 
 Expected: `vision.bootstrap` and `GenerateVisionBootstrap` are absent.
 
-- [ ] **Step 4: Add typed positioned requests**
+- [ ] **Step 4: Replace the Vision lineage schema and strict facts**
+
+Change `VisionInterviewTurn` to `operation IN ('bootstrap', 'clarification',
+'revision')`, make `user_text` nullable, and add
+`vision_evidence_snapshot_id`, `component_basis_json`, `assumptions_json`, and
+`conflicts_json`. Add the same snapshot/basis/assumption/conflict provenance to
+`VisionArtifact`. Update strict facts, loaders, lineage validation, current
+constructors, and fixtures in this atomic batch. Remove `mode`; do not add a
+compatibility column, alias, translation layer, or migration.
+
+- [ ] **Step 5: Add typed positioned requests**
 
 Define `GenerateVisionBootstrap` with request kind `generate_vision_bootstrap`, node `vision.bootstrap`, trusted evidence bundle, operation `bootstrap | revision`, output provenance, and attempt identity. Revise `RecordVisionInterviewTurn` to require operation `clarification`, selected snapshot ID/fingerprint, host-derived addressed question IDs, ordinary `user_text`, output provenance, and attempt identity.
 
-- [ ] **Step 5: Implement one atomic persistence path**
+- [ ] **Step 6: Implement one atomic persistence path**
 
 Extract `_persist_vision_generation` in `workflow/handlers/vision.py`. It must:
 
@@ -714,11 +735,11 @@ Extract `_persist_vision_generation` in `workflow/handlers/vision.py`. It must:
 6. Materialize one artifact only when `is_complete` is true.
 7. Flush and return IDs only after all related rows are valid.
 
-- [ ] **Step 6: Implement pure routing**
+- [ ] **Step 7: Implement pure routing**
 
 Add `vision.bootstrap` before `vision.interview` in `VISION_INTERVIEW_NODES`. Bootstrap is the only required initial action. Clarification is available only for a current incomplete turn or a reviewed artifact with feedback/rejection. A revision intent with no revision turn returns bootstrap; the host later selects `operation=revision`.
 
-- [ ] **Step 7: Run tests and commit**
+- [ ] **Step 8: Run phase tests without committing**
 
 ```bash
 uv run --frozen pytest \
@@ -730,21 +751,15 @@ uv lock --check
 git diff --check
 ```
 
-Expected: all selected tests pass.
-
-```bash
-git add workflow/requests/vision.py workflow/requests/__init__.py \
-  workflow/domain.py workflow/handlers/vision.py workflow/definitions/vision.py \
-  workflow/definitions/root.py tests/workflow/test_vision_bootstrap_graph.py \
-  tests/workflow/test_vision_bootstrap_transitions.py \
-  tests/workflow/test_vision_interview_graph.py \
-  tests/workflow/test_vision_interview_transitions.py
-git commit -m "feat: add vision bootstrap graph route"
-```
+Expected: all selected tests pass. Do not commit this phase; continue directly
+through Tasks 5 and 6 in the same worktree and agent context.
 
 ---
 
-### Task 5: Replay-Safe Input Preparation And Drift Recovery
+### Task 4-6 Atomic Batch, Phase 2: Replay-Safe Input And Drift Recovery
+
+This is the second phase of the same atomic implementation task. It is not an
+independent branch checkpoint and must not be committed before Phase 3.
 
 **Files:**
 - Create: `services/vision_input.py`
@@ -812,7 +827,7 @@ The graph treats the latest `VISION_EVIDENCE_STALE` failure for the current clar
 
 Add one paragraph to the design's replay/failure section: evidence-stale recovery is represented by the existing durable node-attempt failure outcome, allowing the pure graph to advertise bootstrap without mutable workflow session state.
 
-- [ ] **Step 7: Run tests and commit**
+- [ ] **Step 7: Run phase tests without committing**
 
 ```bash
 uv run --frozen pytest \
@@ -823,23 +838,15 @@ uv lock --check
 git diff --check
 ```
 
-Expected: all selected tests pass and fake provider call count is zero on preflight errors.
-
-```bash
-git add services/vision_input.py services/vision_interview_input.py \
-  workflow/contracts.py workflow/facts.py repositories/workflow.py \
-  adapters/adk/errors.py adapters/adk/runner.py tests/services/test_vision_input.py \
-  tests/services/test_vision_interview_input.py \
-  tests/adapters/test_adk_workflow_runner.py \
-  docs/superpowers/specs/2026-08-10-context-grounded-vision-bootstrap-design.md
-git commit -m "feat: prepare replay-safe vision inputs"
-```
+Expected: all selected tests pass and fake provider call count is zero on
+preflight errors. Do not commit this phase; continue directly to Phase 3.
 
 ---
 
-### Task 6: Bounded ADK Vision Generation And One Repair
+### Task 4-6 Atomic Batch, Phase 3: Bounded ADK Generation And Legacy Removal
 
 **Files:**
+- Modify: `services/contracts/vision.py`
 - Modify: `adapters/adk/prompts/vision.txt`
 - Create: `adapters/adk/prompts/vision_repair.txt`
 - Modify: `adapters/adk/agents/vision.py`
@@ -849,10 +856,12 @@ git commit -m "feat: prepare replay-safe vision inputs"
 - Modify: `tests/adapters/test_vision.py`
 - Create: `tests/adapters/test_vision_recipe.py`
 - Modify: `tests/adapters/test_adk_workflow_runner.py`
+- Modify: `tests/services/contracts/test_vision.py`
+- Delete: legacy Vision input/output tests replaced by the Phase 2/3 suites.
 
 **Interfaces:**
-- Consumes: Task 1 contracts/validator, Task 4 positioned requests, and Task 5 preflight envelope.
-- Produces: `vision.bootstrap` and `vision.interview` recipes, trusted output adapters, and a maximum of one compact repair call.
+- Consumes: Task 1 contracts/validator and Phases 1/2 of this atomic batch.
+- Produces: one complete runnable Vision runtime with `vision.bootstrap` and `vision.interview` recipes, trusted output adapters, a maximum of one compact repair call, and no human-first Vision contract remnants.
 
 - [ ] **Step 1: Write failing recipe tests with fake ADK leaves**
 
@@ -886,11 +895,17 @@ uv run --frozen pytest \
 
 Expected: missing grounded schemas, recipe, and repair behavior.
 
-- [ ] **Step 3: Replace prompt and agent schemas**
+- [ ] **Step 3: Replace prompt, agent schemas, and old runtime contracts**
 
 The Vision prompt directs the model to propose a durable direction from supplied evidence, distinguish evidence/human/inference, expose assumptions/conflicts, ask only material questions, preserve human corrections, and produce no Product Goal or delivery scope. Repository evidence is unreviewed context, not authority.
 
 Configure the Vision agent with `VisionAgentInput` and `VisionDraftOutput`. Configure a separate repair agent with `VisionRepairInput` and `VisionDraftOutput`; use the same `product_vision` model role and existing runtime token/settings helpers.
+
+Delete `VisionInterviewInput`, `VisionInterviewOutput`,
+`VisionInterviewInputService`, the old output adapter, and their runtime exports
+and tests now. Update `services/application.py`, direct fixtures, and retained
+projection/lifecycle tests in the same atomic batch. No compatibility aliases
+or human-first fallback route may remain.
 
 - [ ] **Step 4: Build the dedicated bounded workflow**
 
@@ -909,10 +924,16 @@ Set `RetryConfig(max_attempts=1)` for paid Vision leaf nodes so ADK cannot dupli
 
 The `vision.bootstrap` adapter creates `GenerateVisionBootstrap`; the `vision.interview` adapter creates `RecordVisionInterviewTurn`. Both load operation, bundle/snapshot, human response, and question IDs only from `AttemptCompletionContext.normalized_input`. Model output supplies only `VisionDraftOutput` fields.
 
-- [ ] **Step 6: Run tests and commit**
+- [ ] **Step 6: Run the combined focused suite**
 
 ```bash
 uv run --frozen pytest \
+  tests/workflow/test_vision_evidence_persistence.py \
+  tests/workflow/test_vision_bootstrap_graph.py \
+  tests/workflow/test_vision_bootstrap_transitions.py \
+  tests/workflow/test_vision_interview_graph.py \
+  tests/workflow/test_vision_interview_transitions.py \
+  tests/services/test_vision_input.py \
   tests/adapters/test_vision.py \
   tests/adapters/test_vision_recipe.py \
   tests/adapters/test_adk_workflow_runner.py -q
@@ -922,14 +943,28 @@ git diff --check
 
 Expected: all selected tests pass; repair call count never exceeds one.
 
+- [ ] **Step 7: Prove the hard break, commit once, then run the clean full gate**
+
 ```bash
-git add adapters/adk/prompts/vision.txt adapters/adk/prompts/vision_repair.txt \
-  adapters/adk/agents/vision.py adapters/adk/recipes.py \
-  adapters/adk/model_roles.py services/application.py \
-  tests/adapters/test_vision.py tests/adapters/test_vision_recipe.py \
-  tests/adapters/test_adk_workflow_runner.py
-git commit -m "feat: run bounded grounded vision generation"
+rg -n "VisionInterviewInput|VisionInterviewOutput|VisionInterviewInputService" \
+  --glob '*.py' --glob '*.js' .
+rg -n "VisionInterviewTurn\.mode|\.mode == \"initial\"|mode=\"initial\"" \
+  --glob '*.py' .
+git diff --check
 ```
+
+Expected: no runtime or active-test matches. Historical design/plan text is
+allowed. Inspect `git diff --name-only`, stage only the reviewed union of
+Tasks 4-6 files, and commit once:
+
+```bash
+git commit -m "feat: replace human-first vision runtime"
+uv run --frozen pyrepo-check --all
+```
+
+The full gate runs only after the commit because clean-source launcher tests
+require a clean checkout. Any failure is diagnosed and fixed in a follow-up
+TDD commit before this atomic batch is marked complete.
 
 ---
 
@@ -1110,23 +1145,19 @@ git commit -m "feat: add human vision bootstrap flow"
 
 ---
 
-### Task 9: Hard-Break Cleanup And Retained Lifecycle Regression
+### Task 9: Hard-Break Verification And Retained Lifecycle Regression
 
 **Files:**
-- Modify: `services/contracts/vision.py`
-- Modify: `services/application.py`
-- Modify: `workflow/definitions/vision.py`
-- Modify: `adapters/adk/agents/vision.py`
-- Modify: `adapters/adk/prompts/vision.txt`
-- Modify: `frontend/project.js`
 - Modify: `tests/workflow/test_vision_backlog_graph.py`
 - Modify: `tests/workflow/test_vision_backlog_transitions.py`
 - Modify: `tests/services/test_durable_product_definition_projections.py`
 - Modify: `docs/agent-cli-manual.md`
+- Modify only concrete runtime/test files where the absence scan finds a
+  remnant missed by the atomic Task 4-6 implementation.
 
 **Interfaces:**
 - Consumes: completed Tasks 1-8.
-- Produces: one Vision path with no human-first bootstrap remnants and retained accepted-Vision-to-Product-Goal behavior.
+- Produces: proof that the one grounded Vision path has no human-first remnants and that accepted-Vision-to-Product-Goal behavior remains intact.
 
 - [ ] **Step 1: Run hard-break absence scans**
 
@@ -1143,9 +1174,13 @@ Expected: only deliberate historical design references remain; runtime reference
 
 Prove only a human-accepted Vision unlocks Product Goal, feedback/rejection returns to clarification, accepted Vision revision remains blocked by an active Product Goal, and repository attachment is optional for bootstrap.
 
-- [ ] **Step 3: Delete obsolete runtime and tests**
+- [ ] **Step 3: Close only concrete remnants or retained regressions**
 
-Remove the human-first input service, old contracts, prompt prohibition, initial textarea/fallback questions, exposed `mode`/`user_text` graph requirements, and tests asserting repository/spec evidence is absent. Leave no aliases or deprecation paths.
+The atomic Task 4-6 batch already removes the human-first input service, old
+contracts, prompt prohibition, initial textarea/fallback questions, exposed
+`mode` graph requirements, and obsolete tests. If this task's scans find a
+remaining runtime reference, remove that exact remnant with a failing
+regression first. Do not create aliases or deprecation paths.
 
 - [ ] **Step 4: Update the branch-testing guide**
 
@@ -1168,19 +1203,11 @@ Expected: all selected tests pass and runtime absence scans are clean.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add services/contracts/vision.py services/application.py \
-  workflow/definitions/vision.py adapters/adk/agents/vision.py \
-  adapters/adk/prompts/vision.txt adapters/adk/recipes.py frontend/project.js \
-  tests/adapters/test_api_workflow_domain.py \
-  tests/adapters/test_command_renderer.py tests/adapters/test_vision.py \
-  tests/services/contracts/test_vision.py \
-  tests/workflow/test_vision_interview_graph.py \
-  tests/workflow/test_vision_interview_transitions.py \
-  tests/workflow/test_vision_backlog_graph.py \
+git add tests/workflow/test_vision_backlog_graph.py \
   tests/workflow/test_vision_backlog_transitions.py \
   tests/services/test_durable_product_definition_projections.py \
   docs/agent-cli-manual.md
-git commit -m "refactor: remove human-first vision bootstrap"
+git commit -m "test: verify grounded vision lifecycle retention"
 ```
 
 ---
