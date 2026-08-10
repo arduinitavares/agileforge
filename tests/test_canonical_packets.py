@@ -15,6 +15,7 @@ from sqlmodel import Session, col, select
 import api as api_module
 from models.core import Project, Sprint, SprintStory, Task, Team, UserStory
 from models.enums import SprintStatus
+from models.product_definition import VisionArtifact
 from models.specs import (
     CompiledSpecAuthority,
     SpecAuthorityAcceptance,
@@ -23,6 +24,8 @@ from models.specs import (
 from services.read_projections import DurableReadProjectionService
 from services.specs.authority_selection import pending_authority_fingerprint
 from services.specs.story_validation_service import compute_story_input_hash
+from tests.vision_lineage_fixtures import seed_accepted_vision
+from tests.workflow.lifecycle_fixtures import seed_accepted_specification
 from utils.spec_schemas import (
     AlignmentFinding,
     Invariant,
@@ -45,6 +48,7 @@ _JSON_OBJECT = TypeAdapter(JsonObject)
 _JSON_LIST = TypeAdapter(list[JsonValue])
 _SHA256_HEX_LENGTH = 64
 _INVARIANT_ID = "INV-0123456789abcdef"
+_ACCEPTED_VISION_STATEMENT = "Deliver one verified product increment."
 
 
 @dataclass(frozen=True)
@@ -97,13 +101,7 @@ def _seed_packet_context(
     pinned: bool = True,
     task_metadata: TaskMetadata | None = None,
 ) -> _PacketSeed:
-    project = Project(
-        name="Task Packet Project",
-        vision=(
-            "Build trustworthy execution handoffs.\n\n"
-            "Keep delivery evidence deterministic."
-        ),
-    )
+    project = Project(name="Task Packet Project")
     team = Team(name="Packet Team")
     session.add(project)
     session.add(team)
@@ -162,16 +160,15 @@ def _seed_packet_context(
     spec_version_id: int | None = None
     authority_id: int | None = None
     if pinned:
-        spec = SpecRegistry(
+        lineage = seed_accepted_specification(
+            session,
             project_id=project_id,
-            spec_hash="a" * 64,
-            content="# Spec\n\nRequests must include user_id.",
-            status="approved",
-            approved_at=datetime.now(UTC),
-            approved_by="packet-test",
+            content=json.dumps(
+                {"requirements": ["Requests must include user_id."]},
+                separators=(",", ":"),
+            ),
         )
-        session.add(spec)
-        session.flush()
+        spec = lineage.spec
         spec_version_id = _required_id(spec.spec_version_id, "spec_version_id")
         invariant = Invariant(
             id=_INVARIANT_ID,
@@ -251,6 +248,12 @@ def _seed_packet_context(
             input_hash=compute_story_input_hash(story),
         ).model_dump_json()
         session.add(story)
+    else:
+        seed_accepted_vision(
+            session,
+            project_id=project_id,
+            statement=_ACCEPTED_VISION_STATEMENT,
+        )
 
     session.commit()
     return _PacketSeed(
@@ -329,7 +332,7 @@ def test_task_and_story_packets_restore_canonical_project_shape(
     assert project_context == {
         "project_id": seed.project_id,
         "name": "Task Packet Project",
-        "vision_excerpt": "Build trustworthy execution handoffs.",
+        "vision_excerpt": _ACCEPTED_VISION_STATEMENT,
     }
     assert _object(task_context["story"])["story_id"] == seed.story_id
     assert _object(task_context["sprint"])["sprint_id"] == seed.sprint_id
@@ -385,6 +388,28 @@ def test_task_and_story_packets_restore_canonical_project_shape(
         "reject invalid payloads",
     ]
     assert "task_hard_constraints" not in story_constraints
+
+
+def test_packets_fail_closed_on_malformed_durable_vision_lineage(
+    engine: Engine,
+    session: Session,
+) -> None:
+    """Reject a packet when durable Vision content no longer matches its hash."""
+    seed = _seed_packet_context(session, pinned=False)
+    vision = session.exec(
+        select(VisionArtifact).where(col(VisionArtifact.project_id) == seed.project_id)
+    ).one()
+    vision.components_json = '{"purpose":"tampered"}'
+    session.add(vision)
+    session.commit()
+
+    result = DurableReadProjectionService(engine=engine).task_packet(
+        project_id=seed.project_id,
+        sprint_id=seed.sprint_id,
+        task_id=seed.task_id,
+    )
+
+    assert _error_code(result) == "VISION_LINEAGE_INVALID"
 
 
 def test_packet_fingerprints_track_task_metadata_and_story_task_plan(
@@ -698,14 +723,15 @@ def test_pinned_packet_rejects_acceptance_authority_mismatch(
     """Reject an acceptance that points at authority for a different spec."""
     seed = _seed_packet_context(session)
     assert seed.spec_version_id is not None
-    second_spec = SpecRegistry(
+    second_lineage = seed_accepted_specification(
+        session,
         project_id=seed.project_id,
-        spec_hash="b" * 64,
-        content="# Other spec",
-        status="approved",
+        content=json.dumps(
+            {"requirements": ["A different specification."]},
+            separators=(",", ":"),
+        ),
     )
-    session.add(second_spec)
-    session.flush()
+    second_spec = second_lineage.spec
     second_authority = CompiledSpecAuthority(
         spec_version_id=_required_id(second_spec.spec_version_id, "second_spec_id"),
         compiler_version="3.0.0",

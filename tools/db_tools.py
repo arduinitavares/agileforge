@@ -15,6 +15,10 @@ from sqlmodel import Session, col, select
 
 from models.core import Epic, Feature, Project, ProjectPersona, Task, Theme, UserStory
 from models.db import get_engine
+from services.vision_projection import (
+    VisionLineageError,
+    load_current_accepted_vision,
+)
 
 
 class SeedProjectPersonasInput(BaseModel):
@@ -570,6 +574,13 @@ def query_project_structure(project_id: int) -> QueryProjectStructureResult:
                 "success": False,
                 "error": f"Project {project_id} not found",
             }
+        try:
+            vision = load_current_accepted_vision(session, project_id=project_id)
+        except VisionLineageError as error:
+            return {
+                "success": False,
+                "error": f"Vision lineage is invalid: {error}",
+            }
         themes = _load_project_themes(session, project_id)
         theme_ids = [theme.theme_id for theme in themes if theme.theme_id is not None]
         epics = _load_epics_for_theme_ids(session, theme_ids)
@@ -579,8 +590,13 @@ def query_project_structure(project_id: int) -> QueryProjectStructureResult:
             feature.feature_id for feature in features if feature.feature_id is not None
         ]
         stories = _load_stories_for_feature_ids(session, feature_ids)
+        project_summary: _ProjectStructureSummary = {
+            "id": _require_project_id(project),
+            "name": project.name,
+            "vision": None if vision is None else vision.statement,
+        }
         structure = _build_project_structure(
-            project=project,
+            project=project_summary,
             themes=themes,
             epics=epics,
             features=features,
@@ -665,7 +681,7 @@ def _group_stories_by_feature(
 
 def _build_project_structure(
     *,
-    project: Project,
+    project: _ProjectStructureSummary,
     themes: list[Theme],
     epics: list[Epic],
     features: list[Feature],
@@ -683,11 +699,7 @@ def _build_project_structure(
 
     theme_entries: list[_ThemeStructure] = []
     structure: ProjectStructure = {
-        "project": {
-            "id": _require_project_id(project),
-            "name": project.name,
-            "vision": None,
-        },
+        "project": project,
         "themes": theme_entries,
     }
 

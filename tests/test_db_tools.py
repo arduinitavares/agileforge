@@ -8,16 +8,19 @@ Run with: pytest tests/test_db_tools.py -v.
 # Monkey-patch the engine for tests
 import sys
 from pathlib import Path
+from typing import cast
 
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, select
 
 from agile_sqlmodel import Project, Task, UserStory
 from models.core import Epic, Feature, Theme
+from tests.vision_lineage_fixtures import seed_accepted_vision
 from tools.db_tools import (
     CreateOrGetProjectInput,
     CreateTaskInput,
     CreateUserStoryInput,
+    QueryProjectStructureFailure,
     create_or_get_project,
     create_task,
     create_user_story,
@@ -245,8 +248,6 @@ def test_create_task(engine: Engine) -> None:
 
 def test_query_project_structure(engine: Engine) -> None:
     """Test querying full Project structure."""
-    del engine
-
     from tools.db_tools import (  # noqa: PLC0415
         CreateOrGetProjectInput,
         CreateUserStoryInput,
@@ -265,6 +266,12 @@ def test_query_project_structure(engine: Engine) -> None:
         )
     )
     project_id = project_result["project_id"]
+    with Session(engine) as session:
+        seed_accepted_vision(
+            session,
+            project_id=project_id,
+            statement="Test vision statement",
+        )
 
     roadmap = [
         {
@@ -313,6 +320,42 @@ def test_query_project_structure(engine: Engine) -> None:
     assert (
         len(structure["themes"][0]["epics"][0]["features"][0]["stories"]) == 1
     )
+
+
+def test_query_project_structure_fails_closed_on_ambiguous_vision(
+    engine: Engine,
+) -> None:
+    """Reject two accepted Vision roots instead of selecting one arbitrarily."""
+    project_result = create_or_get_project(
+        CreateOrGetProjectInput(
+            project_name="Ambiguous Vision Project",
+            vision=None,
+            description=None,
+        )
+    )
+    project_id = project_result["project_id"]
+    with Session(engine) as session:
+        seed_accepted_vision(
+            session,
+            project_id=project_id,
+            statement="First accepted root.",
+        )
+        seed_accepted_vision(
+            session,
+            project_id=project_id,
+            statement="Second accepted root.",
+            version_number=2,
+        )
+
+    from tools.db_tools import query_project_structure  # noqa: PLC0415
+
+    result = query_project_structure(project_id)
+
+    if result["success"]:
+        message = "Ambiguous Vision lineage unexpectedly produced a structure."
+        raise AssertionError(message)
+    failure = cast("QueryProjectStructureFailure", result)
+    assert "Vision lineage is invalid" in failure["error"]
 
 
 def test_get_story_details(engine: Engine) -> None:

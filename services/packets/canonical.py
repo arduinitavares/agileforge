@@ -28,6 +28,10 @@ from services.specs.authority_selection import (
 )
 from services.specs.compiler_service import load_compiled_artifact
 from services.specs.story_validation_service import compute_story_input_hash
+from services.vision_projection import (
+    VisionLineageError,
+    load_current_accepted_vision,
+)
 from utils.spec_schemas import SpecAuthorityCompilationSuccess, ValidationEvidence
 from utils.task_metadata import TaskMetadata, hash_task_metadata, parse_task_metadata
 from workflow.contracts import JsonObject, JsonValue
@@ -346,11 +350,31 @@ def _sprint_payload(context: _StoryPacketContext) -> JsonObject:
     }
 
 
-def _project_payload(project: Project) -> JsonObject:
+def _project_payload(session: Session, project: Project) -> JsonObject:
+    project_id = project.project_id
+    if project_id is None:
+        error_code = "VISION_LINEAGE_INVALID"
+        message = "Project Vision lineage requires a durable Project identity."
+        raise _error(
+            error_code,
+            message,
+        )
+    try:
+        vision = load_current_accepted_vision(session, project_id=project_id)
+    except VisionLineageError as error:
+        error_code = "VISION_LINEAGE_INVALID"
+        message = "Project Vision lineage is invalid."
+        raise _error(
+            error_code,
+            message,
+            project_id=project_id,
+        ) from error
     return {
-        "project_id": project.project_id,
+        "project_id": project_id,
         "name": project.name,
-        "vision_excerpt": None,
+        "vision_excerpt": (
+            None if vision is None else _vision_excerpt(vision.statement)
+        ),
     }
 
 
@@ -633,7 +657,7 @@ def build_task_packet(
         "context": {
             "story": _story_payload(context.story),
             "sprint": _sprint_payload(context),
-            "project": _project_payload(context.project),
+            "project": _project_payload(session, context.project),
         },
         "constraints": constraints,
     }
@@ -685,7 +709,7 @@ def build_story_packet(
         "task_plan": {"tasks": task_plan},
         "context": {
             "sprint": _sprint_payload(context),
-            "project": _project_payload(context.project),
+            "project": _project_payload(session, context.project),
         },
         "constraints": constraints,
     }

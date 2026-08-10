@@ -370,6 +370,18 @@ class WorkflowFactRepository:
                 product_goal_outcomes=tuple(outcomes.values()),
             )
 
+    def load_vision_snapshot(self, project_id: int) -> WorkflowFactSnapshot:
+        """Load only Project identity and validated immutable Vision lineage."""
+        self._identity_token = object()
+        with self._session.no_autoflush:
+            project = self._project(project_id)
+            visions, decisions = self._vision_artifacts(project_id)
+            return WorkflowFactSnapshot(
+                project=project,
+                vision_artifacts=tuple(visions.values()),
+                vision_artifact_decisions=tuple(decisions.values()),
+            )
+
     def _load(self, project_id: int) -> WorkflowFactSnapshot:
         """Build one snapshot inside the read-only session query boundary."""
         project = self._project(project_id)

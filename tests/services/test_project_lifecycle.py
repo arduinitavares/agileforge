@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
+from threading import Barrier, Lock
 from typing import TYPE_CHECKING
 
 import pytest
 from pydantic import ValidationError
-from sqlmodel import Session, select
+from sqlalchemy import event
+from sqlmodel import Session, SQLModel, create_engine, select
 
 from models.core import Project
+from models.db import set_sqlite_pragma
 from models.repository import RepositoryBinding
 from models.workflow import WorkflowTransitionReceipt
 from services.project_lifecycle import (
@@ -30,15 +34,19 @@ from workflow.definitions.root import project_graph
 from workflow.domain import WorkflowDomain
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
 
     from sqlalchemy.engine import Engine
+
+    from services.repository_probe import RepositoryProbe
 
 
 NOW = datetime(2026, 8, 9, 12, tzinfo=UTC)
 REPOSITORY_PATH = "repository"
 INJECTED_FAILURE = "injected failure"
 EXPECTED_BINDING_COUNT = 2
+_CONCURRENT_REQUEST_COUNT = 2
 
 
 class _Probe:
@@ -51,6 +59,35 @@ class _Probe:
         if isinstance(self.result, Exception):
             raise self.result
         return self.result
+
+
+class _ConcurrentProbe:
+    """Hold both callers at the probe boundary before returning durable input."""
+
+    def __init__(self) -> None:
+        self.barrier = Barrier(_CONCURRENT_REQUEST_COUNT, timeout=5)
+        self.lock = Lock()
+        self.paths: list[str] = []
+
+    def inspect(self, path: Path | str) -> RepositoryProbeResult:
+        normalized = str(path)
+        with self.lock:
+            self.paths.append(normalized)
+        self.barrier.wait()
+        return _probe_result(path=normalized)
+
+
+@pytest.fixture
+def sqlite_file_engine(tmp_path: Path) -> Iterator[Engine]:
+    """Provide independent SQLite connections backed by one database file."""
+    engine = create_engine(
+        f"sqlite:///{tmp_path / 'project-lifecycle-concurrency.db'}",
+        connect_args={"check_same_thread": False},
+    )
+    event.listen(engine, "connect", set_sqlite_pragma)
+    SQLModel.metadata.create_all(engine)
+    yield engine
+    engine.dispose()
 
 
 def _probe_result(
@@ -77,7 +114,7 @@ def _probe_result(
 
 def _service(
     engine: Engine,
-    probe: _Probe,
+    probe: RepositoryProbe,
 ) -> tuple[ProjectLifecycleService, WorkflowDomain]:
     """Build the real lifecycle service around a deterministic v2 domain."""
     domain = WorkflowDomain(
@@ -255,6 +292,94 @@ def test_repository_backed_create_conflicts_on_changed_semantic_input(
     assert conflict.error is not None
     assert conflict.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
     assert probe.paths == [REPOSITORY_PATH]
+
+
+def test_concurrent_repository_backed_create_applies_once_and_replays_once(
+    sqlite_file_engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Serialize first-attempt Project creation across independent sessions."""
+    probe = _ConcurrentProbe()
+    service, domain = _service(sqlite_file_engine, probe)
+    command = _create_command(repository_path=REPOSITORY_PATH)
+    begin_write = domain._begin_write
+    identity_lock = Lock()
+    session_ids: set[int] = set()
+    connection_ids: set[int] = set()
+
+    def observed_begin_write(session: Session) -> None:
+        connection = session.connection()
+        dbapi_connection = connection.connection.dbapi_connection
+        assert dbapi_connection is not None
+        with identity_lock:
+            session_ids.add(id(session))
+            connection_ids.add(id(dbapi_connection))
+        begin_write(session)
+
+    monkeypatch.setattr(domain, "_begin_write", observed_begin_write)
+
+    with ThreadPoolExecutor(max_workers=_CONCURRENT_REQUEST_COUNT) as executor:
+        results = list(
+            executor.map(
+                lambda _index: service.create_project(command),
+                range(_CONCURRENT_REQUEST_COUNT),
+            )
+        )
+
+    assert len(session_ids) == _CONCURRENT_REQUEST_COUNT
+    assert len(connection_ids) == _CONCURRENT_REQUEST_COUNT
+    assert probe.paths == [REPOSITORY_PATH, REPOSITORY_PATH]
+    assert all(result.ok for result in results)
+    assert results[0].output == results[1].output
+    assert results[0].position == results[1].position
+    assert sum(result.replayed for result in results) == 1
+    with Session(sqlite_file_engine) as session:
+        assert len(session.exec(select(Project)).all()) == 1
+        assert len(session.exec(select(RepositoryBinding)).all()) == 1
+        receipts = session.exec(select(WorkflowTransitionReceipt)).all()
+        assert len(receipts) == 1
+        assert receipts[0].result_json is not None
+        assert receipts[0].completed_at is not None
+
+
+def test_concurrent_repository_backed_create_conflicts_on_semantic_input(
+    sqlite_file_engine: Engine,
+) -> None:
+    """Commit one first attempt and reject a concurrent meaning for its key."""
+    probe = _ConcurrentProbe()
+    service, _domain = _service(sqlite_file_engine, probe)
+    commands = (
+        _create_command(
+            description="First meaning",
+            repository_path="repository-a",
+        ),
+        _create_command(
+            description="Second meaning",
+            repository_path="repository-b",
+        ),
+    )
+
+    with ThreadPoolExecutor(max_workers=_CONCURRENT_REQUEST_COUNT) as executor:
+        results = list(executor.map(service.create_project, commands))
+
+    successful_indexes = [index for index, result in enumerate(results) if result.ok]
+    conflict_results = [result for result in results if not result.ok]
+    assert len(successful_indexes) == 1
+    assert len(conflict_results) == 1
+    assert conflict_results[0].error is not None
+    assert conflict_results[0].error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
+    successful_command = commands[successful_indexes[0]]
+    with Session(sqlite_file_engine) as session:
+        projects = session.exec(select(Project)).all()
+        bindings = session.exec(select(RepositoryBinding)).all()
+        receipts = session.exec(select(WorkflowTransitionReceipt)).all()
+        assert len(projects) == 1
+        assert projects[0].description == successful_command.description
+        assert len(bindings) == 1
+        assert bindings[0].worktree_path == successful_command.repository_path
+        assert len(receipts) == 1
+        assert receipts[0].result_json is not None
+        assert receipts[0].completed_at is not None
 
 
 def test_project_name_is_normalized_and_whitespace_only_is_rejected_before_write(
