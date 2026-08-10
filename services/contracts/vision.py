@@ -432,12 +432,18 @@ class VisionRevisionInput(BaseModel):
 
 
 class VisionPreflight(BaseModel):
-    """Observed evidence fingerprints for an existing lineage preflight."""
+    """Freshly recollected evidence for an existing Vision lineage preflight."""
 
     model_config = ConfigDict(extra="forbid")
 
     expected_evidence_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
-    observed_evidence_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    observed_evidence: VisionEvidenceBundle
+
+    @field_validator("observed_evidence", mode="before")
+    @classmethod
+    def validate_observed_evidence(cls, value: object) -> VisionEvidenceBundle:
+        """Parse freshly recollected evidence through the strict bundle contract."""
+        return _parse_evidence(value)
 
 
 type VisionOperationInput = Annotated[
@@ -456,11 +462,19 @@ class VisionAgentInput(BaseModel):
 
     @model_validator(mode="after")
     def validate_preflight_scope(self) -> Self:
-        """Prevent a bootstrap from claiming pre-existing lineage checks."""
-        if self.preflight is not None and isinstance(
-            self.request, VisionBootstrapInput
-        ):
-            msg = "preflight is only valid for existing Vision lineage."
+        """Bind clarification preflight to its persisted request evidence."""
+        if isinstance(self.request, VisionClarificationInput):
+            if self.preflight is None:
+                msg = "clarification requires a preflight."
+                raise ValueError(msg)
+            if (
+                self.preflight.expected_evidence_fingerprint
+                != self.request.evidence.evidence_fingerprint
+            ):
+                msg = "expected_evidence_fingerprint must match request evidence."
+                raise ValueError(msg)
+        elif self.preflight is not None:
+            msg = "preflight is only valid for clarification."
             raise ValueError(msg)
         return self
 

@@ -82,6 +82,45 @@ def test_evidence_item_requires_posix_relative_paths(relative_path: str) -> None
         _item(relative_path=relative_path)
 
 
+@pytest.mark.parametrize(
+    ("relative_path", "kind"),
+    [
+        (".git/config", "readme"),
+        (".git/HEAD", "readme"),
+        ("docs/.git/config", "technical_specification"),
+        ("src/agent.py", "readme"),
+        ("README.md", "context"),
+    ],
+)
+def test_evidence_item_rejects_unapproved_or_mismatched_model_paths(
+    relative_path: str,
+    kind: str,
+) -> None:
+    """Only the seven approved paths may reach the Vision model."""
+    with pytest.raises(ValidationError, match=r"relative_path|kind"):
+        _item(relative_path=relative_path, kind=kind)
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "kind"),
+    [
+        ("README.md", "readme"),
+        ("CONTEXT.md", "context"),
+        ("pyproject.toml", "package_metadata"),
+        ("specs/spec.json", "technical_specification"),
+        ("specs/spec.md", "technical_specification"),
+        ("docs/spec/spec.json", "technical_specification"),
+        ("docs/spec/spec.md", "technical_specification"),
+    ],
+)
+def test_evidence_item_accepts_each_approved_model_path(
+    relative_path: str,
+    kind: str,
+) -> None:
+    """Each explicitly allowed path retains its declared evidence kind."""
+    assert _item(relative_path=relative_path, kind=kind).relative_path == relative_path
+
+
 def test_evidence_item_allows_pathless_metadata_only() -> None:
     """Only metadata/provenance evidence may have no source path."""
     metadata = _item(

@@ -35,6 +35,16 @@ type VisionEvidenceTrust = Literal[
     "unreviewed_repository_evidence",
 ]
 
+_APPROVED_EVIDENCE_PATH_KINDS: dict[str, VisionEvidenceKind] = {
+    "README.md": "readme",
+    "CONTEXT.md": "context",
+    "pyproject.toml": "package_metadata",
+    "specs/spec.json": "technical_specification",
+    "specs/spec.md": "technical_specification",
+    "docs/spec/spec.json": "technical_specification",
+    "docs/spec/spec.md": "technical_specification",
+}
+
 _JSON_OBJECT_ADAPTER: TypeAdapter[JsonObject] = TypeAdapter(JsonObject)
 
 
@@ -108,6 +118,14 @@ class VisionEvidenceItem(BaseModel):
         }:
             msg = "relative_path may be None only for metadata or provenance evidence."
             raise ValueError(msg)
+        if self.relative_path is not None:
+            expected_kind = _APPROVED_EVIDENCE_PATH_KINDS.get(self.relative_path)
+            if expected_kind is None:
+                msg = "relative_path must be one of the approved model-facing paths."
+                raise ValueError(msg)
+            if self.kind != expected_kind:
+                msg = "kind must match the approved relative_path."
+                raise ValueError(msg)
         if self.content_fingerprint != canonical_hash(self.content):
             msg = "content_fingerprint must equal canonical_hash(content)."
             raise ValueError(msg)

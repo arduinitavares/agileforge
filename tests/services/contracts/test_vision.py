@@ -8,6 +8,7 @@ from pydantic import ValidationError
 from services.contracts.vision import (
     VisionAgentInput,
     VisionBootstrapInput,
+    VisionClarificationInput,
     VisionComponents,
     VisionDraftOutput,
     VisionInterviewInput,
@@ -107,8 +108,7 @@ def test_output_completion_matches_components() -> None:
         )
 
 
-def _evidence_bundle() -> VisionEvidenceBundle:
-    content = "Repository context"
+def _evidence_bundle(*, content: str = "Repository context") -> VisionEvidenceBundle:
     item = VisionEvidenceItem(
         evidence_id="file:README.md",
         kind="readme",
@@ -153,7 +153,80 @@ def test_bootstrap_input_and_agent_envelope_are_strict() -> None:
             request=bootstrap,
             preflight=VisionPreflight(
                 expected_evidence_fingerprint="sha256:" + "0" * 64,
-                observed_evidence_fingerprint="sha256:" + "1" * 64,
+                observed_evidence=_evidence_bundle(content="Fresh repository context"),
+            ),
+        )
+
+
+def test_clarification_requires_fresh_preflight_bound_to_persisted_evidence() -> None:
+    """Clarification preflight records fresh evidence against the stored bundle."""
+    persisted_evidence = _evidence_bundle()
+    clarification = VisionClarificationInput(
+        schema_version="agileforge.vision-input.v1",
+        operation="clarification",
+        project_name="AgileForge",
+        project_description=None,
+        vision_evidence_snapshot_id=1,
+        evidence=persisted_evidence,
+        current_components=_components(),
+        current_statement="A durable workflow tool.",
+        current_component_basis=(),
+        current_assumptions=(),
+        current_conflicts=(),
+        current_questions=(),
+        human_response="Keep the current target audience.",
+        addressed_question_ids=(),
+    )
+    fresh_evidence = _evidence_bundle(content="Fresh repository context")
+
+    with pytest.raises(ValidationError, match="preflight"):
+        VisionAgentInput(request=clarification)
+    with pytest.raises(ValidationError, match="expected_evidence_fingerprint"):
+        VisionAgentInput(
+            request=clarification,
+            preflight=VisionPreflight(
+                expected_evidence_fingerprint=fresh_evidence.evidence_fingerprint,
+                observed_evidence=fresh_evidence,
+            ),
+        )
+
+    parsed = VisionAgentInput(
+        request=clarification,
+        preflight=VisionPreflight(
+            expected_evidence_fingerprint=persisted_evidence.evidence_fingerprint,
+            observed_evidence=fresh_evidence,
+        ),
+    )
+
+    assert parsed.preflight is not None
+    assert (
+        parsed.preflight.observed_evidence.evidence_fingerprint
+        == fresh_evidence.evidence_fingerprint
+    )
+
+
+def test_revision_rejects_preflight() -> None:
+    """Only clarification performs a persisted-evidence preflight."""
+    revision = VisionRevisionInput(
+        schema_version="agileforge.vision-input.v1",
+        operation="revision",
+        project_name="AgileForge",
+        project_description=None,
+        evidence=_evidence_bundle(),
+        accepted_components=_components(),
+        accepted_statement="A durable workflow tool.",
+        accepted_vision_fingerprint="sha256:" + "0" * 64,
+        revision_reason="Clarify the target user.",
+        active_product_goal_status="none",
+        prior_review_feedback=None,
+    )
+
+    with pytest.raises(ValidationError, match="preflight"):
+        VisionAgentInput(
+            request=revision,
+            preflight=VisionPreflight(
+                expected_evidence_fingerprint="sha256:" + "0" * 64,
+                observed_evidence=_evidence_bundle(content="Fresh repository context"),
             ),
         )
 
