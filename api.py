@@ -29,6 +29,7 @@ from services.agent_workbench.version import agileforge_version
 from services.application import (
     AgileForgeApplication,
     AuthorityCompileRequest,
+    AuthorityFeedbackRequest,
     AuthorityRepairRequest,
     AuthorityReviewRequest,
     CreateProjectCommand,
@@ -158,6 +159,12 @@ class AuthorityDecisionApiRequest(MutationApiRequest):
     rationale: DecisionRationale
 
 
+class AuthorityFeedbackApiRequest(MutationApiRequest):
+    """Semantic human feedback without caller-owned authority identity."""
+
+    feedback: DecisionRationale
+
+
 class DeliveryActionApiRequest(MutationApiRequest):
     """Transport metadata and optional semantic decision selector only."""
 
@@ -222,6 +229,7 @@ SEMANTIC_API_PATHS: dict[str, str] = {
     "begin_vision_revision": "vision/revision",
     "compile_authority": "authority/compile",
     "decide_authority": "authority/decision",
+    "record_authority_feedback": "authority/feedback",
     "decide_product_goal_review": "goals/review",
     "decide_specification": "specifications/review",
     "decide_vision_review": "vision/review",
@@ -274,6 +282,20 @@ def build_authority_decision_request(
         correlation_id=req.correlation_id,
         decision=req.decision,
         rationale=req.rationale,
+    )
+
+
+def build_authority_feedback_request(
+    project_id: int,
+    req: AuthorityFeedbackApiRequest,
+) -> AuthorityFeedbackRequest:
+    """Translate feedback text without accepting durable authority identity."""
+    return AuthorityFeedbackRequest(
+        project_id=project_id,
+        feedback=req.feedback,
+        idempotency_key=req.idempotency_key,
+        actor=req.actor,
+        correlation_id=req.correlation_id,
     )
 
 
@@ -1005,6 +1027,19 @@ def decide_project_authority(
     return _result_payload(
         _application().decide_authority(
             build_authority_decision_request(project_id, req)
+        )
+    )
+
+
+@app.post("/api/projects/{project_id}/authority/feedback")
+def record_project_authority_feedback(
+    project_id: int,
+    req: AuthorityFeedbackApiRequest,
+) -> dict[str, object]:
+    """Record feedback for the graph-selected rejected authority."""
+    return _result_payload(
+        _application().record_authority_feedback(
+            build_authority_feedback_request(project_id, req)
         )
     )
 

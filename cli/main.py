@@ -19,6 +19,7 @@ from cli.workflow_commands import (
 from services.agent_workbench.version import agileforge_version
 from services.application import (
     AuthorityCompileRequest,
+    AuthorityFeedbackRequest,
     AuthorityRepairRequest,
     AuthorityReviewRequest,
     CreateProjectCommand,
@@ -58,6 +59,7 @@ _SEMANTIC_REQUEST_KINDS = frozenset(
         "begin_vision_revision",
         "compile_authority",
         "decide_authority",
+        "record_authority_feedback",
         "decide_product_goal_review",
         "decide_specification",
         "decide_vision_review",
@@ -236,6 +238,11 @@ class _Application(Protocol):
     ) -> TransitionResult: ...
 
     def decide_authority(self, request: AuthorityReviewRequest) -> TransitionResult: ...
+
+    def record_authority_feedback(
+        self,
+        request: AuthorityFeedbackRequest,
+    ) -> TransitionResult: ...
 
     def repair_authority(self, request: AuthorityRepairRequest) -> TransitionResult: ...
 
@@ -546,6 +553,10 @@ def _install_lifecycle_mutations(
         "--decision", choices=("accepted", "rejected"), required=True
     )
     authority_decide.add_argument("--rationale", required=True)
+    authority_feedback = _semantic_leaf(
+        branches[("authority",)], "feedback", _authority_feedback
+    )
+    authority_feedback.add_argument("--feedback", required=True)
     _semantic_leaf(branches[("authority",)], "repair", _authority_repair)
 
     for group, handler in (
@@ -985,6 +996,20 @@ def _authority_decide(args: argparse.Namespace, application: _Application) -> in
                 project_id=args.project_id,
                 decision=decision,
                 rationale=args.rationale,
+                idempotency_key=args.idempotency_key,
+                actor=args.actor,
+                correlation_id=args.correlation_id,
+            )
+        )
+    )
+
+
+def _authority_feedback(args: argparse.Namespace, application: _Application) -> int:
+    return _emit_result(
+        application.record_authority_feedback(
+            AuthorityFeedbackRequest(
+                project_id=args.project_id,
+                feedback=args.feedback,
                 idempotency_key=args.idempotency_key,
                 actor=args.actor,
                 correlation_id=args.correlation_id,

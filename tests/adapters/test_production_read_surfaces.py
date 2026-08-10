@@ -505,6 +505,7 @@ def test_production_api_registers_semantic_lifecycle_routes() -> None:
         ("POST", "/api/projects/{project_id}/authority/compile"),
         ("GET", "/api/projects/{project_id}/authority/review"),
         ("POST", "/api/projects/{project_id}/authority/decision"),
+        ("POST", "/api/projects/{project_id}/authority/feedback"),
     }
 
     assert expected <= routes

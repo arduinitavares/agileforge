@@ -7,7 +7,13 @@ from functools import cache
 from importlib import import_module
 from typing import TYPE_CHECKING, Any, Literal, Protocol, TypedDict, Unpack, cast
 
-from pydantic import Field, TypeAdapter, ValidationError, model_validator
+from pydantic import (
+    Field,
+    TypeAdapter,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 from sqlmodel import Session, col, select
 
 from adapters.adk.model_roles import AGENTIC_MODEL_ROLES
@@ -88,6 +94,7 @@ from workflow.requests import (
     DecideSpecification,
     DecideVisionReview,
     FulfillProductGoal,
+    RecordAuthorityFeedback,
     RecordDiscoveryArtifact,
     RecordSpecificationCandidate,
 )
@@ -849,6 +856,26 @@ class AuthorityReviewRequest(FrozenModel):
     idempotency_key: str = Field(min_length=1)
     actor: str = Field(min_length=1)
     correlation_id: str | None = None
+
+
+class AuthorityFeedbackRequest(FrozenModel):
+    """Semantic feedback for the graph-selected rejected authority."""
+
+    project_id: int
+    feedback: str = Field(min_length=1)
+    idempotency_key: str = Field(min_length=1)
+    actor: str = Field(min_length=1)
+    correlation_id: str | None = None
+
+    @field_validator("feedback")
+    @classmethod
+    def normalize_feedback(cls, value: str) -> str:
+        """Strip transport whitespace and reject an empty human response."""
+        normalized = value.strip()
+        if not normalized:
+            message = "feedback must not be blank."
+            raise ValueError(message)
+        return normalized
 
 
 class AuthorityRepairRequest(FrozenModel):
@@ -1799,6 +1826,54 @@ class AgileForgeApplication:
             )
         )
 
+    def record_authority_feedback(
+        self,
+        request: AuthorityFeedbackRequest,
+    ) -> TransitionResult:
+        """Record one human feedback statement for the rejected authority."""
+        feedback: JsonObject = {"text": request.feedback}
+        selection = self._authority_review_selection
+        if selection is not None:
+            replay = selection.replay_transition(
+                TransitionReplayQuery(
+                    request_kind="record_authority_feedback",
+                    project_id=request.project_id,
+                    idempotency_key=request.idempotency_key,
+                    actor=request.actor,
+                    correlation_id=request.correlation_id,
+                    operator_input={"feedback": feedback},
+                )
+            )
+            if replay is not None:
+                return replay
+        position = self.position(project_id=request.project_id)
+        decision = _unique_available_decision(position, "authority.feedback")
+        identity = (
+            None if decision is None else _integer_fact_reference(decision, "authority")
+        )
+        if (
+            decision is None
+            or decision.category is not NodeCategory.AVAILABLE
+            or identity is None
+        ):
+            return _transition_not_available(position, "authority.feedback")
+        authority_id, reference = identity
+        return self.transition(
+            RecordAuthorityFeedback(
+                project_id=request.project_id,
+                graph_version=position.graph_version,
+                fact_fingerprint=position.fact_fingerprint,
+                decision_fingerprint=decision.decision_fingerprint,
+                instance_key=decision.instance_key,
+                idempotency_key=request.idempotency_key,
+                actor=request.actor,
+                correlation_id=request.correlation_id,
+                pending_authority_id=authority_id,
+                authority_fingerprint=reference.fingerprint,
+                feedback=feedback,
+            )
+        )
+
     def repair_authority(
         self,
         request: AuthorityRepairRequest,
@@ -2671,6 +2746,7 @@ __all__ = [
     "AgenticActionRequest",
     "AgileForgeApplication",
     "AuthorityCompileRequest",
+    "AuthorityFeedbackRequest",
     "AuthorityRepairInputService",
     "AuthorityRepairRequest",
     "AuthorityReviewRequest",

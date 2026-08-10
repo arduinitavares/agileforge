@@ -13,8 +13,10 @@ from sqlmodel import Session
 import api as api_module
 from api import (
     AuthorityDecisionApiRequest,
+    AuthorityFeedbackApiRequest,
     CreateProjectRequest,
     build_authority_decision_request,
+    build_authority_feedback_request,
     build_create_project_command,
 )
 from cli.workflow_commands import COMMAND_PREFIXES
@@ -24,6 +26,7 @@ from services.application import (
     AgenticActionRequest,
     AgileForgeApplication,
     AuthorityCompileRequest,
+    AuthorityFeedbackRequest,
     AuthorityRepairInputService,
     AuthorityRepairRequest,
     AuthorityReviewRequest,
@@ -69,7 +72,12 @@ from workflow.contracts import (
 )
 from workflow.definitions.planning import candidate_set_fingerprint
 from workflow.fingerprints import canonical_hash, canonical_json
-from workflow.requests import DecideAuthority, StartNodeAttempt, TransitionRequest
+from workflow.requests import (
+    DecideAuthority,
+    RecordAuthorityFeedback,
+    StartNodeAttempt,
+    TransitionRequest,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
@@ -291,6 +299,16 @@ class _FakeApiApplication:
         )
 
     def decide_authority(self, request: AuthorityReviewRequest) -> TransitionResult:
+        self.requests.append(request)
+        return self._transition_result or TransitionResult(
+            ok=True,
+            position=self._position,
+        )
+
+    def record_authority_feedback(
+        self,
+        request: AuthorityFeedbackRequest,
+    ) -> TransitionResult:
         self.requests.append(request)
         return self._transition_result or TransitionResult(
             ok=True,
@@ -690,6 +708,106 @@ def test_semantic_authority_review_replays_or_conflicts_before_advanced_position
     assert conflict.error is not None
     assert conflict.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
     assert domain.position_calls == []
+
+
+def test_semantic_authority_feedback_replays_or_conflicts_before_advanced_position(
+    engine: "Engine",
+) -> None:
+    """Replay matching feedback before reading a now-advanced graph position."""
+    stored = RecordAuthorityFeedback(
+        project_id=PROJECT_ID,
+        graph_version="agileforge.workflow.v2",
+        fact_fingerprint="facts-authority-feedback",
+        decision_fingerprint="decision-authority-feedback",
+        instance_key="authority:17",
+        idempotency_key="authority-feedback-41",
+        actor="operator",
+        pending_authority_id=17,
+        authority_fingerprint="sha256:authority-17",
+        feedback={"text": "Narrow the identity invariant."},
+    )
+    persisted = TransitionResult(ok=True, applied_node_id="authority.feedback")
+    _store_completed_receipt(engine, stored, persisted)
+    domain = _BoundaryDomain(_vision_position())
+    application = AgileForgeApplication(
+        workflow_domain=domain,
+        authority_review_selection=AuthorityReviewSelectionService(engine=engine),
+    )
+
+    replay = application.record_authority_feedback(
+        AuthorityFeedbackRequest(
+            project_id=PROJECT_ID,
+            feedback="  Narrow the identity invariant.  ",
+            idempotency_key="authority-feedback-41",
+            actor="operator",
+        )
+    )
+    conflict = application.record_authority_feedback(
+        AuthorityFeedbackRequest(
+            project_id=PROJECT_ID,
+            feedback="Use a different invariant.",
+            idempotency_key="authority-feedback-41",
+            actor="operator",
+        )
+    )
+
+    assert replay == persisted.model_copy(update={"replayed": True})
+    assert conflict.error is not None
+    assert conflict.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
+    assert domain.position_calls == []
+
+
+def test_semantic_authority_feedback_derives_rejected_identity_from_position() -> None:
+    """Build the feedback transition from the graph's durable authority reference."""
+    decision = NodeDecision(
+        node_id="authority.feedback",
+        instance_key="authority:17",
+        child_graph_id="authority",
+        request_kind="record_authority_feedback",
+        category=NodeCategory.AVAILABLE,
+        recommendation_kind=RecommendationKind.REQUIRED,
+        reason_code="AUTHORITY_FEEDBACK_REQUIRED",
+        decision_fingerprint="decision-authority-feedback",
+        fact_references=(
+            FactReference(
+                fact_type="authority",
+                fact_id="17",
+                fingerprint="sha256:authority-17",
+            ),
+        ),
+    )
+    position = _vision_position(decision).model_copy(
+        update={"available_nodes": ("authority.feedback",)}
+    )
+
+    class CapturingDomain(_BoundaryDomain):
+        def __init__(self) -> None:
+            super().__init__(position)
+            self.requests: list[TransitionRequest] = []
+
+        def transition(self, request: TransitionRequest) -> TransitionResult:
+            self.requests.append(request)
+            return TransitionResult(ok=True)
+
+    domain = CapturingDomain()
+    application = AgileForgeApplication(workflow_domain=domain)
+    expected_authority_id = 17
+
+    result = application.record_authority_feedback(
+        AuthorityFeedbackRequest(
+            project_id=PROJECT_ID,
+            feedback="  Narrow the identity invariant.  ",
+            idempotency_key="authority-feedback-41",
+            actor="operator",
+        )
+    )
+
+    assert result.ok is True
+    request = domain.requests[0]
+    assert isinstance(request, RecordAuthorityFeedback)
+    assert request.pending_authority_id == expected_authority_id
+    assert request.authority_fingerprint == "sha256:authority-17"
+    assert request.feedback == {"text": "Narrow the identity invariant."}
 
 
 def test_semantic_authority_repair_replays_or_conflicts_before_advanced_position(
@@ -1190,6 +1308,57 @@ def test_api_authority_decision_accepts_semantic_choice_only() -> None:
     }
 
 
+def test_api_authority_feedback_accepts_trimmed_text_only() -> None:
+    """Keep rejected-authority identity and payload construction host-owned."""
+    payload = AuthorityFeedbackApiRequest(
+        feedback="  Narrow the identity invariant.  ",
+        idempotency_key="feedback-api-41",
+        actor="dashboard-user",
+        correlation_id="corr-api-41",
+    )
+
+    request = build_authority_feedback_request(41, payload)
+
+    assert isinstance(request, AuthorityFeedbackRequest)
+    assert request.model_dump() == {
+        "project_id": 41,
+        "feedback": "Narrow the identity invariant.",
+        "idempotency_key": "feedback-api-41",
+        "actor": "dashboard-user",
+        "correlation_id": "corr-api-41",
+    }
+
+
+@pytest.mark.parametrize("feedback", ["", "  \t"])
+def test_authority_feedback_api_rejects_blank_text(feedback: str) -> None:
+    """Reject whitespace-only feedback before application composition."""
+    response = TestClient(api_module.app).post(
+        "/api/projects/41/authority/feedback",
+        json={
+            "feedback": feedback,
+            "idempotency_key": "feedback-api-41",
+            "actor": "dashboard-user",
+        },
+    )
+
+    assert response.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+
+
+def test_authority_feedback_api_rejects_caller_owned_identity() -> None:
+    """Do not expose rejected-authority IDs or fingerprints to transports."""
+    response = TestClient(api_module.app).post(
+        "/api/projects/41/authority/feedback",
+        json={
+            "feedback": "Narrow the identity invariant.",
+            "idempotency_key": "feedback-api-41",
+            "actor": "dashboard-user",
+            "pending_authority_id": 17,
+        },
+    )
+
+    assert response.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+
+
 def test_api_adapter_does_not_import_legacy_routing_authority() -> None:
     """Keep the production API free of old routing imports."""
     source = (Path(__file__).parents[2] / "api.py").read_text()
@@ -1677,3 +1846,27 @@ def test_authority_endpoint_submits_exact_typed_request(
     request = cast("AuthorityReviewRequest", application.requests[0])
     assert isinstance(request, AuthorityReviewRequest)
     assert request.actor == "dashboard-user"
+
+
+def test_authority_feedback_endpoint_submits_exact_typed_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Submit feedback text without exposing authority identity or graph guards."""
+    application = _FakeApiApplication()
+    monkeypatch.setattr(api_module, "_application", lambda: application)
+    client = TestClient(api_module.app)
+
+    response = client.post(
+        "/api/projects/41/authority/feedback",
+        json={
+            "feedback": "  Narrow the identity invariant.  ",
+            "idempotency_key": "feedback-api-41",
+            "actor": "dashboard-user",
+            "correlation_id": "corr-api-41",
+        },
+    )
+
+    assert response.status_code == HTTPStatus.OK
+    request = cast("AuthorityFeedbackRequest", application.requests[0])
+    assert isinstance(request, AuthorityFeedbackRequest)
+    assert request.feedback == "Narrow the identity invariant."

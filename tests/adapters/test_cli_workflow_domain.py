@@ -3,7 +3,7 @@
 import importlib
 import shlex
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import pytest
 
@@ -14,6 +14,9 @@ from cli.workflow_commands import (
 )
 from tests.adapters.test_command_renderer import position_fixture
 from workflow.contracts import WorkflowPosition
+
+if TYPE_CHECKING:
+    from services.application import AuthorityFeedbackRequest
 
 SPRINT_CAPACITY_POINTS = 8
 
@@ -87,6 +90,12 @@ SPRINT_CAPACITY_POINTS = 8
             ' --rationale "The outcome is no longer worth pursuing."'
             " --idempotency-key goal-abandon-myfinance-1 --actor acceptance-agent"
         ),
+        (
+            "agileforge authority feedback --project-id 1"
+            ' --feedback "Narrow the identity invariant."'
+            " --idempotency-key authority-feedback-myfinance-1"
+            " --actor acceptance-agent"
+        ),
     ],
 )
 def test_semantic_lifecycle_commands_parse(command: str) -> None:
@@ -96,6 +105,72 @@ def test_semantic_lifecycle_commands_parse(command: str) -> None:
     assert not hasattr(parsed, "graph_version")
     assert not hasattr(parsed, "expected_fact_fingerprint")
     assert not hasattr(parsed, "changed_by")
+
+
+class _AuthorityFeedbackApplication:
+    def __init__(self) -> None:
+        self.requests: list[object] = []
+
+    def record_authority_feedback(self, request: object) -> object:
+        self.requests.append(request)
+        return cli_main.TransitionResult(ok=True)
+
+
+def test_authority_feedback_cli_strips_text_before_calling_application(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Send only the human feedback text and metadata through the CLI boundary."""
+    application = _AuthorityFeedbackApplication()
+
+    exit_code = cli_main.main(
+        [
+            "authority",
+            "feedback",
+            "--project-id",
+            "41",
+            "--feedback",
+            "  Narrow the identity invariant.  ",
+            "--idempotency-key",
+            "feedback-cli-41",
+            "--actor",
+            "operator",
+        ],
+        application=application,
+    )
+
+    assert exit_code == 0
+    request = cast("AuthorityFeedbackRequest", application.requests[0])
+    assert request.feedback == "Narrow the identity invariant."
+    assert not hasattr(request, "pending_authority_id")
+    assert '"ok": true' in capsys.readouterr().out
+
+
+def test_authority_feedback_cli_returns_structured_invalid_input(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Reject whitespace-only feedback without invoking the application."""
+    application = _AuthorityFeedbackApplication()
+    invalid_input_exit_code = 2
+
+    exit_code = cli_main.main(
+        [
+            "authority",
+            "feedback",
+            "--project-id",
+            "41",
+            "--feedback",
+            "  \t",
+            "--idempotency-key",
+            "feedback-cli-41",
+            "--actor",
+            "operator",
+        ],
+        application=application,
+    )
+
+    assert exit_code == invalid_input_exit_code
+    assert application.requests == []
+    assert '"ok": false' in capsys.readouterr().out
 
 
 @pytest.mark.parametrize(
