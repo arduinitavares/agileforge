@@ -320,6 +320,14 @@ def render_workflow_next(position: WorkflowPosition) -> WorkflowNextPayload:
         if decision.request_kind in _SEMANTIC_ARGUMENTS
         and decision.request_kind not in _INSTANCE_SELECTOR_REQUEST_KINDS
     )
+    selectorless_counts = Counter(
+        decision.request_kind
+        for decision in candidates
+        if (
+            decision.request_kind in _INSTANCE_SELECTOR_REQUEST_KINDS
+            and decision.instance_key is None
+        )
+    )
     selector_counts = Counter(
         (decision.request_kind, decision.instance_key)
         for decision in candidates
@@ -336,9 +344,17 @@ def render_workflow_next(position: WorkflowPosition) -> WorkflowNextPayload:
             or (
                 decision.request_kind in _INSTANCE_SELECTOR_REQUEST_KINDS
                 and (
-                    decision.instance_key is None
-                    or selector_counts[(decision.request_kind, decision.instance_key)]
-                    == 1
+                    (
+                        decision.instance_key is None
+                        and selectorless_counts[decision.request_kind] == 1
+                    )
+                    or (
+                        decision.instance_key is not None
+                        and selector_counts[
+                            (decision.request_kind, decision.instance_key)
+                        ]
+                        == 1
+                    )
                 )
             )
             or semantic_counts[decision.request_kind] == 1
