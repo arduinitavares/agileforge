@@ -22,19 +22,29 @@ from models.product_definition import (
     VisionArtifact,
     VisionArtifactDecision,
     VisionInterviewTurn,
+    VisionRevisionIntent,
 )
 from models.specs import SpecRegistry
 from models.workflow import WorkflowNodeAttempt
 from repositories.workflow import WorkflowFactRepository
 from services.read_projections import DurableReadProjectionService
-from workflow.contracts import GRAPH_VERSION, JsonObject, JsonValue
+from workflow.contracts import (
+    GRAPH_VERSION,
+    JsonObject,
+    JsonValue,
+    NodeCategory,
+    WorkflowPosition,
+)
 from workflow.definitions.product_discovery import select_product_definition_state
+from workflow.definitions.product_goal import _goal_interview_rule, _goal_review_rule
+from workflow.definitions.root import ROOT_GRAPH
 from workflow.fingerprints import (
     canonical_hash,
     canonical_json,
     product_goal_artifact_fingerprint,
     product_goal_interview_output_fingerprint,
 )
+from workflow.graph import RuleCategory
 
 if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
@@ -623,6 +633,220 @@ def _seed_goal_candidate(
     return seeded
 
 
+def _seed_superseded_vision_with_stale_open_intent(
+    engine: Engine,
+) -> dict[str, object]:
+    """Persist an open intent on Vision A after accepted Vision B supersedes it."""
+    seeded = _seed_vision_candidate(engine, decision="accepted")
+    project_id = _seeded_int(seeded, "project_id")
+    vision_id = _seeded_int(seeded, "vision_id")
+    vision_fingerprint = seeded["vision_fingerprint"]
+    attempt_id = _seeded_int(seeded, "attempt_id")
+    attempt_fingerprint = seeded["attempt_fingerprint"]
+    assert isinstance(vision_fingerprint, str)
+    assert isinstance(attempt_fingerprint, str)
+    with Session(engine) as session:
+        stale_intent = VisionRevisionIntent(
+            project_id=project_id,
+            source_vision_artifact_id=vision_id,
+            source_vision_fingerprint=vision_fingerprint,
+            reason="Keep an obsolete revision interview open.",
+            initiated_by="operator",
+            initiated_at=NOW + timedelta(seconds=3),
+        )
+        replacement_intent = VisionRevisionIntent(
+            project_id=project_id,
+            source_vision_artifact_id=vision_id,
+            source_vision_fingerprint=vision_fingerprint,
+            reason="Create the selected replacement Vision.",
+            initiated_by="operator",
+            initiated_at=NOW + timedelta(seconds=4),
+        )
+        session.add(stale_intent)
+        session.add(replacement_intent)
+        session.flush()
+        assert stale_intent.vision_revision_intent_id is not None
+        assert replacement_intent.vision_revision_intent_id is not None
+
+        stale_components = _vision_components(complete=False)
+        stale_statement = "An obsolete Vision revision interview."
+        stale_questions = ["What should the obsolete revision emphasize?"]
+        stale_turn = VisionInterviewTurn(
+            project_id=project_id,
+            mode="revision",
+            turn_number=1,
+            revision_intent_id=stale_intent.vision_revision_intent_id,
+            prior_turn_id=None,
+            user_text="Continue revising Vision A.",
+            components_json=canonical_json(stale_components),
+            vision_statement=stale_statement,
+            is_complete=False,
+            clarifying_questions_json=canonical_json(stale_questions),
+            output_fingerprint=canonical_hash(
+                {
+                    "components_json": stale_components,
+                    "vision_statement": stale_statement,
+                    "is_complete": False,
+                    "clarifying_questions_json": stale_questions,
+                }
+            ),
+            workflow_node_attempt_id=attempt_id,
+            attempt_fingerprint=attempt_fingerprint,
+            recorded_at=NOW + timedelta(seconds=5),
+        )
+        replacement_components = _vision_components(complete=True)
+        replacement_statement = "Product teams trust the selected durable Vision."
+        replacement_turn = VisionInterviewTurn(
+            project_id=project_id,
+            mode="revision",
+            turn_number=1,
+            revision_intent_id=replacement_intent.vision_revision_intent_id,
+            prior_turn_id=None,
+            user_text="Complete the selected replacement Vision.",
+            components_json=canonical_json(replacement_components),
+            vision_statement=replacement_statement,
+            is_complete=True,
+            clarifying_questions_json="[]",
+            output_fingerprint=canonical_hash(
+                {
+                    "components_json": replacement_components,
+                    "vision_statement": replacement_statement,
+                    "is_complete": True,
+                    "clarifying_questions_json": [],
+                }
+            ),
+            workflow_node_attempt_id=attempt_id,
+            attempt_fingerprint=attempt_fingerprint,
+            recorded_at=NOW + timedelta(seconds=6),
+        )
+        session.add(stale_turn)
+        session.add(replacement_turn)
+        session.flush()
+        assert stale_turn.vision_interview_turn_id is not None
+        assert replacement_turn.vision_interview_turn_id is not None
+
+        replacement = VisionArtifact(
+            project_id=project_id,
+            version_number=2,
+            components_json=canonical_json(replacement_components),
+            statement=replacement_statement,
+            content_fingerprint=canonical_hash(
+                {
+                    "components": replacement_components,
+                    "statement": replacement_statement,
+                }
+            ),
+            supersedes_vision_artifact_id=vision_id,
+            source_interview_turn_id=replacement_turn.vision_interview_turn_id,
+            created_by="operator",
+            created_at=NOW + timedelta(seconds=7),
+        )
+        session.add(replacement)
+        session.flush()
+        assert replacement.vision_artifact_id is not None
+        replacement_decision = VisionArtifactDecision(
+            project_id=project_id,
+            vision_artifact_id=replacement.vision_artifact_id,
+            artifact_fingerprint=replacement.content_fingerprint,
+            decision="accepted",
+            rationale="This is the current accepted Vision.",
+            reviewer="vision-reviewer",
+            idempotency_key="vision-replacement-accepted",
+            decided_at=NOW + timedelta(seconds=8),
+        )
+        session.add(replacement_decision)
+        session.flush()
+        assert replacement_decision.vision_artifact_decision_id is not None
+        session.commit()
+        seeded.update(
+            stale_vision_intent_id=stale_intent.vision_revision_intent_id,
+            replacement_vision_intent_id=(replacement_intent.vision_revision_intent_id),
+            stale_vision_turn_id=stale_turn.vision_interview_turn_id,
+            replacement_vision_turn_id=replacement_turn.vision_interview_turn_id,
+            current_vision_id=replacement.vision_artifact_id,
+            current_vision_decision_id=(
+                replacement_decision.vision_artifact_decision_id
+            ),
+        )
+    return seeded
+
+
+def _remove_superseded_vision_fixture(
+    engine: Engine,
+    seeded: dict[str, object],
+) -> None:
+    """Delete the cyclic intent/artifact fixture before SQLite drops tables."""
+    with Session(engine) as session:
+        for model, key in (
+            (VisionArtifactDecision, "current_vision_decision_id"),
+            (VisionArtifact, "current_vision_id"),
+            (VisionInterviewTurn, "stale_vision_turn_id"),
+            (VisionInterviewTurn, "replacement_vision_turn_id"),
+            (VisionRevisionIntent, "stale_vision_intent_id"),
+            (VisionRevisionIntent, "replacement_vision_intent_id"),
+        ):
+            row = session.get(model, _seeded_int(seeded, key))
+            assert row is not None
+            session.delete(row)
+            session.flush()
+        session.commit()
+
+
+def _add_detached_goal_revision(
+    engine: Engine,
+    seeded: dict[str, object],
+) -> int:
+    """Persist Goal 1 revision 2 without its required revision 1 parent."""
+    components = _goal_components(complete=True)
+    statement = "Make detached revisions impossible to review."
+    turn_id = _add_goal_turn(
+        engine,
+        seeded,
+        _GoalTurnSeed(
+            components=components,
+            statement=statement,
+            is_complete=True,
+            questions=(),
+            goal_number=1,
+            revision_number=2,
+            prior_turn_id=None,
+            recorded_at=NOW + timedelta(seconds=9),
+        ),
+    )
+    project_id = _seeded_int(seeded, "project_id")
+    vision_id = _seeded_int(seeded, "vision_id")
+    vision_fingerprint = seeded["vision_fingerprint"]
+    assert isinstance(vision_fingerprint, str)
+    with Session(engine) as session:
+        detached = ProductGoalArtifact(
+            project_id=project_id,
+            vision_artifact_id=vision_id,
+            vision_fingerprint=vision_fingerprint,
+            goal_number=1,
+            revision_number=2,
+            statement=statement,
+            content_fingerprint=product_goal_artifact_fingerprint(
+                components, statement
+            ),
+            supersedes_product_goal_artifact_id=None,
+            source_interview_turn_id=turn_id,
+            created_by="operator",
+            created_at=NOW + timedelta(seconds=10),
+        )
+        session.add(detached)
+        session.commit()
+        session.refresh(detached)
+        assert detached.product_goal_artifact_id is not None
+        return detached.product_goal_artifact_id
+
+
+def _root_position(engine: Engine, project_id: int) -> WorkflowPosition:
+    """Evaluate the root graph from the same durable snapshot as projections."""
+    with Session(engine) as session:
+        snapshot = WorkflowFactRepository(session).load(project_id)
+    return ROOT_GRAPH.evaluate(snapshot, NOW)
+
+
 def test_new_project_has_empty_durable_interview_reads(engine: Engine) -> None:
     """A Project with no interview facts exposes an empty, stable contract."""
     with Session(engine) as session:
@@ -815,6 +1039,49 @@ def test_accepted_vision_has_current_artifact_and_no_pending_candidate(
         "decided_at": _stored_iso(NOW + timedelta(seconds=2)),
     }
     assert data["stale_reason"] is None
+
+
+def test_superseded_vision_open_intent_fails_closed_without_transcript(
+    engine: Engine,
+) -> None:
+    """An intent on Vision A cannot remain current after accepted Vision B."""
+    seeded = _seed_superseded_vision_with_stale_open_intent(engine)
+    project_id = _seeded_int(seeded, "project_id")
+    try:
+        data = _data(
+            DurableReadProjectionService(engine=engine).vision_status(
+                project_id=project_id
+            )
+        )
+
+        assert data == {
+            "current": None,
+            "transcript": [],
+            "latest_questions": [],
+            "candidate": None,
+            "review": None,
+            "stale_reason": "VISION_FACT_CONFLICT",
+        }
+    finally:
+        _remove_superseded_vision_fixture(engine, seeded)
+
+
+def test_superseded_vision_open_intent_invalidates_graph_recommendations(
+    engine: Engine,
+) -> None:
+    """The root graph never recommends an interview for a superseded source."""
+    seeded = _seed_superseded_vision_with_stale_open_intent(engine)
+    project_id = _seeded_int(seeded, "project_id")
+    try:
+        position = _root_position(engine, project_id)
+        decisions = {item.node_id: item for item in position.decisions}
+
+        assert decisions["vision.interview"].category is NodeCategory.INVALID
+        assert decisions["vision.interview"].reason_code == "WORKFLOW_FACT_CONFLICT"
+        assert decisions["vision.revision.start"].category is NodeCategory.INVALID
+        assert "vision.interview" not in position.available_nodes
+    finally:
+        _remove_superseded_vision_fixture(engine, seeded)
 
 
 def test_incomplete_goal_exposes_accepted_vision_transcript_and_questions(
@@ -1019,6 +1286,71 @@ def test_resolved_goal_followed_by_new_interview_excludes_old_candidate(
     outcome = _json_object(data["outcome"])
     assert outcome["product_goal_artifact_id"] == goal_id
     assert data["stale_reason"] == "GOAL_RESOLVED"
+
+
+@pytest.mark.parametrize("prior_state", ["feedback", "resolved"])
+def test_detached_goal_revision_fails_closed_in_projection(
+    engine: Engine,
+    prior_state: str,
+) -> None:
+    """Revision 2 without its exact revision 1 parent is never current."""
+    seeded = _seed_goal_candidate(
+        engine,
+        decision="feedback" if prior_state == "feedback" else "accepted",
+    )
+    if prior_state == "resolved":
+        _resolve_goal(engine, seeded)
+    _add_detached_goal_revision(engine, seeded)
+    project_id = _seeded_int(seeded, "project_id")
+
+    data = _data(
+        DurableReadProjectionService(engine=engine).product_goal_status(
+            project_id=project_id
+        )
+    )
+
+    assert data == {
+        "accepted_vision": {
+            "vision_artifact_id": seeded["vision_id"],
+            "fingerprint": seeded["vision_fingerprint"],
+            "statement": seeded["vision_statement"],
+        },
+        "active": None,
+        "transcript": [],
+        "latest_questions": [],
+        "candidate": None,
+        "review": None,
+        "outcome": None,
+        "stale_reason": "PRODUCT_GOAL_FACT_CONFLICT",
+    }
+
+
+@pytest.mark.parametrize("prior_state", ["feedback", "resolved"])
+def test_detached_goal_revision_invalidates_graph_review(
+    engine: Engine,
+    prior_state: str,
+) -> None:
+    """Detached Goal revisions cannot become graph-current review candidates."""
+    seeded = _seed_goal_candidate(
+        engine,
+        decision="feedback" if prior_state == "feedback" else "accepted",
+    )
+    if prior_state == "resolved":
+        _resolve_goal(engine, seeded)
+    detached_id = _add_detached_goal_revision(engine, seeded)
+    project_id = _seeded_int(seeded, "project_id")
+    with Session(engine) as session:
+        snapshot = WorkflowFactRepository(session).load(project_id)
+
+    interview = _goal_interview_rule(snapshot, NOW)[0]
+    review = _goal_review_rule(snapshot, NOW)[0]
+
+    assert interview.category is RuleCategory.INVALID
+    assert interview.reason_code == "WORKFLOW_FACT_CONFLICT"
+    assert review.category is RuleCategory.INVALID
+    assert all(
+        reference.fact_id != str(detached_id) for reference in review.fact_references
+    )
 
 
 def test_ambiguous_vision_leaf_fails_closed_with_typed_stale_reason(

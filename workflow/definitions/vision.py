@@ -464,10 +464,22 @@ def _vision_review_selection(
         )
         if not completed:
             open_intents.append(intent)
-    if len(open_intents) > 1:
-        return None
-    open_revision = open_intents[0] if open_intents else None
+    open_revision = open_intents[0] if len(open_intents) == 1 else None
     decision = None if artifact is None else decisions.get(artifact.vision_artifact_id)
+    if len(open_intents) > 1 or (
+        open_revision is not None
+        and (
+            artifact is None
+            or decision is None
+            or decision.decision != "accepted"
+            or (
+                open_revision.source_vision_artifact_id,
+                open_revision.source_vision_fingerprint,
+            )
+            != (artifact.vision_artifact_id, artifact.content_fingerprint)
+        )
+    ):
+        return None
     return _VisionReviewSelection(artifact, decision, open_revision)
 
 

@@ -246,6 +246,8 @@ def _goal_lineage(
     for item in goals:
         parent_id = item.supersedes_product_goal_artifact_id
         if parent_id is None:
+            if item.revision_number != 1:
+                return None
             continue
         parent = by_id.get(parent_id)
         if (
