@@ -29,6 +29,7 @@ from workflow.fingerprints import (
     canonical_stored_json_hash,
     product_goal_artifact_fingerprint,
     product_goal_interview_output_fingerprint,
+    vision_interview_output_fingerprint,
 )
 
 
@@ -195,13 +196,12 @@ def _seed_accepted_vision_and_goal(
         component_basis_json=basis_json,
         assumptions_json="[]",
         conflicts_json="[]",
-        output_fingerprint=canonical_hash(
-            {
-                "components_json": vision_components,
-                "vision_statement": vision_statement,
-                "is_complete": True,
-                "clarifying_questions_json": [],
-            }
+        output_fingerprint=vision_interview_output_fingerprint(
+            vision_components,
+            vision_statement,
+            True,
+            (),
+            {"component_basis": (), "assumptions": (), "conflicts": ()},
         ),
         workflow_node_attempt_id=_required(
             vision_attempt.workflow_node_attempt_id,

@@ -44,15 +44,34 @@ from workflow.fingerprints import (
     canonical_json,
     product_goal_artifact_fingerprint,
     product_goal_interview_output_fingerprint,
+    vision_interview_output_fingerprint,
 )
 from workflow.graph import RuleCategory
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
+
     from sqlalchemy.engine import Engine
 
 
 NOW = datetime(2026, 8, 5, 14, tzinfo=UTC)
 _JSON_OBJECT = TypeAdapter(JsonObject)
+
+
+def _vision_output_fingerprint(
+    components: Mapping[str, object],
+    statement: str,
+    is_complete: bool,
+    questions: Sequence[Mapping[str, object]],
+) -> str:
+    """Build a valid complete Vision turn fingerprint for direct fixtures."""
+    return vision_interview_output_fingerprint(
+        components,
+        statement,
+        is_complete,
+        questions,
+        {"component_basis": (), "assumptions": (), "conflicts": ()},
+    )
 
 
 def test_public_product_definition_selection_retains_projection_state(
@@ -177,13 +196,11 @@ def _seed_lineage(
             component_basis_json="[]",
             assumptions_json="[]",
             conflicts_json="[]",
-            output_fingerprint=canonical_hash(
-                {
-                    "components_json": vision_components,
-                    "vision_statement": "A durable Vision.",
-                    "is_complete": True,
-                    "clarifying_questions_json": [],
-                }
+            output_fingerprint=_vision_output_fingerprint(
+                vision_components,
+                "A durable Vision.",
+                True,
+                [],
             ),
             workflow_node_attempt_id=attempt.workflow_node_attempt_id,
             attempt_fingerprint=attempt.attempt_fingerprint,
@@ -517,13 +534,11 @@ def _add_vision_turn(
             component_basis_json="[]",
             assumptions_json="[]",
             conflicts_json="[]",
-            output_fingerprint=canonical_hash(
-                {
-                    "components_json": turn_seed.components,
-                    "vision_statement": turn_seed.statement,
-                    "is_complete": turn_seed.is_complete,
-                    "clarifying_questions_json": questions,
-                }
+            output_fingerprint=_vision_output_fingerprint(
+                turn_seed.components,
+                turn_seed.statement,
+                turn_seed.is_complete,
+                questions,
             ),
             workflow_node_attempt_id=attempt_id,
             attempt_fingerprint=attempt_fingerprint,
@@ -809,13 +824,11 @@ def _seed_superseded_vision_with_stale_open_intent(
             component_basis_json="[]",
             assumptions_json="[]",
             conflicts_json="[]",
-            output_fingerprint=canonical_hash(
-                {
-                    "components_json": stale_components,
-                    "vision_statement": stale_statement,
-                    "is_complete": False,
-                    "clarifying_questions_json": stale_questions,
-                }
+            output_fingerprint=_vision_output_fingerprint(
+                stale_components,
+                stale_statement,
+                False,
+                stale_questions,
             ),
             workflow_node_attempt_id=attempt_id,
             attempt_fingerprint=attempt_fingerprint,
@@ -840,13 +853,11 @@ def _seed_superseded_vision_with_stale_open_intent(
             component_basis_json="[]",
             assumptions_json="[]",
             conflicts_json="[]",
-            output_fingerprint=canonical_hash(
-                {
-                    "components_json": replacement_components,
-                    "vision_statement": replacement_statement,
-                    "is_complete": True,
-                    "clarifying_questions_json": [],
-                }
+            output_fingerprint=_vision_output_fingerprint(
+                replacement_components,
+                replacement_statement,
+                True,
+                [],
             ),
             workflow_node_attempt_id=attempt_id,
             attempt_fingerprint=attempt_fingerprint,
@@ -1058,13 +1069,11 @@ def test_incomplete_vision_turn_exposes_exact_transcript_and_questions(
             "components": components,
             "is_complete": False,
             "clarifying_questions": _vision_question_payload(questions),
-            "output_fingerprint": canonical_hash(
-                {
-                    "components_json": components,
-                    "vision_statement": statement,
-                    "is_complete": False,
-                    "clarifying_questions_json": _vision_question_payload(questions),
-                }
+            "output_fingerprint": _vision_output_fingerprint(
+                components,
+                statement,
+                False,
+                _vision_question_payload(questions),
             ),
             "recorded_at": _stored_iso(NOW),
         }

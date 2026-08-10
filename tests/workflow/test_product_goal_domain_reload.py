@@ -44,6 +44,7 @@ from workflow.fingerprints import (
     canonical_stored_json_hash,
     product_goal_artifact_fingerprint,
     product_goal_interview_output_fingerprint,
+    vision_interview_output_fingerprint,
 )
 from workflow.graph import ChildGraphSpec, WorkflowGraph
 from workflow.requests import (
@@ -168,13 +169,12 @@ def _seed_accepted_vision(engine: Engine, *, name: str = "Goal reload") -> int:
             component_basis_json="[]",
             assumptions_json="[]",
             conflicts_json="[]",
-            output_fingerprint=canonical_hash(
-                {
-                    "components_json": components,
-                    "vision_statement": "A durable Vision.",
-                    "is_complete": True,
-                    "clarifying_questions_json": [],
-                }
+            output_fingerprint=vision_interview_output_fingerprint(
+                components,
+                "A durable Vision.",
+                True,
+                (),
+                {"component_basis": (), "assumptions": (), "conflicts": ()},
             ),
             workflow_node_attempt_id=attempt.workflow_node_attempt_id,
             attempt_fingerprint=attempt.attempt_fingerprint,

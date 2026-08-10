@@ -71,8 +71,14 @@ def _add_project(
         return project.project_id
 
 
-def _bind_repository(engine: Engine, *, project_id: int, repository: Path) -> None:
-    """Persist the immutable binding that selects the temporary repository."""
+def _bind_repository(
+    engine: Engine,
+    *,
+    project_id: int,
+    repository: Path,
+    activate: bool = True,
+) -> int:
+    """Persist one immutable binding and optionally select it for the Project."""
     result = GitPythonRepositoryProbe().inspect(repository)
     with Session(engine) as session:
         binding = RepositoryBinding(
@@ -98,11 +104,14 @@ def _bind_repository(engine: Engine, *, project_id: int, repository: Path) -> No
         session.add(binding)
         session.flush()
         assert binding.repository_binding_id is not None
-        project = session.get(Project, project_id)
-        assert project is not None
-        project.active_repository_binding_id = binding.repository_binding_id
-        session.add(project)
+        binding_id = binding.repository_binding_id
+        if activate:
+            project = session.get(Project, project_id)
+            assert project is not None
+            project.active_repository_binding_id = binding_id
+            session.add(project)
         session.commit()
+        return binding_id
 
 
 def _artifact_payload(
@@ -624,6 +633,148 @@ class _ChangingProbe:
         """Return the next deterministic observation."""
         del path
         return next(self._results)
+
+
+class _SelectionChangingProbe:
+    """Change the active binding during the first deterministic repository probe."""
+
+    def __init__(
+        self,
+        engine: Engine,
+        project_id: int,
+        selected_binding_id: int | None,
+        observed: RepositoryProbeResult,
+    ) -> None:
+        self._engine = engine
+        self._project_id = project_id
+        self._selected_binding_id = selected_binding_id
+        self._observed = observed
+        self._changed = False
+
+    def inspect(self, path: Path | str) -> RepositoryProbeResult:
+        """Switch selection once while returning stable worktree observations."""
+        del path
+        if not self._changed:
+            with Session(self._engine) as session:
+                project = session.get(Project, self._project_id)
+                assert project is not None
+                project.active_repository_binding_id = self._selected_binding_id
+                session.add(project)
+                session.commit()
+            self._changed = True
+        return self._observed
+
+
+def test_active_binding_switch_during_collection_fails_closed(
+    engine: Engine,
+    repository: Path,
+    tmp_path: Path,
+) -> None:
+    """Reject evidence from binding A when the Project selects binding B."""
+    other_repository = tmp_path / "other-repository"
+    other_repository.mkdir()
+    with Repo.init(other_repository) as repo:
+        with repo.config_writer() as config:
+            config.set_value("user", "name", "Vision Evidence Test")
+            config.set_value("user", "email", "vision-evidence@example.com")
+        (other_repository / "tracked.txt").write_text("other\n", encoding="utf-8")
+        repo.index.add(["tracked.txt"])
+        repo.index.commit("other evidence fixture")
+    project_id = _add_project(engine)
+    _bind_repository(engine, project_id=project_id, repository=repository)
+    other_binding_id = _bind_repository(
+        engine,
+        project_id=project_id,
+        repository=other_repository,
+        activate=False,
+    )
+    observed = GitPythonRepositoryProbe().inspect(repository)
+    switching_collector = VisionEvidenceCollector(
+        engine=engine,
+        repository_probe=_SelectionChangingProbe(
+            engine,
+            project_id,
+            other_binding_id,
+            observed,
+        ),
+    )
+
+    with pytest.raises(VisionEvidenceCollectionError) as caught:
+        switching_collector.collect(project_id)
+
+    assert (
+        caught.value.code
+        is VisionEvidenceErrorCode.REPOSITORY_CHANGED_DURING_EVIDENCE_COLLECTION
+    )
+
+
+def test_active_binding_detach_during_collection_fails_closed(
+    engine: Engine,
+    repository: Path,
+) -> None:
+    """Reject repository evidence when the active binding is detached mid-read."""
+    project_id = _add_project(engine)
+    _bind_repository(engine, project_id=project_id, repository=repository)
+    observed = GitPythonRepositoryProbe().inspect(repository)
+    switching_collector = VisionEvidenceCollector(
+        engine=engine,
+        repository_probe=_SelectionChangingProbe(
+            engine,
+            project_id,
+            None,
+            observed,
+        ),
+    )
+
+    with pytest.raises(VisionEvidenceCollectionError) as caught:
+        switching_collector.collect(project_id)
+
+    assert (
+        caught.value.code
+        is VisionEvidenceErrorCode.REPOSITORY_CHANGED_DURING_EVIDENCE_COLLECTION
+    )
+
+
+def test_repository_attach_during_project_only_collection_fails_closed(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+) -> None:
+    """Reject project-only evidence when a repository becomes active mid-collection."""
+    project_id = _add_project(engine)
+    binding_id = _bind_repository(
+        engine,
+        project_id=project_id,
+        repository=repository,
+        activate=False,
+    )
+    original = VisionEvidenceCollector._bounded_bundle
+
+    def attach_then_bound(
+        self: VisionEvidenceCollector,
+        candidates: list[vision_evidence_module._CandidateEvidence],
+        warnings: list[vision_evidence_module.VisionEvidenceWarning],
+    ) -> vision_evidence_module.VisionEvidenceBundle:
+        with Session(engine) as session:
+            project = session.get(Project, project_id)
+            assert project is not None
+            project.active_repository_binding_id = binding_id
+            session.add(project)
+            session.commit()
+        return original(self, candidates, warnings)
+
+    monkeypatch.setattr(VisionEvidenceCollector, "_bounded_bundle", attach_then_bound)
+
+    with pytest.raises(VisionEvidenceCollectionError) as caught:
+        VisionEvidenceCollector(
+            engine=engine,
+            repository_probe=GitPythonRepositoryProbe(),
+        ).collect(project_id)
+
+    assert (
+        caught.value.code
+        is VisionEvidenceErrorCode.REPOSITORY_CHANGED_DURING_EVIDENCE_COLLECTION
+    )
 
 
 def test_change_during_collection_discards_partial_evidence(

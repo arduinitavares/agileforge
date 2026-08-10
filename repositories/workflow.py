@@ -61,7 +61,7 @@ from services.contracts.vision_evidence import VisionEvidenceBundle
 from services.specs.authority_selection import pending_authority_fingerprint
 from utils.spec_schemas import SpecAuthorityCompilationSuccess
 from utils.task_metadata import TaskMetadata, serialize_task_metadata
-from workflow.contracts import JsonObject, JsonValue
+from workflow.contracts import JsonValue
 from workflow.execution_integrity import (
     ExecutionIntegrityError,
     SprintStartAudit,
@@ -113,6 +113,7 @@ from workflow.fingerprints import (
     canonical_json,
     product_goal_artifact_fingerprint,
     product_goal_interview_output_fingerprint,
+    vision_interview_output_fingerprint,
 )
 from workflow.planning_integrity import (
     dependency_edges_are_canonical,
@@ -504,6 +505,7 @@ class WorkflowFactRepository:
             name=row.name,
             description=row.description,
             created_at=row.created_at,
+            active_repository_binding_id=row.active_repository_binding_id,
         )
 
     def _spec_versions(self, project_id: int) -> tuple[SpecVersionFact, ...]:
@@ -842,8 +844,13 @@ class WorkflowFactRepository:
             self._require_product_condition(
                 turn is not None
                 and turn.is_complete
+                and turn.vision_evidence_snapshot_id
+                == artifact.vision_evidence_snapshot_id
                 and turn.components == artifact.components
-                and turn.vision_statement == artifact.statement,
+                and turn.vision_statement == artifact.statement
+                and turn.component_basis == artifact.component_basis
+                and turn.assumptions == artifact.assumptions
+                and turn.conflicts == artifact.conflicts,
                 "Vision artifact does not match a complete source interview turn.",
             )
 
@@ -987,11 +994,16 @@ class WorkflowFactRepository:
             )
             self._require_product_condition(
                 row.output_fingerprint
-                == self._vision_interview_output_fingerprint(
+                == vision_interview_output_fingerprint(
                     components,
                     row.vision_statement,
                     row.is_complete,
                     clarifying_questions,
+                    {
+                        "component_basis": component_basis,
+                        "assumptions": assumptions,
+                        "conflicts": conflicts,
+                    },
                 ),
                 "Vision turn output fingerprint changed.",
             )
@@ -3638,23 +3650,6 @@ class WorkflowFactRepository:
             return "revision"
         message = f"Invalid Vision operation {value!r}."
         raise WorkflowFactRepository._error(message)
-
-    @staticmethod
-    def _vision_interview_output_fingerprint(
-        components: JsonObject,
-        vision_statement: str,
-        is_complete: bool,
-        clarifying_questions: tuple[dict[str, JsonValue], ...],
-    ) -> str:
-        """Hash the canonical Vision model output without user-input trace data."""
-        return canonical_hash(
-            {
-                "components_json": components,
-                "vision_statement": vision_statement,
-                "is_complete": is_complete,
-                "clarifying_questions_json": list(clarifying_questions),
-            }
-        )
 
     @staticmethod
     def _product_goal_outcome(value: str) -> _ProductGoalOutcome:

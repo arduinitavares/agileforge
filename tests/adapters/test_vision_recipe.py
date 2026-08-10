@@ -771,6 +771,98 @@ def test_repository_bootstrap_persists_exact_binding_without_model_exposure(
         assert snapshot.repository_binding_id == binding_id
 
 
+def test_binding_switch_after_input_build_blocks_provider_execution(
+    engine: Engine,
+    tmp_path: Path,
+) -> None:
+    """Make a positioned Vision request stale when active repository selection moves."""
+    repositories: list[Path] = []
+    for name in ("binding-a", "binding-b"):
+        repository = tmp_path / name
+        repository.mkdir()
+        with Repo.init(repository) as repo:
+            with repo.config_writer() as config:
+                config.set_value("user", "name", "Binding Race Test")
+                config.set_value("user", "email", "binding-race@example.com")
+            (repository / "README.md").write_text(
+                f"# {name}\n",
+                encoding="utf-8",
+            )
+            repo.index.add(["README.md"])
+            repo.index.commit(f"{name} evidence")
+        repositories.append(repository)
+    project = Project(name="Repository binding race")
+    with Session(engine) as session:
+        session.add(project)
+        session.commit()
+        assert project.project_id is not None
+        project_id = project.project_id
+    first_binding_id = _bind_repository(
+        engine,
+        project_id=project_id,
+        repository=repositories[0],
+    )
+    second_binding_id = _bind_repository(
+        engine,
+        project_id=project_id,
+        repository=repositories[1],
+        activate=False,
+    )
+    primary = _provider_leaf("primary", _draft())
+    registry = _registry(primary, _leaf("repair", [_draft()]))
+    domain = WorkflowDomain(
+        engine=engine,
+        graph=ROOT_GRAPH,
+        clock=FixedClock(now_value=NOW),
+        adk_recipe_registry=registry,
+    )
+    runner = AdkWorkflowRunner(
+        domain=domain,
+        registry=registry,
+        session_service=TrackingSessionService(),
+        config=AdkExecutionConfig(
+            project_id=project_id,
+            model_id="fake/vision",
+            execution_settings=EXECUTION_SETTINGS,
+            lease_seconds=60,
+            actor="operator@example.com",
+        ),
+    )
+    service = VisionInputService(
+        engine=engine,
+        repository_probe=GitPythonRepositoryProbe(),
+    )
+    position = domain.position(project_id)
+    bootstrap = next(
+        item for item in position.decisions if item.node_id == "vision.bootstrap"
+    )
+    payload = service.build_bootstrap(project_id, bootstrap)
+    envelope = VisionAgentInput.model_validate(payload)
+    assert getattr(envelope.host, "repository_binding_id", None) == first_binding_id
+    with Session(engine) as session:
+        stored_project = session.get(Project, project_id)
+        assert stored_project is not None
+        stored_project.active_repository_binding_id = second_binding_id
+        session.add(stored_project)
+        session.commit()
+
+    result = runner.run(
+        bootstrap,
+        payload,
+        guards=AdkRunGuards(
+            position=position,
+            idempotency_key="repository-binding-race",
+            actor="operator@example.com",
+        ),
+    )
+
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.code is WorkflowErrorCode.STALE_POSITION
+    assert isinstance(primary.model, CapturingLlm)
+    assert primary.model.request_texts == []
+
+
 def test_output_adapter_binds_only_trusted_attempt_input() -> None:
     """Bind clarification provenance from persisted host input, not model output."""
     output = RecipeOutput(payload=_draft())

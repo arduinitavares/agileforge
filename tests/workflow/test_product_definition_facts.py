@@ -27,7 +27,11 @@ from models.product_definition import (
 )
 from models.specs import SpecRegistry
 from models.workflow import WorkflowNodeAttempt
-from repositories.workflow import WorkflowFactLoadError, WorkflowFactRepository
+from repositories.workflow import (
+    VisionInputFactRepository,
+    WorkflowFactLoadError,
+    WorkflowFactRepository,
+)
 from utils.runtime_config import (
     ADK_EXECUTION_TRACE_IDENTITY,
     clear_runtime_config_cache,
@@ -39,6 +43,7 @@ from workflow.fingerprints import (
     canonical_json,
     product_goal_artifact_fingerprint,
     product_goal_interview_output_fingerprint,
+    vision_interview_output_fingerprint,
 )
 
 if TYPE_CHECKING:
@@ -132,14 +137,13 @@ def _vision_output_fingerprint(
     is_complete: bool,
     clarifying_questions: list[dict[str, str]],
 ) -> str:
-    """Hash only the canonical persisted Vision model output."""
-    return canonical_hash(
-        {
-            "components_json": components,
-            "vision_statement": vision_statement,
-            "is_complete": is_complete,
-            "clarifying_questions_json": clarifying_questions,
-        }
+    """Use the production fingerprint helper for persisted Vision output."""
+    return vision_interview_output_fingerprint(
+        components,
+        vision_statement,
+        is_complete,
+        clarifying_questions,
+        {"component_basis": (), "assumptions": (), "conflicts": ()},
     )
 
 
@@ -1130,6 +1134,125 @@ def test_loader_rejects_interview_and_goal_artifact_tampering(
 
         with pytest.raises(WorkflowFactLoadError):
             WorkflowFactRepository(session).load(int(seed["project_id"]))
+
+
+def _load_strict_vision_repository(
+    session: Session,
+    project_id: int,
+    loader: str,
+) -> None:
+    """Exercise either strict repository through one simple test call."""
+    if loader == "full":
+        WorkflowFactRepository(session).load(project_id)
+    else:
+        VisionInputFactRepository(session).load_context(project_id)
+
+
+@pytest.mark.parametrize("loader", ["full", "vision"])
+@pytest.mark.parametrize(
+    ("label", "statement", "value"),
+    [
+        (
+            "component basis",
+            "UPDATE vision_interview_turns SET component_basis_json = :value "
+            "WHERE vision_interview_turn_id = :turn_id",
+            canonical_json([{"tampered": "basis"}]),
+        ),
+        (
+            "assumptions",
+            "UPDATE vision_interview_turns SET assumptions_json = :value "
+            "WHERE vision_interview_turn_id = :turn_id",
+            canonical_json([{"tampered": "assumption"}]),
+        ),
+        (
+            "conflicts",
+            "UPDATE vision_interview_turns SET conflicts_json = :value "
+            "WHERE vision_interview_turn_id = :turn_id",
+            canonical_json([{"tampered": "conflict"}]),
+        ),
+    ],
+)
+def test_strict_vision_loaders_reject_turn_provenance_tampering(
+    engine: Engine,
+    loader: str,
+    label: str,
+    statement: str,
+    value: str,
+) -> None:
+    """Bind every canonical turn provenance collection to its output fingerprint."""
+    with Session(engine) as session:
+        seed = _seed_product_definition(session, f"Vision turn {label} tamper")
+        _force_sql(
+            session,
+            statement,
+            {"value": value, "turn_id": int(seed["turn_id"])},
+        )
+        session.commit()
+
+        with pytest.raises(WorkflowFactLoadError):
+            _load_strict_vision_repository(
+                session,
+                int(seed["project_id"]),
+                loader,
+            )
+
+
+@pytest.mark.parametrize("loader", ["full", "vision"])
+@pytest.mark.parametrize(
+    ("label", "statement", "value"),
+    [
+        (
+            "snapshot",
+            "UPDATE vision_artifacts SET vision_evidence_snapshot_id = ("
+            "SELECT vision_evidence_snapshot_id FROM vision_interview_turns "
+            "WHERE vision_interview_turn_id = :turn_id) "
+            "WHERE vision_artifact_id = :vision_id",
+            None,
+        ),
+        (
+            "component basis",
+            "UPDATE vision_artifacts SET component_basis_json = :value "
+            "WHERE vision_artifact_id = :vision_id",
+            canonical_json([{"tampered": "basis"}]),
+        ),
+        (
+            "assumptions",
+            "UPDATE vision_artifacts SET assumptions_json = :value "
+            "WHERE vision_artifact_id = :vision_id",
+            canonical_json([{"tampered": "assumption"}]),
+        ),
+        (
+            "conflicts",
+            "UPDATE vision_artifacts SET conflicts_json = :value "
+            "WHERE vision_artifact_id = :vision_id",
+            canonical_json([{"tampered": "conflict"}]),
+        ),
+    ],
+)
+def test_strict_vision_loaders_reject_artifact_source_provenance_mismatch(
+    engine: Engine,
+    loader: str,
+    label: str,
+    statement: str,
+    value: str | None,
+) -> None:
+    """Require artifact provenance to equal the complete source turn exactly."""
+    with Session(engine) as session:
+        seed = _seed_product_definition(session, f"Vision artifact {label} mismatch")
+        params: dict[str, int | str] = {"vision_id": int(seed["vision_id"])}
+        if value is None:
+            params["turn_id"] = int(seed["turn_id"])
+        else:
+            params["value"] = value
+        _force_sql(session, statement, params)
+        session.commit()
+
+        with pytest.raises(WorkflowFactLoadError):
+            _load_strict_vision_repository(
+                session,
+                int(seed["project_id"]),
+                loader,
+            )
 
 
 @pytest.mark.parametrize(

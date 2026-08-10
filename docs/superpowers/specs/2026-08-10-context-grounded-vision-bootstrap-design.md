@@ -402,7 +402,11 @@ Extend `VisionInterviewTurn` with:
 Every clarification turn in one draft lineage references the same evidence
 snapshot. `VisionArtifact` also stores the source snapshot ID and final basis,
 assumptions, and conflicts so review and later audits do not depend on replaying
-transient model output.
+transient model output. A turn's output fingerprint covers components,
+statement, completeness, questions, component basis, assumptions, and
+conflicts. Strict loads require every artifact to equal its complete source turn
+on the snapshot ID and all six content and provenance fields. The artifact
+content fingerprint remains limited to components and statement.
 
 Existing append-only artifact, decision, attempt, fingerprint, and revision
 lineage rules remain. This is a hard break: schemas and initialization target a
@@ -421,7 +425,12 @@ response advertises `agileforge repository refresh`.
 Evidence reads also verify each selected file's identity, size, and modification
 time around the read, then repeat the repository probe after collection. A
 concurrent change returns `REPOSITORY_CHANGED_DURING_EVIDENCE_COLLECTION`; no
-paid call occurs.
+paid call occurs. Collection captures the active binding ID at entry and
+re-reads the Project after the final evidence operation; binding switches,
+attachment, and detachment fail with the same closed collection error. The
+active binding ID is also part of the graph's Project fact, so a switch after
+host input construction makes `StartNodeAttempt` stale before provider work.
+This identity remains host-only and is never included in model-facing input.
 
 Clarification and revision calls use their persisted snapshot and never
 silently replace its model-facing content. Before a later paid call, the host

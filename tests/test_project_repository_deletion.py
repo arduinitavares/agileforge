@@ -31,7 +31,11 @@ from repositories.project import ProjectRepository
 from services.contracts.vision_evidence import VisionEvidenceBundle, VisionEvidenceItem
 from tests.workflow.lifecycle_fixtures import seed_accepted_specification
 from workflow.contracts import GRAPH_VERSION, JsonObject
-from workflow.fingerprints import canonical_hash, canonical_json
+from workflow.fingerprints import (
+    canonical_hash,
+    canonical_json,
+    vision_interview_output_fingerprint,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
@@ -205,7 +209,13 @@ def _seed_populated_product_lineage(session: Session) -> int:
         component_basis_json="[]",
         assumptions_json="[]",
         conflicts_json="[]",
-        output_fingerprint=canonical_hash({"output": "revision"}),
+        output_fingerprint=vision_interview_output_fingerprint(
+            {"purpose": "revised"},
+            "Deliver the revised Vision.",
+            True,
+            (),
+            {"component_basis": (), "assumptions": (), "conflicts": ()},
+        ),
         workflow_node_attempt_id=attempt.workflow_node_attempt_id,
         attempt_fingerprint=attempt.attempt_fingerprint,
         recorded_at=datetime(2026, 8, 9, 13, 3, 30, tzinfo=UTC),

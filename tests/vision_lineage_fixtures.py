@@ -14,7 +14,11 @@ from models.product_definition import (
 )
 from models.workflow import WorkflowNodeAttempt
 from workflow.contracts import GRAPH_VERSION, JsonObject
-from workflow.fingerprints import canonical_hash, canonical_json
+from workflow.fingerprints import (
+    canonical_hash,
+    canonical_json,
+    vision_interview_output_fingerprint,
+)
 
 if TYPE_CHECKING:
     from sqlmodel import Session
@@ -129,13 +133,12 @@ def seed_accepted_vision(
         component_basis_json="[]",
         assumptions_json="[]",
         conflicts_json="[]",
-        output_fingerprint=canonical_hash(
-            {
-                "components_json": components,
-                "vision_statement": statement,
-                "is_complete": True,
-                "clarifying_questions_json": [],
-            }
+        output_fingerprint=vision_interview_output_fingerprint(
+            components,
+            statement,
+            True,
+            (),
+            {"component_basis": (), "assumptions": (), "conflicts": ()},
         ),
         workflow_node_attempt_id=_required(
             attempt.workflow_node_attempt_id,
@@ -266,13 +269,12 @@ def seed_accepted_vision_revision(
         component_basis_json="[]",
         assumptions_json="[]",
         conflicts_json="[]",
-        output_fingerprint=canonical_hash(
-            {
-                "components_json": components,
-                "vision_statement": statement,
-                "is_complete": True,
-                "clarifying_questions_json": [],
-            }
+        output_fingerprint=vision_interview_output_fingerprint(
+            components,
+            statement,
+            True,
+            (),
+            {"component_basis": (), "assumptions": (), "conflicts": ()},
         ),
         workflow_node_attempt_id=_required(
             attempt.workflow_node_attempt_id,

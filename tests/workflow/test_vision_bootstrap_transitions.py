@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -31,6 +32,7 @@ from tests.workflow.test_vision_interview_transitions import (
     _VisionReview,
 )
 from workflow.contracts import JsonObject, RecommendationKind, WorkflowErrorCode
+from workflow.fingerprints import canonical_hash
 from workflow.requests import (
     BeginVisionRevision,
     FailNodeAttempt,
@@ -159,6 +161,19 @@ def test_complete_bootstrap_persists_artifact_snapshot(engine: Engine) -> None:
         assert artifact.component_basis_json == turn.component_basis_json
         assert artifact.assumptions_json == turn.assumptions_json
         assert artifact.conflicts_json == turn.conflicts_json
+        assert turn.output_fingerprint == canonical_hash(
+            {
+                "components_json": json.loads(turn.components_json),
+                "vision_statement": turn.vision_statement,
+                "is_complete": turn.is_complete,
+                "clarifying_questions_json": json.loads(
+                    turn.clarifying_questions_json
+                ),
+                "component_basis_json": json.loads(turn.component_basis_json),
+                "assumptions_json": json.loads(turn.assumptions_json),
+                "conflicts_json": json.loads(turn.conflicts_json),
+            }
+        )
 
 
 def test_clarification_reuses_bootstrap_snapshot(engine: Engine) -> None:

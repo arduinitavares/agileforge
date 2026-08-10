@@ -19,6 +19,7 @@ class ProjectFact(FrozenModel):
     name: str
     description: str | None = None
     created_at: _DATETIME
+    active_repository_binding_id: int | None = None
 
 
 class ReviewDecisionFact(FrozenModel):

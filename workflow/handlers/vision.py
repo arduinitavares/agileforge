@@ -41,7 +41,11 @@ from workflow.contracts import (
     WorkflowError,
     WorkflowErrorCode,
 )
-from workflow.fingerprints import canonical_hash, canonical_json
+from workflow.fingerprints import (
+    canonical_hash,
+    canonical_json,
+    vision_interview_output_fingerprint,
+)
 from workflow.requests.vision import GenerateVisionBootstrap, RecordVisionInterviewTurn
 
 if TYPE_CHECKING:
@@ -603,6 +607,10 @@ def _persist_vision_turn(
         snapshot_id=snapshot_id,
     )
     components_json = canonical_json(request.updated_components)
+    clarifying_questions = _json_object_tuple(request.clarifying_questions)
+    component_basis = _json_object_tuple(request.component_basis)
+    assumptions = _json_object_tuple(request.assumptions)
+    conflicts = _json_object_tuple(request.conflicts)
     turn = VisionInterviewTurn(
         project_id=request.project_id,
         operation=request.operation,
@@ -614,21 +622,20 @@ def _persist_vision_turn(
         components_json=components_json,
         vision_statement=request.project_vision_statement.strip(),
         is_complete=request.is_complete,
-        clarifying_questions_json=canonical_json(
-            _json_object_tuple(request.clarifying_questions)
-        ),
-        component_basis_json=canonical_json(_json_object_tuple(request.component_basis)),
-        assumptions_json=canonical_json(_json_object_tuple(request.assumptions)),
-        conflicts_json=canonical_json(_json_object_tuple(request.conflicts)),
-        output_fingerprint=canonical_hash(
+        clarifying_questions_json=canonical_json(clarifying_questions),
+        component_basis_json=canonical_json(component_basis),
+        assumptions_json=canonical_json(assumptions),
+        conflicts_json=canonical_json(conflicts),
+        output_fingerprint=vision_interview_output_fingerprint(
+            request.updated_components,
+            request.project_vision_statement.strip(),
+            request.is_complete,
+            clarifying_questions,
             {
-                "components_json": request.updated_components,
-                "vision_statement": request.project_vision_statement.strip(),
-                "is_complete": request.is_complete,
-                "clarifying_questions_json": _json_object_tuple(
-                    request.clarifying_questions
-                ),
-            }
+                "component_basis": component_basis,
+                "assumptions": assumptions,
+                "conflicts": conflicts,
+            },
         ),
         workflow_node_attempt_id=request.attempt_id,
         attempt_fingerprint=request.attempt_fingerprint,

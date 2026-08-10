@@ -427,10 +427,10 @@ def test_project_name_is_normalized_and_whitespace_only_is_rejected_before_write
         assert len(session.exec(select(WorkflowTransitionReceipt)).all()) == 1
 
 
-def test_attachment_is_orthogonal_and_refresh_appends_observation(
+def test_attachment_changes_fact_identity_and_refresh_appends_observation(
     engine: Engine,
 ) -> None:
-    """Leave graph facts untouched while append-only repository state changes."""
+    """Guard active selection while repository history stays append-only."""
     probe = _Probe(_probe_result())
     service, domain = _service(engine, probe)
     created = service.create_project(_create_command())
@@ -448,9 +448,9 @@ def test_attachment_is_orthogonal_and_refresh_appends_observation(
     )
     assert attached.ok is True
     after = domain.position(project_id)
-    assert after.fact_fingerprint == before.fact_fingerprint
+    assert after.fact_fingerprint != before.fact_fingerprint
     assert after.available_nodes == before.available_nodes
-    assert after.decisions == before.decisions
+    assert after.decisions != before.decisions
 
     active_fingerprint = str(attached.output["repository_binding_fingerprint"])
     probe.result = _probe_result(inspected_at=NOW + timedelta(seconds=1))
@@ -464,7 +464,7 @@ def test_attachment_is_orthogonal_and_refresh_appends_observation(
     )
     assert refreshed.ok is True
     after_refresh = domain.position(project_id)
-    assert after_refresh.fact_fingerprint == before.fact_fingerprint
+    assert after_refresh.fact_fingerprint != after.fact_fingerprint
     assert after_refresh.available_nodes == before.available_nodes
     refreshed_fingerprint = str(refreshed.output["repository_binding_fingerprint"])
     assert refreshed_fingerprint != active_fingerprint

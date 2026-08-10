@@ -6,12 +6,20 @@ import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypedDict
 
 from workflow.contracts import GRAPH_VERSION
 
 if TYPE_CHECKING:
     from workflow.facts import WorkflowFactSnapshot
+
+
+class VisionInterviewProvenance(TypedDict):
+    """Provenance collections included in a Vision turn output fingerprint."""
+
+    component_basis: Sequence[Mapping[str, object]]
+    assumptions: Sequence[Mapping[str, object]]
+    conflicts: Sequence[Mapping[str, object]]
 
 
 def _datetime_to_utc_z(value: datetime) -> str:
@@ -85,6 +93,31 @@ def product_goal_interview_output_fingerprint(
             "goal_statement": goal_statement,
             "is_complete": is_complete,
             "clarifying_questions_json": list(clarifying_questions),
+        }
+    )
+
+
+def vision_interview_output_fingerprint(
+    components: Mapping[str, object],
+    vision_statement: str,
+    is_complete: bool,
+    clarifying_questions: Sequence[Mapping[str, object]],
+    provenance: VisionInterviewProvenance,
+) -> str:
+    """Fingerprint the complete persisted Vision model output and provenance."""
+    return canonical_hash(
+        {
+            "components_json": dict(components),
+            "vision_statement": vision_statement,
+            "is_complete": is_complete,
+            "clarifying_questions_json": [
+                dict(question) for question in clarifying_questions
+            ],
+            "component_basis_json": [
+                dict(item) for item in provenance["component_basis"]
+            ],
+            "assumptions_json": [dict(item) for item in provenance["assumptions"]],
+            "conflicts_json": [dict(item) for item in provenance["conflicts"]],
         }
     )
 

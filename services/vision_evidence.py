@@ -78,6 +78,7 @@ class _CollectionContext:
 
     project: Project
     binding: RepositoryBinding | None
+    active_repository_binding_id: int | None
 
 
 @dataclass(frozen=True)
@@ -125,16 +126,16 @@ class VisionEvidenceCollector:
                 )
             )
             self._verify_unchanged(context.binding, observed)
-        binding_id = (
-            None if context.binding is None else context.binding.repository_binding_id
-        )
+        binding_id = context.active_repository_binding_id
         if context.binding is not None and binding_id is None:
             raise VisionEvidenceCollectionError(
                 VisionEvidenceErrorCode.REPOSITORY_BINDING_INVALID,
                 "Active repository binding has no durable identity.",
             )
+        bundle = self._bounded_bundle(candidates, warnings)
+        self._verify_active_binding(project_id, binding_id)
         return VisionEvidenceCollection(
-            bundle=self._bounded_bundle(candidates, warnings),
+            bundle=bundle,
             repository_binding_id=binding_id,
         )
 
@@ -149,7 +150,11 @@ class VisionEvidenceCollector:
                 )
             binding_id = project.active_repository_binding_id
             if binding_id is None:
-                return _CollectionContext(project=project, binding=None)
+                return _CollectionContext(
+                    project=project,
+                    binding=None,
+                    active_repository_binding_id=None,
+                )
             binding = session.get(RepositoryBinding, binding_id)
             if binding is None or binding.project_id != project_id:
                 raise VisionEvidenceCollectionError(
@@ -159,7 +164,30 @@ class VisionEvidenceCollector:
                         "another project."
                     ),
                 )
-            return _CollectionContext(project=project, binding=binding)
+            return _CollectionContext(
+                project=project,
+                binding=binding,
+                active_repository_binding_id=binding_id,
+            )
+
+    def _verify_active_binding(
+        self,
+        project_id: int,
+        expected_binding_id: int | None,
+    ) -> None:
+        """Require repository selection to match the identity captured at entry."""
+        with Session(self.engine) as session:
+            project = session.get(Project, project_id)
+            if project is None:
+                raise VisionEvidenceCollectionError(
+                    VisionEvidenceErrorCode.PROJECT_NOT_FOUND,
+                    "Project was removed during evidence collection.",
+                )
+            if project.active_repository_binding_id != expected_binding_id:
+                raise VisionEvidenceCollectionError(
+                    VisionEvidenceErrorCode.REPOSITORY_CHANGED_DURING_EVIDENCE_COLLECTION,
+                    "Active repository selection changed during evidence collection.",
+                )
 
     def _verify_binding(self, binding: RepositoryBinding) -> RepositoryProbeResult:
         """Probe the selected worktree and require an exact durable match."""

@@ -17,7 +17,7 @@ from tests.vision_lineage_fixtures import (
     seed_accepted_vision,
     seed_accepted_vision_revision,
 )
-from workflow.fingerprints import canonical_hash
+from workflow.fingerprints import vision_interview_output_fingerprint
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -44,15 +44,16 @@ def test_projection_rejects_incomplete_source_turn(engine: Engine) -> None:
         turn = session.get(VisionInterviewTurn, artifact.source_interview_turn_id)
         assert turn is not None
         turn.is_complete = False
-        turn.output_fingerprint = canonical_hash(
+        turn.output_fingerprint = vision_interview_output_fingerprint(
+            json.loads(turn.components_json),
+            turn.vision_statement,
+            False,
+            json.loads(turn.clarifying_questions_json),
             {
-                "components_json": json.loads(turn.components_json),
-                "vision_statement": turn.vision_statement,
-                "is_complete": False,
-                "clarifying_questions_json": json.loads(
-                    turn.clarifying_questions_json
-                ),
-            }
+                "component_basis": json.loads(turn.component_basis_json),
+                "assumptions": json.loads(turn.assumptions_json),
+                "conflicts": json.loads(turn.conflicts_json),
+            },
         )
         session.add(turn)
         session.commit()
