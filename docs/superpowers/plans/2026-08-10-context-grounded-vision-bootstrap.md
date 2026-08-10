@@ -382,7 +382,19 @@ git commit -m "feat: define grounded vision contracts"
 
 **Interfaces:**
 - Consumes: `RepositoryProbe`, `RepositoryBinding`, `TechnicalSpecArtifact`, and Task 1 evidence contracts.
-- Produces: `VisionEvidenceCollector(engine: Engine, repository_probe: RepositoryProbe)` with `collect(project_id: int) -> VisionEvidenceBundle` and typed `VisionEvidenceCollectionError(code, message)`.
+- Produces: `VisionEvidenceCollector(engine: Engine, repository_probe: RepositoryProbe)` with `collect(project_id: int) -> VisionEvidenceBundle` and `VisionEvidenceCollectionError(code: VisionEvidenceErrorCode, message: str)`.
+
+Use this closed error enum:
+
+```python
+class VisionEvidenceErrorCode(StrEnum):
+    PROJECT_NOT_FOUND = "PROJECT_NOT_FOUND"
+    REPOSITORY_BINDING_INVALID = "REPOSITORY_BINDING_INVALID"
+    REPOSITORY_PROVENANCE_STALE = "REPOSITORY_PROVENANCE_STALE"
+    REPOSITORY_CHANGED_DURING_EVIDENCE_COLLECTION = (
+        "REPOSITORY_CHANGED_DURING_EVIDENCE_COLLECTION"
+    )
+```
 
 - [ ] **Step 1: Create temporary-repository fixtures and failing collector tests**
 
@@ -471,9 +483,54 @@ class VisionEvidenceCollector:
 
 Read eligible files through descriptors and compare identity, size, and nanosecond modification time before/after each read. Resolve symlinks and reject targets outside the worktree. Re-probe after all reads and compare exact provenance fields with the pre-read probe. Parse TOML with `tomllib`; validate JSON specs with `TechnicalSpecArtifact.model_validate_json`.
 
+Load `Project` by `project_id`; if `active_repository_binding_id` is present, load that exact `RepositoryBinding` and require its `project_id` to match. Compare the fresh probe to the binding on worktree path, common Git directory, HEAD, branch, detached state, dirty state, status fingerprint, and canonical remotes. Compare the post-read probe to the pre-read probe on the same fields. Raise the typed error; do not return partial evidence after either mismatch.
+
+Use these exact model-facing content shapes:
+
+```python
+project_content = {
+    "name": project.name,
+    "description": project.description,
+}
+repository_content = {
+    "head_sha": probe.head_sha,
+    "branch_name": probe.branch_name,
+    "detached_head": probe.detached_head,
+    "dirty": probe.dirty,
+    "remotes": sanitized_remotes,
+}
+package_content = {
+    "name": project_table.get("name"),
+    "description": project_table.get("description"),
+    "keywords": project_table.get("keywords", []),
+    "scripts": project_table.get("scripts", {}),
+}
+```
+
+Drop absent optional package fields instead of serializing them as null. Sort keyword values and script keys deterministically. Repository evidence never includes worktree path, common Git directory, status fingerprint, status entries, probe timestamps, or warning paths.
+
+Sanitize network remotes with `urllib.parse`: remove user information, password, query, and fragment while preserving scheme, host, port, and repository path. Convert SCP-style `user@host:path` to `ssh://host/path`. Omit local/file remotes entirely with `REMOTE_OMITTED` rather than exposing an absolute path.
+
 - [ ] **Step 5: Implement canonical IDs, warnings, and limits**
 
-Use `project:metadata`, `repository:provenance`, and `file:<relative-path>` evidence IDs. Compute item/bundle fingerprints with `canonical_hash` over structured content excluding timestamps. Truncate text by UTF-8 byte count; omit oversized structured values with `STRUCTURED_EVIDENCE_TOO_LARGE`.
+Use `project:metadata`, `repository:provenance`, and `file:<relative-path>` evidence IDs. Compute item/bundle fingerprints with `canonical_hash` over structured content excluding timestamps. Measure text content as `len(content.encode("utf-8"))` and structured content as `len(canonical_json(content).encode("utf-8"))`. Truncate text at a valid UTF-8 boundary first to 32 KiB and then, if needed, to the remaining 96 KiB bundle budget. Recompute its fingerprint and mark `truncated=True`. Never truncate structured content; omit it when it exceeds either remaining limit.
+
+Use only these stable warning codes:
+
+```text
+SYMLINK_ESCAPE
+EVIDENCE_UNREADABLE
+INVALID_UTF8
+INVALID_TOML
+INVALID_SPECIFICATION
+STRUCTURED_EVIDENCE_TOO_LARGE
+TEXT_EVIDENCE_TRUNCATED
+EVIDENCE_TOTAL_LIMIT_REACHED
+CONFLICTING_SPECIFICATIONS
+REMOTE_OMITTED
+```
+
+Warning `source` is `repository`, `bundle`, or one approved relative path. Sort warnings by `(source, code, message)`. Missing optional files do not warn. Arbitrary files are never traversed and therefore do not warn. If both JSON specs validate and their canonical hashes differ, include both and add `CONFLICTING_SPECIFICATIONS`; if they match, include both without that warning. Include one Markdown fallback, preferring `docs/spec/spec.md`, only when neither JSON spec validates. An invalid JSON candidate still emits `INVALID_SPECIFICATION` even when Markdown fallback succeeds.
 
 - [ ] **Step 6: Run tests and commit**
 
