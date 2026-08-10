@@ -99,8 +99,8 @@ position. Operators provide only task-specific semantic fields and transport
 metadata such as idempotency key and actor.
 
 Use a distinct idempotency key for each distinct request. Stop when a fully
-instantiated advertised command cannot parse or when unchanged current guards
-are rejected.
+instantiated advertised command cannot parse or when a newly selected semantic
+command is rejected as stale without another mutation changing the position.
 
 ## Lifecycle Evidence
 
@@ -169,17 +169,20 @@ After a recorded position:
 4. Record the same Workflow Position.
 5. Prove durable business facts and routing decisions did not change.
 
-## Stale Guard Probe
+## Stale Position Proof
 
 Choose one successful normal mutation:
 
-1. Save its original command template and guards.
+1. Record the semantic command advertised by `workflow next`.
 2. Execute it successfully.
-3. Confirm the Project fact fingerprint changed.
-4. Retry the original guards with a new idempotency key and unchanged semantic
-   payload.
-5. Require stale rejection.
-6. Confirm no second mutation was applied.
+3. Read `workflow position` and `workflow next` again in a fresh invocation.
+4. Confirm the current response reflects the new durable position and selects
+   the next semantic action.
+5. Execute only the newly selected semantic command.
+6. Confirm only the expected mutations were applied.
+
+Public transports cannot inject internal guards. Low-level stale concurrency
+belongs in automated domain tests.
 
 ## Distribution And Quality Evidence
 
@@ -205,7 +208,8 @@ Stop and report without repair when:
 - business and trace database ownership is ambiguous
 - a required graph decision is absent
 - an advertised command cannot parse
-- current unchanged guards fail
+- a newly selected semantic command is rejected as stale before another
+  mutation changes the position
 - a provider result cannot pass the declared schema
 - target repository state changes without Operator ownership
 - credential values appear in captured evidence

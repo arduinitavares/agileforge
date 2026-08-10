@@ -144,16 +144,18 @@ Each recipe receives host-normalized input, invokes one configured leaf, validat
 structured output, and returns a positioned transition request. Recipes do not
 read persistence or choose graph routes.
 
-## Guard Failures
+## Stale Position Recovery
 
-When a graph, fact, decision, instance, or lease guard is stale:
+When a mutation reports that the workflow position changed:
 
-1. Stop using the old command.
-2. Read `workflow position` or `workflow next` again.
-3. Compare the new reason code and fact references.
-4. Execute only the newly returned template.
+1. Stop using the previously selected command.
+2. Read `workflow position` and `workflow next` again.
+3. Review the current reason code and available semantic action.
+4. Execute only the newly selected semantic command with its task-specific
+   fields and a fresh idempotency key.
 
-Do not remove guards or alter payload semantics to force progress.
+Public transports cannot inject internal guards. Low-level stale concurrency
+belongs in automated domain tests.
 
 ## Provider Configuration
 

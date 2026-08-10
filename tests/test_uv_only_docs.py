@@ -74,10 +74,9 @@ def test_operator_docs_expose_only_semantic_mutation_inputs() -> None:
         "--expected-fact-fingerprint",
         "--expected-decision-fingerprint",
     )
-    internal_guard_instruction = re.compile(
-        r"\bpreserv\w*\b[^.\n]{0,120}"
-        r"\b(?:graph|fact|decision|instance)(?:-[a-z]+)?\b"
-        r"[^.\n]{0,80}\bguard",
+    operator_guard_directive = re.compile(
+        r"\b(?:preserv\w*|remov\w*|sav\w*|retr(?:y|ies|ied|ying))\b"
+        r"[^.\n]{0,120}\bguards?\b",
         flags=re.IGNORECASE,
     )
 
@@ -85,7 +84,7 @@ def test_operator_docs_expose_only_semantic_mutation_inputs() -> None:
         text = " ".join(_read(path).split())
         for flag in forbidden_flags:
             assert flag not in text
-        assert internal_guard_instruction.search(text) is None
+        assert operator_guard_directive.search(text) is None
         assert (
             "AgileForge derives and validates internal guards from the current "
             "durable position."
@@ -93,6 +92,13 @@ def test_operator_docs_expose_only_semantic_mutation_inputs() -> None:
         assert (
             "Operators provide only task-specific semantic fields and transport "
             "metadata such as idempotency key and actor."
+        ) in text
+
+    for path in (CLI_MANUAL_PATH, ACCEPTANCE_CHECKLIST_PATH):
+        text = " ".join(_read(path).split())
+        assert "Public transports cannot inject internal guards." in text
+        assert (
+            "Low-level stale concurrency belongs in automated domain tests."
         ) in text
 
 

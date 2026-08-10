@@ -28,7 +28,7 @@ def test_acceptance_checklist_has_current_sections() -> None:
         "Target Notes",
         "Restart Proof",
         "Trace Reset Proof",
-        "Stale Guard Probe",
+        "Stale Position Proof",
         "Distribution And Quality Evidence",
         "Stop Conditions",
     }
