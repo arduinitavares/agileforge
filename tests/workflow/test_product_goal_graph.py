@@ -22,6 +22,7 @@ from workflow.facts import (
     VisionArtifactFact,
     WorkflowFactSnapshot,
 )
+from workflow.graph import RuleCategory
 
 NOW = datetime(2026, 8, 5, tzinfo=UTC)
 
@@ -130,6 +131,79 @@ def test_pending_goal_exposes_only_review() -> None:
     review = _goal_review_rule(snapshot, NOW)[0]
     assert review.reason_code == "PRODUCT_GOAL_REVIEW_REQUIRED"
     assert review.fact_references[1].fact_id == "20"
+
+
+def test_multiple_unresolved_accepted_goals_invalidate_goal_selection() -> None:
+    """Contradictory accepted Goals never advertise another interview."""
+    snapshot = _snapshot(goal_decision="accepted")
+    goal = snapshot.product_goal_artifacts[0]
+    decision = snapshot.product_goal_artifact_decisions[0]
+    conflicting_goal = goal.model_copy(
+        update={
+            "product_goal_artifact_id": 22,
+            "goal_number": 2,
+            "content_fingerprint": "goal-fingerprint-2",
+        }
+    )
+    conflicting_decision = decision.model_copy(
+        update={
+            "product_goal_artifact_decision_id": 23,
+            "product_goal_artifact_id": 22,
+            "artifact_fingerprint": "goal-fingerprint-2",
+            "idempotency_key": "goal-review-2",
+        }
+    )
+    conflicted = snapshot.model_copy(
+        update={
+            "product_goal_artifacts": (goal, conflicting_goal),
+            "product_goal_artifact_decisions": (decision, conflicting_decision),
+        }
+    )
+
+    interview = _goal_interview_rule(conflicted, NOW)[0]
+    review = _goal_review_rule(conflicted, NOW)[0]
+
+    assert accepted_current_goal(conflicted) is None
+    assert interview.category is RuleCategory.INVALID
+    assert interview.reason_code == "WORKFLOW_FACT_CONFLICT"
+    assert review.category is RuleCategory.INVALID
+    assert review.reason_code == "WORKFLOW_FACT_CONFLICT"
+
+
+def test_multiple_pending_goals_invalidate_goal_selection() -> None:
+    """Ambiguous review candidates never advertise another interview."""
+    snapshot = _snapshot()
+    goal = ProductGoalArtifactFact(
+        product_goal_artifact_id=20,
+        vision_artifact_id=10,
+        vision_fingerprint="vision-fingerprint",
+        goal_number=1,
+        revision_number=1,
+        statement="Ship an approved specification.",
+        content_fingerprint="goal-fingerprint",
+        supersedes_product_goal_artifact_id=None,
+        source_interview_turn_id=2,
+        created_by="operator",
+        created_at=NOW,
+    )
+    conflicting_goal = goal.model_copy(
+        update={
+            "product_goal_artifact_id": 22,
+            "goal_number": 2,
+            "content_fingerprint": "goal-fingerprint-2",
+        }
+    )
+    conflicted = snapshot.model_copy(
+        update={"product_goal_artifacts": (goal, conflicting_goal)}
+    )
+
+    interview = _goal_interview_rule(conflicted, NOW)[0]
+    review = _goal_review_rule(conflicted, NOW)[0]
+
+    assert interview.category is RuleCategory.INVALID
+    assert interview.reason_code == "WORKFLOW_FACT_CONFLICT"
+    assert review.category is RuleCategory.INVALID
+    assert review.reason_code == "WORKFLOW_FACT_CONFLICT"
 
 
 def test_feedback_reopens_goal_interview_without_an_active_goal() -> None:

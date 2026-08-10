@@ -66,7 +66,6 @@ from workflow.contracts import (
     WorkflowErrorCode,
 )
 from workflow.definitions.authority import authority_graph
-from workflow.definitions.product_definition import product_definition_graph
 from workflow.definitions.root import ROOT_GRAPH
 from workflow.domain import WorkflowDomain
 from workflow.fingerprints import canonical_hash
@@ -545,7 +544,7 @@ def _build_runner(
     registry = AdkRecipeRegistry((recipe,))
     domain = WorkflowDomain(
         engine=engine,
-        graph=product_definition_graph(),
+        graph=ROOT_GRAPH,
         clock=clock or FixedClock(now_value=EVALUATED_AT),
         adk_recipe_registry=registry,
     )
@@ -642,7 +641,7 @@ def test_runner_loads_vision_input_from_persisted_attempt(
     )
     domain = WorkflowDomain(
         engine=engine,
-        graph=product_definition_graph(),
+        graph=ROOT_GRAPH,
         clock=FixedClock(now_value=EVALUATED_AT),
         adk_recipe_registry=registry,
     )

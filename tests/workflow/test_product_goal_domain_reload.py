@@ -675,6 +675,12 @@ def test_goal_input_rejects_multiple_unresolved_accepted_goals(
             project_id, decision, "Do not prepare from ambiguous Goal state"
         )
 
+    with pytest.raises(
+        WorkflowFactLoadError,
+        match="more than one accepted Product Goal without an outcome",
+    ):
+        _domain(engine).position(project_id)
+
 
 def test_goal_feedback_revision_and_outcome_are_exact_and_durable(
     engine: Engine,

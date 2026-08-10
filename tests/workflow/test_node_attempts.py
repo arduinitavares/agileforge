@@ -38,7 +38,7 @@ from workflow.contracts import (
     TransitionResult,
     WorkflowErrorCode,
 )
-from workflow.definitions.product_definition import product_definition_graph
+from workflow.definitions.root import ROOT_GRAPH
 from workflow.domain import WorkflowDomain
 from workflow.fingerprints import canonical_hash, canonical_json
 from workflow.requests import FailNodeAttempt, RecordBacklogDraft, StartNodeAttempt
@@ -168,7 +168,7 @@ def _domain(
 ) -> WorkflowDomain:
     return WorkflowDomain(
         engine=engine,
-        graph=product_definition_graph(),
+        graph=ROOT_GRAPH,
         clock=clock,
         adk_recipe_registry=registry,
     )

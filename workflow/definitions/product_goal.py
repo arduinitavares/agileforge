@@ -66,6 +66,15 @@ def accepted_current_goal(
     vision = accepted_current_vision(snapshot)
     if vision is None:
         return None
+    accepted = _unresolved_accepted_goals(snapshot, vision)
+    return accepted[0] if len(accepted) == 1 else None
+
+
+def _unresolved_accepted_goals(
+    snapshot: WorkflowFactSnapshot,
+    vision: VisionArtifactFact,
+) -> tuple[ProductGoalArtifactFact, ...]:
+    """Return every unresolved accepted Goal under one accepted Vision."""
     outcomes = {
         outcome.product_goal_artifact_id for outcome in snapshot.product_goal_outcomes
     }
@@ -85,7 +94,7 @@ def accepted_current_goal(
             and decisions[0].artifact_fingerprint == goal.content_fingerprint
         ):
             accepted.append(goal)
-    return accepted[0] if len(accepted) == 1 else None
+    return tuple(accepted)
 
 
 def lifecycle_is_quiescent(snapshot: WorkflowFactSnapshot) -> bool:
@@ -121,6 +130,16 @@ def _pending_goal(
     snapshot: WorkflowFactSnapshot,
     vision: VisionArtifactFact,
 ) -> ProductGoalArtifactFact | None:
+    """Return the sole pending Goal under the accepted Vision."""
+    pending = _pending_goals(snapshot, vision)
+    return pending[0] if len(pending) == 1 else None
+
+
+def _pending_goals(
+    snapshot: WorkflowFactSnapshot,
+    vision: VisionArtifactFact,
+) -> tuple[ProductGoalArtifactFact, ...]:
+    """Return every pending Goal under one accepted Vision."""
     pending = []
     for goal in snapshot.product_goal_artifacts:
         decisions = [
@@ -134,7 +153,7 @@ def _pending_goal(
             and not decisions
         ):
             pending.append(goal)
-    return pending[0] if len(pending) == 1 else None
+    return tuple(pending)
 
 
 def _goal_interview_rule(
@@ -149,14 +168,18 @@ def _goal_interview_rule(
                 "PRODUCT_GOAL_VISION_NOT_ACCEPTED",
             ),
         )
-    if accepted_current_goal(snapshot) is not None:
+    accepted_goals = _unresolved_accepted_goals(snapshot, vision)
+    pending_goals = _pending_goals(snapshot, vision)
+    if len(accepted_goals) > 1 or len(pending_goals) > 1:
+        return (RuleEvaluation(RuleCategory.INVALID, "WORKFLOW_FACT_CONFLICT"),)
+    if accepted_goals:
         return (
             RuleEvaluation(
                 RuleCategory.SATISFIED,
                 "PRODUCT_GOAL_INTERVIEW_NOT_READY",
             ),
         )
-    if _pending_goal(snapshot, vision) is not None:
+    if pending_goals:
         return (
             RuleEvaluation(
                 RuleCategory.SATISFIED,
@@ -190,14 +213,18 @@ def _goal_review_rule(
                 "PRODUCT_GOAL_REVIEW_NOT_READY",
             ),
         )
-    goal = _pending_goal(snapshot, vision)
-    if goal is None:
+    accepted_goals = _unresolved_accepted_goals(snapshot, vision)
+    pending_goals = _pending_goals(snapshot, vision)
+    if len(accepted_goals) > 1 or len(pending_goals) > 1:
+        return (RuleEvaluation(RuleCategory.INVALID, "WORKFLOW_FACT_CONFLICT"),)
+    if len(pending_goals) != 1:
         return (
             RuleEvaluation(
                 RuleCategory.SATISFIED,
                 "PRODUCT_GOAL_REVIEW_NOT_PENDING",
             ),
         )
+    goal = pending_goals[0]
     return (
         RuleEvaluation(
             RuleCategory.WAITING,

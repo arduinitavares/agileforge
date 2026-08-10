@@ -35,7 +35,7 @@ from services.node_attempt_replay import (
 from services.vision_interview_input import VisionInterviewInputService
 from workflow.clock import FixedClock
 from workflow.contracts import WorkflowErrorCode
-from workflow.definitions.product_definition import product_definition_graph
+from workflow.definitions.root import project_graph
 from workflow.domain import WorkflowDomain
 from workflow.fingerprints import (
     canonical_hash,
@@ -272,7 +272,7 @@ class _PositionMustNotRunDomain:
 def _domain(engine: Engine) -> WorkflowDomain:
     return WorkflowDomain(
         engine=engine,
-        graph=product_definition_graph(),
+        graph=project_graph(),
         clock=FixedClock(now_value=NOW),
         adk_recipe_registry=_Registry(),
     )

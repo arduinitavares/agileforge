@@ -71,8 +71,6 @@ from utils.spec_authority_ir import (
 )
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from models.specs import CompiledSpecAuthority
     from utils.spec_schemas import (
         Invariant,
@@ -426,10 +424,8 @@ def build_authority_review_snapshot_in_session(
     *,
     project_id: int,
     include_spec: str = "auto",
-    repo_root: Path | None = None,
 ) -> AuthorityReviewSnapshot | JsonDict:
     """Build a review snapshot using only the caller-owned session."""
-    del repo_root
     project = session.get(Project, project_id)
     if project is None:
         return _project_not_found_error(AUTHORITY_REVIEW_COMMAND, project_id)

@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from workflow.contracts import JsonObject, NodeCategory
-from workflow.definitions.product_definition import product_definition_graph
+from workflow.definitions.root import project_graph
 from workflow.facts import (
     ProductGoalArtifactDecisionFact,
     ProductGoalOutcomeFact,
@@ -101,7 +101,7 @@ def _snapshot(**changes: object) -> WorkflowFactSnapshot:
 
 
 def _position(**changes: object) -> WorkflowPosition:
-    return product_definition_graph().evaluate(_snapshot(**changes), NOW)
+    return project_graph().evaluate(_snapshot(**changes), NOW)
 
 
 def _node(position: WorkflowPosition, node_id: str) -> NodeDecision:

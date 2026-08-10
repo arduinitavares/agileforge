@@ -11,7 +11,7 @@ from pydantic import ValidationError
 from services.contracts.backlog import InputSchema as BacklogInput
 from services.contracts.roadmap import RoadmapBuilderInput
 from workflow.contracts import NodeCategory, NodeDecision, WorkflowPosition
-from workflow.definitions.product_definition import product_definition_graph
+from workflow.definitions.root import project_graph
 from workflow.facts import (
     AuthorityFact,
     NodeAttemptFact,
@@ -198,7 +198,7 @@ def _snapshot(
 
 
 def _position(snapshot: WorkflowFactSnapshot) -> WorkflowPosition:
-    return product_definition_graph().evaluate(snapshot, EVALUATED_AT)
+    return project_graph().evaluate(snapshot, EVALUATED_AT)
 
 
 def _decision(snapshot: WorkflowFactSnapshot, node_id: str) -> NodeDecision:
