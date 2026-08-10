@@ -16,6 +16,7 @@ from models.product_definition import (
     ProductGoalInterviewTurn,
     SpecificationCandidate,
     VisionArtifact,
+    VisionEvidenceSnapshot,
     VisionInterviewTurn,
 )
 from models.specs import SpecRegistry
@@ -106,15 +107,50 @@ def _seed_candidate(
     session.add(attempt)
     session.flush()
     assert attempt.workflow_node_attempt_id is not None
+    snapshot = VisionEvidenceSnapshot(
+        project_id=PROJECT_ID,
+        repository_binding_id=None,
+        workflow_node_attempt_id=attempt.workflow_node_attempt_id,
+        evidence_json=canonical_json(
+            {
+                "schema_version": "agileforge.vision-evidence.v1",
+                "items": [],
+                "warnings": [],
+                "evidence_fingerprint": canonical_hash(
+                    {
+                        "schema_version": "agileforge.vision-evidence.v1",
+                        "items": [],
+                        "warnings": [],
+                    }
+                ),
+            }
+        ),
+        evidence_fingerprint=canonical_hash(
+            {
+                "schema_version": "agileforge.vision-evidence.v1",
+                "items": [],
+                "warnings": [],
+            }
+        ),
+        warnings_json="[]",
+        created_at=started_at,
+    )
+    session.add(snapshot)
+    session.flush()
+    assert snapshot.vision_evidence_snapshot_id is not None
     vision_turn = VisionInterviewTurn(
         project_id=PROJECT_ID,
-        mode="initial",
+        operation="bootstrap",
         turn_number=1,
-        user_text="vision",
+        vision_evidence_snapshot_id=snapshot.vision_evidence_snapshot_id,
+        user_text=None,
         components_json="{}",
         vision_statement="Vision",
         is_complete=True,
         clarifying_questions_json="[]",
+        component_basis_json="[]",
+        assumptions_json="[]",
+        conflicts_json="[]",
         output_fingerprint="vision-output",
         workflow_node_attempt_id=attempt.workflow_node_attempt_id,
         attempt_fingerprint=attempt.attempt_fingerprint,
@@ -128,6 +164,10 @@ def _seed_candidate(
         components_json="{}",
         statement="Vision",
         content_fingerprint="vision-fingerprint",
+        vision_evidence_snapshot_id=snapshot.vision_evidence_snapshot_id,
+        component_basis_json="[]",
+        assumptions_json="[]",
+        conflicts_json="[]",
         source_interview_turn_id=vision_turn.vision_interview_turn_id,
         created_by="test",
     )

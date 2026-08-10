@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from adapters.adk.agents.vision import root_agent
+from pydantic import TypeAdapter
+
+from adapters.adk.agents.vision import repair_agent, root_agent
 from adapters.adk.recipes import (
     AgenticRecipeNodes,
     AttemptCompletionContext,
@@ -12,43 +14,164 @@ from adapters.adk.recipes import (
 )
 from services.application import (
     AgileForgeApplication,
+    VisionBootstrapRequest,
     VisionInterviewRequest,
     VisionReviewRequest,
     VisionRevisionRequest,
 )
 from services.contracts.vision import (
-    VisionInterviewInput,
-    VisionInterviewOutput,
+    VisionAgentInput,
+    VisionDraftOutput,
+    VisionRepairInput,
 )
 from services.node_attempt_replay import NodeAttemptReplayQuery, TransitionReplayQuery
 from workflow.contracts import (
     GRAPH_VERSION,
+    JsonObject,
     TransitionResult,
     WorkflowError,
     WorkflowErrorCode,
 )
+from workflow.fingerprints import canonical_hash
+from workflow.requests import RecordVisionInterviewTurn
+
+_JSON_OBJECT = TypeAdapter(JsonObject)
+EXECUTION_SETTINGS: JsonObject = {"timeout_seconds": 5.0, "max_attempts": 1}
 
 
 def test_vision_interview_agent_uses_the_strict_v2_contract() -> None:
     """Keep the active Vision recipe bound to its interview contract."""
-    assert root_agent.input_schema is VisionInterviewInput
-    assert root_agent.output_schema is VisionInterviewOutput
+    assert root_agent.input_schema is VisionAgentInput
+    assert root_agent.output_schema is VisionDraftOutput
+    assert repair_agent.input_schema is VisionRepairInput
+    assert repair_agent.output_schema is VisionDraftOutput
+
+
+def _evidence() -> JsonObject:
+    content = {"name": "Vision", "description": None}
+    item = {
+        "evidence_id": "project:metadata",
+        "kind": "project_metadata",
+        "relative_path": None,
+        "content_fingerprint": canonical_hash(content),
+        "trust": "operator_provided",
+        "content": content,
+        "truncated": False,
+    }
+    return _JSON_OBJECT.validate_python({
+        "schema_version": "agileforge.vision-evidence.v1",
+        "items": [item],
+        "warnings": [],
+        "evidence_fingerprint": canonical_hash(
+            {
+                "schema_version": "agileforge.vision-evidence.v1",
+                "items": [item],
+                "warnings": [],
+            }
+        ),
+    })
+
+
+def _draft_payload() -> JsonObject:
+    components = {
+        "project_name": "Vision",
+        "target_user": "Operators",
+        "problem": "State drift",
+        "product_category": "Tool",
+        "key_benefit": "Trust",
+        "competitors": "Spreadsheets",
+        "differentiator": "Facts",
+    }
+    return _JSON_OBJECT.validate_python({
+        "schema_version": "agileforge.vision-draft.v1",
+        "components": components,
+        "component_basis": [
+            {
+                "component": name,
+                "source_kinds": ["evidence"],
+                "evidence_ids": ["project:metadata"],
+                "assumption_ids": [],
+            }
+            for name in components
+        ],
+        "draft_statement": "A trusted workflow tool.",
+        "assumptions": [],
+        "conflicts": [],
+        "clarifying_questions": [],
+        "is_complete": True,
+    })
+
+
+def _bootstrap_input() -> JsonObject:
+    return _JSON_OBJECT.validate_python({
+        "request": {
+            "schema_version": "agileforge.vision-input.v1",
+            "operation": "bootstrap",
+            "project_name": "Vision",
+            "project_description": None,
+            "evidence": _evidence(),
+        },
+        "preflight": None,
+    })
+
+
+def _clarification_input() -> JsonObject:
+    """Return a strict host-owned clarification envelope."""
+    evidence = _evidence()
+    return _JSON_OBJECT.validate_python({
+        "request": {
+            "schema_version": "agileforge.vision-input.v1",
+            "operation": "clarification",
+            "project_name": "Vision",
+            "project_description": None,
+            "vision_evidence_snapshot_id": 10,
+            "evidence": evidence,
+            "current_components": {
+                "project_name": "Vision",
+                "target_user": None,
+                "problem": "State drift",
+                "product_category": "Tool",
+                "key_benefit": "Trust",
+                "competitors": "Spreadsheets",
+                "differentiator": "Facts",
+            },
+            "current_statement": "A draft.",
+            "current_component_basis": [],
+            "current_assumptions": [],
+            "current_conflicts": [],
+            "current_questions": [
+                {
+                    "question_id": "question:target",
+                    "text": "Who is the user?",
+                    "affected_components": ["target_user"],
+                    "conflict_ids": [],
+                }
+            ],
+            "human_response": "Correct the target user.",
+            "addressed_question_ids": ["question:target"],
+        },
+        "preflight": {
+            "expected_evidence_fingerprint": evidence["evidence_fingerprint"],
+            "observed_evidence": evidence,
+        },
+    })
 
 
 def test_recipe_catalog_excludes_legacy_vision_and_adapts_interview_output() -> None:
-    """Expose only the v2 Vision interview recipe and its output adapter."""
+    """Expose both explicit Vision recipes and their output adapter."""
     registry = build_agentic_recipe_registry(
         nodes=AgenticRecipeNodes(
             authority_compile=root_agent,
             authority_repair=root_agent,
             vision_interview=root_agent,
+            vision_repair=repair_agent,
             product_goal=root_agent,
             backlog_generation=root_agent,
             roadmap_generation=root_agent,
             story_generation=root_agent,
             sprint_planning=root_agent,
         ),
-        execution_settings={"timeout_seconds": 5.0, "max_attempts": 1},
+        execution_settings=EXECUTION_SETTINGS,
     )
     context = AttemptCompletionContext(
         project_id=1,
@@ -61,51 +184,27 @@ def test_recipe_catalog_excludes_legacy_vision_and_adapts_interview_output() -> 
         idempotency_key="vision:complete",
         actor="operator@example.com",
         correlation_id=None,
-        normalized_input={"mode": "initial", "user_response": "Build a tool."},
+        normalized_input=_bootstrap_input(),
     )
 
-    interview = registry.require("vision.interview").output_adapter(
-        RecipeOutput(
-            payload={
-                "updated_components": {
-                    "project_name": "Vision",
-                    "target_user": "Operators",
-                    "problem": "State drift",
-                    "product_category": "Tool",
-                    "key_benefit": "Trust",
-                    "competitors": "Spreadsheets",
-                    "differentiator": "Facts",
-                },
-                "project_vision_statement": "A trusted workflow tool.",
-                "is_complete": True,
-                "clarifying_questions": [],
-            }
-        ),
+    bootstrap = registry.require("vision.bootstrap").output_adapter(
+        RecipeOutput(payload=_draft_payload()),
         context,
     )
 
-    assert interview.kind == "record_vision_interview_turn"
+    assert registry.node_ids[:4] == (
+        "authority.compile",
+        "authority.repair",
+        "vision.bootstrap",
+        "vision.interview",
+    )
+    assert bootstrap.kind == "generate_vision_bootstrap"
 
 
 def test_vision_adapter_uses_trusted_attempt_input_for_human_turn() -> None:
-    """Model output cannot replace the captured user response or interview mode."""
+    """Model output cannot replace the captured human response or snapshot."""
     completion = _vision_interview_output_adapter(
-        RecipeOutput(
-            payload={
-                "updated_components": {
-                    "project_name": "Vision",
-                    "target_user": "Operators",
-                    "problem": "State drift",
-                    "product_category": "Tool",
-                    "key_benefit": "Trust",
-                    "competitors": "Spreadsheets",
-                    "differentiator": "Facts",
-                },
-                "project_vision_statement": "A trusted workflow tool.",
-                "is_complete": True,
-                "clarifying_questions": [],
-            }
-        ),
+        RecipeOutput(payload=_draft_payload()),
         AttemptCompletionContext(
             project_id=1,
             graph_version=GRAPH_VERSION,
@@ -117,14 +216,14 @@ def test_vision_adapter_uses_trusted_attempt_input_for_human_turn() -> None:
             idempotency_key="vision:complete",
             actor="operator@example.com",
             correlation_id=None,
-            normalized_input={
-                "mode": "revision",
-                "user_response": "Correct the target user.",
-            },
+            normalized_input=_clarification_input(),
         ),
     )
 
-    assert completion.mode == "revision"
+    assert isinstance(completion, RecordVisionInterviewTurn)
+    assert completion.operation == "clarification"
+    expected_snapshot_id = 10
+    assert completion.vision_evidence_snapshot_id == expected_snapshot_id
     assert completion.user_text == "Correct the target user."
 
 
@@ -151,6 +250,8 @@ class _ReceiptReplay:
 
     def replay(self, query: NodeAttemptReplayQuery) -> TransitionResult:
         self.calls.append(query)
+        if query.node_id == "vision.bootstrap" and query.user_text is None:
+            return self.result
         if query.user_text == "Same answer.":
             return self.result
         return _conflict()
@@ -185,13 +286,15 @@ def test_review_and_revision_replay_before_position_reads() -> None:
     replay = _ReceiptReplay(result)
     app = object.__new__(AgileForgeApplication)
     app._workflow_domain = _PositionMustNotRunDomain()
-    app._vision_interview_input = replay
-    app._prepared_agentic_inputs = type(
-        "PreparedVisionInputServices",
-        (),
-        {"vision_interview": replay},
-    )()
+    app._vision_input = replay
 
+    bootstrap = app.bootstrap_vision(
+        VisionBootstrapRequest(
+            project_id=7,
+            idempotency_key="bootstrap-retry",
+            actor="operator@example.com",
+        )
+    )
     interview = app.run_vision_interview(
         VisionInterviewRequest(
             project_id=7,
@@ -225,9 +328,11 @@ def test_review_and_revision_replay_before_position_reads() -> None:
     assert review == result
     assert revision == result
     assert interview == result
+    assert bootstrap == result
     assert isinstance(replay.calls[0], NodeAttemptReplayQuery)
-    assert isinstance(replay.calls[1], TransitionReplayQuery)
+    assert isinstance(replay.calls[1], NodeAttemptReplayQuery)
     assert isinstance(replay.calls[2], TransitionReplayQuery)
+    assert isinstance(replay.calls[3], TransitionReplayQuery)
 
 
 def test_replay_rejects_changed_vision_operator_input_before_position_reads() -> None:
@@ -235,12 +340,7 @@ def test_replay_rejects_changed_vision_operator_input_before_position_reads() ->
     app = object.__new__(AgileForgeApplication)
     app._workflow_domain = _PositionMustNotRunDomain()
     replay = _ReceiptReplay(TransitionResult(ok=True, replayed=True))
-    app._vision_interview_input = replay
-    app._prepared_agentic_inputs = type(
-        "PreparedVisionInputServices",
-        (),
-        {"vision_interview": replay},
-    )()
+    app._vision_input = replay
 
     interview = app.run_vision_interview(
         VisionInterviewRequest(

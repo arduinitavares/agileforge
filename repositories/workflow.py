@@ -150,7 +150,7 @@ type _PhaseStatus = Literal[
     "superseded",
 ]
 type _SprintFactStatus = Literal["planned", "active", "completed"]
-type _VisionMode = Literal["initial", "revision"]
+type _VisionOperation = Literal["bootstrap", "clarification", "revision"]
 type _ProductGoalOutcome = Literal["fulfilled", "abandoned"]
 type _ProductGoalDecision = Literal["accepted", "rejected", "feedback"]
 
@@ -736,6 +736,18 @@ class WorkflowFactRepository:
                 row.components_json,
                 "Vision artifact components",
             )
+            component_basis = self._canonical_json_object_list(
+                row.component_basis_json,
+                "Vision artifact component basis",
+            )
+            assumptions = self._canonical_json_object_list(
+                row.assumptions_json,
+                "Vision artifact assumptions",
+            )
+            conflicts = self._canonical_json_object_list(
+                row.conflicts_json,
+                "Vision artifact conflicts",
+            )
             self._require_product_condition(
                 canonical_hash({"components": components, "statement": row.statement})
                 == row.content_fingerprint,
@@ -758,6 +770,10 @@ class WorkflowFactRepository:
                 components=components,
                 statement=row.statement,
                 content_fingerprint=row.content_fingerprint,
+                vision_evidence_snapshot_id=row.vision_evidence_snapshot_id,
+                component_basis=tuple(component_basis),
+                assumptions=tuple(assumptions),
+                conflicts=tuple(conflicts),
                 supersedes_vision_artifact_id=parent_id,
                 source_interview_turn_id=row.source_interview_turn_id,
                 created_by=row.created_by,
@@ -870,21 +886,22 @@ class WorkflowFactRepository:
         facts: dict[int, VisionInterviewTurnFact] = {}
         for row in rows:
             identifier = self._required_id(row.vision_interview_turn_id, "Vision turn")
-            message = f"Vision turn {identifier} has invalid mode."
+            message = f"Vision turn {identifier} has invalid operation."
             self._require_product_condition(
-                row.mode in {"initial", "revision"},
+                row.operation in {"bootstrap", "clarification", "revision"},
                 message,
             )
-            mode = self._vision_mode(row.mode)
-            if mode == "initial":
+            operation = self._vision_operation(row.operation)
+            if operation == "bootstrap":
                 self._require_product_condition(
                     row.revision_intent_id is None,
-                    "Initial Vision turn cannot have a revision intent.",
+                    "Bootstrap Vision turn cannot have a revision intent.",
                 )
-            else:
+            elif row.revision_intent_id is not None:
                 self._require_product_condition(
                     row.revision_intent_id in revisions,
-                    "Revision Vision turn requires an exact Project revision intent.",
+                    "Revision-lineage Vision turn requires an exact Project "
+                    "revision intent.",
                 )
             prior_turn = (
                 None if row.prior_turn_id is None else facts.get(row.prior_turn_id)
@@ -898,15 +915,31 @@ class WorkflowFactRepository:
                     row.turn_number == 1,
                     "First Vision interview turn must have turn number one.",
                 )
+                self._require_product_condition(
+                    operation in {"bootstrap", "revision"},
+                    "Clarification Vision turn requires a prior turn.",
+                )
             else:
                 self._require_product_condition(
-                    (prior_turn.mode, prior_turn.revision_intent_id)
-                    == (mode, row.revision_intent_id),
-                    "Vision turn prior turn has a different mode or revision chain.",
+                    prior_turn.vision_evidence_snapshot_id
+                    == row.vision_evidence_snapshot_id
+                    and prior_turn.revision_intent_id == row.revision_intent_id,
+                    "Vision turn prior turn has a different evidence or revision "
+                    "chain.",
                 )
                 self._require_product_condition(
                     prior_turn.turn_number + 1 == row.turn_number,
                     "Vision turn prior turn is not sequential.",
+                )
+            if operation == "bootstrap":
+                self._require_product_condition(
+                    row.user_text is None,
+                    "Bootstrap Vision turn cannot have user text.",
+                )
+            else:
+                self._require_product_condition(
+                    row.user_text is not None,
+                    "Clarification and revision Vision turns require user text.",
                 )
             if attempts is not None:
                 self._require_fingerprint_reference(
@@ -919,9 +952,21 @@ class WorkflowFactRepository:
                 row.components_json,
                 "Vision turn components",
             )
-            clarifying_questions = self._canonical_string_list(
+            clarifying_questions = self._canonical_json_object_list(
                 row.clarifying_questions_json,
                 "Vision turn clarifying questions",
+            )
+            component_basis = self._canonical_json_object_list(
+                row.component_basis_json,
+                "Vision turn component basis",
+            )
+            assumptions = self._canonical_json_object_list(
+                row.assumptions_json,
+                "Vision turn assumptions",
+            )
+            conflicts = self._canonical_json_object_list(
+                row.conflicts_json,
+                "Vision turn conflicts",
             )
             self._require_product_condition(
                 row.output_fingerprint
@@ -935,15 +980,19 @@ class WorkflowFactRepository:
             )
             facts[identifier] = VisionInterviewTurnFact(
                 vision_interview_turn_id=identifier,
-                mode=mode,
+                operation=operation,
                 turn_number=row.turn_number,
                 revision_intent_id=row.revision_intent_id,
+                vision_evidence_snapshot_id=row.vision_evidence_snapshot_id,
                 prior_turn_id=row.prior_turn_id,
                 user_text=row.user_text,
                 components=components,
                 vision_statement=row.vision_statement,
                 is_complete=row.is_complete,
                 clarifying_questions=clarifying_questions,
+                component_basis=tuple(component_basis),
+                assumptions=tuple(assumptions),
+                conflicts=tuple(conflicts),
                 output_fingerprint=row.output_fingerprint,
                 workflow_node_attempt_id=row.workflow_node_attempt_id,
                 attempt_fingerprint=row.attempt_fingerprint,
@@ -3304,9 +3353,36 @@ class WorkflowFactRepository:
                 model_id=row.model_id,
                 lease_expires_at=row.lease_expires_at,
                 outcome=self._outcome_for_attempt(row, outcomes_by_attempt),
+                failure_code=(
+                    None
+                    if (
+                        outcome := outcomes_by_attempt.get(
+                            self._required_id(
+                                row.workflow_node_attempt_id,
+                                "workflow node attempt",
+                            )
+                        )
+                    )
+                    is None
+                    else outcome.failure_code
+                ),
             )
             for row in attempts
         )
+
+    def _node_attempt_lookup(self, project_id: int) -> dict[int, str]:
+        """Return exact attempt fingerprints for narrow input projections."""
+        return {
+            self._required_id(row.workflow_node_attempt_id, "workflow node attempt"): (
+                row.attempt_fingerprint
+            )
+            for row in self._session.exec(
+                select(WorkflowNodeAttempt)
+                .where(col(WorkflowNodeAttempt.project_id) == project_id)
+                .order_by(col(WorkflowNodeAttempt.workflow_node_attempt_id)),
+                execution_options=self._query_options(),
+            ).all()
+        }
 
     @staticmethod
     def _required_id(value: int | None, label: str) -> int:
@@ -3380,6 +3456,22 @@ class WorkflowFactRepository:
         """Decode one canonical JSON string list retained without a content hash."""
         try:
             value = _STRING_LIST.validate_json(content)
+        except ValidationError as exc:
+            message = f"{label} JSON is invalid."
+            raise WorkflowFactRepository._error(message) from exc
+        if canonical_json(value) != content:
+            message = f"{label} JSON is not canonical."
+            raise WorkflowFactRepository._error(message)
+        return tuple(value)
+
+    @staticmethod
+    def _canonical_json_object_list(
+        content: str,
+        label: str,
+    ) -> tuple[dict[str, JsonValue], ...]:
+        """Decode one canonical JSON object list retained without a content hash."""
+        try:
+            value = _JSON_OBJECT_LIST.validate_json(content)
         except ValidationError as exc:
             message = f"{label} JSON is invalid."
             raise WorkflowFactRepository._error(message) from exc
@@ -3520,12 +3612,14 @@ class WorkflowFactRepository:
         raise WorkflowFactRepository._error(message)
 
     @staticmethod
-    def _vision_mode(value: str) -> _VisionMode:
-        if value == "initial":
-            return "initial"
+    def _vision_operation(value: str) -> _VisionOperation:
+        if value == "bootstrap":
+            return "bootstrap"
+        if value == "clarification":
+            return "clarification"
         if value == "revision":
             return "revision"
-        message = f"Invalid Vision interview mode {value!r}."
+        message = f"Invalid Vision operation {value!r}."
         raise WorkflowFactRepository._error(message)
 
     @staticmethod
@@ -3533,7 +3627,7 @@ class WorkflowFactRepository:
         components: JsonObject,
         vision_statement: str,
         is_complete: bool,
-        clarifying_questions: tuple[str, ...],
+        clarifying_questions: tuple[dict[str, JsonValue], ...],
     ) -> str:
         """Hash the canonical Vision model output without user-input trace data."""
         return canonical_hash(
@@ -3640,6 +3734,7 @@ class VisionInputContext:
     vision_artifacts: tuple[VisionArtifactFact, ...]
     vision_decisions: tuple[VisionArtifactDecisionFact, ...]
     revision_intents: tuple[VisionRevisionIntentFact, ...]
+    evidence_snapshots: tuple[VisionEvidenceSnapshotFact, ...]
     interview_turns: tuple[VisionInterviewTurnFact, ...]
 
 
@@ -3647,10 +3742,11 @@ class VisionInputContext:
 class VisionInputSelection:
     """Current Vision chain state without expanding to a workflow snapshot."""
 
-    mode: _VisionMode
-    accepted_vision_statement: str | None
+    operation: _VisionOperation
+    accepted_vision: VisionArtifactFact | None
     revision_intent_id: int | None
     prior_turn: VisionInterviewTurnFact | None
+    evidence_snapshot: VisionEvidenceSnapshotFact | None
 
 
 class VisionInputFactRepository(WorkflowFactRepository):
@@ -3674,7 +3770,9 @@ class VisionInputFactRepository(WorkflowFactRepository):
                 if item.decision == "accepted"
             }
             revisions = self._vision_revision_intents(project_id, accepted_visions)
-            turns = self._vision_interview_turns(project_id, revisions, None)
+            attempts = self._node_attempt_lookup(project_id)
+            snapshots = self._vision_evidence_snapshots(project_id, attempts)
+            turns = self._vision_interview_turns(project_id, revisions, attempts)
             self._validate_vision_artifact_sources(visions, turns)
         return VisionInputContext(
             project=project,
@@ -3682,6 +3780,7 @@ class VisionInputFactRepository(WorkflowFactRepository):
             vision_artifacts=tuple(visions.values()),
             vision_decisions=tuple(decisions.values()),
             revision_intents=tuple(revisions.values()),
+            evidence_snapshots=snapshots,
             interview_turns=tuple(turns.values()),
         )
 
@@ -3736,7 +3835,7 @@ def select_vision_interview_input(context: VisionInputContext) -> VisionInputSel
         item
         for item in context.revision_intents
         if not any(
-            turn.mode == "revision"
+            turn.operation == "revision"
             and turn.revision_intent_id == item.vision_revision_intent_id
             and turn.vision_interview_turn_id in completed_turn_ids
             for turn in context.interview_turns
@@ -3748,12 +3847,12 @@ def select_vision_interview_input(context: VisionInputContext) -> VisionInputSel
     revision = open_intents[0] if open_intents else None
     if revision is not None:
         source = artifacts_by_id[revision.source_vision_artifact_id]
-        mode: _VisionMode = "revision"
-        accepted_statement = source.statement
+        operation: _VisionOperation = "revision"
+        accepted_vision = source
         intent_id = revision.vision_revision_intent_id
     else:
-        mode = "initial"
-        accepted_statement = None
+        operation = "bootstrap"
+        accepted_vision = None
         intent_id = None
         artifact_decision = (
             None
@@ -3766,16 +3865,30 @@ def select_vision_interview_input(context: VisionInputContext) -> VisionInputSel
     turns = tuple(
         item
         for item in context.interview_turns
-        if item.mode == mode and item.revision_intent_id == intent_id
+        if item.revision_intent_id == intent_id
     )
     prior_ids = {item.prior_turn_id for item in turns if item.prior_turn_id is not None}
     leaves = [item for item in turns if item.vision_interview_turn_id not in prior_ids]
     if len(leaves) > 1:
         message = "Vision interview turn chain is ambiguous."
         raise WorkflowFactLoadError(message)
+    prior_turn = leaves[0] if leaves else None
+    snapshot = None
+    if prior_turn is not None:
+        matches = tuple(
+            item
+            for item in context.evidence_snapshots
+            if item.vision_evidence_snapshot_id
+            == prior_turn.vision_evidence_snapshot_id
+        )
+        if len(matches) != 1:
+            message = "Vision evidence snapshot is ambiguous."
+            raise WorkflowFactLoadError(message)
+        snapshot = matches[0]
     return VisionInputSelection(
-        mode=mode,
-        accepted_vision_statement=accepted_statement,
+        operation="clarification" if prior_turn is not None else operation,
+        accepted_vision=accepted_vision,
         revision_intent_id=intent_id,
-        prior_turn=leaves[0] if leaves else None,
+        prior_turn=prior_turn,
+        evidence_snapshot=snapshot,
     )

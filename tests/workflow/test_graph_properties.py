@@ -116,9 +116,10 @@ AUTHORITATIVE_SNAPSHOT_VARIANTS: tuple[tuple[str, object], ...] = (
         (
             VisionInterviewTurnFact(
                 vision_interview_turn_id=84,
-                mode="revision",
+                operation="revision",
                 turn_number=1,
                 revision_intent_id=82,
+                vision_evidence_snapshot_id=83,
                 prior_turn_id=None,
                 user_text="Clarify the Vision.",
                 components={"constraint": "durable"},
@@ -141,6 +142,7 @@ AUTHORITATIVE_SNAPSHOT_VARIANTS: tuple[tuple[str, object], ...] = (
                 components={"constraint": "durable"},
                 statement="A durable workflow.",
                 content_fingerprint="sha256:vision",
+                vision_evidence_snapshot_id=83,
                 supersedes_vision_artifact_id=None,
                 source_interview_turn_id=84,
                 created_by="operator",

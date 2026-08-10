@@ -85,7 +85,7 @@ class VisionEvidenceSnapshot(SQLModel, table=True):
 
 
 class VisionInterviewTurn(SQLModel, table=True):
-    """One immutable user/agent interview turn for initial or revision Vision work."""
+    """One immutable generation or clarification turn for Project Vision work."""
 
     __tablename__ = "vision_interview_turns"
     __table_args__ = (
@@ -95,11 +95,11 @@ class VisionInterviewTurn(SQLModel, table=True):
             name="uq_vision_interview_turn_project_id",
         ),
         Index(
-            "uq_vision_interview_initial_turn_number",
+            "uq_vision_interview_bootstrap_turn_number",
             "project_id",
             "turn_number",
             unique=True,
-            sqlite_where=text("mode = 'initial'"),
+            sqlite_where=text("operation = 'bootstrap'"),
         ),
         Index(
             "uq_vision_interview_revision_turn_number",
@@ -107,11 +107,25 @@ class VisionInterviewTurn(SQLModel, table=True):
             "revision_intent_id",
             "turn_number",
             unique=True,
-            sqlite_where=text("mode = 'revision'"),
+            sqlite_where=text("operation = 'revision'"),
+        ),
+        Index(
+            "uq_vision_interview_clarification_turn_number",
+            "project_id",
+            "vision_evidence_snapshot_id",
+            "turn_number",
+            unique=True,
+            sqlite_where=text("operation = 'clarification'"),
         ),
         CheckConstraint(
-            "mode IN ('initial', 'revision')",
-            name="ck_vision_interview_turn_mode",
+            "operation IN ('bootstrap', 'clarification', 'revision')",
+            name="ck_vision_interview_turn_operation",
+        ),
+        CheckConstraint(
+            "((operation = 'bootstrap' AND user_text IS NULL) "
+            "OR (operation IN ('clarification', 'revision') "
+            "AND user_text IS NOT NULL))",
+            name="ck_vision_interview_turn_user_text_operation",
         ),
         ForeignKeyConstraint(
             ["project_id", "revision_intent_id"],
@@ -120,6 +134,14 @@ class VisionInterviewTurn(SQLModel, table=True):
                 "vision_revision_intents.vision_revision_intent_id",
             ],
             name="fk_vision_interview_turn_revision_intent",
+        ),
+        ForeignKeyConstraint(
+            ["project_id", "vision_evidence_snapshot_id"],
+            [
+                "vision_evidence_snapshots.project_id",
+                "vision_evidence_snapshots.vision_evidence_snapshot_id",
+            ],
+            name="fk_vision_interview_turn_evidence_snapshot",
         ),
         ForeignKeyConstraint(
             ["project_id", "prior_turn_id"],
@@ -141,15 +163,19 @@ class VisionInterviewTurn(SQLModel, table=True):
 
     vision_interview_turn_id: int | None = Field(default=None, primary_key=True)
     project_id: int = Field(foreign_key="projects.project_id", index=True)
-    mode: str = Field(index=True)
+    operation: str = Field(index=True)
     turn_number: int
     revision_intent_id: int | None = Field(default=None, index=True)
+    vision_evidence_snapshot_id: int = Field(index=True)
     prior_turn_id: int | None = Field(default=None, index=True)
-    user_text: str = Field(sa_type=Text)
+    user_text: str | None = Field(default=None, sa_type=Text)
     components_json: str = Field(sa_type=Text)
     vision_statement: str = Field(sa_type=Text)
     is_complete: bool
     clarifying_questions_json: str = Field(sa_type=Text)
+    component_basis_json: str = Field(sa_type=Text)
+    assumptions_json: str = Field(sa_type=Text)
+    conflicts_json: str = Field(sa_type=Text)
     output_fingerprint: str = Field(index=True)
     workflow_node_attempt_id: int = Field(index=True)
     attempt_fingerprint: str = Field(index=True)
@@ -195,6 +221,14 @@ class VisionArtifact(SQLModel, table=True):
             ],
             name="fk_vision_artifact_source_turn",
         ),
+        ForeignKeyConstraint(
+            ["project_id", "vision_evidence_snapshot_id"],
+            [
+                "vision_evidence_snapshots.project_id",
+                "vision_evidence_snapshots.vision_evidence_snapshot_id",
+            ],
+            name="fk_vision_artifact_evidence_snapshot",
+        ),
     )
 
     vision_artifact_id: int | None = Field(default=None, primary_key=True)
@@ -203,6 +237,10 @@ class VisionArtifact(SQLModel, table=True):
     components_json: str = Field(sa_type=Text)
     statement: str = Field(sa_type=Text)
     content_fingerprint: str = Field(index=True)
+    vision_evidence_snapshot_id: int = Field(index=True)
+    component_basis_json: str = Field(sa_type=Text)
+    assumptions_json: str = Field(sa_type=Text)
+    conflicts_json: str = Field(sa_type=Text)
     supersedes_vision_artifact_id: int | None = Field(default=None, index=True)
     source_interview_turn_id: int = Field(index=True)
     created_by: str = Field(index=True)

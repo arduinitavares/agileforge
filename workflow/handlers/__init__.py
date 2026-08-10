@@ -45,6 +45,7 @@ from workflow.handlers.project import (
 from workflow.handlers.vision import (
     execute_begin_vision_revision,
     execute_decide_vision_review,
+    execute_generate_vision_bootstrap,
     execute_record_vision_interview_turn,
 )
 
@@ -62,6 +63,7 @@ __all__ = [
     "execute_decide_vision_review",
     "execute_execution_request",
     "execute_fulfill_product_goal",
+    "execute_generate_vision_bootstrap",
     "execute_planning_request",
     "execute_record_authority_feedback",
     "execute_record_backlog_draft",

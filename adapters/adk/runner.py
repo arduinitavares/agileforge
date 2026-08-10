@@ -16,6 +16,7 @@ from google.genai import types
 from pydantic import TypeAdapter
 from sqlalchemy.exc import SQLAlchemyError
 
+from adapters.adk.errors import VisionAgenticPreflightError
 from adapters.adk.recipes import (
     AdkRecipe,
     AdkRecipeRegistry,
@@ -230,6 +231,24 @@ class AdkWorkflowRunner:
                 )
             )
             completion = recipe.output_adapter(output, context)
+        except VisionAgenticPreflightError as error:
+            failed = self._domain.transition(
+                FailNodeAttempt(
+                    project_id=self._config.project_id,
+                    attempt_id=attempt_id,
+                    attempt_fingerprint=attempt_fingerprint,
+                    failure_code=error.code.value,
+                    failure_message=error.message,
+                    idempotency_key=f"{request.idempotency_key}:failure",
+                    actor=request.actor,
+                    correlation_id=request.correlation_id,
+                )
+            )
+            return TransitionResult(
+                ok=False,
+                position=failed.position,
+                error=WorkflowError(code=error.code, message=error.message),
+            )
         except (
             DynamicNodeFailError,
             NodeTimeoutError,

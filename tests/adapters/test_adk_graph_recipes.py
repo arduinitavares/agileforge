@@ -158,6 +158,7 @@ def _agentic_nodes() -> AgenticRecipeNodes:
             name="fake_vision_interview",
             response={},
         ),
+        vision_repair=FakeLeafAgent(name="fake_vision_repair", response={}),
         product_goal=FakeLeafAgent(name="fake_product_goal", response={}),
         backlog_generation=FakeLeafAgent(name="fake_backlog", response={}),
         roadmap_generation=FakeLeafAgent(name="fake_roadmap", response={}),
@@ -225,7 +226,12 @@ def test_recipe_registry_covers_each_stable_agentic_domain_node_once() -> None:
         recipe = registry.require(node_id)
         assert recipe.workflow.timeout == RECIPE_TIMEOUT_SECONDS
         assert recipe.workflow.retry_config is not None
-        assert recipe.workflow.retry_config.max_attempts == RECIPE_MAX_ATTEMPTS
+        expected_attempts = (
+            1
+            if node_id in {"vision.bootstrap", "vision.interview"}
+            else RECIPE_MAX_ATTEMPTS
+        )
+        assert recipe.workflow.retry_config.max_attempts == expected_attempts
         assert not hasattr(recipe, "prerequisites")
         assert not hasattr(recipe, "next_command")
 

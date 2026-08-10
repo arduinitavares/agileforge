@@ -17,6 +17,7 @@ from models.product_definition import (
     SpecificationDecision,
     VisionArtifact,
     VisionArtifactDecision,
+    VisionEvidenceSnapshot,
     VisionInterviewTurn,
 )
 from models.specs import SpecRegistry
@@ -134,21 +135,66 @@ def _seed_accepted_vision_and_goal(
     vision_attempt = _attempt(
         session,
         project_id=project_id,
-        node_id="vision.interview",
+        node_id="vision.bootstrap",
         ordinal=1,
         started_at=recorded_at,
     )
+    evidence_item: JsonObject = {
+        "evidence_id": "project:metadata",
+        "kind": "project_metadata",
+        "relative_path": None,
+        "content_fingerprint": canonical_hash(
+            {"name": "Fixture", "description": None}
+        ),
+        "trust": "operator_provided",
+        "content": {"name": "Fixture", "description": None},
+        "truncated": False,
+    }
+    evidence: JsonObject = {
+        "schema_version": "agileforge.vision-evidence.v1",
+        "items": [evidence_item],
+        "warnings": [],
+        "evidence_fingerprint": canonical_hash(
+            {
+                "schema_version": "agileforge.vision-evidence.v1",
+                "items": [evidence_item],
+                "warnings": [],
+            }
+        ),
+    }
+    snapshot = VisionEvidenceSnapshot(
+        project_id=project_id,
+        repository_binding_id=None,
+        workflow_node_attempt_id=_required(
+            vision_attempt.workflow_node_attempt_id,
+            "Vision attempt",
+        ),
+        evidence_json=canonical_json(evidence),
+        evidence_fingerprint=str(evidence["evidence_fingerprint"]),
+        warnings_json="[]",
+        created_at=recorded_at,
+    )
+    session.add(snapshot)
+    session.flush()
+    basis_json = canonical_json([])
     vision_turn = VisionInterviewTurn(
         project_id=project_id,
-        mode="initial",
+        operation="bootstrap",
         turn_number=1,
         revision_intent_id=None,
+        vision_evidence_snapshot_id=_required(
+            snapshot.vision_evidence_snapshot_id,
+            "Vision evidence snapshot",
+        ),
         prior_turn_id=None,
-        user_text="Define the product Vision.",
+        user_text=None,
         components_json=canonical_json(vision_components),
         vision_statement=vision_statement,
         is_complete=True,
         clarifying_questions_json="[]",
+        component_basis_json=basis_json,
+        assumptions_json="[]",
+        conflicts_json="[]",
         output_fingerprint=canonical_hash(
             {
                 "components_json": vision_components,
@@ -174,6 +220,13 @@ def _seed_accepted_vision_and_goal(
         content_fingerprint=canonical_hash(
             {"components": vision_components, "statement": vision_statement}
         ),
+        vision_evidence_snapshot_id=_required(
+            snapshot.vision_evidence_snapshot_id,
+            "Vision evidence snapshot",
+        ),
+        component_basis_json=basis_json,
+        assumptions_json="[]",
+        conflicts_json="[]",
         supersedes_vision_artifact_id=None,
         source_interview_turn_id=_required(
             vision_turn.vision_interview_turn_id,

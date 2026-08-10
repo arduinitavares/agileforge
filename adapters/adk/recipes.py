@@ -10,6 +10,7 @@ from google.adk import Context, Workflow
 from google.adk.workflow import START, JoinNode, RetryConfig, node
 from pydantic import BaseModel, ConfigDict, TypeAdapter
 
+from adapters.adk.errors import VisionAgenticPreflightError
 from services.contracts.product_goal import ProductGoalInterviewOutput
 from services.contracts.sprint import (
     SprintPlannerInput,
@@ -18,7 +19,14 @@ from services.contracts.sprint import (
     validate_task_invariant_bindings,
 )
 from services.contracts.vision import (
-    VisionInterviewOutput,
+    VisionAgentInput,
+    VisionClarificationInput,
+    VisionDraftOutput,
+    VisionRepairInput,
+)
+from services.vision_output_validation import (
+    VisionDraftValidationError,
+    validate_vision_draft,
 )
 from utils.spec_schemas import (
     SpecAuthorityCompilationFailure,
@@ -26,10 +34,11 @@ from utils.spec_schemas import (
     SpecAuthorityCompilerEnvelope,
     SpecAuthorityCompilerInput,
 )
-from workflow.contracts import JsonObject
+from workflow.contracts import JsonObject, WorkflowErrorCode
 from workflow.fingerprints import canonical_hash
 from workflow.requests import (
     CompileAuthority,
+    GenerateVisionBootstrap,
     RecordBacklogDraft,
     RecordProductGoalInterviewTurn,
     RecordRoadmapDraft,
@@ -47,6 +56,7 @@ _JSON_OBJECT = TypeAdapter(JsonObject)
 AGENTIC_NODE_IDS = (
     "authority.compile",
     "authority.repair",
+    "vision.bootstrap",
     "vision.interview",
     "goal.interview",
     "backlog.generate",
@@ -162,6 +172,7 @@ class AgenticRecipeNodes:
     authority_compile: BaseAgent | Workflow
     authority_repair: BaseAgent | Workflow
     vision_interview: BaseAgent | Workflow
+    vision_repair: BaseAgent | Workflow
     product_goal: BaseAgent | Workflow
     backlog_generation: BaseAgent | Workflow
     roadmap_generation: BaseAgent | Workflow
@@ -269,23 +280,51 @@ def _request_output_adapter(
 def _vision_interview_output_adapter(
     output: object,
     context: AttemptCompletionContext,
-) -> RecordVisionInterviewTurn:
-    """Bind model output to the durable human input captured at attempt start."""
-    envelope = RecipeOutput.model_validate(output)
-    parsed = VisionInterviewOutput.model_validate(envelope.payload)
-    user_text = context.normalized_input.get("user_response")
-    mode = context.normalized_input.get("mode")
-    if not isinstance(user_text, str):
-        message = "Vision attempt input is missing its trusted user response or mode."
-        raise TypeError(message)
-    if mode == "initial":
-        interview_mode: Literal["initial", "revision"] = "initial"
-    elif mode == "revision":
-        interview_mode = "revision"
-    else:
-        message = "Vision attempt input is missing its trusted user response or mode."
-        raise ValueError(message)
-    return RecordVisionInterviewTurn(
+) -> GenerateVisionBootstrap | RecordVisionInterviewTurn:
+    """Bind strict Vision output to trusted host input captured at attempt start."""
+    parsed_input = VisionAgentInput.model_validate(context.normalized_input)
+    request = parsed_input.request
+    recipe_output = RecipeOutput.model_validate(output)
+    parsed = VisionDraftOutput.model_validate(recipe_output.payload)
+    if isinstance(request, VisionClarificationInput):
+        return RecordVisionInterviewTurn(
+            project_id=context.project_id,
+            graph_version=context.graph_version,
+            fact_fingerprint=context.fact_fingerprint,
+            decision_fingerprint=context.decision_fingerprint,
+            instance_key=context.instance_key,
+            idempotency_key=context.idempotency_key,
+            actor=context.actor,
+            correlation_id=context.correlation_id,
+            vision_evidence_snapshot_id=request.vision_evidence_snapshot_id,
+            evidence_fingerprint=request.evidence.evidence_fingerprint,
+            user_text=request.human_response,
+            addressed_question_ids=request.addressed_question_ids,
+            updated_components=_JSON_OBJECT.validate_python(
+                parsed.components.model_dump(mode="json")
+            ),
+            project_vision_statement=parsed.draft_statement,
+            is_complete=parsed.is_complete,
+            clarifying_questions=tuple(
+                _JSON_OBJECT.validate_python(item.model_dump(mode="json"))
+                for item in parsed.clarifying_questions
+            ),
+            component_basis=tuple(
+                _JSON_OBJECT.validate_python(item.model_dump(mode="json"))
+                for item in parsed.component_basis
+            ),
+            assumptions=tuple(
+                _JSON_OBJECT.validate_python(item.model_dump(mode="json"))
+                for item in parsed.assumptions
+            ),
+            conflicts=tuple(
+                _JSON_OBJECT.validate_python(item.model_dump(mode="json"))
+                for item in parsed.conflicts
+            ),
+            attempt_id=context.attempt_id,
+            attempt_fingerprint=context.attempt_fingerprint,
+        )
+    return GenerateVisionBootstrap(
         project_id=context.project_id,
         graph_version=context.graph_version,
         fact_fingerprint=context.fact_fingerprint,
@@ -294,12 +333,35 @@ def _vision_interview_output_adapter(
         idempotency_key=context.idempotency_key,
         actor=context.actor,
         correlation_id=context.correlation_id,
-        mode=interview_mode,
-        user_text=user_text,
-        updated_components=parsed.updated_components.model_dump(mode="json"),
-        project_vision_statement=parsed.project_vision_statement,
+        operation=request.operation,
+        evidence=_JSON_OBJECT.validate_python(request.evidence.model_dump(mode="json")),
+        evidence_fingerprint=request.evidence.evidence_fingerprint,
+        evidence_warnings=tuple(
+            _JSON_OBJECT.validate_python(item.model_dump(mode="json"))
+            for item in request.evidence.warnings
+        ),
+        repository_binding_id=None,
+        updated_components=_JSON_OBJECT.validate_python(
+            parsed.components.model_dump(mode="json")
+        ),
+        project_vision_statement=parsed.draft_statement,
         is_complete=parsed.is_complete,
-        clarifying_questions=tuple(parsed.clarifying_questions),
+        clarifying_questions=tuple(
+            _JSON_OBJECT.validate_python(item.model_dump(mode="json"))
+            for item in parsed.clarifying_questions
+        ),
+        component_basis=tuple(
+            _JSON_OBJECT.validate_python(item.model_dump(mode="json"))
+            for item in parsed.component_basis
+        ),
+        assumptions=tuple(
+            _JSON_OBJECT.validate_python(item.model_dump(mode="json"))
+            for item in parsed.assumptions
+        ),
+        conflicts=tuple(
+            _JSON_OBJECT.validate_python(item.model_dump(mode="json"))
+            for item in parsed.conflicts
+        ),
         attempt_id=context.attempt_id,
         attempt_fingerprint=context.attempt_fingerprint,
     )
@@ -520,6 +582,80 @@ def _build_sprint_workflow(
     )
 
 
+def build_vision_workflow(
+    *,
+    primary_leaf: BaseAgent | Workflow,
+    repair_leaf: BaseAgent | Workflow | None = None,
+    execution_settings: JsonObject,
+) -> Workflow:
+    """Run Vision once, with at most one semantic repair call."""
+    timeout_seconds, _max_attempts = _execution_limits(execution_settings)
+    retry_config = RetryConfig(max_attempts=1)
+
+    @node(
+        name="generate_vision_draft",
+        rerun_on_resume=True,
+        retry_config=retry_config,
+        timeout=timeout_seconds,
+    )
+    async def generate_vision_draft(
+        context: Context,
+        node_input: RecipeInput,
+    ) -> RecipeOutput:
+        envelope = VisionAgentInput.model_validate(node_input.payload)
+        if (
+            envelope.preflight is not None
+            and envelope.preflight.expected_evidence_fingerprint
+            != envelope.preflight.observed_evidence.evidence_fingerprint
+        ):
+            raise VisionAgenticPreflightError(
+                code=WorkflowErrorCode.VISION_EVIDENCE_STALE,
+                message="Vision evidence changed before provider invocation.",
+            )
+        generated = await context.run_node(
+            primary_leaf,
+            node_input=envelope.request.model_dump(mode="json"),
+        )
+        draft = VisionDraftOutput.model_validate(validate_structured_output(generated))
+        try:
+            validate_vision_draft(draft, envelope.request)
+        except VisionDraftValidationError as error:
+            if repair_leaf is None:
+                raise
+            repair_input = VisionRepairInput(
+                schema_version="agileforge.vision-repair.v1",
+                operation="repair",
+                validation_findings=error.findings,
+                invalid_output=draft,
+                allowed_evidence_ids=tuple(
+                    item.evidence_id for item in envelope.request.evidence.items
+                ),
+                human_input_available=isinstance(
+                    envelope.request,
+                    VisionClarificationInput,
+                )
+                or envelope.request.operation == "revision",
+            )
+            repaired = await context.run_node(
+                repair_leaf,
+                node_input=repair_input.model_dump(mode="json"),
+            )
+            draft = VisionDraftOutput.model_validate(
+                validate_structured_output(repaired)
+            )
+            validate_vision_draft(draft, envelope.request)
+        return RecipeOutput(payload=draft.model_dump(mode="json"))
+
+    return Workflow(
+        name="vision_generation",
+        retry_config=retry_config,
+        timeout=timeout_seconds,
+        input_schema=RecipeInput,
+        output_schema=RecipeOutput,
+        edges=[(START, generate_vision_draft)],
+    )
+
+
 def _authority_completion_payload(
     payload: _AuthorityRecipePayload,
     compiled_authority: SpecAuthorityCompilationSuccess,
@@ -709,11 +845,19 @@ def build_agentic_recipe_registry(
                 output_adapter=_request_output_adapter(RepairAuthority),
             ),
             AdkRecipe(
+                node_id="vision.bootstrap",
+                workflow=build_vision_workflow(
+                    primary_leaf=nodes.vision_interview,
+                    repair_leaf=nodes.vision_repair,
+                    execution_settings=execution_settings,
+                ),
+                output_adapter=_vision_interview_output_adapter,
+            ),
+            AdkRecipe(
                 node_id="vision.interview",
-                workflow=_build_single_leaf_workflow(
-                    workflow_name="vision_interview",
-                    execution_node_name="execute_vision_interviewer",
-                    leaf_agent=nodes.vision_interview,
+                workflow=build_vision_workflow(
+                    primary_leaf=nodes.vision_interview,
+                    repair_leaf=nodes.vision_repair,
                     execution_settings=execution_settings,
                 ),
                 output_adapter=_vision_interview_output_adapter,
@@ -781,5 +925,6 @@ __all__ = [
     "UnknownAdkRecipeError",
     "build_agentic_recipe_registry",
     "build_backlog_generation_workflow",
+    "build_vision_workflow",
     "validate_structured_output",
 ]

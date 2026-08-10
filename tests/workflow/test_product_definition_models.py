@@ -20,6 +20,8 @@ from models.product_definition import (
     ProductGoalOutcome,
     SpecificationCandidate,
     SpecificationDecision,
+    VisionArtifact,
+    VisionEvidenceSnapshot,
     VisionInterviewTurn,
     VisionRevisionIntent,
 )
@@ -37,22 +39,52 @@ EXPECTED_COLUMNS: dict[type[SQLModel], set[str]] = {
         "initiated_by",
         "initiated_at",
     },
+    VisionEvidenceSnapshot: {
+        "vision_evidence_snapshot_id",
+        "project_id",
+        "repository_binding_id",
+        "workflow_node_attempt_id",
+        "evidence_json",
+        "evidence_fingerprint",
+        "warnings_json",
+        "created_at",
+    },
     VisionInterviewTurn: {
         "vision_interview_turn_id",
         "project_id",
-        "mode",
+        "operation",
         "turn_number",
         "revision_intent_id",
+        "vision_evidence_snapshot_id",
         "prior_turn_id",
         "user_text",
         "components_json",
         "vision_statement",
         "is_complete",
         "clarifying_questions_json",
+        "component_basis_json",
+        "assumptions_json",
+        "conflicts_json",
         "output_fingerprint",
         "workflow_node_attempt_id",
         "attempt_fingerprint",
         "recorded_at",
+    },
+    VisionArtifact: {
+        "vision_artifact_id",
+        "project_id",
+        "version_number",
+        "components_json",
+        "statement",
+        "content_fingerprint",
+        "vision_evidence_snapshot_id",
+        "component_basis_json",
+        "assumptions_json",
+        "conflicts_json",
+        "supersedes_vision_artifact_id",
+        "source_interview_turn_id",
+        "created_by",
+        "created_at",
     },
     ProductGoalInterviewTurn: {
         "product_goal_interview_turn_id",
@@ -156,7 +188,9 @@ EXPECTED_COLUMNS: dict[type[SQLModel], set[str]] = {
 
 EXPECTED_TABLE_NAMES: dict[type[SQLModel], str] = {
     VisionRevisionIntent: "vision_revision_intents",
+    VisionEvidenceSnapshot: "vision_evidence_snapshots",
     VisionInterviewTurn: "vision_interview_turns",
+    VisionArtifact: "vision_artifacts",
     ProductGoalInterviewTurn: "product_goal_interview_turns",
     ProductGoalArtifact: "product_goal_artifacts",
     ProductGoalArtifactDecision: "product_goal_artifact_decisions",
@@ -195,7 +229,9 @@ def test_fresh_schema_has_versioned_product_definition_tables(engine: Engine) ->
 
     assert {
         "vision_revision_intents",
+        "vision_evidence_snapshots",
         "vision_interview_turns",
+        "vision_artifacts",
         "product_goal_interview_turns",
         "product_goal_artifacts",
         "product_goal_artifact_decisions",
@@ -219,7 +255,7 @@ def test_product_definition_records_expose_exact_immutable_columns() -> None:
 
 
 def test_product_definition_records_enforce_scoped_lineage_and_values() -> None:
-    """Reject cross-Project parents and unsupported mode or decision values."""
+    """Reject cross-Project parents and unsupported operation or decision values."""
     assert (
         ("project_id", "source_vision_artifact_id", "source_vision_fingerprint"),
         (
@@ -236,13 +272,28 @@ def test_product_definition_records_enforce_scoped_lineage_and_values() -> None:
         ),
     ) in _foreign_keys("vision_interview_turns")
     assert (
+        ("project_id", "vision_evidence_snapshot_id"),
+        (
+            "vision_evidence_snapshots.project_id",
+            "vision_evidence_snapshots.vision_evidence_snapshot_id",
+        ),
+    ) in _foreign_keys("vision_interview_turns")
+    assert (
         ("project_id", "prior_turn_id"),
         (
             "vision_interview_turns.project_id",
             "vision_interview_turns.vision_interview_turn_id",
         ),
     ) in _foreign_keys("vision_interview_turns")
-    assert "mode IN ('initial', 'revision')" in _checks("vision_interview_turns")
+    assert (
+        "operation IN ('bootstrap', 'clarification', 'revision')"
+        in _checks("vision_interview_turns")
+    )
+    assert (
+        "((operation = 'bootstrap' AND user_text IS NULL) "
+        "OR (operation IN ('clarification', 'revision') "
+        "AND user_text IS NOT NULL))"
+    ) in _checks("vision_interview_turns")
     assert "outcome IN ('fulfilled', 'abandoned')" in _checks("product_goal_outcomes")
     assert "decision IN ('accepted', 'rejected', 'feedback')" in _checks(
         "product_goal_artifact_decisions"
@@ -252,14 +303,17 @@ def test_product_definition_records_enforce_scoped_lineage_and_values() -> None:
     )
 
     vision_table = SQLModel.metadata.tables["vision_interview_turns"]
-    initial_index = next(
+    bootstrap_index = next(
         index
         for index in vision_table.indexes
-        if index.name == "uq_vision_interview_initial_turn_number"
+        if index.name == "uq_vision_interview_bootstrap_turn_number"
     )
-    assert initial_index.unique
-    assert tuple(initial_index.columns.keys()) == ("project_id", "turn_number")
-    assert str(initial_index.dialect_options["sqlite"]["where"]) == "mode = 'initial'"
+    assert bootstrap_index.unique
+    assert tuple(bootstrap_index.columns.keys()) == ("project_id", "turn_number")
+    assert (
+        str(bootstrap_index.dialect_options["sqlite"]["where"])
+        == "operation = 'bootstrap'"
+    )
     revision_index = next(
         index
         for index in vision_table.indexes
@@ -271,7 +325,34 @@ def test_product_definition_records_enforce_scoped_lineage_and_values() -> None:
         "revision_intent_id",
         "turn_number",
     )
-    assert str(revision_index.dialect_options["sqlite"]["where"]) == "mode = 'revision'"
+    assert (
+        str(revision_index.dialect_options["sqlite"]["where"])
+        == "operation = 'revision'"
+    )
+    clarification_index = next(
+        index
+        for index in vision_table.indexes
+        if index.name == "uq_vision_interview_clarification_turn_number"
+    )
+    assert clarification_index.unique
+    assert tuple(clarification_index.columns.keys()) == (
+        "project_id",
+        "vision_evidence_snapshot_id",
+        "turn_number",
+    )
+    assert (
+        str(clarification_index.dialect_options["sqlite"]["where"])
+        == "operation = 'clarification'"
+    )
+
+    vision_artifact_keys = _foreign_keys("vision_artifacts")
+    assert (
+        ("project_id", "vision_evidence_snapshot_id"),
+        (
+            "vision_evidence_snapshots.project_id",
+            "vision_evidence_snapshots.vision_evidence_snapshot_id",
+        ),
+    ) in vision_artifact_keys
 
     goal_fingerprints = _foreign_keys("product_goal_artifacts")
     assert (
@@ -351,24 +432,28 @@ def test_spec_registry_requires_product_definition_lineage() -> None:
 def _insert_vision_turn(
     session: Session,
     *,
-    mode: str,
+    operation: str,
     revision_intent_id: int | None,
     turn_number: int,
 ) -> None:
     """Insert minimal rows to exercise SQLite's partial unique indexes."""
     session.connection().exec_driver_sql(
         "INSERT INTO vision_interview_turns ("
-        "project_id, mode, turn_number, revision_intent_id, prior_turn_id, "
+        "project_id, operation, turn_number, revision_intent_id, "
+        "vision_evidence_snapshot_id, prior_turn_id, "
         "user_text, components_json, vision_statement, is_complete, "
-        "clarifying_questions_json, output_fingerprint, workflow_node_attempt_id, "
+        "clarifying_questions_json, component_basis_json, assumptions_json, "
+        "conflicts_json, output_fingerprint, workflow_node_attempt_id, "
         "attempt_fingerprint, recorded_at"
-        ") VALUES (1, :mode, :turn_number, :revision_intent_id, NULL, "
-        "'user', '{}', 'statement', 1, '[]', 'sha256:output', 1, "
+        ") VALUES (1, :operation, :turn_number, :revision_intent_id, 1, NULL, "
+        ":user_text, '{}', 'statement', 1, '[]', '[]', '[]', '[]', "
+        "'sha256:output', 1, "
         "'sha256:attempt', '2026-08-05 12:00:00')",
         {
-            "mode": mode,
+            "operation": operation,
             "revision_intent_id": revision_intent_id,
             "turn_number": turn_number,
+            "user_text": None if operation == "bootstrap" else "user",
         },
     )
 
@@ -381,26 +466,26 @@ def test_vision_interview_turn_number_indexes_are_scoped_to_each_chain(
         session.connection().exec_driver_sql("PRAGMA foreign_keys = OFF")
         _insert_vision_turn(
             session,
-            mode="initial",
+            operation="bootstrap",
             revision_intent_id=None,
             turn_number=1,
         )
         _insert_vision_turn(
             session,
-            mode="revision",
+            operation="revision",
             revision_intent_id=10,
             turn_number=1,
         )
         _insert_vision_turn(
             session,
-            mode="revision",
+            operation="revision",
             revision_intent_id=11,
             turn_number=1,
         )
         with pytest.raises(IntegrityError):
             _insert_vision_turn(
                 session,
-                mode="initial",
+                operation="bootstrap",
                 revision_intent_id=None,
                 turn_number=1,
             )
@@ -408,14 +493,14 @@ def test_vision_interview_turn_number_indexes_are_scoped_to_each_chain(
 
         _insert_vision_turn(
             session,
-            mode="revision",
+            operation="revision",
             revision_intent_id=10,
             turn_number=1,
         )
         with pytest.raises(IntegrityError):
             _insert_vision_turn(
                 session,
-                mode="revision",
+                operation="revision",
                 revision_intent_id=10,
                 turn_number=1,
             )

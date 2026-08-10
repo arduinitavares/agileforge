@@ -63,18 +63,22 @@ class VisionEvidenceSnapshotFact(FrozenModel):
 
 
 class VisionInterviewTurnFact(FrozenModel):
-    """Immutable initial or revision interview turn."""
+    """Immutable Vision generation or clarification turn."""
 
     vision_interview_turn_id: int
-    mode: Literal["initial", "revision"]
+    operation: Literal["bootstrap", "clarification", "revision"]
     turn_number: int
     revision_intent_id: int | None
+    vision_evidence_snapshot_id: int
     prior_turn_id: int | None
-    user_text: str
+    user_text: str | None
     components: JsonObject
     vision_statement: str
     is_complete: bool
-    clarifying_questions: tuple[str, ...]
+    clarifying_questions: tuple[JsonObject, ...]
+    component_basis: tuple[JsonObject, ...] = ()
+    assumptions: tuple[JsonObject, ...] = ()
+    conflicts: tuple[JsonObject, ...] = ()
     output_fingerprint: str
     workflow_node_attempt_id: int
     attempt_fingerprint: str
@@ -89,6 +93,10 @@ class VisionArtifactFact(FrozenModel):
     components: JsonObject
     statement: str
     content_fingerprint: str
+    vision_evidence_snapshot_id: int
+    component_basis: tuple[JsonObject, ...] = ()
+    assumptions: tuple[JsonObject, ...] = ()
+    conflicts: tuple[JsonObject, ...] = ()
     supersedes_vision_artifact_id: int | None
     source_interview_turn_id: int
     created_by: str
@@ -488,6 +496,7 @@ class NodeAttemptFact(FrozenModel):
     model_id: str
     lease_expires_at: _DATETIME
     outcome: Literal["success", "failure", "obsolete"] | None
+    failure_code: str | None = None
 
     @field_validator("lease_expires_at", mode="after")
     @classmethod

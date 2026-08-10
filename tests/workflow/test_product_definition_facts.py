@@ -21,6 +21,7 @@ from models.product_definition import (
     SpecificationDecision,
     VisionArtifact,
     VisionArtifactDecision,
+    VisionEvidenceSnapshot,
     VisionInterviewTurn,
     VisionRevisionIntent,
 )
@@ -104,6 +105,7 @@ def _clear_product_definition_fixture_rows(engine: Engine) -> Iterator[None]:
         ):
             session.delete(turn)
             session.flush()
+        session.exec(delete(VisionEvidenceSnapshot))
         session.exec(delete(WorkflowNodeAttempt))
         session.exec(delete(Project))
         session.commit()
@@ -128,7 +130,7 @@ def _vision_output_fingerprint(
     components: dict[str, str],
     vision_statement: str,
     is_complete: bool,
-    clarifying_questions: list[str],
+    clarifying_questions: list[dict[str, str]],
 ) -> str:
     """Hash only the canonical persisted Vision model output."""
     return canonical_hash(
@@ -139,6 +141,44 @@ def _vision_output_fingerprint(
             "clarifying_questions_json": clarifying_questions,
         }
     )
+
+
+def _vision_evidence_snapshot(
+    session: Session,
+    project_id: int,
+    attempt_id: int,
+    recorded_at: datetime,
+    *,
+    key: str,
+) -> int:
+    """Persist deterministic Vision evidence used by direct test fixtures."""
+    evidence_item = {
+        "evidence_id": f"project:{key}",
+        "kind": "project_metadata",
+        "relative_path": None,
+        "content_fingerprint": canonical_hash({"project_id": project_id, "key": key}),
+        "trust": "operator_provided",
+        "content": {"project_id": project_id, "key": key},
+        "truncated": False,
+    }
+    evidence = {
+        "schema_version": "agileforge.vision-evidence.v1",
+        "items": [evidence_item],
+        "warnings": [],
+    }
+    evidence["evidence_fingerprint"] = canonical_hash(evidence)
+    snapshot = VisionEvidenceSnapshot(
+        project_id=project_id,
+        repository_binding_id=None,
+        workflow_node_attempt_id=attempt_id,
+        evidence_json=canonical_json(evidence),
+        evidence_fingerprint=str(evidence["evidence_fingerprint"]),
+        warnings_json=canonical_json([]),
+        created_at=recorded_at,
+    )
+    session.add(snapshot)
+    session.flush()
+    return _id(snapshot.vision_evidence_snapshot_id)
 
 
 def _product_goal_output_fingerprint(
@@ -198,17 +238,24 @@ def _vision_artifact(
         session,
         project_id,
         recorded_at,
-        node_id="vision.interview",
+        node_id="vision.bootstrap",
+        key=f"vision-initial-{version_number}",
+    )
+    snapshot_id = _vision_evidence_snapshot(
+        session,
+        project_id,
+        attempt_id,
+        recorded_at,
         key=f"vision-initial-{version_number}",
     )
     components = {"constraint": f"initial-{version_number}"}
-    clarifying_questions: list[str] = []
+    clarifying_questions: list[dict[str, str]] = []
     statement = f"Vision {project_id} version {version_number}."
     prior_turn = session.exec(
         select(VisionInterviewTurn)
         .where(
             VisionInterviewTurn.project_id == project_id,
-            VisionInterviewTurn.mode == "initial",
+            VisionInterviewTurn.operation == "bootstrap",
         )
         .order_by(col(VisionInterviewTurn.turn_number).desc())
     ).first()
@@ -219,17 +266,21 @@ def _vision_artifact(
     ).first()
     turn = VisionInterviewTurn(
         project_id=project_id,
-        mode="initial",
+        operation="bootstrap",
         turn_number=1 if prior_turn is None else prior_turn.turn_number + 1,
         revision_intent_id=None,
         prior_turn_id=(
             None if prior_turn is None else prior_turn.vision_interview_turn_id
         ),
-        user_text="Define the initial Vision.",
+        vision_evidence_snapshot_id=snapshot_id,
+        user_text=None,
         components_json=canonical_json(components),
         vision_statement=statement,
         is_complete=True,
         clarifying_questions_json=canonical_json(clarifying_questions),
+        component_basis_json=canonical_json([]),
+        assumptions_json=canonical_json([]),
+        conflicts_json=canonical_json([]),
         output_fingerprint=_vision_output_fingerprint(
             components,
             statement,
@@ -251,6 +302,10 @@ def _vision_artifact(
         content_fingerprint=canonical_hash(
             {"components": components, "statement": statement}
         ),
+        vision_evidence_snapshot_id=snapshot_id,
+        component_basis_json=canonical_json([]),
+        assumptions_json=canonical_json([]),
+        conflicts_json=canonical_json([]),
         supersedes_vision_artifact_id=(
             None if parent is None else parent.vision_artifact_id
         ),
@@ -327,7 +382,14 @@ def _seed_product_definition(
         session,
         project_id,
         recorded_at,
-        node_id="vision.interview",
+        node_id="vision.bootstrap",
+        key="vision-revision",
+    )
+    snapshot_id = _vision_evidence_snapshot(
+        session,
+        project_id,
+        attempt_id,
+        recorded_at,
         key="vision-revision",
     )
     revision = VisionRevisionIntent(
@@ -341,19 +403,28 @@ def _seed_product_definition(
     session.add(revision)
     session.flush()
     vision_components = {"constraint": "deterministic"}
-    vision_questions = ["Which durable records are required?"]
+    vision_questions = [
+        {
+            "question_id": "vision-q1",
+            "prompt": "Which durable records are required?",
+        }
+    ]
     vision_statement = "A deterministic workflow."
     turn = VisionInterviewTurn(
         project_id=project_id,
-        mode="revision",
+        operation="revision",
         turn_number=1,
         revision_intent_id=_id(revision.vision_revision_intent_id),
         prior_turn_id=None,
+        vision_evidence_snapshot_id=snapshot_id,
         user_text="Keep the workflow deterministic.",
         components_json=canonical_json(vision_components),
         vision_statement=vision_statement,
         is_complete=False,
         clarifying_questions_json=canonical_json(vision_questions),
+        component_basis_json=canonical_json([]),
+        assumptions_json=canonical_json([]),
+        conflicts_json=canonical_json([]),
         output_fingerprint=_vision_output_fingerprint(
             vision_components,
             vision_statement,
@@ -703,10 +774,10 @@ def test_loader_loads_initial_and_revision_vision_chains_with_turn_one(
         snapshot = WorkflowFactRepository(session).load(int(seed["project_id"]))
 
     assert {
-        (turn.mode, turn.revision_intent_id, turn.turn_number)
+        (turn.operation, turn.revision_intent_id, turn.turn_number)
         for turn in snapshot.vision_interview_turns
     } == {
-        ("initial", None, 1),
+        ("bootstrap", None, 1),
         ("revision", seed["revision_id"], 1),
     }
 
@@ -1103,19 +1174,23 @@ def test_loader_rejects_nonsequential_or_inconsistent_interview_chains(
         session.add(other_revision)
         session.flush()
         vision_components = {"constraint": "followup"}
-        vision_questions: list[str] = []
+        vision_questions: list[dict[str, str]] = []
         vision_statement = "A deterministic follow-up workflow."
         vision_followup = VisionInterviewTurn(
             project_id=project_id,
-            mode="revision",
+            operation="clarification",
             turn_number=2,
             revision_intent_id=first_vision_turn.revision_intent_id,
+            vision_evidence_snapshot_id=first_vision_turn.vision_evidence_snapshot_id,
             prior_turn_id=int(seed["turn_id"]),
             user_text="Refine the first Vision interview.",
             components_json=canonical_json(vision_components),
             vision_statement=vision_statement,
             is_complete=True,
             clarifying_questions_json=canonical_json(vision_questions),
+            component_basis_json=canonical_json([]),
+            assumptions_json=canonical_json([]),
+            conflicts_json=canonical_json([]),
             output_fingerprint=_vision_output_fingerprint(
                 vision_components,
                 vision_statement,

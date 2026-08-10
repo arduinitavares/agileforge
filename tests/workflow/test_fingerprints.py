@@ -105,15 +105,18 @@ def test_incomplete_vision_turn_changes_business_fact_fingerprint() -> None:
         vision_interview_turns=(
             VisionInterviewTurnFact(
                 vision_interview_turn_id=7,
-                mode="initial",
+                operation="bootstrap",
                 turn_number=1,
                 revision_intent_id=None,
+                vision_evidence_snapshot_id=11,
                 prior_turn_id=None,
-                user_text="Track the household ledger.",
+                user_text=None,
                 components={"scope": "household"},
                 vision_statement="A household ledger.",
                 is_complete=False,
-                clarifying_questions=("Which institutions?",),
+                clarifying_questions=(
+                    {"question_id": "q1", "prompt": "Which institutions?"},
+                ),
                 output_fingerprint="sha256:turn",
                 workflow_node_attempt_id=11,
                 attempt_fingerprint="sha256:attempt",

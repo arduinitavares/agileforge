@@ -95,75 +95,6 @@ class VisionComponents(BaseModel):
         )
 
 
-class VisionInterviewInput(BaseModel):
-    """All and only the host-prepared information passed to the Vision model."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    project_name: str
-    project_description: str | None
-    mode: Literal["initial", "revision"]
-    user_response: str
-    prior_components: VisionComponents | None
-    accepted_vision_statement: str | None
-
-    @classmethod
-    def normalize_user_response(cls, value: str) -> str:
-        """Apply the persisted Vision interview response boundary."""
-        return _strip_required(value, "user_response")
-
-    @field_validator("project_name", "user_response")
-    @classmethod
-    def normalize_required(cls, value: str, info: object) -> str:
-        """Reject blank required input before invoking any provider."""
-        field_name = str(getattr(info, "field_name", "value"))
-        if field_name == "user_response":
-            return cls.normalize_user_response(value)
-        return _strip_required(value, field_name)
-
-    @field_validator("project_description", "accepted_vision_statement")
-    @classmethod
-    def normalize_optional(cls, value: str | None, info: object) -> str | None:
-        """Normalize optional strings while preserving absent context."""
-        if value is None:
-            return None
-        return _strip_required(value, str(getattr(info, "field_name", "value")))
-
-
-class VisionInterviewOutput(BaseModel):
-    """Strict model result persisted as one immutable Vision interview turn."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    updated_components: VisionComponents
-    project_vision_statement: str
-    is_complete: bool
-    clarifying_questions: list[str]
-
-    @field_validator("project_vision_statement")
-    @classmethod
-    def normalize_statement(cls, value: str) -> str:
-        """Require a substantive statement on every interview turn."""
-        return _strip_required(value, "project_vision_statement")
-
-    @field_validator("clarifying_questions")
-    @classmethod
-    def normalize_questions(cls, value: list[str]) -> list[str]:
-        """Strip every question and reject blank questions individually."""
-        return [_strip_required(item, "clarifying_questions") for item in value]
-
-    @model_validator(mode="after")
-    def validate_completion(self) -> Self:
-        """Keep completion and the next human question internally coherent."""
-        if self.is_complete != self.updated_components.is_fully_defined():
-            message = "is_complete must match updated_components."
-            raise ValueError(message)
-        if not self.is_complete and not self.clarifying_questions:
-            message = "Incomplete Vision output requires a clarifying question."
-            raise ValueError(message)
-        return self
-
-
 class VisionComponentBasis(BaseModel):
     """Provenance for one non-null Vision component."""
 
@@ -512,8 +443,6 @@ __all__ = [
     "VisionComponents",
     "VisionConflict",
     "VisionDraftOutput",
-    "VisionInterviewInput",
-    "VisionInterviewOutput",
     "VisionOperationInput",
     "VisionPreflight",
     "VisionRepairInput",

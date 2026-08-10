@@ -408,6 +408,7 @@ def _goal_registry(
             authority_compile=_unused_leaf("unused_authority_compile"),
             authority_repair=_unused_leaf("unused_authority_repair"),
             vision_interview=_unused_leaf("unused_vision_interview"),
+            vision_repair=_unused_leaf("unused_vision_repair"),
             product_goal=leaf,
             backlog_generation=_unused_leaf("unused_backlog"),
             roadmap_generation=_unused_leaf("unused_roadmap"),
@@ -609,17 +610,53 @@ def test_runner_loads_vision_input_from_persisted_attempt(
         session.commit()
         assert project.project_id is not None
         project_id = project.project_id
+    evidence_item: JsonObject = {
+        "evidence_id": "project:metadata",
+        "kind": "project_metadata",
+        "relative_path": None,
+        "content_fingerprint": canonical_hash(
+            {"name": "Persisted Vision", "description": None}
+        ),
+        "trust": "operator_provided",
+        "content": {"name": "Persisted Vision", "description": None},
+        "truncated": False,
+    }
+    evidence: JsonObject = {
+        "schema_version": "agileforge.vision-evidence.v1",
+        "items": [evidence_item],
+        "warnings": [],
+        "evidence_fingerprint": canonical_hash(
+            {
+                "schema_version": "agileforge.vision-evidence.v1",
+                "items": [evidence_item],
+                "warnings": [],
+            }
+        ),
+    }
+    components: JsonObject = {
+                "project_name": "Persisted Vision",
+                "target_user": "Operators",
+                "problem": "State drift",
+                "product_category": "Tool",
+                "key_benefit": "Trust",
+                "competitors": "Spreadsheets",
+                "differentiator": "Durable facts",
+    }
     vision_response: JsonObject = {
-        "updated_components": {
-            "project_name": "Persisted Vision",
-            "target_user": "Operators",
-            "problem": "State drift",
-            "product_category": "Tool",
-            "key_benefit": "Trust",
-            "competitors": "Spreadsheets",
-            "differentiator": "Durable facts",
-        },
-        "project_vision_statement": "A trusted workflow tool.",
+        "schema_version": "agileforge.vision-draft.v1",
+        "components": components,
+        "component_basis": [
+            {
+                "component": name,
+                "source_kinds": ["evidence"],
+                "evidence_ids": ["project:metadata"],
+                "assumption_ids": [],
+            }
+            for name in components
+        ],
+        "draft_statement": "A trusted workflow tool.",
+        "assumptions": [],
+        "conflicts": [],
         "is_complete": True,
         "clarifying_questions": [],
     }
@@ -631,6 +668,7 @@ def test_runner_loads_vision_input_from_persisted_attempt(
                 name="vision_interview",
                 response=vision_response,
             ),
+            vision_repair=_unused_leaf("unused_vision_repair"),
             product_goal=_unused_leaf("unused_product_goal"),
             backlog_generation=_unused_leaf("unused_backlog"),
             roadmap_generation=_unused_leaf("unused_roadmap"),
@@ -662,25 +700,39 @@ def test_runner_loads_vision_input_from_persisted_attempt(
     def persist_then_tamper(request: TransitionRequest) -> TransitionResult:
         result = transition(request)
         if isinstance(request, StartNodeAttempt):
-            request.normalized_input["user_response"] = "Tampered in memory."
+            normalized_request = request.normalized_input.get("request")
+            if not isinstance(normalized_request, dict):
+                message = "Vision attempt input did not include a request object."
+                raise TypeError(message)
+            normalized_request["project_name"] = "Tampered"
         return result
 
     monkeypatch.setattr(domain, "transition", persist_then_tamper)
     decision = next(
         item
         for item in domain.position(project_id).decisions
-        if item.node_id == "vision.interview"
+        if item.node_id == "vision.bootstrap"
     )
 
     result = runner.run(
         decision,
-        {"mode": "initial", "user_response": "Trusted persisted answer."},
+        {
+            "request": {
+                "schema_version": "agileforge.vision-input.v1",
+                "operation": "bootstrap",
+                "project_name": "Persisted Vision",
+                "project_description": None,
+                "evidence": evidence,
+            },
+            "preflight": None,
+        },
     )
 
     assert result.ok
     with Session(engine) as session:
         turn = session.exec(select(VisionInterviewTurn)).one()
-        assert turn.user_text == "Trusted persisted answer."
+        assert turn.operation == "bootstrap"
+        assert turn.user_text is None
 
 
 def test_runner_executes_product_goal_recipe_through_record_goal_turn(
@@ -1135,6 +1187,7 @@ def test_authority_runner_executes_provider_once_before_completion_transaction(
             authority_compile=compiler_leaf,
             authority_repair=_unused_leaf("unused_authority_repair"),
             vision_interview=_unused_leaf("unused_vision_interview"),
+            vision_repair=_unused_leaf("unused_vision_repair"),
             product_goal=_unused_leaf("unused_product_goal"),
             backlog_generation=_unused_leaf("unused_backlog"),
             roadmap_generation=_unused_leaf("unused_roadmap"),

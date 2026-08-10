@@ -21,6 +21,7 @@ from models.product_definition import (
     SpecificationDecision,
     VisionArtifact,
     VisionArtifactDecision,
+    VisionEvidenceSnapshot,
     VisionInterviewTurn,
     VisionRevisionIntent,
 )
@@ -72,6 +73,50 @@ def test_public_product_definition_selection_retains_projection_state(
     assert not selection.has_conflict
 
 
+def _add_vision_evidence_snapshot(
+    session: Session,
+    project_id: int,
+    attempt_id: int,
+    *,
+    key: str,
+) -> int:
+    evidence_payload = {
+        "schema_version": "agileforge.vision-evidence.v1",
+        "items": [
+            {
+                "evidence_id": f"project:{key}",
+                "kind": "project_metadata",
+                "relative_path": None,
+                "content_fingerprint": canonical_hash(
+                    {"project_id": project_id, "key": key}
+                ),
+                "trust": "operator_provided",
+                "content": {"project_id": project_id, "key": key},
+                "truncated": False,
+            }
+        ],
+        "warnings": [],
+    }
+    snapshot = VisionEvidenceSnapshot(
+        project_id=project_id,
+        repository_binding_id=None,
+        workflow_node_attempt_id=attempt_id,
+        evidence_json=canonical_json(
+            {
+                **evidence_payload,
+                "evidence_fingerprint": canonical_hash(evidence_payload),
+            }
+        ),
+        evidence_fingerprint=canonical_hash(evidence_payload),
+        warnings_json="[]",
+        created_at=NOW,
+    )
+    session.add(snapshot)
+    session.flush()
+    assert snapshot.vision_evidence_snapshot_id is not None
+    return snapshot.vision_evidence_snapshot_id
+
+
 def _seed_lineage(
     engine: Engine,
     *,
@@ -89,7 +134,7 @@ def _seed_lineage(
         assert project.project_id is not None
         attempt = WorkflowNodeAttempt(
             project_id=project.project_id,
-            node_id="vision.interview",
+            node_id="vision.bootstrap",
             instance_key=None,
             graph_version=GRAPH_VERSION,
             fact_fingerprint="sha256:facts",
@@ -109,19 +154,29 @@ def _seed_lineage(
         session.add(attempt)
         session.flush()
         assert attempt.workflow_node_attempt_id is not None
+        snapshot_id = _add_vision_evidence_snapshot(
+            session,
+            project.project_id,
+            attempt.workflow_node_attempt_id,
+            key=f"lineage-{goal_number}",
+        )
 
         vision_components = {"purpose": "durable reads"}
         vision_turn = VisionInterviewTurn(
             project_id=project.project_id,
-            mode="initial",
+            operation="bootstrap",
             turn_number=1,
             revision_intent_id=None,
+            vision_evidence_snapshot_id=snapshot_id,
             prior_turn_id=None,
-            user_text="Define vision",
+            user_text=None,
             components_json=canonical_json(vision_components),
             vision_statement="A durable Vision.",
             is_complete=True,
             clarifying_questions_json="[]",
+            component_basis_json="[]",
+            assumptions_json="[]",
+            conflicts_json="[]",
             output_fingerprint=canonical_hash(
                 {
                     "components_json": vision_components,
@@ -145,6 +200,10 @@ def _seed_lineage(
             content_fingerprint=canonical_hash(
                 {"components": vision_components, "statement": "A durable Vision."}
             ),
+            vision_evidence_snapshot_id=snapshot_id,
+            component_basis_json="[]",
+            assumptions_json="[]",
+            conflicts_json="[]",
             supersedes_vision_artifact_id=None,
             source_interview_turn_id=vision_turn.vision_interview_turn_id,
             created_by="operator",
@@ -351,10 +410,17 @@ def _seed_interview_project(engine: Engine) -> dict[str, object]:
         session.add(attempt)
         session.flush()
         assert attempt.workflow_node_attempt_id is not None
+        snapshot_id = _add_vision_evidence_snapshot(
+            session,
+            project.project_id,
+            attempt.workflow_node_attempt_id,
+            key="interview-read",
+        )
         result = {
             "project_id": project.project_id,
             "attempt_id": attempt.workflow_node_attempt_id,
             "attempt_fingerprint": attempt.attempt_fingerprint,
+            "vision_evidence_snapshot_id": snapshot_id,
         }
         session.commit()
         return result
@@ -380,6 +446,13 @@ def _goal_components(*, complete: bool) -> JsonObject:
         "success_signals": ["Exact candidates are reviewable"],
         "boundaries": ["No mutable cache reads"] if complete else [],
     }
+
+
+def _vision_question_payload(questions: tuple[str, ...]) -> list[dict[str, str]]:
+    return [
+        {"question_id": f"q{index + 1}", "prompt": question}
+        for index, question in enumerate(questions)
+    ]
 
 
 @dataclass(frozen=True)
@@ -417,27 +490,39 @@ def _add_vision_turn(
     project_id = seeded["project_id"]
     attempt_id = seeded["attempt_id"]
     attempt_fingerprint = seeded["attempt_fingerprint"]
+    snapshot_id = seeded["vision_evidence_snapshot_id"]
     assert isinstance(project_id, int)
     assert isinstance(attempt_id, int)
     assert isinstance(attempt_fingerprint, str)
+    assert isinstance(snapshot_id, int)
+    questions = _vision_question_payload(turn_seed.questions)
+    operation = "bootstrap" if turn_seed.prior_turn_id is None else "clarification"
     with Session(engine) as session:
         turn = VisionInterviewTurn(
             project_id=project_id,
-            mode="initial",
+            operation=operation,
             turn_number=turn_seed.turn_number,
             revision_intent_id=None,
+            vision_evidence_snapshot_id=snapshot_id,
             prior_turn_id=turn_seed.prior_turn_id,
-            user_text=f"Vision answer {turn_seed.turn_number}",
+            user_text=(
+                None
+                if operation == "bootstrap"
+                else f"Vision answer {turn_seed.turn_number}"
+            ),
             components_json=canonical_json(turn_seed.components),
             vision_statement=turn_seed.statement,
             is_complete=turn_seed.is_complete,
-            clarifying_questions_json=canonical_json(list(turn_seed.questions)),
+            clarifying_questions_json=canonical_json(questions),
+            component_basis_json="[]",
+            assumptions_json="[]",
+            conflicts_json="[]",
             output_fingerprint=canonical_hash(
                 {
                     "components_json": turn_seed.components,
                     "vision_statement": turn_seed.statement,
                     "is_complete": turn_seed.is_complete,
-                    "clarifying_questions_json": list(turn_seed.questions),
+                    "clarifying_questions_json": questions,
                 }
             ),
             workflow_node_attempt_id=attempt_id,
@@ -473,7 +558,9 @@ def _seed_vision_candidate(
         ),
     )
     project_id = seeded["project_id"]
+    snapshot_id = seeded["vision_evidence_snapshot_id"]
     assert isinstance(project_id, int)
+    assert isinstance(snapshot_id, int)
     with Session(engine) as session:
         artifact = VisionArtifact(
             project_id=project_id,
@@ -483,6 +570,10 @@ def _seed_vision_candidate(
             content_fingerprint=canonical_hash(
                 {"components": components, "statement": statement}
             ),
+            vision_evidence_snapshot_id=snapshot_id,
+            component_basis_json="[]",
+            assumptions_json="[]",
+            conflicts_json="[]",
             supersedes_vision_artifact_id=None,
             source_interview_turn_id=turn_id,
             created_by="operator",
@@ -642,6 +733,7 @@ def _seed_superseded_vision_with_stale_open_intent(
     vision_id = _seeded_int(seeded, "vision_id")
     vision_fingerprint = seeded["vision_fingerprint"]
     attempt_id = _seeded_int(seeded, "attempt_id")
+    snapshot_id = _seeded_int(seeded, "vision_evidence_snapshot_id")
     attempt_fingerprint = seeded["attempt_fingerprint"]
     assert isinstance(vision_fingerprint, str)
     assert isinstance(attempt_fingerprint, str)
@@ -670,18 +762,27 @@ def _seed_superseded_vision_with_stale_open_intent(
 
         stale_components = _vision_components(complete=False)
         stale_statement = "An obsolete Vision revision interview."
-        stale_questions = ["What should the obsolete revision emphasize?"]
+        stale_questions = [
+            {
+                "question_id": "stale-q1",
+                "prompt": "What should the obsolete revision emphasize?",
+            }
+        ]
         stale_turn = VisionInterviewTurn(
             project_id=project_id,
-            mode="revision",
+            operation="revision",
             turn_number=1,
             revision_intent_id=stale_intent.vision_revision_intent_id,
+            vision_evidence_snapshot_id=snapshot_id,
             prior_turn_id=None,
             user_text="Continue revising Vision A.",
             components_json=canonical_json(stale_components),
             vision_statement=stale_statement,
             is_complete=False,
             clarifying_questions_json=canonical_json(stale_questions),
+            component_basis_json="[]",
+            assumptions_json="[]",
+            conflicts_json="[]",
             output_fingerprint=canonical_hash(
                 {
                     "components_json": stale_components,
@@ -698,15 +799,19 @@ def _seed_superseded_vision_with_stale_open_intent(
         replacement_statement = "Product teams trust the selected durable Vision."
         replacement_turn = VisionInterviewTurn(
             project_id=project_id,
-            mode="revision",
+            operation="revision",
             turn_number=1,
             revision_intent_id=replacement_intent.vision_revision_intent_id,
+            vision_evidence_snapshot_id=snapshot_id,
             prior_turn_id=None,
             user_text="Complete the selected replacement Vision.",
             components_json=canonical_json(replacement_components),
             vision_statement=replacement_statement,
             is_complete=True,
             clarifying_questions_json="[]",
+            component_basis_json="[]",
+            assumptions_json="[]",
+            conflicts_json="[]",
             output_fingerprint=canonical_hash(
                 {
                     "components_json": replacement_components,
@@ -736,6 +841,10 @@ def _seed_superseded_vision_with_stale_open_intent(
                     "statement": replacement_statement,
                 }
             ),
+            vision_evidence_snapshot_id=snapshot_id,
+            component_basis_json="[]",
+            assumptions_json="[]",
+            conflicts_json="[]",
             supersedes_vision_artifact_id=vision_id,
             source_interview_turn_id=replacement_turn.vision_interview_turn_id,
             created_by="operator",
@@ -910,27 +1019,28 @@ def test_incomplete_vision_turn_exposes_exact_transcript_and_questions(
     assert data["transcript"] == [
         {
             "vision_interview_turn_id": turn_id,
-            "mode": "initial",
+            "operation": "bootstrap",
             "turn_number": 1,
             "revision_intent_id": None,
+            "vision_evidence_snapshot_id": seeded["vision_evidence_snapshot_id"],
             "prior_turn_id": None,
-            "user_text": "Vision answer 1",
+            "user_text": None,
             "statement": statement,
             "components": components,
             "is_complete": False,
-            "clarifying_questions": list(questions),
+            "clarifying_questions": _vision_question_payload(questions),
             "output_fingerprint": canonical_hash(
                 {
                     "components_json": components,
                     "vision_statement": statement,
                     "is_complete": False,
-                    "clarifying_questions_json": list(questions),
+                    "clarifying_questions_json": _vision_question_payload(questions),
                 }
             ),
             "recorded_at": _stored_iso(NOW),
         }
     ]
-    assert data["latest_questions"] == list(questions)
+    assert data["latest_questions"] == _vision_question_payload(questions)
     assert data["candidate"] is None
     assert data["review"] is None
 
@@ -1007,7 +1117,7 @@ def test_vision_feedback_keeps_reviewed_candidate_separate_from_revision_chain(
     assert [_json_object(item)["vision_interview_turn_id"] for item in transcript] == [
         revision_turn_id
     ]
-    assert data["latest_questions"] == list(questions)
+    assert data["latest_questions"] == _vision_question_payload(questions)
 
 
 def test_accepted_vision_has_current_artifact_and_no_pending_candidate(
@@ -1374,7 +1484,9 @@ def test_ambiguous_vision_leaf_fails_closed_with_typed_stale_reason(
         ),
     )
     project_id = seeded["project_id"]
+    snapshot_id = seeded["vision_evidence_snapshot_id"]
     assert isinstance(project_id, int)
+    assert isinstance(snapshot_id, int)
     with Session(engine) as session:
         session.add(
             VisionArtifact(
@@ -1385,6 +1497,10 @@ def test_ambiguous_vision_leaf_fails_closed_with_typed_stale_reason(
                 content_fingerprint=canonical_hash(
                     {"components": components, "statement": statement}
                 ),
+                vision_evidence_snapshot_id=snapshot_id,
+                component_basis_json="[]",
+                assumptions_json="[]",
+                conflicts_json="[]",
                 supersedes_vision_artifact_id=None,
                 source_interview_turn_id=turn_id,
                 created_by="operator",

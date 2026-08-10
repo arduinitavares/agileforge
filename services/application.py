@@ -57,7 +57,6 @@ from services.contracts.sprint import (
     SprintPlannerStory,
 )
 from services.contracts.story import UserStoryWriterInput, UserStoryWriterOutput
-from services.contracts.vision import VisionInterviewInput
 from services.node_attempt_replay import (
     DurableNodeAttemptReplayService,
     DurableTransitionReplayService,
@@ -83,7 +82,7 @@ from services.sprint_selection import (
 from services.story_linkage import normalize_requirement_key
 from services.story_rank import parse_story_rank, story_rank_is_valid
 from services.story_runtime import build_story_input_context
-from services.vision_interview_input import VisionInterviewInputService
+from services.vision_input import VisionInputService
 from utils.model_config import get_model_id
 from utils.spec_schemas import ValidationEvidence
 from workflow.contracts import (
@@ -180,8 +179,8 @@ class WorkflowDomainPort(Protocol):
         ...
 
 
-class _VisionInterviewInputPort(Protocol):
-    """Host preparation for a Project Vision interview turn."""
+class _VisionInputPort(Protocol):
+    """Host preparation for Project Vision bootstrap and clarification."""
 
     def replay(self, query: NodeAttemptReplayQuery) -> TransitionResult | None: ...
 
@@ -190,7 +189,13 @@ class _VisionInterviewInputPort(Protocol):
         query: TransitionReplayQuery,
     ) -> TransitionResult | None: ...
 
-    def build(
+    def build_bootstrap(
+        self,
+        project_id: int,
+        decision: NodeDecision,
+    ) -> JsonObject: ...
+
+    def build_clarification(
         self,
         project_id: int,
         decision: NodeDecision,
@@ -1085,7 +1090,7 @@ class ProductGoalLifecycleServices:
 class _LifecycleServiceOptions(TypedDict, total=False):
     """Optional host-preparation services accepted by the application boundary."""
 
-    vision_interview_input: _VisionInterviewInputPort | None
+    vision_input: _VisionInputPort | None
     product_goal_services: ProductGoalLifecycleServices | None
     authority_compilation_input: _AuthorityCompilationInputPort | None
     authority_review_selection: _AuthorityReviewSelectionPort | None
@@ -1453,6 +1458,15 @@ class VisionInterviewRequest(FrozenModel):
     correlation_id: str | None = None
 
 
+class VisionBootstrapRequest(FrozenModel):
+    """Transport metadata for one host-prepared Vision bootstrap attempt."""
+
+    project_id: int
+    idempotency_key: str = Field(min_length=1)
+    actor: str = Field(min_length=1)
+    correlation_id: str | None = None
+
+
 class VisionResponseRequest(FrozenModel):
     """Semantic caller input for one Project Vision interview turn."""
 
@@ -1659,7 +1673,7 @@ class AgileForgeApplication:
         self._workflow_domain = workflow_domain
         self._recipe_registry = recipe_registry
         self._read_projection = read_projection
-        self._vision_interview_input = lifecycle_services.get("vision_interview_input")
+        self._vision_input = lifecycle_services.get("vision_input")
         self._product_goal_services = lifecycle_services.get("product_goal_services")
         self._authority_compilation_input = lifecycle_services.get(
             "authority_compilation_input"
@@ -2632,7 +2646,7 @@ class AgileForgeApplication:
         request: VisionResponseRequest,
     ) -> TransitionResult:
         """Resolve the current Vision interview guards from one position read."""
-        input_service = self._vision_interview_input
+        input_service = self._vision_input
         if input_service is None:
             message = "Vision interview requires an injected input builder."
             raise RuntimeError(message)
@@ -2646,7 +2660,7 @@ class AgileForgeApplication:
                 idempotency_key=request.idempotency_key,
                 actor=request.actor,
                 correlation_id=request.correlation_id,
-                user_text=VisionInterviewInput.normalize_user_response(request.text),
+                user_text=request.text.strip(),
             )
         )
         if replay is not None:
@@ -2684,6 +2698,47 @@ class AgileForgeApplication:
             check_replay=False,
         )
 
+    def bootstrap_vision(self, request: VisionBootstrapRequest) -> TransitionResult:
+        """Run one explicit host-prepared Project Vision bootstrap generation."""
+        input_service = self._vision_input
+        if input_service is None:
+            message = "Vision bootstrap requires an injected input builder."
+            raise RuntimeError(message)
+        replay = input_service.replay(
+            NodeAttemptReplayQuery(
+                project_id=request.project_id,
+                graph_version=None,
+                fact_fingerprint=None,
+                decision_fingerprint=None,
+                node_id="vision.bootstrap",
+                idempotency_key=request.idempotency_key,
+                actor=request.actor,
+                correlation_id=request.correlation_id,
+                user_text=None,
+            )
+        )
+        if replay is not None:
+            return replay
+        position = self.position(project_id=request.project_id)
+        decision = _unique_available_decision(position, "vision.bootstrap")
+        if decision is None or decision.category is not NodeCategory.AVAILABLE:
+            return _transition_not_available(position, "vision.bootstrap")
+        input_payload = input_service.build_bootstrap(request.project_id, decision)
+        return self.run_agentic_action(
+            AgenticActionRequest(
+                project_id=request.project_id,
+                graph_version=position.graph_version,
+                fact_fingerprint=position.fact_fingerprint,
+                decision_fingerprint=decision.decision_fingerprint,
+                node_id="vision.bootstrap",
+                input_payload=input_payload,
+                model_id=get_model_id(AGENTIC_MODEL_ROLES["vision.bootstrap"]),
+                idempotency_key=request.idempotency_key,
+                actor=request.actor,
+                correlation_id=request.correlation_id,
+            )
+        )
+
     def _run_vision_interview_at_position(
         self,
         request: VisionInterviewRequest,
@@ -2692,7 +2747,7 @@ class AgileForgeApplication:
         check_replay: bool = True,
     ) -> TransitionResult:
         node_id = "vision.interview"
-        input_service = self._vision_interview_input
+        input_service = self._vision_input
         if input_service is None:
             message = "Vision interview requires an injected input builder."
             raise RuntimeError(message)
@@ -2702,7 +2757,7 @@ class AgileForgeApplication:
         decision = _guarded_vision_interview_decision(position, request)
         if decision is None:
             return _stale_vision_interview(position)
-        input_payload = input_service.build(
+        input_payload = input_service.build_clarification(
             project_id=request.project_id,
             decision=decision,
             user_text=request.user_text,
@@ -2726,7 +2781,7 @@ class AgileForgeApplication:
         self,
         request: VisionInterviewRequest,
     ) -> TransitionResult | None:
-        input_service = self._vision_interview_input
+        input_service = self._vision_input
         if input_service is None:
             message = "Vision interview requires an injected input builder."
             raise RuntimeError(message)
@@ -2740,15 +2795,13 @@ class AgileForgeApplication:
                 idempotency_key=request.idempotency_key,
                 actor=request.actor,
                 correlation_id=request.correlation_id,
-                user_text=VisionInterviewInput.normalize_user_response(
-                    request.user_text
-                ),
+                user_text=request.user_text.strip(),
             )
         )
 
     def review_vision(self, request: VisionReviewRequest) -> TransitionResult:
         """Prepare exact pending Vision identity internally before review."""
-        input_service = self._vision_interview_input
+        input_service = self._vision_input
         if input_service is not None:
             replay = input_service.replay_transition(
                 TransitionReplayQuery(
@@ -2798,7 +2851,7 @@ class AgileForgeApplication:
         request: VisionRevisionRequest,
     ) -> TransitionResult:
         """Prepare the accepted Vision identity internally before revision start."""
-        input_service = self._vision_interview_input
+        input_service = self._vision_input
         if input_service is not None:
             replay = input_service.replay_transition(
                 TransitionReplayQuery(
@@ -4424,12 +4477,17 @@ def production_application() -> AgileForgeApplication:
         "BaseAgent",
         vars(import_module("adapters.adk.agents.product_goal"))["root_agent"],
     )
+    vision_repair_agent = cast(
+        "BaseAgent",
+        vars(import_module("adapters.adk.agents.vision"))["repair_agent"],
+    )
     graph = project_graph()
     registry = build_agentic_recipe_registry(
         nodes=AgenticRecipeNodes(
             authority_compile=build_spec_authority_compiler_agent(),
             authority_repair=build_spec_authority_compiler_agent(),
             vision_interview=vision_interview_agent,
+            vision_repair=vision_repair_agent,
             product_goal=product_goal_interview_agent,
             backlog_generation=backlog_agent,
             roadmap_generation=roadmap_agent,
@@ -4451,7 +4509,10 @@ def production_application() -> AgileForgeApplication:
         workflow_domain=domain,
         recipe_registry=registry,
         read_projection=DurableReadProjectionService(engine=engine),
-        vision_interview_input=VisionInterviewInputService(engine=engine),
+        vision_input=VisionInputService(
+            engine=engine,
+            repository_probe=GitPythonRepositoryProbe(),
+        ),
         product_goal_services=ProductGoalLifecycleServices(
             interview_input=ProductGoalInterviewInputService(engine=engine),
             discovery_selection=ProductDiscoverySelectionService(engine=engine),
@@ -4519,6 +4580,7 @@ __all__ = [
     "StoryReadinessRepair",
     "StoryReadinessRepairRequest",
     "StoryReviewRequest",
+    "VisionBootstrapRequest",
     "VisionInterviewRequest",
     "VisionResponseRequest",
     "VisionReviewRequest",

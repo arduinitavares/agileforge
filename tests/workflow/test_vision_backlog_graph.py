@@ -92,6 +92,7 @@ def _snapshot(
         components={},
         statement="Reliable delivery decisions.",
         content_fingerprint=PRODUCT_VISION_FINGERPRINT,
+        vision_evidence_snapshot_id=1,
         supersedes_vision_artifact_id=None,
         source_interview_turn_id=1,
         created_by="operator@example.com",

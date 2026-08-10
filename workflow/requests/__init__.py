@@ -45,6 +45,7 @@ from workflow.requests.project import (
 from workflow.requests.vision import (
     BeginVisionRevision,
     DecideVisionReview,
+    GenerateVisionBootstrap,
     RecordVisionInterviewTurn,
 )
 
@@ -55,6 +56,7 @@ type TransitionRequest = (
     | DecideAuthority
     | RecordAuthorityFeedback
     | RepairAuthority
+    | GenerateVisionBootstrap
     | RecordVisionInterviewTurn
     | DecideVisionReview
     | BeginVisionRevision
@@ -104,6 +106,7 @@ __all__ = [
     "DecideVisionReview",
     "FailNodeAttempt",
     "FulfillProductGoal",
+    "GenerateVisionBootstrap",
     "RecordAuthorityFeedback",
     "RecordBacklogDraft",
     "RecordDiscoveryArtifact",

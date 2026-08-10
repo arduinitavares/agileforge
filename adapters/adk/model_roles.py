@@ -8,11 +8,12 @@ from typing import Final
 from workflow.definitions.root import ROOT_GRAPH
 
 AGENTIC_MODEL_ROLES: Final[MappingProxyType[str, str]] = MappingProxyType(
-    {
-        "authority.compile": "spec_authority_compiler",
-        "authority.repair": "spec_authority_compiler",
-        "vision.interview": "product_vision",
-        "goal.interview": "product_goal",
+        {
+            "authority.compile": "spec_authority_compiler",
+            "authority.repair": "spec_authority_compiler",
+            "vision.bootstrap": "product_vision",
+            "vision.interview": "product_vision",
+            "goal.interview": "product_goal",
         "backlog.generate": "backlog_primer",
         "planning.roadmap.generate": "roadmap_builder",
         "planning.story.generate": "user_story_writer",

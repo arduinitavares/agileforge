@@ -168,14 +168,9 @@ def _vision_review_selection(
             or source.content_fingerprint != intent.source_vision_fingerprint
         ):
             return None
-        completed = any(
-            turn.mode == "revision"
-            and turn.revision_intent_id == intent.vision_revision_intent_id
-            and any(
-                artifact_item.source_interview_turn_id == turn.vision_interview_turn_id
-                for artifact_item in snapshot.vision_artifacts
-            )
-            for turn in snapshot.vision_interview_turns
+        completed = _vision_revision_completed(
+            snapshot,
+            revision_intent_id=intent.vision_revision_intent_id,
         )
         if not completed:
             open_intents.append(intent)
@@ -198,6 +193,35 @@ def _vision_review_selection(
     return _VisionReviewSelection(artifact, decision, open_revision)
 
 
+def _vision_revision_completed(
+    snapshot: WorkflowFactSnapshot,
+    *,
+    revision_intent_id: int,
+) -> bool:
+    """Return whether any turn in a revision chain produced a Vision artifact."""
+    source_turn_ids = {
+        item.source_interview_turn_id for item in snapshot.vision_artifacts
+    }
+    return any(
+        turn.revision_intent_id == revision_intent_id
+        and turn.vision_interview_turn_id in source_turn_ids
+        for turn in snapshot.vision_interview_turns
+    )
+
+
+def _active_revision_turns(
+    snapshot: WorkflowFactSnapshot,
+    revision_intent_id: int,
+) -> tuple[VisionInterviewTurnFact, ...]:
+    """Return every interview turn in the open revision chain."""
+    return tuple(
+        item
+        for item in snapshot.vision_interview_turns
+        if item.revision_intent_id == revision_intent_id
+        and item.operation in {"revision", "clarification"}
+    )
+
+
 def _vision_transcript(
     snapshot: WorkflowFactSnapshot,
     review: _VisionReviewSelection,
@@ -210,18 +234,18 @@ def _vision_transcript(
         item.source_interview_turn_id for item in snapshot.vision_artifacts
     )
     if open_revision is not None:
-        turns = tuple(
-            item
-            for item in snapshot.vision_interview_turns
-            if item.mode == "revision"
-            and item.revision_intent_id == open_revision.vision_revision_intent_id
+        transcript = _vision_turn_chain(
+            _active_revision_turns(
+                snapshot,
+                open_revision.vision_revision_intent_id,
+            )
         )
-        transcript = _vision_turn_chain(turns)
     elif artifact is None:
         turns = tuple(
             item
             for item in snapshot.vision_interview_turns
-            if item.mode == "initial" and item.revision_intent_id is None
+            if item.operation in {"bootstrap", "clarification"}
+            and item.revision_intent_id is None
         )
         transcript = _vision_turn_chain(turns)
     elif decision is None:
@@ -238,8 +262,9 @@ def _vision_transcript(
         turns = tuple(
             item
             for item in snapshot.vision_interview_turns
-            if (item.mode, item.revision_intent_id)
-            == (source_turn.mode, source_turn.revision_intent_id)
+            if item.vision_evidence_snapshot_id
+            == source_turn.vision_evidence_snapshot_id
+            and item.revision_intent_id == source_turn.revision_intent_id
         )
         transcript = _vision_turn_chain(
             turns,
@@ -251,7 +276,8 @@ def _vision_transcript(
         turns = tuple(
             item
             for item in snapshot.vision_interview_turns
-            if item.mode == "initial" and item.revision_intent_id is None
+            if item.operation in {"bootstrap", "clarification"}
+            and item.revision_intent_id is None
         )
         transcript = _vision_turn_chain(
             turns,
@@ -304,12 +330,11 @@ def _interview_instance_key(
     revision: VisionRevisionIntentFact | None,
 ) -> str | None:
     """Advance the attempt instance after each persisted interview turn."""
-    mode = "revision" if revision is not None else "initial"
     revision_id = None if revision is None else revision.vision_revision_intent_id
     turns = tuple(
         item
         for item in snapshot.vision_interview_turns
-        if item.mode == mode and item.revision_intent_id == revision_id
+        if item.revision_intent_id == revision_id
     )
     if not turns:
         if revision is None:
@@ -318,50 +343,178 @@ def _interview_instance_key(
     return f"after-turn:{max(item.vision_interview_turn_id for item in turns)}"
 
 
+def _latest_vision_evidence_stale_failure(
+    snapshot: WorkflowFactSnapshot,
+    *,
+    instance_key: str | None,
+) -> bool:
+    """Return whether the current clarification attempt failed on stale evidence."""
+    attempts = tuple(
+        item
+        for item in snapshot.node_attempts
+        if item.node_id == "vision.interview"
+        and item.instance_key == instance_key
+        and item.outcome == "failure"
+    )
+    if not attempts:
+        return False
+    latest = max(attempts, key=lambda item: item.attempt_id)
+    return latest.failure_code == "VISION_EVIDENCE_STALE"
+
+
+def _interview_rule_for_revision(
+    state: VisionInterviewState,
+    instance_key: str | None,
+) -> tuple[RuleEvaluation, ...]:
+    """Route clarification for an active revision lineage."""
+    if not state.transcript:
+        return (
+            RuleEvaluation(RuleCategory.SATISFIED, "VISION_BOOTSTRAP_REQUIRED"),
+        )
+    if state.open_revision is None:
+        message = "Revision interview routing requires an open revision intent."
+        raise RuntimeError(message)
+    return (
+        RuleEvaluation(
+            RuleCategory.AVAILABLE,
+            "VISION_REVISION_INTERVIEW_REQUIRED",
+            instance_key=instance_key,
+            fact_references=(_interview_reference(state.open_revision),),
+        ),
+    )
+
+
+def _interview_rule_for_candidate(
+    state: VisionInterviewState,
+    instance_key: str | None,
+) -> tuple[RuleEvaluation, ...]:
+    """Route bootstrap-derived draft clarification or review."""
+    if not state.transcript:
+        return (
+            RuleEvaluation(RuleCategory.SATISFIED, "VISION_BOOTSTRAP_REQUIRED"),
+        )
+    latest = state.transcript[-1]
+    if latest.is_complete:
+        return (RuleEvaluation(RuleCategory.SATISFIED, "VISION_REVIEW_PENDING"),)
+    return (
+        RuleEvaluation(
+            RuleCategory.AVAILABLE,
+            "VISION_CLARIFICATION_REQUIRED",
+            instance_key=instance_key,
+        ),
+    )
+
+
+def _interview_rule_for_review(
+    state: VisionInterviewState,
+    instance_key: str | None,
+) -> tuple[RuleEvaluation, ...]:
+    """Route accepted and returned Vision artifact states."""
+    if state.decision is None:
+        return (RuleEvaluation(RuleCategory.SATISFIED, "VISION_REVIEW_PENDING"),)
+    if state.decision.decision not in {"feedback", "rejected"}:
+        return (RuleEvaluation(RuleCategory.SATISFIED, "VISION_ACCEPTED"),)
+    if state.artifact is None:
+        message = "Vision review recovery requires an artifact."
+        raise RuntimeError(message)
+    return (
+        RuleEvaluation(
+            RuleCategory.AVAILABLE,
+            "VISION_REVISION_REQUIRED",
+            instance_key=instance_key,
+            fact_references=(
+                _reference(
+                    "vision",
+                    state.artifact.vision_artifact_id,
+                    state.artifact.content_fingerprint,
+                ),
+            ),
+            recommendation_kind=RecommendationKind.RECOVERY,
+        ),
+    )
+
+
+def _interview_rule_for_state(
+    state: VisionInterviewState,
+    instance_key: str | None,
+) -> tuple[RuleEvaluation, ...]:
+    """Select the current Vision interview route after common guards."""
+    if state.open_revision is not None:
+        return _interview_rule_for_revision(state, instance_key)
+    if state.artifact is None:
+        return _interview_rule_for_candidate(state, instance_key)
+    return _interview_rule_for_review(state, instance_key)
+
+
 def _vision_interview_rule(
     snapshot: WorkflowFactSnapshot,
     _evaluated_at: datetime,
 ) -> tuple[RuleEvaluation, ...]:
-    """Offer only the isolated human Vision interview lifecycle."""
+    """Offer clarification only after a bootstrap draft exists."""
     state = select_vision_interview_state(snapshot)
     if state.conflict:
         return (RuleEvaluation(RuleCategory.INVALID, "WORKFLOW_FACT_CONFLICT"),)
+    instance_key = _interview_instance_key(snapshot, state.open_revision)
+    if _latest_vision_evidence_stale_failure(snapshot, instance_key=instance_key):
+        return (RuleEvaluation(RuleCategory.SATISFIED, "VISION_BOOTSTRAP_REQUIRED"),)
+    return _interview_rule_for_state(state, instance_key)
+
+
+def _bootstrap_rule_for_state(
+    state: VisionInterviewState,
+) -> tuple[RuleEvaluation, ...]:
+    """Select normal bootstrap availability after common recovery guards."""
     if state.open_revision is not None:
+        if state.transcript:
+            return (RuleEvaluation(RuleCategory.SATISFIED, "VISION_REVISION_ACTIVE"),)
         return (
             RuleEvaluation(
                 RuleCategory.AVAILABLE,
-                "VISION_REVISION_INTERVIEW_REQUIRED",
-                instance_key=_interview_instance_key(snapshot, state.open_revision),
+                "VISION_REVISION_BOOTSTRAP_REQUIRED",
+                instance_key=f"revision:{state.open_revision.vision_revision_intent_id}",
                 fact_references=(_interview_reference(state.open_revision),),
             ),
         )
-    if state.artifact is None:
+    if state.artifact is None and not state.transcript:
         return (
             RuleEvaluation(
                 RuleCategory.AVAILABLE,
-                "VISION_INTERVIEW_REQUIRED",
-                instance_key=_interview_instance_key(snapshot, None),
+                "VISION_BOOTSTRAP_REQUIRED",
             ),
         )
-    if state.decision is None:
-        return (RuleEvaluation(RuleCategory.SATISFIED, "VISION_REVIEW_PENDING"),)
-    if state.decision.decision in {"feedback", "rejected"}:
+    if state.decision is not None and state.decision.decision in {
+        "feedback",
+        "rejected",
+    }:
+        return (
+            RuleEvaluation(RuleCategory.SATISFIED, "VISION_CLARIFICATION_REQUIRED"),
+        )
+    return (RuleEvaluation(RuleCategory.SATISFIED, "VISION_BOOTSTRAP_NOT_REQUIRED"),)
+
+
+def _vision_bootstrap_rule(
+    snapshot: WorkflowFactSnapshot,
+    _evaluated_at: datetime,
+) -> tuple[RuleEvaluation, ...]:
+    """Offer explicit context-grounded generation before clarification."""
+    state = select_vision_interview_state(snapshot)
+    if state.conflict:
+        return (RuleEvaluation(RuleCategory.INVALID, "WORKFLOW_FACT_CONFLICT"),)
+    instance_key = _interview_instance_key(snapshot, state.open_revision)
+    if _latest_vision_evidence_stale_failure(snapshot, instance_key=instance_key):
         return (
             RuleEvaluation(
                 RuleCategory.AVAILABLE,
-                "VISION_REVISION_REQUIRED",
-                instance_key=_interview_instance_key(snapshot, None),
-                fact_references=(
-                    _reference(
-                        "vision",
-                        state.artifact.vision_artifact_id,
-                        state.artifact.content_fingerprint,
-                    ),
+                "VISION_EVIDENCE_STALE",
+                instance_key=(
+                    None
+                    if state.open_revision is None
+                    else f"revision:{state.open_revision.vision_revision_intent_id}"
                 ),
                 recommendation_kind=RecommendationKind.RECOVERY,
             ),
         )
-    return (RuleEvaluation(RuleCategory.SATISFIED, "VISION_ACCEPTED"),)
+    return _bootstrap_rule_for_state(state)
 
 
 def _vision_interview_review_rule(
@@ -421,12 +574,24 @@ def _vision_revision_start_rule(
 
 VISION_INTERVIEW_NODES: tuple[NodeSpec, ...] = (
     NodeSpec(
+        node_id="vision.bootstrap",
+        child_graph_id="vision",
+        request_kind="generate_vision_bootstrap",
+        recommendation_kind=RecommendationKind.REQUIRED,
+        required_inputs=(),
+        evaluate_rule=_vision_bootstrap_rule,
+        agentic_execution=AgenticExecutionSpec(
+            active_reason="VISION_BOOTSTRAP_ACTIVE",
+            failure_reason="VISION_BOOTSTRAP_FAILED",
+            recovery_reason="VISION_BOOTSTRAP_RECOVERY_REQUIRED",
+        ),
+    ),
+    NodeSpec(
         node_id="vision.interview",
         child_graph_id="vision",
         request_kind="record_vision_interview_turn",
         recommendation_kind=RecommendationKind.REQUIRED,
         required_inputs=(
-            InputField(name="mode", value_type="string"),
             InputField(name="user_text", value_type="string"),
         ),
         evaluate_rule=_vision_interview_rule,

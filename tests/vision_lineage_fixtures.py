@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from models.product_definition import (
     VisionArtifact,
     VisionArtifactDecision,
+    VisionEvidenceSnapshot,
     VisionInterviewTurn,
     VisionRevisionIntent,
 )
@@ -26,6 +27,50 @@ def _required(value: int | None, label: str) -> int:
     return value
 
 
+def _snapshot(
+    session: Session,
+    *,
+    project_id: int,
+    attempt_id: int,
+    timestamp: datetime,
+) -> VisionEvidenceSnapshot:
+    evidence_item: JsonObject = {
+        "evidence_id": "project:metadata",
+        "kind": "project_metadata",
+        "relative_path": None,
+        "content_fingerprint": canonical_hash(
+            {"name": "Vision fixture", "description": None}
+        ),
+        "trust": "operator_provided",
+        "content": {"name": "Vision fixture", "description": None},
+        "truncated": False,
+    }
+    evidence: JsonObject = {
+        "schema_version": "agileforge.vision-evidence.v1",
+        "items": [evidence_item],
+        "warnings": [],
+        "evidence_fingerprint": canonical_hash(
+            {
+                "schema_version": "agileforge.vision-evidence.v1",
+                "items": [evidence_item],
+                "warnings": [],
+            }
+        ),
+    }
+    row = VisionEvidenceSnapshot(
+        project_id=project_id,
+        repository_binding_id=None,
+        workflow_node_attempt_id=attempt_id,
+        evidence_json=canonical_json(evidence),
+        evidence_fingerprint=str(evidence["evidence_fingerprint"]),
+        warnings_json="[]",
+        created_at=timestamp,
+    )
+    session.add(row)
+    session.flush()
+    return row
+
+
 def seed_accepted_vision(
     session: Session,
     *,
@@ -39,7 +84,7 @@ def seed_accepted_vision(
     attempt_fingerprint = f"sha256:vision-fixture-{project_id}-{version_number}"
     attempt = WorkflowNodeAttempt(
         project_id=project_id,
-        node_id="vision.interview",
+        node_id="vision.bootstrap",
         instance_key=None,
         graph_version=GRAPH_VERSION,
         fact_fingerprint=f"sha256:vision-facts-{project_id}-{version_number}",
@@ -60,17 +105,30 @@ def seed_accepted_vision(
     )
     session.add(attempt)
     session.flush()
+    snapshot = _snapshot(
+        session,
+        project_id=project_id,
+        attempt_id=_required(attempt.workflow_node_attempt_id, "Vision attempt"),
+        timestamp=timestamp,
+    )
     turn = VisionInterviewTurn(
         project_id=project_id,
-        mode="initial",
+        operation="bootstrap",
         turn_number=version_number,
         revision_intent_id=None,
+        vision_evidence_snapshot_id=_required(
+            snapshot.vision_evidence_snapshot_id,
+            "Vision evidence snapshot",
+        ),
         prior_turn_id=None,
-        user_text="Define the durable Project Vision.",
+        user_text=None,
         components_json=canonical_json(components),
         vision_statement=statement,
         is_complete=True,
         clarifying_questions_json="[]",
+        component_basis_json="[]",
+        assumptions_json="[]",
+        conflicts_json="[]",
         output_fingerprint=canonical_hash(
             {
                 "components_json": components,
@@ -96,6 +154,13 @@ def seed_accepted_vision(
         content_fingerprint=canonical_hash(
             {"components": components, "statement": statement}
         ),
+        vision_evidence_snapshot_id=_required(
+            snapshot.vision_evidence_snapshot_id,
+            "Vision evidence snapshot",
+        ),
+        component_basis_json="[]",
+        assumptions_json="[]",
+        conflicts_json="[]",
         supersedes_vision_artifact_id=None,
         source_interview_turn_id=_required(
             turn.vision_interview_turn_id,
@@ -153,7 +218,7 @@ def seed_accepted_vision_revision(
     session.flush()
     attempt = WorkflowNodeAttempt(
         project_id=project_id,
-        node_id="vision.interview",
+        node_id="vision.bootstrap",
         instance_key=None,
         graph_version=GRAPH_VERSION,
         fact_fingerprint=f"sha256:vision-facts-{project_id}-{version_number}",
@@ -174,13 +239,23 @@ def seed_accepted_vision_revision(
     )
     session.add(attempt)
     session.flush()
+    snapshot = _snapshot(
+        session,
+        project_id=project_id,
+        attempt_id=_required(attempt.workflow_node_attempt_id, "Vision attempt"),
+        timestamp=timestamp,
+    )
     turn = VisionInterviewTurn(
         project_id=project_id,
-        mode="revision",
+        operation="revision",
         turn_number=1,
         revision_intent_id=_required(
             revision.vision_revision_intent_id,
             "Vision revision intent",
+        ),
+        vision_evidence_snapshot_id=_required(
+            snapshot.vision_evidence_snapshot_id,
+            "Vision evidence snapshot",
         ),
         prior_turn_id=None,
         user_text="Refine the durable Project Vision.",
@@ -188,6 +263,9 @@ def seed_accepted_vision_revision(
         vision_statement=statement,
         is_complete=True,
         clarifying_questions_json="[]",
+        component_basis_json="[]",
+        assumptions_json="[]",
+        conflicts_json="[]",
         output_fingerprint=canonical_hash(
             {
                 "components_json": components,
@@ -213,6 +291,13 @@ def seed_accepted_vision_revision(
         content_fingerprint=canonical_hash(
             {"components": components, "statement": statement}
         ),
+        vision_evidence_snapshot_id=_required(
+            snapshot.vision_evidence_snapshot_id,
+            "Vision evidence snapshot",
+        ),
+        component_basis_json="[]",
+        assumptions_json="[]",
+        conflicts_json="[]",
         supersedes_vision_artifact_id=prior_id,
         source_interview_turn_id=_required(
             turn.vision_interview_turn_id,

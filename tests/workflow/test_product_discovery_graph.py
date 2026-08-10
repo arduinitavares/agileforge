@@ -40,6 +40,7 @@ def _snapshot(
         components={},
         statement="Vision",
         content_fingerprint="vision",
+        vision_evidence_snapshot_id=1,
         supersedes_vision_artifact_id=None,
         source_interview_turn_id=1,
         created_by="operator",

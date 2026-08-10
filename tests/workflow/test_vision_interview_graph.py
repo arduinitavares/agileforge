@@ -40,6 +40,10 @@ def _artifact(identifier: int = 1, parent: int | None = None) -> VisionArtifactF
         components=COMPONENTS,
         statement="A durable Vision.",
         content_fingerprint=f"sha256:vision-{identifier}",
+        vision_evidence_snapshot_id=identifier,
+        component_basis=(),
+        assumptions=(),
+        conflicts=(),
         supersedes_vision_artifact_id=parent,
         source_interview_turn_id=identifier,
         created_by="operator@example.com",
@@ -65,20 +69,43 @@ def _decision(
 
 
 def _turn(
-    *, complete: bool, mode: str = "initial", intent: int | None = None
+    *,
+    complete: bool,
+    operation: str = "bootstrap",
+    intent: int | None = None,
+    identifier: int = 1,
 ) -> VisionInterviewTurnFact:
     return VisionInterviewTurnFact.model_validate(
         {
-            "vision_interview_turn_id": 1,
-            "mode": mode,
-            "turn_number": 1,
+            "vision_interview_turn_id": identifier,
+            "operation": operation,
+            "turn_number": identifier,
             "revision_intent_id": intent,
-            "prior_turn_id": None,
-            "user_text": "Build a trusted workflow tool.",
+            "vision_evidence_snapshot_id": 1,
+            "prior_turn_id": None if identifier == 1 else identifier - 1,
+            "user_text": (
+                None
+                if operation == "bootstrap"
+                else "Build a trusted workflow tool."
+            ),
             "components": COMPONENTS,
             "vision_statement": "A durable Vision.",
             "is_complete": complete,
-            "clarifying_questions": [] if complete else ["Who is the user?"],
+            "clarifying_questions": (
+                []
+                if complete
+                else [
+                    {
+                        "question_id": "question:user",
+                        "text": "Who is the user?",
+                        "affected_components": ["target_user"],
+                        "conflict_ids": [],
+                    }
+                ]
+            ),
+            "component_basis": (),
+            "assumptions": (),
+            "conflicts": (),
             "output_fingerprint": "sha256:turn",
             "workflow_node_attempt_id": 1,
             "attempt_fingerprint": "sha256:attempt",
@@ -107,11 +134,12 @@ def _node(position: WorkflowPosition, node_id: str) -> NodeDecision:
     return next(item for item in position.decisions if item.node_id == node_id)
 
 
-def test_new_project_exposes_only_the_vision_interview_without_authority() -> None:
+def test_new_project_exposes_only_the_vision_bootstrap_without_authority() -> None:
     """Vision begins from Project identity rather than authority or discovery."""
     position = _position()
 
-    assert "vision.interview" in position.available_nodes
+    assert "vision.bootstrap" in position.available_nodes
+    assert "vision.interview" not in position.available_nodes
     assert "goal.interview" not in position.available_nodes
     assert all("discovery" not in node_id for node_id in position.available_nodes)
 
@@ -206,7 +234,7 @@ def test_resolved_goal_allows_revision_and_trace_rows_do_not_change_position() -
 
 
 def test_open_revision_requires_a_revision_interview() -> None:
-    """A revision intent changes only the Vision interview mode and parent."""
+    """A revision intent starts with a new grounded bootstrap generation."""
     intent = VisionRevisionIntentFact(
         vision_revision_intent_id=2,
         source_vision_artifact_id=1,
@@ -223,6 +251,6 @@ def test_open_revision_requires_a_revision_interview() -> None:
     )
 
     assert (
-        _node(position, "vision.interview").reason_code
-        == "VISION_REVISION_INTERVIEW_REQUIRED"
+        _node(position, "vision.bootstrap").reason_code
+        == "VISION_REVISION_BOOTSTRAP_REQUIRED"
     )

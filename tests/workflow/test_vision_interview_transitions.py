@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Literal
 
-from sqlmodel import Session, select
+from sqlmodel import Session, col, select
 
 from models.core import Project
 from models.product_definition import (
@@ -19,20 +19,16 @@ from models.product_definition import (
     SpecificationDecision,
     VisionArtifact,
     VisionArtifactDecision,
+    VisionEvidenceSnapshot,
     VisionInterviewTurn,
     VisionRevisionIntent,
 )
 from models.specs import SpecRegistry
 from repositories.workflow import WorkflowFactRepository
-from services.application import (
-    AgileForgeApplication,
-    VisionInterviewRequest,
-)
 from services.node_attempt_replay import (
     DurableNodeAttemptReplayService,
     NodeAttemptReplayQuery,
 )
-from services.vision_interview_input import VisionInterviewInputService
 from workflow.clock import FixedClock
 from workflow.contracts import WorkflowErrorCode
 from workflow.definitions.root import project_graph
@@ -46,6 +42,7 @@ from workflow.fingerprints import (
 from workflow.requests import (
     BeginVisionRevision,
     DecideVisionReview,
+    GenerateVisionBootstrap,
     RecordVisionInterviewTurn,
     StartNodeAttempt,
 )
@@ -72,7 +69,7 @@ EXPECTED_VISION_ARTIFACT_COUNT = 2
 class _RecordRequest:
     complete: bool
     key: str
-    mode: Literal["initial", "revision"] = "initial"
+    operation: Literal["bootstrap", "clarification", "revision"] = "bootstrap"
     components: JsonObject = field(default_factory=lambda: dict(COMPONENTS))
     statement: str = "A trusted workflow tool."
 
@@ -106,8 +103,56 @@ class _ResolvedGoalSpecificationLineage:
 
 class _Registry:
     def require(self, node_id: str) -> object:
-        assert node_id == "vision.interview"
+        assert node_id in {"vision.bootstrap", "vision.interview"}
         return object()
+
+
+def _question() -> JsonObject:
+    return {
+        "question_id": "question:target-user",
+        "text": "Who is the target user?",
+        "affected_components": ["target_user"],
+        "conflict_ids": [],
+    }
+
+
+def _evidence() -> JsonObject:
+    item: JsonObject = {
+        "evidence_id": "project:metadata",
+        "kind": "project_metadata",
+        "relative_path": None,
+        "content_fingerprint": canonical_hash(
+            {"name": "Vision transitions", "description": None}
+        ),
+        "trust": "operator_provided",
+        "content": {"name": "Vision transitions", "description": None},
+        "truncated": False,
+    }
+    return {
+        "schema_version": "agileforge.vision-evidence.v1",
+        "items": [item],
+        "warnings": [],
+        "evidence_fingerprint": canonical_hash(
+            {
+                "schema_version": "agileforge.vision-evidence.v1",
+                "items": [item],
+                "warnings": [],
+            }
+        ),
+    }
+
+
+def _basis(components: JsonObject) -> tuple[JsonObject, ...]:
+    return tuple(
+        {
+            "component": name,
+            "source_kinds": ["evidence"],
+            "evidence_ids": ["project:metadata"],
+            "assumption_ids": [],
+        }
+        for name, value in components.items()
+        if value is not None
+    )
 
 
 def _seed_accepted_goal(
@@ -255,20 +300,6 @@ def _seed_accepted_goal_specification_lineage(
     )
 
 
-class _PositionMustNotRunDomain:
-    """Fail when a durable replay attempts to derive current graph state."""
-
-    def position(self, project_id: int) -> object:
-        del project_id
-        message = "receipt replay must happen before position reads"
-        raise AssertionError(message)
-
-    def transition(self, request: object) -> TransitionResult:
-        del request
-        message = "receipt replay must happen before transitions"
-        raise AssertionError(message)
-
-
 def _domain(engine: Engine) -> WorkflowDomain:
     return WorkflowDomain(
         engine=engine,
@@ -291,10 +322,11 @@ def _start(
     project_id: int,
     key: str,
     *,
-    mode: Literal["initial", "revision"] = "initial",
+    node_id: Literal["vision.bootstrap", "vision.interview"] = "vision.bootstrap",
+    operation: Literal["bootstrap", "clarification", "revision"] = "bootstrap",
 ) -> tuple[StartNodeAttempt, TransitionResult]:
     position = domain.position(project_id)
-    decision = _decision(domain, project_id, "vision.interview")
+    decision = _decision(domain, project_id, node_id)
     request = StartNodeAttempt(
         project_id=project_id,
         graph_version=position.graph_version,
@@ -302,9 +334,9 @@ def _start(
         decision_fingerprint=decision.decision_fingerprint,
         idempotency_key=key,
         actor="operator@example.com",
-        target_node_id="vision.interview",
+        target_node_id=node_id,
         target_instance_key=decision.instance_key,
-        normalized_input={"mode": mode, "user_response": "Build a tool."},
+        normalized_input={"operation": operation, "user_response": "Build a tool."},
         model_id="fake/vision",
         execution_settings={"timeout_seconds": 5.0, "max_attempts": 1},
         lease_seconds=60,
@@ -315,6 +347,7 @@ def _start(
 
 
 def _record(
+    engine: Engine,
     domain: WorkflowDomain,
     start: StartNodeAttempt,
     result: TransitionResult,
@@ -325,6 +358,47 @@ def _record(
     attempt_fingerprint = result.output["attempt_fingerprint"]
     assert isinstance(attempt_id, int)
     assert isinstance(attempt_fingerprint, str)
+    questions = () if request.complete else (_question(),)
+    if start.target_node_id == "vision.bootstrap":
+        evidence = _evidence()
+        return domain.transition(
+            GenerateVisionBootstrap(
+                project_id=start.project_id,
+                graph_version=start.graph_version,
+                fact_fingerprint=start.fact_fingerprint,
+                decision_fingerprint=start.decision_fingerprint,
+                instance_key=start.target_instance_key,
+                idempotency_key=request.key,
+                actor=start.actor,
+                operation=(
+                    "revision" if request.operation == "revision" else "bootstrap"
+                ),
+                evidence=evidence,
+                evidence_fingerprint=str(evidence["evidence_fingerprint"]),
+                evidence_warnings=(),
+                repository_binding_id=None,
+                updated_components=request.components,
+                project_vision_statement=request.statement,
+                is_complete=request.complete,
+                clarifying_questions=questions,
+                component_basis=_basis(request.components),
+                assumptions=(),
+                conflicts=(),
+                attempt_id=attempt_id,
+                attempt_fingerprint=attempt_fingerprint,
+            )
+        )
+    with Session(engine) as session:
+        snapshot_id = session.exec(
+            select(VisionInterviewTurn.vision_evidence_snapshot_id)
+            .where(VisionInterviewTurn.project_id == start.project_id)
+            .order_by(col(VisionInterviewTurn.vision_interview_turn_id).desc())
+        ).first()
+        assert isinstance(snapshot_id, int)
+        snapshot = session.get(VisionEvidenceSnapshot, snapshot_id)
+        assert snapshot is not None
+        evidence_fingerprint = snapshot.evidence_fingerprint
+    assert isinstance(snapshot_id, int)
     return domain.transition(
         RecordVisionInterviewTurn(
             project_id=start.project_id,
@@ -334,12 +408,17 @@ def _record(
             instance_key=start.target_instance_key,
             idempotency_key=request.key,
             actor=start.actor,
-            mode=request.mode,
+            vision_evidence_snapshot_id=snapshot_id,
+            evidence_fingerprint=evidence_fingerprint,
             user_text="Build a tool.",
+            addressed_question_ids=("question:target-user",),
             updated_components=request.components,
             project_vision_statement=request.statement,
             is_complete=request.complete,
-            clarifying_questions=(() if request.complete else ("Who is the user?",)),
+            clarifying_questions=questions,
+            component_basis=_basis(request.components),
+            assumptions=(),
+            conflicts=(),
             attempt_id=attempt_id,
             attempt_fingerprint=attempt_fingerprint,
         )
@@ -445,6 +524,7 @@ def test_incomplete_then_complete_turn_creates_one_pending_vision(
     first_start, first_attempt = _start(domain, project_id, "vision-incomplete")
 
     incomplete = _record(
+        engine,
         domain,
         first_start,
         first_attempt,
@@ -453,8 +533,15 @@ def test_incomplete_then_complete_turn_creates_one_pending_vision(
 
     assert incomplete.ok
     assert "vision.interview" in domain.position(project_id).available_nodes
-    second_start, second_attempt = _start(domain, project_id, "vision-complete")
+    second_start, second_attempt = _start(
+        domain,
+        project_id,
+        "vision-complete",
+        node_id="vision.interview",
+        operation="clarification",
+    )
     complete = _record(
+        engine,
         domain,
         second_start,
         second_attempt,
@@ -478,13 +565,20 @@ def test_replay_uses_persisted_after_turn_instance_key(engine: Engine) -> None:
     domain = _domain(engine)
     first_start, first_attempt = _start(domain, project_id, "vision-first-turn")
     incomplete = _record(
+        engine,
         domain,
         first_start,
         first_attempt,
         request=_RecordRequest(complete=False, key="vision-first-complete"),
     )
     assert incomplete.ok
-    second_start, second_attempt = _start(domain, project_id, "vision-later-turn")
+    second_start, second_attempt = _start(
+        domain,
+        project_id,
+        "vision-later-turn",
+        node_id="vision.interview",
+        operation="clarification",
+    )
     assert second_start.target_instance_key is not None
     assert second_start.target_instance_key.startswith("after-turn:")
 
@@ -521,68 +615,6 @@ def test_replay_uses_persisted_after_turn_instance_key(engine: Engine) -> None:
     assert changed_input.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
 
 
-def test_application_replay_normalizes_retry_user_text_before_position_read(
-    engine: Engine,
-) -> None:
-    """Padded retries use the same Vision input boundary as persisted starts."""
-    with Session(engine) as session:
-        project = Project(name="Vision replay normalization")
-        session.add(project)
-        session.commit()
-        assert project.project_id is not None
-        project_id = project.project_id
-    domain = _domain(engine)
-    decision = _decision(domain, project_id, "vision.interview")
-    input_service = VisionInterviewInputService(engine=engine)
-    persisted_input = input_service.build(
-        project_id=project_id,
-        decision=decision,
-        user_text="  Same answer.  ",
-    )
-    start = StartNodeAttempt(
-        project_id=project_id,
-        graph_version=domain.position(project_id).graph_version,
-        fact_fingerprint=domain.position(project_id).fact_fingerprint,
-        decision_fingerprint=decision.decision_fingerprint,
-        idempotency_key="vision-padded-replay",
-        actor="operator@example.com",
-        target_node_id="vision.interview",
-        target_instance_key=decision.instance_key,
-        normalized_input=persisted_input,
-        model_id="fake/vision",
-        execution_settings={"timeout_seconds": 5.0, "max_attempts": 1},
-        lease_seconds=60,
-    )
-    started = domain.transition(start)
-    assert started.ok
-    app = object.__new__(AgileForgeApplication)
-    app._workflow_domain = _PositionMustNotRunDomain()
-    app._vision_interview_input = input_service
-    app._prepared_agentic_inputs = type(
-        "PreparedVisionInputServices",
-        (),
-        {"vision_interview": input_service},
-    )()
-    same_request = VisionInterviewRequest(
-        project_id=project_id,
-        graph_version=start.graph_version,
-        fact_fingerprint=start.fact_fingerprint,
-        decision_fingerprint=start.decision_fingerprint,
-        user_text="  Same answer.  ",
-        idempotency_key=start.idempotency_key,
-        actor=start.actor,
-    )
-
-    replay = app.run_vision_interview(same_request)
-    changed = app.run_vision_interview(
-        same_request.model_copy(update={"user_text": "Changed answer."})
-    )
-
-    assert replay == started.model_copy(update={"replayed": True})
-    assert changed.error is not None
-    assert changed.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
-
-
 def test_review_accepts_one_vision_exactly_once(engine: Engine) -> None:
     """A review decision targets the graph-selected artifact and is idempotent."""
     with Session(engine) as session:
@@ -594,6 +626,7 @@ def test_review_accepts_one_vision_exactly_once(engine: Engine) -> None:
     domain = _domain(engine)
     start, attempt = _start(domain, project_id, "vision-review-start")
     recorded = _record(
+        engine,
         domain,
         start,
         attempt,
@@ -640,6 +673,7 @@ def test_feedback_reopens_the_same_vision_interview(engine: Engine) -> None:
     domain = _domain(engine)
     start, attempt = _start(domain, project_id, "feedback-start")
     recorded = _record(
+        engine,
         domain,
         start,
         attempt,
@@ -684,6 +718,7 @@ def test_accepted_revision_creates_only_a_new_vision(engine: Engine) -> None:
     domain = _domain(engine)
     initial_start, initial_attempt = _start(domain, project_id, "revision-initial")
     initial = _record(
+        engine,
         domain,
         initial_start,
         initial_attempt,
@@ -721,22 +756,24 @@ def test_accepted_revision_creates_only_a_new_vision(engine: Engine) -> None:
         )
     )
     assert opened.ok
-    decision = _decision(domain, project_id, "vision.interview")
+    decision = _decision(domain, project_id, "vision.bootstrap")
     assert decision.category.value == "available"
     revision_start, revision_attempt = _start(
         domain,
         project_id,
         "revision-turn",
-        mode="revision",
+        node_id="vision.bootstrap",
+        operation="revision",
     )
     revised = _record(
+        engine,
         domain,
         revision_start,
         revision_attempt,
         request=_RecordRequest(
             complete=True,
             key="revision-record",
-            mode="revision",
+            operation="revision",
             components=COMPONENTS | {"differentiator": "Changed durable facts"},
             statement="A revised trusted workflow tool.",
         ),
@@ -797,7 +834,9 @@ def test_accepted_revision_creates_only_a_new_vision(engine: Engine) -> None:
                 session.delete(row)
         session.flush()
         revision_turns = session.exec(
-            select(VisionInterviewTurn).where(VisionInterviewTurn.mode == "revision")
+            select(VisionInterviewTurn).where(
+                VisionInterviewTurn.operation == "revision"
+            )
         ).all()
         for turn in revision_turns:
             turn.revision_intent_id = None

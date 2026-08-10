@@ -42,6 +42,7 @@ from workflow.handlers import (
     execute_decide_vision_review,
     execute_execution_request,
     execute_fulfill_product_goal,
+    execute_generate_vision_bootstrap,
     execute_planning_request,
     execute_record_authority_feedback,
     execute_record_backlog_draft,
@@ -80,6 +81,7 @@ from workflow.requests import (
     DecideVisionReview,
     FailNodeAttempt,
     FulfillProductGoal,
+    GenerateVisionBootstrap,
     RecordAuthorityFeedback,
     RecordBacklogDraft,
     RecordDiscoveryArtifact,
@@ -136,7 +138,10 @@ type _ProductDiscoveryRequest = (
     RecordDiscoveryArtifact | RecordSpecificationCandidate | DecideSpecification
 )
 type _VisionRequest = (
-    RecordVisionInterviewTurn | DecideVisionReview | BeginVisionRevision
+    GenerateVisionBootstrap
+    | RecordVisionInterviewTurn
+    | DecideVisionReview
+    | BeginVisionRevision
 )
 type _BacklogRequest = RecordBacklogDraft | DecideBacklog
 type _PlanningRequest = (
@@ -155,6 +160,7 @@ type _ExecutionRequest = (
 )
 type _PositionedTransitionRequest = (
     _AuthorityRequest
+    | GenerateVisionBootstrap
     | RecordVisionInterviewTurn
     | DecideVisionReview
     | BeginVisionRevision
@@ -871,7 +877,10 @@ class WorkflowDomain:
             result = self._dispatch_authority(session, request, decision, evaluated_at)
         elif isinstance(
             request,
-            RecordVisionInterviewTurn | DecideVisionReview | BeginVisionRevision,
+            GenerateVisionBootstrap
+            | RecordVisionInterviewTurn
+            | DecideVisionReview
+            | BeginVisionRevision,
         ):
             result = self._dispatch_vision(session, request, decision, evaluated_at)
         elif isinstance(request, RecordBacklogDraft | DecideBacklog):
@@ -965,6 +974,10 @@ class WorkflowDomain:
         decision: NodeDecision,
         evaluated_at: datetime,
     ) -> TransitionResult:
+        if isinstance(request, GenerateVisionBootstrap):
+            return execute_generate_vision_bootstrap(
+                session, request, decision, evaluated_at
+            )
         if isinstance(request, RecordVisionInterviewTurn):
             return execute_record_vision_interview_turn(
                 session, request, decision, evaluated_at

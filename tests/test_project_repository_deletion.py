@@ -182,24 +182,29 @@ def _seed_populated_product_lineage(session: Session) -> int:
     session.add(attempt)
     session.flush()
     assert attempt.workflow_node_attempt_id is not None
-    session.add(
-        _vision_evidence_snapshot(
-            project_id,
-            attempt,
-            binding.repository_binding_id,
-        )
+    snapshot = _vision_evidence_snapshot(
+        project_id,
+        attempt,
+        binding.repository_binding_id,
     )
+    session.add(snapshot)
+    session.flush()
+    assert snapshot.vision_evidence_snapshot_id is not None
     turn = VisionInterviewTurn(
         project_id=project_id,
-        mode="revision",
+        operation="revision",
         turn_number=1,
         revision_intent_id=intent.vision_revision_intent_id,
+        vision_evidence_snapshot_id=snapshot.vision_evidence_snapshot_id,
         prior_turn_id=None,
         user_text="Revise the Vision.",
         components_json='{"purpose":"revised"}',
         vision_statement="Deliver the revised Vision.",
         is_complete=True,
         clarifying_questions_json="[]",
+        component_basis_json="[]",
+        assumptions_json="[]",
+        conflicts_json="[]",
         output_fingerprint=canonical_hash({"output": "revision"}),
         workflow_node_attempt_id=attempt.workflow_node_attempt_id,
         attempt_fingerprint=attempt.attempt_fingerprint,
@@ -215,6 +220,10 @@ def _seed_populated_product_lineage(session: Session) -> int:
             components_json='{"purpose":"revised"}',
             statement="Deliver the revised Vision.",
             content_fingerprint=canonical_hash({"vision": "revised"}),
+            vision_evidence_snapshot_id=snapshot.vision_evidence_snapshot_id,
+            component_basis_json="[]",
+            assumptions_json="[]",
+            conflicts_json="[]",
             supersedes_vision_artifact_id=lineage.vision_artifact_id,
             source_interview_turn_id=turn.vision_interview_turn_id,
             created_by="operator@example.com",

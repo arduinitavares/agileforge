@@ -53,6 +53,7 @@ from workflow.requests import (
     DecideStory,
     DecideVisionReview,
     FulfillProductGoal,
+    GenerateVisionBootstrap,
     RecordBacklogDraft,
     RecordDiscoveryArtifact,
     RecordPostSprintTriage,
@@ -61,7 +62,6 @@ from workflow.requests import (
     RecordSpecificationCandidate,
     RecordSprintPlan,
     RecordStoryDraft,
-    RecordVisionInterviewTurn,
     ReviewSprint,
     StartNodeAttempt,
     StartSprint,
@@ -395,25 +395,47 @@ def _new_journey(engine: Engine) -> _Journey:
     )
 
 
+def _vision_evidence(project_id: int) -> JsonObject:
+    item = {
+        "evidence_id": "project:journey",
+        "kind": "project_metadata",
+        "relative_path": None,
+        "content_fingerprint": canonical_hash({"project_id": project_id}),
+        "trust": "operator_provided",
+        "content": {"project_id": project_id},
+        "truncated": False,
+    }
+    payload = {
+        "schema_version": "agileforge.vision-evidence.v1",
+        "items": [item],
+        "warnings": [],
+    }
+    return _JSON_OBJECT.validate_python(
+        {**payload, "evidence_fingerprint": canonical_hash(payload)}
+    )
+
+
 def _accept_initial_vision(journey: _Journey) -> None:
     domain = journey.domain
     project_id = journey.project_id
-    position, interview = _assert_next(
-        domain, project_id, "vision.interview", NodeCategory.AVAILABLE
+    evidence = _vision_evidence(project_id)
+    evidence_fingerprint = str(evidence["evidence_fingerprint"])
+    position, bootstrap = _assert_next(
+        domain, project_id, "vision.bootstrap", NodeCategory.AVAILABLE
     )
     started = domain.transition(
         StartNodeAttempt(
             project_id=project_id,
             graph_version=position.graph_version,
             fact_fingerprint=position.fact_fingerprint,
-            decision_fingerprint=interview.decision_fingerprint,
+            decision_fingerprint=bootstrap.decision_fingerprint,
             idempotency_key="journey-vision-start",
             actor="operator@example.com",
-            target_node_id="vision.interview",
+            target_node_id="vision.bootstrap",
             target_instance_key=None,
             normalized_input={
-                "mode": "initial",
-                "user_response": "Define the lifecycle product Vision.",
+                "operation": "bootstrap",
+                "evidence_fingerprint": evidence_fingerprint,
             },
             model_id="fake/vision",
             execution_settings={"timeout_seconds": 1.0, "max_attempts": 1},
@@ -422,11 +444,14 @@ def _accept_initial_vision(journey: _Journey) -> None:
     )
     assert started.ok is True
     recorded = domain.transition(
-        RecordVisionInterviewTurn(
-            **_guards(position, "vision.interview"),
+        GenerateVisionBootstrap(
+            **_guards(position, "vision.bootstrap"),
             idempotency_key="journey-vision-record",
-            mode="initial",
-            user_text="Define the lifecycle product Vision.",
+            operation="bootstrap",
+            evidence=evidence,
+            evidence_fingerprint=evidence_fingerprint,
+            evidence_warnings=(),
+            repository_binding_id=None,
             updated_components={
                 "project_name": "Persisted lifecycle",
                 "target_user": "Operators",
@@ -439,6 +464,9 @@ def _accept_initial_vision(journey: _Journey) -> None:
             project_vision_statement="A durable product delivery lifecycle.",
             is_complete=True,
             clarifying_questions=(),
+            component_basis=(),
+            assumptions=(),
+            conflicts=(),
             attempt_id=_output_int(started, "attempt_id"),
             attempt_fingerprint=str(started.output["attempt_fingerprint"]),
         )

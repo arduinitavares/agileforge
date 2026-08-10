@@ -159,9 +159,10 @@ def _vision_turn_data(turn: VisionInterviewTurnFact) -> JsonObject:
     """Render one typed immutable Vision interview turn."""
     return {
         "vision_interview_turn_id": turn.vision_interview_turn_id,
-        "mode": turn.mode,
+        "operation": turn.operation,
         "turn_number": turn.turn_number,
         "revision_intent_id": turn.revision_intent_id,
+        "vision_evidence_snapshot_id": turn.vision_evidence_snapshot_id,
         "prior_turn_id": turn.prior_turn_id,
         "user_text": turn.user_text,
         "statement": turn.vision_statement,
