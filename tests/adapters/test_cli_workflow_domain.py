@@ -460,6 +460,139 @@ def test_story_review_requires_exact_instance_selector() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("command", "request_type_name"),
+    [
+        (
+            "backlog reconcile --project-id 41 "
+            "--idempotency-key reconcile-41 --actor operator",
+            "BacklogReconcileRequest",
+        ),
+        (
+            "story dependencies apply --project-id 41 "
+            "--story-id 7 --story-id 9 "
+            "--dependency '9:7:Story 9 requires Story 7.' "
+            "--idempotency-key dependencies-41 --actor operator",
+            "StoryDependenciesApplyRequest",
+        ),
+        (
+            "story readiness repair --project-id 41 "
+            "--repair 7:3:1.1 --repair '9:5:priority high' "
+            "--idempotency-key readiness-41 --actor operator",
+            "StoryReadinessRepairRequest",
+        ),
+        (
+            "sprint start --project-id 41 --idempotency-key start-41 --actor operator",
+            "SprintStartRequest",
+        ),
+    ],
+)
+def test_planning_action_commands_use_task_specific_semantics(
+    command: str,
+    request_type_name: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Parse and dispatch the four planning actions without request files."""
+
+    class PlanningActionApplication:
+        def __init__(self) -> None:
+            self.requests: list[object] = []
+
+        def __getattr__(self, name: str) -> object:
+            if name not in {
+                "apply_story_dependencies",
+                "reconcile_backlog",
+                "repair_story_readiness",
+                "start_sprint",
+            }:
+                raise AttributeError(name)
+
+            def capture(request: object) -> object:
+                self.requests.append(request)
+                return cli_main.TransitionResult(ok=True)
+
+            return capture
+
+    application = PlanningActionApplication()
+
+    exit_code = cli_main.main(shlex.split(command), application=application)
+
+    assert exit_code == 0
+    assert len(application.requests) == 1
+    request = application.requests[0]
+    assert type(request).__name__ == request_type_name
+    assert not hasattr(request, "graph_version")
+    assert not hasattr(request, "fact_fingerprint")
+    assert not hasattr(request, "request_file")
+    assert '"ok": true' in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "repairs",
+    [
+        ["0:3:1.1"],
+        ["7:0:1.1"],
+        ["7:3:"],
+        ["7:3:1.1", "7:5:1.2"],
+    ],
+)
+def test_story_readiness_cli_rejects_invalid_repairs(
+    repairs: list[str],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Reject invalid IDs, points, blank ranks, and duplicate Story repairs."""
+
+    class UncalledApplication:
+        def repair_story_readiness(self, request: object) -> object:
+            pytest.fail(f"invalid repair reached application: {request}")
+
+    arguments = [
+        "story",
+        "readiness",
+        "repair",
+        "--project-id",
+        "41",
+    ]
+    for repair in repairs:
+        arguments.extend(("--repair", repair))
+    arguments.extend(
+        (
+            "--idempotency-key",
+            "readiness-41",
+            "--actor",
+            "operator",
+        )
+    )
+
+    argparse_error_exit_code = 2
+    assert (
+        cli_main.main(arguments, application=UncalledApplication())
+        == argparse_error_exit_code
+    )
+    assert '"ok": false' in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "backlog reconcile --project-id 41 --request-file request.json "
+        "--idempotency-key reconcile-41 --actor operator",
+        "story dependencies apply --project-id 41 --story-id 7 "
+        "--request-file request.json --idempotency-key dependencies-41 "
+        "--actor operator",
+        "story readiness repair --project-id 41 --repair 7:3:1.1 "
+        "--request-file request.json --idempotency-key readiness-41 "
+        "--actor operator",
+        "sprint start --project-id 41 --request-file request.json "
+        "--idempotency-key start-41 --actor operator",
+    ],
+)
+def test_planning_action_commands_reject_request_file(command: str) -> None:
+    """Remove generic JSON request files from all four planning actions."""
+    with pytest.raises(ValueError, match="unrecognized arguments"):
+        cli_main.build_parser().parse_args(shlex.split(command))
+
+
 @pytest.mark.parametrize("field", ["artifact_fingerprint", "plan_fingerprint"])
 def test_guarded_payload_rejects_artifact_guards(field: str) -> None:
     """Keep review fingerprints out of retained generic request files."""

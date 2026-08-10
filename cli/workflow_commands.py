@@ -7,6 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol, TypedDict
 
+from services.application import planning_action_decision_is_transportable
 from workflow.contracts import (
     JsonObject,
     NodeCategory,
@@ -148,6 +149,12 @@ def _render_command(
 
 _SEMANTIC_ARGUMENTS: dict[str, tuple[str, ...]] = {
     "abandon_product_goal": ("--rationale", "<rationale>"),
+    "apply_story_dependencies": (
+        "--story-id",
+        "<story-id>",
+        "--dependency",
+        "<dependency>",
+    ),
     "begin_vision_revision": ("--reason", "<reason>"),
     "compile_authority": (),
     "decide_authority": (
@@ -213,7 +220,10 @@ _SEMANTIC_ARGUMENTS: dict[str, tuple[str, ...]] = {
     ),
     "record_story_draft": (),
     "record_vision_interview_turn": ("--text", "<text>"),
+    "reconcile_backlog": (),
     "repair_authority": (),
+    "repair_story_readiness": ("--repair", "<repair>"),
+    "start_sprint": (),
 }
 
 _DELIVERY_REQUEST_KINDS = frozenset(
@@ -313,6 +323,7 @@ def render_workflow_next(position: WorkflowPosition) -> WorkflowNextPayload:
         )
         and decision.recommendation_kind
         in {RecommendationKind.REQUIRED, RecommendationKind.RECOVERY}
+        and planning_action_decision_is_transportable(position.project_id, decision)
     )
     semantic_counts = Counter(
         decision.request_kind

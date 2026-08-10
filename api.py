@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from importlib.resources import files
 from pathlib import Path
-from typing import Annotated, Literal, TypedDict, cast
+from typing import Annotated, Literal, Self, TypedDict, cast
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import RedirectResponse
@@ -23,6 +23,7 @@ from pydantic import (
     TypeAdapter,
     ValidationError,
     field_validator,
+    model_validator,
 )
 
 from repositories.project import ProjectRepository
@@ -33,6 +34,7 @@ from services.application import (
     AuthorityFeedbackRequest,
     AuthorityRepairRequest,
     AuthorityReviewRequest,
+    BacklogReconcileRequest,
     BacklogReviewRequest,
     CreateProjectCommand,
     DeliveryActionRequest,
@@ -47,10 +49,16 @@ from services.application import (
     SpecificationReviewRequest,
     SprintPlanningRequest,
     SprintPlanReviewRequest,
+    SprintStartRequest,
+    StoryDependenciesApplyRequest,
+    StoryDependencyEdgeRequest,
+    StoryReadinessRepair,
+    StoryReadinessRepairRequest,
     StoryReviewRequest,
     VisionResponseRequest,
     VisionReviewRequest,
     VisionRevisionRequest,
+    planning_action_decision_is_transportable,
     production_application,
 )
 from utils.runtime_controls import UI_LAUNCH_NONCE_ENV
@@ -89,6 +97,7 @@ type SemanticText = Annotated[
     str,
     StringConstraints(strip_whitespace=True, min_length=1),
 ]
+type PositiveStoryId = Annotated[int, Field(strict=True, gt=0)]
 
 
 class CreateProjectRequest(BaseModel):
@@ -216,6 +225,65 @@ class SprintPlanningApiRequest(MutationApiRequest):
         return value
 
 
+class BacklogReconcileApiRequest(MutationApiRequest):
+    """Transport metadata only for graph-selected Backlog reconciliation."""
+
+
+class StoryDependenciesApplyApiRequest(MutationApiRequest):
+    """Strict operator-reviewed Story dependency semantics."""
+
+    selected_story_ids: list[PositiveStoryId] = Field(min_length=1)
+    reviewed_edges: list[StoryDependencyEdgeRequest]
+
+    @field_validator("selected_story_ids")
+    @classmethod
+    def validate_selected_story_ids(cls, value: list[int]) -> list[int]:
+        """Reject duplicate Story selections at the HTTP boundary."""
+        if len(set(value)) != len(value):
+            message = "selected_story_ids must not contain duplicates."
+            raise ValueError(message)
+        return value
+
+    @model_validator(mode="after")
+    def validate_reviewed_edges(self) -> Self:
+        """Reject duplicate and out-of-selection dependency edges."""
+        pairs = [
+            (item.dependent_story_id, item.prerequisite_story_id)
+            for item in self.reviewed_edges
+        ]
+        if len(set(pairs)) != len(pairs):
+            message = "reviewed_edges must not contain duplicate Story pairs."
+            raise ValueError(message)
+        selected = set(self.selected_story_ids)
+        if any(left not in selected or right not in selected for left, right in pairs):
+            message = "reviewed_edges must remain inside selected_story_ids."
+            raise ValueError(message)
+        return self
+
+
+class StoryReadinessRepairApiRequest(MutationApiRequest):
+    """Strict explicit Story readiness repairs without derived guards."""
+
+    repairs: list[StoryReadinessRepair] = Field(min_length=1)
+
+    @field_validator("repairs")
+    @classmethod
+    def validate_unique_repairs(
+        cls,
+        value: list[StoryReadinessRepair],
+    ) -> list[StoryReadinessRepair]:
+        """Reject multiple repairs for the same Story."""
+        story_ids = [item.story_id for item in value]
+        if len(set(story_ids)) != len(story_ids):
+            message = "repairs must not contain duplicate Story IDs."
+            raise ValueError(message)
+        return value
+
+
+class SprintStartApiRequest(MutationApiRequest):
+    """Transport metadata only for the accepted current Sprint plan."""
+
+
 class PositionedTransitionApiRequest(MutationApiRequest):
     """Operator-owned semantic fields for one retained non-agentic route."""
 
@@ -244,19 +312,16 @@ DELIVERY_API_PATHS: dict[str, str] = {
 }
 
 POSITIONED_API_PATHS: dict[str, str] = {
-    "apply_story_dependencies": "story/dependencies/apply",
     "close_sprint": "sprint/close",
     "close_story": "story/close",
     "complete_task": "sprint/task/complete",
-    "reconcile_backlog": "backlog/reconcile",
     "record_post_sprint_triage": "sprint/triage",
-    "repair_story_readiness": "story/readiness/repair",
     "review_sprint": "sprint/review",
-    "start_sprint": "sprint/start",
 }
 
 SEMANTIC_API_PATHS: dict[str, str] = {
     "abandon_product_goal": "goals/abandon",
+    "apply_story_dependencies": "story/dependencies/apply",
     "begin_vision_revision": "vision/revision",
     "compile_authority": "authority/compile",
     "decide_authority": "authority/decision",
@@ -274,7 +339,10 @@ SEMANTIC_API_PATHS: dict[str, str] = {
     "record_specification_candidate": "specifications",
     "record_sprint_plan": "sprint/generate",
     "record_vision_interview_turn": "vision/respond",
+    "reconcile_backlog": "backlog/reconcile",
     "repair_authority": "authority/repair",
+    "repair_story_readiness": "story/readiness/repair",
+    "start_sprint": "sprint/start",
 }
 
 _ACTIONABLE_WAITING_REQUEST_KINDS = frozenset(
@@ -444,6 +512,7 @@ def _workflow_actions(position: WorkflowPosition) -> list[JsonObject]:
         in {RecommendationKind.REQUIRED, RecommendationKind.RECOVERY}
         and decision.request_kind
         in SEMANTIC_API_PATHS | DELIVERY_API_PATHS | POSITIONED_API_PATHS
+        and planning_action_decision_is_transportable(position.project_id, decision)
     )
     semantic_counts = Counter(
         decision.request_kind
@@ -1249,6 +1318,67 @@ def decide_project_sprint_plan(
                 rationale=req.rationale,
                 **_metadata(req),
             )
+        )
+    )
+
+
+@app.post("/api/projects/{project_id}/backlog/reconcile")
+def reconcile_project_backlog(
+    project_id: int,
+    req: BacklogReconcileApiRequest,
+) -> dict[str, object]:
+    """Reconcile exact graph-selected stale artifacts under current authority."""
+    return _result_payload(
+        _application().reconcile_backlog(
+            BacklogReconcileRequest(project_id=project_id, **_metadata(req))
+        )
+    )
+
+
+@app.post("/api/projects/{project_id}/story/dependencies/apply")
+def apply_project_story_dependencies(
+    project_id: int,
+    req: StoryDependenciesApplyApiRequest,
+) -> dict[str, object]:
+    """Apply only operator-reviewed Story dependency semantics."""
+    return _result_payload(
+        _application().apply_story_dependencies(
+            StoryDependenciesApplyRequest(
+                project_id=project_id,
+                selected_story_ids=tuple(req.selected_story_ids),
+                reviewed_edges=tuple(req.reviewed_edges),
+                **_metadata(req),
+            )
+        )
+    )
+
+
+@app.post("/api/projects/{project_id}/story/readiness/repair")
+def repair_project_story_readiness(
+    project_id: int,
+    req: StoryReadinessRepairApiRequest,
+) -> dict[str, object]:
+    """Apply explicit Story points and rank repairs against current facts."""
+    return _result_payload(
+        _application().repair_story_readiness(
+            StoryReadinessRepairRequest(
+                project_id=project_id,
+                repairs=tuple(req.repairs),
+                **_metadata(req),
+            )
+        )
+    )
+
+
+@app.post("/api/projects/{project_id}/sprint/start")
+def start_project_sprint(
+    project_id: int,
+    req: SprintStartApiRequest,
+) -> dict[str, object]:
+    """Start the exact accepted current Sprint plan."""
+    return _result_payload(
+        _application().start_sprint(
+            SprintStartRequest(project_id=project_id, **_metadata(req))
         )
     )
 

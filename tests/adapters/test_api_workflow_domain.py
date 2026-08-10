@@ -12,6 +12,7 @@ from pydantic import BaseModel, ValidationError
 from sqlmodel import Session, select
 
 import api as api_module
+import services.application as application_module
 from api import (
     AuthorityDecisionApiRequest,
     AuthorityFeedbackApiRequest,
@@ -22,6 +23,7 @@ from api import (
     build_create_project_command,
 )
 from cli.workflow_commands import COMMAND_PREFIXES
+from models.core import UserStory
 from models.workflow import (
     BacklogArtifact,
     RoadmapArtifact,
@@ -60,7 +62,11 @@ from services.contracts.backlog import InputSchema as BacklogInput
 from services.contracts.roadmap import RoadmapBuilderInput
 from services.contracts.sprint import SprintPlannerInput
 from services.contracts.story import UserStoryWriterInput
-from services.node_attempt_replay import NodeAttemptReplayQuery, TransitionReplayQuery
+from services.node_attempt_replay import (
+    DurableTransitionReplayService,
+    NodeAttemptReplayQuery,
+    TransitionReplayQuery,
+)
 from services.product_goal_interview_input import ProductGoalInterviewInputService
 from tests.adapters.test_command_renderer import position_fixture
 from tests.workflow.test_execution_transitions import (
@@ -68,6 +74,7 @@ from tests.workflow.test_execution_transitions import (
 )
 from tests.workflow.test_planning_transitions import (
     _apply_current_dependencies,
+    _guards,
     _record_and_accept_roadmap,
     _record_and_accept_story,
     _record_sprint_plan_draft,
@@ -90,6 +97,7 @@ from workflow.contracts import (
 from workflow.definitions.planning import candidate_set_fingerprint
 from workflow.fingerprints import canonical_hash, canonical_json
 from workflow.requests import (
+    ApplyStoryDependencies,
     DecideAuthority,
     DecideBacklog,
     DecideRoadmap,
@@ -101,6 +109,7 @@ from workflow.requests import (
     StartNodeAttempt,
     TransitionRequest,
 )
+from workflow.requests.planning import ReviewedDependencyEdge
 
 if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
@@ -401,6 +410,18 @@ class _FakeApiApplication:
     def decide_sprint_plan(self, request: object) -> TransitionResult:
         return self._record_delivery_request(request)
 
+    def reconcile_backlog(self, request: object) -> TransitionResult:
+        return self._record_delivery_request(request)
+
+    def apply_story_dependencies(self, request: object) -> TransitionResult:
+        return self._record_delivery_request(request)
+
+    def repair_story_readiness(self, request: object) -> TransitionResult:
+        return self._record_delivery_request(request)
+
+    def start_sprint(self, request: object) -> TransitionResult:
+        return self._record_delivery_request(request)
+
     def _record_delivery_request(self, request: object) -> TransitionResult:
         self.requests.append(request)
         return self._transition_result or TransitionResult(
@@ -581,6 +602,76 @@ class _DeliveryReviewSelection:
         return self.identity
 
 
+class _PlanningActionSelection:
+    def __init__(self, replay: TransitionResult | None = None) -> None:
+        self.replay_result = replay
+        self.replay_queries: list[TransitionReplayQuery] = []
+        self.prepare_calls: list[tuple[str, int, str, object]] = []
+
+    def replay_transition(
+        self,
+        query: TransitionReplayQuery,
+    ) -> TransitionResult | None:
+        self.replay_queries.append(query)
+        return self.replay_result
+
+    def prepare_backlog_reconciliation(
+        self,
+        *,
+        project_id: int,
+        decision: NodeDecision,
+    ) -> tuple[int, str, tuple[int, ...]]:
+        self.prepare_calls.append(
+            ("reconcile_backlog", project_id, decision.decision_fingerprint, None)
+        )
+        return 17, "authority-current", (5, 7)
+
+    def prepare_story_dependencies(
+        self,
+        *,
+        project_id: int,
+        decision: NodeDecision,
+        selected_story_ids: tuple[int, ...],
+    ) -> str:
+        self.prepare_calls.append(
+            (
+                "apply_story_dependencies",
+                project_id,
+                decision.decision_fingerprint,
+                selected_story_ids,
+            )
+        )
+        return "dependency-source-current"
+
+    def prepare_story_readiness(
+        self,
+        *,
+        project_id: int,
+        decision: NodeDecision,
+        repair_story_ids: tuple[int, ...],
+    ) -> tuple[tuple[int, ...], str]:
+        self.prepare_calls.append(
+            (
+                "repair_story_readiness",
+                project_id,
+                decision.decision_fingerprint,
+                repair_story_ids,
+            )
+        )
+        return (7, 9), "readiness-current"
+
+    def prepare_sprint_start(
+        self,
+        *,
+        project_id: int,
+        decision: NodeDecision,
+    ) -> tuple[int, int, str, str]:
+        self.prepare_calls.append(
+            ("start_sprint", project_id, decision.decision_fingerprint, None)
+        )
+        return 29, 31, "plan-current", "candidates-current"
+
+
 class _CapturingTransitionDomain(_BoundaryDomain):
     def __init__(self, position: WorkflowPosition) -> None:
         super().__init__(position)
@@ -678,6 +769,437 @@ def _delivery_decision(
         recommendation_kind=RecommendationKind.REQUIRED,
         reason_code="DELIVERY_REQUIRED",
         decision_fingerprint=f"decision-{node_id}",
+    )
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        (
+            "reconcile_backlog",
+            "BacklogReconcileRequest",
+            "reconcile_backlog",
+            "backlog.reconcile",
+            {},
+            {
+                "replacement_authority_id": 17,
+                "replacement_authority_fingerprint": "authority-current",
+                "affected_artifact_ids": [5, 7],
+            },
+            {},
+        ),
+        (
+            "apply_story_dependencies",
+            "StoryDependenciesApplyRequest",
+            "apply_story_dependencies",
+            "planning.story_dependencies",
+            {
+                "selected_story_ids": (7, 9),
+                "reviewed_edges": (
+                    {
+                        "dependent_story_id": 9,
+                        "prerequisite_story_id": 7,
+                        "reason": "Story 9 requires Story 7.",
+                    },
+                ),
+            },
+            {
+                "selected_story_ids": [7, 9],
+                "reviewed_edges": [
+                    {
+                        "dependent_story_id": 9,
+                        "prerequisite_story_id": 7,
+                        "reason": "Story 9 requires Story 7.",
+                    }
+                ],
+                "source_fingerprint": "dependency-source-current",
+            },
+            {
+                "selected_story_ids": [7, 9],
+                "reviewed_edges": [
+                    {
+                        "dependent_story_id": 9,
+                        "prerequisite_story_id": 7,
+                        "reason": "Story 9 requires Story 7.",
+                    }
+                ],
+            },
+        ),
+        (
+            "repair_story_readiness",
+            "StoryReadinessRepairRequest",
+            "repair_story_readiness",
+            "planning.story_readiness",
+            {
+                "repairs": (
+                    {"story_id": 7, "story_points": 3, "rank": "1.1"},
+                    {"story_id": 9, "story_points": 5, "rank": "1.2"},
+                )
+            },
+            {
+                "story_ids": [7, 9],
+                "repairs": [
+                    {"story_id": 7, "story_points": 3, "rank": "1.1"},
+                    {"story_id": 9, "story_points": 5, "rank": "1.2"},
+                ],
+                "expected_readiness_fingerprint": "readiness-current",
+            },
+            {
+                "repairs": [
+                    {"story_id": 7, "story_points": 3, "rank": "1.1"},
+                    {"story_id": 9, "story_points": 5, "rank": "1.2"},
+                ]
+            },
+        ),
+        (
+            "start_sprint",
+            "SprintStartRequest",
+            "start_sprint",
+            "planning.sprint.start",
+            {},
+            {
+                "sprint_plan_artifact_id": 29,
+                "sprint_id": 31,
+                "plan_fingerprint": "plan-current",
+                "candidate_set_fingerprint": "candidates-current",
+            },
+            {},
+        ),
+    ],
+)
+def test_planning_action_application_derives_internal_guards(
+    case: tuple[
+        str,
+        str,
+        str,
+        str,
+        dict[str, object],
+        dict[str, object],
+        dict[str, object],
+    ],
+) -> None:
+    """Build guarded workflow requests only after semantic replay and selection."""
+    (
+        method_name,
+        request_type_name,
+        request_kind,
+        node_id,
+        request_fields,
+        expected_internal,
+        expected_operator_input,
+    ) = case
+    decision = _delivery_decision(node_id=node_id, request_kind=request_kind)
+    position = _vision_position(decision)
+    domain = _CapturingTransitionDomain(position)
+    selection = _PlanningActionSelection()
+    application = AgileForgeApplication(
+        workflow_domain=domain,
+        planning_action_selection=selection,
+    )
+    request_type = cast(
+        "type[BaseModel]", getattr(application_module, request_type_name)
+    )
+    request = request_type(
+        project_id=PROJECT_ID,
+        idempotency_key=f"{request_kind}-41",
+        actor="operator",
+        **request_fields,
+    )
+
+    result = getattr(application, method_name)(request)
+
+    assert result.ok is True
+    assert domain.position_calls == [PROJECT_ID]
+    assert len(domain.requests) == 1
+    internal = domain.requests[0].model_dump(mode="json")
+    assert internal["kind"] == request_kind
+    for field, expected in expected_internal.items():
+        assert internal[field] == expected
+    assert selection.replay_queries[0].operator_input == expected_operator_input
+
+
+@pytest.mark.parametrize(
+    ("method_name", "request_type_name", "request_kind", "request_fields"),
+    [
+        ("reconcile_backlog", "BacklogReconcileRequest", "reconcile_backlog", {}),
+        (
+            "apply_story_dependencies",
+            "StoryDependenciesApplyRequest",
+            "apply_story_dependencies",
+            {"selected_story_ids": (7,), "reviewed_edges": ()},
+        ),
+        (
+            "repair_story_readiness",
+            "StoryReadinessRepairRequest",
+            "repair_story_readiness",
+            {"repairs": ({"story_id": 7, "story_points": 3, "rank": "1.1"},)},
+        ),
+        ("start_sprint", "SprintStartRequest", "start_sprint", {}),
+    ],
+)
+def test_planning_action_application_replays_before_current_position(
+    method_name: str,
+    request_type_name: str,
+    request_kind: str,
+    request_fields: dict[str, object],
+) -> None:
+    """Return exact replay/conflict results before reading advanced graph state."""
+    replayed = TransitionResult(ok=True, replayed=True, applied_node_id="advanced")
+    selection = _PlanningActionSelection(replay=replayed)
+    domain = _BoundaryDomain(_vision_position())
+    application = AgileForgeApplication(
+        workflow_domain=domain,
+        planning_action_selection=selection,
+    )
+    request_type = cast(
+        "type[BaseModel]", getattr(application_module, request_type_name)
+    )
+    request = request_type(
+        project_id=PROJECT_ID,
+        idempotency_key=f"{request_kind}-41",
+        actor="operator",
+        **request_fields,
+    )
+
+    result = getattr(application, method_name)(request)
+
+    assert result == replayed
+    assert domain.position_calls == []
+    assert selection.prepare_calls == []
+
+
+@pytest.mark.parametrize(
+    ("request_type_name", "request_fields"),
+    [
+        (
+            "StoryDependenciesApplyRequest",
+            {"selected_story_ids": (0,), "reviewed_edges": ()},
+        ),
+        (
+            "StoryDependenciesApplyRequest",
+            {"selected_story_ids": (7, 7), "reviewed_edges": ()},
+        ),
+        (
+            "StoryReadinessRepairRequest",
+            {"repairs": ({"story_id": 0, "story_points": 3, "rank": "1.1"},)},
+        ),
+        (
+            "StoryReadinessRepairRequest",
+            {"repairs": ({"story_id": 7, "story_points": 0, "rank": "1.1"},)},
+        ),
+        (
+            "StoryReadinessRepairRequest",
+            {"repairs": ({"story_id": 7, "story_points": 3, "rank": "  "},)},
+        ),
+        (
+            "StoryReadinessRepairRequest",
+            {
+                "repairs": (
+                    {"story_id": 7, "story_points": 3, "rank": "1.1"},
+                    {"story_id": 7, "story_points": 5, "rank": "1.2"},
+                )
+            },
+        ),
+    ],
+)
+def test_planning_application_requests_reject_invalid_story_semantics(
+    request_type_name: str,
+    request_fields: dict[str, object],
+) -> None:
+    """Enforce IDs, points, ranks, and uniqueness at the application boundary."""
+    request_type = cast(
+        "type[BaseModel]", getattr(application_module, request_type_name)
+    )
+
+    with pytest.raises(ValidationError):
+        request_type(
+            project_id=PROJECT_ID,
+            idempotency_key="invalid-planning-41",
+            actor="operator",
+            **request_fields,
+        )
+
+
+def test_planning_selection_derives_backlog_reconciliation_from_durable_facts(
+    engine: "Engine",
+) -> None:
+    """Resolve replacement authority and exact artifacts without caller input."""
+    project_id = _seed_accepted_backlog(engine)
+    with Session(engine) as session:
+        snapshot = WorkflowFactRepository(session).load(project_id)
+    authority = next(item for item in snapshot.authorities if item.status == "accepted")
+    backlog = next(
+        item
+        for item in snapshot.phase_artifacts
+        if item.artifact_type == "backlog" and item.status == "accepted"
+    )
+    decision = NodeDecision(
+        node_id="backlog.reconcile",
+        child_graph_id="backlog",
+        request_kind="reconcile_backlog",
+        category=NodeCategory.AVAILABLE,
+        recommendation_kind=RecommendationKind.REQUIRED,
+        reason_code="BACKLOG_RECONCILIATION_REQUIRED",
+        decision_fingerprint="decision-reconcile",
+        fact_references=(
+            FactReference(
+                fact_type="authority",
+                fact_id=str(authority.authority_id),
+                fingerprint=authority.authority_fingerprint,
+            ),
+            FactReference(
+                fact_type="backlog",
+                fact_id=str(backlog.artifact_id),
+                fingerprint=backlog.artifact_fingerprint,
+            ),
+        ),
+    )
+    service_type = application_module.PlanningActionSelectionService
+    service = service_type(engine=engine)
+
+    target = service.prepare_backlog_reconciliation(
+        project_id=project_id,
+        decision=decision,
+    )
+
+    assert target == (
+        authority.authority_id,
+        authority.authority_fingerprint,
+        (int(backlog.artifact_id),),
+    )
+    assert (
+        service.prepare_backlog_reconciliation(
+            project_id=project_id,
+            decision=decision.model_copy(update={"fact_references": ()}),
+        )
+        is None
+    )
+
+
+def test_planning_selection_derives_dependency_and_readiness_guards(
+    engine: "Engine",
+) -> None:
+    """Bind dependency and repair semantics to exact current Story facts."""
+    project_id = _seed_accepted_backlog(engine)
+    domain = planning_domain(engine)
+    _record_and_accept_roadmap(domain, project_id)
+    _story_artifact_id, story_id = _record_and_accept_story(domain, project_id)
+    service_type = application_module.PlanningActionSelectionService
+    service = service_type(engine=engine)
+    position = domain.position(project_id)
+    dependency_decision = next(
+        item
+        for item in position.decisions
+        if item.node_id == "planning.story_dependencies"
+    )
+
+    source_fingerprint = service.prepare_story_dependencies(
+        project_id=project_id,
+        decision=dependency_decision,
+        selected_story_ids=(story_id,),
+    )
+
+    assert isinstance(source_fingerprint, str)
+    with Session(engine) as session:
+        story = session.get(UserStory, story_id)
+        assert story is not None
+        story.story_points = None
+        story.rank = None
+        session.add(story)
+        session.commit()
+    position = domain.position(project_id)
+    readiness_decision = next(
+        item
+        for item in position.decisions
+        if item.node_id == "planning.story_readiness"
+    )
+
+    readiness_target = service.prepare_story_readiness(
+        project_id=project_id,
+        decision=readiness_decision,
+        repair_story_ids=(story_id,),
+    )
+
+    assert readiness_target is not None
+    assert readiness_target[0] == (story_id,)
+    assert isinstance(readiness_target[1], str)
+    assert (
+        service.prepare_story_readiness(
+            project_id=project_id,
+            decision=readiness_decision,
+            repair_story_ids=(story_id + 1,),
+        )
+        is None
+    )
+
+
+def test_planning_selection_derives_sprint_start_from_accepted_current_plan(
+    engine: "Engine",
+) -> None:
+    """Resolve plan, Sprint, and candidate fingerprints from durable plan facts."""
+    project_id = _seed_accepted_backlog(engine)
+    domain = planning_domain(engine)
+    _record_and_accept_roadmap(domain, project_id)
+    _story_artifact_id, story_id = _record_and_accept_story(domain, project_id)
+    plan_id, sprint_id, candidate_fingerprint, plan = _record_sprint_plan_draft(
+        engine,
+        domain,
+        project_id,
+        story_id,
+        team_name="Planning Selection Team",
+        idempotency_key="selection-sprint-plan",
+    )
+    plan_fingerprint = canonical_hash(plan)
+    position = domain.position(project_id)
+    accepted = domain.transition(
+        DecideSprintPlan(
+            **_guards(position, "planning.sprint.review"),
+            idempotency_key="selection-accept-plan",
+            sprint_plan_artifact_id=plan_id,
+            plan_fingerprint=plan_fingerprint,
+            decision="accepted",
+            rationale="Plan is current.",
+        )
+    )
+    assert accepted.ok is True
+    position = domain.position(project_id)
+    start_decision = next(
+        item for item in position.decisions if item.node_id == "planning.sprint.start"
+    )
+    service_type = application_module.PlanningActionSelectionService
+    service = service_type(engine=engine)
+
+    target = service.prepare_sprint_start(
+        project_id=project_id,
+        decision=start_decision,
+    )
+
+    assert target == (
+        plan_id,
+        sprint_id,
+        plan_fingerprint,
+        candidate_fingerprint,
+    )
+    candidate_reference = next(
+        item
+        for item in start_decision.fact_references
+        if item.fact_type == "candidate_set"
+    )
+    assert (
+        service.prepare_sprint_start(
+            project_id=project_id,
+            decision=start_decision.model_copy(
+                update={
+                    "fact_references": tuple(
+                        item.model_copy(update={"fingerprint": "tampered"})
+                        if item == candidate_reference
+                        else item
+                        for item in start_decision.fact_references
+                    )
+                }
+            ),
+        )
+        is None
     )
 
 
@@ -1258,6 +1780,65 @@ def _store_completed_receipt(
             )
         )
         session.commit()
+
+
+def test_transition_replay_compares_structured_semantics_in_json_form(
+    engine: "Engine",
+) -> None:
+    """Replay tuple/model semantics exactly and conflict on changed dependency edges."""
+    stored = ApplyStoryDependencies(
+        project_id=PROJECT_ID,
+        graph_version="agileforge.workflow.v2",
+        fact_fingerprint="facts-dependencies",
+        decision_fingerprint="decision-dependencies",
+        idempotency_key="dependencies-replay-41",
+        actor="operator",
+        selected_story_ids=(7, 9),
+        reviewed_edges=(
+            ReviewedDependencyEdge(
+                dependent_story_id=9,
+                prerequisite_story_id=7,
+                reason="Story 9 requires Story 7.",
+            ),
+        ),
+        source_fingerprint="dependency-source-current",
+    )
+    persisted = TransitionResult(ok=True, applied_node_id="planning.story_dependencies")
+    _store_completed_receipt(engine, stored, persisted)
+    service = DurableTransitionReplayService(engine=engine)
+    query = TransitionReplayQuery(
+        request_kind="apply_story_dependencies",
+        project_id=PROJECT_ID,
+        idempotency_key="dependencies-replay-41",
+        actor="operator",
+        operator_input={
+            "selected_story_ids": [7, 9],
+            "reviewed_edges": [
+                {
+                    "dependent_story_id": 9,
+                    "prerequisite_story_id": 7,
+                    "reason": "Story 9 requires Story 7.",
+                }
+            ],
+        },
+    )
+
+    replay = service.replay(query)
+    conflict = service.replay(
+        query.model_copy(
+            update={
+                "operator_input": {
+                    **query.operator_input,
+                    "reviewed_edges": [],
+                }
+            }
+        )
+    )
+
+    assert replay == persisted.model_copy(update={"replayed": True})
+    assert conflict is not None
+    assert conflict.error is not None
+    assert conflict.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
 
 
 @pytest.mark.parametrize(
@@ -1901,6 +2482,57 @@ _AGENTIC_NODE_IDS = {
 }
 
 
+def _request_kind_fact_references(kind: str) -> tuple[FactReference, ...]:
+    if kind == "reconcile_backlog":
+        return (
+            FactReference(
+                fact_type="authority",
+                fact_id="17",
+                fingerprint="authority-17",
+            ),
+            FactReference(
+                fact_type="backlog",
+                fact_id="23",
+                fingerprint="backlog-23",
+            ),
+        )
+    if kind == "apply_story_dependencies":
+        return (
+            FactReference(
+                fact_type="story_dependency_source",
+                fact_id="41",
+                fingerprint="dependency-source-41",
+            ),
+        )
+    if kind == "repair_story_readiness":
+        return (
+            FactReference(
+                fact_type="story_readiness",
+                fact_id="41",
+                fingerprint="readiness-41",
+            ),
+        )
+    if kind == "start_sprint":
+        return (
+            FactReference(
+                fact_type="sprint_plan",
+                fact_id="29",
+                fingerprint="plan-29",
+            ),
+            FactReference(
+                fact_type="candidate_set",
+                fact_id="41",
+                fingerprint="candidates-41",
+            ),
+            FactReference(
+                fact_type="sprint_plan_tasks",
+                fact_id="31",
+                fingerprint="tasks-31",
+            ),
+        )
+    return ()
+
+
 def _all_request_kinds_position() -> WorkflowPosition:
     decisions = tuple(
         NodeDecision(
@@ -1912,6 +2544,7 @@ def _all_request_kinds_position() -> WorkflowPosition:
             recommendation_kind=RecommendationKind.REQUIRED,
             reason_code="TEST_AVAILABLE",
             decision_fingerprint=f"decision-{index}",
+            fact_references=_request_kind_fact_references(kind),
         )
         for index, kind in enumerate(COMMAND_PREFIXES)
     )
@@ -2233,6 +2866,178 @@ def test_delivery_review_api_rejects_caller_owned_guards(
     assert response.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
 
 
+@pytest.mark.parametrize(
+    ("path", "payload", "request_type_name"),
+    [
+        (
+            "/api/projects/41/backlog/reconcile",
+            {},
+            "BacklogReconcileRequest",
+        ),
+        (
+            "/api/projects/41/story/dependencies/apply",
+            {
+                "selected_story_ids": [7, 9],
+                "reviewed_edges": [
+                    {
+                        "dependent_story_id": 9,
+                        "prerequisite_story_id": 7,
+                        "reason": "Story 9 requires Story 7.",
+                    }
+                ],
+            },
+            "StoryDependenciesApplyRequest",
+        ),
+        (
+            "/api/projects/41/story/readiness/repair",
+            {
+                "repairs": [
+                    {"story_id": 7, "story_points": 3, "rank": "1.1"},
+                    {"story_id": 9, "story_points": 5, "rank": "1.2"},
+                ]
+            },
+            "StoryReadinessRepairRequest",
+        ),
+        (
+            "/api/projects/41/sprint/start",
+            {},
+            "SprintStartRequest",
+        ),
+    ],
+)
+def test_planning_action_api_uses_task_specific_semantic_requests(
+    path: str,
+    payload: dict[str, object],
+    request_type_name: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Route operator semantics without caller-owned durable identities."""
+    application = _FakeApiApplication(position=_all_request_kinds_position())
+    monkeypatch.setattr(api_module, "_application", lambda: application)
+
+    response = TestClient(api_module.app).post(
+        path,
+        json={
+            **payload,
+            "idempotency_key": "planning-action-41",
+            "actor": "operator",
+        },
+    )
+
+    assert response.status_code == HTTPStatus.OK
+    assert len(application.requests) == 1
+    request = application.requests[0]
+    assert type(request).__name__ == request_type_name
+    assert not hasattr(request, "graph_version")
+    assert not hasattr(request, "fact_fingerprint")
+    assert not hasattr(request, "decision_fingerprint")
+
+
+@pytest.mark.parametrize(
+    ("path", "payload", "internal_field", "value"),
+    [
+        ("/api/projects/41/backlog/reconcile", {}, "semantic_input", {}),
+        ("/api/projects/41/backlog/reconcile", {}, "affected_artifact_ids", [7]),
+        (
+            "/api/projects/41/story/dependencies/apply",
+            {"selected_story_ids": [7], "reviewed_edges": []},
+            "source_fingerprint",
+            "caller-owned",
+        ),
+        (
+            "/api/projects/41/story/dependencies/apply",
+            {"selected_story_ids": [7], "reviewed_edges": []},
+            "graph_version",
+            "caller-owned",
+        ),
+        (
+            "/api/projects/41/story/readiness/repair",
+            {"repairs": [{"story_id": 7, "story_points": 3, "rank": "1.1"}]},
+            "story_ids",
+            [7],
+        ),
+        (
+            "/api/projects/41/story/readiness/repair",
+            {"repairs": [{"story_id": 7, "story_points": 3, "rank": "1.1"}]},
+            "expected_readiness_fingerprint",
+            "caller-owned",
+        ),
+        ("/api/projects/41/sprint/start", {}, "sprint_plan_artifact_id", 29),
+        ("/api/projects/41/sprint/start", {}, "plan_fingerprint", "caller-owned"),
+        ("/api/projects/41/sprint/start", {}, "candidate_set_fingerprint", "owned"),
+    ],
+)
+def test_planning_action_api_rejects_internal_fields(
+    path: str,
+    payload: dict[str, object],
+    internal_field: str,
+    value: object,
+) -> None:
+    """Return 422 for generic envelopes, guards, fingerprints, and artifact IDs."""
+    response = TestClient(api_module.app).post(
+        path,
+        json={
+            **payload,
+            "idempotency_key": "planning-action-41",
+            "actor": "operator",
+            internal_field: value,
+        },
+    )
+
+    assert response.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+
+
+@pytest.mark.parametrize(
+    ("path", "payload"),
+    [
+        (
+            "/api/projects/41/story/dependencies/apply",
+            {"selected_story_ids": [0], "reviewed_edges": []},
+        ),
+        (
+            "/api/projects/41/story/dependencies/apply",
+            {"selected_story_ids": [7, 7], "reviewed_edges": []},
+        ),
+        (
+            "/api/projects/41/story/readiness/repair",
+            {"repairs": [{"story_id": 0, "story_points": 3, "rank": "1.1"}]},
+        ),
+        (
+            "/api/projects/41/story/readiness/repair",
+            {"repairs": [{"story_id": 7, "story_points": 0, "rank": "1.1"}]},
+        ),
+        (
+            "/api/projects/41/story/readiness/repair",
+            {"repairs": [{"story_id": 7, "story_points": 3, "rank": "  "}]},
+        ),
+        (
+            "/api/projects/41/story/readiness/repair",
+            {
+                "repairs": [
+                    {"story_id": 7, "story_points": 3, "rank": "1.1"},
+                    {"story_id": 7, "story_points": 5, "rank": "1.2"},
+                ]
+            },
+        ),
+    ],
+)
+def test_planning_action_api_rejects_invalid_story_semantics(
+    path: str,
+    payload: dict[str, object],
+) -> None:
+    """Reject invalid IDs, points, ranks, and duplicate semantic selections."""
+    response = TestClient(api_module.app).post(
+        path,
+        json={
+            **payload,
+            "idempotency_key": "planning-action-41",
+            "actor": "operator",
+        },
+    )
+
+    assert response.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+
+
 def test_semantic_sprint_generation_api_is_strict(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2356,6 +3161,36 @@ def test_position_advertises_only_executable_semantic_api_routes(
     assert all(item["endpoint"].startswith("/") is False for item in actions)
     assert "record_sprint_plan" in expected
     assert all("decision_fingerprint" not in item for item in actions)
+
+
+@pytest.mark.parametrize(
+    "request_kind",
+    [
+        "reconcile_backlog",
+        "apply_story_dependencies",
+        "repair_story_readiness",
+        "start_sprint",
+    ],
+)
+def test_position_does_not_advertise_malformed_planning_actions(
+    request_kind: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Suppress actions whose graph decision omits required durable references."""
+    decision = _delivery_decision(
+        node_id=f"test.{request_kind}",
+        request_kind=request_kind,
+    )
+    monkeypatch.setattr(
+        api_module,
+        "_application",
+        lambda: _FakeApiApplication(position=_vision_position(decision)),
+    )
+
+    response = TestClient(api_module.app).get("/api/projects/41/position")
+
+    assert response.status_code == HTTPStatus.OK
+    assert response.json()["actions"] == []
 
 
 def test_position_advertises_waiting_vision_review(

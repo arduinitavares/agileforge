@@ -22,6 +22,7 @@ from services.application import (
     AuthorityFeedbackRequest,
     AuthorityRepairRequest,
     AuthorityReviewRequest,
+    BacklogReconcileRequest,
     BacklogReviewRequest,
     CreateProjectCommand,
     DeliveryActionRequest,
@@ -36,6 +37,11 @@ from services.application import (
     SpecificationReviewRequest,
     SprintPlanningRequest,
     SprintPlanReviewRequest,
+    SprintStartRequest,
+    StoryDependenciesApplyRequest,
+    StoryDependencyEdgeRequest,
+    StoryReadinessRepair,
+    StoryReadinessRepairRequest,
     StoryReviewRequest,
     VisionResponseRequest,
     VisionReviewRequest,
@@ -60,6 +66,7 @@ _TRANSITION_REQUEST = TypeAdapter(TransitionRequest)
 _SEMANTIC_REQUEST_KINDS = frozenset(
     {
         "abandon_product_goal",
+        "apply_story_dependencies",
         "begin_vision_revision",
         "compile_authority",
         "decide_authority",
@@ -80,7 +87,10 @@ _SEMANTIC_REQUEST_KINDS = frozenset(
         "record_sprint_plan",
         "record_story_draft",
         "record_vision_interview_turn",
+        "reconcile_backlog",
         "repair_authority",
+        "repair_story_readiness",
+        "start_sprint",
     }
 )
 
@@ -273,6 +283,23 @@ class _Application(Protocol):
         request: SprintPlanReviewRequest,
     ) -> TransitionResult: ...
 
+    def reconcile_backlog(
+        self,
+        request: BacklogReconcileRequest,
+    ) -> TransitionResult: ...
+
+    def apply_story_dependencies(
+        self,
+        request: StoryDependenciesApplyRequest,
+    ) -> TransitionResult: ...
+
+    def repair_story_readiness(
+        self,
+        request: StoryReadinessRepairRequest,
+    ) -> TransitionResult: ...
+
+    def start_sprint(self, request: SprintStartRequest) -> TransitionResult: ...
+
 
 type CommandHandler = Callable[[argparse.Namespace, _Application], int]
 
@@ -301,6 +328,40 @@ def _add_mutation_metadata(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--idempotency-key", required=True)
     parser.add_argument("--actor", required=True)
     parser.add_argument("--correlation-id")
+
+
+def _parse_story_dependency(value: str) -> StoryDependencyEdgeRequest:
+    """Parse DEPENDENT_ID:PREREQUISITE_ID:REASON into one typed edge."""
+    parts = value.split(":", maxsplit=2)
+    expected_parts = 3
+    if len(parts) != expected_parts:
+        message = "--dependency must be DEPENDENT_ID:PREREQUISITE_ID:REASON."
+        raise argparse.ArgumentTypeError(message)
+    try:
+        return StoryDependencyEdgeRequest(
+            dependent_story_id=int(parts[0]),
+            prerequisite_story_id=int(parts[1]),
+            reason=parts[2],
+        )
+    except (ValueError, ValidationError) as error:
+        raise argparse.ArgumentTypeError(str(error)) from error
+
+
+def _parse_story_readiness_repair(value: str) -> StoryReadinessRepair:
+    """Parse STORY_ID:POINTS:RANK into one explicit typed repair."""
+    parts = value.split(":", maxsplit=2)
+    expected_parts = 3
+    if len(parts) != expected_parts:
+        message = "--repair must be STORY_ID:POINTS:RANK."
+        raise argparse.ArgumentTypeError(message)
+    try:
+        return StoryReadinessRepair(
+            story_id=int(parts[0]),
+            story_points=int(parts[1]),
+            rank=parts[2],
+        )
+    except (ValueError, ValidationError) as error:
+        raise argparse.ArgumentTypeError(str(error)) from error
 
 
 def _add_transition_leaf(
@@ -411,6 +472,13 @@ def _install_story_reads(
     inspect = dependencies_sub.add_parser("inspect")
     inspect.add_argument("--project-id", type=int, required=True)
     inspect.set_defaults(command_handler=_story_dependencies)
+    readiness = story_sub.add_parser("readiness")
+    readiness_sub = readiness.add_subparsers(
+        dest="readiness_action",
+        required=True,
+    )
+    parsers[("story", "readiness")] = readiness
+    branches[("story", "readiness")] = readiness_sub
 
 
 def _install_sprint_reads(
@@ -515,6 +583,45 @@ def _semantic_leaf(
     return parser
 
 
+def _install_planning_action_mutations(
+    branches: dict[tuple[str, ...], argparse._SubParsersAction],
+) -> None:
+    """Install the four task-specific planning action transports."""
+    _semantic_leaf(branches[("backlog",)], "reconcile", _backlog_reconcile)
+    dependency_apply = _semantic_leaf(
+        branches[("story", "dependencies")],
+        "apply",
+        _story_dependencies_apply,
+    )
+    dependency_apply.add_argument(
+        "--story-id",
+        dest="selected_story_ids",
+        action="append",
+        type=int,
+        required=True,
+    )
+    dependency_apply.add_argument(
+        "--dependency",
+        dest="reviewed_edges",
+        action="append",
+        type=_parse_story_dependency,
+        default=None,
+    )
+    readiness_repair = _semantic_leaf(
+        branches[("story", "readiness")],
+        "repair",
+        _story_readiness_repair,
+    )
+    readiness_repair.add_argument(
+        "--repair",
+        dest="repairs",
+        action="append",
+        type=_parse_story_readiness_repair,
+        required=True,
+    )
+    _semantic_leaf(branches[("sprint",)], "start", _sprint_start)
+
+
 def _install_lifecycle_mutations(
     branches: dict[tuple[str, ...], argparse._SubParsersAction],
 ) -> None:
@@ -606,6 +713,8 @@ def _install_lifecycle_mutations(
         required=True,
     )
     story_review.add_argument("--rationale", required=True)
+
+    _install_planning_action_mutations(branches)
 
     sprint_generate = _semantic_leaf(
         branches[("sprint",)],
@@ -1168,6 +1277,67 @@ def _sprint_decide(args: argparse.Namespace, application: _Application) -> int:
                 project_id=args.project_id,
                 decision=decision,
                 rationale=args.rationale,
+                idempotency_key=args.idempotency_key,
+                actor=args.actor,
+                correlation_id=args.correlation_id,
+            )
+        )
+    )
+
+
+def _backlog_reconcile(args: argparse.Namespace, application: _Application) -> int:
+    return _emit_result(
+        application.reconcile_backlog(
+            BacklogReconcileRequest(
+                project_id=args.project_id,
+                idempotency_key=args.idempotency_key,
+                actor=args.actor,
+                correlation_id=args.correlation_id,
+            )
+        )
+    )
+
+
+def _story_dependencies_apply(
+    args: argparse.Namespace,
+    application: _Application,
+) -> int:
+    return _emit_result(
+        application.apply_story_dependencies(
+            StoryDependenciesApplyRequest(
+                project_id=args.project_id,
+                selected_story_ids=tuple(args.selected_story_ids),
+                reviewed_edges=tuple(args.reviewed_edges or ()),
+                idempotency_key=args.idempotency_key,
+                actor=args.actor,
+                correlation_id=args.correlation_id,
+            )
+        )
+    )
+
+
+def _story_readiness_repair(
+    args: argparse.Namespace,
+    application: _Application,
+) -> int:
+    return _emit_result(
+        application.repair_story_readiness(
+            StoryReadinessRepairRequest(
+                project_id=args.project_id,
+                repairs=tuple(args.repairs),
+                idempotency_key=args.idempotency_key,
+                actor=args.actor,
+                correlation_id=args.correlation_id,
+            )
+        )
+    )
+
+
+def _sprint_start(args: argparse.Namespace, application: _Application) -> int:
+    return _emit_result(
+        application.start_sprint(
+            SprintStartRequest(
+                project_id=args.project_id,
                 idempotency_key=args.idempotency_key,
                 actor=args.actor,
                 correlation_id=args.correlation_id,

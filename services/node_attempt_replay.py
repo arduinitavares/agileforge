@@ -136,13 +136,19 @@ class DurableTransitionReplayService:
             if receipt is None:
                 return None
             stored = _TRANSITION_REQUEST.validate_json(receipt.request_json)
+            stored_payload = stored.model_dump(mode="json")
+            query_payload = query.model_dump(mode="json")
+            operator_input = query_payload["operator_input"]
+            if not isinstance(operator_input, dict):
+                message = "Semantic replay input must serialize as an object."
+                raise TypeError(message)
             if (
                 stored.project_id != query.project_id
                 or stored.actor != query.actor
                 or stored.correlation_id != query.correlation_id
                 or any(
-                    getattr(stored, key, None) != value
-                    for key, value in query.operator_input.items()
+                    stored_payload.get(key) != value
+                    for key, value in operator_input.items()
                 )
             ):
                 return _fact_conflict(

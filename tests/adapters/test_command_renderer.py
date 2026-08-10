@@ -5,9 +5,12 @@ import shlex
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
+
 from cli.main import build_parser
 from cli.workflow_commands import COMMAND_PREFIXES, render_workflow_next
 from workflow.contracts import (
+    FactReference,
     NodeCategory,
     NodeDecision,
     RecommendationKind,
@@ -25,6 +28,9 @@ _PLACEHOLDERS = {
     "<feedback>": "Narrow the identity invariant.",
     "<rationale>": "reviewed",
     "<reason>": "changed",
+    "<story-id>": "7",
+    "<dependency>": "7:8:Story 7 requires Story 8.",
+    "<repair>": "7:3:1.1",
     "<max-story-points>": "3",
     "<team-name>": "Platform",
     "<idempotency-key>": "run-41",
@@ -276,6 +282,145 @@ def test_delivery_reviews_render_fingerprint_free_semantic_commands() -> None:
         item["command"] for item in commands if item["request_kind"] == "decide_story"
     )
     assert "--instance-key requirement:req-7" in story_command
+
+
+@pytest.mark.parametrize(
+    ("request_kind", "expected_flags", "fact_references"),
+    [
+        (
+            "reconcile_backlog",
+            (),
+            (
+                FactReference(
+                    fact_type="authority",
+                    fact_id="17",
+                    fingerprint="authority-17",
+                ),
+                FactReference(
+                    fact_type="backlog",
+                    fact_id="23",
+                    fingerprint="backlog-23",
+                ),
+            ),
+        ),
+        (
+            "apply_story_dependencies",
+            ("--story-id", "--dependency"),
+            (
+                FactReference(
+                    fact_type="story_dependency_source",
+                    fact_id="41",
+                    fingerprint="dependency-source-41",
+                ),
+            ),
+        ),
+        (
+            "repair_story_readiness",
+            ("--repair",),
+            (
+                FactReference(
+                    fact_type="story_readiness",
+                    fact_id="41",
+                    fingerprint="readiness-41",
+                ),
+            ),
+        ),
+        (
+            "start_sprint",
+            (),
+            (
+                FactReference(
+                    fact_type="sprint_plan",
+                    fact_id="29",
+                    fingerprint="plan-29",
+                ),
+                FactReference(
+                    fact_type="candidate_set",
+                    fact_id="41",
+                    fingerprint="candidates-41",
+                ),
+                FactReference(
+                    fact_type="sprint_plan_tasks",
+                    fact_id="31",
+                    fingerprint="tasks-31",
+                ),
+            ),
+        ),
+    ],
+)
+def test_planning_actions_render_task_specific_semantic_commands(
+    request_kind: str,
+    expected_flags: tuple[str, ...],
+    fact_references: tuple[FactReference, ...],
+) -> None:
+    """Advertise only parser-valid operator semantics for planning actions."""
+    decision = NodeDecision(
+        node_id=f"test.{request_kind}",
+        child_graph_id="planning",
+        request_kind=request_kind,
+        category=NodeCategory.AVAILABLE,
+        recommendation_kind=RecommendationKind.REQUIRED,
+        reason_code="TEST_AVAILABLE",
+        decision_fingerprint=f"decision-{request_kind}",
+        fact_references=fact_references,
+    )
+    position = position_fixture().model_copy(
+        update={
+            "decisions": (decision,),
+            "available_nodes": (decision.node_id,),
+            "waiting_nodes": (),
+            "blocked_nodes": (),
+            "invalid_nodes": (),
+        }
+    )
+
+    commands = render_workflow_next(position)["commands"]
+
+    assert len(commands) == 1
+    command = commands[0]["command"]
+    assert "--request-file" not in command
+    assert "fingerprint" not in command
+    for flag in expected_flags:
+        assert flag in command
+    parsed = build_parser().parse_args(
+        [_PLACEHOLDERS.get(argument, argument) for argument in shlex.split(command)[1:]]
+    )
+    assert parsed.project_id == position.project_id
+
+
+@pytest.mark.parametrize(
+    "request_kind",
+    [
+        "reconcile_backlog",
+        "apply_story_dependencies",
+        "repair_story_readiness",
+        "start_sprint",
+    ],
+)
+def test_planning_actions_with_malformed_decisions_are_not_advertised(
+    request_kind: str,
+) -> None:
+    """Suppress semantic commands when required graph references are absent."""
+    decision = NodeDecision(
+        node_id=f"test.{request_kind}",
+        child_graph_id="planning",
+        request_kind=request_kind,
+        category=NodeCategory.AVAILABLE,
+        recommendation_kind=RecommendationKind.REQUIRED,
+        reason_code="TEST_AVAILABLE",
+        decision_fingerprint=f"decision-{request_kind}",
+    )
+    position = position_fixture().model_copy(
+        update={
+            "decisions": (decision,),
+            "available_nodes": (decision.node_id,),
+            "waiting_nodes": (),
+            "blocked_nodes": (),
+            "invalid_nodes": (),
+        }
+    )
+
+    assert render_workflow_next(position)["commands"] == []
 
 
 def test_sprint_generation_advertises_parser_valid_capacity_remediation() -> None:

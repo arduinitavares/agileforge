@@ -95,10 +95,16 @@ from workflow.contracts import (
     WorkflowErrorCode,
     WorkflowPosition,
 )
-from workflow.definitions.planning import candidate_set_fingerprint
+from workflow.definitions.authority import accepted_current_authority
+from workflow.definitions.planning import (
+    candidate_set_fingerprint,
+    readiness_fingerprint,
+    story_dependency_source_fingerprint,
+)
 from workflow.fingerprints import canonical_hash, canonical_json
 from workflow.requests import (
     AbandonProductGoal,
+    ApplyStoryDependencies,
     BeginVisionRevision,
     DecideAuthority,
     DecideBacklog,
@@ -109,10 +115,14 @@ from workflow.requests import (
     DecideStory,
     DecideVisionReview,
     FulfillProductGoal,
+    ReconcileBacklog,
     RecordAuthorityFeedback,
     RecordDiscoveryArtifact,
     RecordSpecificationCandidate,
+    RepairStoryReadiness,
+    StartSprint,
 )
+from workflow.requests.planning import ReviewedDependencyEdge, StoryReadinessUpdate
 
 if TYPE_CHECKING:
     from google.adk.agents import BaseAgent
@@ -237,7 +247,18 @@ class _AuthorityRepairInputPort(Protocol):
     ) -> JsonObject | None: ...
 
 
-class _DeliveryReviewSelectionPort(Protocol):
+class SemanticTransitionReplayPort(Protocol):
+    """Reusable replay boundary for semantic non-agentic transitions."""
+
+    def replay_transition(
+        self,
+        query: TransitionReplayQuery,
+    ) -> TransitionResult | None:
+        """Replay exact semantics without reading the current graph position."""
+        ...
+
+
+class _DeliveryReviewSelectionPort(SemanticTransitionReplayPort, Protocol):
     """Resolve replay and durable artifact identity for delivery reviews."""
 
     def replay_transition(
@@ -266,6 +287,40 @@ class _DeliveryActionInputPort(Protocol):
         decision: NodeDecision,
         node_id: str,
     ) -> JsonObject | None: ...
+
+
+class _PlanningActionSelectionPort(SemanticTransitionReplayPort, Protocol):
+    """Derive guarded planning-action identities from exact durable facts."""
+
+    def prepare_backlog_reconciliation(
+        self,
+        *,
+        project_id: int,
+        decision: NodeDecision,
+    ) -> tuple[int, str, tuple[int, ...]] | None: ...
+
+    def prepare_story_dependencies(
+        self,
+        *,
+        project_id: int,
+        decision: NodeDecision,
+        selected_story_ids: tuple[int, ...],
+    ) -> str | None: ...
+
+    def prepare_story_readiness(
+        self,
+        *,
+        project_id: int,
+        decision: NodeDecision,
+        repair_story_ids: tuple[int, ...],
+    ) -> tuple[tuple[int, ...], str] | None: ...
+
+    def prepare_sprint_start(
+        self,
+        *,
+        project_id: int,
+        decision: NodeDecision,
+    ) -> tuple[int, int, str, str] | None: ...
 
 
 class _SprintPlanningInputPort(Protocol):
@@ -441,6 +496,169 @@ class DeliveryReviewSelectionService:
                     and artifact.plan_fingerprint == reference.fingerprint
                 )
         return (artifact_id, reference.fingerprint) if valid else None
+
+
+@dataclass(frozen=True)
+class PlanningActionSelectionService:
+    """Resolve planning transition guards from graph-selected durable facts."""
+
+    engine: Engine
+
+    def replay_transition(
+        self,
+        query: TransitionReplayQuery,
+    ) -> TransitionResult | None:
+        """Replay exact operator semantics before any current fact read."""
+        return DurableTransitionReplayService(engine=self.engine).replay(query)
+
+    def prepare_backlog_reconciliation(
+        self,
+        *,
+        project_id: int,
+        decision: NodeDecision,
+    ) -> tuple[int, str, tuple[int, ...]] | None:
+        """Derive replacement authority and exact affected phase artifacts."""
+        snapshot = self._snapshot(project_id)
+        if snapshot is None:
+            return None
+        authority, conflict = accepted_current_authority(snapshot)
+        authority_target = _integer_fact_reference(decision, "authority")
+        if (
+            conflict
+            or authority is None
+            or authority_target is None
+            or authority_target[0] != authority.authority_id
+            or authority_target[1].fingerprint != authority.authority_fingerprint
+        ):
+            return None
+        references = tuple(
+            item
+            for item in decision.fact_references
+            if item.fact_type in {"vision", "backlog"}
+        )
+        if not references:
+            return None
+        affected_artifact_ids = _matched_phase_artifact_ids(snapshot, references)
+        if affected_artifact_ids is None:
+            return None
+        return (
+            authority.authority_id,
+            authority.authority_fingerprint,
+            affected_artifact_ids,
+        )
+
+    def prepare_story_dependencies(
+        self,
+        *,
+        project_id: int,
+        decision: NodeDecision,
+        selected_story_ids: tuple[int, ...],
+    ) -> str | None:
+        """Derive the source fingerprint for the exact selected Story set."""
+        snapshot = self._snapshot(project_id)
+        if snapshot is None:
+            return None
+        stories = tuple(
+            sorted(
+                (item for item in snapshot.stories if item.sprint_candidate),
+                key=lambda item: item.story_id,
+            )
+        )
+        expected_ids = tuple(item.story_id for item in stories)
+        source_fingerprint = story_dependency_source_fingerprint(stories)
+        reference = _single_fact_reference(decision, "story_dependency_source")
+        if (
+            selected_story_ids != expected_ids
+            or reference is None
+            or reference.fact_id != str(project_id)
+            or reference.fingerprint != source_fingerprint
+        ):
+            return None
+        return source_fingerprint
+
+    def prepare_story_readiness(
+        self,
+        *,
+        project_id: int,
+        decision: NodeDecision,
+        repair_story_ids: tuple[int, ...],
+    ) -> tuple[tuple[int, ...], str] | None:
+        """Derive exact missing Story IDs and their current readiness guard."""
+        snapshot = self._snapshot(project_id)
+        if snapshot is None:
+            return None
+        missing_ids = tuple(
+            sorted(
+                item.story_id
+                for item in snapshot.stories
+                if item.sprint_candidate
+                and (item.story_points is None or item.rank is None)
+            )
+        )
+        fingerprint = readiness_fingerprint(snapshot.stories)
+        reference = _single_fact_reference(decision, "story_readiness")
+        if (
+            repair_story_ids != missing_ids
+            or reference is None
+            or reference.fact_id != str(project_id)
+            or reference.fingerprint != fingerprint
+        ):
+            return None
+        return missing_ids, fingerprint
+
+    def prepare_sprint_start(
+        self,
+        *,
+        project_id: int,
+        decision: NodeDecision,
+    ) -> tuple[int, int, str, str] | None:
+        """Derive exact accepted plan, Sprint, and candidate identities."""
+        snapshot = self._snapshot(project_id)
+        if snapshot is None:
+            return None
+        plan_target = _integer_fact_reference(decision, "sprint_plan")
+        candidate_reference = _single_fact_reference(decision, "candidate_set")
+        task_reference = _integer_fact_reference(decision, "sprint_plan_tasks")
+        if (
+            plan_target is None
+            or candidate_reference is None
+            or candidate_reference.fact_id != str(project_id)
+            or task_reference is None
+        ):
+            return None
+        plan_id, plan_reference = plan_target
+        sprint_id, task_reference_value = task_reference
+        plans = tuple(
+            item
+            for item in snapshot.planning_artifacts
+            if item.artifact_type == "sprint_plan"
+            and item.artifact_id == plan_id
+            and item.artifact_fingerprint == plan_reference.fingerprint
+            and item.status == "accepted"
+        )
+        if len(plans) != 1:
+            return None
+        plan = plans[0]
+        stories = tuple(item for item in snapshot.stories if item.sprint_candidate)
+        current_candidates = candidate_set_fingerprint(
+            stories,
+            snapshot.story_dependencies,
+        )
+        if (
+            plan.sprint_id != sprint_id
+            or plan.candidate_set_fingerprint != current_candidates
+            or candidate_reference.fingerprint != current_candidates
+            or plan.task_content_fingerprint != task_reference_value.fingerprint
+        ):
+            return None
+        return plan_id, sprint_id, plan.artifact_fingerprint, current_candidates
+
+    def _snapshot(self, project_id: int) -> WorkflowFactSnapshot | None:
+        try:
+            with Session(self.engine) as session:
+                return WorkflowFactRepository(session).load(project_id)
+        except WorkflowFactLoadError:
+            return None
 
 
 @dataclass(frozen=True)
@@ -623,6 +841,7 @@ class _LifecycleServiceOptions(TypedDict, total=False):
     authority_repair_input: _AuthorityRepairInputPort | None
     delivery_review_selection: _DeliveryReviewSelectionPort | None
     delivery_action_input: _DeliveryActionInputPort | None
+    planning_action_selection: _PlanningActionSelectionPort | None
     sprint_planning_input: _SprintPlanningInputPort | None
 
 
@@ -830,6 +1049,91 @@ class SprintPlanningRequest(FrozenModel):
             message = "selected_story_ids must not contain duplicates."
             raise ValueError(message)
         return self
+
+
+type PositiveStoryId = Annotated[int, Field(strict=True, gt=0)]
+
+
+class _PlanningMutationRequest(FrozenModel):
+    """Transport metadata shared by task-specific planning action requests."""
+
+    project_id: int
+    idempotency_key: str = Field(min_length=1)
+    actor: str = Field(min_length=1)
+    correlation_id: str | None = None
+
+
+class BacklogReconcileRequest(_PlanningMutationRequest):
+    """Transport-only request to reconcile graph-selected stale Backlog facts."""
+
+
+class StoryDependencyEdgeRequest(FrozenModel):
+    """One operator-reviewed typed Story dependency edge."""
+
+    dependent_story_id: PositiveStoryId
+    prerequisite_story_id: PositiveStoryId
+    reason: SemanticText
+
+    @model_validator(mode="after")
+    def reject_self_edge(self) -> StoryDependencyEdgeRequest:
+        """Reject a dependency edge from one Story to itself."""
+        if self.dependent_story_id == self.prerequisite_story_id:
+            message = "A Story dependency cannot reference itself."
+            raise ValueError(message)
+        return self
+
+
+class StoryDependenciesApplyRequest(_PlanningMutationRequest):
+    """Exact operator-reviewed Story selection and dependency semantics."""
+
+    selected_story_ids: tuple[PositiveStoryId, ...] = Field(min_length=1)
+    reviewed_edges: tuple[StoryDependencyEdgeRequest, ...]
+
+    @model_validator(mode="after")
+    def validate_dependency_set(self) -> StoryDependenciesApplyRequest:
+        """Reject duplicate selections and invalid edge membership."""
+        if len(set(self.selected_story_ids)) != len(self.selected_story_ids):
+            message = "selected_story_ids must not contain duplicates."
+            raise ValueError(message)
+        pairs = tuple(
+            (item.dependent_story_id, item.prerequisite_story_id)
+            for item in self.reviewed_edges
+        )
+        if len(set(pairs)) != len(pairs):
+            message = "reviewed_edges must not contain duplicate Story pairs."
+            raise ValueError(message)
+        selected = set(self.selected_story_ids)
+        if any(left not in selected or right not in selected for left, right in pairs):
+            message = "reviewed_edges must remain inside selected_story_ids."
+            raise ValueError(message)
+        return self
+
+
+class StoryReadinessRepair(FrozenModel):
+    """Operator-supplied readiness values for one Story."""
+
+    story_id: PositiveStoryId
+    story_points: Annotated[int, Field(strict=True, gt=0)]
+    rank: SemanticText
+
+
+class StoryReadinessRepairRequest(_PlanningMutationRequest):
+    """Explicit operator readiness repairs without derived guards."""
+
+    repairs: tuple[StoryReadinessRepair, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_unique_story_repairs(self) -> StoryReadinessRepairRequest:
+        """Reject multiple readiness repairs for one Story."""
+        story_ids = tuple(item.story_id for item in self.repairs)
+        if len(set(story_ids)) != len(story_ids):
+            message = "repairs must not contain duplicate Story IDs."
+            raise ValueError(message)
+        return self
+
+
+class SprintStartRequest(_PlanningMutationRequest):
+    """Transport-only request to start the graph-selected accepted Sprint plan."""
 
 
 class VisionInterviewRequest(FrozenModel):
@@ -1040,6 +1344,9 @@ class AgileForgeApplication:
             "delivery_review_selection"
         )
         self._delivery_action_input = lifecycle_services.get("delivery_action_input")
+        self._planning_action_selection = lifecycle_services.get(
+            "planning_action_selection"
+        )
         self._sprint_planning_input = lifecycle_services.get("sprint_planning_input")
         self._project_lifecycle: ProjectLifecycleService | None = None
 
@@ -1453,6 +1760,216 @@ class AgileForgeApplication:
                 plan_fingerprint=fingerprint,
                 decision=request.decision,
                 rationale=request.rationale,
+            )
+        )
+
+    def reconcile_backlog(
+        self,
+        request: BacklogReconcileRequest,
+    ) -> TransitionResult:
+        """Reconcile graph-selected stale artifacts under current authority."""
+        selection = self._planning_action_selection
+        if selection is None:
+            return _transition_not_available(None, "backlog.reconcile")
+        replay = self._replay_planning_action(
+            request_kind="reconcile_backlog",
+            request=request,
+            operator_input={},
+        )
+        if replay is not None:
+            return replay
+        position = self.position(project_id=request.project_id)
+        decision = _unique_available_decision(position, "backlog.reconcile")
+        target = (
+            None
+            if decision is None or decision.category is not NodeCategory.AVAILABLE
+            else selection.prepare_backlog_reconciliation(
+                project_id=request.project_id,
+                decision=decision,
+            )
+        )
+        if decision is None or target is None:
+            return _transition_not_available(position, "backlog.reconcile")
+        authority_id, authority_fingerprint, affected_artifact_ids = target
+        return self.transition(
+            ReconcileBacklog(
+                project_id=request.project_id,
+                graph_version=position.graph_version,
+                fact_fingerprint=position.fact_fingerprint,
+                decision_fingerprint=decision.decision_fingerprint,
+                instance_key=decision.instance_key,
+                idempotency_key=request.idempotency_key,
+                actor=request.actor,
+                correlation_id=request.correlation_id,
+                replacement_authority_id=authority_id,
+                replacement_authority_fingerprint=authority_fingerprint,
+                affected_artifact_ids=affected_artifact_ids,
+            )
+        )
+
+    def apply_story_dependencies(
+        self,
+        request: StoryDependenciesApplyRequest,
+    ) -> TransitionResult:
+        """Apply reviewed dependency semantics against current Story facts."""
+        selection = self._planning_action_selection
+        if selection is None:
+            return _transition_not_available(None, "planning.story_dependencies")
+        selected_story_ids = tuple(sorted(request.selected_story_ids))
+        reviewed_edges = _canonical_dependency_edges(request.reviewed_edges)
+        replay = self._replay_planning_action(
+            request_kind="apply_story_dependencies",
+            request=request,
+            operator_input={
+                "selected_story_ids": list(selected_story_ids),
+                "reviewed_edges": [
+                    item.model_dump(mode="json") for item in reviewed_edges
+                ],
+            },
+        )
+        if replay is not None:
+            return replay
+        position = self.position(project_id=request.project_id)
+        decision = _unique_available_decision(
+            position,
+            "planning.story_dependencies",
+        )
+        source_fingerprint = (
+            None
+            if decision is None or decision.category is not NodeCategory.AVAILABLE
+            else selection.prepare_story_dependencies(
+                project_id=request.project_id,
+                decision=decision,
+                selected_story_ids=selected_story_ids,
+            )
+        )
+        if decision is None or source_fingerprint is None:
+            return _transition_not_available(position, "planning.story_dependencies")
+        return self.transition(
+            ApplyStoryDependencies(
+                project_id=request.project_id,
+                graph_version=position.graph_version,
+                fact_fingerprint=position.fact_fingerprint,
+                decision_fingerprint=decision.decision_fingerprint,
+                instance_key=decision.instance_key,
+                idempotency_key=request.idempotency_key,
+                actor=request.actor,
+                correlation_id=request.correlation_id,
+                selected_story_ids=selected_story_ids,
+                reviewed_edges=reviewed_edges,
+                source_fingerprint=source_fingerprint,
+            )
+        )
+
+    def repair_story_readiness(
+        self,
+        request: StoryReadinessRepairRequest,
+    ) -> TransitionResult:
+        """Apply explicit repairs against the current missing-readiness set."""
+        selection = self._planning_action_selection
+        if selection is None:
+            return _transition_not_available(None, "planning.story_readiness")
+        repairs = _canonical_story_readiness_repairs(request.repairs)
+        repair_story_ids = tuple(item.story_id for item in repairs)
+        replay = self._replay_planning_action(
+            request_kind="repair_story_readiness",
+            request=request,
+            operator_input={
+                "repairs": [item.model_dump(mode="json") for item in repairs]
+            },
+        )
+        if replay is not None:
+            return replay
+        position = self.position(project_id=request.project_id)
+        decision = _unique_available_decision(position, "planning.story_readiness")
+        target = (
+            None
+            if decision is None or decision.category is not NodeCategory.AVAILABLE
+            else selection.prepare_story_readiness(
+                project_id=request.project_id,
+                decision=decision,
+                repair_story_ids=repair_story_ids,
+            )
+        )
+        if decision is None or target is None:
+            return _transition_not_available(position, "planning.story_readiness")
+        story_ids, readiness_guard = target
+        return self.transition(
+            RepairStoryReadiness(
+                project_id=request.project_id,
+                graph_version=position.graph_version,
+                fact_fingerprint=position.fact_fingerprint,
+                decision_fingerprint=decision.decision_fingerprint,
+                instance_key=decision.instance_key,
+                idempotency_key=request.idempotency_key,
+                actor=request.actor,
+                correlation_id=request.correlation_id,
+                story_ids=story_ids,
+                repairs=repairs,
+                expected_readiness_fingerprint=readiness_guard,
+            )
+        )
+
+    def start_sprint(self, request: SprintStartRequest) -> TransitionResult:
+        """Start the accepted current Sprint plan without caller-owned identity."""
+        selection = self._planning_action_selection
+        if selection is None:
+            return _transition_not_available(None, "planning.sprint.start")
+        replay = self._replay_planning_action(
+            request_kind="start_sprint",
+            request=request,
+            operator_input={},
+        )
+        if replay is not None:
+            return replay
+        position = self.position(project_id=request.project_id)
+        decision = _unique_available_decision(position, "planning.sprint.start")
+        target = (
+            None
+            if decision is None or decision.category is not NodeCategory.AVAILABLE
+            else selection.prepare_sprint_start(
+                project_id=request.project_id,
+                decision=decision,
+            )
+        )
+        if decision is None or target is None:
+            return _transition_not_available(position, "planning.sprint.start")
+        plan_id, sprint_id, plan_fingerprint, candidate_fingerprint = target
+        return self.transition(
+            StartSprint(
+                project_id=request.project_id,
+                graph_version=position.graph_version,
+                fact_fingerprint=position.fact_fingerprint,
+                decision_fingerprint=decision.decision_fingerprint,
+                instance_key=decision.instance_key,
+                idempotency_key=request.idempotency_key,
+                actor=request.actor,
+                correlation_id=request.correlation_id,
+                sprint_plan_artifact_id=plan_id,
+                sprint_id=sprint_id,
+                plan_fingerprint=plan_fingerprint,
+                candidate_set_fingerprint=candidate_fingerprint,
+            )
+        )
+
+    def _replay_planning_action(
+        self,
+        *,
+        request_kind: str,
+        request: _PlanningMutationRequest,
+        operator_input: JsonObject,
+    ) -> TransitionResult | None:
+        selection = self._planning_action_selection
+        if selection is None:
+            return None
+        return selection.replay_transition(
+            TransitionReplayQuery(
+                request_kind=request_kind,
+                project_id=request.project_id,
+                idempotency_key=request.idempotency_key,
+                actor=request.actor,
+                correlation_id=request.correlation_id,
+                operator_input=operator_input,
             )
         )
 
@@ -2948,6 +3465,38 @@ def _sprint_capacity_error() -> WorkflowError:
     )
 
 
+def _canonical_dependency_edges(
+    edges: tuple[StoryDependencyEdgeRequest, ...],
+) -> tuple[ReviewedDependencyEdge, ...]:
+    return tuple(
+        ReviewedDependencyEdge(
+            dependent_story_id=item.dependent_story_id,
+            prerequisite_story_id=item.prerequisite_story_id,
+            reason=item.reason,
+        )
+        for item in sorted(
+            edges,
+            key=lambda edge: (
+                edge.dependent_story_id,
+                edge.prerequisite_story_id,
+            ),
+        )
+    )
+
+
+def _canonical_story_readiness_repairs(
+    repairs: tuple[StoryReadinessRepair, ...],
+) -> tuple[StoryReadinessUpdate, ...]:
+    return tuple(
+        StoryReadinessUpdate(
+            story_id=item.story_id,
+            story_points=item.story_points,
+            rank=item.rank,
+        )
+        for item in sorted(repairs, key=lambda repair: repair.story_id)
+    )
+
+
 def _unique_available_decision(
     position: WorkflowPosition,
     node_id: str,
@@ -2974,6 +3523,73 @@ def _single_fact_reference(
         item for item in decision.fact_references if item.fact_type == fact_type
     )
     return references[0] if len(references) == 1 else None
+
+
+def _matched_phase_artifact_ids(
+    snapshot: WorkflowFactSnapshot,
+    references: tuple[FactReference, ...],
+) -> tuple[int, ...] | None:
+    """Match decision references to exact durable phase artifacts."""
+    matched_ids: list[int] = []
+    for reference in references:
+        try:
+            artifact_id = int(reference.fact_id)
+        except ValueError:
+            return None
+        matching = tuple(
+            item
+            for item in snapshot.phase_artifacts
+            if item.artifact_type == reference.fact_type
+            and item.artifact_id == artifact_id
+            and item.artifact_fingerprint == reference.fingerprint
+        )
+        if len(matching) != 1:
+            return None
+        matched_ids.append(artifact_id)
+    result = tuple(sorted(matched_ids))
+    return result if len(set(result)) == len(references) else None
+
+
+def _backlog_reconciliation_decision_is_transportable(
+    decision: NodeDecision,
+) -> bool:
+    """Validate exact graph references needed by Backlog reconciliation."""
+    if _integer_fact_reference(decision, "authority") is None:
+        return False
+    artifact_references = tuple(
+        item
+        for item in decision.fact_references
+        if item.fact_type in {"vision", "backlog"}
+    )
+    try:
+        artifact_ids = tuple(int(item.fact_id) for item in artifact_references)
+    except ValueError:
+        return False
+    return bool(artifact_ids) and len(set(artifact_ids)) == len(artifact_ids)
+
+
+def planning_action_decision_is_transportable(
+    project_id: int,
+    decision: NodeDecision,
+) -> bool:
+    """Return whether one planning decision has the references its route needs."""
+    if decision.request_kind == "reconcile_backlog":
+        return _backlog_reconciliation_decision_is_transportable(decision)
+    if decision.request_kind == "apply_story_dependencies":
+        reference = _single_fact_reference(decision, "story_dependency_source")
+        return reference is not None and reference.fact_id == str(project_id)
+    if decision.request_kind == "repair_story_readiness":
+        reference = _single_fact_reference(decision, "story_readiness")
+        return reference is not None and reference.fact_id == str(project_id)
+    if decision.request_kind == "start_sprint":
+        candidate_reference = _single_fact_reference(decision, "candidate_set")
+        return (
+            _integer_fact_reference(decision, "sprint_plan") is not None
+            and candidate_reference is not None
+            and candidate_reference.fact_id == str(project_id)
+            and _integer_fact_reference(decision, "sprint_plan_tasks") is not None
+        )
+    return True
 
 
 def _transition_not_available(
@@ -3097,6 +3713,7 @@ def production_application() -> AgileForgeApplication:
         authority_repair_input=AuthorityRepairInputService(engine=engine),
         delivery_review_selection=DeliveryReviewSelectionService(engine=engine),
         delivery_action_input=DeliveryActionInputService(engine=engine),
+        planning_action_selection=PlanningActionSelectionService(engine=engine),
         sprint_planning_input=SprintPlanningInputService(engine=engine),
     )
     application.set_project_lifecycle(
@@ -3118,12 +3735,14 @@ __all__ = [
     "AuthorityRepairRequest",
     "AuthorityReviewRequest",
     "AuthorityReviewSelectionService",
+    "BacklogReconcileRequest",
     "BacklogReviewRequest",
     "CreateProjectCommand",
     "DeliveryActionInputService",
     "DeliveryActionRequest",
     "DeliveryReviewSelectionService",
     "DiscoveryArtifactRequest",
+    "PlanningActionSelectionService",
     "ProductGoalInterviewRequest",
     "ProductGoalLifecycleServices",
     "ProductGoalOutcomeRequest",
@@ -3134,16 +3753,23 @@ __all__ = [
     "RepositoryRefreshCommand",
     "RepositoryRefreshRequest",
     "RoadmapReviewRequest",
+    "SemanticTransitionReplayPort",
     "SpecificationCandidateRequest",
     "SpecificationReviewRequest",
     "SprintPlanReviewRequest",
     "SprintPlanningInputService",
     "SprintPlanningRequest",
+    "SprintStartRequest",
+    "StoryDependenciesApplyRequest",
+    "StoryDependencyEdgeRequest",
+    "StoryReadinessRepair",
+    "StoryReadinessRepairRequest",
     "StoryReviewRequest",
     "VisionInterviewRequest",
     "VisionResponseRequest",
     "VisionReviewRequest",
     "VisionRevisionRequest",
     "WorkflowDomainPort",
+    "planning_action_decision_is_transportable",
     "production_application",
 ]
