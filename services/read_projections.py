@@ -57,6 +57,18 @@ if TYPE_CHECKING:
 
 _JSON_OBJECT = TypeAdapter(JsonObject)
 _AUTO_SPEC_CONTENT_LIMIT_BYTES = 64_000
+_VISION_COMPONENT_NAMES: tuple[str, ...] = (
+    "project_name",
+    "target_user",
+    "problem",
+    "product_category",
+    "key_benefit",
+    "competitors",
+    "differentiator",
+)
+_VISION_BASIS_SOURCE_KINDS: frozenset[str] = frozenset(
+    {"human", "evidence", "inference"}
+)
 
 
 def _success(data: JsonObject) -> JsonObject:
@@ -155,36 +167,147 @@ def _specification_review_data(
     }
 
 
-def _vision_turn_data(turn: VisionInterviewTurnFact) -> JsonObject:
-    """Render one typed immutable Vision interview turn."""
+def _vision_component_names(value: object) -> list[JsonValue]:
+    """Keep only deliberate display names from strict Vision provenance."""
+    if not isinstance(value, list | tuple):
+        return []
+    return [
+        item
+        for item in value
+        if isinstance(item, str) and item in _VISION_COMPONENT_NAMES
+    ]
+
+
+def _vision_components_data(
+    components: JsonObject,
+    basis: Iterable[JsonObject],
+) -> list[JsonValue]:
+    """Join component values to whitelisted source kinds without raw references."""
+    basis_by_component = {
+        item.get("component"): item
+        for item in basis
+        if item.get("component") in _VISION_COMPONENT_NAMES
+    }
+    rendered: list[JsonValue] = []
+    for name in _VISION_COMPONENT_NAMES:
+        value = components.get(name)
+        source_kinds = basis_by_component.get(name, {}).get("source_kinds", [])
+        rendered.append(
+            {
+                "name": name,
+                "value": value if isinstance(value, str) else None,
+                "source_kinds": [
+                    item
+                    for item in source_kinds
+                    if isinstance(item, str)
+                    and item in _VISION_BASIS_SOURCE_KINDS
+                ]
+                if isinstance(source_kinds, list | tuple)
+                else [],
+            }
+        )
+    return rendered
+
+
+def _vision_assumptions_data(
+    assumptions: Iterable[JsonObject],
+) -> list[JsonValue]:
+    """Project assumption prose and scope without persistence identities."""
+    return [
+        {
+            "text": item.get("text"),
+            "affected_components": _vision_component_names(
+                item.get("affected_components")
+            ),
+        }
+        for item in assumptions
+        if isinstance(item.get("text"), str)
+    ]
+
+
+def _vision_conflicts_data(conflicts: Iterable[JsonObject]) -> list[JsonValue]:
+    """Project reviewable conflict state without evidence or assumption IDs."""
+    rendered: list[JsonValue] = []
+    for item in conflicts:
+        text = item.get("text")
+        status = item.get("status")
+        if not isinstance(text, str) or status not in {"resolved", "unresolved"}:
+            continue
+        resolution = item.get("resolution")
+        rendered.append(
+            {
+                "text": text,
+                "status": status,
+                "affected_components": _vision_component_names(
+                    item.get("affected_components")
+                ),
+                "resolution": resolution if isinstance(resolution, str) else None,
+            }
+        )
+    return rendered
+
+
+def _vision_questions_data(questions: Iterable[JsonObject]) -> list[JsonValue]:
+    """Retain question identity for rendering only; omit internal references."""
+    return [
+        {
+            "question_id": item.get("question_id"),
+            "text": item.get("text"),
+            "affected_components": _vision_component_names(
+                item.get("affected_components")
+            ),
+        }
+        for item in questions
+        if isinstance(item.get("question_id"), str)
+        and isinstance(item.get("text"), str)
+    ]
+
+
+def _vision_review_material(
+    *,
+    statement: str,
+    components: JsonObject,
+    provenance: tuple[
+        Iterable[JsonObject],
+        Iterable[JsonObject],
+        Iterable[JsonObject],
+    ],
+    questions: Iterable[JsonObject] = (),
+) -> JsonObject:
+    """Build the sole display-safe Vision draft/candidate shape."""
+    component_basis, assumptions, conflicts = provenance
     return {
-        "vision_interview_turn_id": turn.vision_interview_turn_id,
-        "operation": turn.operation,
-        "turn_number": turn.turn_number,
-        "revision_intent_id": turn.revision_intent_id,
-        "prior_turn_id": turn.prior_turn_id,
-        "user_text": turn.user_text,
-        "statement": turn.vision_statement,
-        "components": turn.components,
-        "is_complete": turn.is_complete,
-        "clarifying_questions": list(turn.clarifying_questions),
-        "output_fingerprint": turn.output_fingerprint,
-        "recorded_at": _iso(turn.recorded_at),
+        "statement": statement,
+        "components": _vision_components_data(components, component_basis),
+        "assumptions": _vision_assumptions_data(assumptions),
+        "conflicts": _vision_conflicts_data(conflicts),
+        "questions": _vision_questions_data(questions),
     }
 
 
+def _vision_turn_draft_data(turn: VisionInterviewTurnFact) -> JsonObject:
+    """Render the latest incomplete turn as display-safe draft material."""
+    return _vision_review_material(
+        statement=turn.vision_statement,
+        components=turn.components,
+        provenance=(turn.component_basis, turn.assumptions, turn.conflicts),
+        questions=turn.clarifying_questions,
+    )
+
+
 def _vision_candidate_data(artifact: VisionArtifactFact) -> JsonObject:
-    """Render one exact immutable Vision candidate."""
+    """Render review material plus the one browser-required concurrency binding."""
     return {
-        "vision_artifact_id": artifact.vision_artifact_id,
-        "version_number": artifact.version_number,
-        "fingerprint": artifact.content_fingerprint,
-        "statement": artifact.statement,
-        "components": artifact.components,
-        "supersedes_vision_artifact_id": artifact.supersedes_vision_artifact_id,
-        "source_interview_turn_id": artifact.source_interview_turn_id,
-        "created_by": artifact.created_by,
-        "created_at": _iso(artifact.created_at),
+        **_vision_review_material(
+            statement=artifact.statement,
+            components=artifact.components,
+            provenance=(
+                artifact.component_basis,
+                artifact.assumptions,
+                artifact.conflicts,
+            ),
+        ),
+        "review_fingerprint": artifact.content_fingerprint,
     }
 
 
@@ -195,14 +318,10 @@ def _vision_review_data(
 ) -> JsonObject | None:
     """Render pending or exact terminal Vision review state."""
     if decision is None:
-        return {"state": "pending"} if pending else None
+        return {"state": "pending", "rationale": None} if pending else None
     return {
         "state": decision.decision,
-        "vision_artifact_decision_id": decision.vision_artifact_decision_id,
-        "decision": decision.decision,
         "rationale": decision.rationale,
-        "reviewer": decision.reviewer,
-        "decided_at": _iso(decision.decided_at),
     }
 
 
@@ -726,9 +845,10 @@ class DurableReadProjectionService:
         if selection.conflict:
             return _success(
                 {
+                    "bootstrap_available": False,
                     "current": None,
+                    "draft": None,
                     "transcript": [],
-                    "latest_questions": [],
                     "candidate": None,
                     "review": None,
                     "stale_reason": "VISION_FACT_CONFLICT",
@@ -736,12 +856,17 @@ class DurableReadProjectionService:
             )
         vision = accepted_current_vision(snapshot)
         transcript: list[JsonValue] = [
-            _vision_turn_data(item) for item in selection.transcript
+            {"user_text": item.user_text}
+            for item in selection.transcript
+            if item.user_text is not None
         ]
-        latest_questions: list[JsonValue] = (
-            []
-            if not selection.transcript
-            else list(selection.transcript[-1].clarifying_questions)
+        latest_turn = (
+            selection.transcript[-1] if selection.transcript else None
+        )
+        draft_data: JsonObject | None = (
+            _vision_turn_draft_data(latest_turn)
+            if latest_turn is not None and not latest_turn.is_complete
+            else None
         )
         candidate = (
             selection.artifact
@@ -752,19 +877,20 @@ class DurableReadProjectionService:
         current_data: JsonObject | None = (
             None
             if vision is None
-            else {
-                "vision_artifact_id": vision.vision_artifact_id,
-                "fingerprint": vision.content_fingerprint,
-                "statement": vision.statement,
-            }
+            else {"statement": vision.statement}
         )
         candidate_data: JsonObject | None = (
             None if candidate is None else _vision_candidate_data(candidate)
         )
         data: JsonObject = {
+            "bootstrap_available": not selection.transcript
+            and (
+                selection.artifact is None
+                or selection.open_revision is not None
+            ),
             "current": current_data,
+            "draft": draft_data,
             "transcript": transcript,
-            "latest_questions": latest_questions,
             "candidate": candidate_data,
             "review": _vision_review_data(
                 selection.decision,

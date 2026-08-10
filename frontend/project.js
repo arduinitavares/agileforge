@@ -28,6 +28,7 @@ const REQUEST_STAGE = {
     decide_sprint_plan: 'Sprint',
     decide_story: 'Stories',
     fulfill_product_goal: 'Product Goal',
+    generate_vision_bootstrap: 'Vision',
     record_authority_feedback: 'Authority',
     record_backlog_draft: 'Backlog',
     record_discovery_artifact: 'Discovery',
@@ -225,7 +226,9 @@ function questionListMarkup(questions) {
     return `<ul class="space-y-2">${questions.map((question) => `
         <li class="flex min-w-0 gap-3 text-sm leading-6 text-slate-800">
             <span class="material-symbols-outlined mt-0.5 shrink-0 text-accent" aria-hidden="true">help</span>
-            <span class="min-w-0 break-words">${escapeWorkflowText(question)}</span>
+            <span class="min-w-0 break-words">${escapeWorkflowText(
+                typeof question === 'string' ? question : question?.text,
+            )}</span>
         </li>
     `).join('')}</ul>`;
 }
@@ -254,6 +257,111 @@ function candidateMarkup(candidate, label) {
     </div>`;
 }
 
+const VISION_COMPONENT_LABELS = {
+    project_name: 'Project name',
+    target_user: 'Target user',
+    problem: 'Problem',
+    product_category: 'Product category',
+    key_benefit: 'Key benefit',
+    competitors: 'Alternatives',
+    differentiator: 'Differentiator',
+};
+
+const VISION_SOURCE_LABELS = {
+    evidence: { icon: 'source', label: 'Project evidence' },
+    human: { icon: 'person', label: 'Human input' },
+    inference: { icon: 'lightbulb', label: 'Inferred' },
+};
+
+function visionComponentLabel(value) {
+    return VISION_COMPONENT_LABELS[value] ?? humanizeKey(value);
+}
+
+function visionAffectedMarkup(components) {
+    const labels = (Array.isArray(components) ? components : [])
+        .map(visionComponentLabel)
+        .filter(Boolean);
+    if (labels.length === 0) return '';
+    return `<p class="mt-1 break-words text-xs text-slate-500">${escapeWorkflowText(labels.join(', '))}</p>`;
+}
+
+function visionSourceKindsMarkup(sourceKinds) {
+    const sources = (Array.isArray(sourceKinds) ? sourceKinds : [])
+        .map((kind) => VISION_SOURCE_LABELS[kind])
+        .filter(Boolean);
+    if (sources.length === 0) {
+        return '<span class="text-xs text-slate-500">Basis pending</span>';
+    }
+    return `<ul class="flex min-w-0 flex-wrap gap-x-4 gap-y-1">${sources.map((source) => `
+        <li class="inline-flex min-w-0 items-center gap-1 text-xs text-slate-600">
+            <span class="material-symbols-outlined shrink-0 text-[1rem]" aria-hidden="true">${source.icon}</span>
+            <span class="break-words">${source.label}</span>
+        </li>
+    `).join('')}</ul>`;
+}
+
+function visionComponentsMarkup(components) {
+    const items = Array.isArray(components) ? components : [];
+    return `<section class="min-w-0">
+        <h3 class="text-sm font-semibold">Components and basis</h3>
+        <dl class="mt-3 divide-y divide-slate-200 border-y border-slate-200">${items.map((component) => `
+            <div class="grid min-w-0 gap-2 py-3 sm:grid-cols-[10rem_minmax(0,1fr)] sm:gap-4">
+                <dt class="break-words text-xs font-semibold uppercase text-slate-500">${escapeWorkflowText(visionComponentLabel(component?.name))}</dt>
+                <dd class="min-w-0">
+                    <p class="break-words text-sm leading-6 ${component?.value ? 'text-slate-800' : 'text-slate-500'}">${escapeWorkflowText(component?.value ?? 'Not yet defined')}</p>
+                    <div class="mt-1">${visionSourceKindsMarkup(component?.source_kinds)}</div>
+                </dd>
+            </div>
+        `).join('')}</dl>
+    </section>`;
+}
+
+function visionAssumptionsMarkup(assumptions) {
+    const items = Array.isArray(assumptions) ? assumptions : [];
+    return `<section class="min-w-0">
+        <h3 class="text-sm font-semibold">Assumptions</h3>
+        ${items.length > 0 ? `<ul class="mt-3 space-y-3">${items.map((item) => `
+            <li class="flex min-w-0 gap-2 border-l-2 border-amber-300 pl-3 text-sm leading-6 text-slate-700">
+                <span class="material-symbols-outlined mt-0.5 shrink-0 text-amber-700" aria-hidden="true">lightbulb</span>
+                <div class="min-w-0"><p class="break-words">${escapeWorkflowText(item?.text)}</p>${visionAffectedMarkup(item?.affected_components)}</div>
+            </li>
+        `).join('')}</ul>` : '<p class="mt-2 text-sm text-slate-500">None recorded.</p>'}
+    </section>`;
+}
+
+function visionConflictsMarkup(conflicts) {
+    const items = Array.isArray(conflicts) ? conflicts : [];
+    return `<section class="min-w-0">
+        <h3 class="text-sm font-semibold">Conflicts</h3>
+        ${items.length > 0 ? `<ul class="mt-3 space-y-3">${items.map((item) => `
+            <li class="flex min-w-0 gap-2 border-l-2 ${item?.status === 'resolved' ? 'border-emerald-300' : 'border-red-300'} pl-3 text-sm leading-6 text-slate-700">
+                <span class="material-symbols-outlined mt-0.5 shrink-0 ${item?.status === 'resolved' ? 'text-emerald-700' : 'text-red-700'}" aria-hidden="true">${item?.status === 'resolved' ? 'check_circle' : 'error'}</span>
+                <div class="min-w-0">
+                    <p class="break-words">${escapeWorkflowText(item?.text)}</p>
+                    ${visionAffectedMarkup(item?.affected_components)}
+                    ${item?.resolution ? `<p class="mt-1 break-words text-xs text-slate-600"><strong>Resolution:</strong> ${escapeWorkflowText(item.resolution)}</p>` : ''}
+                </div>
+            </li>
+        `).join('')}</ul>` : '<p class="mt-2 text-sm text-slate-500">None recorded.</p>'}
+    </section>`;
+}
+
+function visionReviewMaterialMarkup(material, label) {
+    return `<div class="max-w-4xl min-w-0">
+        <div class="border-l-4 border-accent pl-4">
+            <p class="text-xs font-semibold uppercase text-accent">${escapeWorkflowText(label)}</p>
+            <p class="mt-2 break-words text-base font-semibold leading-7">${escapeWorkflowText(material?.statement)}</p>
+        </div>
+        <div class="mt-6 grid min-w-0 gap-6 lg:grid-cols-[minmax(0,1.5fr)_minmax(16rem,1fr)]">
+            ${visionComponentsMarkup(material?.components)}
+            <div class="grid min-w-0 content-start gap-6">
+                ${visionAssumptionsMarkup(material?.assumptions)}
+                ${visionConflictsMarkup(material?.conflicts)}
+            </div>
+        </div>
+    </div>`;
+}
+
 function reviewControlsMarkup(scope, action) {
     if (!action) return '';
     return `<div class="mt-5 flex flex-wrap gap-3">
@@ -273,7 +381,9 @@ function interviewFormMarkup(scope, questions, transcript, label) {
     return `<div class="grid min-w-0 gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(18rem,28rem)]">
         <div class="min-w-0">
             <p class="mb-3 text-sm font-semibold">Focused questions</p>
-            ${questionListMarkup(questions)}
+            ${questions.length > 0
+                ? questionListMarkup(questions)
+                : '<p class="text-sm text-slate-500">No open questions recorded.</p>'}
             ${transcriptMarkup(transcript, label)}
         </div>
         <form data-interview-scope="${scope}" class="min-w-0 self-start border-l-2 border-slate-200 pl-4">
@@ -289,33 +399,57 @@ function interviewFormMarkup(scope, questions, transcript, label) {
     </div>`;
 }
 
-function visionPanelMarkup(projection, actions = []) {
+function visionBootstrapContextMarkup(context) {
+    const project = context?.project ?? {};
+    return `<div class="grid min-w-0 gap-4 sm:grid-cols-2">
+        <div class="min-w-0 border-l-2 border-slate-300 pl-3">
+            <p class="text-xs font-semibold uppercase text-slate-500">Project</p>
+            <p class="mt-1 break-words text-sm font-semibold text-slate-800">${escapeWorkflowText(project.name ?? 'Current Project')}</p>
+            ${project.description ? `<p class="mt-1 break-words text-sm leading-6 text-slate-600">${escapeWorkflowText(project.description)}</p>` : ''}
+        </div>
+        <div class="min-w-0 border-l-2 border-slate-300 pl-3">
+            <p class="text-xs font-semibold uppercase text-slate-500">Repository context</p>
+            <p class="mt-1 text-sm text-slate-700">${context?.repository ? 'Attached' : 'Not attached'}</p>
+        </div>
+    </div>`;
+}
+
+function visionPanelMarkup(projection, actions = [], context = {}) {
     const candidate = projection?.candidate;
     const reviewState = projection?.review?.state;
     const reviewAction = findAction(actions, 'decide_vision_review');
     if (candidate && reviewState === 'pending') {
-        return `${candidateMarkup(candidate, 'Vision')}${reviewControlsMarkup('vision', reviewAction)}`;
+        return `${visionReviewMaterialMarkup(candidate, 'Vision candidate')}${reviewControlsMarkup('vision', reviewAction)}`;
     }
 
     const respondAction = findAction(actions, 'record_vision_interview_turn');
     if (respondAction) {
-        const questions = Array.isArray(projection?.latest_questions)
-            && projection.latest_questions.length > 0
-            ? projection.latest_questions
-            : [
-                'Who should benefit from this product first?',
-                'What problem should be meaningfully different for them?',
-                'What principles should guide product decisions?',
-            ];
+        const material = projection?.draft ?? candidate;
+        const questions = Array.isArray(material?.questions) ? material.questions : [];
         const feedback = ['feedback', 'rejected'].includes(reviewState)
             ? `<p class="mb-5 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900"><strong>Review response:</strong> ${escapeWorkflowText(projection?.review?.rationale ?? 'Revise the Vision with the review in mind.')}</p>`
             : '';
-        return `${feedback}<p class="mb-5 text-sm leading-6 text-slate-600">Shape the durable direction for this Project.</p>${interviewFormMarkup(
+        return `${feedback}${visionReviewMaterialMarkup(material, 'Vision draft')}<div class="mt-6">${interviewFormMarkup(
             'vision',
             questions,
             projection?.transcript ?? [],
             'Vision',
-        )}`;
+        )}</div>`;
+    }
+
+    const bootstrapAction = findAction(actions, 'generate_vision_bootstrap');
+    if (bootstrapAction && projection?.bootstrap_available) {
+        const current = projection?.current
+            ? `<div class="mb-5 border-l-4 border-emerald-500 pl-4">
+                <p class="text-xs font-semibold uppercase text-emerald-700">Accepted Vision</p>
+                <p class="mt-2 break-words text-base font-semibold leading-7">${escapeWorkflowText(projection.current.statement)}</p>
+            </div>`
+            : '';
+        return `${current}<p class="mb-4 text-sm leading-6 text-slate-600">Draft from available Project context.</p>
+            ${visionBootstrapContextMarkup(context)}
+            <button type="button" data-direct-action="generate_vision_bootstrap" class="mt-5 ${BUTTON_PRIMARY}">
+                <span class="material-symbols-outlined" aria-hidden="true">auto_awesome</span><span>Generate Vision draft</span>
+            </button>`;
     }
 
     if (projection?.current) {
@@ -602,7 +736,13 @@ function renderDashboard() {
         'lifecycle-stage-strip',
         workflowPositionMarkup(lifecycleState.position, lifecycleState.actions),
     );
-    setMarkup('vision-panel', visionPanelMarkup(lifecycleState.vision, lifecycleState.actions));
+    setMarkup(
+        'vision-panel',
+        visionPanelMarkup(lifecycleState.vision, lifecycleState.actions, {
+            project: lifecycleState.project,
+            repository: lifecycleState.repository?.repository,
+        }),
+    );
     setMarkup('goal-panel', productGoalPanelMarkup(lifecycleState.goal, lifecycleState.actions));
     setMarkup('discovery-panel', discoveryPanelMarkup(lifecycleState.discovery));
     setMarkup(
@@ -740,7 +880,7 @@ function reviewCandidateFingerprint(state, scope) {
         authority: state?.authority?.pending_authority?.authority_fingerprint,
         goal: state?.goal?.candidate?.fingerprint,
         specification: state?.specification?.candidate?.fingerprint,
-        vision: state?.vision?.candidate?.fingerprint,
+        vision: state?.vision?.candidate?.review_fingerprint,
     }[scope] ?? null;
 }
 
@@ -899,6 +1039,7 @@ async function submitHumanAction() {
 }
 
 async function runDirectAction(requestKind, button, fallbackEndpoint = null) {
+    if (button.disabled) return false;
     button.disabled = true;
     setProjectError('');
     try {
@@ -911,6 +1052,7 @@ async function runDirectAction(requestKind, button, fallbackEndpoint = null) {
     } finally {
         button.disabled = false;
     }
+    return true;
 }
 
 function installInteractions() {

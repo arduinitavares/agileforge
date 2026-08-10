@@ -465,11 +465,41 @@ def _goal_components(*, complete: bool) -> JsonObject:
     }
 
 
-def _vision_question_payload(questions: tuple[str, ...]) -> list[dict[str, str]]:
+def _vision_question_payload(questions: tuple[str, ...]) -> list[JsonObject]:
     return [
-        {"question_id": f"q{index + 1}", "prompt": question}
+        {
+            "question_id": f"q{index + 1}",
+            "text": question,
+            "affected_components": ["competitors"],
+            "conflict_ids": [],
+        }
         for index, question in enumerate(questions)
     ]
+
+
+def _vision_display_material(
+    components: JsonObject,
+    statement: str,
+    questions: tuple[str, ...] = (),
+) -> JsonObject:
+    """Return the display-safe Vision shape expected from direct fixtures."""
+    return {
+        "statement": statement,
+        "components": [
+            {"name": name, "value": value, "source_kinds": []}
+            for name, value in components.items()
+        ],
+        "assumptions": [],
+        "conflicts": [],
+        "questions": [
+            {
+                "question_id": f"q{index + 1}",
+                "text": question,
+                "affected_components": ["competitors"],
+            }
+            for index, question in enumerate(questions)
+        ],
+    }
 
 
 @dataclass(frozen=True)
@@ -1010,9 +1040,10 @@ def test_new_project_has_empty_durable_interview_reads(engine: Engine) -> None:
     reads = DurableReadProjectionService(engine=engine)
 
     assert _data(reads.vision_status(project_id=project_id)) == {
+        "bootstrap_available": True,
         "current": None,
+        "draft": None,
         "transcript": [],
-        "latest_questions": [],
         "candidate": None,
         "review": None,
         "stale_reason": "VISION_NOT_ACCEPTED",
@@ -1037,7 +1068,7 @@ def test_incomplete_vision_turn_exposes_exact_transcript_and_questions(
     components = _vision_components(complete=False)
     questions = ("What alternatives do product teams use today?",)
     statement = "Product teams need durable workflow review."
-    turn_id = _add_vision_turn(
+    _add_vision_turn(
         engine,
         seeded,
         _VisionTurnSeed(
@@ -1057,28 +1088,13 @@ def test_incomplete_vision_turn_exposes_exact_transcript_and_questions(
         DurableReadProjectionService(engine=engine).vision_status(project_id=project_id)
     )
 
-    assert data["transcript"] == [
-        {
-            "vision_interview_turn_id": turn_id,
-            "operation": "bootstrap",
-            "turn_number": 1,
-            "revision_intent_id": None,
-            "prior_turn_id": None,
-            "user_text": None,
-            "statement": statement,
-            "components": components,
-            "is_complete": False,
-            "clarifying_questions": _vision_question_payload(questions),
-            "output_fingerprint": _vision_output_fingerprint(
-                components,
-                statement,
-                False,
-                _vision_question_payload(questions),
-            ),
-            "recorded_at": _stored_iso(NOW),
-        }
-    ]
-    assert data["latest_questions"] == _vision_question_payload(questions)
+    assert data["bootstrap_available"] is False
+    assert data["transcript"] == []
+    assert data["draft"] == _vision_display_material(
+        components,
+        statement,
+        questions,
+    )
     assert data["candidate"] is None
     assert data["review"] is None
 
@@ -1094,23 +1110,18 @@ def test_pending_vision_exposes_exact_candidate_and_pending_review(
     data = _data(
         DurableReadProjectionService(engine=engine).vision_status(project_id=project_id)
     )
+    vision_components = _JSON_OBJECT.validate_python(seeded["vision_components"])
 
     assert data["candidate"] == {
-        "vision_artifact_id": seeded["vision_id"],
-        "version_number": 1,
-        "fingerprint": seeded["vision_fingerprint"],
-        "statement": seeded["vision_statement"],
-        "components": seeded["vision_components"],
-        "supersedes_vision_artifact_id": None,
-        "source_interview_turn_id": seeded["vision_turn_id"],
-        "created_by": "operator",
-        "created_at": _stored_iso(NOW + timedelta(seconds=1)),
+        **_vision_display_material(
+            vision_components,
+            str(seeded["vision_statement"]),
+        ),
+        "review_fingerprint": seeded["vision_fingerprint"],
     }
-    assert data["review"] == {"state": "pending"}
-    transcript = data["transcript"]
-    assert isinstance(transcript, list)
-    assert len(transcript) == 1
-    assert data["latest_questions"] == []
+    assert data["review"] == {"state": "pending", "rationale": None}
+    assert data["draft"] is None
+    assert data["transcript"] == []
 
 
 def test_vision_feedback_keeps_reviewed_candidate_separate_from_revision_chain(
@@ -1120,12 +1131,13 @@ def test_vision_feedback_keeps_reviewed_candidate_separate_from_revision_chain(
     seeded = _seed_vision_candidate(engine, decision="feedback")
     components = _vision_components(complete=False)
     questions = ("Which differentiator should the revision emphasize?",)
-    revision_turn_id = _add_vision_turn(
+    revision_statement = "Product teams need a sharper durable workflow Vision."
+    _add_vision_turn(
         engine,
         seeded,
         _VisionTurnSeed(
             components=components,
-            statement="Product teams need a sharper durable workflow Vision.",
+            statement=revision_statement,
             is_complete=False,
             questions=questions,
             turn_number=2,
@@ -1141,21 +1153,17 @@ def test_vision_feedback_keeps_reviewed_candidate_separate_from_revision_chain(
     )
 
     candidate = _json_object(data["candidate"])
-    assert candidate["vision_artifact_id"] == seeded["vision_id"]
+    assert candidate["review_fingerprint"] == seeded["vision_fingerprint"]
     assert data["review"] == {
         "state": "feedback",
-        "vision_artifact_decision_id": 1,
-        "decision": "feedback",
         "rationale": "Vision feedback rationale.",
-        "reviewer": "vision-reviewer",
-        "decided_at": _stored_iso(NOW + timedelta(seconds=2)),
     }
-    transcript = data["transcript"]
-    assert isinstance(transcript, list)
-    assert [_json_object(item)["vision_interview_turn_id"] for item in transcript] == [
-        revision_turn_id
-    ]
-    assert data["latest_questions"] == _vision_question_payload(questions)
+    assert data["transcript"] == [{"user_text": "Vision answer 2"}]
+    assert data["draft"] == _vision_display_material(
+        components,
+        revision_statement,
+        questions,
+    )
 
 
 def test_accepted_vision_has_current_artifact_and_no_pending_candidate(
@@ -1171,20 +1179,14 @@ def test_accepted_vision_has_current_artifact_and_no_pending_candidate(
     )
 
     assert data["current"] == {
-        "vision_artifact_id": seeded["vision_id"],
-        "fingerprint": seeded["vision_fingerprint"],
         "statement": seeded["vision_statement"],
     }
     assert data["candidate"] is None
     assert data["transcript"] == []
-    assert data["latest_questions"] == []
+    assert data["draft"] is None
     assert data["review"] == {
         "state": "accepted",
-        "vision_artifact_decision_id": 1,
-        "decision": "accepted",
         "rationale": "Vision accepted rationale.",
-        "reviewer": "vision-reviewer",
-        "decided_at": _stored_iso(NOW + timedelta(seconds=2)),
     }
     assert data["stale_reason"] is None
 
@@ -1203,9 +1205,10 @@ def test_superseded_vision_open_intent_fails_closed_without_transcript(
         )
 
         assert data == {
+            "bootstrap_available": False,
             "current": None,
+            "draft": None,
             "transcript": [],
-            "latest_questions": [],
             "candidate": None,
             "review": None,
             "stale_reason": "VISION_FACT_CONFLICT",
@@ -1552,9 +1555,10 @@ def test_ambiguous_vision_leaf_fails_closed_with_typed_stale_reason(
     )
 
     assert data == {
+        "bootstrap_available": False,
         "current": None,
+        "draft": None,
         "transcript": [],
-        "latest_questions": [],
         "candidate": None,
         "review": None,
         "stale_reason": "VISION_FACT_CONFLICT",
@@ -1687,8 +1691,6 @@ def test_durable_projections_expose_current_human_content_and_pending_review(
     review_data = _data(reads.specification_review(project_id=project_id))
 
     assert vision_data["current"] == {
-        "vision_artifact_id": vision_id,
-        "fingerprint": vision_fingerprint,
         "statement": "A durable Vision.",
     }
     active_goal = _json_object(goal_data["active"])

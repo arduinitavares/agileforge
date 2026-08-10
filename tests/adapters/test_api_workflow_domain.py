@@ -176,9 +176,10 @@ def test_vision_and_goal_status_endpoints_expose_durable_interview_contract(
 
     assert vision.status_code == HTTPStatus.OK
     assert vision.json()["data"] == {
+        "bootstrap_available": True,
         "current": None,
+        "draft": None,
         "transcript": [],
-        "latest_questions": [],
         "candidate": None,
         "review": None,
         "stale_reason": "VISION_NOT_ACCEPTED",
