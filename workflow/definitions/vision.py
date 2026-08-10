@@ -282,7 +282,10 @@ def _vision_transcript(
             None,
         )
     )
-    if artifact is not None and source_turn is None:
+    needs_source_turn = artifact is not None and (
+        decision is None or decision.decision in {"feedback", "rejected"}
+    )
+    if needs_source_turn and source_turn is None:
         return None
     if open_revision is not None:
         transcript = _vision_turn_chain(
