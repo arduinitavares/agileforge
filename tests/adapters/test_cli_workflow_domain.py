@@ -1,6 +1,5 @@
 """CLI adapter tests for the WorkflowDomain cutover."""
 
-import argparse
 import importlib
 import shlex
 from pathlib import Path
@@ -17,9 +16,10 @@ from tests.adapters.test_command_renderer import position_fixture
 from workflow.contracts import WorkflowPosition
 
 if TYPE_CHECKING:
-    from services.application import AuthorityFeedbackRequest
+    from services.application import AuthorityFeedbackRequest, PostSprintTriageRequest
 
 SPRINT_CAPACITY_POINTS = 8
+ARGUMENT_ERROR_EXIT_CODE = 2
 _SEMANTIC_TEXT_COMMANDS = (
     (
         "vision respond --project-id 41 --text {value} "
@@ -366,6 +366,8 @@ def test_removed_agentic_cli_flags_fail_parser_validation(flag: str) -> None:
                 "generate",
                 "--project-id",
                 "41",
+                "--instance-key",
+                "sprint:31",
                 "--idempotency-key",
                 "backlog-41",
                 "--actor",
@@ -593,25 +595,275 @@ def test_planning_action_commands_reject_request_file(command: str) -> None:
         cli_main.build_parser().parse_args(shlex.split(command))
 
 
-@pytest.mark.parametrize("field", ["artifact_fingerprint", "plan_fingerprint"])
-def test_guarded_payload_rejects_artifact_guards(field: str) -> None:
-    """Keep review fingerprints out of retained generic request files."""
-    position = position_fixture()
-    args = argparse.Namespace(
-        request_kind="apply_story_dependencies",
-        project_id=41,
-        idempotency_key="generic-41",
-        actor="operator",
-        correlation_id=None,
+class _ExecutionActionApplication:
+    """Capture any strict execution or triage semantic request."""
+
+    _METHODS = frozenset(
+        {
+            "close_sprint",
+            "close_story",
+            "complete_task",
+            "record_post_sprint_triage",
+            "review_sprint",
+        }
     )
 
-    with pytest.raises(ValueError, match="semantic fields only"):
-        cli_main._guarded_payload(
-            args,
-            {field: "caller-owned"},
-            position,
-            position.decisions[0],
+    def __init__(self) -> None:
+        self.requests: list[object] = []
+
+    def __getattr__(self, name: str) -> object:
+        if name not in self._METHODS:
+            raise AttributeError(name)
+
+        def capture(request: object) -> object:
+            self.requests.append(request)
+            return cli_main.TransitionResult(ok=True)
+
+        return capture
+
+
+@pytest.mark.parametrize(
+    ("arguments", "request_type_name"),
+    [
+        (
+            [
+                "sprint",
+                "task",
+                "complete",
+                "--project-id",
+                "41",
+                "--instance-key",
+                "task:7",
+                "--outcome-summary",
+                "Implemented semantic execution.",
+                "--artifact-ref",
+                "services/application.py",
+                "--acceptance-result",
+                "fully_met",
+                "--checklist-item",
+                "Focused tests=passed",
+                "--idempotency-key",
+                "complete-task-41",
+                "--actor",
+                "operator",
+            ],
+            "CompleteTaskRequest",
+        ),
+        (
+            [
+                "story",
+                "close",
+                "--project-id",
+                "41",
+                "--instance-key",
+                "story:9",
+                "--resolution",
+                "Completed",
+                "--delivered",
+                "Semantic execution transport.",
+                "--evidence",
+                "Focused tests pass.",
+                "--known-gaps",
+                "None.",
+                "--idempotency-key",
+                "close-story-41",
+                "--actor",
+                "operator",
+            ],
+            "CloseStoryRequest",
+        ),
+        (
+            [
+                "sprint",
+                "review",
+                "--project-id",
+                "41",
+                "--instance-key",
+                "sprint:31",
+                "--idempotency-key",
+                "review-sprint-41",
+                "--actor",
+                "operator",
+            ],
+            "SprintReviewRequest",
+        ),
+        (
+            [
+                "sprint",
+                "close",
+                "--project-id",
+                "41",
+                "--instance-key",
+                "sprint:31",
+                "--idempotency-key",
+                "close-sprint-41",
+                "--actor",
+                "operator",
+            ],
+            "SprintCloseRequest",
+        ),
+    ],
+)
+def test_execution_action_commands_use_task_specific_semantics(
+    arguments: list[str],
+    request_type_name: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Parse and dispatch strict execution commands without request files."""
+    application = _ExecutionActionApplication()
+
+    exit_code = cli_main.main(arguments, application=application)
+
+    assert exit_code == 0
+    assert len(application.requests) == 1
+    request = application.requests[0]
+    assert type(request).__name__ == request_type_name
+    assert not hasattr(request, "sprint_id")
+    assert not hasattr(request, "request_file")
+    assert '"ok": true' in capsys.readouterr().out
+
+
+def test_post_sprint_triage_cli_reads_only_semantic_payload(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Read the triage artifact as canonical_payload, not a workflow request."""
+    payload_path = tmp_path / "triage.json"
+    payload_path.write_text('{"summary":"Follow-up required."}', encoding="utf-8")
+    application = _ExecutionActionApplication()
+
+    exit_code = cli_main.main(
+        [
+            "sprint",
+            "triage",
+            "--project-id",
+            "41",
+            "--instance-key",
+            "sprint:31",
+            "--impact",
+            "backlog",
+            "--file",
+            str(payload_path),
+            "--idempotency-key",
+            "triage-41",
+            "--actor",
+            "operator",
+        ],
+        application=application,
+    )
+
+    assert exit_code == 0
+    request = cast("PostSprintTriageRequest", application.requests[0])
+    assert type(request).__name__ == "PostSprintTriageRequest"
+    assert request.canonical_payload == {"summary": "Follow-up required."}
+    assert not hasattr(request, "sprint_id")
+    assert '"ok": true' in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "sprint task complete --project-id 41 --instance-key task:7 "
+        "--outcome-summary done --artifact-ref result --acceptance-result fully_met "
+        "--checklist-item check=passed --request-file request.json "
+        "--idempotency-key complete-41 --actor operator",
+        "story close --project-id 41 --instance-key story:9 "
+        "--resolution done --delivered delivered --evidence tested "
+        "--known-gaps none --request-file request.json "
+        "--idempotency-key story-41 --actor operator",
+        "sprint review --project-id 41 --instance-key sprint:31 "
+        "--request-file request.json "
+        "--idempotency-key review-41 --actor operator",
+        "sprint close --project-id 41 --instance-key sprint:31 "
+        "--request-file request.json "
+        "--idempotency-key close-41 --actor operator",
+        "sprint triage --project-id 41 --instance-key sprint:31 --impact none "
+        "--file triage.json --request-file request.json "
+        "--idempotency-key triage-41 --actor operator",
+    ],
+)
+def test_execution_action_commands_reject_request_file(command: str) -> None:
+    """Remove generic workflow request files from all execution commands."""
+    with pytest.raises(ValueError, match="unrecognized arguments"):
+        cli_main.build_parser().parse_args(shlex.split(command))
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "sprint task complete --project-id 41 --outcome-summary done "
+        "--artifact-ref result --acceptance-result fully_met "
+        "--checklist-item check=passed --idempotency-key complete-41 "
+        "--actor operator",
+        "story close --project-id 41 --resolution Completed --delivered done "
+        "--evidence tested --known-gaps none --idempotency-key story-41 "
+        "--actor operator",
+        "sprint review --project-id 41 --idempotency-key review-41 --actor operator",
+        "sprint close --project-id 41 --idempotency-key close-41 --actor operator",
+        "sprint triage --project-id 41 --impact none --file triage.json "
+        "--idempotency-key triage-41 --actor operator",
+    ],
+)
+def test_execution_action_commands_require_exact_instance_key(command: str) -> None:
+    """Require an explicit non-null selector for every execution action."""
+    with pytest.raises(ValueError, match="--instance-key"):
+        cli_main.build_parser().parse_args(shlex.split(command))
+
+
+@pytest.mark.parametrize(
+    "checklist_items",
+    [
+        ["missing-separator"],
+        [" =passed"],
+        ["check= "],
+        ["check=passed", "check=failed"],
+    ],
+)
+def test_complete_task_cli_rejects_invalid_checklist_map(
+    checklist_items: list[str],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Reject malformed, blank, or duplicate KEY=VALUE checklist entries."""
+    application = _ExecutionActionApplication()
+    arguments = [
+        "sprint",
+        "task",
+        "complete",
+        "--project-id",
+        "41",
+        "--instance-key",
+        "task:7",
+        "--outcome-summary",
+        "Done.",
+        "--artifact-ref",
+        "result",
+        "--acceptance-result",
+        "fully_met",
+    ]
+    for item in checklist_items:
+        arguments.extend(("--checklist-item", item))
+    arguments.extend(
+        (
+            "--idempotency-key",
+            "complete-41",
+            "--actor",
+            "operator",
         )
+    )
+
+    assert cli_main.main(arguments, application=application) == ARGUMENT_ERROR_EXIT_CODE
+    assert application.requests == []
+    assert '"ok": false' in capsys.readouterr().out
+
+
+def test_generic_cli_transition_transport_is_removed() -> None:
+    """Delete generic request-file installation and guarded dispatch helpers."""
+    source = (Path(__file__).parents[2] / "cli" / "main.py").read_text()
+
+    assert not hasattr(cli_main, "_run_transition")
+    assert not hasattr(cli_main, "_guarded_payload")
+    assert "_install_transition_commands" not in source
+    assert "_add_transition_leaf" not in source
 
 
 def test_semantic_sprint_generation_command_parses() -> None:

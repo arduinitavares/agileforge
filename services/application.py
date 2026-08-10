@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 from functools import cache
 from importlib import import_module
@@ -101,11 +102,20 @@ from workflow.definitions.planning import (
     readiness_fingerprint,
     story_dependency_source_fingerprint,
 )
+from workflow.execution_integrity import (
+    ExecutionIntegrityError,
+    sprint_close_fingerprint,
+    sprint_review_fingerprint,
+    story_completion_eligibility_fingerprint,
+)
 from workflow.fingerprints import canonical_hash, canonical_json
 from workflow.requests import (
     AbandonProductGoal,
     ApplyStoryDependencies,
     BeginVisionRevision,
+    CloseSprint,
+    CloseStory,
+    CompleteTask,
     DecideAuthority,
     DecideBacklog,
     DecideProductGoalReview,
@@ -118,8 +128,10 @@ from workflow.requests import (
     ReconcileBacklog,
     RecordAuthorityFeedback,
     RecordDiscoveryArtifact,
+    RecordPostSprintTriage,
     RecordSpecificationCandidate,
     RepairStoryReadiness,
+    ReviewSprint,
     StartSprint,
 )
 from workflow.requests.planning import ReviewedDependencyEdge, StoryReadinessUpdate
@@ -129,7 +141,12 @@ if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
 
     from adapters.adk.recipes import AdkRecipeRegistry
-    from workflow.facts import StoryDependencyFact, StoryFact, WorkflowFactSnapshot
+    from workflow.facts import (
+        PostSprintTriageFact,
+        StoryDependencyFact,
+        StoryFact,
+        WorkflowFactSnapshot,
+    )
     from workflow.requests import TransitionRequest
 
 _JSON_OBJECT = TypeAdapter(JsonObject)
@@ -321,6 +338,45 @@ class _PlanningActionSelectionPort(SemanticTransitionReplayPort, Protocol):
         project_id: int,
         decision: NodeDecision,
     ) -> tuple[int, int, str, str] | None: ...
+
+
+class _ExecutionActionSelectionPort(SemanticTransitionReplayPort, Protocol):
+    """Derive exact execution identities from decisions and durable facts."""
+
+    def prepare_task_completion(
+        self,
+        *,
+        project_id: int,
+        decision: NodeDecision,
+    ) -> tuple[int, int] | None: ...
+
+    def prepare_story_close(
+        self,
+        *,
+        project_id: int,
+        decision: NodeDecision,
+    ) -> tuple[int, int, str] | None: ...
+
+    def prepare_sprint_review(
+        self,
+        *,
+        project_id: int,
+        decision: NodeDecision,
+    ) -> tuple[int, str] | None: ...
+
+    def prepare_sprint_close(
+        self,
+        *,
+        project_id: int,
+        decision: NodeDecision,
+    ) -> tuple[int, str, str] | None: ...
+
+    def prepare_post_sprint_triage(
+        self,
+        *,
+        project_id: int,
+        decision: NodeDecision,
+    ) -> tuple[int, str] | None: ...
 
 
 class _SprintPlanningInputPort(Protocol):
@@ -662,6 +718,244 @@ class PlanningActionSelectionService:
 
 
 @dataclass(frozen=True)
+class ExecutionActionSelectionService:
+    """Resolve execution targets and guards from exact durable workflow facts."""
+
+    engine: Engine
+
+    def replay_transition(
+        self,
+        query: TransitionReplayQuery,
+    ) -> TransitionResult | None:
+        """Replay exact public semantics before reading current execution facts."""
+        return DurableTransitionReplayService(engine=self.engine).replay(query)
+
+    def prepare_task_completion(
+        self,
+        *,
+        project_id: int,
+        decision: NodeDecision,
+    ) -> tuple[int, int] | None:
+        """Resolve one selected open Task and its active Sprint."""
+        if not execution_action_decision_is_transportable(decision):
+            return None
+        snapshot = self._snapshot(project_id)
+        task_id = _instance_identity(decision, "task")
+        active_sprint_id = _single_sprint_id(snapshot, status="active")
+        if snapshot is None or task_id is None or active_sprint_id is None:
+            return None
+        tasks = tuple(
+            item
+            for item in snapshot.tasks
+            if item.task_id == task_id
+            and item.sprint_id == active_sprint_id
+            and item.status not in {"Done", "Cancelled"}
+        )
+        reference = _integer_fact_reference(decision, "task")
+        if len(tasks) != 1 or reference is None:
+            return None
+        task = tasks[0]
+        referenced_id, fact_reference = reference
+        if referenced_id != task_id or fact_reference.fingerprint != canonical_hash(
+            task.model_dump(mode="json")
+        ):
+            return None
+        return task_id, active_sprint_id
+
+    def prepare_story_close(
+        self,
+        *,
+        project_id: int,
+        decision: NodeDecision,
+    ) -> tuple[int, int, str] | None:
+        """Resolve one selected Story and its current completion fingerprint."""
+        if not execution_action_decision_is_transportable(decision):
+            return None
+        snapshot = self._snapshot(project_id)
+        story_id = _instance_identity(decision, "story")
+        active_sprint_id = _single_sprint_id(snapshot, status="active")
+        if snapshot is None or story_id is None or active_sprint_id is None:
+            return None
+        stories = tuple(
+            item
+            for item in snapshot.stories
+            if item.story_id == story_id
+            and active_sprint_id in item.sprint_ids
+            and item.status not in {"Done", "Accepted"}
+        )
+        reference = _integer_fact_reference(decision, "story_completion")
+        try:
+            fingerprint = story_completion_eligibility_fingerprint(
+                snapshot,
+                sprint_id=active_sprint_id,
+                story_id=story_id,
+            )
+        except ExecutionIntegrityError:
+            return None
+        if (
+            len(stories) != 1
+            or reference is None
+            or reference[0] != story_id
+            or reference[1].fingerprint != fingerprint
+        ):
+            return None
+        return story_id, active_sprint_id, fingerprint
+
+    def prepare_sprint_review(
+        self,
+        *,
+        project_id: int,
+        decision: NodeDecision,
+    ) -> tuple[int, str] | None:
+        """Resolve the active Sprint and terminal-review fingerprint."""
+        if not execution_action_decision_is_transportable(decision):
+            return None
+        snapshot = self._snapshot(project_id)
+        sprint_id = _instance_identity(decision, "sprint")
+        active_sprint_id = _single_sprint_id(snapshot, status="active")
+        if (
+            snapshot is None
+            or sprint_id is None
+            or sprint_id != active_sprint_id
+            or any(item.sprint_id == sprint_id for item in snapshot.sprint_reviews)
+        ):
+            return None
+        try:
+            fingerprint = sprint_review_fingerprint(snapshot, sprint_id)
+        except ExecutionIntegrityError:
+            return None
+        reference = _integer_fact_reference(decision, "sprint_review")
+        if (
+            reference is None
+            or reference[0] != sprint_id
+            or reference[1].fingerprint != fingerprint
+        ):
+            return None
+        return sprint_id, fingerprint
+
+    def prepare_sprint_close(
+        self,
+        *,
+        project_id: int,
+        decision: NodeDecision,
+    ) -> tuple[int, str, str] | None:
+        """Resolve active Sprint review and close fingerprints."""
+        if not execution_action_decision_is_transportable(decision):
+            return None
+        snapshot = self._snapshot(project_id)
+        sprint_id = _instance_identity(decision, "sprint")
+        active_sprint_id = _single_sprint_id(snapshot, status="active")
+        if snapshot is None or sprint_id is None or sprint_id != active_sprint_id:
+            return None
+        reviews = tuple(
+            item for item in snapshot.sprint_reviews if item.sprint_id == sprint_id
+        )
+        if len(reviews) != 1 or any(
+            item.sprint_id == sprint_id for item in snapshot.sprint_closures
+        ):
+            return None
+        try:
+            review_fingerprint = sprint_review_fingerprint(snapshot, sprint_id)
+            close_fingerprint = sprint_close_fingerprint(
+                snapshot,
+                sprint_id,
+                review_fingerprint,
+            )
+        except ExecutionIntegrityError:
+            return None
+        sprint_reference = _integer_fact_reference(decision, "sprint")
+        review_reference = _integer_fact_reference(decision, "sprint_review")
+        close_reference = _integer_fact_reference(decision, "sprint_close")
+        sprint = next(item for item in snapshot.sprints if item.sprint_id == sprint_id)
+        if (
+            reviews[0].review_fingerprint != review_fingerprint
+            or sprint_reference is None
+            or sprint_reference[0] != sprint_id
+            or sprint_reference[1].fingerprint
+            != canonical_hash(sprint.model_dump(mode="json"))
+            or review_reference is None
+            or review_reference[0] != sprint_id
+            or review_reference[1].fingerprint != review_fingerprint
+            or close_reference is None
+            or close_reference[0] != sprint_id
+            or close_reference[1].fingerprint != close_fingerprint
+        ):
+            return None
+        return sprint_id, review_fingerprint, close_fingerprint
+
+    def prepare_post_sprint_triage(
+        self,
+        *,
+        project_id: int,
+        decision: NodeDecision,
+    ) -> tuple[int, str] | None:
+        """Resolve one completed Sprint and its exact closure identity."""
+        if not execution_action_decision_is_transportable(decision):
+            return None
+        snapshot = self._snapshot(project_id)
+        sprint_id = _instance_identity(decision, "sprint")
+        if snapshot is None or sprint_id is None:
+            return None
+        completed = tuple(
+            item
+            for item in snapshot.sprints
+            if item.sprint_id == sprint_id and item.status == "completed"
+        )
+        reviews = tuple(
+            item for item in snapshot.sprint_reviews if item.sprint_id == sprint_id
+        )
+        closures = tuple(
+            item for item in snapshot.sprint_closures if item.sprint_id == sprint_id
+        )
+        if len(completed) != 1 or len(reviews) != 1 or len(closures) != 1:
+            return None
+        try:
+            review_fingerprint = sprint_review_fingerprint(snapshot, sprint_id)
+            close_fingerprint = sprint_close_fingerprint(
+                snapshot,
+                sprint_id,
+                review_fingerprint,
+            )
+        except ExecutionIntegrityError:
+            return None
+        reference = _integer_fact_reference(decision, "sprint_closure")
+        triage_reference = _integer_fact_reference(decision, "post_sprint_triage")
+        triage_rows = tuple(
+            item for item in snapshot.post_sprint_triage if item.sprint_id == sprint_id
+        )
+        triage_valid, current_triage = _current_post_sprint_triage(triage_rows)
+        closure = closures[0]
+        if (
+            reviews[0].review_fingerprint != review_fingerprint
+            or closure.review_fingerprint != review_fingerprint
+            or closure.close_fingerprint != close_fingerprint
+            or reference is None
+            or reference[0] != sprint_id
+            or reference[1].fingerprint != close_fingerprint
+            or not triage_valid
+            or (current_triage is None and triage_reference is not None)
+            or (
+                current_triage is not None
+                and (
+                    triage_reference is None
+                    or triage_reference[0] != current_triage.triage_id
+                    or triage_reference[1].fingerprint
+                    != current_triage.payload_fingerprint
+                )
+            )
+        ):
+            return None
+        return sprint_id, close_fingerprint
+
+    def _snapshot(self, project_id: int) -> WorkflowFactSnapshot | None:
+        try:
+            with Session(self.engine) as session:
+                return WorkflowFactRepository(session).load(project_id)
+        except WorkflowFactLoadError:
+            return None
+
+
+@dataclass(frozen=True)
 class _DeliveryLineage:
     """Exact durable source rows shared by retained delivery inputs."""
 
@@ -842,6 +1136,7 @@ class _LifecycleServiceOptions(TypedDict, total=False):
     delivery_review_selection: _DeliveryReviewSelectionPort | None
     delivery_action_input: _DeliveryActionInputPort | None
     planning_action_selection: _PlanningActionSelectionPort | None
+    execution_action_selection: _ExecutionActionSelectionPort | None
     sprint_planning_input: _SprintPlanningInputPort | None
 
 
@@ -1136,6 +1431,55 @@ class SprintStartRequest(_PlanningMutationRequest):
     """Transport-only request to start the graph-selected accepted Sprint plan."""
 
 
+class _ExecutionMutationRequest(FrozenModel):
+    """Transport metadata shared by strict execution and triage requests."""
+
+    project_id: int
+    idempotency_key: str = Field(min_length=1)
+    actor: str = Field(min_length=1)
+    correlation_id: str | None = None
+
+
+class CompleteTaskRequest(_ExecutionMutationRequest):
+    """Semantic completion evidence for one selected Task."""
+
+    instance_key: SemanticText
+    outcome_summary: SemanticText
+    artifact_refs: tuple[SemanticText, ...] = Field(min_length=1)
+    acceptance_result: Literal["partially_met", "fully_met"]
+    checklist_result: dict[SemanticText, SemanticText] = Field(min_length=1)
+
+
+class CloseStoryRequest(_ExecutionMutationRequest):
+    """Semantic closure evidence for one selected Story."""
+
+    instance_key: SemanticText
+    resolution: SemanticText
+    delivered: SemanticText
+    evidence: SemanticText
+    known_gaps: SemanticText
+
+
+class SprintReviewRequest(_ExecutionMutationRequest):
+    """Transport metadata only for the graph-selected terminal Sprint review."""
+
+    instance_key: SemanticText
+
+
+class SprintCloseRequest(_ExecutionMutationRequest):
+    """Transport metadata only for the graph-selected reviewed Sprint close."""
+
+    instance_key: SemanticText
+
+
+class PostSprintTriageRequest(_ExecutionMutationRequest):
+    """Semantic post-Sprint impact and canonical payload."""
+
+    instance_key: SemanticText
+    impact: Literal["none", "backlog", "specification"]
+    canonical_payload: JsonObject
+
+
 class VisionInterviewRequest(FrozenModel):
     """Transport request for one host-prepared Vision interview attempt."""
 
@@ -1346,6 +1690,9 @@ class AgileForgeApplication:
         self._delivery_action_input = lifecycle_services.get("delivery_action_input")
         self._planning_action_selection = lifecycle_services.get(
             "planning_action_selection"
+        )
+        self._execution_action_selection = lifecycle_services.get(
+            "execution_action_selection"
         )
         self._sprint_planning_input = lifecycle_services.get("sprint_planning_input")
         self._project_lifecycle: ProjectLifecycleService | None = None
@@ -1949,6 +2296,287 @@ class AgileForgeApplication:
                 sprint_id=sprint_id,
                 plan_fingerprint=plan_fingerprint,
                 candidate_set_fingerprint=candidate_fingerprint,
+            )
+        )
+
+    def complete_task(self, request: CompleteTaskRequest) -> TransitionResult:
+        """Complete one exact graph-selected Task from semantic evidence."""
+        artifact_refs = tuple(sorted(set(request.artifact_refs)))
+        checklist_result = _JSON_OBJECT.validate_python(request.checklist_result)
+        operator_input = _JSON_OBJECT.validate_python(
+            {
+                "instance_key": request.instance_key,
+                "outcome_summary": request.outcome_summary,
+                "artifact_refs": list(artifact_refs),
+                "acceptance_result": request.acceptance_result,
+                "checklist_result": checklist_result,
+            }
+        )
+        replay = self._replay_execution_action(
+            request_kind="complete_task",
+            request=request,
+            operator_input=operator_input,
+        )
+        if replay is not None:
+            return replay
+        position = self.position(project_id=request.project_id)
+        decision = _unique_execution_decision(
+            position,
+            request_kind="complete_task",
+            node_id="execution.task.complete",
+            instance_key=request.instance_key,
+        )
+        selection = self._execution_action_selection
+        target = (
+            None
+            if decision is None
+            or decision.category is not NodeCategory.AVAILABLE
+            or selection is None
+            else selection.prepare_task_completion(
+                project_id=request.project_id,
+                decision=decision,
+            )
+        )
+        if decision is None or target is None:
+            return _transition_not_available(position, "execution.task.complete")
+        task_id, _sprint_id = target
+        return self.transition(
+            CompleteTask(
+                project_id=request.project_id,
+                graph_version=position.graph_version,
+                fact_fingerprint=position.fact_fingerprint,
+                decision_fingerprint=decision.decision_fingerprint,
+                instance_key=request.instance_key,
+                idempotency_key=request.idempotency_key,
+                actor=request.actor,
+                correlation_id=request.correlation_id,
+                task_id=task_id,
+                outcome_summary=request.outcome_summary,
+                artifact_refs=artifact_refs,
+                acceptance_result=request.acceptance_result,
+                checklist_result=checklist_result,
+            )
+        )
+
+    def close_story(self, request: CloseStoryRequest) -> TransitionResult:
+        """Close one exact graph-selected Story from semantic evidence."""
+        replay = self._replay_execution_action(
+            request_kind="close_story",
+            request=request,
+            operator_input={
+                "instance_key": request.instance_key,
+                "resolution": request.resolution,
+                "delivered": request.delivered,
+                "evidence": request.evidence,
+                "known_gaps": request.known_gaps,
+            },
+        )
+        if replay is not None:
+            return replay
+        position = self.position(project_id=request.project_id)
+        decision = _unique_execution_decision(
+            position,
+            request_kind="close_story",
+            node_id="execution.story.close",
+            instance_key=request.instance_key,
+        )
+        selection = self._execution_action_selection
+        target = (
+            None
+            if decision is None
+            or decision.category is not NodeCategory.AVAILABLE
+            or selection is None
+            else selection.prepare_story_close(
+                project_id=request.project_id,
+                decision=decision,
+            )
+        )
+        if decision is None or target is None:
+            return _transition_not_available(position, "execution.story.close")
+        story_id, _sprint_id, _completion_fingerprint = target
+        return self.transition(
+            CloseStory(
+                project_id=request.project_id,
+                graph_version=position.graph_version,
+                fact_fingerprint=position.fact_fingerprint,
+                decision_fingerprint=decision.decision_fingerprint,
+                instance_key=request.instance_key,
+                idempotency_key=request.idempotency_key,
+                actor=request.actor,
+                correlation_id=request.correlation_id,
+                story_id=story_id,
+                resolution=request.resolution,
+                delivered=request.delivered,
+                evidence=request.evidence,
+                known_gaps=request.known_gaps,
+            )
+        )
+
+    def review_sprint(self, request: SprintReviewRequest) -> TransitionResult:
+        """Review the unique terminal active Sprint from durable facts."""
+        replay = self._replay_execution_action(
+            request_kind="review_sprint",
+            request=request,
+            operator_input={"instance_key": request.instance_key},
+        )
+        if replay is not None:
+            return replay
+        position = self.position(project_id=request.project_id)
+        decision = _unique_execution_decision(
+            position,
+            request_kind="review_sprint",
+            node_id="execution.sprint.review",
+            instance_key=request.instance_key,
+        )
+        selection = self._execution_action_selection
+        target = (
+            None
+            if decision is None
+            or decision.category not in {NodeCategory.AVAILABLE, NodeCategory.WAITING}
+            or selection is None
+            else selection.prepare_sprint_review(
+                project_id=request.project_id,
+                decision=decision,
+            )
+        )
+        if decision is None or target is None:
+            return _transition_not_available(position, "execution.sprint.review")
+        sprint_id, review_fingerprint = target
+        return self.transition(
+            ReviewSprint(
+                project_id=request.project_id,
+                graph_version=position.graph_version,
+                fact_fingerprint=position.fact_fingerprint,
+                decision_fingerprint=decision.decision_fingerprint,
+                instance_key=request.instance_key,
+                idempotency_key=request.idempotency_key,
+                actor=request.actor,
+                correlation_id=request.correlation_id,
+                sprint_id=sprint_id,
+                review_fingerprint=review_fingerprint,
+            )
+        )
+
+    def close_sprint(self, request: SprintCloseRequest) -> TransitionResult:
+        """Close the unique reviewed active Sprint from durable facts."""
+        replay = self._replay_execution_action(
+            request_kind="close_sprint",
+            request=request,
+            operator_input={"instance_key": request.instance_key},
+        )
+        if replay is not None:
+            return replay
+        position = self.position(project_id=request.project_id)
+        decision = _unique_execution_decision(
+            position,
+            request_kind="close_sprint",
+            node_id="execution.sprint.close",
+            instance_key=request.instance_key,
+        )
+        selection = self._execution_action_selection
+        target = (
+            None
+            if decision is None
+            or decision.category is not NodeCategory.AVAILABLE
+            or selection is None
+            else selection.prepare_sprint_close(
+                project_id=request.project_id,
+                decision=decision,
+            )
+        )
+        if decision is None or target is None:
+            return _transition_not_available(position, "execution.sprint.close")
+        sprint_id, review_fingerprint, _close_fingerprint = target
+        return self.transition(
+            CloseSprint(
+                project_id=request.project_id,
+                graph_version=position.graph_version,
+                fact_fingerprint=position.fact_fingerprint,
+                decision_fingerprint=decision.decision_fingerprint,
+                instance_key=request.instance_key,
+                idempotency_key=request.idempotency_key,
+                actor=request.actor,
+                correlation_id=request.correlation_id,
+                sprint_id=sprint_id,
+                review_fingerprint=review_fingerprint,
+            )
+        )
+
+    def record_post_sprint_triage(
+        self,
+        request: PostSprintTriageRequest,
+    ) -> TransitionResult:
+        """Record semantic triage for one exact graph-selected completed Sprint."""
+        canonical_payload = dict(request.canonical_payload)
+        replay = self._replay_execution_action(
+            request_kind="record_post_sprint_triage",
+            request=request,
+            operator_input={
+                "instance_key": request.instance_key,
+                "impact": request.impact,
+                "canonical_payload": canonical_payload,
+            },
+        )
+        if replay is not None:
+            return replay
+        position = self.position(project_id=request.project_id)
+        decision = _unique_execution_decision(
+            position,
+            request_kind="record_post_sprint_triage",
+            node_id="execution.post_sprint_triage",
+            instance_key=request.instance_key,
+        )
+        selection = self._execution_action_selection
+        target = (
+            None
+            if decision is None
+            or decision.category is not NodeCategory.AVAILABLE
+            or selection is None
+            else selection.prepare_post_sprint_triage(
+                project_id=request.project_id,
+                decision=decision,
+            )
+        )
+        if decision is None or target is None:
+            return _transition_not_available(
+                position,
+                "execution.post_sprint_triage",
+            )
+        sprint_id, _closure_fingerprint = target
+        return self.transition(
+            RecordPostSprintTriage(
+                project_id=request.project_id,
+                graph_version=position.graph_version,
+                fact_fingerprint=position.fact_fingerprint,
+                decision_fingerprint=decision.decision_fingerprint,
+                instance_key=request.instance_key,
+                idempotency_key=request.idempotency_key,
+                actor=request.actor,
+                correlation_id=request.correlation_id,
+                sprint_id=sprint_id,
+                impact=request.impact,
+                canonical_payload=canonical_payload,
+            )
+        )
+
+    def _replay_execution_action(
+        self,
+        *,
+        request_kind: str,
+        request: _ExecutionMutationRequest,
+        operator_input: JsonObject,
+    ) -> TransitionResult | None:
+        selection = self._execution_action_selection
+        if selection is None:
+            return None
+        return selection.replay_transition(
+            TransitionReplayQuery(
+                request_kind=request_kind,
+                project_id=request.project_id,
+                idempotency_key=request.idempotency_key,
+                actor=request.actor,
+                correlation_id=request.correlation_id,
+                operator_input=operator_input,
             )
         )
 
@@ -3514,6 +4142,86 @@ def _unique_available_decision(
     return candidates[0] if len(candidates) == 1 else None
 
 
+def _unique_execution_decision(
+    position: WorkflowPosition,
+    *,
+    request_kind: str,
+    node_id: str,
+    instance_key: str,
+) -> NodeDecision | None:
+    """Select one exact execution decision by kind, node, and public selector."""
+    candidates = tuple(
+        item
+        for item in position.decisions
+        if item.request_kind == request_kind
+        and item.node_id == node_id
+        and item.instance_key == instance_key
+        and item.category in {NodeCategory.AVAILABLE, NodeCategory.WAITING}
+    )
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _instance_identity(decision: NodeDecision, prefix: str) -> int | None:
+    """Parse one exact positive numeric semantic instance selector."""
+    instance_key = decision.instance_key
+    expected_prefix = f"{prefix}:"
+    if instance_key is None or not instance_key.startswith(expected_prefix):
+        return None
+    try:
+        identity = int(instance_key.removeprefix(expected_prefix))
+    except ValueError:
+        return None
+    return identity if identity > 0 else None
+
+
+def _single_sprint_id(
+    snapshot: WorkflowFactSnapshot | None,
+    *,
+    status: Literal["active", "completed"],
+) -> int | None:
+    """Return one exact durable Sprint identity for a lifecycle status."""
+    if snapshot is None:
+        return None
+    sprint_ids = tuple(
+        item.sprint_id for item in snapshot.sprints if item.status == status
+    )
+    return sprint_ids[0] if len(sprint_ids) == 1 else None
+
+
+def _current_post_sprint_triage(
+    rows: tuple[PostSprintTriageFact, ...],
+) -> tuple[bool, PostSprintTriageFact | None]:
+    """Return the one append-only triage tip only when the chain is exact."""
+    if not rows:
+        return True, None
+    by_id = {item.triage_id: item for item in rows}
+    if len(by_id) != len(rows):
+        return False, None
+    parent_ids = tuple(
+        item.supersedes_triage_id
+        for item in rows
+        if item.supersedes_triage_id is not None
+    )
+    if len(set(parent_ids)) != len(parent_ids) or any(
+        parent_id not in by_id for parent_id in parent_ids
+    ):
+        return False, None
+    tips = tuple(item for item in rows if item.triage_id not in set(parent_ids))
+    if len(tips) != 1:
+        return False, None
+    seen: set[int] = set()
+    current = tips[0]
+    while True:
+        if current.triage_id in seen:
+            return False, None
+        seen.add(current.triage_id)
+        parent_id = current.supersedes_triage_id
+        if parent_id is None:
+            break
+        current = by_id[parent_id]
+    return (len(seen) == len(rows), tips[0] if len(seen) == len(rows) else None)
+
+
 def _single_fact_reference(
     decision: NodeDecision,
     fact_type: str,
@@ -3590,6 +4298,108 @@ def planning_action_decision_is_transportable(
             and _integer_fact_reference(decision, "sprint_plan_tasks") is not None
         )
     return True
+
+
+_SINGLE_REFERENCE_EXECUTION_ACTIONS = {
+    "complete_task": ("task", "task"),
+    "close_story": ("story", "story_completion"),
+    "review_sprint": ("sprint", "sprint_review"),
+}
+
+
+def execution_action_decision_is_transportable(decision: NodeDecision) -> bool:
+    """Return whether one execution decision has an exact public selector target."""
+    simple_contract = _SINGLE_REFERENCE_EXECUTION_ACTIONS.get(decision.request_kind)
+    if simple_contract is not None:
+        return _single_reference_execution_action_is_transportable(
+            decision,
+            instance_prefix=simple_contract[0],
+            fact_type=simple_contract[1],
+        )
+    if decision.request_kind == "close_sprint":
+        return _sprint_close_decision_is_transportable(decision)
+    if decision.request_kind == "record_post_sprint_triage":
+        return _post_sprint_triage_decision_is_transportable(decision)
+    return True
+
+
+def _single_reference_execution_action_is_transportable(
+    decision: NodeDecision,
+    *,
+    instance_prefix: str,
+    fact_type: str,
+) -> bool:
+    """Match one exact instance selector to one required fact reference."""
+    identity = _instance_identity(decision, instance_prefix)
+    reference = _integer_fact_reference(decision, fact_type)
+    return (
+        _fact_reference_shape(decision, required=(fact_type,))
+        and identity is not None
+        and reference is not None
+        and reference[0] == identity
+    )
+
+
+def _sprint_close_decision_is_transportable(decision: NodeDecision) -> bool:
+    """Validate the exact Sprint, review, and close references for closure."""
+    required = ("sprint", "sprint_review", "sprint_close")
+    identity = _instance_identity(decision, "sprint")
+    references = tuple(
+        _integer_fact_reference(decision, fact_type) for fact_type in required
+    )
+    return (
+        _fact_reference_shape(decision, required=required)
+        and identity is not None
+        and all(
+            reference is not None and reference[0] == identity
+            for reference in references
+        )
+    )
+
+
+def _post_sprint_triage_decision_is_transportable(
+    decision: NodeDecision,
+) -> bool:
+    """Validate completed-Sprint identity and optional prior triage reference."""
+    if not _fact_reference_shape(
+        decision,
+        required=("sprint_closure",),
+        optional=("post_sprint_triage",),
+    ):
+        return False
+    identity = _instance_identity(decision, "sprint")
+    reference = _integer_fact_reference(decision, "sprint_closure")
+    triage_valid, triage_reference = _optional_fact_reference(
+        decision,
+        "post_sprint_triage",
+    )
+    try:
+        triage_id = None if triage_reference is None else int(triage_reference.fact_id)
+    except ValueError:
+        return False
+    return (
+        triage_valid
+        and (triage_id is None or triage_id > 0)
+        and identity is not None
+        and reference is not None
+        and reference[0] == identity
+    )
+
+
+def _fact_reference_shape(
+    decision: NodeDecision,
+    *,
+    required: tuple[str, ...],
+    optional: tuple[str, ...] = (),
+) -> bool:
+    """Require exactly one required reference and at most one optional reference."""
+    allowed = frozenset((*required, *optional))
+    if any(item.fact_type not in allowed for item in decision.fact_references):
+        return False
+    counts = Counter(item.fact_type for item in decision.fact_references)
+    return all(counts[item] == 1 for item in required) and all(
+        counts[item] <= 1 for item in optional
+    )
 
 
 def _transition_not_available(
@@ -3714,6 +4524,7 @@ def production_application() -> AgileForgeApplication:
         delivery_review_selection=DeliveryReviewSelectionService(engine=engine),
         delivery_action_input=DeliveryActionInputService(engine=engine),
         planning_action_selection=PlanningActionSelectionService(engine=engine),
+        execution_action_selection=ExecutionActionSelectionService(engine=engine),
         sprint_planning_input=SprintPlanningInputService(engine=engine),
     )
     application.set_project_lifecycle(
@@ -3737,12 +4548,16 @@ __all__ = [
     "AuthorityReviewSelectionService",
     "BacklogReconcileRequest",
     "BacklogReviewRequest",
+    "CloseStoryRequest",
+    "CompleteTaskRequest",
     "CreateProjectCommand",
     "DeliveryActionInputService",
     "DeliveryActionRequest",
     "DeliveryReviewSelectionService",
     "DiscoveryArtifactRequest",
+    "ExecutionActionSelectionService",
     "PlanningActionSelectionService",
+    "PostSprintTriageRequest",
     "ProductGoalInterviewRequest",
     "ProductGoalLifecycleServices",
     "ProductGoalOutcomeRequest",
@@ -3756,9 +4571,11 @@ __all__ = [
     "SemanticTransitionReplayPort",
     "SpecificationCandidateRequest",
     "SpecificationReviewRequest",
+    "SprintCloseRequest",
     "SprintPlanReviewRequest",
     "SprintPlanningInputService",
     "SprintPlanningRequest",
+    "SprintReviewRequest",
     "SprintStartRequest",
     "StoryDependenciesApplyRequest",
     "StoryDependencyEdgeRequest",
@@ -3770,6 +4587,7 @@ __all__ = [
     "VisionReviewRequest",
     "VisionRevisionRequest",
     "WorkflowDomainPort",
+    "execution_action_decision_is_transportable",
     "planning_action_decision_is_transportable",
     "production_application",
 ]

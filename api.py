@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from collections import Counter
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from importlib.resources import files
 from pathlib import Path
@@ -20,8 +20,6 @@ from pydantic import (
     ConfigDict,
     Field,
     StringConstraints,
-    TypeAdapter,
-    ValidationError,
     field_validator,
     model_validator,
 )
@@ -36,9 +34,12 @@ from services.application import (
     AuthorityReviewRequest,
     BacklogReconcileRequest,
     BacklogReviewRequest,
+    CloseStoryRequest,
+    CompleteTaskRequest,
     CreateProjectCommand,
     DeliveryActionRequest,
     DiscoveryArtifactRequest,
+    PostSprintTriageRequest,
     ProductGoalOutcomeRequest,
     ProductGoalResponseRequest,
     ProductGoalReviewRequest,
@@ -47,8 +48,10 @@ from services.application import (
     RoadmapReviewRequest,
     SpecificationCandidateRequest,
     SpecificationReviewRequest,
+    SprintCloseRequest,
     SprintPlanningRequest,
     SprintPlanReviewRequest,
+    SprintReviewRequest,
     SprintStartRequest,
     StoryDependenciesApplyRequest,
     StoryDependencyEdgeRequest,
@@ -58,6 +61,7 @@ from services.application import (
     VisionResponseRequest,
     VisionReviewRequest,
     VisionRevisionRequest,
+    execution_action_decision_is_transportable,
     planning_action_decision_is_transportable,
     production_application,
 )
@@ -65,14 +69,10 @@ from utils.runtime_controls import UI_LAUNCH_NONCE_ENV
 from workflow.contracts import (
     JsonObject,
     NodeCategory,
-    NodeDecision,
     RecommendationKind,
     TransitionResult,
-    WorkflowError,
-    WorkflowErrorCode,
     WorkflowPosition,
 )
-from workflow.requests import TransitionRequest
 
 _FRONTEND_ROOT = files("frontend")
 
@@ -284,11 +284,44 @@ class SprintStartApiRequest(MutationApiRequest):
     """Transport metadata only for the accepted current Sprint plan."""
 
 
-class PositionedTransitionApiRequest(MutationApiRequest):
-    """Operator-owned semantic fields for one retained non-agentic route."""
+class CompleteTaskApiRequest(MutationApiRequest):
+    """Strict semantic completion evidence for one selected Task."""
 
-    instance_key: str | None = None
-    semantic_input: JsonObject
+    instance_key: SemanticText
+    outcome_summary: SemanticText
+    artifact_refs: list[SemanticText] = Field(min_length=1)
+    acceptance_result: Literal["partially_met", "fully_met"]
+    checklist_result: dict[SemanticText, SemanticText] = Field(min_length=1)
+
+
+class CloseStoryApiRequest(MutationApiRequest):
+    """Strict semantic closure evidence for one selected Story."""
+
+    instance_key: SemanticText
+    resolution: SemanticText
+    delivered: SemanticText
+    evidence: SemanticText
+    known_gaps: SemanticText
+
+
+class SprintReviewApiRequest(MutationApiRequest):
+    """Transport metadata only for the graph-selected terminal Sprint review."""
+
+    instance_key: SemanticText
+
+
+class SprintCloseApiRequest(MutationApiRequest):
+    """Transport metadata only for the graph-selected reviewed Sprint close."""
+
+    instance_key: SemanticText
+
+
+class PostSprintTriageApiRequest(MutationApiRequest):
+    """Strict semantic post-Sprint impact and canonical payload."""
+
+    instance_key: SemanticText
+    impact: Literal["none", "backlog", "specification"]
+    canonical_payload: JsonObject
 
 
 class DashboardConfig(BaseModel):
@@ -311,25 +344,21 @@ DELIVERY_API_PATHS: dict[str, str] = {
     "record_story_draft": "story/generate",
 }
 
-POSITIONED_API_PATHS: dict[str, str] = {
-    "close_sprint": "sprint/close",
-    "close_story": "story/close",
-    "complete_task": "sprint/task/complete",
-    "record_post_sprint_triage": "sprint/triage",
-    "review_sprint": "sprint/review",
-}
-
 SEMANTIC_API_PATHS: dict[str, str] = {
     "abandon_product_goal": "goals/abandon",
     "apply_story_dependencies": "story/dependencies/apply",
     "begin_vision_revision": "vision/revision",
+    "close_sprint": "sprint/close",
+    "close_story": "story/close",
     "compile_authority": "authority/compile",
+    "complete_task": "sprint/task/complete",
     "decide_authority": "authority/decision",
     "decide_backlog": "backlog/decide",
     "decide_roadmap": "roadmap/decide",
     "decide_sprint_plan": "sprint/decide",
     "decide_story": "story/decide",
     "record_authority_feedback": "authority/feedback",
+    "record_post_sprint_triage": "sprint/triage",
     "decide_product_goal_review": "goals/review",
     "decide_specification": "specifications/review",
     "decide_vision_review": "vision/review",
@@ -342,6 +371,7 @@ SEMANTIC_API_PATHS: dict[str, str] = {
     "reconcile_backlog": "backlog/reconcile",
     "repair_authority": "authority/repair",
     "repair_story_readiness": "story/readiness/repair",
+    "review_sprint": "sprint/review",
     "start_sprint": "sprint/start",
 }
 
@@ -355,13 +385,17 @@ _ACTIONABLE_WAITING_REQUEST_KINDS = frozenset(
         "decide_specification",
         "decide_story",
         "decide_vision_review",
+        "review_sprint",
     }
 )
-_SELECTOR_API_REQUEST_KINDS = (
-    frozenset(DELIVERY_API_PATHS) | frozenset(POSITIONED_API_PATHS) | {"decide_story"}
-)
-
-_TRANSITION_REQUEST = TypeAdapter(TransitionRequest)
+_SELECTOR_API_REQUEST_KINDS = frozenset(DELIVERY_API_PATHS) | {
+    "close_sprint",
+    "complete_task",
+    "close_story",
+    "decide_story",
+    "record_post_sprint_triage",
+    "review_sprint",
+}
 
 
 def _application() -> AgileForgeApplication:
@@ -408,47 +442,6 @@ def build_authority_feedback_request(
     )
 
 
-def build_positioned_transition_request(
-    project_id: int,
-    request_kind: str,
-    req: PositionedTransitionApiRequest,
-    position: WorkflowPosition,
-    decision: NodeDecision,
-) -> TransitionRequest:
-    """Add host-owned workflow guards to retained operator semantics."""
-    forbidden = {
-        "actor",
-        "correlation_id",
-        "decision_fingerprint",
-        "fact_fingerprint",
-        "graph_version",
-        "idempotency_key",
-        "instance_key",
-        "kind",
-        "artifact_fingerprint",
-        "plan_fingerprint",
-        "project_id",
-    }
-    if forbidden.intersection(req.semantic_input):
-        message = "semantic_input must not contain host-owned workflow guards."
-        raise ValueError(message)
-    payload = dict(req.semantic_input)
-    payload.update(
-        {
-            "kind": request_kind,
-            "project_id": project_id,
-            "graph_version": position.graph_version,
-            "fact_fingerprint": position.fact_fingerprint,
-            "decision_fingerprint": decision.decision_fingerprint,
-            "instance_key": decision.instance_key,
-            "idempotency_key": req.idempotency_key,
-            "actor": req.actor,
-            "correlation_id": req.correlation_id,
-        }
-    )
-    return _TRANSITION_REQUEST.validate_python(payload)
-
-
 def _result_payload(result: TransitionResult) -> dict[str, object]:
     if not isinstance(result, TransitionResult):
         raise TypeError(type(result).__name__)
@@ -462,38 +455,6 @@ def _result_payload(result: TransitionResult) -> dict[str, object]:
             detail=detail,
         )
     return {"status": "success", "data": result.model_dump(mode="json")}
-
-
-def _current_decision(
-    application: AgileForgeApplication,
-    *,
-    project_id: int,
-    request_kind: str,
-    instance_key: str | None,
-) -> tuple[WorkflowPosition, NodeDecision | None]:
-    position = application.position(project_id=project_id)
-    candidates = tuple(
-        decision
-        for decision in position.decisions
-        if decision.request_kind == request_kind
-        and decision.category in {NodeCategory.AVAILABLE, NodeCategory.WAITING}
-        and (instance_key is None or decision.instance_key == instance_key)
-    )
-    return position, candidates[0] if len(candidates) == 1 else None
-
-
-def _transition_not_available(
-    position: WorkflowPosition,
-    request_kind: str,
-) -> TransitionResult:
-    return TransitionResult(
-        ok=False,
-        position=position,
-        error=WorkflowError(
-            code=WorkflowErrorCode.TRANSITION_NOT_AVAILABLE,
-            message=f"No unique {request_kind} transition is currently available.",
-        ),
-    )
 
 
 def _workflow_actions(position: WorkflowPosition) -> list[JsonObject]:
@@ -510,9 +471,9 @@ def _workflow_actions(position: WorkflowPosition) -> list[JsonObject]:
         )
         and decision.recommendation_kind
         in {RecommendationKind.REQUIRED, RecommendationKind.RECOVERY}
-        and decision.request_kind
-        in SEMANTIC_API_PATHS | DELIVERY_API_PATHS | POSITIONED_API_PATHS
+        and decision.request_kind in SEMANTIC_API_PATHS | DELIVERY_API_PATHS
         and planning_action_decision_is_transportable(position.project_id, decision)
+        and execution_action_decision_is_transportable(decision)
     )
     semantic_counts = Counter(
         decision.request_kind
@@ -541,9 +502,6 @@ def _workflow_actions(position: WorkflowPosition) -> list[JsonObject]:
         elif request_kind in DELIVERY_API_PATHS:
             endpoint = DELIVERY_API_PATHS[request_kind]
             transport = "semantic"
-        elif request_kind in POSITIONED_API_PATHS:
-            endpoint = POSITIONED_API_PATHS[request_kind]
-            transport = "positioned"
         else:
             continue
         actions.append(
@@ -1383,53 +1341,98 @@ def start_project_sprint(
     )
 
 
-type PositionedRoute = Callable[
-    [int, PositionedTransitionApiRequest],
-    dict[str, object],
-]
-
-
-def _positioned_route(request_kind: str) -> PositionedRoute:
-    def route(
-        project_id: int,
-        req: PositionedTransitionApiRequest,
-    ) -> dict[str, object]:
-        application = _application()
-        position, decision = _current_decision(
-            application,
-            project_id=project_id,
-            request_kind=request_kind,
-            instance_key=req.instance_key,
-        )
-        if decision is None:
-            return _result_payload(_transition_not_available(position, request_kind))
-        try:
-            request = build_positioned_transition_request(
-                project_id,
-                request_kind,
-                req,
-                position,
-                decision,
+@app.post("/api/projects/{project_id}/sprint/task/complete")
+def complete_project_task(
+    project_id: int,
+    req: CompleteTaskApiRequest,
+) -> dict[str, object]:
+    """Complete one exact Task from semantic outcome and checklist evidence."""
+    return _result_payload(
+        _application().complete_task(
+            CompleteTaskRequest(
+                project_id=project_id,
+                instance_key=req.instance_key,
+                outcome_summary=req.outcome_summary,
+                artifact_refs=tuple(req.artifact_refs),
+                acceptance_result=req.acceptance_result,
+                checklist_result=req.checklist_result,
+                **_metadata(req),
             )
-        except ValidationError as error:
-            raise HTTPException(
-                status_code=422,
-                detail=error.errors(include_url=False),
-            ) from error
-        except ValueError as error:
-            raise HTTPException(status_code=422, detail=str(error)) from error
-        return _result_payload(application.transition(request))
-
-    route.__name__ = f"transition_{request_kind}"
-    route.__doc__ = f"Apply the exact {request_kind} workflow request."
-    return route
+        )
+    )
 
 
-for _request_kind, _route_suffix in POSITIONED_API_PATHS.items():
-    app.add_api_route(
-        f"/api/projects/{{project_id}}/{_route_suffix}",
-        _positioned_route(_request_kind),
-        methods=["POST"],
+@app.post("/api/projects/{project_id}/story/close")
+def close_project_story(
+    project_id: int,
+    req: CloseStoryApiRequest,
+) -> dict[str, object]:
+    """Close one exact Story from semantic delivery evidence."""
+    return _result_payload(
+        _application().close_story(
+            CloseStoryRequest(
+                project_id=project_id,
+                instance_key=req.instance_key,
+                resolution=req.resolution,
+                delivered=req.delivered,
+                evidence=req.evidence,
+                known_gaps=req.known_gaps,
+                **_metadata(req),
+            )
+        )
+    )
+
+
+@app.post("/api/projects/{project_id}/sprint/review")
+def review_project_sprint(
+    project_id: int,
+    req: SprintReviewApiRequest,
+) -> dict[str, object]:
+    """Review the exact graph-selected terminal Sprint."""
+    return _result_payload(
+        _application().review_sprint(
+            SprintReviewRequest(
+                project_id=project_id,
+                instance_key=req.instance_key,
+                **_metadata(req),
+            )
+        )
+    )
+
+
+@app.post("/api/projects/{project_id}/sprint/close")
+def close_project_sprint(
+    project_id: int,
+    req: SprintCloseApiRequest,
+) -> dict[str, object]:
+    """Close the exact graph-selected reviewed Sprint."""
+    return _result_payload(
+        _application().close_sprint(
+            SprintCloseRequest(
+                project_id=project_id,
+                instance_key=req.instance_key,
+                **_metadata(req),
+            )
+        )
+    )
+
+
+@app.post("/api/projects/{project_id}/sprint/triage")
+def record_project_post_sprint_triage(
+    project_id: int,
+    req: PostSprintTriageApiRequest,
+) -> dict[str, object]:
+    """Record semantic triage for one exact completed Sprint."""
+    return _result_payload(
+        _application().record_post_sprint_triage(
+            PostSprintTriageRequest(
+                project_id=project_id,
+                instance_key=req.instance_key,
+                impact=req.impact,
+                canonical_payload=req.canonical_payload,
+                **_metadata(req),
+            )
+        )
     )
 
 

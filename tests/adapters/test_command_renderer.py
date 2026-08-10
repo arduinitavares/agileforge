@@ -31,6 +31,15 @@ _PLACEHOLDERS = {
     "<story-id>": "7",
     "<dependency>": "7:8:Story 7 requires Story 8.",
     "<repair>": "7:3:1.1",
+    "<outcome-summary>": "Implemented semantic execution.",
+    "<artifact-ref>": "services/application.py",
+    "<acceptance-result>": "fully_met",
+    "<checklist-item>": "Focused tests=passed",
+    "<resolution>": "Completed",
+    "<delivered>": "Semantic execution transport.",
+    "<evidence>": "Focused tests pass.",
+    "<known-gaps>": "None.",
+    "<impact>": "none",
     "<max-story-points>": "3",
     "<team-name>": "Platform",
     "<idempotency-key>": "run-41",
@@ -421,6 +430,194 @@ def test_planning_actions_with_malformed_decisions_are_not_advertised(
     )
 
     assert render_workflow_next(position)["commands"] == []
+
+
+@pytest.mark.parametrize(
+    ("request_kind", "instance_key", "expected_flags", "fact_references"),
+    [
+        (
+            "complete_task",
+            "task:7",
+            (
+                "--instance-key",
+                "--outcome-summary",
+                "--artifact-ref",
+                "--acceptance-result",
+                "--checklist-item",
+            ),
+            (
+                FactReference(
+                    fact_type="task",
+                    fact_id="7",
+                    fingerprint="task-7",
+                ),
+            ),
+        ),
+        (
+            "close_story",
+            "story:9",
+            (
+                "--instance-key",
+                "--resolution",
+                "--delivered",
+                "--evidence",
+                "--known-gaps",
+            ),
+            (
+                FactReference(
+                    fact_type="story_completion",
+                    fact_id="9",
+                    fingerprint="story-completion-9",
+                ),
+            ),
+        ),
+        (
+            "review_sprint",
+            "sprint:31",
+            ("--instance-key",),
+            (
+                FactReference(
+                    fact_type="sprint_review",
+                    fact_id="31",
+                    fingerprint="sprint-review-31",
+                ),
+            ),
+        ),
+        (
+            "close_sprint",
+            "sprint:31",
+            ("--instance-key",),
+            (
+                FactReference(
+                    fact_type="sprint",
+                    fact_id="31",
+                    fingerprint="sprint-31",
+                ),
+                FactReference(
+                    fact_type="sprint_review",
+                    fact_id="31",
+                    fingerprint="sprint-review-31",
+                ),
+                FactReference(
+                    fact_type="sprint_close",
+                    fact_id="31",
+                    fingerprint="sprint-close-31",
+                ),
+            ),
+        ),
+        (
+            "record_post_sprint_triage",
+            "sprint:31",
+            ("--instance-key", "--impact", "--file"),
+            (
+                FactReference(
+                    fact_type="sprint_closure",
+                    fact_id="31",
+                    fingerprint="sprint-close-31",
+                ),
+            ),
+        ),
+    ],
+)
+def test_execution_actions_render_parser_valid_semantic_commands(
+    request_kind: str,
+    instance_key: str,
+    expected_flags: tuple[str, ...],
+    fact_references: tuple[FactReference, ...],
+) -> None:
+    """Advertise only strict execution semantics and required exact selectors."""
+    decision = NodeDecision(
+        node_id=f"test.{request_kind}",
+        instance_key=instance_key,
+        child_graph_id="execution",
+        request_kind=request_kind,
+        category=NodeCategory.AVAILABLE,
+        recommendation_kind=RecommendationKind.REQUIRED,
+        reason_code="TEST_AVAILABLE",
+        decision_fingerprint=f"decision-{request_kind}",
+        fact_references=fact_references,
+    )
+    position = position_fixture().model_copy(
+        update={
+            "decisions": (decision,),
+            "available_nodes": (decision.node_id,),
+            "waiting_nodes": (),
+            "blocked_nodes": (),
+            "invalid_nodes": (),
+        }
+    )
+
+    commands = render_workflow_next(position)["commands"]
+
+    assert len(commands) == 1
+    command = commands[0]["command"]
+    assert "--request-file" not in command
+    assert "fingerprint" not in command
+    for flag in expected_flags:
+        assert flag in command
+    parsed = build_parser().parse_args(
+        [_PLACEHOLDERS.get(argument, argument) for argument in shlex.split(command)[1:]]
+    )
+    assert parsed.project_id == position.project_id
+
+    malformed = decision.model_copy(
+        update={
+            "fact_references": (
+                *fact_references,
+                FactReference(
+                    fact_type="unexpected_guard",
+                    fact_id="99",
+                    fingerprint="caller-owned",
+                ),
+            )
+        }
+    )
+    malformed_position = position.model_copy(update={"decisions": (malformed,)})
+    assert render_workflow_next(malformed_position)["commands"] == []
+
+
+@pytest.mark.parametrize(
+    "request_kind",
+    [
+        "complete_task",
+        "close_story",
+        "review_sprint",
+        "close_sprint",
+        "record_post_sprint_triage",
+    ],
+)
+def test_execution_actions_with_malformed_decisions_are_not_advertised(
+    request_kind: str,
+) -> None:
+    """Suppress execution recommendations without exact selectors and references."""
+    decision = NodeDecision(
+        node_id=f"test.{request_kind}",
+        child_graph_id="execution",
+        request_kind=request_kind,
+        category=NodeCategory.AVAILABLE,
+        recommendation_kind=RecommendationKind.REQUIRED,
+        reason_code="TEST_AVAILABLE",
+        decision_fingerprint=f"decision-{request_kind}",
+    )
+    position = position_fixture().model_copy(
+        update={
+            "decisions": (decision,),
+            "available_nodes": (decision.node_id,),
+            "waiting_nodes": (),
+            "blocked_nodes": (),
+            "invalid_nodes": (),
+        }
+    )
+
+    assert render_workflow_next(position)["commands"] == []
+
+
+def test_generic_workflow_command_renderer_is_removed() -> None:
+    """Keep every public recommendation on an explicit semantic renderer."""
+    source = (Path(__file__).parents[2] / "cli" / "workflow_commands.py").read_text()
+
+    assert "def _render_command(" not in source
+    assert "<request-file>" not in source
 
 
 def test_sprint_generation_advertises_parser_valid_capacity_remediation() -> None:

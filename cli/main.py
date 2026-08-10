@@ -12,7 +12,6 @@ from typing import Literal, NoReturn, Protocol, cast
 from pydantic import TypeAdapter, ValidationError
 
 from cli.workflow_commands import (
-    COMMAND_PREFIXES,
     workflow_next,
     workflow_position,
 )
@@ -24,9 +23,12 @@ from services.application import (
     AuthorityReviewRequest,
     BacklogReconcileRequest,
     BacklogReviewRequest,
+    CloseStoryRequest,
+    CompleteTaskRequest,
     CreateProjectCommand,
     DeliveryActionRequest,
     DiscoveryArtifactRequest,
+    PostSprintTriageRequest,
     ProductGoalOutcomeRequest,
     ProductGoalResponseRequest,
     ProductGoalReviewRequest,
@@ -35,8 +37,10 @@ from services.application import (
     RoadmapReviewRequest,
     SpecificationCandidateRequest,
     SpecificationReviewRequest,
+    SprintCloseRequest,
     SprintPlanningRequest,
     SprintPlanReviewRequest,
+    SprintReviewRequest,
     SprintStartRequest,
     StoryDependenciesApplyRequest,
     StoryDependencyEdgeRequest,
@@ -51,48 +55,11 @@ from services.application import (
 from utils.logging_config import configure_logging
 from workflow.contracts import (
     JsonObject,
-    NodeCategory,
-    NodeDecision,
     TransitionResult,
-    WorkflowError,
-    WorkflowErrorCode,
     WorkflowPosition,
 )
-from workflow.requests import TransitionRequest
 
 _JSON_OBJECT = TypeAdapter(JsonObject)
-_TRANSITION_REQUEST = TypeAdapter(TransitionRequest)
-
-_SEMANTIC_REQUEST_KINDS = frozenset(
-    {
-        "abandon_product_goal",
-        "apply_story_dependencies",
-        "begin_vision_revision",
-        "compile_authority",
-        "decide_authority",
-        "decide_backlog",
-        "decide_roadmap",
-        "decide_sprint_plan",
-        "decide_story",
-        "record_authority_feedback",
-        "decide_product_goal_review",
-        "decide_specification",
-        "decide_vision_review",
-        "fulfill_product_goal",
-        "record_discovery_artifact",
-        "record_backlog_draft",
-        "record_product_goal_interview_turn",
-        "record_roadmap_draft",
-        "record_specification_candidate",
-        "record_sprint_plan",
-        "record_story_draft",
-        "record_vision_interview_turn",
-        "reconcile_backlog",
-        "repair_authority",
-        "repair_story_readiness",
-        "start_sprint",
-    }
-)
 
 
 class _ReadProjection(Protocol):
@@ -193,10 +160,6 @@ class _Application(Protocol):
 
     def position(self, *, project_id: int) -> WorkflowPosition:
         """Return one current position."""
-        ...
-
-    def transition(self, request: TransitionRequest) -> TransitionResult:
-        """Apply one typed transition."""
         ...
 
     def create_project(self, request: CreateProjectCommand) -> TransitionResult: ...
@@ -300,6 +263,19 @@ class _Application(Protocol):
 
     def start_sprint(self, request: SprintStartRequest) -> TransitionResult: ...
 
+    def complete_task(self, request: CompleteTaskRequest) -> TransitionResult: ...
+
+    def close_story(self, request: CloseStoryRequest) -> TransitionResult: ...
+
+    def review_sprint(self, request: SprintReviewRequest) -> TransitionResult: ...
+
+    def close_sprint(self, request: SprintCloseRequest) -> TransitionResult: ...
+
+    def record_post_sprint_triage(
+        self,
+        request: PostSprintTriageRequest,
+    ) -> TransitionResult: ...
+
 
 type CommandHandler = Callable[[argparse.Namespace, _Application], int]
 
@@ -364,47 +340,15 @@ def _parse_story_readiness_repair(value: str) -> StoryReadinessRepair:
         raise argparse.ArgumentTypeError(str(error)) from error
 
 
-def _add_transition_leaf(
-    parser: argparse.ArgumentParser,
-    *,
-    request_kind: str,
-) -> None:
-    _add_mutation_metadata(parser)
-    parser.add_argument("--instance-key")
-    parser.set_defaults(request_kind=request_kind)
-    parser.add_argument("--request-file", required=True)
-    parser.set_defaults(command_handler=_run_transition)
-
-
-def _install_transition_commands(
-    subparsers: argparse._SubParsersAction,
-    *,
-    branches: dict[tuple[str, ...], argparse._SubParsersAction],
-    parsers: dict[tuple[str, ...], argparse.ArgumentParser],
-) -> None:
-    branches[()] = subparsers
-    for request_kind, full_prefix in COMMAND_PREFIXES.items():
-        if request_kind in _SEMANTIC_REQUEST_KINDS:
-            continue
-        parts = full_prefix[1:]
-        if parts[0] == "project":
-            continue
-        parent: tuple[str, ...] = ()
-        for index, part in enumerate(parts):
-            current = (*parent, part)
-            parser = parsers.get(current)
-            if parser is None:
-                parser = branches[parent].add_parser(part)
-                parsers[current] = parser
-            if index == len(parts) - 1:
-                _add_transition_leaf(parser, request_kind=request_kind)
-                continue
-            if current not in branches:
-                branches[current] = parser.add_subparsers(
-                    dest=f"command_{index}_{part}",
-                    required=True,
-                )
-            parent = current
+def _parse_checklist_item(value: str) -> tuple[str, str]:
+    """Parse one strict checklist KEY=VALUE pair."""
+    key, separator, result = value.partition("=")
+    key = key.strip()
+    result = result.strip()
+    if not separator or not key or not result:
+        message = "--checklist-item must be a nonblank KEY=VALUE pair."
+        raise argparse.ArgumentTypeError(message)
+    return key, result
 
 
 def _install_authority_reads(
@@ -622,6 +566,63 @@ def _install_planning_action_mutations(
     _semantic_leaf(branches[("sprint",)], "start", _sprint_start)
 
 
+def _install_execution_action_mutations(
+    branches: dict[tuple[str, ...], argparse._SubParsersAction],
+) -> None:
+    """Install strict semantic execution and post-Sprint triage commands."""
+    complete = _semantic_leaf(
+        branches[("sprint", "task")],
+        "complete",
+        _task_complete,
+    )
+    complete.add_argument("--instance-key", required=True)
+    complete.add_argument("--outcome-summary", required=True)
+    complete.add_argument(
+        "--artifact-ref",
+        dest="artifact_refs",
+        action="append",
+        required=True,
+    )
+    complete.add_argument(
+        "--acceptance-result",
+        choices=("partially_met", "fully_met"),
+        required=True,
+    )
+    complete.add_argument(
+        "--checklist-item",
+        dest="checklist_items",
+        action="append",
+        type=_parse_checklist_item,
+        required=True,
+    )
+    story_close = _semantic_leaf(branches[("story",)], "close", _story_close)
+    story_close.add_argument("--instance-key", required=True)
+    story_close.add_argument("--resolution", required=True)
+    story_close.add_argument("--delivered", required=True)
+    story_close.add_argument("--evidence", required=True)
+    story_close.add_argument("--known-gaps", required=True)
+    sprint_review = _semantic_leaf(
+        branches[("sprint",)],
+        "review",
+        _sprint_review,
+    )
+    sprint_review.add_argument("--instance-key", required=True)
+    sprint_close = _semantic_leaf(
+        branches[("sprint",)],
+        "close",
+        _sprint_close,
+    )
+    sprint_close.add_argument("--instance-key", required=True)
+    triage = _semantic_leaf(branches[("sprint",)], "triage", _sprint_triage)
+    triage.add_argument("--instance-key", required=True)
+    triage.add_argument(
+        "--impact",
+        choices=("none", "backlog", "specification"),
+        required=True,
+    )
+    triage.add_argument("--file", required=True)
+
+
 def _install_lifecycle_mutations(
     branches: dict[tuple[str, ...], argparse._SubParsersAction],
 ) -> None:
@@ -715,6 +716,7 @@ def _install_lifecycle_mutations(
     story_review.add_argument("--rationale", required=True)
 
     _install_planning_action_mutations(branches)
+    _install_execution_action_mutations(branches)
 
     sprint_generate = _semantic_leaf(
         branches[("sprint",)],
@@ -779,11 +781,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _install_lifecycle_mutations(branches)
 
-    _install_transition_commands(
-        subparsers,
-        branches=branches,
-        parsers=parsers,
-    )
     return parser
 
 
@@ -1346,6 +1343,96 @@ def _sprint_start(args: argparse.Namespace, application: _Application) -> int:
     )
 
 
+def _task_complete(args: argparse.Namespace, application: _Application) -> int:
+    checklist_items = cast("list[tuple[str, str]]", args.checklist_items)
+    checklist_result = dict(checklist_items)
+    if len(checklist_result) != len(checklist_items):
+        message = "--checklist-item keys must be unique."
+        raise ValueError(message)
+    acceptance_result = cast(
+        "Literal['partially_met', 'fully_met']",
+        args.acceptance_result,
+    )
+    return _emit_result(
+        application.complete_task(
+            CompleteTaskRequest(
+                project_id=args.project_id,
+                instance_key=args.instance_key,
+                outcome_summary=args.outcome_summary,
+                artifact_refs=tuple(args.artifact_refs),
+                acceptance_result=acceptance_result,
+                checklist_result=checklist_result,
+                idempotency_key=args.idempotency_key,
+                actor=args.actor,
+                correlation_id=args.correlation_id,
+            )
+        )
+    )
+
+
+def _story_close(args: argparse.Namespace, application: _Application) -> int:
+    return _emit_result(
+        application.close_story(
+            CloseStoryRequest(
+                project_id=args.project_id,
+                instance_key=args.instance_key,
+                resolution=args.resolution,
+                delivered=args.delivered,
+                evidence=args.evidence,
+                known_gaps=args.known_gaps,
+                idempotency_key=args.idempotency_key,
+                actor=args.actor,
+                correlation_id=args.correlation_id,
+            )
+        )
+    )
+
+
+def _sprint_review(args: argparse.Namespace, application: _Application) -> int:
+    return _emit_result(
+        application.review_sprint(
+            SprintReviewRequest(
+                project_id=args.project_id,
+                instance_key=args.instance_key,
+                idempotency_key=args.idempotency_key,
+                actor=args.actor,
+                correlation_id=args.correlation_id,
+            )
+        )
+    )
+
+
+def _sprint_close(args: argparse.Namespace, application: _Application) -> int:
+    return _emit_result(
+        application.close_sprint(
+            SprintCloseRequest(
+                project_id=args.project_id,
+                instance_key=args.instance_key,
+                idempotency_key=args.idempotency_key,
+                actor=args.actor,
+                correlation_id=args.correlation_id,
+            )
+        )
+    )
+
+
+def _sprint_triage(args: argparse.Namespace, application: _Application) -> int:
+    impact = cast("Literal['none', 'backlog', 'specification']", args.impact)
+    return _emit_result(
+        application.record_post_sprint_triage(
+            PostSprintTriageRequest(
+                project_id=args.project_id,
+                instance_key=args.instance_key,
+                impact=impact,
+                canonical_payload=_read_json_object(args.file),
+                idempotency_key=args.idempotency_key,
+                actor=args.actor,
+                correlation_id=args.correlation_id,
+            )
+        )
+    )
+
+
 def _workflow_next(args: argparse.Namespace, application: _Application) -> int:
     _write_json(workflow_next(application=application, project_id=args.project_id))
     return 0
@@ -1360,89 +1447,6 @@ def _workflow_position(args: argparse.Namespace, application: _Application) -> i
         )
     )
     return 0
-
-
-def _current_decision(
-    application: _Application,
-    args: argparse.Namespace,
-) -> tuple[WorkflowPosition, NodeDecision | None]:
-    position = application.position(project_id=args.project_id)
-    instance_key = getattr(args, "instance_key", None)
-    candidates = tuple(
-        decision
-        for decision in position.decisions
-        if decision.request_kind == args.request_kind
-        and decision.category in {NodeCategory.AVAILABLE, NodeCategory.WAITING}
-        and (instance_key is None or decision.instance_key == instance_key)
-    )
-    return position, candidates[0] if len(candidates) == 1 else None
-
-
-def _unavailable_result(
-    position: WorkflowPosition,
-    request_kind: str,
-) -> TransitionResult:
-    return TransitionResult(
-        ok=False,
-        position=position,
-        error=WorkflowError(
-            code=WorkflowErrorCode.TRANSITION_NOT_AVAILABLE,
-            message=f"No unique {request_kind} transition is currently available.",
-        ),
-    )
-
-
-def _guarded_payload(
-    args: argparse.Namespace,
-    payload: JsonObject,
-    position: WorkflowPosition,
-    decision: NodeDecision,
-) -> JsonObject:
-    forbidden = {
-        "actor",
-        "correlation_id",
-        "decision_fingerprint",
-        "fact_fingerprint",
-        "graph_version",
-        "idempotency_key",
-        "instance_key",
-        "kind",
-        "artifact_fingerprint",
-        "plan_fingerprint",
-        "project_id",
-    }
-    if forbidden.intersection(payload):
-        message = "Request files must contain semantic fields only."
-        raise ValueError(message)
-    guarded = dict(payload)
-    guarded.update(
-        {
-            "kind": args.request_kind,
-            "project_id": args.project_id,
-            "graph_version": position.graph_version,
-            "fact_fingerprint": position.fact_fingerprint,
-            "decision_fingerprint": decision.decision_fingerprint,
-            "instance_key": decision.instance_key,
-            "idempotency_key": args.idempotency_key,
-            "actor": args.actor,
-            "correlation_id": args.correlation_id,
-        }
-    )
-    return _JSON_OBJECT.validate_python(guarded)
-
-
-def _run_transition(args: argparse.Namespace, application: _Application) -> int:
-    position, decision = _current_decision(application, args)
-    if decision is None:
-        return _emit_result(_unavailable_result(position, args.request_kind))
-    payload = _guarded_payload(
-        args,
-        _read_json_object(args.request_file),
-        position,
-        decision,
-    )
-    request = _TRANSITION_REQUEST.validate_python(payload)
-    return _emit_result(application.transition(request))
 
 
 def _emit_result(result: TransitionResult) -> int:

@@ -69,8 +69,16 @@ from services.node_attempt_replay import (
 )
 from services.product_goal_interview_input import ProductGoalInterviewInputService
 from tests.adapters.test_command_renderer import position_fixture
+from tests.workflow.execution_fixtures import seed_started_execution
 from tests.workflow.test_execution_transitions import (
     _complete_execution_sprint_with_unselected_story,
+    _complete_task,
+)
+from tests.workflow.test_execution_transitions import (
+    _domain as execution_domain,
+)
+from tests.workflow.test_execution_transitions import (
+    _guards as execution_guards,
 )
 from tests.workflow.test_planning_transitions import (
     _apply_current_dependencies,
@@ -98,6 +106,9 @@ from workflow.definitions.planning import candidate_set_fingerprint
 from workflow.fingerprints import canonical_hash, canonical_json
 from workflow.requests import (
     ApplyStoryDependencies,
+    CloseSprint,
+    CloseStory,
+    CompleteTask,
     DecideAuthority,
     DecideBacklog,
     DecideRoadmap,
@@ -105,7 +116,9 @@ from workflow.requests import (
     DecideStory,
     RecordAuthorityFeedback,
     RecordDiscoveryArtifact,
+    RecordPostSprintTriage,
     RecordSpecificationCandidate,
+    ReviewSprint,
     StartNodeAttempt,
     TransitionRequest,
 )
@@ -422,6 +435,21 @@ class _FakeApiApplication:
     def start_sprint(self, request: object) -> TransitionResult:
         return self._record_delivery_request(request)
 
+    def complete_task(self, request: object) -> TransitionResult:
+        return self._record_delivery_request(request)
+
+    def close_story(self, request: object) -> TransitionResult:
+        return self._record_delivery_request(request)
+
+    def review_sprint(self, request: object) -> TransitionResult:
+        return self._record_delivery_request(request)
+
+    def close_sprint(self, request: object) -> TransitionResult:
+        return self._record_delivery_request(request)
+
+    def record_post_sprint_triage(self, request: object) -> TransitionResult:
+        return self._record_delivery_request(request)
+
     def _record_delivery_request(self, request: object) -> TransitionResult:
         self.requests.append(request)
         return self._transition_result or TransitionResult(
@@ -670,6 +698,79 @@ class _PlanningActionSelection:
             ("start_sprint", project_id, decision.decision_fingerprint, None)
         )
         return 29, 31, "plan-current", "candidates-current"
+
+
+class _ExecutionActionSelection:
+    def __init__(self, replay: TransitionResult | None = None) -> None:
+        self.replay_result = replay
+        self.replay_queries: list[TransitionReplayQuery] = []
+        self.prepare_calls: list[tuple[str, int, str]] = []
+
+    def replay_transition(
+        self,
+        query: TransitionReplayQuery,
+    ) -> TransitionResult | None:
+        self.replay_queries.append(query)
+        return self.replay_result
+
+    def prepare_task_completion(
+        self,
+        *,
+        project_id: int,
+        decision: NodeDecision,
+    ) -> tuple[int, int]:
+        self.prepare_calls.append(
+            ("complete_task", project_id, decision.decision_fingerprint)
+        )
+        return 7, 31
+
+    def prepare_story_close(
+        self,
+        *,
+        project_id: int,
+        decision: NodeDecision,
+    ) -> tuple[int, int, str]:
+        self.prepare_calls.append(
+            ("close_story", project_id, decision.decision_fingerprint)
+        )
+        return 9, 31, "story-completion-current"
+
+    def prepare_sprint_review(
+        self,
+        *,
+        project_id: int,
+        decision: NodeDecision,
+    ) -> tuple[int, str]:
+        self.prepare_calls.append(
+            ("review_sprint", project_id, decision.decision_fingerprint)
+        )
+        return 31, "sprint-review-current"
+
+    def prepare_sprint_close(
+        self,
+        *,
+        project_id: int,
+        decision: NodeDecision,
+    ) -> tuple[int, str, str]:
+        self.prepare_calls.append(
+            ("close_sprint", project_id, decision.decision_fingerprint)
+        )
+        return 31, "sprint-review-current", "sprint-close-current"
+
+    def prepare_post_sprint_triage(
+        self,
+        *,
+        project_id: int,
+        decision: NodeDecision,
+    ) -> tuple[int, str]:
+        self.prepare_calls.append(
+            (
+                "record_post_sprint_triage",
+                project_id,
+                decision.decision_fingerprint,
+            )
+        )
+        return 31, "sprint-close-current"
 
 
 class _CapturingTransitionDomain(_BoundaryDomain):
@@ -966,6 +1067,622 @@ def test_planning_action_application_replays_before_current_position(
     assert result == replayed
     assert domain.position_calls == []
     assert selection.prepare_calls == []
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        (
+            "complete_task",
+            "CompleteTaskRequest",
+            "complete_task",
+            "execution.task.complete",
+            "task:7",
+            {
+                "instance_key": "task:7",
+                "outcome_summary": "Implemented semantic execution.",
+                "artifact_refs": ("services/application.py",),
+                "acceptance_result": "fully_met",
+                "checklist_result": {"Focused tests": "passed"},
+            },
+            {"task_id": 7},
+        ),
+        (
+            "close_story",
+            "CloseStoryRequest",
+            "close_story",
+            "execution.story.close",
+            "story:9",
+            {
+                "instance_key": "story:9",
+                "resolution": "Completed",
+                "delivered": "Semantic execution transport.",
+                "evidence": "Focused tests pass.",
+                "known_gaps": "None.",
+            },
+            {"story_id": 9},
+        ),
+        (
+            "review_sprint",
+            "SprintReviewRequest",
+            "review_sprint",
+            "execution.sprint.review",
+            "sprint:31",
+            {"instance_key": "sprint:31"},
+            {"sprint_id": 31, "review_fingerprint": "sprint-review-current"},
+        ),
+        (
+            "close_sprint",
+            "SprintCloseRequest",
+            "close_sprint",
+            "execution.sprint.close",
+            "sprint:31",
+            {"instance_key": "sprint:31"},
+            {"sprint_id": 31, "review_fingerprint": "sprint-review-current"},
+        ),
+        (
+            "record_post_sprint_triage",
+            "PostSprintTriageRequest",
+            "record_post_sprint_triage",
+            "execution.post_sprint_triage",
+            "sprint:31",
+            {
+                "instance_key": "sprint:31",
+                "impact": "backlog",
+                "canonical_payload": {"summary": "Follow-up required."},
+            },
+            {"sprint_id": 31},
+        ),
+    ],
+)
+def test_execution_action_application_derives_internal_identity(
+    case: tuple[
+        str,
+        str,
+        str,
+        str,
+        str,
+        dict[str, object],
+        dict[str, object],
+    ],
+) -> None:
+    """Build exact execution requests from semantic input and durable selection."""
+    (
+        method_name,
+        request_type_name,
+        request_kind,
+        node_id,
+        instance_key,
+        request_fields,
+        expected_internal,
+    ) = case
+    decision = _delivery_decision(
+        node_id=node_id,
+        request_kind=request_kind,
+        instance_key=instance_key,
+    )
+    domain = _CapturingTransitionDomain(_vision_position(decision))
+    selection = _ExecutionActionSelection()
+    application = AgileForgeApplication(
+        workflow_domain=domain,
+        execution_action_selection=selection,
+    )
+    request_type = cast(
+        "type[BaseModel]", getattr(application_module, request_type_name)
+    )
+    request = request_type(
+        project_id=PROJECT_ID,
+        idempotency_key=f"{request_kind}-41",
+        actor="operator",
+        **request_fields,
+    )
+
+    result = getattr(application, method_name)(request)
+
+    assert result.ok is True
+    assert domain.position_calls == [PROJECT_ID]
+    assert len(domain.requests) == 1
+    internal = domain.requests[0].model_dump(mode="json")
+    assert internal["kind"] == request_kind
+    assert internal["instance_key"] == instance_key
+    for field, expected in expected_internal.items():
+        assert internal[field] == expected
+    assert len(selection.replay_queries) == 1
+
+
+@pytest.mark.parametrize(
+    ("method_name", "request_type_name", "request_kind", "request_fields"),
+    [
+        (
+            "complete_task",
+            "CompleteTaskRequest",
+            "complete_task",
+            {
+                "instance_key": "task:7",
+                "outcome_summary": "Implemented semantic execution.",
+                "artifact_refs": ("services/application.py",),
+                "acceptance_result": "fully_met",
+                "checklist_result": {"Focused tests": "passed"},
+            },
+        ),
+        (
+            "close_story",
+            "CloseStoryRequest",
+            "close_story",
+            {
+                "instance_key": "story:9",
+                "resolution": "Completed",
+                "delivered": "Semantic execution transport.",
+                "evidence": "Focused tests pass.",
+                "known_gaps": "None.",
+            },
+        ),
+        (
+            "review_sprint",
+            "SprintReviewRequest",
+            "review_sprint",
+            {"instance_key": "sprint:31"},
+        ),
+        (
+            "close_sprint",
+            "SprintCloseRequest",
+            "close_sprint",
+            {"instance_key": "sprint:31"},
+        ),
+        (
+            "record_post_sprint_triage",
+            "PostSprintTriageRequest",
+            "record_post_sprint_triage",
+            {
+                "instance_key": "sprint:31",
+                "impact": "none",
+                "canonical_payload": {"summary": "No follow-up."},
+            },
+        ),
+    ],
+)
+def test_execution_action_application_replays_before_current_position(
+    method_name: str,
+    request_type_name: str,
+    request_kind: str,
+    request_fields: dict[str, object],
+) -> None:
+    """Return an exact replay or changed-input conflict before position reads."""
+    replayed = TransitionResult(ok=True, replayed=True, applied_node_id="advanced")
+    selection = _ExecutionActionSelection(replay=replayed)
+    domain = _BoundaryDomain(_vision_position())
+    application = AgileForgeApplication(
+        workflow_domain=domain,
+        execution_action_selection=selection,
+    )
+    request_type = cast(
+        "type[BaseModel]", getattr(application_module, request_type_name)
+    )
+    request = request_type(
+        project_id=PROJECT_ID,
+        idempotency_key=f"{request_kind}-41",
+        actor="operator",
+        **request_fields,
+    )
+
+    result = getattr(application, method_name)(request)
+
+    assert result == replayed
+    assert domain.position_calls == []
+    assert selection.prepare_calls == []
+
+
+@pytest.mark.parametrize(
+    ("request_type_name", "request_fields"),
+    [
+        (
+            "CompleteTaskRequest",
+            {
+                "instance_key": None,
+                "outcome_summary": "Done.",
+                "artifact_refs": ("result",),
+                "acceptance_result": "fully_met",
+                "checklist_result": {"Tests": "passed"},
+            },
+        ),
+        (
+            "CompleteTaskRequest",
+            {
+                "instance_key": "task:7",
+                "outcome_summary": "Done.",
+                "artifact_refs": (),
+                "acceptance_result": "fully_met",
+                "checklist_result": {"Tests": "passed"},
+            },
+        ),
+        (
+            "CompleteTaskRequest",
+            {
+                "instance_key": "task:7",
+                "outcome_summary": "Done.",
+                "artifact_refs": ("result",),
+                "acceptance_result": "fully_met",
+                "checklist_result": {"Tests": 1},
+            },
+        ),
+        (
+            "CloseStoryRequest",
+            {
+                "instance_key": "story:9",
+                "resolution": "Completed",
+                "delivered": " ",
+                "evidence": "Tests.",
+                "known_gaps": "None.",
+            },
+        ),
+        ("SprintReviewRequest", {"instance_key": None}),
+        ("SprintCloseRequest", {"instance_key": None}),
+        (
+            "PostSprintTriageRequest",
+            {
+                "instance_key": None,
+                "impact": "none",
+                "canonical_payload": {},
+            },
+        ),
+    ],
+)
+def test_execution_application_requests_are_strict(
+    request_type_name: str,
+    request_fields: dict[str, object],
+) -> None:
+    """Reject null selectors, blank evidence, and untyped semantic mappings."""
+    request_type = cast(
+        "type[BaseModel]", getattr(application_module, request_type_name)
+    )
+
+    with pytest.raises(ValidationError):
+        request_type(
+            project_id=PROJECT_ID,
+            idempotency_key="invalid-execution-41",
+            actor="operator",
+            **request_fields,
+        )
+
+
+@pytest.mark.parametrize(
+    ("method_name", "stored", "public_request", "changed_input"),
+    [
+        (
+            "complete_task",
+            CompleteTask(
+                project_id=PROJECT_ID,
+                graph_version="agileforge.workflow.v2",
+                fact_fingerprint="facts-task",
+                decision_fingerprint="decision-task",
+                instance_key="task:7",
+                idempotency_key="complete-task-replay-41",
+                actor="operator",
+                task_id=7,
+                outcome_summary="Original outcome.",
+                artifact_refs=("services/application.py",),
+                acceptance_result="fully_met",
+                checklist_result={"Focused tests": "passed"},
+            ),
+            application_module.CompleteTaskRequest(
+                project_id=PROJECT_ID,
+                instance_key="task:7",
+                outcome_summary="Original outcome.",
+                artifact_refs=("services/application.py",),
+                acceptance_result="fully_met",
+                checklist_result={"Focused tests": "passed"},
+                idempotency_key="complete-task-replay-41",
+                actor="operator",
+            ),
+            {"outcome_summary": "Changed outcome."},
+        ),
+        (
+            "close_story",
+            CloseStory(
+                project_id=PROJECT_ID,
+                graph_version="agileforge.workflow.v2",
+                fact_fingerprint="facts-story",
+                decision_fingerprint="decision-story",
+                instance_key="story:9",
+                idempotency_key="close-story-replay-41",
+                actor="operator",
+                story_id=9,
+                resolution="Completed",
+                delivered="Semantic transport delivered.",
+                evidence="Focused tests pass.",
+                known_gaps="None.",
+            ),
+            application_module.CloseStoryRequest(
+                project_id=PROJECT_ID,
+                instance_key="story:9",
+                resolution="Completed",
+                delivered="Semantic transport delivered.",
+                evidence="Focused tests pass.",
+                known_gaps="None.",
+                idempotency_key="close-story-replay-41",
+                actor="operator",
+            ),
+            {"evidence": "Changed evidence."},
+        ),
+        (
+            "review_sprint",
+            ReviewSprint(
+                project_id=PROJECT_ID,
+                graph_version="agileforge.workflow.v2",
+                fact_fingerprint="facts-review",
+                decision_fingerprint="decision-review",
+                instance_key="sprint:31",
+                idempotency_key="review-sprint-replay-41",
+                actor="operator",
+                sprint_id=31,
+                review_fingerprint="sprint-review-current",
+            ),
+            application_module.SprintReviewRequest(
+                project_id=PROJECT_ID,
+                instance_key="sprint:31",
+                idempotency_key="review-sprint-replay-41",
+                actor="operator",
+            ),
+            {"instance_key": "sprint:32"},
+        ),
+        (
+            "close_sprint",
+            CloseSprint(
+                project_id=PROJECT_ID,
+                graph_version="agileforge.workflow.v2",
+                fact_fingerprint="facts-close",
+                decision_fingerprint="decision-close",
+                instance_key="sprint:31",
+                idempotency_key="close-sprint-replay-41",
+                actor="operator",
+                sprint_id=31,
+                review_fingerprint="sprint-review-current",
+            ),
+            application_module.SprintCloseRequest(
+                project_id=PROJECT_ID,
+                instance_key="sprint:31",
+                idempotency_key="close-sprint-replay-41",
+                actor="operator",
+            ),
+            {"instance_key": "sprint:32"},
+        ),
+        (
+            "record_post_sprint_triage",
+            RecordPostSprintTriage(
+                project_id=PROJECT_ID,
+                graph_version="agileforge.workflow.v2",
+                fact_fingerprint="facts-triage",
+                decision_fingerprint="decision-triage",
+                instance_key="sprint:31",
+                idempotency_key="triage-sprint-replay-41",
+                actor="operator",
+                sprint_id=31,
+                impact="none",
+                canonical_payload={"summary": "No follow-up."},
+            ),
+            application_module.PostSprintTriageRequest(
+                project_id=PROJECT_ID,
+                instance_key="sprint:31",
+                impact="none",
+                canonical_payload={"summary": "No follow-up."},
+                idempotency_key="triage-sprint-replay-41",
+                actor="operator",
+            ),
+            {"impact": "backlog"},
+        ),
+    ],
+)
+def test_execution_action_changed_retry_conflicts_before_position(
+    engine: "Engine",
+    method_name: str,
+    stored: TransitionRequest,
+    public_request: BaseModel,
+    changed_input: dict[str, object],
+) -> None:
+    """Replay exact public semantics and reject changed input before position reads."""
+    _store_completed_receipt(engine, stored, TransitionResult(ok=True))
+    domain = _BoundaryDomain(_vision_position())
+    service_type = application_module.ExecutionActionSelectionService
+    application = AgileForgeApplication(
+        workflow_domain=domain,
+        execution_action_selection=service_type(engine=engine),
+    )
+    method = getattr(application, method_name)
+    replay = method(public_request)
+    conflict = method(public_request.model_copy(update=changed_input))
+
+    assert replay.replayed is True
+    assert conflict.error is not None
+    assert conflict.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
+    assert domain.position_calls == []
+
+
+def test_execution_selection_derives_all_current_durable_identities(
+    engine: "Engine",
+) -> None:
+    """Resolve Task, Story, active Sprint, terminal hashes, and closure identity."""
+
+    def with_extra_reference(decision: NodeDecision) -> NodeDecision:
+        return decision.model_copy(
+            update={
+                "fact_references": (
+                    *decision.fact_references,
+                    FactReference(
+                        fact_type="unexpected_guard",
+                        fact_id="99",
+                        fingerprint="caller-owned",
+                    ),
+                )
+            }
+        )
+
+    project_id, sprint_id, story_id, task_id = seed_started_execution(engine)
+    domain = execution_domain(engine)
+    service_type = application_module.ExecutionActionSelectionService
+    service = service_type(engine=engine)
+    task_decision = next(
+        item
+        for item in domain.position(project_id).decisions
+        if item.node_id == "execution.task.complete"
+    )
+    assert service.prepare_task_completion(
+        project_id=project_id,
+        decision=task_decision,
+    ) == (task_id, sprint_id)
+    assert (
+        service.prepare_task_completion(
+            project_id=project_id,
+            decision=with_extra_reference(task_decision),
+        )
+        is None
+    )
+    assert domain.transition(_complete_task(domain, project_id, task_id)).ok
+
+    story_decision = next(
+        item
+        for item in domain.position(project_id).decisions
+        if item.node_id == "execution.story.close"
+    )
+    story_target = service.prepare_story_close(
+        project_id=project_id,
+        decision=story_decision,
+    )
+    assert story_target is not None
+    assert story_target[:2] == (story_id, sprint_id)
+    assert story_target[2]
+    assert (
+        service.prepare_story_close(
+            project_id=project_id,
+            decision=with_extra_reference(story_decision),
+        )
+        is None
+    )
+    assert domain.transition(
+        CloseStory(
+            **execution_guards(
+                domain,
+                project_id,
+                "execution.story.close",
+                f"story:{story_id}",
+            ),
+            instance_key=f"story:{story_id}",
+            idempotency_key="selection-close-story",
+            story_id=story_id,
+            resolution="Completed",
+            delivered="Semantic transport delivered.",
+            evidence="Focused tests pass.",
+            known_gaps="None.",
+        )
+    ).ok
+
+    review_decision = next(
+        item
+        for item in domain.position(project_id).decisions
+        if item.node_id == "execution.sprint.review"
+    )
+    review_target = service.prepare_sprint_review(
+        project_id=project_id,
+        decision=review_decision,
+    )
+    assert review_target is not None
+    assert review_target[0] == sprint_id
+    assert (
+        service.prepare_sprint_review(
+            project_id=project_id,
+            decision=with_extra_reference(review_decision),
+        )
+        is None
+    )
+    assert domain.transition(
+        ReviewSprint(
+            **execution_guards(
+                domain,
+                project_id,
+                "execution.sprint.review",
+                f"sprint:{sprint_id}",
+            ),
+            instance_key=f"sprint:{sprint_id}",
+            idempotency_key="selection-review-sprint",
+            sprint_id=sprint_id,
+            review_fingerprint=review_target[1],
+        )
+    ).ok
+
+    close_decision = next(
+        item
+        for item in domain.position(project_id).decisions
+        if item.node_id == "execution.sprint.close"
+    )
+    close_target = service.prepare_sprint_close(
+        project_id=project_id,
+        decision=close_decision,
+    )
+    assert close_target is not None
+    assert close_target[:2] == (sprint_id, review_target[1])
+    assert close_target[2]
+    assert (
+        service.prepare_sprint_close(
+            project_id=project_id,
+            decision=with_extra_reference(close_decision),
+        )
+        is None
+    )
+    assert domain.transition(
+        CloseSprint(
+            **execution_guards(
+                domain,
+                project_id,
+                "execution.sprint.close",
+                f"sprint:{sprint_id}",
+            ),
+            instance_key=f"sprint:{sprint_id}",
+            idempotency_key="selection-close-sprint",
+            sprint_id=sprint_id,
+            review_fingerprint=review_target[1],
+        )
+    ).ok
+
+    triage_decision = next(
+        item
+        for item in domain.position(project_id).decisions
+        if item.node_id == "execution.post_sprint_triage"
+    )
+    assert service.prepare_post_sprint_triage(
+        project_id=project_id,
+        decision=triage_decision,
+    ) == (sprint_id, close_target[2])
+    assert (
+        service.prepare_post_sprint_triage(
+            project_id=project_id,
+            decision=with_extra_reference(triage_decision),
+        )
+        is None
+    )
+    assert domain.transition(
+        RecordPostSprintTriage(
+            **execution_guards(
+                domain,
+                project_id,
+                "execution.post_sprint_triage",
+                f"sprint:{sprint_id}",
+            ),
+            instance_key=f"sprint:{sprint_id}",
+            idempotency_key="selection-triage-sprint",
+            sprint_id=sprint_id,
+            impact="none",
+            canonical_payload={"summary": "No downstream change."},
+        )
+    ).ok
+    correction_decision = next(
+        item
+        for item in domain.position(project_id).decisions
+        if item.node_id == "execution.post_sprint_triage"
+        and item.instance_key == f"sprint:{sprint_id}"
+    )
+    assert service.prepare_post_sprint_triage(
+        project_id=project_id,
+        decision=correction_decision,
+    ) == (sprint_id, close_target[2])
 
 
 @pytest.mark.parametrize(
@@ -2482,62 +3199,61 @@ _AGENTIC_NODE_IDS = {
 }
 
 
+_REQUEST_KIND_FACT_REFERENCE_ROWS = {
+    "complete_task": (("task", "7", "task-7"),),
+    "close_story": (("story_completion", "9", "story-completion-9"),),
+    "review_sprint": (("sprint_review", "31", "sprint-review-31"),),
+    "close_sprint": (
+        ("sprint", "31", "sprint-31"),
+        ("sprint_review", "31", "sprint-review-31"),
+        ("sprint_close", "31", "sprint-close-31"),
+    ),
+    "record_post_sprint_triage": (("sprint_closure", "31", "sprint-close-31"),),
+    "reconcile_backlog": (
+        ("authority", "17", "authority-17"),
+        ("backlog", "23", "backlog-23"),
+    ),
+    "apply_story_dependencies": (
+        ("story_dependency_source", "41", "dependency-source-41"),
+    ),
+    "repair_story_readiness": (("story_readiness", "41", "readiness-41"),),
+    "start_sprint": (
+        ("sprint_plan", "29", "plan-29"),
+        ("candidate_set", "41", "candidates-41"),
+        ("sprint_plan_tasks", "31", "tasks-31"),
+    ),
+}
+
+
 def _request_kind_fact_references(kind: str) -> tuple[FactReference, ...]:
-    if kind == "reconcile_backlog":
-        return (
-            FactReference(
-                fact_type="authority",
-                fact_id="17",
-                fingerprint="authority-17",
-            ),
-            FactReference(
-                fact_type="backlog",
-                fact_id="23",
-                fingerprint="backlog-23",
-            ),
+    return tuple(
+        FactReference(
+            fact_type=fact_type,
+            fact_id=fact_id,
+            fingerprint=fingerprint,
         )
-    if kind == "apply_story_dependencies":
-        return (
-            FactReference(
-                fact_type="story_dependency_source",
-                fact_id="41",
-                fingerprint="dependency-source-41",
-            ),
+        for fact_type, fact_id, fingerprint in _REQUEST_KIND_FACT_REFERENCE_ROWS.get(
+            kind,
+            (),
         )
-    if kind == "repair_story_readiness":
-        return (
-            FactReference(
-                fact_type="story_readiness",
-                fact_id="41",
-                fingerprint="readiness-41",
-            ),
-        )
-    if kind == "start_sprint":
-        return (
-            FactReference(
-                fact_type="sprint_plan",
-                fact_id="29",
-                fingerprint="plan-29",
-            ),
-            FactReference(
-                fact_type="candidate_set",
-                fact_id="41",
-                fingerprint="candidates-41",
-            ),
-            FactReference(
-                fact_type="sprint_plan_tasks",
-                fact_id="31",
-                fingerprint="tasks-31",
-            ),
-        )
-    return ()
+    )
+
+
+def _request_kind_instance_key(kind: str, index: int) -> str:
+    if kind == "complete_task":
+        return "task:7"
+    if kind == "close_story":
+        return "story:9"
+    if kind in {"review_sprint", "close_sprint", "record_post_sprint_triage"}:
+        return "sprint:31"
+    return f"instance:{index}"
 
 
 def _all_request_kinds_position() -> WorkflowPosition:
     decisions = tuple(
         NodeDecision(
             node_id=_AGENTIC_NODE_IDS.get(kind, f"test.{index}"),
-            instance_key=f"instance:{index}",
+            instance_key=_request_kind_instance_key(kind, index),
             child_graph_id="test",
             request_kind=kind,
             category=NodeCategory.AVAILABLE,
@@ -3038,6 +3754,234 @@ def test_planning_action_api_rejects_invalid_story_semantics(
     assert response.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
 
 
+@pytest.mark.parametrize(
+    ("path", "payload", "request_type_name"),
+    [
+        (
+            "/api/projects/41/sprint/task/complete",
+            {
+                "instance_key": "task:7",
+                "outcome_summary": "Implemented semantic execution.",
+                "artifact_refs": ["services/application.py"],
+                "acceptance_result": "fully_met",
+                "checklist_result": {"Focused tests": "passed"},
+            },
+            "CompleteTaskRequest",
+        ),
+        (
+            "/api/projects/41/story/close",
+            {
+                "instance_key": "story:9",
+                "resolution": "Completed",
+                "delivered": "Semantic execution transport.",
+                "evidence": "Focused tests pass.",
+                "known_gaps": "None.",
+            },
+            "CloseStoryRequest",
+        ),
+        (
+            "/api/projects/41/sprint/review",
+            {"instance_key": "sprint:31"},
+            "SprintReviewRequest",
+        ),
+        (
+            "/api/projects/41/sprint/close",
+            {"instance_key": "sprint:31"},
+            "SprintCloseRequest",
+        ),
+        (
+            "/api/projects/41/sprint/triage",
+            {
+                "instance_key": "sprint:31",
+                "impact": "backlog",
+                "canonical_payload": {"summary": "Follow-up required."},
+            },
+            "PostSprintTriageRequest",
+        ),
+    ],
+)
+def test_execution_action_api_uses_strict_semantic_requests(
+    path: str,
+    payload: dict[str, object],
+    request_type_name: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Route execution semantics without caller-owned IDs or fingerprints."""
+    application = _FakeApiApplication(position=_all_request_kinds_position())
+    monkeypatch.setattr(api_module, "_application", lambda: application)
+
+    response = TestClient(api_module.app).post(
+        path,
+        json={
+            **payload,
+            "idempotency_key": "execution-action-41",
+            "actor": "operator",
+        },
+    )
+
+    assert response.status_code == HTTPStatus.OK
+    assert len(application.requests) == 1
+    request = application.requests[0]
+    assert type(request).__name__ == request_type_name
+    assert not hasattr(request, "graph_version")
+    assert not hasattr(request, "fact_fingerprint")
+    assert not hasattr(request, "decision_fingerprint")
+    assert not hasattr(request, "sprint_id")
+
+
+@pytest.mark.parametrize(
+    ("path", "payload", "internal_field", "value"),
+    [
+        (
+            "/api/projects/41/sprint/task/complete",
+            {
+                "instance_key": "task:7",
+                "outcome_summary": "Implemented semantic execution.",
+                "artifact_refs": ["services/application.py"],
+                "acceptance_result": "fully_met",
+                "checklist_result": {"Focused tests": "passed"},
+            },
+            "task_id",
+            7,
+        ),
+        (
+            "/api/projects/41/story/close",
+            {
+                "instance_key": "story:9",
+                "resolution": "Completed",
+                "delivered": "Semantic execution transport.",
+                "evidence": "Focused tests pass.",
+                "known_gaps": "None.",
+            },
+            "completion_fingerprint",
+            "caller-owned",
+        ),
+        (
+            "/api/projects/41/sprint/review",
+            {"instance_key": "sprint:31"},
+            "sprint_id",
+            31,
+        ),
+        (
+            "/api/projects/41/sprint/close",
+            {"instance_key": "sprint:31"},
+            "review_fingerprint",
+            "owned",
+        ),
+        (
+            "/api/projects/41/sprint/triage",
+            {
+                "instance_key": "sprint:31",
+                "impact": "none",
+                "canonical_payload": {"summary": "No follow-up."},
+            },
+            "closure_fingerprint",
+            "caller-owned",
+        ),
+        (
+            "/api/projects/41/sprint/review",
+            {"instance_key": "sprint:31"},
+            "semantic_input",
+            {},
+        ),
+        (
+            "/api/projects/41/sprint/close",
+            {"instance_key": "sprint:31"},
+            "graph_version",
+            "caller-owned",
+        ),
+        (
+            "/api/projects/41/sprint/triage",
+            {
+                "instance_key": "sprint:31",
+                "impact": "none",
+                "canonical_payload": {"summary": "No follow-up."},
+            },
+            "model_id",
+            "caller/model",
+        ),
+    ],
+)
+def test_execution_action_api_rejects_internal_fields(
+    path: str,
+    payload: dict[str, object],
+    internal_field: str,
+    value: object,
+) -> None:
+    """Reject graph IDs, fact IDs, and fingerprints at every HTTP boundary."""
+    response = TestClient(api_module.app).post(
+        path,
+        json={
+            **payload,
+            internal_field: value,
+            "idempotency_key": "execution-action-41",
+            "actor": "operator",
+        },
+    )
+
+    assert response.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+
+
+@pytest.mark.parametrize(
+    ("path", "payload"),
+    [
+        (
+            "/api/projects/41/sprint/task/complete",
+            {
+                "instance_key": "task:7",
+                "outcome_summary": "  ",
+                "artifact_refs": ["services/application.py"],
+                "acceptance_result": "fully_met",
+                "checklist_result": {"Focused tests": "passed"},
+            },
+        ),
+        (
+            "/api/projects/41/sprint/task/complete",
+            {
+                "instance_key": "task:7",
+                "outcome_summary": "Implemented semantic execution.",
+                "artifact_refs": ["services/application.py"],
+                "acceptance_result": "fully_met",
+                "checklist_result": {"Focused tests": 1},
+            },
+        ),
+        (
+            "/api/projects/41/story/close",
+            {
+                "instance_key": "story:9",
+                "resolution": "Completed",
+                "delivered": " ",
+                "evidence": "Focused tests pass.",
+                "known_gaps": "None.",
+            },
+        ),
+        (
+            "/api/projects/41/sprint/triage",
+            {
+                "instance_key": "sprint:31",
+                "impact": "invalid",
+                "canonical_payload": {},
+            },
+        ),
+    ],
+)
+def test_execution_action_api_rejects_invalid_semantics(
+    path: str,
+    payload: dict[str, object],
+) -> None:
+    """Reject blank text, untyped checklist values, and invalid triage impact."""
+    response = TestClient(api_module.app).post(
+        path,
+        json={
+            **payload,
+            "idempotency_key": "execution-action-41",
+            "actor": "operator",
+        },
+    )
+
+    assert response.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+
+
 def test_semantic_sprint_generation_api_is_strict(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3102,25 +4046,14 @@ def test_retained_non_agentic_delivery_api_rejects_input_payload(
     assert response.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
 
 
-@pytest.mark.parametrize("field", ["artifact_fingerprint", "plan_fingerprint"])
-def test_positioned_api_builder_rejects_artifact_guards(field: str) -> None:
-    """Keep artifact review fingerprints out of every generic semantic envelope."""
-    position = _all_request_kinds_position()
-    decision = position.decisions[0]
-    request = api_module.PositionedTransitionApiRequest(
-        idempotency_key="positioned-41",
-        actor="operator",
-        semantic_input={field: "caller-owned"},
-    )
+def test_generic_positioned_api_transport_is_removed() -> None:
+    """Delete the public generic positioned model, path map, and route installer."""
+    source = (Path(__file__).parents[2] / "api.py").read_text()
 
-    with pytest.raises(ValueError, match="host-owned workflow guards"):
-        api_module.build_positioned_transition_request(
-            PROJECT_ID,
-            decision.request_kind,
-            request,
-            position,
-            decision,
-        )
+    assert not hasattr(api_module, "PositionedTransitionApiRequest")
+    assert not hasattr(api_module, "POSITIONED_API_PATHS")
+    assert "_positioned_route" not in source
+    assert "build_positioned_transition_request" not in source
 
 
 def test_position_endpoint_delegates_once_and_state_endpoint_is_absent(
@@ -3152,11 +4085,7 @@ def test_position_advertises_only_executable_semantic_api_routes(
 
     assert response.status_code == HTTPStatus.OK
     actions = response.json()["actions"]
-    expected = (
-        set(api_module.SEMANTIC_API_PATHS)
-        | set(api_module.DELIVERY_API_PATHS)
-        | set(api_module.POSITIONED_API_PATHS)
-    )
+    expected = set(api_module.SEMANTIC_API_PATHS) | set(api_module.DELIVERY_API_PATHS)
     assert {item["request_kind"] for item in actions} == expected
     assert all(item["endpoint"].startswith("/") is False for item in actions)
     assert "record_sprint_plan" in expected
@@ -3177,6 +4106,37 @@ def test_position_does_not_advertise_malformed_planning_actions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Suppress actions whose graph decision omits required durable references."""
+    decision = _delivery_decision(
+        node_id=f"test.{request_kind}",
+        request_kind=request_kind,
+    )
+    monkeypatch.setattr(
+        api_module,
+        "_application",
+        lambda: _FakeApiApplication(position=_vision_position(decision)),
+    )
+
+    response = TestClient(api_module.app).get("/api/projects/41/position")
+
+    assert response.status_code == HTTPStatus.OK
+    assert response.json()["actions"] == []
+
+
+@pytest.mark.parametrize(
+    "request_kind",
+    [
+        "complete_task",
+        "close_story",
+        "review_sprint",
+        "close_sprint",
+        "record_post_sprint_triage",
+    ],
+)
+def test_position_does_not_advertise_malformed_execution_actions(
+    request_kind: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Suppress execution actions without an exact selector and durable references."""
     decision = _delivery_decision(
         node_id=f"test.{request_kind}",
         request_kind=request_kind,
@@ -3372,9 +4332,7 @@ def test_structured_conflict_advertises_actions_for_returned_position(
     detail = response.json()["detail"]
     assert detail["position"] == position.model_dump(mode="json")
     assert {item["request_kind"] for item in detail["actions"]} == (
-        set(api_module.SEMANTIC_API_PATHS)
-        | set(api_module.DELIVERY_API_PATHS)
-        | set(api_module.POSITIONED_API_PATHS)
+        set(api_module.SEMANTIC_API_PATHS) | set(api_module.DELIVERY_API_PATHS)
     )
 
 

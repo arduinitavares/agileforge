@@ -7,7 +7,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol, TypedDict
 
-from services.application import planning_action_decision_is_transportable
+from services.application import (
+    execution_action_decision_is_transportable,
+    planning_action_decision_is_transportable,
+)
 from workflow.contracts import (
     JsonObject,
     NodeCategory,
@@ -119,34 +122,6 @@ COMMAND_PREFIXES: dict[str, tuple[str, ...]] = {
 }
 
 
-def _render_command(
-    prefix: tuple[str, ...],
-) -> CommandRender:
-    def render(
-        position: WorkflowPosition,
-        decision: NodeDecision,
-    ) -> tuple[str, ...]:
-        command = [
-            *prefix,
-            "--project-id",
-            str(position.project_id),
-        ]
-        if decision.instance_key is not None:
-            command.extend(("--instance-key", decision.instance_key))
-        command.extend(("--request-file", "<request-file>"))
-        command.extend(
-            (
-                "--idempotency-key",
-                "<idempotency-key>",
-                "--actor",
-                "<actor>",
-            )
-        )
-        return tuple(command)
-
-    return render
-
-
 _SEMANTIC_ARGUMENTS: dict[str, tuple[str, ...]] = {
     "abandon_product_goal": ("--rationale", "<rationale>"),
     "apply_story_dependencies": (
@@ -156,7 +131,28 @@ _SEMANTIC_ARGUMENTS: dict[str, tuple[str, ...]] = {
         "<dependency>",
     ),
     "begin_vision_revision": ("--reason", "<reason>"),
+    "close_sprint": (),
+    "close_story": (
+        "--resolution",
+        "<resolution>",
+        "--delivered",
+        "<delivered>",
+        "--evidence",
+        "<evidence>",
+        "--known-gaps",
+        "<known-gaps>",
+    ),
     "compile_authority": (),
+    "complete_task": (
+        "--outcome-summary",
+        "<outcome-summary>",
+        "--artifact-ref",
+        "<artifact-ref>",
+        "--acceptance-result",
+        "<acceptance-result>",
+        "--checklist-item",
+        "<checklist-item>",
+    ),
     "decide_authority": (
         "--decision",
         "<decision>",
@@ -209,6 +205,12 @@ _SEMANTIC_ARGUMENTS: dict[str, tuple[str, ...]] = {
     "record_discovery_artifact": ("--file", "<file>"),
     "record_backlog_draft": (),
     "record_authority_feedback": ("--feedback", "<feedback>"),
+    "record_post_sprint_triage": (
+        "--impact",
+        "<impact>",
+        "--file",
+        "<file>",
+    ),
     "record_product_goal_interview_turn": ("--text", "<text>"),
     "record_roadmap_draft": (),
     "record_specification_candidate": ("--file", "<file>"),
@@ -223,6 +225,7 @@ _SEMANTIC_ARGUMENTS: dict[str, tuple[str, ...]] = {
     "reconcile_backlog": (),
     "repair_authority": (),
     "repair_story_readiness": ("--repair", "<repair>"),
+    "review_sprint": (),
     "start_sprint": (),
 }
 
@@ -233,7 +236,14 @@ _DELIVERY_REQUEST_KINDS = frozenset(
         "record_story_draft",
     }
 )
-_INSTANCE_SELECTOR_REQUEST_KINDS = _DELIVERY_REQUEST_KINDS | {"decide_story"}
+_INSTANCE_SELECTOR_REQUEST_KINDS = _DELIVERY_REQUEST_KINDS | {
+    "close_sprint",
+    "complete_task",
+    "close_story",
+    "decide_story",
+    "record_post_sprint_triage",
+    "review_sprint",
+}
 
 
 def _render_semantic_command(
@@ -272,11 +282,7 @@ COMMAND_RENDERERS = CommandRendererRegistry(
     tuple(
         CommandRenderer(
             request_kind=kind,
-            render=(
-                _render_semantic_command(prefix, kind)
-                if kind in _SEMANTIC_ARGUMENTS
-                else _render_command(prefix)
-            ),
+            render=_render_semantic_command(prefix, kind),
         )
         for kind, prefix in COMMAND_PREFIXES.items()
     )
@@ -318,12 +324,14 @@ def render_workflow_next(position: WorkflowPosition) -> WorkflowNextPayload:
                     "decide_specification",
                     "decide_story",
                     "decide_vision_review",
+                    "review_sprint",
                 }
             )
         )
         and decision.recommendation_kind
         in {RecommendationKind.REQUIRED, RecommendationKind.RECOVERY}
         and planning_action_decision_is_transportable(position.project_id, decision)
+        and execution_action_decision_is_transportable(decision)
     )
     semantic_counts = Counter(
         decision.request_kind

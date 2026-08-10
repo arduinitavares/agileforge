@@ -147,9 +147,7 @@ def _active_dependencies(
             or item.prerequisite_story_id not in stories
         ):
             return None, "TASK_DEPENDENCY_PREREQUISITE_MISSING"
-        edges.setdefault(item.dependent_story_id, set()).add(
-            item.prerequisite_story_id
-        )
+        edges.setdefault(item.dependent_story_id, set()).add(item.prerequisite_story_id)
 
     visiting: set[int] = set()
     visited: set[int] = set()
@@ -325,9 +323,7 @@ def _task_candidate_rule(
         item for item in nonterminal if item.status == "To Do"
     )
     eligible = tuple(
-        item
-        for item in eligible_pool
-        if not _dependency_blockers(item, stories, edges)
+        item for item in eligible_pool if not _dependency_blockers(item, stories, edges)
     )
     if eligible:
         task = min(eligible, key=lambda item: item.task_id)
@@ -508,9 +504,7 @@ def _story_without_active_sprint(
     snapshot: WorkflowFactSnapshot,
 ) -> tuple[RuleEvaluation, ...]:
     if any(item.status == "completed" for item in snapshot.sprints):
-        return (
-            RuleEvaluation(RuleCategory.SATISFIED, "SPRINT_EXECUTION_COMPLETE"),
-        )
+        return (RuleEvaluation(RuleCategory.SATISFIED, "SPRINT_EXECUTION_COMPLETE"),)
     return (
         _blocked(
             "ACTIVE_SPRINT_REQUIRED",
@@ -597,9 +591,7 @@ def _active_story_rule(
                 closures,
             )
         except ExecutionIntegrityError:
-            return (
-                RuleEvaluation(RuleCategory.INVALID, "WORKFLOW_FACT_CONFLICT"),
-            )
+            return (RuleEvaluation(RuleCategory.INVALID, "WORKFLOW_FACT_CONFLICT"),)
         evaluation = _story_evaluation(story, tasks, closures, expected)
         if evaluation is not None:
             evaluations.append(evaluation)
@@ -734,6 +726,7 @@ def _sprint_review_rule(
             RuleEvaluation(
                 RuleCategory.WAITING,
                 "SPRINT_REVIEW_REQUIRED",
+                instance_key=f"sprint:{active.sprint_id}",
                 fact_references=(
                     FactReference(
                         fact_type="sprint_review",
@@ -766,9 +759,7 @@ def _completed_sprint_close_rule(
         completed.sprint_id,
     )
     if error is not None:
-        return (
-            RuleEvaluation(RuleCategory.INVALID, "SPRINT_TERMINAL_FACT_CONFLICT"),
-        )
+        return (RuleEvaluation(RuleCategory.INVALID, "SPRINT_TERMINAL_FACT_CONFLICT"),)
     return (RuleEvaluation(RuleCategory.SATISFIED, "SPRINT_CLOSED"),)
 
 
@@ -797,10 +788,10 @@ def _sprint_close_rule(
         )
         if not reviews:
             result = (
-            _blocked(
-                "SPRINT_REVIEW_REQUIRED",
-                "Sprint close requires persisted review.",
-            ),
+                _blocked(
+                    "SPRINT_REVIEW_REQUIRED",
+                    "Sprint close requires persisted review.",
+                ),
             )
         elif len(reviews) != 1 or reviews[0].review_fingerprint != expected:
             result = (
@@ -822,13 +813,12 @@ def _sprint_close_rule(
                 RuleEvaluation(
                     RuleCategory.AVAILABLE,
                     "SPRINT_READY_TO_CLOSE",
+                    instance_key=f"sprint:{active.sprint_id}",
                     fact_references=(
                         FactReference(
                             fact_type="sprint",
                             fact_id=str(active.sprint_id),
-                            fingerprint=canonical_hash(
-                                active.model_dump(mode="json")
-                            ),
+                            fingerprint=canonical_hash(active.model_dump(mode="json")),
                         ),
                         FactReference(
                             fact_type="sprint_review",
@@ -907,9 +897,7 @@ def _current_triage(
 def _historical_execution_problem(
     snapshot: WorkflowFactSnapshot,
 ) -> RuleEvaluation | None:
-    completed = tuple(
-        item for item in snapshot.sprints if item.status == "completed"
-    )
+    completed = tuple(item for item in snapshot.sprints if item.status == "completed")
     if any(item.completed_at is None for item in completed):
         return RuleEvaluation(RuleCategory.INVALID, "SPRINT_COMPLETION_TIME_MISSING")
     for sprint in sorted(
@@ -1040,14 +1028,10 @@ def _triage_for_completed_history(
     completed: tuple[SprintFact, ...],
 ) -> tuple[RuleEvaluation, ...]:
     completed_with_time = tuple(
-        (item.completed_at, item)
-        for item in completed
-        if item.completed_at is not None
+        (item.completed_at, item) for item in completed if item.completed_at is not None
     )
     if len(completed_with_time) != len(completed):
-        return (
-            RuleEvaluation(RuleCategory.INVALID, "SPRINT_COMPLETION_TIME_MISSING"),
-        )
+        return (RuleEvaluation(RuleCategory.INVALID, "SPRINT_COMPLETION_TIME_MISSING"),)
     if not completed:
         if active is not None:
             return (RuleEvaluation(RuleCategory.SATISFIED, "SPRINT_STILL_ACTIVE"),)
@@ -1091,7 +1075,6 @@ EXECUTION_NODES: tuple[NodeSpec, ...] = (
         request_kind="complete_task",
         recommendation_kind=RecommendationKind.REQUIRED,
         required_inputs=(
-            InputField(name="task_id", value_type="integer"),
             InputField(name="outcome_summary", value_type="string"),
             InputField(name="artifact_refs", value_type="array"),
             InputField(name="acceptance_result", value_type="string"),
@@ -1105,7 +1088,6 @@ EXECUTION_NODES: tuple[NodeSpec, ...] = (
         request_kind="close_story",
         recommendation_kind=RecommendationKind.REQUIRED,
         required_inputs=(
-            InputField(name="story_id", value_type="integer"),
             InputField(name="resolution", value_type="string"),
             InputField(name="delivered", value_type="string"),
             InputField(name="evidence", value_type="string"),
@@ -1118,10 +1100,7 @@ EXECUTION_NODES: tuple[NodeSpec, ...] = (
         child_graph_id="execution",
         request_kind="review_sprint",
         recommendation_kind=RecommendationKind.REQUIRED,
-        required_inputs=(
-            InputField(name="sprint_id", value_type="integer"),
-            InputField(name="review_fingerprint", value_type="string"),
-        ),
+        required_inputs=(),
         evaluate_rule=_after_abandonment(_sprint_review_rule),
     ),
     NodeSpec(
@@ -1129,10 +1108,7 @@ EXECUTION_NODES: tuple[NodeSpec, ...] = (
         child_graph_id="execution",
         request_kind="close_sprint",
         recommendation_kind=RecommendationKind.REQUIRED,
-        required_inputs=(
-            InputField(name="sprint_id", value_type="integer"),
-            InputField(name="review_fingerprint", value_type="string"),
-        ),
+        required_inputs=(),
         evaluate_rule=_after_abandonment(_sprint_close_rule),
     ),
     NodeSpec(
@@ -1141,7 +1117,6 @@ EXECUTION_NODES: tuple[NodeSpec, ...] = (
         request_kind="record_post_sprint_triage",
         recommendation_kind=RecommendationKind.REQUIRED,
         required_inputs=(
-            InputField(name="sprint_id", value_type="integer"),
             InputField(name="impact", value_type="string"),
             InputField(name="canonical_payload", value_type="object"),
         ),

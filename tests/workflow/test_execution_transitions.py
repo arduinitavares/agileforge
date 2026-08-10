@@ -230,40 +230,68 @@ def _close_execution_sprint(
 ) -> str:
     """Complete one normalized single-Story Sprint through explicit close."""
     assert domain.transition(_complete_task(domain, project_id, task_id)).ok is True
-    assert domain.transition(
-        CloseStory(
-            **_guards(domain, project_id, "execution.story.close", f"story:{story_id}"),
-            instance_key=f"story:{story_id}",
-            idempotency_key="close-story",
-            story_id=story_id,
-            resolution="Completed",
-            delivered="Execution graph delivered.",
-            evidence="Focused tests pass.",
-            known_gaps="None.",
-        )
-    ).ok is True
-    review_decision = _decision(domain, project_id, "execution.sprint.review")
+    assert (
+        domain.transition(
+            CloseStory(
+                **_guards(
+                    domain, project_id, "execution.story.close", f"story:{story_id}"
+                ),
+                instance_key=f"story:{story_id}",
+                idempotency_key="close-story",
+                story_id=story_id,
+                resolution="Completed",
+                delivered="Execution graph delivered.",
+                evidence="Focused tests pass.",
+                known_gaps="None.",
+            )
+        ).ok
+        is True
+    )
+    review_decision = _decision(
+        domain,
+        project_id,
+        "execution.sprint.review",
+        f"sprint:{sprint_id}",
+    )
     review_fingerprint = next(
         ref.fingerprint
         for ref in review_decision.fact_references
         if ref.fact_type == "sprint_review"
     )
-    assert domain.transition(
-        ReviewSprint(
-            **_guards(domain, project_id, "execution.sprint.review"),
-            idempotency_key="review-sprint",
-            sprint_id=sprint_id,
-            review_fingerprint=review_fingerprint,
-        )
-    ).ok is True
-    assert domain.transition(
-        CloseSprint(
-            **_guards(domain, project_id, "execution.sprint.close"),
-            idempotency_key="close-sprint",
-            sprint_id=sprint_id,
-            review_fingerprint=review_fingerprint,
-        )
-    ).ok is True
+    assert (
+        domain.transition(
+            ReviewSprint(
+                **_guards(
+                    domain,
+                    project_id,
+                    "execution.sprint.review",
+                    f"sprint:{sprint_id}",
+                ),
+                instance_key=f"sprint:{sprint_id}",
+                idempotency_key="review-sprint",
+                sprint_id=sprint_id,
+                review_fingerprint=review_fingerprint,
+            )
+        ).ok
+        is True
+    )
+    assert (
+        domain.transition(
+            CloseSprint(
+                **_guards(
+                    domain,
+                    project_id,
+                    "execution.sprint.close",
+                    f"sprint:{sprint_id}",
+                ),
+                instance_key=f"sprint:{sprint_id}",
+                idempotency_key="close-sprint",
+                sprint_id=sprint_id,
+                review_fingerprint=review_fingerprint,
+            )
+        ).ok
+        is True
+    )
     return review_fingerprint
 
 
@@ -452,22 +480,17 @@ def test_manually_activated_sprint_is_invalid_and_exposes_no_task(
     engine: Engine,
 ) -> None:
     """Reject an active Sprint without accepted plan and StartSprint lineage."""
-    project_id, _sprint_id, _story_id, _task_id = _seed_unlineaged_active_task(
-        engine
-    )
+    project_id, _sprint_id, _story_id, _task_id = _seed_unlineaged_active_task(engine)
 
     position = _domain(engine).position(project_id)
     decision = next(
-        item
-        for item in position.decisions
-        if item.node_id == "execution.task.complete"
+        item for item in position.decisions if item.node_id == "execution.task.complete"
     )
 
     assert decision.category.value == "invalid"
     assert decision.reason_code == "WORKFLOW_FACT_CONFLICT"
     assert not any(
-        item.node_id == "execution.task.complete"
-        and item.category.value == "available"
+        item.node_id == "execution.task.complete" and item.category.value == "available"
         for item in position.decisions
     )
 
@@ -562,44 +585,70 @@ def test_story_review_close_and_triage_persist_distinct_facts(engine: Engine) ->
         known_gaps="None.",
     )
     assert domain.transition(close_story).ok is True
-    review_decision = _decision(domain, project_id, "execution.sprint.review")
+    review_decision = _decision(
+        domain,
+        project_id,
+        "execution.sprint.review",
+        f"sprint:{sprint_id}",
+    )
     review_fingerprint = next(
         ref.fingerprint
         for ref in review_decision.fact_references
         if ref.fact_type == "sprint_review"
     )
-    assert domain.transition(
-        ReviewSprint(
-            **_guards(domain, project_id, "execution.sprint.review"),
-            idempotency_key="review-sprint",
-            sprint_id=sprint_id,
-            review_fingerprint=review_fingerprint,
-        )
-    ).ok is True
-    assert domain.transition(
-        CloseSprint(
-            **_guards(domain, project_id, "execution.sprint.close"),
-            idempotency_key="close-sprint",
-            sprint_id=sprint_id,
-            review_fingerprint=review_fingerprint,
-        )
-    ).ok is True
+    assert (
+        domain.transition(
+            ReviewSprint(
+                **_guards(
+                    domain,
+                    project_id,
+                    "execution.sprint.review",
+                    f"sprint:{sprint_id}",
+                ),
+                instance_key=f"sprint:{sprint_id}",
+                idempotency_key="review-sprint",
+                sprint_id=sprint_id,
+                review_fingerprint=review_fingerprint,
+            )
+        ).ok
+        is True
+    )
+    assert (
+        domain.transition(
+            CloseSprint(
+                **_guards(
+                    domain,
+                    project_id,
+                    "execution.sprint.close",
+                    f"sprint:{sprint_id}",
+                ),
+                instance_key=f"sprint:{sprint_id}",
+                idempotency_key="close-sprint",
+                sprint_id=sprint_id,
+                review_fingerprint=review_fingerprint,
+            )
+        ).ok
+        is True
+    )
     payload: JsonObject = {"summary": "No downstream change."}
-    assert domain.transition(
-        RecordPostSprintTriage(
-            **_guards(
-                domain,
-                project_id,
-                "execution.post_sprint_triage",
-                f"sprint:{sprint_id}",
-            ),
-            instance_key=f"sprint:{sprint_id}",
-            idempotency_key="triage-sprint",
-            sprint_id=sprint_id,
-            impact="none",
-            canonical_payload=payload,
-        )
-    ).ok is True
+    assert (
+        domain.transition(
+            RecordPostSprintTriage(
+                **_guards(
+                    domain,
+                    project_id,
+                    "execution.post_sprint_triage",
+                    f"sprint:{sprint_id}",
+                ),
+                instance_key=f"sprint:{sprint_id}",
+                idempotency_key="triage-sprint",
+                sprint_id=sprint_id,
+                impact="none",
+                canonical_payload=payload,
+            )
+        ).ok
+        is True
+    )
     with Session(engine) as session:
         assert session.exec(select(StoryClosure)).one().story_id == story_id
         assert session.exec(select(StoryCompletionLog)).one().story_id == story_id
@@ -615,19 +664,29 @@ def test_stale_review_fingerprint_and_duplicate_triage_fail_closed(
     project_id, sprint_id, story_id, task_id = _seed_active_task(engine)
     domain = _domain(engine)
     assert domain.transition(_complete_task(domain, project_id, task_id)).ok is True
-    assert domain.transition(
-        CloseStory(
-            **_guards(domain, project_id, "execution.story.close", f"story:{story_id}"),
-            instance_key=f"story:{story_id}",
-            idempotency_key="close-story",
-            story_id=story_id,
-            resolution="Completed",
-            delivered="Delivered.",
-            evidence="Verified.",
-            known_gaps="None.",
-        )
-    ).ok is True
-    decision = _decision(domain, project_id, "execution.sprint.review")
+    assert (
+        domain.transition(
+            CloseStory(
+                **_guards(
+                    domain, project_id, "execution.story.close", f"story:{story_id}"
+                ),
+                instance_key=f"story:{story_id}",
+                idempotency_key="close-story",
+                story_id=story_id,
+                resolution="Completed",
+                delivered="Delivered.",
+                evidence="Verified.",
+                known_gaps="None.",
+            )
+        ).ok
+        is True
+    )
+    decision = _decision(
+        domain,
+        project_id,
+        "execution.sprint.review",
+        f"sprint:{sprint_id}",
+    )
     fingerprint = next(
         ref.fingerprint
         for ref in decision.fact_references
@@ -635,7 +694,13 @@ def test_stale_review_fingerprint_and_duplicate_triage_fail_closed(
     )
     stale_review = domain.transition(
         ReviewSprint(
-            **_guards(domain, project_id, "execution.sprint.review"),
+            **_guards(
+                domain,
+                project_id,
+                "execution.sprint.review",
+                f"sprint:{sprint_id}",
+            ),
+            instance_key=f"sprint:{sprint_id}",
             idempotency_key="stale-review",
             sprint_id=sprint_id,
             review_fingerprint="sha256:stale",
@@ -644,14 +709,23 @@ def test_stale_review_fingerprint_and_duplicate_triage_fail_closed(
     assert stale_review.ok is False
     assert stale_review.error is not None
     assert stale_review.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
-    assert domain.transition(
-        ReviewSprint(
-            **_guards(domain, project_id, "execution.sprint.review"),
-            idempotency_key="review",
-            sprint_id=sprint_id,
-            review_fingerprint=fingerprint,
-        )
-    ).ok is True
+    assert (
+        domain.transition(
+            ReviewSprint(
+                **_guards(
+                    domain,
+                    project_id,
+                    "execution.sprint.review",
+                    f"sprint:{sprint_id}",
+                ),
+                instance_key=f"sprint:{sprint_id}",
+                idempotency_key="review",
+                sprint_id=sprint_id,
+                review_fingerprint=fingerprint,
+            )
+        ).ok
+        is True
+    )
 
 
 def test_triage_correction_is_append_only_and_fingerprint_guarded(
@@ -673,7 +747,12 @@ def test_triage_correction_is_append_only_and_fingerprint_guarded(
             known_gaps="None.",
         )
     ).ok
-    review_decision = _decision(domain, project_id, "execution.sprint.review")
+    review_decision = _decision(
+        domain,
+        project_id,
+        "execution.sprint.review",
+        f"sprint:{sprint_id}",
+    )
     review_fingerprint = next(
         ref.fingerprint
         for ref in review_decision.fact_references
@@ -681,7 +760,13 @@ def test_triage_correction_is_append_only_and_fingerprint_guarded(
     )
     assert domain.transition(
         ReviewSprint(
-            **_guards(domain, project_id, "execution.sprint.review"),
+            **_guards(
+                domain,
+                project_id,
+                "execution.sprint.review",
+                f"sprint:{sprint_id}",
+            ),
+            instance_key=f"sprint:{sprint_id}",
             idempotency_key="review",
             sprint_id=sprint_id,
             review_fingerprint=review_fingerprint,
@@ -689,7 +774,13 @@ def test_triage_correction_is_append_only_and_fingerprint_guarded(
     ).ok
     assert domain.transition(
         CloseSprint(
-            **_guards(domain, project_id, "execution.sprint.close"),
+            **_guards(
+                domain,
+                project_id,
+                "execution.sprint.close",
+                f"sprint:{sprint_id}",
+            ),
+            instance_key=f"sprint:{sprint_id}",
             idempotency_key="close",
             sprint_id=sprint_id,
             review_fingerprint=review_fingerprint,
@@ -758,18 +849,23 @@ def test_story_closure_evidence_tamper_is_loader_invalid(engine: Engine) -> None
     project_id, _sprint_id, story_id, task_id = _seed_active_task(engine)
     domain = _domain(engine)
     assert domain.transition(_complete_task(domain, project_id, task_id)).ok is True
-    assert domain.transition(
-        CloseStory(
-            **_guards(domain, project_id, "execution.story.close", f"story:{story_id}"),
-            instance_key=f"story:{story_id}",
-            idempotency_key="close-story",
-            story_id=story_id,
-            resolution="Completed",
-            delivered="Original delivery evidence.",
-            evidence="Original test evidence.",
-            known_gaps="None.",
-        )
-    ).ok is True
+    assert (
+        domain.transition(
+            CloseStory(
+                **_guards(
+                    domain, project_id, "execution.story.close", f"story:{story_id}"
+                ),
+                instance_key=f"story:{story_id}",
+                idempotency_key="close-story",
+                story_id=story_id,
+                resolution="Completed",
+                delivered="Original delivery evidence.",
+                evidence="Original test evidence.",
+                known_gaps="None.",
+            )
+        ).ok
+        is True
+    )
     with Session(engine) as session:
         closure = session.exec(select(StoryClosure)).one()
         closure.delivered = "Tampered after close."
@@ -969,21 +1065,24 @@ def test_cross_project_historical_triage_is_loader_invalid(engine: Engine) -> No
     domain, project_id, sprint_id, _story_id, _task_id, _review = (
         _complete_execution_sprint(engine)
     )
-    assert domain.transition(
-        RecordPostSprintTriage(
-            **_guards(
-                domain,
-                project_id,
-                "execution.post_sprint_triage",
-                f"sprint:{sprint_id}",
-            ),
-            instance_key=f"sprint:{sprint_id}",
-            idempotency_key="triage-cross-project",
-            sprint_id=sprint_id,
-            impact="none",
-            canonical_payload={"summary": "No downstream change."},
-        )
-    ).ok is True
+    assert (
+        domain.transition(
+            RecordPostSprintTriage(
+                **_guards(
+                    domain,
+                    project_id,
+                    "execution.post_sprint_triage",
+                    f"sprint:{sprint_id}",
+                ),
+                instance_key=f"sprint:{sprint_id}",
+                idempotency_key="triage-cross-project",
+                sprint_id=sprint_id,
+                impact="none",
+                canonical_payload={"summary": "No downstream change."},
+            )
+        ).ok
+        is True
+    )
     with Session(engine) as session:
         other = Project(name="Task 12 triage owner", origin="greenfield")
         session.add(other)
