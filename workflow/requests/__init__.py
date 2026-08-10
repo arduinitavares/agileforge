@@ -55,6 +55,11 @@ from workflow.requests.product_goal import (
     FulfillProductGoal,
     RecordProductGoalInterviewTurn,
 )
+from workflow.requests.project import (
+    CreateProject,
+    RecordRepositoryBinding,
+    RepositoryBindingInput,
+)
 from workflow.requests.project_shell import AbandonProjectShell, OpenProjectShell
 from workflow.requests.scope_extension import (
     AbandonScopeExtension,
@@ -75,7 +80,9 @@ from workflow.requests.vision import (
 )
 
 type TransitionRequest = (
-    OpenProjectShell
+    CreateProject
+    | RecordRepositoryBinding
+    | OpenProjectShell
     | AbandonProjectShell
     | RecordChallengeArtifact
     | RecordRepositoryBaseline
@@ -143,6 +150,7 @@ __all__ = [
     "CloseStory",
     "CompileAuthority",
     "CompleteTask",
+    "CreateProject",
     "DecideAmendmentSpecDraft",
     "DecideAuthority",
     "DecideBacklog",
@@ -175,6 +183,7 @@ __all__ = [
     "RecordPrdVersion",
     "RecordProductGoalInterviewTurn",
     "RecordRepositoryBaseline",
+    "RecordRepositoryBinding",
     "RecordRepositoryInventory",
     "RecordRoadmapDraft",
     "RecordSpecificationCandidate",
@@ -186,6 +195,7 @@ __all__ = [
     "RegisterScopeExtension",
     "RepairAuthority",
     "RepairStoryReadiness",
+    "RepositoryBindingInput",
     "ReviewSprint",
     "ScopeExtensionArtifactReference",
     "StartNodeAttempt",

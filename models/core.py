@@ -6,7 +6,7 @@ from types import ModuleType
 from typing import TYPE_CHECKING, ClassVar
 
 from sqlalchemy import func
-from sqlalchemy.schema import CheckConstraint, UniqueConstraint
+from sqlalchemy.schema import CheckConstraint, ForeignKeyConstraint, UniqueConstraint
 from sqlalchemy.types import Date, Text
 from sqlmodel import Field, Relationship, SQLModel
 
@@ -46,35 +46,20 @@ class Project(SQLModel, table=True):
 
     __tablename__: ClassVar[str] = "projects"
     __table_args__ = (
-        CheckConstraint(
-            "origin IN ('greenfield', 'brownfield')",
-            name="ck_project_origin",
+        ForeignKeyConstraint(
+            ["active_repository_binding_id"],
+            ["repository_bindings.repository_binding_id"],
+            name="fk_project_active_repository_binding",
+            ondelete="SET NULL",
+            use_alter=True,
         ),
     )
-
     project_id: int | None = Field(default=None, primary_key=True)
     name: str = Field(index=True, unique=True)
-    origin: str = Field(default="greenfield", index=True)
     description: str | None = Field(default=None, sa_type=Text)
-    vision: str | None = Field(default=None, sa_type=Text)
-    roadmap: str | None = Field(default=None, sa_type=Text)
-
-    technical_spec: str | None = Field(
+    active_repository_binding_id: int | None = Field(
         default=None,
-        sa_type=Text,
-    )
-    compiled_authority_json: str | None = Field(
-        default=None,
-        sa_type=Text,
-        description="Latest compiled spec authority JSON artifact (cached)",
-    )
-    spec_file_path: str | None = Field(
-        default=None,
-        description="Path to original spec file or generated backup file",
-    )
-    spec_loaded_at: datetime | None = Field(
-        default=None,
-        description="When the specification was saved to this project",
+        index=True,
     )
 
     created_at: datetime = Field(

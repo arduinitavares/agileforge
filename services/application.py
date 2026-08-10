@@ -14,6 +14,12 @@ from services.contracts.product_goal import ProductGoalInterviewInput
 from services.contracts.vision import VisionInterviewInput
 from services.node_attempt_replay import NodeAttemptReplayQuery, TransitionReplayQuery
 from services.product_goal_interview_input import ProductGoalInterviewInputService
+from services.project_lifecycle import (
+    CreateProjectCommand,
+    ProjectLifecycleService,
+    RepositoryAttachmentCommand,
+    RepositoryRefreshCommand,
+)
 from services.vision_interview_input import VisionInterviewInputService
 from utils.model_config import get_model_id
 from workflow.contracts import (
@@ -123,6 +129,8 @@ class _ReadProjectionPort(Protocol):
     def project_list(self) -> JsonObject: ...
 
     def project_show(self, *, project_id: int) -> JsonObject: ...
+
+    def repository_status(self, *, project_id: int) -> JsonObject: ...
 
     def project_initial_spec(self, *, project_id: int) -> JsonObject: ...
 
@@ -375,6 +383,7 @@ class AgileForgeApplication:
         self._read_projection = read_projection
         self._vision_interview_input = vision_interview_input
         self._product_goal_services = product_goal_services
+        self._project_lifecycle: ProjectLifecycleService | None = None
 
     @property
     def reads(self) -> _ReadProjectionPort:
@@ -391,6 +400,35 @@ class AgileForgeApplication:
     def transition(self, request: TransitionRequest) -> TransitionResult:
         """Apply one exact typed workflow request."""
         return self._workflow_domain.transition(request)
+
+    def create_project(self, request: CreateProjectCommand) -> TransitionResult:
+        """Create a Project from semantic business input only."""
+        return self._project_lifecycle_service().create_project(request)
+
+    def set_project_lifecycle(self, service: ProjectLifecycleService) -> None:
+        """Configure the production-only Project lifecycle application service."""
+        self._project_lifecycle = service
+
+    def attach_repository(
+        self,
+        request: RepositoryAttachmentCommand,
+    ) -> TransitionResult:
+        """Attach or replace a Project repository from one path input."""
+        return self._project_lifecycle_service().attach_repository(request)
+
+    def refresh_repository(
+        self,
+        request: RepositoryRefreshCommand,
+    ) -> TransitionResult:
+        """Refresh the active Project repository provenance."""
+        return self._project_lifecycle_service().refresh_repository(request)
+
+    def _project_lifecycle_service(self) -> ProjectLifecycleService:
+        service = self._project_lifecycle
+        if service is None:
+            message = "Project lifecycle operations require an injected service."
+            raise RuntimeError(message)
+        return service
 
     def run_agentic_action(
         self,
@@ -1021,6 +1059,7 @@ def production_application() -> AgileForgeApplication:
         AgenticRecipeNodes,
         build_agentic_recipe_registry,
     )
+    from adapters.git.repository_probe import GitPythonRepositoryProbe  # noqa: PLC0415
     from models.db import ensure_business_db_ready, get_engine  # noqa: PLC0415
     from services.product_discovery_selection import (  # noqa: PLC0415
         ProductDiscoverySelectionService,
@@ -1059,7 +1098,7 @@ def production_application() -> AgileForgeApplication:
         adk_recipe_registry=registry,
     )
 
-    return AgileForgeApplication(
+    application = AgileForgeApplication(
         workflow_domain=domain,
         recipe_registry=registry,
         read_projection=DurableReadProjectionService(engine=engine),
@@ -1069,16 +1108,27 @@ def production_application() -> AgileForgeApplication:
             discovery_selection=ProductDiscoverySelectionService(engine=engine),
         ),
     )
+    application.set_project_lifecycle(
+        ProjectLifecycleService(
+            engine=engine,
+            workflow_domain=domain,
+            repository_probe=GitPythonRepositoryProbe(),
+        )
+    )
+    return application
 
 
 __all__ = [
     "AgenticActionRequest",
     "AgileForgeApplication",
+    "CreateProjectCommand",
     "DiscoveryArtifactRequest",
     "ProductGoalInterviewRequest",
     "ProductGoalLifecycleServices",
     "ProductGoalOutcomeRequest",
     "ProductGoalReviewRequest",
+    "RepositoryAttachmentCommand",
+    "RepositoryRefreshCommand",
     "SpecificationCandidateRequest",
     "SpecificationReviewRequest",
     "VisionInterviewRequest",

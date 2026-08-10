@@ -17,10 +17,12 @@ from git.exc import GitCommandError
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
 from adapters.adk.model_roles import AGENTIC_MODEL_ROLES
+from repositories.project import ProjectRepository
 from services.agent_workbench.version import agileforge_version
 from services.application import (
     AgenticActionRequest,
     AgileForgeApplication,
+    CreateProjectCommand,
     production_application,
 )
 from utils.api_schemas import WorkflowPositionGuards
@@ -32,7 +34,7 @@ from workflow.contracts import (
     TransitionResult,
     WorkflowPosition,
 )
-from workflow.requests import DecideAuthority, OpenProjectShell, TransitionRequest
+from workflow.requests import DecideAuthority, TransitionRequest
 
 _TRANSITION_REQUEST = TypeAdapter(TransitionRequest)
 _FRONTEND_ROOT = files("frontend")
@@ -56,11 +58,12 @@ app.mount(
 
 
 class CreateProjectRequest(BaseModel):
-    """Request body for opening a Project Shell."""
+    """Business input for creating one Project."""
 
     model_config = ConfigDict(extra="forbid")
     name: str = Field(min_length=1, max_length=200)
-    origin: Literal["greenfield", "brownfield"]
+    description: str | None = Field(default=None, max_length=4000)
+    repository_path: str | None = None
     idempotency_key: str = Field(min_length=1, max_length=200)
     changed_by: str = Field(default="dashboard-ui", min_length=1, max_length=200)
     correlation_id: str | None = Field(default=None, min_length=1)
@@ -158,11 +161,12 @@ def _application() -> AgileForgeApplication:
     return production_application()
 
 
-def build_project_shell_request(req: CreateProjectRequest) -> OpenProjectShell:
-    """Translate one API payload into the exact Project Shell request."""
-    return OpenProjectShell(
+def build_create_project_command(req: CreateProjectRequest) -> CreateProjectCommand:
+    """Translate transport metadata and semantic Project input at the boundary."""
+    return CreateProjectCommand(
         name=req.name,
-        origin=req.origin,
+        description=req.description,
+        repository_path=req.repository_path,
         idempotency_key=req.idempotency_key,
         actor=req.changed_by,
         correlation_id=req.correlation_id,
@@ -331,8 +335,9 @@ def get_dashboard_config() -> DashboardConfig:
 
 @app.post("/api/projects")
 def create_project(req: CreateProjectRequest) -> dict[str, object]:
-    """Open a greenfield or Brownfield Project Shell."""
-    return _result_payload(_application().transition(build_project_shell_request(req)))
+    """Create a Project and optional local repository provenance."""
+    command = build_create_project_command(req)
+    return _result_payload(_application().create_project(command))
 
 
 @app.get("/api/projects")
@@ -345,6 +350,14 @@ def get_projects() -> dict[str, object]:
 def get_project(project_id: int) -> dict[str, object]:
     """Return one non-routing Project detail projection."""
     return _read_payload(_application().reads.project_show(project_id=project_id))
+
+
+@app.delete("/api/projects/{project_id}")
+def delete_project(project_id: int) -> dict[str, str]:
+    """Delete one Project and its current durable records transactionally."""
+    if not ProjectRepository().delete_project(project_id):
+        raise HTTPException(status_code=404, detail="Project not found.")
+    return {"status": "success"}
 
 
 @app.get("/api/projects/{project_id}/position")

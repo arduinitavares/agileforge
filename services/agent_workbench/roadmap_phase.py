@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING
 
 from sqlmodel import Session, col, select
 
-from models.core import Project
 from models.enums import WorkflowEventType
 from models.events import WorkflowEvent
 from models.workflow import RoadmapArtifact, RoadmapArtifactDecision
@@ -115,13 +114,6 @@ def record_roadmap_decision_in_session(
     )
     session.add(row)
     if inputs.decision == "accepted":
-        project = session.get(Project, artifact.project_id)
-        if project is None:
-            message = "Roadmap Project does not exist."
-            raise ValueError(message)
-        project.roadmap = artifact.canonical_content_json
-        project.updated_at = inputs.decided_at
-        session.add(project)
         session.add(
             WorkflowEvent(
                 event_type=WorkflowEventType.ROADMAP_SAVED,

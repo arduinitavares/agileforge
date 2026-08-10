@@ -13,11 +13,11 @@ _DATETIME = _datetime.datetime
 
 
 class ProjectFact(FrozenModel):
-    """Durable project identity and origin."""
+    """Durable Project identity used by the product lifecycle graph."""
 
     project_id: int
     name: str
-    origin: Literal["greenfield", "brownfield"]
+    description: str | None
     created_at: _DATETIME
 
 

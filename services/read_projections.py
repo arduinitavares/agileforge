@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import UTC
 from typing import TYPE_CHECKING, Protocol
@@ -11,6 +12,7 @@ from sqlmodel import Session, col, select
 
 from models.core import Project, Sprint, UserStory
 from models.events import TaskExecutionLog
+from models.repository import RepositoryBinding
 from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance, SpecRegistry
 from models.workflow import (
     DiscoveryRun,
@@ -595,7 +597,6 @@ class DurableReadProjectionService:
                     "id": project_id,
                     "project_id": project_id,
                     "name": project.name,
-                    "origin": project.origin,
                     "description": project.description,
                     "user_stories_count": sum(
                         1
@@ -623,16 +624,35 @@ class DurableReadProjectionService:
             sprints = session.exec(
                 select(Sprint).where(col(Sprint.project_id) == project_id)
             ).all()
+            snapshot = WorkflowFactRepository(session).load(project_id)
+        vision = accepted_current_vision(snapshot)
+        goal = accepted_current_goal(snapshot)
         return _success(
             {
                 "id": project_id,
                 "project_id": project_id,
                 "name": project.name,
-                "origin": project.origin,
                 "description": project.description,
-                "vision_present": bool(project.vision),
-                "roadmap_present": bool(project.roadmap),
-                "spec_file_path": project.spec_file_path,
+                "accepted_vision": (
+                    None
+                    if vision is None
+                    else {
+                        "vision_artifact_id": vision.vision_artifact_id,
+                        "fingerprint": vision.content_fingerprint,
+                        "statement": vision.statement,
+                    }
+                ),
+                "accepted_product_goal": (
+                    None
+                    if goal is None
+                    else {
+                        "product_goal_artifact_id": goal.product_goal_artifact_id,
+                        "fingerprint": goal.content_fingerprint,
+                        "statement": goal.statement,
+                        "goal_number": goal.goal_number,
+                    }
+                ),
+                "repository": self._repository_data(project),
                 "structure_counts": {
                     "user_stories": sum(
                         1 for story in stories if not story.is_superseded
@@ -642,6 +662,49 @@ class DurableReadProjectionService:
                 "updated_at": _iso(project.updated_at),
             }
         )
+
+    def repository_status(self, *, project_id: int) -> JsonObject:
+        """Return active immutable repository provenance without graph routing state."""
+        context = self._project(project_id)
+        if isinstance(context, _ProjectReadFailure):
+            return context.error
+        return _success({"repository": self._repository_data(context.project)})
+
+    def _repository_data(self, project: Project) -> JsonObject | None:
+        if project.active_repository_binding_id is None:
+            return None
+        with Session(self._engine) as session:
+            binding = session.get(
+                RepositoryBinding,
+                project.active_repository_binding_id,
+            )
+        if binding is None:
+            return None
+        try:
+            remotes = json.loads(binding.remotes_json)
+            warnings = json.loads(binding.warnings_json)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(remotes, list) or not isinstance(warnings, list):
+            return None
+        return {
+            "repository_binding_id": binding.repository_binding_id,
+            "fingerprint": binding.status_fingerprint,
+            "worktree_path": binding.worktree_path,
+            "common_git_dir": binding.common_git_dir,
+            "head_sha": binding.head_sha,
+            "branch_name": binding.branch_name,
+            "detached_head": binding.detached_head,
+            "dirty": binding.dirty,
+            "remotes": remotes,
+            "warnings": warnings,
+            "probe_version": binding.probe_version,
+            "inspected_at": _iso(binding.inspected_at),
+            "recorded_by": binding.recorded_by,
+            "supersedes_repository_binding_id": (
+                binding.supersedes_repository_binding_id
+            ),
+        }
 
     def project_initial_spec(self, *, project_id: int) -> JsonObject:
         """Return the sole active immutable initial draft for human review."""
@@ -821,11 +884,7 @@ class DurableReadProjectionService:
                 "stale_reason": (
                     "SPECIFICATION_FACT_CONFLICT"
                     if selection.accepted_spec_conflict
-                    else (
-                        None
-                        if spec is not None
-                        else "SPECIFICATION_NOT_APPROVED"
-                    )
+                    else (None if spec is not None else "SPECIFICATION_NOT_APPROVED")
                 ),
             }
         )
@@ -866,9 +925,7 @@ class DurableReadProjectionService:
                     "SPECIFICATION_REVIEW_CONFLICT"
                     if review is None
                     else (
-                        None
-                        if review["state"] == "pending"
-                        else "CANDIDATE_REVIEWED"
+                        None if review["state"] == "pending" else "CANDIDATE_REVIEWED"
                     )
                 ),
             }

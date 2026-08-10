@@ -177,12 +177,6 @@ def record_vision_decision_in_session(  # noqa: PLR0913
     )
     session.add(row)
     if decision == "accepted":
-        project = session.get(Project, artifact.project_id)
-        if project is None:
-            message = f"Project {artifact.project_id} not found."
-            raise ValueError(message)
-        project.vision = artifact.statement
-        session.add(project)
         session.add(
             WorkflowEvent(
                 event_type=WorkflowEventType.VISION_SAVED,

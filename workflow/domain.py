@@ -35,6 +35,7 @@ from workflow.handlers import (
     execute_abandon_project_shell,
     execute_begin_vision_revision,
     execute_compile_authority,
+    execute_create_project,
     execute_decide_authority,
     execute_decide_backlog,
     execute_decide_brownfield_initial_spec,
@@ -58,6 +59,7 @@ from workflow.handlers import (
     execute_record_prd_version,
     execute_record_product_goal_interview_turn,
     execute_record_repository_baseline,
+    execute_record_repository_binding,
     execute_record_repository_inventory,
     execute_record_specification_candidate,
     execute_record_vision_draft,
@@ -86,6 +88,7 @@ from workflow.requests import (
     CloseStory,
     CompileAuthority,
     CompleteTask,
+    CreateProject,
     DecideAmendmentSpecDraft,
     DecideAuthority,
     DecideBacklog,
@@ -118,6 +121,7 @@ from workflow.requests import (
     RecordPrdVersion,
     RecordProductGoalInterviewTurn,
     RecordRepositoryBaseline,
+    RecordRepositoryBinding,
     RecordRepositoryInventory,
     RecordRoadmapDraft,
     RecordSpecificationCandidate,
@@ -309,7 +313,7 @@ class WorkflowDomain:
         evaluated_at = self._clock.now()
         with Session(self._engine) as session:
             try:
-                result = self._transition_in_session(session, request, evaluated_at)
+                result = self.transition_in_session(session, request, evaluated_at)
                 session.commit()
             except OperationalError as error:
                 session.rollback()
@@ -338,6 +342,19 @@ class WorkflowDomain:
                 raise
             else:
                 return result
+
+    def transition_in_session(
+        self,
+        session: Session,
+        request: TransitionRequest,
+        evaluated_at: datetime | None = None,
+    ) -> TransitionResult:
+        """Apply one transition in a caller-owned transaction without committing it."""
+        return self._transition_in_session(
+            session,
+            request,
+            self._clock.now() if evaluated_at is None else evaluated_at,
+        )
 
     def _transition_in_session(
         self,
@@ -472,6 +489,8 @@ class WorkflowDomain:
         evaluated_at: datetime,
     ) -> TransitionResult:
         """Dispatch only after the receipt claim and all position guards."""
+        if isinstance(request, CreateProject | RecordRepositoryBinding):
+            return self._execute_project_request(session, request, evaluated_at)
         if isinstance(request, OpenProjectShell):
             return execute_open_project_shell(
                 session,
@@ -490,6 +509,36 @@ class WorkflowDomain:
                 evaluated_at,
             )
         return self._execute_positioned(session, request, evaluated_at)
+
+    def _execute_project_request(
+        self,
+        session: Session,
+        request: CreateProject | RecordRepositoryBinding,
+        evaluated_at: datetime,
+    ) -> TransitionResult:
+        """Dispatch the two non-positioned Project aggregate mutations."""
+        if isinstance(request, CreateProject):
+            return execute_create_project(session, request, self._graph, evaluated_at)
+        return self._execute_repository_binding(session, request, evaluated_at)
+
+    def _execute_repository_binding(
+        self,
+        session: Session,
+        request: RecordRepositoryBinding,
+        evaluated_at: datetime,
+    ) -> TransitionResult:
+        """Guard an orthogonal repository mutation against the current graph facts."""
+        position = self._position_in_session(session, request.project_id, evaluated_at)
+        if request.graph_version != position.graph_version:
+            return self._stale(position, "The workflow graph version changed.")
+        if request.fact_fingerprint != position.fact_fingerprint:
+            return self._stale(position, "The complete Project facts changed.")
+        return execute_record_repository_binding(
+            session,
+            request,
+            self._graph,
+            evaluated_at,
+        )
 
     def _execute_start_attempt(
         self,

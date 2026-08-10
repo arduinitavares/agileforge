@@ -54,6 +54,10 @@ from workflow.handlers.product_goal import (
     execute_fulfill_product_goal,
     execute_record_product_goal_interview_turn,
 )
+from workflow.handlers.project import (
+    execute_create_project,
+    execute_record_repository_binding,
+)
 from workflow.handlers.project_shell import (
     execute_abandon_project_shell,
     execute_open_project_shell,
@@ -72,6 +76,7 @@ __all__ = [
     "execute_abandon_project_shell",
     "execute_begin_vision_revision",
     "execute_compile_authority",
+    "execute_create_project",
     "execute_decide_authority",
     "execute_decide_backlog",
     "execute_decide_brownfield_initial_spec",
@@ -95,6 +100,7 @@ __all__ = [
     "execute_record_prd_version",
     "execute_record_product_goal_interview_turn",
     "execute_record_repository_baseline",
+    "execute_record_repository_binding",
     "execute_record_repository_inventory",
     "execute_record_specification_candidate",
     "execute_record_vision_draft",

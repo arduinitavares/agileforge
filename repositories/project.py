@@ -34,6 +34,20 @@ from models.core import (
 )
 from models.db import get_engine
 from models.events import StoryCompletionLog, TaskExecutionLog, WorkflowEvent
+from models.product_definition import (
+    DiscoveryArtifact,
+    ProductGoalArtifact,
+    ProductGoalArtifactDecision,
+    ProductGoalInterviewTurn,
+    ProductGoalOutcome,
+    SpecificationCandidate,
+    SpecificationDecision,
+    VisionArtifact,
+    VisionArtifactDecision,
+    VisionInterviewTurn,
+    VisionRevisionIntent,
+)
+from models.repository import RepositoryBinding
 from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance, SpecRegistry
 
 logger: logging.Logger = logging.getLogger(name=__name__)
@@ -397,6 +411,36 @@ def _delete_project_roadmap(session: Session, project_id: int) -> None:
         session.delete(theme)
 
 
+def _delete_project_lifecycle_rows(session: Session, project: Project) -> None:
+    """Delete current product-definition and repository rows in FK-safe order."""
+    project_id = project.project_id
+    if project_id is None:
+        message = "Project deletion requires a durable Project identity."
+        raise RuntimeError(message)
+    for model in (
+        SpecificationDecision,
+        SpecificationCandidate,
+        DiscoveryArtifact,
+        ProductGoalOutcome,
+        ProductGoalArtifactDecision,
+        ProductGoalArtifact,
+        ProductGoalInterviewTurn,
+        VisionArtifactDecision,
+        VisionRevisionIntent,
+        VisionArtifact,
+        VisionInterviewTurn,
+    ):
+        session.exec(delete(model).where(col(model.project_id) == project_id))
+    project.active_repository_binding_id = None
+    session.add(project)
+    session.flush()
+    session.exec(
+        delete(RepositoryBinding).where(
+            col(RepositoryBinding.project_id) == project_id
+        )
+    )
+
+
 class ProjectRepository:
     """Repository handling database operations for the Project entity."""
 
@@ -436,54 +480,6 @@ class ProjectRepository:
             if not self._session:
                 session.close()
 
-    def update_vision(self, project_id: int, vision: str) -> Project | None:
-        """Update the product vision text for a project."""
-        session = self._get_session()
-        try:
-            project = session.get(Project, project_id)
-            if project:
-                project.vision = vision
-                session.add(project)
-                session.commit()
-                session.refresh(project)
-            return project
-        finally:
-            if not self._session:
-                session.close()
-
-    def update_technical_spec(
-        self, project_id: int, technical_spec: str
-    ) -> Project | None:
-        """Update the raw technical spec for a project."""
-        session = self._get_session()
-        try:
-            project = session.get(Project, project_id)
-            if project:
-                project.technical_spec = technical_spec
-                session.add(project)
-                session.commit()
-                session.refresh(project)
-            return project
-        finally:
-            if not self._session:
-                session.close()
-
-    def update_compiled_authority(
-        self, project_id: int, compiled_json: str
-    ) -> Project | None:
-        """Update the compiled authority JSON for a project."""
-        session = self._get_session()
-        try:
-            project = session.get(Project, project_id)
-            if project:
-                project.compiled_authority_json = compiled_json
-                session.add(project)
-                session.commit()
-                session.refresh(project)
-        finally:
-            if not self._session:
-                session.close()
-
     def delete_project(self, project_id: int) -> bool:
         """Fully delete a project and all associated agile entities."""
         session = self._get_session()
@@ -494,6 +490,7 @@ class ProjectRepository:
 
             _ensure_project_authority_deletable(session, project_id)
             _ensure_project_discovery_deletable(session, project_id)
+            _delete_project_lifecycle_rows(session, project)
 
             sprints = session.exec(
                 select(Sprint).where(Sprint.project_id == project_id)

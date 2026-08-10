@@ -44,7 +44,6 @@ def execute_open_project_shell(
 
     project = Project(
         name=request.name,
-        origin=request.origin,
         created_at=evaluated_at,
         updated_at=evaluated_at,
     )

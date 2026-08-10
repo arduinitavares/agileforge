@@ -594,13 +594,10 @@ class WorkflowFactRepository:
         if row.project_id is None:
             message = "Project row has no project_id."
             raise self._error(message)
-        if row.origin not in {"greenfield", "brownfield"}:
-            message = f"Project {project_id} has invalid origin {row.origin!r}."
-            raise self._error(message)
         return ProjectFact(
             project_id=row.project_id,
             name=row.name,
-            origin=self._project_origin(row.origin),
+            description=row.description,
             created_at=row.created_at,
         )
 
