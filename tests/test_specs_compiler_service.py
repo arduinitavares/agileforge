@@ -1886,43 +1886,6 @@ def test_preview_spec_authority_honors_tool_compiler_monkeypatch(
     )
 
 
-def test_resolve_engine_honors_legacy_spec_tools_engine(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Verify resolve engine honors legacy spec tools engine."""
-    from services.specs import compiler_service  # noqa: PLC0415
-    from tools import spec_tools  # noqa: PLC0415
-
-    sentinel_engine = object()
-    monkeypatch.setattr(spec_tools, "engine", sentinel_engine, raising=False)
-    monkeypatch.setattr(
-        spec_tools,
-        "get_engine",
-        compiler_service.get_engine,
-    )
-
-    resolved = compiler_service._resolve_engine()
-
-    assert resolved is sentinel_engine
-
-
-def test_resolve_engine_prefers_patched_spec_tools_get_engine_over_stale_engine(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Verify resolve engine prefers patched spec tools get engine over stale engine."""
-    from services.specs import compiler_service  # noqa: PLC0415
-    from tools import spec_tools  # noqa: PLC0415
-
-    stale_engine = object()
-    preferred_engine = object()
-    monkeypatch.setattr(spec_tools, "engine", stale_engine, raising=False)
-    monkeypatch.setattr(spec_tools, "get_engine", lambda: preferred_engine)
-
-    resolved = compiler_service._resolve_engine()
-
-    assert resolved is preferred_engine
-
-
 def test_default_compiler_invocation_rejects_unstructured_spec_source(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

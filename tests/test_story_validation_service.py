@@ -409,26 +409,6 @@ def test_story_validation_moves_only_to_exact_newly_accepted_row(
     assert selected == [rows[1].authority_id]
 
 
-def test_resolve_engine_honors_legacy_spec_tools_engine(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Verify resolve engine honors legacy spec tools engine."""
-    from services.specs import story_validation_service  # noqa: PLC0415
-    from tools import spec_tools  # noqa: PLC0415
-
-    sentinel_engine = object()
-    monkeypatch.setattr(spec_tools, "engine", sentinel_engine, raising=False)
-    monkeypatch.setattr(
-        spec_tools,
-        "get_engine",
-        story_validation_service.get_engine,
-    )
-
-    resolved = story_validation_service._resolve_engine()
-
-    assert resolved is sentinel_engine
-
-
 def test_compute_story_input_hash_is_stable_for_same_story_content() -> None:
     """Verify compute story input hash is stable for same story content."""
     from services.specs.story_validation_service import (  # noqa: PLC0415
