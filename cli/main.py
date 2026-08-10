@@ -692,7 +692,7 @@ def _install_lifecycle_mutations(
         ("story", _story_generate),
     ):
         generate = _semantic_leaf(branches[(group,)], "generate", handler)
-        generate.add_argument("--instance-key")
+        generate.add_argument("--instance-key", required=group == "story")
 
     for group, handler in (
         ("backlog", _backlog_decide),

@@ -203,6 +203,12 @@ class DeliveryActionApiRequest(MutationApiRequest):
     instance_key: str | None = None
 
 
+class StoryDeliveryActionApiRequest(DeliveryActionApiRequest):
+    """Story delivery request with one exact caller-owned selector."""
+
+    instance_key: SemanticText
+
+
 class SprintPlanningApiRequest(MutationApiRequest):
     """Strict operator-owned Sprint planning semantics."""
 
@@ -1178,7 +1184,7 @@ def generate_project_roadmap(
 @app.post("/api/projects/{project_id}/story/generate")
 def generate_project_story(
     project_id: int,
-    req: DeliveryActionApiRequest,
+    req: StoryDeliveryActionApiRequest,
 ) -> dict[str, object]:
     """Generate Story drafts from host-prepared durable input."""
     return _result_payload(

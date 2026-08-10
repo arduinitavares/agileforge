@@ -334,10 +334,17 @@ def test_retired_cli_parser_branches_are_absent(command: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "group",
-    ["backlog", "roadmap", "story"],
+    ("group", "extra"),
+    [
+        ("backlog", []),
+        ("roadmap", []),
+        ("story", ["--instance-key", "requirement:req-7"]),
+    ],
 )
-def test_retained_agentic_commands_parse_without_model_owned_input(group: str) -> None:
+def test_retained_agentic_commands_parse_without_model_owned_input(
+    group: str,
+    extra: list[str],
+) -> None:
     """Accept host-prepared delivery commands with transport metadata only."""
     parsed = cli_main.build_parser().parse_args(
         [
@@ -345,6 +352,7 @@ def test_retained_agentic_commands_parse_without_model_owned_input(group: str) -
             "generate",
             "--project-id",
             "41",
+            *extra,
             "--idempotency-key",
             f"{group}-41",
             "--actor",
@@ -354,6 +362,23 @@ def test_retained_agentic_commands_parse_without_model_owned_input(group: str) -
 
     assert not hasattr(parsed, "input_file")
     assert not hasattr(parsed, "model_id")
+
+
+def test_story_generation_requires_exact_instance_selector() -> None:
+    """Refuse to select one repeated Story generation decision implicitly."""
+    with pytest.raises(ValueError, match="--instance-key"):
+        cli_main.build_parser().parse_args(
+            [
+                "story",
+                "generate",
+                "--project-id",
+                "41",
+                "--idempotency-key",
+                "story-41",
+                "--actor",
+                "operator",
+            ]
+        )
 
 
 @pytest.mark.parametrize("flag", ["--input-file", "--model-id"])
@@ -479,7 +504,7 @@ def test_story_review_requires_exact_instance_selector() -> None:
         ),
         (
             "story readiness repair --project-id 41 "
-            "--repair 7:3:1.1 --repair '9:5:priority high' "
+            "--repair 7:3:101 --repair 9:5:102 "
             "--idempotency-key readiness-41 --actor operator",
             "StoryReadinessRepairRequest",
         ),
@@ -532,10 +557,16 @@ def test_planning_action_commands_use_task_specific_semantics(
 @pytest.mark.parametrize(
     "repairs",
     [
-        ["0:3:1.1"],
-        ["7:0:1.1"],
+        ["0:3:101"],
+        ["7:0:101"],
         ["7:3:"],
-        ["7:3:1.1", "7:5:1.2"],
+        ["7:3:101", "7:5:102"],
+        ["7:3:0"],
+        ["7:3:-1"],
+        ["7:3:1.1"],
+        ["7:3:high"],
+        ["7:3:01"],
+        ["7:3:+1"],
     ],
 )
 def test_story_readiness_cli_rejects_invalid_repairs(
@@ -582,7 +613,7 @@ def test_story_readiness_cli_rejects_invalid_repairs(
         "story dependencies apply --project-id 41 --story-id 7 "
         "--request-file request.json --idempotency-key dependencies-41 "
         "--actor operator",
-        "story readiness repair --project-id 41 --repair 7:3:1.1 "
+        "story readiness repair --project-id 41 --repair 7:3:101 "
         "--request-file request.json --idempotency-key readiness-41 "
         "--actor operator",
         "sprint start --project-id 41 --request-file request.json "

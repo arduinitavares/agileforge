@@ -497,11 +497,24 @@ def test_semantic_replay_binds_the_requested_instance_selector(
             correlation_id=stored.correlation_id,
         )
     )
+    removed_requirement = service.replay(
+        NodeAttemptReplayQuery(
+            project_id=stored.project_id,
+            graph_version=None,
+            fact_fingerprint=None,
+            decision_fingerprint=None,
+            node_id=stored.target_node_id,
+            idempotency_key=stored.idempotency_key,
+            actor=stored.actor,
+            correlation_id=stored.correlation_id,
+        )
+    )
 
     assert exact == persisted.model_copy(update={"replayed": True})
-    assert wrong_requirement is not None
-    assert wrong_requirement.error is not None
-    assert wrong_requirement.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
+    for conflict in (wrong_requirement, removed_requirement):
+        assert conflict is not None
+        assert conflict.error is not None
+        assert conflict.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
 
 
 @pytest.mark.parametrize(

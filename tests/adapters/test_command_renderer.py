@@ -30,7 +30,7 @@ _PLACEHOLDERS = {
     "<reason>": "changed",
     "<story-id>": "7",
     "<dependency>": "7:8:Story 7 requires Story 8.",
-    "<repair>": "7:3:1.1",
+    "<repair>": "7:3:101",
     "<outcome-summary>": "Implemented semantic execution.",
     "<artifact-ref>": "services/application.py",
     "<acceptance-result>": "fully_met",
@@ -89,8 +89,10 @@ def test_workflow_next_renders_required_and_recovery_only() -> None:
     assert "--graph-version" not in serialized
     assert "--expected-fact-fingerprint" not in serialized
     assert "--expected-decision-fingerprint" not in serialized
-    assert "--idempotency-key <idempotency-key>" in serialized
-    assert "--actor <actor>" in serialized
+    for item in payload["commands"]:
+        tokens = shlex.split(item["command"])
+        assert tokens[tokens.index("--idempotency-key") + 1] == "<idempotency-key>"
+        assert tokens[tokens.index("--actor") + 1] == "<actor>"
     assert "decision_fingerprint" not in serialized
     assert "--expected-" + "state" not in serialized
     assert "--expected-setup-status" not in serialized
@@ -179,6 +181,54 @@ def test_rendered_commands_are_accepted_by_the_cli_parser() -> None:
         assert not hasattr(parsed, "model_id")
         assert "--input-file" not in item["command"]
         assert "--model-id" not in item["command"]
+
+
+@pytest.mark.parametrize(
+    ("request_kind", "node_id", "category"),
+    [
+        (
+            "record_story_draft",
+            "planning.story.generate",
+            NodeCategory.AVAILABLE,
+        ),
+        ("decide_story", "planning.story.review", NodeCategory.WAITING),
+    ],
+)
+def test_story_commands_preserve_punctuated_requirement_selector_token(
+    request_kind: str,
+    node_id: str,
+    category: NodeCategory,
+) -> None:
+    """Keep one exact Story selector token through shell and argparse parsing."""
+    selector = "requirement:reconcile household balances (joint) & taxes"
+    decision = NodeDecision(
+        node_id=node_id,
+        instance_key=selector,
+        child_graph_id="planning",
+        request_kind=request_kind,
+        category=category,
+        recommendation_kind=RecommendationKind.REQUIRED,
+        reason_code="STORY_ACTION_REQUIRED",
+        decision_fingerprint=f"decision-{request_kind}",
+    )
+    position = position_fixture().model_copy(
+        update={
+            "decisions": (decision,),
+            "available_nodes": (node_id,) if category is NodeCategory.AVAILABLE else (),
+            "waiting_nodes": (node_id,) if category is NodeCategory.WAITING else (),
+            "blocked_nodes": (),
+            "invalid_nodes": (),
+        }
+    )
+
+    command = render_workflow_next(position)["commands"][0]["command"]
+    argv = shlex.split(command)[1:]
+    parsed = build_parser().parse_args(
+        [_PLACEHOLDERS.get(argument, argument) for argument in argv]
+    )
+
+    assert parsed.instance_key == selector
+    assert argv[argv.index("--instance-key") + 1] == selector
 
 
 def test_lifecycle_positions_render_semantic_commands() -> None:
@@ -276,8 +326,9 @@ def test_delivery_reviews_render_fingerprint_free_semantic_commands() -> None:
     assert len(commands) == len(decisions)
     for item in commands:
         command = item["command"]
-        assert "--decision <decision>" in command
-        assert "--rationale <rationale>" in command
+        tokens = shlex.split(command)
+        assert tokens[tokens.index("--decision") + 1] == "<decision>"
+        assert tokens[tokens.index("--rationale") + 1] == "<rationale>"
         assert "--request-file" not in command
         assert "fingerprint" not in command
         parsed = build_parser().parse_args(
@@ -290,7 +341,10 @@ def test_delivery_reviews_render_fingerprint_free_semantic_commands() -> None:
     story_command = next(
         item["command"] for item in commands if item["request_kind"] == "decide_story"
     )
-    assert "--instance-key requirement:req-7" in story_command
+    story_tokens = shlex.split(story_command)
+    assert story_tokens[story_tokens.index("--instance-key") + 1] == (
+        "requirement:req-7"
+    )
 
 
 @pytest.mark.parametrize(
@@ -646,8 +700,9 @@ def test_sprint_generation_advertises_parser_valid_capacity_remediation() -> Non
     assert len(payload["commands"]) == 1
     command = payload["commands"][0]["command"]
     assert "agileforge sprint generate" in command
-    assert "--max-story-points <max-story-points>" in command
-    assert "--team-name <team-name>" in command
+    tokens = shlex.split(command)
+    assert tokens[tokens.index("--max-story-points") + 1] == "<max-story-points>"
+    assert tokens[tokens.index("--team-name") + 1] == "<team-name>"
     assert "--input-file" not in command
     assert "--model-id" not in command
     argv = [
@@ -732,20 +787,28 @@ def test_duplicate_story_review_selectors_are_ambiguous() -> None:
 
     commands = render_workflow_next(position)["commands"]
 
-    assert [item["command"] for item in commands] == [
-        (
-            "agileforge story decide --project-id 41 "
-            "--instance-key requirement:req-2 --decision <decision> "
-            "--rationale <rationale> --idempotency-key <idempotency-key> "
-            "--actor <actor>"
-        ),
-        (
-            "agileforge story decide --project-id 41 "
-            "--instance-key requirement:req-3 --decision <decision> "
-            "--rationale <rationale> --idempotency-key <idempotency-key> "
-            "--actor <actor>"
-        ),
+    expected_prefixes = [
+        [
+            "agileforge",
+            "story",
+            "decide",
+            "--project-id",
+            "41",
+            "--instance-key",
+            "requirement:req-2",
+        ],
+        [
+            "agileforge",
+            "story",
+            "decide",
+            "--project-id",
+            "41",
+            "--instance-key",
+            "requirement:req-3",
+        ],
     ]
+    for item, expected_prefix in zip(commands, expected_prefixes, strict=True):
+        assert shlex.split(item["command"])[: len(expected_prefix)] == expected_prefix
 
 
 def test_duplicate_selectorless_story_reviews_are_ambiguous() -> None:

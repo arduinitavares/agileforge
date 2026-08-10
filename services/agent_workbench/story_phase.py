@@ -18,6 +18,7 @@ from services.contracts.story import (
     UserStoryWriterOutput,
 )
 from services.story_linkage import normalize_requirement_key
+from services.story_rank import parse_story_rank
 from workflow.fingerprints import canonical_json
 
 if TYPE_CHECKING:
@@ -144,6 +145,8 @@ def _write_story_item(
     item: UserStoryItem,
     story: UserStory | None,
 ) -> int:
+    rank = str((context.inputs.requirement_rank * 100) + slot)
+    parse_story_rank(rank)
     acceptance_criteria = "\n".join(
         criterion if criterion.startswith("- ") else f"- {criterion}"
         for criterion in item.acceptance_criteria
@@ -177,7 +180,7 @@ def _write_story_item(
     story.story_points = {"XS": 1, "S": 2, "M": 3, "L": 5, "XL": 8}[
         item.estimated_effort
     ]
-    story.rank = str((context.inputs.requirement_rank * 100) + slot)
+    story.rank = rank
     story.source_requirement = context.normalized_requirement
     story.refinement_slot = slot
     story.story_origin = "refined"
@@ -338,6 +341,8 @@ def repair_story_readiness_in_session(
     repaired_at: datetime,
 ) -> tuple[int, ...]:
     """Repair exact Story points and rank under the caller-owned transaction."""
+    for _story_id, _story_points, rank in repairs:
+        parse_story_rank(rank)
     _assert_repair_readiness_safe_in_session(session, project_id=project_id)
     story_ids = tuple(item[0] for item in repairs)
     rows = session.exec(

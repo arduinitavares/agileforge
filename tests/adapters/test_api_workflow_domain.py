@@ -933,22 +933,22 @@ def _delivery_decision(
             "planning.story_readiness",
             {
                 "repairs": (
-                    {"story_id": 7, "story_points": 3, "rank": "1.1"},
-                    {"story_id": 9, "story_points": 5, "rank": "1.2"},
+                    {"story_id": 7, "story_points": 3, "rank": "101"},
+                    {"story_id": 9, "story_points": 5, "rank": "102"},
                 )
             },
             {
                 "story_ids": [7, 9],
                 "repairs": [
-                    {"story_id": 7, "story_points": 3, "rank": "1.1"},
-                    {"story_id": 9, "story_points": 5, "rank": "1.2"},
+                    {"story_id": 7, "story_points": 3, "rank": "101"},
+                    {"story_id": 9, "story_points": 5, "rank": "102"},
                 ],
                 "expected_readiness_fingerprint": "readiness-current",
             },
             {
                 "repairs": [
-                    {"story_id": 7, "story_points": 3, "rank": "1.1"},
-                    {"story_id": 9, "story_points": 5, "rank": "1.2"},
+                    {"story_id": 7, "story_points": 3, "rank": "101"},
+                    {"story_id": 9, "story_points": 5, "rank": "102"},
                 ]
             },
         ),
@@ -1033,7 +1033,7 @@ def test_planning_action_application_derives_internal_guards(
             "repair_story_readiness",
             "StoryReadinessRepairRequest",
             "repair_story_readiness",
-            {"repairs": ({"story_id": 7, "story_points": 3, "rank": "1.1"},)},
+            {"repairs": ({"story_id": 7, "story_points": 3, "rank": "101"},)},
         ),
         ("start_sprint", "SprintStartRequest", "start_sprint", {}),
     ],
@@ -1698,11 +1698,11 @@ def test_execution_selection_derives_all_current_durable_identities(
         ),
         (
             "StoryReadinessRepairRequest",
-            {"repairs": ({"story_id": 0, "story_points": 3, "rank": "1.1"},)},
+            {"repairs": ({"story_id": 0, "story_points": 3, "rank": "101"},)},
         ),
         (
             "StoryReadinessRepairRequest",
-            {"repairs": ({"story_id": 7, "story_points": 0, "rank": "1.1"},)},
+            {"repairs": ({"story_id": 7, "story_points": 0, "rank": "101"},)},
         ),
         (
             "StoryReadinessRepairRequest",
@@ -1712,8 +1712,8 @@ def test_execution_selection_derives_all_current_durable_identities(
             "StoryReadinessRepairRequest",
             {
                 "repairs": (
-                    {"story_id": 7, "story_points": 3, "rank": "1.1"},
-                    {"story_id": 7, "story_points": 5, "rank": "1.2"},
+                    {"story_id": 7, "story_points": 3, "rank": "101"},
+                    {"story_id": 7, "story_points": 5, "rank": "102"},
                 )
             },
         ),
@@ -1734,6 +1734,20 @@ def test_planning_application_requests_reject_invalid_story_semantics(
             idempotency_key="invalid-planning-41",
             actor="operator",
             **request_fields,
+        )
+
+
+@pytest.mark.parametrize("rank", ["0", "-1", "1.1", "high", " 1", "01", "+1"])
+def test_story_readiness_application_rejects_noncanonical_rank(rank: str) -> None:
+    """Require one canonical positive base-10 rank before application mutation."""
+    with pytest.raises(ValidationError, match="canonical positive base-10"):
+        application_module.StoryReadinessRepairRequest.model_validate(
+            {
+                "project_id": PROJECT_ID,
+                "repairs": ({"story_id": 7, "story_points": 3, "rank": rank},),
+                "idempotency_key": "invalid-rank-41",
+                "actor": "operator",
+            }
         )
 
 
@@ -2736,8 +2750,26 @@ def test_semantic_delivery_review_changed_operator_input_conflicts(
             actor="operator",
         )
     )
+    removed_selector = DurableTransitionReplayService(engine=engine).replay(
+        TransitionReplayQuery(
+            request_kind="decide_story",
+            project_id=PROJECT_ID,
+            idempotency_key=story.idempotency_key,
+            actor="operator",
+            operator_input={
+                "decision": "accepted",
+                "rationale": "Reviewed artifact.",
+            },
+        )
+    )
 
-    for result in (changed_decision, changed_rationale, changed_selector):
+    for result in (
+        changed_decision,
+        changed_rationale,
+        changed_selector,
+        removed_selector,
+    ):
+        assert result is not None
         assert result.error is not None
         assert result.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
     assert domain.position_calls == []
@@ -2820,6 +2852,32 @@ def test_story_replay_uses_the_caller_requested_requirement_selector() -> None:
     assert domain.position_calls == []
     assert delivery_input.replay_queries[0].instance_key == "requirement:REQ-B"
     assert application.agent_requests == []
+
+
+def test_story_generation_rejects_omitted_selector_before_wildcard_selection() -> None:
+    """Do not select the sole Story generation decision without its selector."""
+    decision = _delivery_decision(
+        node_id="planning.story.generate",
+        request_kind="record_story_draft",
+        instance_key="requirement:REQ-A",
+    )
+    domain = _BoundaryDomain(_vision_position(decision))
+    delivery_input = _DeliveryInput({"prepared_by": "host"})
+    application = _CapturingDeliveryApplication(domain, delivery_input)
+
+    result = application.generate_story(
+        DeliveryActionRequest(
+            project_id=PROJECT_ID,
+            idempotency_key="story-without-selector",
+            actor="operator",
+        )
+    )
+
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.code is WorkflowErrorCode.TRANSITION_NOT_AVAILABLE
+    assert domain.position_calls == []
+    assert delivery_input.build_calls == []
 
 
 def test_sprint_generation_fails_closed_without_host_capacity_input(
@@ -3445,16 +3503,21 @@ def test_retained_delivery_api_rejects_model_owned_input(
 
 
 @pytest.mark.parametrize(
-    ("path", "method_name"),
+    ("path", "method_name", "extra"),
     [
-        ("/api/projects/41/backlog/generate", "generate_backlog"),
-        ("/api/projects/41/roadmap/generate", "generate_roadmap"),
-        ("/api/projects/41/story/generate", "generate_story"),
+        ("/api/projects/41/backlog/generate", "generate_backlog", {}),
+        ("/api/projects/41/roadmap/generate", "generate_roadmap", {}),
+        (
+            "/api/projects/41/story/generate",
+            "generate_story",
+            {"instance_key": "requirement:req-7"},
+        ),
     ],
 )
 def test_retained_delivery_api_calls_host_prepared_application_method(
     path: str,
     method_name: str,
+    extra: dict[str, object],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Route metadata-only delivery requests through semantic methods."""
@@ -3463,13 +3526,66 @@ def test_retained_delivery_api_calls_host_prepared_application_method(
 
     response = TestClient(api_module.app).post(
         path,
-        json={"idempotency_key": "delivery-41", "actor": "operator"},
+        json={"idempotency_key": "delivery-41", "actor": "operator", **extra},
     )
 
     assert response.status_code == HTTPStatus.OK
     assert len(application.requests) == 1
     assert isinstance(application.requests[0], DeliveryActionRequest)
     assert method_name.startswith("generate_")
+
+
+@pytest.mark.parametrize(
+    ("path", "payload"),
+    [
+        (
+            "/api/projects/41/story/generate",
+            {"idempotency_key": "story-generate-41", "actor": "operator"},
+        ),
+        (
+            "/api/projects/41/story/generate",
+            {
+                "instance_key": "  ",
+                "idempotency_key": "story-generate-41",
+                "actor": "operator",
+            },
+        ),
+        (
+            "/api/projects/41/story/decide",
+            {
+                "decision": "accepted",
+                "rationale": "Reviewed current Story.",
+                "idempotency_key": "story-review-41",
+                "actor": "operator",
+            },
+        ),
+        (
+            "/api/projects/41/story/decide",
+            {
+                "instance_key": "  ",
+                "decision": "accepted",
+                "rationale": "Reviewed current Story.",
+                "idempotency_key": "story-review-41",
+                "actor": "operator",
+            },
+        ),
+    ],
+)
+def test_story_api_requires_nonblank_instance_selector(
+    path: str,
+    payload: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reject omitted or normalized-empty selectors for both Story actions."""
+    monkeypatch.setattr(
+        api_module,
+        "_application",
+        lambda: _FakeApiApplication(position=_all_request_kinds_position()),
+    )
+
+    response = TestClient(api_module.app).post(path, json=payload)
+
+    assert response.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
 
 
 @pytest.mark.parametrize(
@@ -3608,8 +3724,8 @@ def test_delivery_review_api_rejects_caller_owned_guards(
             "/api/projects/41/story/readiness/repair",
             {
                 "repairs": [
-                    {"story_id": 7, "story_points": 3, "rank": "1.1"},
-                    {"story_id": 9, "story_points": 5, "rank": "1.2"},
+                    {"story_id": 7, "story_points": 3, "rank": "101"},
+                    {"story_id": 9, "story_points": 5, "rank": "102"},
                 ]
             },
             "StoryReadinessRepairRequest",
@@ -3668,13 +3784,13 @@ def test_planning_action_api_uses_task_specific_semantic_requests(
         ),
         (
             "/api/projects/41/story/readiness/repair",
-            {"repairs": [{"story_id": 7, "story_points": 3, "rank": "1.1"}]},
+            {"repairs": [{"story_id": 7, "story_points": 3, "rank": "101"}]},
             "story_ids",
             [7],
         ),
         (
             "/api/projects/41/story/readiness/repair",
-            {"repairs": [{"story_id": 7, "story_points": 3, "rank": "1.1"}]},
+            {"repairs": [{"story_id": 7, "story_points": 3, "rank": "101"}]},
             "expected_readiness_fingerprint",
             "caller-owned",
         ),
@@ -3716,11 +3832,11 @@ def test_planning_action_api_rejects_internal_fields(
         ),
         (
             "/api/projects/41/story/readiness/repair",
-            {"repairs": [{"story_id": 0, "story_points": 3, "rank": "1.1"}]},
+            {"repairs": [{"story_id": 0, "story_points": 3, "rank": "101"}]},
         ),
         (
             "/api/projects/41/story/readiness/repair",
-            {"repairs": [{"story_id": 7, "story_points": 0, "rank": "1.1"}]},
+            {"repairs": [{"story_id": 7, "story_points": 0, "rank": "101"}]},
         ),
         (
             "/api/projects/41/story/readiness/repair",
@@ -3730,8 +3846,8 @@ def test_planning_action_api_rejects_internal_fields(
             "/api/projects/41/story/readiness/repair",
             {
                 "repairs": [
-                    {"story_id": 7, "story_points": 3, "rank": "1.1"},
-                    {"story_id": 7, "story_points": 5, "rank": "1.2"},
+                    {"story_id": 7, "story_points": 3, "rank": "101"},
+                    {"story_id": 7, "story_points": 5, "rank": "102"},
                 ]
             },
         ),

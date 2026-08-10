@@ -681,7 +681,7 @@ def _seed_dependency_review_rows(
                 story_origin="refined",
                 is_refined=True,
                 story_points=3,
-                rank=f"1.{index}",
+                rank=str(100 + index),
             )
             for index in range(1, 4)
         ]
@@ -701,7 +701,7 @@ def _seed_dependency_review_rows(
             story_origin="refined",
             is_refined=True,
             story_points=3,
-            rank="1.1",
+            rank="101",
         )
         session.add(foreign_story)
         session.flush()
@@ -880,20 +880,25 @@ def test_dependency_and_readiness_transitions_bind_exact_current_story_facts(
     with Session(engine) as session:
         story = session.get(UserStory, story_id)
         assert story is not None
-        story.story_points = None
-        story.rank = None
+        story.story_points = REPAIRED_STORY_POINTS
+        story.rank = "0"
         session.add(story)
         session.commit()
         snapshot = WorkflowFactRepository(session).load(project_id)
     expected_readiness = readiness_fingerprint(snapshot.stories)
     position = domain.position(project_id)
+    readiness = _decision(position, "planning.story_readiness")
+    sprint_plan = _decision(position, "planning.sprint.plan")
+    assert readiness.category is NodeCategory.AVAILABLE
+    assert sprint_plan.category is NodeCategory.BLOCKED
+    assert any(blocker.code == "STORY_RANK_INVALID" for blocker in sprint_plan.blockers)
     repaired = domain.transition(
         RepairStoryReadiness(
             **_guards(position, "planning.story_readiness"),
             idempotency_key="repair-readiness",
             story_ids=(story_id,),
             repairs=(
-                StoryReadinessUpdate(story_id=story_id, story_points=3, rank="1.1"),
+                StoryReadinessUpdate(story_id=story_id, story_points=3, rank="101"),
             ),
             expected_readiness_fingerprint=expected_readiness,
         )
@@ -909,7 +914,33 @@ def test_dependency_and_readiness_transitions_bind_exact_current_story_facts(
         repaired_story = session.get(UserStory, story_id)
         assert repaired_story is not None
         assert repaired_story.story_points == REPAIRED_STORY_POINTS
-        assert repaired_story.rank == "1.1"
+        assert repaired_story.rank == "101"
+
+
+def test_story_readiness_persistence_rejects_invalid_rank_before_mutation(
+    engine: Engine,
+) -> None:
+    """Reject an invalid durable rank before changing any Story planning values."""
+    project_id = _seed_accepted_backlog(engine)
+    domain = _domain(engine)
+    _record_and_accept_roadmap(domain, project_id)
+    _story_artifact_id, story_id = _record_and_accept_story(domain, project_id)
+
+    with Session(engine) as session:
+        story = session.get(UserStory, story_id)
+        assert story is not None
+        original = (story.story_points, story.rank, story.updated_at)
+
+        with pytest.raises(ValueError, match="canonical positive base-10"):
+            story_phase_module.repair_story_readiness_in_session(
+                session,
+                project_id=project_id,
+                repairs=((story_id, 5, "01"),),
+                repaired_at=EVALUATED_AT + timedelta(minutes=1),
+            )
+
+        session.refresh(story)
+        assert (story.story_points, story.rank, story.updated_at) == original
 
 
 def test_sprint_plan_review_and_start_bind_exact_plan_and_candidate_set(

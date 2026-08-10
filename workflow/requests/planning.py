@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from typing import ClassVar, Literal, Self
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 
+from services.story_rank import parse_story_rank
 from workflow.contracts import FrozenModel, JsonObject
 from workflow.facts import StoryDependencyReviewEdgeFact
 from workflow.requests.base import PositionedRequest, ReviewRationale
@@ -18,7 +19,14 @@ class StoryReadinessUpdate(FrozenModel):
 
     story_id: int
     story_points: int = Field(ge=1)
-    rank: str = Field(min_length=1)
+    rank: str = Field(strict=True)
+
+    @field_validator("rank")
+    @classmethod
+    def validate_rank(cls, value: str) -> str:
+        """Require the shared durable Story rank representation."""
+        parse_story_rank(value)
+        return value
 
 
 class RecordRoadmapDraft(PositionedRequest):

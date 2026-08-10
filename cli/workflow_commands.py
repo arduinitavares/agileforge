@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
+from shlex import join
 from typing import Protocol, TypedDict
 
 from services.application import (
@@ -300,7 +301,7 @@ def _decision_payload(
         "request_kind": decision.request_kind,
         "recommendation_kind": decision.recommendation_kind.value,
         "reason_code": decision.reason_code,
-        "command": " ".join(COMMAND_RENDERERS.command_for(position, decision)),
+        "command": join(COMMAND_RENDERERS.command_for(position, decision)),
     }
 
 

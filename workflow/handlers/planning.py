@@ -45,6 +45,7 @@ from services.story_dependencies import (
     StoryDependencyGraphError,
     apply_story_dependencies_in_session,
 )
+from services.story_rank import parse_story_rank
 from workflow.contracts import (
     NodeDecision,
     TransitionResult,
@@ -96,6 +97,18 @@ type PlanningRequest = (
     | DecideSprintPlan
     | StartSprint
 )
+
+
+def _story_needs_readiness_repair(story: StoryFact) -> bool:
+    if story.story_points is None:
+        return True
+    try:
+        parse_story_rank(story.rank)
+    except ValueError:
+        return True
+    return False
+
+
 type PlanningReviewRequest = DecideRoadmap | DecideStory | DecideSprintPlan
 type RoadmapPlanningRequest = RecordRoadmapDraft | DecideRoadmap
 type StoryPlanningRequest = (
@@ -537,7 +550,7 @@ def execute_repair_story_readiness(
     missing_ids = tuple(
         item.story_id
         for item in snapshot.stories
-        if item.sprint_candidate and (item.story_points is None or item.rank is None)
+        if item.sprint_candidate and _story_needs_readiness_repair(item)
     )
     expected = readiness_fingerprint(snapshot.stories)
     if (

@@ -24,6 +24,8 @@ from workflow.fingerprints import canonical_hash
 from workflow.requests import StartNodeAttempt, TransitionRequest
 
 _TRANSITION_REQUEST = TypeAdapter(TransitionRequest)
+_CALLER_OWNED_ATTEMPT_SELECTOR_NODES = frozenset({"planning.story.generate"})
+_CALLER_OWNED_TRANSITION_SELECTOR_KINDS = frozenset({"decide_story"})
 
 if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
@@ -97,9 +99,13 @@ class DurableNodeAttemptReplayService:
                 correlation_id=query.correlation_id,
                 target_node_id=query.node_id,
                 target_instance_key=(
-                    stored.target_instance_key
-                    if query.instance_key is None
-                    else query.instance_key
+                    query.instance_key
+                    if query.node_id in _CALLER_OWNED_ATTEMPT_SELECTOR_NODES
+                    else (
+                        stored.target_instance_key
+                        if query.instance_key is None
+                        else query.instance_key
+                    )
                 ),
                 normalized_input=_replay_normalized_input(stored, query),
                 model_id=stored.model_id,
@@ -146,6 +152,10 @@ class DurableTransitionReplayService:
                 stored.project_id != query.project_id
                 or stored.actor != query.actor
                 or stored.correlation_id != query.correlation_id
+                or (
+                    query.request_kind in _CALLER_OWNED_TRANSITION_SELECTOR_KINDS
+                    and "instance_key" not in operator_input
+                )
                 or any(
                     stored_payload.get(key) != value
                     for key, value in operator_input.items()

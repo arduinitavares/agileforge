@@ -22,6 +22,7 @@ from pydantic import (
     StringConstraints,
     TypeAdapter,
     ValidationError,
+    field_validator,
     model_validator,
 )
 from sqlmodel import Session, col, select
@@ -80,6 +81,7 @@ from services.sprint_selection import (
     select_sprint_story_rows,
 )
 from services.story_linkage import normalize_requirement_key
+from services.story_rank import parse_story_rank
 from services.story_runtime import build_story_input_context
 from services.vision_interview_input import VisionInterviewInputService
 from utils.model_config import get_model_id
@@ -1409,7 +1411,14 @@ class StoryReadinessRepair(FrozenModel):
 
     story_id: PositiveStoryId
     story_points: Annotated[int, Field(strict=True, gt=0)]
-    rank: SemanticText
+    rank: Annotated[str, Field(strict=True)]
+
+    @field_validator("rank")
+    @classmethod
+    def validate_rank(cls, value: str) -> str:
+        """Require the one durable Story rank representation."""
+        parse_story_rank(value)
+        return value
 
 
 class StoryReadinessRepairRequest(_PlanningMutationRequest):
@@ -2652,6 +2661,10 @@ class AgileForgeApplication:
         )
         if replay is not None:
             return replay
+        if node_id == "planning.story.generate" and (
+            request.instance_key is None or not request.instance_key.strip()
+        ):
+            return _transition_not_available(None, node_id)
         position = self.position(project_id=request.project_id)
         decision = _unique_available_decision(
             position,
@@ -4038,14 +4051,10 @@ def _sprint_selection_rows(
 def _sprint_story_priority(story: UserStory) -> int:
     """Parse one durable Story rank into the selector's numeric priority."""
     try:
-        priority = int(story.rank or "")
+        return parse_story_rank(story.rank)
     except ValueError as error:
-        message = f"Story {story.story_id} has a non-numeric rank."
+        message = f"Story {story.story_id} has an invalid rank: {error}"
         raise ValueError(message) from error
-    if priority <= 0:
-        message = f"Story {story.story_id} has a non-positive rank."
-        raise ValueError(message)
-    return priority
 
 
 def _sprint_validation_evidence(story: UserStory) -> tuple[list[str], list[str]]:
