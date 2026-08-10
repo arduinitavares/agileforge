@@ -177,14 +177,15 @@ def _seed_accepted_vision(engine: Engine, *, name: str = "Goal reload") -> int:
         return project.project_id
 
 
-def _add_accepted_goal_chain(
+def _add_goal_chain(
     session: Session,
     project_id: int,
     vision: VisionArtifact,
     *,
     goal_number: int,
+    accepted: bool = True,
 ) -> None:
-    """Persist one complete accepted Goal chain without a terminal outcome."""
+    """Persist one complete Goal chain with an optional accepted review."""
     recorded_at = NOW + timedelta(minutes=goal_number)
     attempt = WorkflowNodeAttempt(
         project_id=project_id,
@@ -255,18 +256,19 @@ def _add_accepted_goal_chain(
     session.add(goal)
     session.flush()
     assert goal.product_goal_artifact_id is not None
-    session.add(
-        ProductGoalArtifactDecision(
-            project_id=project_id,
-            product_goal_artifact_id=goal.product_goal_artifact_id,
-            artifact_fingerprint=goal.content_fingerprint,
-            decision="accepted",
-            rationale="Accepted without an outcome.",
-            reviewer="operator",
-            idempotency_key=f"ambiguous-goal-{goal_number}-accepted",
-            decided_at=recorded_at + timedelta(seconds=3),
+    if accepted:
+        session.add(
+            ProductGoalArtifactDecision(
+                project_id=project_id,
+                product_goal_artifact_id=goal.product_goal_artifact_id,
+                artifact_fingerprint=goal.content_fingerprint,
+                decision="accepted",
+                rationale="Accepted without an outcome.",
+                reviewer="operator",
+                idempotency_key=f"ambiguous-goal-{goal_number}-accepted",
+                decided_at=recorded_at + timedelta(seconds=3),
+            )
         )
-    )
 
 
 def _record_turn(
@@ -663,13 +665,13 @@ def test_goal_input_rejects_multiple_unresolved_accepted_goals(
         vision = session.exec(
             select(VisionArtifact).where(VisionArtifact.project_id == project_id)
         ).one()
-        _add_accepted_goal_chain(session, project_id, vision, goal_number=1)
-        _add_accepted_goal_chain(session, project_id, vision, goal_number=2)
+        _add_goal_chain(session, project_id, vision, goal_number=1)
+        _add_goal_chain(session, project_id, vision, goal_number=2)
         session.commit()
 
     with pytest.raises(
         WorkflowFactLoadError,
-        match="more than one accepted Product Goal without an outcome",
+        match="more than one unresolved Product Goal selection",
     ):
         ProductGoalInterviewInputService(engine=engine).build(
             project_id, decision, "Do not prepare from ambiguous Goal state"
@@ -677,7 +679,39 @@ def test_goal_input_rejects_multiple_unresolved_accepted_goals(
 
     with pytest.raises(
         WorkflowFactLoadError,
-        match="more than one accepted Product Goal without an outcome",
+        match="more than one unresolved Product Goal selection",
+    ):
+        _domain(engine).position(project_id)
+
+
+def test_goal_input_rejects_mixed_unresolved_accepted_and_pending_goals(
+    engine: Engine,
+) -> None:
+    """An accepted Goal and pending Goal cannot form a domain position."""
+    project_id = _seed_accepted_vision(engine)
+    position = _domain(engine).position(project_id)
+    decision = next(
+        item for item in position.decisions if item.node_id == "goal.interview"
+    )
+    with Session(engine) as session:
+        vision = session.exec(
+            select(VisionArtifact).where(VisionArtifact.project_id == project_id)
+        ).one()
+        _add_goal_chain(session, project_id, vision, goal_number=1)
+        _add_goal_chain(session, project_id, vision, goal_number=2, accepted=False)
+        session.commit()
+
+    with pytest.raises(
+        WorkflowFactLoadError,
+        match="more than one unresolved Product Goal selection",
+    ):
+        ProductGoalInterviewInputService(engine=engine).build(
+            project_id, decision, "Do not prepare from mixed Goal state"
+        )
+
+    with pytest.raises(
+        WorkflowFactLoadError,
+        match="more than one unresolved Product Goal selection",
     ):
         _domain(engine).position(project_id)
 

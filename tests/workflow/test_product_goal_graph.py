@@ -5,12 +5,14 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Literal
 
+from workflow.contracts import NodeCategory
 from workflow.definitions.product_goal import (
     _goal_interview_rule,
     _goal_review_rule,
     _outcome_rule,
     accepted_current_goal,
 )
+from workflow.definitions.root import ROOT_GRAPH
 from workflow.facts import (
     PhaseArtifactFact,
     PostSprintTriageFact,
@@ -204,6 +206,48 @@ def test_multiple_pending_goals_invalidate_goal_selection() -> None:
     assert interview.reason_code == "WORKFLOW_FACT_CONFLICT"
     assert review.category is RuleCategory.INVALID
     assert review.reason_code == "WORKFLOW_FACT_CONFLICT"
+
+
+def test_mixed_goal_lineage_advertises_no_goal_or_downstream_action() -> None:
+    """Conflicting single-active Goal lineage blocks every Goal-dependent action."""
+    snapshot = _snapshot(goal_decision="accepted")
+    accepted_goal = snapshot.product_goal_artifacts[0]
+    pending_goal = accepted_goal.model_copy(
+        update={
+            "product_goal_artifact_id": 22,
+            "goal_number": 2,
+            "content_fingerprint": "goal-fingerprint-2",
+        }
+    )
+    conflicted = snapshot.model_copy(
+        update={"product_goal_artifacts": (accepted_goal, pending_goal)}
+    )
+
+    position = ROOT_GRAPH.evaluate(conflicted, NOW)
+    decisions = {item.node_id: item for item in position.decisions}
+    advertised = set(position.available_nodes)
+
+    assert decisions["goal.interview"].category is NodeCategory.INVALID
+    assert decisions["goal.interview"].reason_code == "WORKFLOW_FACT_CONFLICT"
+    assert decisions["goal.review"].category is NodeCategory.INVALID
+    assert decisions["goal.review"].reason_code == "WORKFLOW_FACT_CONFLICT"
+    assert accepted_current_goal(conflicted) is None
+    assert {
+        node_id.split(".", maxsplit=1)[0]
+        for node_id in advertised
+    }.isdisjoint(
+        {
+            "goal",
+            "discovery",
+            "specification",
+            "authority",
+            "backlog",
+            "roadmap",
+            "story",
+            "sprint",
+            "task",
+        }
+    )
 
 
 def test_feedback_reopens_goal_interview_without_an_active_goal() -> None:

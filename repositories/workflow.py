@@ -359,7 +359,7 @@ class WorkflowFactRepository:
             goals = self._product_goals(project_id, vision_fingerprints, turns)
             decisions = self._product_goal_decisions(project_id, goals)
             outcomes = self._product_goal_outcomes(project_id, goals, decisions)
-            self._active_accepted_product_goal_ids(decisions, outcomes)
+            self._active_accepted_product_goal_ids(goals, decisions, outcomes)
             return WorkflowFactSnapshot(
                 project=project,
                 vision_artifacts=tuple(visions.values()),
@@ -944,6 +944,7 @@ class WorkflowFactRepository:
             decisions,
         )
         self._active_accepted_product_goal_ids(
+            goals,
             decisions,
             outcomes,
         )
@@ -1652,10 +1653,11 @@ class WorkflowFactRepository:
 
     def _active_accepted_product_goal_ids(
         self,
+        goals: dict[int, ProductGoalArtifactFact],
         decisions: dict[int, ProductGoalArtifactDecisionFact],
         outcomes: dict[int, ProductGoalOutcomeFact],
     ) -> frozenset[int]:
-        """Return accepted Goals that have not reached a terminal outcome."""
+        """Return active accepted Goals after rejecting competing Goal selections."""
         accepted_goal_ids = {
             item.product_goal_artifact_id
             for item in decisions.values()
@@ -1663,9 +1665,12 @@ class WorkflowFactRepository:
         }
         outcome_goal_ids = {item.product_goal_artifact_id for item in outcomes.values()}
         unresolved_goal_ids = frozenset(accepted_goal_ids - outcome_goal_ids)
+        pending_goal_ids = frozenset(goals) - {
+            item.product_goal_artifact_id for item in decisions.values()
+        }
         self._require_product_condition(
-            len(unresolved_goal_ids) <= 1,
-            "Project has more than one accepted Product Goal without an outcome.",
+            len(unresolved_goal_ids) + len(pending_goal_ids) <= 1,
+            "Project has more than one unresolved Product Goal selection.",
         )
         return unresolved_goal_ids
 
@@ -4798,7 +4803,7 @@ class VisionInputFactRepository(WorkflowFactRepository):
             goals = self._product_goals(project_id, vision_fingerprints, goal_turns)
             decisions = self._product_goal_decisions(project_id, goals)
             outcomes = self._product_goal_outcomes(project_id, goals, decisions)
-        return bool(self._active_accepted_product_goal_ids(decisions, outcomes))
+        return bool(self._active_accepted_product_goal_ids(goals, decisions, outcomes))
 
 
 def select_vision_interview_input(context: VisionInputContext) -> VisionInputSelection:

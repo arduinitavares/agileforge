@@ -67,7 +67,10 @@ def accepted_current_goal(
     if vision is None:
         return None
     accepted = _unresolved_accepted_goals(snapshot, vision)
-    return accepted[0] if len(accepted) == 1 else None
+    pending = _pending_goals(snapshot, vision)
+    if len(accepted) + len(pending) != 1:
+        return None
+    return accepted[0] if accepted else None
 
 
 def _unresolved_accepted_goals(
@@ -170,7 +173,7 @@ def _goal_interview_rule(
         )
     accepted_goals = _unresolved_accepted_goals(snapshot, vision)
     pending_goals = _pending_goals(snapshot, vision)
-    if len(accepted_goals) > 1 or len(pending_goals) > 1:
+    if len(accepted_goals) + len(pending_goals) > 1:
         return (RuleEvaluation(RuleCategory.INVALID, "WORKFLOW_FACT_CONFLICT"),)
     if accepted_goals:
         return (
@@ -215,7 +218,7 @@ def _goal_review_rule(
         )
     accepted_goals = _unresolved_accepted_goals(snapshot, vision)
     pending_goals = _pending_goals(snapshot, vision)
-    if len(accepted_goals) > 1 or len(pending_goals) > 1:
+    if len(accepted_goals) + len(pending_goals) > 1:
         return (RuleEvaluation(RuleCategory.INVALID, "WORKFLOW_FACT_CONFLICT"),)
     if len(pending_goals) != 1:
         return (
