@@ -433,6 +433,30 @@ def test_duplicate_selectorless_story_reviews_are_ambiguous() -> None:
     assert render_workflow_next(position)["commands"] == []
 
 
+def test_selectorless_story_review_is_not_executable() -> None:
+    """Suppress even one Story review decision without its required selector."""
+    decision = NodeDecision(
+        node_id="planning.story.review",
+        child_graph_id="planning",
+        request_kind="decide_story",
+        category=NodeCategory.WAITING,
+        recommendation_kind=RecommendationKind.REQUIRED,
+        reason_code="STORY_REVIEW_REQUIRED",
+        decision_fingerprint="decision-story",
+    )
+    position = position_fixture().model_copy(
+        update={
+            "decisions": (decision,),
+            "available_nodes": (),
+            "waiting_nodes": (decision.node_id,),
+            "blocked_nodes": (),
+            "invalid_nodes": (),
+        }
+    )
+
+    assert render_workflow_next(position)["commands"] == []
+
+
 def test_ambiguous_semantic_decisions_do_not_render_an_unusable_command() -> None:
     """Advertise a semantic action only when the parser needs no hidden selector."""
     parser = build_parser()

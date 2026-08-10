@@ -2477,6 +2477,32 @@ def test_position_omits_ambiguous_unselectable_semantic_actions(
     ]
 
 
+def test_position_omits_unique_selectorless_story_review_action(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Do not advertise a Story review action without its required selector."""
+    decision = _delivery_decision(
+        node_id="planning.story.review",
+        request_kind="decide_story",
+    )
+    position = _vision_position(decision).model_copy(
+        update={
+            "available_nodes": (),
+            "waiting_nodes": (decision.node_id,),
+        }
+    )
+    monkeypatch.setattr(
+        api_module,
+        "_application",
+        lambda: _FakeApiApplication(position=position),
+    )
+
+    response = TestClient(api_module.app).get("/api/projects/41/position")
+
+    assert response.status_code == HTTPStatus.OK
+    assert response.json()["actions"] == []
+
+
 def test_structured_conflict_advertises_actions_for_returned_position(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

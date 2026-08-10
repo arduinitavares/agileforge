@@ -459,7 +459,9 @@ def _workflow_actions(position: WorkflowPosition) -> list[JsonObject]:
     for decision in candidates:
         request_kind = decision.request_kind
         if request_kind in _SELECTOR_API_REQUEST_KINDS:
-            selectable = selector_counts[(request_kind, decision.instance_key)] == 1
+            selectable = (
+                request_kind != "decide_story" or decision.instance_key is not None
+            ) and selector_counts[(request_kind, decision.instance_key)] == 1
         else:
             selectable = semantic_counts[request_kind] == 1
         if not selectable:

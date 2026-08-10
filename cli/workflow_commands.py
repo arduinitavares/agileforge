@@ -346,6 +346,7 @@ def render_workflow_next(position: WorkflowPosition) -> WorkflowNextPayload:
                 and (
                     (
                         decision.instance_key is None
+                        and decision.request_kind != "decide_story"
                         and selectorless_counts[decision.request_kind] == 1
                     )
                     or (
