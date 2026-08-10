@@ -11,8 +11,8 @@ from google.adk.models.lite_llm import LiteLlm
 
 from adapters.adk.prompts import load_prompt
 from services.contracts.vision import (
-    VisionAgentInput,
     VisionDraftOutput,
+    VisionModelInput,
     VisionRepairInput,
 )
 from utils.model_config import get_model_id, get_openrouter_extra_body
@@ -43,9 +43,10 @@ root_agent: Agent = Agent(
         "human clarification."
     ),
     model=model,
-    input_schema=VisionAgentInput,
+    input_schema=VisionModelInput,
     output_schema=VisionDraftOutput,
     instruction=instructions,
+    mode="single_turn",
     output_key="product_vision_assessment",
     disallow_transfer_to_parent=True,
     disallow_transfer_to_peers=True,
@@ -58,6 +59,7 @@ repair_agent: Agent = Agent(
     input_schema=VisionRepairInput,
     output_schema=VisionDraftOutput,
     instruction=repair_instructions,
+    mode="single_turn",
     output_key="product_vision_repair",
     disallow_transfer_to_parent=True,
     disallow_transfer_to_peers=True,

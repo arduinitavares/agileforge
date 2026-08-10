@@ -13,6 +13,7 @@ from workflow.facts import (
     ProjectFact,
     VisionArtifactDecisionFact,
     VisionArtifactFact,
+    VisionEvidenceSnapshotFact,
     VisionInterviewTurnFact,
     VisionRevisionIntentFact,
     WorkflowFactSnapshot,
@@ -84,9 +85,7 @@ def _turn(
             "vision_evidence_snapshot_id": 1,
             "prior_turn_id": None if identifier == 1 else identifier - 1,
             "user_text": (
-                None
-                if operation == "bootstrap"
-                else "Build a trusted workflow tool."
+                None if operation == "bootstrap" else "Build a trusted workflow tool."
             ),
             "components": COMPONENTS,
             "vision_statement": "A durable Vision.",
@@ -111,6 +110,19 @@ def _turn(
             "attempt_fingerprint": "sha256:attempt",
             "recorded_at": NOW,
         }
+    )
+
+
+def _evidence_snapshot(identifier: int = 1) -> VisionEvidenceSnapshotFact:
+    return VisionEvidenceSnapshotFact(
+        vision_evidence_snapshot_id=identifier,
+        repository_binding_id=None,
+        supersedes_vision_evidence_snapshot_id=None,
+        workflow_node_attempt_id=1,
+        evidence={},
+        evidence_fingerprint=f"sha256:evidence-{identifier}",
+        warnings=(),
+        created_at=NOW,
     )
 
 
@@ -146,7 +158,10 @@ def test_new_project_exposes_only_the_vision_bootstrap_without_authority() -> No
 
 def test_incomplete_turn_keeps_interview_available() -> None:
     """An incomplete answer remains in the same human interview loop."""
-    position = _position(vision_interview_turns=(_turn(complete=False),))
+    position = _position(
+        vision_evidence_snapshots=(_evidence_snapshot(),),
+        vision_interview_turns=(_turn(complete=False),),
+    )
 
     assert _node(position, "vision.interview").category is NodeCategory.AVAILABLE
     assert "vision.review" not in position.waiting_nodes

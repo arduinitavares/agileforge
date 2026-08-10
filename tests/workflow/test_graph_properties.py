@@ -103,6 +103,7 @@ AUTHORITATIVE_SNAPSHOT_VARIANTS: tuple[tuple[str, object], ...] = (
             VisionEvidenceSnapshotFact(
                 vision_evidence_snapshot_id=83,
                 repository_binding_id=84,
+                supersedes_vision_evidence_snapshot_id=None,
                 workflow_node_attempt_id=85,
                 evidence={"project": {"name": "Changed Project"}},
                 evidence_fingerprint="sha256:evidence",

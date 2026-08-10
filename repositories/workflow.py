@@ -650,6 +650,8 @@ class WorkflowFactRepository:
             execution_options=self._query_options(),
         ).all()
         facts: list[VisionEvidenceSnapshotFact] = []
+        facts_by_id: dict[int, VisionEvidenceSnapshotFact] = {}
+        superseded_ids: set[int] = set()
         for row in rows:
             identifier = self._required_id(
                 row.vision_evidence_snapshot_id,
@@ -666,6 +668,17 @@ class WorkflowFactRepository:
                     "Vision evidence snapshot references a missing or cross-Project "
                     "repository binding.",
                 )
+            supersedes_id = row.supersedes_vision_evidence_snapshot_id
+            self._require_product_condition(
+                supersedes_id is None or supersedes_id in facts_by_id,
+                "Vision evidence snapshot supersedes an unknown or later snapshot.",
+            )
+            self._require_product_condition(
+                supersedes_id is None or supersedes_id not in superseded_ids,
+                "Vision evidence snapshot supersession chain branches.",
+            )
+            if supersedes_id is not None:
+                superseded_ids.add(supersedes_id)
             try:
                 evidence_json = _JSON_OBJECT.validate_json(row.evidence_json)
                 evidence = VisionEvidenceBundle.model_validate(evidence_json)
@@ -678,9 +691,7 @@ class WorkflowFactRepository:
                 )
                 raise self._error(message)
             if evidence.evidence_fingerprint != row.evidence_fingerprint:
-                message = (
-                    f"Vision evidence snapshot {identifier} fingerprint changed."
-                )
+                message = f"Vision evidence snapshot {identifier} fingerprint changed."
                 raise self._error(message)
             try:
                 warnings = _JSON_OBJECT_LIST.validate_json(row.warnings_json)
@@ -701,17 +712,18 @@ class WorkflowFactRepository:
             if warnings != evidence_warnings:
                 message = f"Vision evidence snapshot {identifier} warnings changed."
                 raise self._error(message)
-            facts.append(
-                VisionEvidenceSnapshotFact(
-                    vision_evidence_snapshot_id=identifier,
-                    repository_binding_id=row.repository_binding_id,
-                    workflow_node_attempt_id=row.workflow_node_attempt_id,
-                    evidence=evidence_json,
-                    evidence_fingerprint=row.evidence_fingerprint,
-                    warnings=tuple(warnings),
-                    created_at=row.created_at,
-                )
+            fact = VisionEvidenceSnapshotFact(
+                vision_evidence_snapshot_id=identifier,
+                repository_binding_id=row.repository_binding_id,
+                supersedes_vision_evidence_snapshot_id=supersedes_id,
+                workflow_node_attempt_id=row.workflow_node_attempt_id,
+                evidence=evidence_json,
+                evidence_fingerprint=row.evidence_fingerprint,
+                warnings=tuple(warnings),
+                created_at=row.created_at,
             )
+            facts.append(fact)
+            facts_by_id[identifier] = fact
         return tuple(facts)
 
     def _vision_artifacts(
@@ -3747,7 +3759,7 @@ class VisionInputContext:
 class VisionInputSelection:
     """Current Vision chain state without expanding to a workflow snapshot."""
 
-    operation: _VisionOperation
+    generation_operation: _VisionOperation
     accepted_vision: VisionArtifactFact | None
     revision_intent_id: int | None
     prior_turn: VisionInterviewTurnFact | None
@@ -3808,92 +3820,226 @@ class VisionInputFactRepository(WorkflowFactRepository):
         return bool(self._active_accepted_product_goal_ids(goals, decisions, outcomes))
 
 
-def select_vision_interview_input(context: VisionInputContext) -> VisionInputSelection:
-    """Select one current Vision interview chain from its narrow fact projection."""
-    artifacts_by_id = {
-        item.vision_artifact_id: item for item in context.vision_artifacts
+def _active_vision_snapshot_descendant(
+    snapshots: tuple[VisionEvidenceSnapshotFact, ...],
+    root_id: int,
+) -> int:
+    """Follow the explicit supersession chain to one active snapshot leaf."""
+    children = {
+        item.supersedes_vision_evidence_snapshot_id: item.vision_evidence_snapshot_id
+        for item in snapshots
+        if item.supersedes_vision_evidence_snapshot_id is not None
     }
+    current = root_id
+    visited: set[int] = set()
+    while current in children:
+        if current in visited:
+            message = "Vision evidence snapshot supersession is cyclic."
+            raise WorkflowFactLoadError(message)
+        visited.add(current)
+        current = children[current]
+    return current
+
+
+@dataclass(frozen=True)
+class _VisionGenerationLineage:
+    """Exact generation lineage selected from durable Vision facts."""
+
+    operation: _VisionOperation
+    accepted_vision: VisionArtifactFact | None
+    revision_intent_id: int | None
+    snapshot_id: int | None
+
+
+def _current_vision_artifact(
+    context: VisionInputContext,
+) -> VisionArtifactFact | None:
     children = {
         item.supersedes_vision_artifact_id
         for item in context.vision_artifacts
         if item.supersedes_vision_artifact_id is not None
     }
-    current = [
+    current = tuple(
         item
         for item in context.vision_artifacts
         if item.vision_artifact_id not in children
-    ]
+    )
     if len(current) > 1:
         message = "Vision facts are ambiguous."
         raise WorkflowFactLoadError(message)
-    artifact = current[0] if current else None
-    decisions_by_artifact = {
-        item.vision_artifact_id: item for item in context.vision_decisions
-    }
-    if len(decisions_by_artifact) != len(context.vision_decisions):
+    return current[0] if current else None
+
+
+def _vision_decisions_by_artifact(
+    context: VisionInputContext,
+) -> dict[int, VisionArtifactDecisionFact]:
+    decisions = {item.vision_artifact_id: item for item in context.vision_decisions}
+    if len(decisions) != len(context.vision_decisions):
         message = "Vision facts are ambiguous."
         raise WorkflowFactLoadError(message)
+    return decisions
+
+
+def _open_vision_revision(
+    context: VisionInputContext,
+) -> VisionRevisionIntentFact | None:
     completed_turn_ids = {
         item.source_interview_turn_id for item in context.vision_artifacts
     }
-    open_intents = [
+    open_intents = tuple(
         item
         for item in context.revision_intents
         if not any(
-            turn.operation == "revision"
-            and turn.revision_intent_id == item.vision_revision_intent_id
+            turn.revision_intent_id == item.vision_revision_intent_id
             and turn.vision_interview_turn_id in completed_turn_ids
             for turn in context.interview_turns
         )
-    ]
+    )
     if len(open_intents) > 1:
         message = "Vision facts are ambiguous."
         raise WorkflowFactLoadError(message)
-    revision = open_intents[0] if open_intents else None
-    if revision is not None:
-        source = artifacts_by_id[revision.source_vision_artifact_id]
-        operation: _VisionOperation = "revision"
-        accepted_vision = source
-        intent_id = revision.vision_revision_intent_id
-    else:
-        operation = "bootstrap"
-        accepted_vision = None
-        intent_id = None
-        artifact_decision = (
-            None
-            if artifact is None
-            else decisions_by_artifact.get(artifact.vision_artifact_id)
+    return open_intents[0] if open_intents else None
+
+
+def _reviewed_vision_lineage(
+    context: VisionInputContext,
+    *,
+    artifacts_by_id: dict[int, VisionArtifactFact],
+    artifact: VisionArtifactFact,
+) -> _VisionGenerationLineage:
+    source_turn = next(
+        (
+            item
+            for item in context.interview_turns
+            if item.vision_interview_turn_id == artifact.source_interview_turn_id
+        ),
+        None,
+    )
+    if source_turn is None:
+        message = "Vision reviewed artifact source turn is missing."
+        raise WorkflowFactLoadError(message)
+    intent_id = source_turn.revision_intent_id
+    accepted_vision = None
+    if intent_id is not None:
+        revision = next(
+            (
+                item
+                for item in context.revision_intents
+                if item.vision_revision_intent_id == intent_id
+            ),
+            None,
         )
-        if artifact_decision is not None and artifact_decision.decision == "accepted":
-            message = "Accepted Vision requires an explicit revision intent."
+        if revision is None:
+            message = "Vision reviewed artifact revision intent is missing."
             raise WorkflowFactLoadError(message)
+        accepted_vision = artifacts_by_id[revision.source_vision_artifact_id]
+    return _VisionGenerationLineage(
+        operation="revision" if intent_id is not None else "bootstrap",
+        accepted_vision=accepted_vision,
+        revision_intent_id=intent_id,
+        snapshot_id=_active_vision_snapshot_descendant(
+            context.evidence_snapshots,
+            source_turn.vision_evidence_snapshot_id,
+        ),
+    )
+
+
+def _vision_generation_lineage(
+    context: VisionInputContext,
+    *,
+    artifacts_by_id: dict[int, VisionArtifactFact],
+    artifact: VisionArtifactFact | None,
+    decisions: dict[int, VisionArtifactDecisionFact],
+    revision: VisionRevisionIntentFact | None,
+) -> _VisionGenerationLineage:
+    if revision is not None:
+        return _VisionGenerationLineage(
+            operation="revision",
+            accepted_vision=artifacts_by_id[revision.source_vision_artifact_id],
+            revision_intent_id=revision.vision_revision_intent_id,
+            snapshot_id=None,
+        )
+    if artifact is None:
+        return _VisionGenerationLineage("bootstrap", None, None, None)
+    decision = decisions.get(artifact.vision_artifact_id)
+    if decision is None:
+        return _VisionGenerationLineage("bootstrap", None, None, None)
+    if decision.decision == "accepted":
+        message = "Accepted Vision requires an explicit revision intent."
+        raise WorkflowFactLoadError(message)
+    return _reviewed_vision_lineage(
+        context,
+        artifacts_by_id=artifacts_by_id,
+        artifact=artifact,
+    )
+
+
+def _vision_lineage_leaf(
+    context: VisionInputContext,
+    lineage: _VisionGenerationLineage,
+) -> VisionInterviewTurnFact | None:
+    superseded_snapshot_ids = {
+        item.supersedes_vision_evidence_snapshot_id
+        for item in context.evidence_snapshots
+        if item.supersedes_vision_evidence_snapshot_id is not None
+    }
     turns = tuple(
         item
         for item in context.interview_turns
-        if item.revision_intent_id == intent_id
+        if item.revision_intent_id == lineage.revision_intent_id
+        and item.vision_evidence_snapshot_id not in superseded_snapshot_ids
+        and (
+            lineage.snapshot_id is None
+            or item.vision_evidence_snapshot_id == lineage.snapshot_id
+        )
     )
     prior_ids = {item.prior_turn_id for item in turns if item.prior_turn_id is not None}
-    leaves = [item for item in turns if item.vision_interview_turn_id not in prior_ids]
+    leaves = tuple(
+        item for item in turns if item.vision_interview_turn_id not in prior_ids
+    )
     if len(leaves) > 1:
         message = "Vision interview turn chain is ambiguous."
         raise WorkflowFactLoadError(message)
-    prior_turn = leaves[0] if leaves else None
-    snapshot = None
-    if prior_turn is not None:
-        matches = tuple(
-            item
-            for item in context.evidence_snapshots
-            if item.vision_evidence_snapshot_id
-            == prior_turn.vision_evidence_snapshot_id
-        )
-        if len(matches) != 1:
-            message = "Vision evidence snapshot is ambiguous."
-            raise WorkflowFactLoadError(message)
-        snapshot = matches[0]
+    return leaves[0] if leaves else None
+
+
+def _vision_lineage_snapshot(
+    context: VisionInputContext,
+    prior_turn: VisionInterviewTurnFact | None,
+) -> VisionEvidenceSnapshotFact | None:
+    if prior_turn is None:
+        return None
+    matches = tuple(
+        item
+        for item in context.evidence_snapshots
+        if item.vision_evidence_snapshot_id == prior_turn.vision_evidence_snapshot_id
+    )
+    if len(matches) != 1:
+        message = "Vision evidence snapshot is ambiguous."
+        raise WorkflowFactLoadError(message)
+    return matches[0]
+
+
+def select_vision_interview_input(context: VisionInputContext) -> VisionInputSelection:
+    """Select one current Vision interview chain from its narrow fact projection."""
+    artifacts_by_id = {
+        item.vision_artifact_id: item for item in context.vision_artifacts
+    }
+    artifact = _current_vision_artifact(context)
+    decisions = _vision_decisions_by_artifact(context)
+    revision = _open_vision_revision(context)
+    lineage = _vision_generation_lineage(
+        context,
+        artifacts_by_id=artifacts_by_id,
+        artifact=artifact,
+        decisions=decisions,
+        revision=revision,
+    )
+    prior_turn = _vision_lineage_leaf(context, lineage)
     return VisionInputSelection(
-        operation="clarification" if prior_turn is not None else operation,
-        accepted_vision=accepted_vision,
-        revision_intent_id=intent_id,
+        generation_operation=lineage.operation,
+        accepted_vision=lineage.accepted_vision,
+        revision_intent_id=lineage.revision_intent_id,
         prior_turn=prior_turn,
-        evidence_snapshot=snapshot,
+        evidence_snapshot=_vision_lineage_snapshot(context, prior_turn),
     )

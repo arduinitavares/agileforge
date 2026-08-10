@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import pytest
 from git import Repo
@@ -305,6 +305,123 @@ def test_feedback_clarification_allows_empty_addressed_question_ids(
     request = VisionAgentInput.model_validate(payload).request
     assert isinstance(request, VisionClarificationInput)
     assert request.addressed_question_ids == ()
+
+
+@pytest.mark.parametrize("review_decision", ["feedback", "rejected"])
+def test_revised_review_clarification_uses_revised_source_lineage(
+    engine: Engine,
+    review_decision: Literal["feedback", "rejected"],
+) -> None:
+    """Bind revised feedback and rejection to the revised turn and snapshot."""
+    project_id = _add_project(engine, name=f"Revised {review_decision} Vision")
+    domain = _domain(engine)
+    initial_start, initial_attempt = _start(domain, project_id, "review-initial")
+    initial = _record(
+        engine,
+        domain,
+        initial_start,
+        initial_attempt,
+        request=_RecordRequest(complete=True, key="review-initial-record"),
+    )
+    initial_artifact_id = initial.output["vision_artifact_id"]
+    initial_fingerprint = initial.output["vision_fingerprint"]
+    assert isinstance(initial_artifact_id, int)
+    assert isinstance(initial_fingerprint, str)
+    accepted = _review_vision(
+        domain,
+        project_id,
+        _VisionReview(
+            artifact_id=initial_artifact_id,
+            fingerprint=initial_fingerprint,
+            decision="accepted",
+            rationale="Accept before revision.",
+            idempotency_key="review-initial-accept",
+        ),
+    )
+    assert accepted.ok
+    revision = _decision(domain, project_id, "vision.revision.start")
+    position = domain.position(project_id)
+    opened = domain.transition(
+        BeginVisionRevision(
+            project_id=project_id,
+            graph_version=position.graph_version,
+            fact_fingerprint=position.fact_fingerprint,
+            decision_fingerprint=revision.decision_fingerprint,
+            idempotency_key="review-revision-open",
+            actor="operator@example.com",
+            source_vision_artifact_id=initial_artifact_id,
+            source_vision_fingerprint=initial_fingerprint,
+            reason="Change the differentiator.",
+        )
+    )
+    assert opened.ok
+    revised_components = COMPONENTS | {"differentiator": "Revised differentiator"}
+    revision_start, revision_attempt = _start(
+        domain,
+        project_id,
+        "review-revision",
+        operation="revision",
+    )
+    revised = _record(
+        engine,
+        domain,
+        revision_start,
+        revision_attempt,
+        request=_RecordRequest(
+            complete=True,
+            key="review-revision-record",
+            operation="revision",
+            components=revised_components,
+            statement="A revised Vision statement.",
+        ),
+    )
+    revised_artifact_id = revised.output["vision_artifact_id"]
+    revised_fingerprint = revised.output["vision_fingerprint"]
+    assert isinstance(revised_artifact_id, int)
+    assert isinstance(revised_fingerprint, str)
+    reviewed = _review_vision(
+        domain,
+        project_id,
+        _VisionReview(
+            artifact_id=revised_artifact_id,
+            fingerprint=revised_fingerprint,
+            decision=review_decision,
+            rationale="Refine the revised candidate.",
+            idempotency_key=f"review-revised-{review_decision}",
+        ),
+    )
+    assert reviewed.ok
+
+    payload = _service(engine).build_clarification(
+        project_id=project_id,
+        decision=_decision(domain, project_id, "vision.interview"),
+        user_text="Refine this revised direction.",
+    )
+    request = VisionAgentInput.model_validate(payload).request
+    assert isinstance(request, VisionClarificationInput)
+    with Session(engine) as session:
+        turns = session.exec(
+            select(VisionInterviewTurn).where(
+                VisionInterviewTurn.project_id == project_id
+            )
+        ).all()
+        initial_turn = next(turn for turn in turns if turn.operation == "bootstrap")
+        revised_turn = next(turn for turn in turns if turn.operation == "revision")
+        revised_snapshot_id = revised_turn.vision_evidence_snapshot_id
+        initial_snapshot_id = initial_turn.vision_evidence_snapshot_id
+        for turn in turns:
+            if turn.revision_intent_id is not None:
+                turn.revision_intent_id = None
+                session.add(turn)
+        session.flush()
+        for intent in session.exec(select(VisionRevisionIntent)).all():
+            session.delete(intent)
+        session.commit()
+
+    assert request.vision_evidence_snapshot_id == revised_snapshot_id
+    assert request.vision_evidence_snapshot_id != initial_snapshot_id
+    assert request.current_components.differentiator == "Revised differentiator"
+    assert request.current_statement == "A revised Vision statement."
     assert request.current_questions == ()
 
 

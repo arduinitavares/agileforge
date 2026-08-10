@@ -43,6 +43,7 @@ EXPECTED_COLUMNS: dict[type[SQLModel], set[str]] = {
         "vision_evidence_snapshot_id",
         "project_id",
         "repository_binding_id",
+        "supersedes_vision_evidence_snapshot_id",
         "workflow_node_attempt_id",
         "evidence_json",
         "evidence_fingerprint",
@@ -257,6 +258,20 @@ def test_product_definition_records_expose_exact_immutable_columns() -> None:
 def test_product_definition_records_enforce_scoped_lineage_and_values() -> None:
     """Reject cross-Project parents and unsupported operation or decision values."""
     assert (
+        ("project_id", "repository_binding_id"),
+        (
+            "repository_bindings.project_id",
+            "repository_bindings.repository_binding_id",
+        ),
+    ) in _foreign_keys("vision_evidence_snapshots")
+    assert (
+        ("project_id", "supersedes_vision_evidence_snapshot_id"),
+        (
+            "vision_evidence_snapshots.project_id",
+            "vision_evidence_snapshots.vision_evidence_snapshot_id",
+        ),
+    ) in _foreign_keys("vision_evidence_snapshots")
+    assert (
         ("project_id", "source_vision_artifact_id", "source_vision_fingerprint"),
         (
             "vision_artifacts.project_id",
@@ -285,9 +300,8 @@ def test_product_definition_records_enforce_scoped_lineage_and_values() -> None:
             "vision_interview_turns.vision_interview_turn_id",
         ),
     ) in _foreign_keys("vision_interview_turns")
-    assert (
-        "operation IN ('bootstrap', 'clarification', 'revision')"
-        in _checks("vision_interview_turns")
+    assert "operation IN ('bootstrap', 'clarification', 'revision')" in _checks(
+        "vision_interview_turns"
     )
     assert (
         "((operation = 'bootstrap' AND user_text IS NULL) "
@@ -302,47 +316,15 @@ def test_product_definition_records_enforce_scoped_lineage_and_values() -> None:
         "specification_decisions"
     )
 
-    vision_table = SQLModel.metadata.tables["vision_interview_turns"]
-    bootstrap_index = next(
-        index
-        for index in vision_table.indexes
-        if index.name == "uq_vision_interview_bootstrap_turn_number"
-    )
-    assert bootstrap_index.unique
-    assert tuple(bootstrap_index.columns.keys()) == ("project_id", "turn_number")
-    assert (
-        str(bootstrap_index.dialect_options["sqlite"]["where"])
-        == "operation = 'bootstrap'"
-    )
-    revision_index = next(
-        index
-        for index in vision_table.indexes
-        if index.name == "uq_vision_interview_revision_turn_number"
-    )
-    assert revision_index.unique
-    assert tuple(revision_index.columns.keys()) == (
-        "project_id",
-        "revision_intent_id",
-        "turn_number",
-    )
-    assert (
-        str(revision_index.dialect_options["sqlite"]["where"])
-        == "operation = 'revision'"
-    )
-    clarification_index = next(
-        index
-        for index in vision_table.indexes
-        if index.name == "uq_vision_interview_clarification_turn_number"
-    )
-    assert clarification_index.unique
-    assert tuple(clarification_index.columns.keys()) == (
+    vision_constraints = {
+        constraint.name: tuple(constraint.columns.keys())
+        for constraint in SQLModel.metadata.tables["vision_interview_turns"].constraints
+        if isinstance(constraint, UniqueConstraint)
+    }
+    assert vision_constraints["uq_vision_interview_snapshot_turn_number"] == (
         "project_id",
         "vision_evidence_snapshot_id",
         "turn_number",
-    )
-    assert (
-        str(clarification_index.dialect_options["sqlite"]["where"])
-        == "operation = 'clarification'"
     )
 
     vision_artifact_keys = _foreign_keys("vision_artifacts")
@@ -434,9 +416,10 @@ def _insert_vision_turn(
     *,
     operation: str,
     revision_intent_id: int | None,
+    vision_evidence_snapshot_id: int,
     turn_number: int,
 ) -> None:
-    """Insert minimal rows to exercise SQLite's partial unique indexes."""
+    """Insert minimal rows to exercise snapshot-scoped turn uniqueness."""
     session.connection().exec_driver_sql(
         "INSERT INTO vision_interview_turns ("
         "project_id, operation, turn_number, revision_intent_id, "
@@ -445,41 +428,46 @@ def _insert_vision_turn(
         "clarifying_questions_json, component_basis_json, assumptions_json, "
         "conflicts_json, output_fingerprint, workflow_node_attempt_id, "
         "attempt_fingerprint, recorded_at"
-        ") VALUES (1, :operation, :turn_number, :revision_intent_id, 1, NULL, "
+        ") VALUES (1, :operation, :turn_number, :revision_intent_id, "
+        ":vision_evidence_snapshot_id, NULL, "
         ":user_text, '{}', 'statement', 1, '[]', '[]', '[]', '[]', "
         "'sha256:output', 1, "
         "'sha256:attempt', '2026-08-05 12:00:00')",
         {
             "operation": operation,
             "revision_intent_id": revision_intent_id,
+            "vision_evidence_snapshot_id": vision_evidence_snapshot_id,
             "turn_number": turn_number,
             "user_text": None if operation == "bootstrap" else "user",
         },
     )
 
 
-def test_vision_interview_turn_number_indexes_are_scoped_to_each_chain(
+def test_vision_interview_turn_numbers_are_scoped_to_each_snapshot_lineage(
     engine: Engine,
 ) -> None:
-    """Allow equal chain-local numbers and reject duplicates in one chain."""
+    """Allow equal lineage-local numbers and reject duplicates on one snapshot."""
     with Session(engine) as session:
         session.connection().exec_driver_sql("PRAGMA foreign_keys = OFF")
         _insert_vision_turn(
             session,
             operation="bootstrap",
             revision_intent_id=None,
+            vision_evidence_snapshot_id=1,
             turn_number=1,
         )
         _insert_vision_turn(
             session,
             operation="revision",
             revision_intent_id=10,
+            vision_evidence_snapshot_id=2,
             turn_number=1,
         )
         _insert_vision_turn(
             session,
             operation="revision",
             revision_intent_id=11,
+            vision_evidence_snapshot_id=3,
             turn_number=1,
         )
         with pytest.raises(IntegrityError):
@@ -487,6 +475,7 @@ def test_vision_interview_turn_number_indexes_are_scoped_to_each_chain(
                 session,
                 operation="bootstrap",
                 revision_intent_id=None,
+                vision_evidence_snapshot_id=1,
                 turn_number=1,
             )
         session.rollback()
@@ -495,6 +484,7 @@ def test_vision_interview_turn_number_indexes_are_scoped_to_each_chain(
             session,
             operation="revision",
             revision_intent_id=10,
+            vision_evidence_snapshot_id=2,
             turn_number=1,
         )
         with pytest.raises(IntegrityError):
@@ -502,6 +492,7 @@ def test_vision_interview_turn_number_indexes_are_scoped_to_each_chain(
                 session,
                 operation="revision",
                 revision_intent_id=10,
+                vision_evidence_snapshot_id=2,
                 turn_number=1,
             )
         session.rollback()

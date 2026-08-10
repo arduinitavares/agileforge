@@ -22,6 +22,7 @@ from services.contracts.vision import (
     VisionAgentInput,
     VisionClarificationInput,
     VisionDraftOutput,
+    VisionModelInput,
     VisionRepairInput,
 )
 from services.vision_output_validation import (
@@ -340,7 +341,10 @@ def _vision_interview_output_adapter(
             _JSON_OBJECT.validate_python(item.model_dump(mode="json"))
             for item in request.evidence.warnings
         ),
-        repository_binding_id=None,
+        repository_binding_id=parsed_input.host.repository_binding_id,
+        supersedes_vision_evidence_snapshot_id=(
+            parsed_input.host.supersedes_vision_evidence_snapshot_id
+        ),
         updated_components=_JSON_OBJECT.validate_python(
             parsed.components.model_dump(mode="json")
         ),
@@ -614,7 +618,9 @@ def build_vision_workflow(
             )
         generated = await context.run_node(
             primary_leaf,
-            node_input=envelope.request.model_dump(mode="json"),
+            node_input=VisionModelInput(request=envelope.request).model_dump(
+                mode="json"
+            ),
         )
         draft = VisionDraftOutput.model_validate(validate_structured_output(generated))
         try:

@@ -760,6 +760,32 @@ def _seed_superseded_vision_with_stale_open_intent(
         assert stale_intent.vision_revision_intent_id is not None
         assert replacement_intent.vision_revision_intent_id is not None
 
+        source_snapshot = session.get(VisionEvidenceSnapshot, snapshot_id)
+        assert source_snapshot is not None
+        stale_snapshot = VisionEvidenceSnapshot(
+            project_id=project_id,
+            repository_binding_id=source_snapshot.repository_binding_id,
+            workflow_node_attempt_id=attempt_id,
+            evidence_json=source_snapshot.evidence_json,
+            evidence_fingerprint=source_snapshot.evidence_fingerprint,
+            warnings_json=source_snapshot.warnings_json,
+            created_at=NOW + timedelta(seconds=4),
+        )
+        replacement_snapshot = VisionEvidenceSnapshot(
+            project_id=project_id,
+            repository_binding_id=source_snapshot.repository_binding_id,
+            workflow_node_attempt_id=attempt_id,
+            evidence_json=source_snapshot.evidence_json,
+            evidence_fingerprint=source_snapshot.evidence_fingerprint,
+            warnings_json=source_snapshot.warnings_json,
+            created_at=NOW + timedelta(seconds=4),
+        )
+        session.add(stale_snapshot)
+        session.add(replacement_snapshot)
+        session.flush()
+        assert stale_snapshot.vision_evidence_snapshot_id is not None
+        assert replacement_snapshot.vision_evidence_snapshot_id is not None
+
         stale_components = _vision_components(complete=False)
         stale_statement = "An obsolete Vision revision interview."
         stale_questions = [
@@ -773,7 +799,7 @@ def _seed_superseded_vision_with_stale_open_intent(
             operation="revision",
             turn_number=1,
             revision_intent_id=stale_intent.vision_revision_intent_id,
-            vision_evidence_snapshot_id=snapshot_id,
+            vision_evidence_snapshot_id=(stale_snapshot.vision_evidence_snapshot_id),
             prior_turn_id=None,
             user_text="Continue revising Vision A.",
             components_json=canonical_json(stale_components),
@@ -802,7 +828,9 @@ def _seed_superseded_vision_with_stale_open_intent(
             operation="revision",
             turn_number=1,
             revision_intent_id=replacement_intent.vision_revision_intent_id,
-            vision_evidence_snapshot_id=snapshot_id,
+            vision_evidence_snapshot_id=(
+                replacement_snapshot.vision_evidence_snapshot_id
+            ),
             prior_turn_id=None,
             user_text="Complete the selected replacement Vision.",
             components_json=canonical_json(replacement_components),
@@ -841,7 +869,9 @@ def _seed_superseded_vision_with_stale_open_intent(
                     "statement": replacement_statement,
                 }
             ),
-            vision_evidence_snapshot_id=snapshot_id,
+            vision_evidence_snapshot_id=(
+                replacement_snapshot.vision_evidence_snapshot_id
+            ),
             component_basis_json="[]",
             assumptions_json="[]",
             conflicts_json="[]",
@@ -1022,7 +1052,6 @@ def test_incomplete_vision_turn_exposes_exact_transcript_and_questions(
             "operation": "bootstrap",
             "turn_number": 1,
             "revision_intent_id": None,
-            "vision_evidence_snapshot_id": seeded["vision_evidence_snapshot_id"],
             "prior_turn_id": None,
             "user_text": None,
             "statement": statement,

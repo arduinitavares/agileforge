@@ -92,6 +92,14 @@ class _CandidateEvidence:
 
 
 @dataclass(frozen=True)
+class VisionEvidenceCollection:
+    """One evidence bundle and the exact binding used to collect it."""
+
+    bundle: VisionEvidenceBundle
+    repository_binding_id: int | None
+
+
+@dataclass(frozen=True)
 class VisionEvidenceCollector:
     """Read only the approved, stable evidence surface for one project."""
 
@@ -100,6 +108,10 @@ class VisionEvidenceCollector:
 
     def collect(self, project_id: int) -> VisionEvidenceBundle:
         """Collect one deterministic bundle or fail closed on provenance drift."""
+        return self.collect_with_provenance(project_id).bundle
+
+    def collect_with_provenance(self, project_id: int) -> VisionEvidenceCollection:
+        """Collect evidence and return binding identity from the same context."""
         context = self._load_context(project_id)
         candidates = [self._project_candidate(context.project)]
         warnings: list[VisionEvidenceWarning] = []
@@ -113,7 +125,18 @@ class VisionEvidenceCollector:
                 )
             )
             self._verify_unchanged(context.binding, observed)
-        return self._bounded_bundle(candidates, warnings)
+        binding_id = (
+            None if context.binding is None else context.binding.repository_binding_id
+        )
+        if context.binding is not None and binding_id is None:
+            raise VisionEvidenceCollectionError(
+                VisionEvidenceErrorCode.REPOSITORY_BINDING_INVALID,
+                "Active repository binding has no durable identity.",
+            )
+        return VisionEvidenceCollection(
+            bundle=self._bounded_bundle(candidates, warnings),
+            repository_binding_id=binding_id,
+        )
 
     def _load_context(self, project_id: int) -> _CollectionContext:
         """Load the requested project and its exact active binding, if selected."""
@@ -828,6 +851,7 @@ class VisionEvidenceCollector:
 
 
 __all__ = [
+    "VisionEvidenceCollection",
     "VisionEvidenceCollectionError",
     "VisionEvidenceCollector",
     "VisionEvidenceErrorCode",

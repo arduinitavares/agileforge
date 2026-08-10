@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import Index, text
 from sqlalchemy.schema import CheckConstraint, ForeignKeyConstraint, UniqueConstraint
 from sqlalchemy.types import Text
 from sqlmodel import Field, SQLModel
@@ -72,11 +71,23 @@ class VisionEvidenceSnapshot(SQLModel, table=True):
             ],
             name="fk_vision_evidence_snapshot_repository_binding",
         ),
+        ForeignKeyConstraint(
+            ["project_id", "supersedes_vision_evidence_snapshot_id"],
+            [
+                "vision_evidence_snapshots.project_id",
+                "vision_evidence_snapshots.vision_evidence_snapshot_id",
+            ],
+            name="fk_vision_evidence_snapshot_supersedes",
+        ),
     )
 
     vision_evidence_snapshot_id: int | None = Field(default=None, primary_key=True)
     project_id: int = Field(foreign_key="projects.project_id", index=True)
     repository_binding_id: int | None = Field(default=None, index=True)
+    supersedes_vision_evidence_snapshot_id: int | None = Field(
+        default=None,
+        index=True,
+    )
     workflow_node_attempt_id: int = Field(index=True)
     evidence_json: str = Field(sa_type=Text)
     evidence_fingerprint: str = Field(index=True)
@@ -94,28 +105,11 @@ class VisionInterviewTurn(SQLModel, table=True):
             "vision_interview_turn_id",
             name="uq_vision_interview_turn_project_id",
         ),
-        Index(
-            "uq_vision_interview_bootstrap_turn_number",
-            "project_id",
-            "turn_number",
-            unique=True,
-            sqlite_where=text("operation = 'bootstrap'"),
-        ),
-        Index(
-            "uq_vision_interview_revision_turn_number",
-            "project_id",
-            "revision_intent_id",
-            "turn_number",
-            unique=True,
-            sqlite_where=text("operation = 'revision'"),
-        ),
-        Index(
-            "uq_vision_interview_clarification_turn_number",
+        UniqueConstraint(
             "project_id",
             "vision_evidence_snapshot_id",
             "turn_number",
-            unique=True,
-            sqlite_where=text("operation = 'clarification'"),
+            name="uq_vision_interview_snapshot_turn_number",
         ),
         CheckConstraint(
             "operation IN ('bootstrap', 'clarification', 'revision')",

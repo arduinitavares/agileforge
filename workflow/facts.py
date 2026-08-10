@@ -55,6 +55,7 @@ class VisionEvidenceSnapshotFact(FrozenModel):
 
     vision_evidence_snapshot_id: int
     repository_binding_id: int | None
+    supersedes_vision_evidence_snapshot_id: int | None
     workflow_node_attempt_id: int
     evidence: JsonObject
     evidence_fingerprint: str

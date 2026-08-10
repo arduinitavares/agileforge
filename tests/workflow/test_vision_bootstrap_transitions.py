@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from sqlmodel import Session, col, select
 
+from adapters.git.repository_probe import GitPythonRepositoryProbe
 from models.core import Project
 from models.product_definition import (
     VisionArtifact,
@@ -14,6 +16,8 @@ from models.product_definition import (
     VisionInterviewTurn,
     VisionRevisionIntent,
 )
+from services.contracts.vision import VisionAgentInput, VisionRevisionInput
+from services.vision_input import VisionInputService
 from tests.workflow.test_vision_interview_transitions import (
     COMPONENTS,
     _basis,
@@ -26,7 +30,7 @@ from tests.workflow.test_vision_interview_transitions import (
     _start,
     _VisionReview,
 )
-from workflow.contracts import RecommendationKind, WorkflowErrorCode
+from workflow.contracts import JsonObject, RecommendationKind, WorkflowErrorCode
 from workflow.requests import (
     BeginVisionRevision,
     FailNodeAttempt,
@@ -37,7 +41,19 @@ from workflow.requests import (
 if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
 
+    from workflow.domain import WorkflowDomain
+
 REVISION_TURN_COUNT = 2
+
+
+@dataclass(frozen=True)
+class _OpenRevision:
+    """Inputs needed to open one revision intent in transition tests."""
+
+    artifact_id: int
+    fingerprint: str
+    idempotency_key: str
+    reason: str
 
 
 def _project(engine: Engine, name: str = "Vision bootstrap transitions") -> int:
@@ -47,6 +63,50 @@ def _project(engine: Engine, name: str = "Vision bootstrap transitions") -> int:
         session.commit()
         assert project.project_id is not None
         return project.project_id
+
+
+def _open_revision(
+    domain: WorkflowDomain,
+    project_id: int,
+    request: _OpenRevision,
+) -> int:
+    """Open one revision intent and return its durable identity."""
+    position = domain.position(project_id)
+    decision = _decision(domain, project_id, "vision.revision.start")
+    result = domain.transition(
+        BeginVisionRevision(
+            project_id=project_id,
+            graph_version=position.graph_version,
+            fact_fingerprint=position.fact_fingerprint,
+            decision_fingerprint=decision.decision_fingerprint,
+            idempotency_key=request.idempotency_key,
+            actor="operator@example.com",
+            source_vision_artifact_id=request.artifact_id,
+            source_vision_fingerprint=request.fingerprint,
+            reason=request.reason,
+        )
+    )
+    assert result.ok
+    revision_intent_id = result.output["vision_revision_intent_id"]
+    assert isinstance(revision_intent_id, int)
+    return revision_intent_id
+
+
+def _try_build_revision_bootstrap(
+    engine: Engine,
+    domain: WorkflowDomain,
+    project_id: int,
+) -> tuple[JsonObject | None, ValueError | None]:
+    """Build host input while preserving cleanup after an assertion failure."""
+    try:
+        decision = _decision(domain, project_id, "vision.bootstrap")
+        payload = VisionInputService(
+            engine=engine,
+            repository_probe=GitPythonRepositoryProbe(),
+        ).build_bootstrap(project_id, decision)
+    except ValueError as error:
+        return None, error
+    return payload, None
 
 
 def test_bootstrap_persists_snapshot_and_turn_atomically(engine: Engine) -> None:
@@ -254,24 +314,16 @@ def test_revision_clarification_reuses_revision_snapshot(engine: Engine) -> None
             idempotency_key="revision-clarification-accept",
         ),
     ).ok
-    position = domain.position(project_id)
-    revision = _decision(domain, project_id, "vision.revision.start")
-    opened = domain.transition(
-        BeginVisionRevision(
-            project_id=project_id,
-            graph_version=position.graph_version,
-            fact_fingerprint=position.fact_fingerprint,
-            decision_fingerprint=revision.decision_fingerprint,
+    revision_intent_id = _open_revision(
+        domain,
+        project_id,
+        _OpenRevision(
+            artifact_id=artifact_id,
+            fingerprint=fingerprint,
             idempotency_key="revision-clarification-open",
-            actor="operator@example.com",
-            source_vision_artifact_id=artifact_id,
-            source_vision_fingerprint=fingerprint,
             reason="Direction changed.",
-        )
+        ),
     )
-    assert opened.ok
-    revision_intent_id = opened.output["vision_revision_intent_id"]
-    assert isinstance(revision_intent_id, int)
     revision_start, revision_attempt = _start(
         domain,
         project_id,
@@ -310,6 +362,37 @@ def test_revision_clarification_reuses_revision_snapshot(engine: Engine) -> None
             components=COMPONENTS | {"differentiator": "Clarified revision lineage"},
         ),
     )
+    assert clarified.ok
+    revised_artifact_id = clarified.output["vision_artifact_id"]
+    revised_fingerprint = clarified.output["vision_fingerprint"]
+    assert isinstance(revised_artifact_id, int)
+    assert isinstance(revised_fingerprint, str)
+    assert _review_vision(
+        domain,
+        project_id,
+        _VisionReview(
+            artifact_id=revised_artifact_id,
+            fingerprint=revised_fingerprint,
+            decision="accepted",
+            rationale="Accept clarified revision.",
+            idempotency_key="revision-clarification-revised-accept",
+        ),
+    ).ok
+    _open_revision(
+        domain,
+        project_id,
+        _OpenRevision(
+            artifact_id=revised_artifact_id,
+            fingerprint=revised_fingerprint,
+            idempotency_key="revision-clarification-second-open",
+            reason="Revise the clarified direction again.",
+        ),
+    )
+    second_payload, selection_error = _try_build_revision_bootstrap(
+        engine,
+        domain,
+        project_id,
+    )
 
     revision_operations: list[str] = []
     revision_snapshot_ids: set[int | None] = set()
@@ -327,14 +410,19 @@ def test_revision_clarification_reuses_revision_snapshot(engine: Engine) -> None
         }
         clarification_prior_turn_id = revision_turns[1].prior_turn_id
         revision_first_turn_id = revision_turns[0].vision_interview_turn_id
-        for turn in revision_turns:
-            turn.revision_intent_id = None
-            session.add(turn)
+        for turn in session.exec(select(VisionInterviewTurn)).all():
+            if turn.revision_intent_id is not None:
+                turn.revision_intent_id = None
+                session.add(turn)
         for intent in session.exec(select(VisionRevisionIntent)).all():
             session.delete(intent)
         session.commit()
 
-    assert clarified.ok
+    assert selection_error is None
+    assert second_payload is not None
+    second_request = VisionAgentInput.model_validate(second_payload).request
+    assert isinstance(second_request, VisionRevisionInput)
+    assert second_request.revision_reason == "Revise the clarified direction again."
     assert len(revision_operations) == REVISION_TURN_COUNT
     assert revision_operations == [
         "revision",

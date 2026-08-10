@@ -218,6 +218,8 @@ def _create_snapshot(
     session: Session,
     request: GenerateVisionBootstrap,
     evaluated_at: datetime,
+    *,
+    revision_intent_id: int | None,
 ) -> VisionEvidenceSnapshot | TransitionResult:
     try:
         evidence = VisionEvidenceBundle.model_validate(request.evidence)
@@ -231,9 +233,42 @@ def _create_snapshot(
     )
     if warnings_json != expected_warnings:
         return _conflict("Vision bootstrap evidence warnings changed.")
+    supersedes_id = request.supersedes_vision_evidence_snapshot_id
+    if supersedes_id is not None:
+        superseded = session.exec(
+            select(VisionEvidenceSnapshot).where(
+                col(VisionEvidenceSnapshot.project_id) == request.project_id,
+                col(VisionEvidenceSnapshot.vision_evidence_snapshot_id)
+                == supersedes_id,
+            )
+        ).one_or_none()
+        existing_child = session.exec(
+            select(VisionEvidenceSnapshot).where(
+                col(VisionEvidenceSnapshot.project_id) == request.project_id,
+                col(VisionEvidenceSnapshot.supersedes_vision_evidence_snapshot_id)
+                == supersedes_id,
+            )
+        ).one_or_none()
+        lineage_turns = session.exec(
+            select(VisionInterviewTurn).where(
+                col(VisionInterviewTurn.project_id) == request.project_id,
+                col(VisionInterviewTurn.vision_evidence_snapshot_id) == supersedes_id,
+            )
+        ).all()
+        if (
+            superseded is None
+            or existing_child is not None
+            or not lineage_turns
+            or {turn.revision_intent_id for turn in lineage_turns}
+            != {revision_intent_id}
+        ):
+            return _conflict(
+                "Vision replacement does not target the active same-lineage snapshot."
+            )
     snapshot = VisionEvidenceSnapshot(
         project_id=request.project_id,
         repository_binding_id=request.repository_binding_id,
+        supersedes_vision_evidence_snapshot_id=supersedes_id,
         workflow_node_attempt_id=request.attempt_id,
         evidence_json=canonical_json(evidence.model_dump(mode="json")),
         evidence_fingerprint=evidence.evidence_fingerprint,
@@ -285,19 +320,47 @@ def _prior_turn(
 
 def _revision_for_generation(
     session: Session,
-    request: GenerateVisionBootstrap | RecordVisionInterviewTurn,
+    request: GenerateVisionBootstrap,
 ) -> VisionRevisionIntent | TransitionResult | None:
     """Resolve whether this request belongs to the open revision lineage."""
     revision = _open_revision_intent(session, request.project_id)
-    if isinstance(request, RecordVisionInterviewTurn):
-        return revision
+    if request.operation == "revision" and revision is None:
+        return _conflict("Vision revision does not have one open revision intent.")
     if request.operation == "revision":
-        if revision is None:
-            return _conflict("Vision revision does not have one open revision intent.")
         return revision
     if revision is not None:
         return _conflict("Initial Vision turn is invalid while a revision is open.")
     return None
+
+
+def _revision_for_snapshot(
+    session: Session,
+    *,
+    project_id: int,
+    snapshot_id: int,
+) -> VisionRevisionIntent | TransitionResult | None:
+    """Derive exact revision identity from one selected snapshot lineage."""
+    turns = session.exec(
+        select(VisionInterviewTurn).where(
+            col(VisionInterviewTurn.project_id) == project_id,
+            col(VisionInterviewTurn.vision_evidence_snapshot_id) == snapshot_id,
+        )
+    ).all()
+    revision_ids = {turn.revision_intent_id for turn in turns}
+    if not turns or len(revision_ids) != 1:
+        return _conflict("Vision snapshot lineage has ambiguous revision identity.")
+    revision_id = revision_ids.pop()
+    if revision_id is None:
+        return None
+    revision = session.exec(
+        select(VisionRevisionIntent).where(
+            col(VisionRevisionIntent.project_id) == project_id,
+            col(VisionRevisionIntent.vision_revision_intent_id) == revision_id,
+        )
+    ).one_or_none()
+    if revision is None:
+        return _conflict("Vision snapshot references a missing revision intent.")
+    return revision
 
 
 def _bootstrap_input(evidence: VisionEvidenceBundle) -> VisionBootstrapInput:
@@ -379,12 +442,12 @@ def _generation_context(
     request: GenerateVisionBootstrap | RecordVisionInterviewTurn,
 ) -> _GenerationContext | TransitionResult:
     """Validate request lineage and prepare draft validation input."""
-    revision = _revision_for_generation(session, request)
-    if isinstance(revision, TransitionResult):
-        return revision
     if isinstance(request, GenerateVisionBootstrap):
+        revision = _revision_for_generation(session, request)
+        if isinstance(revision, TransitionResult):
+            return revision
         return _bootstrap_generation_context(session, request, revision)
-    return _clarification_generation_context(session, request, revision)
+    return _clarification_generation_context(session, request)
 
 
 def _bootstrap_generation_context(
@@ -413,15 +476,24 @@ def _bootstrap_generation_context(
 def _clarification_generation_context(
     session: Session,
     request: RecordVisionInterviewTurn,
-    revision: VisionRevisionIntent | None,
 ) -> _GenerationContext | TransitionResult:
     """Prepare one clarification against its existing evidence snapshot."""
-    revision_intent_id = (
-        None if revision is None else revision.vision_revision_intent_id
-    )
     snapshot = _existing_snapshot(session, request)
     if isinstance(snapshot, TransitionResult):
         return snapshot
+    snapshot_id = snapshot.vision_evidence_snapshot_id
+    if snapshot_id is None:
+        return _conflict("Vision clarification snapshot has no durable identity.")
+    revision = _revision_for_snapshot(
+        session,
+        project_id=request.project_id,
+        snapshot_id=snapshot_id,
+    )
+    if isinstance(revision, TransitionResult):
+        return revision
+    revision_intent_id = (
+        None if revision is None else revision.vision_revision_intent_id
+    )
     input_payload = _clarification_input(
         session,
         request,
@@ -456,17 +528,24 @@ def _materialize_artifact(
     """Create the reviewable Vision artifact for a complete turn."""
     if context.snapshot is None or context.snapshot.vision_evidence_snapshot_id is None:
         return _conflict("Vision artifact requires a durable evidence snapshot.")
-    parent_id = (
-        None
-        if context.revision is None
-        else context.revision.source_vision_artifact_id
-    )
-    if parent_id is None:
-        parent_id = session.exec(
-            select(func.max(VisionArtifact.vision_artifact_id)).where(
-                col(VisionArtifact.project_id) == request.project_id
-            )
-        ).one()
+    artifacts = session.exec(
+        select(VisionArtifact).where(
+            col(VisionArtifact.project_id) == request.project_id
+        )
+    ).all()
+    superseded_artifact_ids = {
+        artifact.supersedes_vision_artifact_id
+        for artifact in artifacts
+        if artifact.supersedes_vision_artifact_id is not None
+    }
+    artifact_leaves = [
+        artifact
+        for artifact in artifacts
+        if artifact.vision_artifact_id not in superseded_artifact_ids
+    ]
+    if len(artifact_leaves) > 1:
+        return _conflict("Vision artifact replacement lineage is ambiguous.")
+    parent_id = None if not artifact_leaves else artifact_leaves[0].vision_artifact_id
     version_number = (
         session.exec(
             select(func.max(VisionArtifact.version_number)).where(
@@ -581,7 +660,12 @@ def _prepared_generation(
         return draft
     snapshot = context.snapshot
     if isinstance(request, GenerateVisionBootstrap):
-        snapshot = _create_snapshot(session, request, evaluated_at)
+        snapshot = _create_snapshot(
+            session,
+            request,
+            evaluated_at,
+            revision_intent_id=context.revision_intent_id,
+        )
         if isinstance(snapshot, TransitionResult):
             return snapshot
     if snapshot is None:

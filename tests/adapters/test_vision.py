@@ -20,8 +20,8 @@ from services.application import (
     VisionRevisionRequest,
 )
 from services.contracts.vision import (
-    VisionAgentInput,
     VisionDraftOutput,
+    VisionModelInput,
     VisionRepairInput,
 )
 from services.node_attempt_replay import NodeAttemptReplayQuery, TransitionReplayQuery
@@ -41,7 +41,8 @@ EXECUTION_SETTINGS: JsonObject = {"timeout_seconds": 5.0, "max_attempts": 1}
 
 def test_vision_interview_agent_uses_the_strict_v2_contract() -> None:
     """Keep the active Vision recipe bound to its interview contract."""
-    assert root_agent.input_schema is VisionAgentInput
+    assert root_agent.input_schema is VisionModelInput
+    assert set(root_agent.input_schema.model_fields) == {"request"}
     assert root_agent.output_schema is VisionDraftOutput
     assert repair_agent.input_schema is VisionRepairInput
     assert repair_agent.output_schema is VisionDraftOutput

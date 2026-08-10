@@ -377,6 +377,15 @@ class VisionPreflight(BaseModel):
         return _parse_evidence(value)
 
 
+class VisionHostMetadata(BaseModel):
+    """Trusted host identities that never cross the provider boundary."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    repository_binding_id: int | None = Field(default=None, gt=0)
+    supersedes_vision_evidence_snapshot_id: int | None = Field(default=None, gt=0)
+
+
 type VisionOperationInput = Annotated[
     VisionBootstrapInput | VisionClarificationInput | VisionRevisionInput,
     Field(discriminator="operation"),
@@ -390,6 +399,7 @@ class VisionAgentInput(BaseModel):
 
     request: VisionOperationInput
     preflight: VisionPreflight | None = None
+    host: VisionHostMetadata = Field(default_factory=VisionHostMetadata)
 
     @model_validator(mode="after")
     def validate_preflight_scope(self) -> Self:
@@ -408,6 +418,14 @@ class VisionAgentInput(BaseModel):
             msg = "preflight is only valid for clarification."
             raise ValueError(msg)
         return self
+
+
+class VisionModelInput(BaseModel):
+    """Strict model-facing envelope containing no host preflight metadata."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    request: VisionOperationInput
 
 
 class VisionRepairInput(BaseModel):
@@ -443,6 +461,8 @@ __all__ = [
     "VisionComponents",
     "VisionConflict",
     "VisionDraftOutput",
+    "VisionHostMetadata",
+    "VisionModelInput",
     "VisionOperationInput",
     "VisionPreflight",
     "VisionRepairInput",

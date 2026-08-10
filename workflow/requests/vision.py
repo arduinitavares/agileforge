@@ -18,6 +18,7 @@ class GenerateVisionBootstrap(PositionedRequest):
     evidence_fingerprint: str = Field(min_length=1)
     evidence_warnings: tuple[JsonObject, ...] = ()
     repository_binding_id: int | None = None
+    supersedes_vision_evidence_snapshot_id: int | None = None
     updated_components: JsonObject
     project_vision_statement: str = Field(min_length=1)
     is_complete: bool

@@ -365,6 +365,7 @@ Add one immutable table with:
 - `vision_evidence_snapshot_id`
 - `project_id`
 - Nullable `repository_binding_id`
+- Nullable `supersedes_vision_evidence_snapshot_id`
 - `workflow_node_attempt_id` for the attempt whose trusted input created it
 - Canonical `evidence_json`
 - `evidence_fingerprint`
@@ -380,6 +381,12 @@ output adapter binds that trusted attempt input to the positioned request, and
 the graph handler creates the evidence snapshot and Vision turn atomically.
 Failed or obsolete attempts retain diagnostic attempt input but create no
 Vision evidence snapshot or Vision business fact.
+
+Evidence-stale recovery appends a snapshot whose same-Project
+`supersedes_vision_evidence_snapshot_id` names the stale snapshot. The prior
+snapshot and turns remain durable, but only the unsuperseded snapshot leaf is
+active. A replacement generation starts a new turn root, and turn-number
+uniqueness is scoped to its exact evidence snapshot.
 
 ### Vision lineage
 
@@ -425,7 +432,8 @@ status entry. A mismatch returns `VISION_EVIDENCE_STALE` and blocks the call.
 After repository refresh, an unchanged evidence fingerprint may continue the
 existing lineage. A changed fingerprint leaves the old draft stale and the
 workflow advertises `vision.bootstrap` to create a new explicit snapshot and
-draft lineage.
+draft lineage. That snapshot explicitly supersedes the stale snapshot; active
+lineage selection never infers replacement from row recency.
 
 Projects without repositories skip repository freshness checks.
 

@@ -23,6 +23,7 @@ from services.contracts.vision import (
     VisionComponentBasis,
     VisionComponents,
     VisionConflict,
+    VisionHostMetadata,
     VisionPreflight,
     VisionRevisionInput,
 )
@@ -33,7 +34,7 @@ from services.node_attempt_replay import (
     NodeAttemptReplayQuery,
     TransitionReplayQuery,
 )
-from services.vision_evidence import VisionEvidenceCollector
+from services.vision_evidence import VisionEvidenceCollection, VisionEvidenceCollector
 
 if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
@@ -70,11 +71,15 @@ class VisionInputService:
                 facts = VisionInputFactRepository(session)
                 context = facts.load_context(project_id)
                 selection = select_vision_interview_input(context)
-                if selection.prior_turn is not None:
+                recovery = decision.reason_code == "VISION_EVIDENCE_STALE"
+                if selection.prior_turn is not None and not recovery:
                     message = "Vision bootstrap is not current for this lineage."
                     raise ValueError(message)
+                if recovery and selection.evidence_snapshot is None:
+                    message = "Vision recovery requires an active stale snapshot."
+                    raise ValueError(message)
                 if (
-                    selection.operation == "revision"
+                    selection.generation_operation == "revision"
                     and facts.has_active_product_goal(context)
                 ):
                     message = (
@@ -83,8 +88,9 @@ class VisionInputService:
                     raise ValueError(message)
         except WorkflowFactLoadError as error:
             raise ValueError(str(error)) from error
-        evidence = self._collect(project_id)
-        if selection.operation == "revision":
+        collection = self._collect(project_id)
+        evidence = collection.bundle
+        if selection.generation_operation == "revision":
             accepted = selection.accepted_vision
             revision = next(
                 item
@@ -100,7 +106,9 @@ class VisionInputService:
                 project_name=context.project.name,
                 project_description=context.project_description,
                 evidence=evidence,
-                accepted_components=VisionComponents.model_validate(accepted.components),
+                accepted_components=VisionComponents.model_validate(
+                    accepted.components
+                ),
                 accepted_statement=accepted.statement,
                 accepted_vision_fingerprint=accepted.content_fingerprint,
                 revision_reason=revision.reason,
@@ -115,7 +123,20 @@ class VisionInputService:
                 project_description=context.project_description,
                 evidence=evidence,
             )
-        return VisionAgentInput(request=request).model_dump(mode="json")
+        supersedes_snapshot_id = (
+            None
+            if selection.evidence_snapshot is None
+            else selection.evidence_snapshot.vision_evidence_snapshot_id
+        )
+        return VisionAgentInput(
+            request=request,
+            host=VisionHostMetadata(
+                repository_binding_id=collection.repository_binding_id,
+                supersedes_vision_evidence_snapshot_id=(
+                    supersedes_snapshot_id if recovery else None
+                ),
+            ),
+        ).model_dump(mode="json")
 
     def build_clarification(
         self,
@@ -174,7 +195,7 @@ class VisionInputService:
             human_response=user_text,
             addressed_question_ids=question_ids,
         )
-        observed = self._collect(project_id)
+        observed = self._collect(project_id).bundle
         return VisionAgentInput(
             request=request,
             preflight=VisionPreflight(
@@ -183,13 +204,13 @@ class VisionInputService:
             ),
         ).model_dump(mode="json")
 
-    def _collect(self, project_id: int) -> VisionEvidenceBundle:
+    def _collect(self, project_id: int) -> VisionEvidenceCollection:
         """Collect and validate current bounded evidence."""
         try:
             return VisionEvidenceCollector(
                 engine=self.engine,
                 repository_probe=self.repository_probe,
-            ).collect(project_id)
+            ).collect_with_provenance(project_id)
         except (ValidationError, json.JSONDecodeError) as error:
             raise ValueError(str(error)) from error
 

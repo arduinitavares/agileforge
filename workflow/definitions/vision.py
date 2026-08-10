@@ -214,12 +214,48 @@ def _active_revision_turns(
     revision_intent_id: int,
 ) -> tuple[VisionInterviewTurnFact, ...]:
     """Return every interview turn in the open revision chain."""
+    active_snapshot_ids = _active_vision_snapshot_ids(snapshot)
     return tuple(
         item
         for item in snapshot.vision_interview_turns
         if item.revision_intent_id == revision_intent_id
         and item.operation in {"revision", "clarification"}
+        and item.vision_evidence_snapshot_id in active_snapshot_ids
     )
+
+
+def _active_vision_snapshot_ids(snapshot: WorkflowFactSnapshot) -> frozenset[int]:
+    """Return explicit snapshot leaves after append-only supersession."""
+    superseded_ids = {
+        item.supersedes_vision_evidence_snapshot_id
+        for item in snapshot.vision_evidence_snapshots
+        if item.supersedes_vision_evidence_snapshot_id is not None
+    }
+    return frozenset(
+        item.vision_evidence_snapshot_id
+        for item in snapshot.vision_evidence_snapshots
+        if item.vision_evidence_snapshot_id not in superseded_ids
+    )
+
+
+def _active_vision_snapshot_descendant(
+    snapshot: WorkflowFactSnapshot,
+    root_id: int,
+) -> int:
+    """Follow explicit snapshot supersession from one reviewed source root."""
+    children = {
+        item.supersedes_vision_evidence_snapshot_id: item.vision_evidence_snapshot_id
+        for item in snapshot.vision_evidence_snapshots
+        if item.supersedes_vision_evidence_snapshot_id is not None
+    }
+    current = root_id
+    visited: set[int] = set()
+    while current in children:
+        if current in visited:
+            return root_id
+        visited.add(current)
+        current = children[current]
+    return current
 
 
 def _vision_transcript(
@@ -233,6 +269,21 @@ def _vision_transcript(
     completed_source_ids = frozenset(
         item.source_interview_turn_id for item in snapshot.vision_artifacts
     )
+    active_snapshot_ids = _active_vision_snapshot_ids(snapshot)
+    source_turn = (
+        None
+        if artifact is None
+        else next(
+            (
+                item
+                for item in snapshot.vision_interview_turns
+                if item.vision_interview_turn_id == artifact.source_interview_turn_id
+            ),
+            None,
+        )
+    )
+    if artifact is not None and source_turn is None:
+        return None
     if open_revision is not None:
         transcript = _vision_turn_chain(
             _active_revision_turns(
@@ -246,17 +297,10 @@ def _vision_transcript(
             for item in snapshot.vision_interview_turns
             if item.operation in {"bootstrap", "clarification"}
             and item.revision_intent_id is None
+            and item.vision_evidence_snapshot_id in active_snapshot_ids
         )
         transcript = _vision_turn_chain(turns)
     elif decision is None:
-        source_turn = next(
-            (
-                item
-                for item in snapshot.vision_interview_turns
-                if item.vision_interview_turn_id == artifact.source_interview_turn_id
-            ),
-            None,
-        )
         if source_turn is None:
             return None
         turns = tuple(
@@ -273,11 +317,17 @@ def _vision_transcript(
             - {source_turn.vision_interview_turn_id},
         )
     elif decision.decision in {"feedback", "rejected"}:
+        if source_turn is None:
+            return None
+        active_source_snapshot_id = _active_vision_snapshot_descendant(
+            snapshot,
+            source_turn.vision_evidence_snapshot_id,
+        )
         turns = tuple(
             item
             for item in snapshot.vision_interview_turns
-            if item.operation in {"bootstrap", "clarification"}
-            and item.revision_intent_id is None
+            if item.vision_evidence_snapshot_id == active_source_snapshot_id
+            and item.revision_intent_id == source_turn.revision_intent_id
         )
         transcript = _vision_turn_chain(
             turns,
@@ -327,9 +377,19 @@ def _active_goal_exists(snapshot: WorkflowFactSnapshot) -> bool:
 
 def _interview_instance_key(
     snapshot: WorkflowFactSnapshot,
-    revision: VisionRevisionIntentFact | None,
+    state: VisionInterviewState,
 ) -> str | None:
     """Advance the attempt instance after each persisted interview turn."""
+    revision = state.open_revision
+    if state.transcript:
+        turn_id = max(item.vision_interview_turn_id for item in state.transcript)
+        return f"after-turn:{turn_id}"
+    if (
+        state.artifact is not None
+        and state.decision is not None
+        and state.decision.decision in {"feedback", "rejected"}
+    ):
+        return f"after-turn:{state.artifact.source_interview_turn_id}"
     revision_id = None if revision is None else revision.vision_revision_intent_id
     turns = tuple(
         item
@@ -454,7 +514,7 @@ def _vision_interview_rule(
     state = select_vision_interview_state(snapshot)
     if state.conflict:
         return (RuleEvaluation(RuleCategory.INVALID, "WORKFLOW_FACT_CONFLICT"),)
-    instance_key = _interview_instance_key(snapshot, state.open_revision)
+    instance_key = _interview_instance_key(snapshot, state)
     if _latest_vision_evidence_stale_failure(snapshot, instance_key=instance_key):
         return (RuleEvaluation(RuleCategory.SATISFIED, "VISION_BOOTSTRAP_REQUIRED"),)
     return _interview_rule_for_state(state, instance_key)
@@ -500,7 +560,7 @@ def _vision_bootstrap_rule(
     state = select_vision_interview_state(snapshot)
     if state.conflict:
         return (RuleEvaluation(RuleCategory.INVALID, "WORKFLOW_FACT_CONFLICT"),)
-    instance_key = _interview_instance_key(snapshot, state.open_revision)
+    instance_key = _interview_instance_key(snapshot, state)
     if _latest_vision_evidence_stale_failure(snapshot, instance_key=instance_key):
         return (
             RuleEvaluation(
