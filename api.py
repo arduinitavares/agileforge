@@ -71,6 +71,7 @@ from workflow.contracts import (
     NodeCategory,
     RecommendationKind,
     TransitionResult,
+    WorkflowErrorCode,
     WorkflowPosition,
 )
 
@@ -450,7 +451,12 @@ def _result_payload(result: TransitionResult) -> dict[str, object]:
     if not isinstance(result, TransitionResult):
         raise TypeError(type(result).__name__)
     if not result.ok:
-        status = 409 if result.error is not None else 400
+        if result.error is None:
+            status = 400
+        elif result.error.code is WorkflowErrorCode.PROJECT_NOT_FOUND:
+            status = 404
+        else:
+            status = 409
         detail = result.model_dump(mode="json")
         if result.position is not None:
             detail["actions"] = _workflow_actions(result.position)

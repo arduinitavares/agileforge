@@ -14,6 +14,7 @@ from typing import (
     Protocol,
     TypedDict,
     Unpack,
+    assert_never,
     cast,
 )
 
@@ -82,7 +83,10 @@ from services.sprint_selection import (
 from services.story_linkage import normalize_requirement_key
 from services.story_rank import parse_story_rank, story_rank_is_valid
 from services.story_runtime import build_story_input_context
-from services.vision_evidence import VisionEvidenceCollectionError
+from services.vision_evidence import (
+    VisionEvidenceCollectionError,
+    VisionEvidenceErrorCode,
+)
 from services.vision_input import VisionInputService
 from utils.model_config import get_model_id
 from utils.spec_schemas import ValidationEvidence
@@ -1659,6 +1663,22 @@ class AuthorityRepairRequest(FrozenModel):
     correlation_id: str | None = None
 
 
+def _vision_evidence_workflow_error_code(
+    code: VisionEvidenceErrorCode,
+) -> WorkflowErrorCode:
+    """Map every closed evidence failure to its exact transport code."""
+    match code:
+        case VisionEvidenceErrorCode.PROJECT_NOT_FOUND:
+            return WorkflowErrorCode.PROJECT_NOT_FOUND
+        case VisionEvidenceErrorCode.REPOSITORY_BINDING_INVALID:
+            return WorkflowErrorCode.REPOSITORY_BINDING_INVALID
+        case VisionEvidenceErrorCode.REPOSITORY_PROVENANCE_STALE:
+            return WorkflowErrorCode.REPOSITORY_PROVENANCE_STALE
+        case VisionEvidenceErrorCode.REPOSITORY_CHANGED_DURING_EVIDENCE_COLLECTION:
+            return WorkflowErrorCode.REPOSITORY_CHANGED_DURING_EVIDENCE_COLLECTION
+    assert_never(code)
+
+
 class AgileForgeApplication:
     """Expose the narrow workflow application interface to transports."""
 
@@ -2731,7 +2751,7 @@ class AgileForgeApplication:
                 ok=False,
                 position=position,
                 error=WorkflowError(
-                    code=WorkflowErrorCode(error.code.value),
+                    code=_vision_evidence_workflow_error_code(error.code),
                     message=str(error),
                 ),
             )

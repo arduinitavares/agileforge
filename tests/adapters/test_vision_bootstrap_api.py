@@ -212,6 +212,44 @@ def test_bootstrap_post_forwards_only_mutation_metadata(
 
 
 @pytest.mark.parametrize(
+    "payload",
+    [
+        {"actor": "operator"},
+        {"idempotency_key": "vision-bootstrap-41"},
+        {"idempotency_key": "", "actor": "operator"},
+        {"idempotency_key": "vision-bootstrap-41", "actor": ""},
+        {
+            "idempotency_key": "vision-bootstrap-41",
+            "actor": "operator",
+            "correlation_id": "",
+        },
+        {"idempotency_key": 41, "actor": "operator"},
+        {"idempotency_key": "vision-bootstrap-41", "actor": 41},
+        {
+            "idempotency_key": "vision-bootstrap-41",
+            "actor": "operator",
+            "correlation_id": 41,
+        },
+    ],
+)
+def test_bootstrap_post_rejects_malformed_mutation_metadata(
+    payload: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reject missing, blank, or wrongly typed transport metadata."""
+    application = _CapturingApplication()
+    monkeypatch.setattr(api_module, "_application", lambda: application)
+
+    response = TestClient(api_module.app).post(
+        f"/api/projects/{PROJECT_ID}/vision/bootstrap",
+        json=payload,
+    )
+
+    assert response.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+    assert application.requests == []
+
+
+@pytest.mark.parametrize(
     ("field", "value"),
     [
         ("graph_version", "agileforge.workflow.v2"),
@@ -277,10 +315,7 @@ def test_bootstrap_post_replays_same_key_without_second_execution(
 
 @pytest.mark.parametrize(
     "failure_code",
-    [
-        VisionEvidenceErrorCode.REPOSITORY_PROVENANCE_STALE,
-        VisionEvidenceErrorCode.REPOSITORY_CHANGED_DURING_EVIDENCE_COLLECTION,
-    ],
+    tuple(VisionEvidenceErrorCode),
 )
 def test_bootstrap_preflight_failure_uses_transport_error_without_execution(
     failure_code: VisionEvidenceErrorCode,
@@ -302,9 +337,27 @@ def test_bootstrap_preflight_failure_uses_transport_error_without_execution(
         },
     )
 
-    assert response.status_code == HTTPStatus.CONFLICT
+    expected_status = (
+        HTTPStatus.NOT_FOUND
+        if failure_code is VisionEvidenceErrorCode.PROJECT_NOT_FOUND
+        else HTTPStatus.CONFLICT
+    )
+    assert response.status_code == expected_status
     assert response.json()["detail"]["error"]["code"] == failure_code.value
     assert application.execution_calls == []
+
+
+def test_bootstrap_get_is_disallowed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep Vision bootstrap unavailable through a read HTTP method."""
+    application = _CapturingApplication()
+    monkeypatch.setattr(api_module, "_application", lambda: application)
+
+    response = TestClient(api_module.app).get(
+        f"/api/projects/{PROJECT_ID}/vision/bootstrap"
+    )
+
+    assert response.status_code == HTTPStatus.METHOD_NOT_ALLOWED
+    assert application.requests == []
 
 
 def test_project_vision_reads_and_position_do_not_invoke_bootstrap(
