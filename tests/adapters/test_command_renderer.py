@@ -356,6 +356,56 @@ def test_story_generation_renders_each_exact_requirement_selector() -> None:
         assert "--model-id" not in item["command"]
 
 
+def test_duplicate_story_review_selectors_are_ambiguous() -> None:
+    """Suppress duplicate Story review selectors but keep distinct ones."""
+    decisions = tuple(
+        NodeDecision(
+            node_id="planning.story.review",
+            instance_key=instance_key,
+            child_graph_id="planning",
+            request_kind="decide_story",
+            category=NodeCategory.WAITING,
+            recommendation_kind=RecommendationKind.REQUIRED,
+            reason_code="STORY_REVIEW_REQUIRED",
+            decision_fingerprint=f"decision-story-{index}",
+        )
+        for index, instance_key in enumerate(
+            (
+                "requirement:req-1",
+                "requirement:req-1",
+                "requirement:req-2",
+                "requirement:req-3",
+            )
+        )
+    )
+    position = position_fixture().model_copy(
+        update={
+            "decisions": decisions,
+            "available_nodes": (),
+            "waiting_nodes": tuple(item.node_id for item in decisions),
+            "blocked_nodes": (),
+            "invalid_nodes": (),
+        }
+    )
+
+    commands = render_workflow_next(position)["commands"]
+
+    assert [item["command"] for item in commands] == [
+        (
+            "agileforge story decide --project-id 41 "
+            "--instance-key requirement:req-2 --decision <decision> "
+            "--rationale <rationale> --idempotency-key <idempotency-key> "
+            "--actor <actor>"
+        ),
+        (
+            "agileforge story decide --project-id 41 "
+            "--instance-key requirement:req-3 --decision <decision> "
+            "--rationale <rationale> --idempotency-key <idempotency-key> "
+            "--actor <actor>"
+        ),
+    ]
+
+
 def test_ambiguous_semantic_decisions_do_not_render_an_unusable_command() -> None:
     """Advertise a semantic action only when the parser needs no hidden selector."""
     parser = build_parser()
