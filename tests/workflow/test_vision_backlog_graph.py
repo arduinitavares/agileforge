@@ -144,7 +144,6 @@ def _snapshot(
         project=ProjectFact(
             project_id=PROJECT_ID,
             name="Backlog lineage",
-            origin="greenfield",
             created_at=EVALUATED_AT,
         ),
         spec_versions=(
@@ -304,8 +303,8 @@ def test_accepted_current_backlog_unlocks_roadmap_with_goal_lineage() -> None:
     }
 
 
-def test_agent_inputs_reject_retired_scope_and_implementation_context() -> None:
-    """Agents receive only product-delivery context and user refinement input."""
+def test_agent_inputs_reject_unknown_context() -> None:
+    """Agents receive only their declared product-delivery context."""
     with pytest.raises(ValidationError):
         BacklogInput.model_validate(
             {
@@ -315,7 +314,7 @@ def test_agent_inputs_reject_retired_scope_and_implementation_context() -> None:
                 "compiled_authority": "Authority",
                 "prior_backlog_state": "NO_HISTORY",
                 "user_input": None,
-                "implementation_evidence": "retired",
+                "unknown_control": "invalid",
             }
         )
     with pytest.raises(ValidationError):
@@ -325,6 +324,6 @@ def test_agent_inputs_reject_retired_scope_and_implementation_context() -> None:
                 "product_vision": "Vision",
                 "technical_spec": "Spec",
                 "compiled_authority": "Authority",
-                "scope_extension": {"retired": True},
+                "unknown_control": {"invalid": True},
             }
         )

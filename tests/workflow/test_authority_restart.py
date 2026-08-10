@@ -5,11 +5,14 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from sqlmodel import Session
+from sqlalchemy import event
+from sqlalchemy.pool import StaticPool
+from sqlmodel import Session, SQLModel, create_engine
 
 from models.core import Project
-from models.specs import CompiledSpecAuthority, SpecRegistry
-from tests.workflow.test_workflow_repository import sqlite_engine
+from models.db import set_sqlite_pragma
+from models.specs import CompiledSpecAuthority
+from tests.workflow.lifecycle_fixtures import seed_accepted_specification
 from utils.spec_schemas import (
     Invariant,
     InvariantType,
@@ -24,7 +27,21 @@ from workflow.domain import WorkflowDomain
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from sqlalchemy.engine import Engine
+
 EVALUATED_AT = datetime(2026, 8, 2, 12, tzinfo=UTC)
+
+
+def sqlite_engine(path: Path) -> Engine:
+    """Create a fresh file-backed SQLite engine for restart tests."""
+    engine = create_engine(
+        f"sqlite:///{path}",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    event.listen(engine, "connect", set_sqlite_pragma)
+    SQLModel.metadata.create_all(engine)
+    return engine
 
 
 def _authority_json() -> str:
@@ -57,20 +74,17 @@ def test_pending_review_survives_restart_without_adk_or_workflow_session(
     session_path.write_text("disposable session state", encoding="utf-8")
     engine = sqlite_engine(database_path)
     with Session(engine) as session:
-        project = Project(name="Restart authority", origin="greenfield")
+        project = Project(name="Restart authority")
         session.add(project)
         session.flush()
         assert project.project_id is not None
-        spec = SpecRegistry(
+        lineage = seed_accepted_specification(
+            session,
             project_id=project.project_id,
-            spec_hash="sha256:restart-spec",
-            content="# Restart scope",
-            status="approved",
-            approved_at=EVALUATED_AT,
-            approved_by="reviewer",
+            content='{"title":"Restart authority"}',
+            recorded_at=EVALUATED_AT,
         )
-        session.add(spec)
-        session.flush()
+        spec = lineage.spec
         assert spec.spec_version_id is not None
         session.add(
             CompiledSpecAuthority(

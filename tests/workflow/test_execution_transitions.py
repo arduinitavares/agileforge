@@ -62,7 +62,7 @@ if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
 
 EVALUATED_AT = datetime(2026, 8, 2, 12, tzinfo=UTC)
-EXPECTED_REQUEST_VARIANT_COUNT = 56
+EXPECTED_REQUEST_VARIANT_COUNT = 34
 EXECUTION_REQUESTS = (
     CompleteTask,
     CloseStory,
@@ -107,7 +107,7 @@ def _seed_active_task(engine: Engine) -> tuple[int, int, int, int]:
 
 def _seed_unlineaged_active_task(engine: Engine) -> tuple[int, int, int, int]:
     with Session(engine) as session:
-        project = Project(name="Task 12", origin="greenfield")
+        project = Project(name="Task 12")
         team = Team(name="Task 12 Team")
         session.add(project)
         session.add(team)
@@ -126,7 +126,7 @@ def _seed_unlineaged_active_task(engine: Engine) -> tuple[int, int, int, int]:
             status=StoryStatus.TO_DO,
             is_refined=True,
             story_points=3,
-            rank="1.1",
+            rank="1",
         )
         session.add(sprint)
         session.add(story)
@@ -458,7 +458,7 @@ def test_cross_project_sprint_start_lineage_is_loader_invalid(engine: Engine) ->
     """Reject a StartSprint row whose Project differs from its Sprint."""
     project_id, _sprint_id, _story_id, _task_id = _seed_active_task(engine)
     with Session(engine) as session:
-        other = Project(name="Task 12 lineage owner", origin="greenfield")
+        other = Project(name="Task 12 lineage owner")
         session.add(other)
         session.commit()
         assert other.project_id is not None
@@ -547,7 +547,7 @@ def test_stale_task_decision_and_cross_project_links_fail_closed(
     """Fail stale guards and cross-project Sprint links closed."""
     project_id, sprint_id, _story_id, task_id = _seed_active_task(engine)
     with Session(engine) as session:
-        other = Project(name="Task 12 other", origin="greenfield")
+        other = Project(name="Task 12 other")
         session.add(other)
         session.commit()
         assert other.project_id is not None
@@ -1084,7 +1084,7 @@ def test_cross_project_historical_triage_is_loader_invalid(engine: Engine) -> No
         is True
     )
     with Session(engine) as session:
-        other = Project(name="Task 12 triage owner", origin="greenfield")
+        other = Project(name="Task 12 triage owner")
         session.add(other)
         session.commit()
         assert other.project_id is not None

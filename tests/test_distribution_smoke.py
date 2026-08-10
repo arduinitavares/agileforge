@@ -313,9 +313,11 @@ def test_installed_parser_probe_covers_navigation_and_public_transition() -> Non
     """Keep installed smoke coverage on current graph parser entry points."""
     assert '["workflow", "next", "--project-id", "1"]' in _RESOURCE_PROBE
     assert '["workflow", "position", "--project-id", "1"]' in _RESOURCE_PROBE
-    assert '["project", "abandon"' in _RESOURCE_PROBE
+    assert '["project", "create"' in _RESOURCE_PROBE
     assert "include_optional is False" in _RESOURCE_PROBE
-    assert 'request_kind == "abandon_project_shell"' in _RESOURCE_PROBE
+    assert 'create_args.command_handler.__name__ == "_create_project"' in (
+        _RESOURCE_PROBE
+    )
 
 
 @pytest.mark.parametrize("archive_kind", ["wheel", "sdist"])

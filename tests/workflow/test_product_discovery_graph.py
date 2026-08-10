@@ -125,7 +125,6 @@ def _snapshot(
         project=ProjectFact(
             project_id=1,
             name="Discovery graph",
-            origin="greenfield",
             created_at=NOW,
         ),
         vision_artifacts=(vision,),

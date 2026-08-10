@@ -1,24 +1,4 @@
-"""
-Specification persistence and retrieval tools.
-
-Handles both file-based and pasted text specifications.
-
-Design:
-- save_project_specification: Saves spec to DB, creates backup file if needed
-- read_project_specification: Retrieves spec for active project
-
-Specification Authority v1 (NEW):
-- register_spec_version: Create versioned spec with hash
-- approve_spec_version: Explicit approval gate
-- compile_spec_authority: Extract and cache spec authority (LLM-based)
-- check_spec_authority_status: Status check (CURRENT/STALE/NOT_COMPILED/PENDING_REVIEW)
-- get_compiled_authority_by_version: Deterministic retrieval
-
-Usage:
-1. User provides spec via file path -> Load from file, save path reference
-2. User pastes spec text -> Save text, create backup file in specs/
-3. Agents read spec on-demand using read_project_specification
-"""
+"""Specification authority compilation, retrieval, and validation tools."""
 
 import logging
 from collections.abc import Callable, Coroutine
@@ -94,36 +74,6 @@ from services.specs.compiler_service import (
 from services.specs.compiler_service import (
     update_spec_and_compile_authority as _service_update_spec_and_compile_authority,
 )
-from services.specs.lifecycle_service import (
-    ApproveSpecVersionInput as _service_ApproveSpecVersionInput,
-)
-from services.specs.lifecycle_service import (
-    LinkSpecToProjectInput as _service_LinkSpecToProjectInput,
-)
-from services.specs.lifecycle_service import (
-    ReadProjectSpecificationInput as _service_ReadProjectSpecificationInput,
-)
-from services.specs.lifecycle_service import (
-    RegisterSpecVersionInput as _service_RegisterSpecVersionInput,
-)
-from services.specs.lifecycle_service import (
-    SaveProjectSpecificationInput as _service_SaveProjectSpecificationInput,
-)
-from services.specs.lifecycle_service import (
-    approve_spec_version as _service_approve_spec_version,
-)
-from services.specs.lifecycle_service import (
-    link_spec_to_project as _service_link_spec_to_project,
-)
-from services.specs.lifecycle_service import (
-    read_project_specification as _service_read_project_specification,
-)
-from services.specs.lifecycle_service import (
-    register_spec_version as _service_register_spec_version,
-)
-from services.specs.lifecycle_service import (
-    save_project_specification as _service_save_project_specification,
-)
 from services.specs.story_validation_service import (
     LlmValidationResult as _service_LlmValidationResult,
 )
@@ -174,9 +124,6 @@ _LEGACY_DB_EXPORTS = (engine, get_engine)
 
 # --- Input Schemas ---
 
-SaveProjectSpecificationInput = _service_SaveProjectSpecificationInput
-LinkSpecToProjectInput = _service_LinkSpecToProjectInput
-ReadProjectSpecificationInput = _service_ReadProjectSpecificationInput
 PreviewSpecAuthorityInput = _service_PreviewSpecAuthorityInput
 
 
@@ -205,39 +152,6 @@ class CompileSpecAuthorityForVersionToolInput(BaseModel):
     force_recompile: Optional[bool] = Field(  # noqa: UP045
         default=None,
         description="When true, ignore cached compiled authority and recompile.",
-    )
-
-
-def save_project_specification(
-    params: dict[str, Any],
-    tool_context: ToolContext | None = None,  # pylint: disable=unused-argument
-) -> dict[str, Any]:
-    """Compatibility adapter over the public lifecycle service boundary."""
-    return _service_save_project_specification(
-        params,
-        tool_context=tool_context,
-    )
-
-
-def link_spec_to_project(
-    params: dict[str, Any],
-    tool_context: ToolContext | None = None,
-) -> dict[str, Any]:
-    """Compatibility adapter over the public lifecycle service boundary."""
-    return _service_link_spec_to_project(
-        params,
-        tool_context=tool_context,
-    )
-
-
-def read_project_specification(
-    params: Optional[dict[str, Any]] = None,  # noqa: UP045
-    tool_context: ToolContext | None = None,
-) -> dict[str, Any]:
-    """Compatibility adapter over the public lifecycle service boundary."""
-    return _service_read_project_specification(
-        params,
-        tool_context=tool_context,
     )
 
 
@@ -332,10 +246,6 @@ def _load_compiled_artifact(
 SPEC_COMPILER_VERSION = "1.0.0"
 
 
-RegisterSpecVersionInput = _service_RegisterSpecVersionInput
-ApproveSpecVersionInput = _service_ApproveSpecVersionInput
-
-
 CompileSpecAuthorityInput = _service_CompileSpecAuthorityInput
 
 
@@ -349,28 +259,6 @@ CheckSpecAuthorityStatusInput = _service_CheckSpecAuthorityStatusInput
 
 
 GetCompiledAuthorityInput = _service_GetCompiledAuthorityInput
-
-
-def register_spec_version(
-    params: Union[dict[str, Any], RegisterSpecVersionInput],  # noqa: UP007
-    tool_context: ToolContext | None = None,
-) -> dict[str, Any]:
-    """Compatibility adapter over the public lifecycle service boundary."""
-    return _service_register_spec_version(
-        params,
-        tool_context=tool_context,
-    )
-
-
-def approve_spec_version(
-    params: Union[dict[str, Any], ApproveSpecVersionInput],  # noqa: UP007
-    tool_context: ToolContext | None = None,
-) -> dict[str, Any]:
-    """Compatibility adapter over the public lifecycle service boundary."""
-    return _service_approve_spec_version(
-        params,
-        tool_context=tool_context,
-    )
 
 
 def compile_spec_authority(

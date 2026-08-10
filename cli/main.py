@@ -21,7 +21,6 @@ from services.application import (
     AuthorityFeedbackRequest,
     AuthorityRepairRequest,
     AuthorityReviewRequest,
-    BacklogReconcileRequest,
     BacklogReviewRequest,
     CloseStoryRequest,
     CompleteTaskRequest,
@@ -244,11 +243,6 @@ class _Application(Protocol):
     def decide_sprint_plan(
         self,
         request: SprintPlanReviewRequest,
-    ) -> TransitionResult: ...
-
-    def reconcile_backlog(
-        self,
-        request: BacklogReconcileRequest,
     ) -> TransitionResult: ...
 
     def apply_story_dependencies(
@@ -530,8 +524,7 @@ def _semantic_leaf(
 def _install_planning_action_mutations(
     branches: dict[tuple[str, ...], argparse._SubParsersAction],
 ) -> None:
-    """Install the four task-specific planning action transports."""
-    _semantic_leaf(branches[("backlog",)], "reconcile", _backlog_reconcile)
+    """Install the retained task-specific planning action transports."""
     dependency_apply = _semantic_leaf(
         branches[("story", "dependencies")],
         "apply",
@@ -1274,19 +1267,6 @@ def _sprint_decide(args: argparse.Namespace, application: _Application) -> int:
                 project_id=args.project_id,
                 decision=decision,
                 rationale=args.rationale,
-                idempotency_key=args.idempotency_key,
-                actor=args.actor,
-                correlation_id=args.correlation_id,
-            )
-        )
-    )
-
-
-def _backlog_reconcile(args: argparse.Namespace, application: _Application) -> int:
-    return _emit_result(
-        application.reconcile_backlog(
-            BacklogReconcileRequest(
-                project_id=args.project_id,
                 idempotency_key=args.idempotency_key,
                 actor=args.actor,
                 correlation_id=args.correlation_id,

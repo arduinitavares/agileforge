@@ -7,12 +7,6 @@ from models.authority_curation import (
     AuthorityCurationAttempt,
     AuthorityFeedbackAttempt,
 )
-from models.brownfield import (
-    BrownfieldScanAttempt,
-    BrownfieldSourceArtifact,
-    BrownfieldSpecApproval,
-    BrownfieldSpecDraftAttempt,
-)
 from models.core import (
     Epic,
     Feature,
@@ -66,10 +60,6 @@ from models.specs import (
 __all__ = [
     "AuthorityCurationAttempt",
     "AuthorityFeedbackAttempt",
-    "BrownfieldScanAttempt",
-    "BrownfieldSourceArtifact",
-    "BrownfieldSpecApproval",
-    "BrownfieldSpecDraftAttempt",
     "CompiledSpecAuthority",
     "DiscoveryArtifact",
     "Epic",

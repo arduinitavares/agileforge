@@ -42,7 +42,6 @@ EXPECTED_ERROR_METADATA = {
     ErrorCode.AUTHORITY_REPAIR_TARGET_NOT_FOUND: (1, False),
     ErrorCode.AUTHORITY_CURATION_TARGET_READ_ONLY: (4, False),
     ErrorCode.STALE_STATE: (3, True),
-    ErrorCode.STALE_SETUP_STATUS: (3, True),
     ErrorCode.STALE_SPEC_HASH: (3, True),
     ErrorCode.STALE_SPEC_VERSION: (3, True),
     ErrorCode.STALE_ARTIFACT_FINGERPRINT: (3, True),
@@ -66,42 +65,6 @@ EXPECTED_ERROR_METADATA = {
     ErrorCode.TRIAGE_REQUIRED_FIELD_MISSING: (2, False),
     ErrorCode.TRIAGE_FIELD_INVALID: (2, False),
     ErrorCode.BACKLOG_SOURCE_UNAVAILABLE: (2, False),
-    ErrorCode.SCOPE_EXTENSION_NOT_AVAILABLE: (4, False),
-    ErrorCode.SCOPE_EXTENSION_BASE_SPEC_MISMATCH: (3, True),
-    ErrorCode.SCOPE_EXTENSION_UNRESOLVED_WORK: (4, False),
-    ErrorCode.SCOPE_EXTENSION_NOT_ADDITIVE: (2, False),
-    ErrorCode.SCOPE_EXTENSION_NO_ADDED_ITEMS: (2, False),
-    ErrorCode.CHALLENGE_ARTIFACT_FILE_NOT_FOUND: (2, False),
-    ErrorCode.CHALLENGE_ARTIFACT_INVALID: (2, False),
-    ErrorCode.CHALLENGE_PRODUCER_INVALID: (2, False),
-    ErrorCode.PRD_FILE_NOT_FOUND: (2, False),
-    ErrorCode.PRD_DRAFT_INVALID: (2, False),
-    ErrorCode.PRD_PRODUCER_INVALID: (2, False),
-    ErrorCode.PRD_SOURCE_CHALLENGE_NOT_FOUND: (4, False),
-    ErrorCode.PRD_SOURCE_CHALLENGE_NOT_READY: (4, False),
-    ErrorCode.PRD_NOT_FOUND: (4, False),
-    ErrorCode.PRD_REVIEW_STATE_INVALID: (4, False),
-    ErrorCode.PRD_ACCEPTED_IMMUTABLE: (4, False),
-    ErrorCode.PRD_SUPERSEDES_NOT_FOUND: (4, False),
-    ErrorCode.PRD_SUPERSEDES_NOT_ACCEPTED: (4, False),
-    ErrorCode.SPEC_AMENDMENT_SOURCE_PRD_NOT_ACCEPTED: (4, False),
-    ErrorCode.SPEC_AMENDMENT_NOT_FOUND: (4, False),
-    ErrorCode.SPEC_AMENDMENT_REVIEW_STATE_INVALID: (4, False),
-    ErrorCode.SPEC_AMENDMENT_NOT_ACCEPTED: (4, False),
-    ErrorCode.GREENFIELD_DISCOVERY_REQUIRED: (4, False),
-    ErrorCode.GREENFIELD_DISCOVERY_NOT_FOUND: (4, False),
-    ErrorCode.GREENFIELD_SPEC_AMENDMENT_NOT_ACCEPTED: (4, False),
-    ErrorCode.BROWNFIELD_SOURCE_FILE_NOT_FOUND: (2, False),
-    ErrorCode.BROWNFIELD_REPO_PATH_NOT_FOUND: (2, False),
-    ErrorCode.BROWNFIELD_SOURCE_NOT_FOUND: (4, False),
-    ErrorCode.BROWNFIELD_SCAN_NOT_FOUND: (4, False),
-    ErrorCode.BROWNFIELD_DRAFT_NOT_FOUND: (4, False),
-    ErrorCode.BROWNFIELD_DRAFT_STALE: (3, True),
-    ErrorCode.BROWNFIELD_DRAFT_INCOMPLETE: (4, False),
-    ErrorCode.BROWNFIELD_SOURCE_SUPERSEDED: (3, True),
-    ErrorCode.BROWNFIELD_APPROVAL_CHAIN_MISMATCH: (3, True),
-    ErrorCode.BROWNFIELD_CURATED_SPEC_ALREADY_REGISTERED: (10, False),
-    ErrorCode.BROWNFIELD_APPROVAL_STALE_GUARD: (3, True),
 }
 
 
@@ -117,9 +80,6 @@ def test_registry_covers_representative_phase_2a_error_codes() -> None:
         "CONFIRMATION_REQUIRED",
         "MUTATION_RECOVERY_REQUIRED",
         "IDEMPOTENCY_KEY_REUSED",
-        "BROWNFIELD_DRAFT_NOT_FOUND",
-        "BROWNFIELD_APPROVAL_CHAIN_MISMATCH",
-        "BROWNFIELD_CURATED_SPEC_ALREADY_REGISTERED",
     }.issubset(codes)
     assert "STALE_FINGERPRINT" not in codes
     assert codes == {code.value for code in ErrorCode}
@@ -215,31 +175,15 @@ def test_authority_compile_stale_guard_error_codes_are_registered() -> None:
     """Expose stable metadata for authority compile stale guards."""
     expected_exit_code = 3
 
-    assert ErrorCode.STALE_SETUP_STATUS.value == "STALE_SETUP_STATUS"
     assert ErrorCode.STALE_SPEC_HASH.value == "STALE_SPEC_HASH"
     assert ErrorCode.STALE_SPEC_VERSION.value == "STALE_SPEC_VERSION"
     for code in (
-        ErrorCode.STALE_SETUP_STATUS,
         ErrorCode.STALE_SPEC_HASH,
         ErrorCode.STALE_SPEC_VERSION,
     ):
         metadata = error_metadata(code)
         assert metadata.default_exit_code == expected_exit_code
         assert metadata.retryable is True
-
-
-def test_scope_extension_guard_error_codes_are_registered() -> None:
-    """Expose stable metadata for scope-extension availability guards."""
-    codes = registered_error_codes()
-
-    assert "SCOPE_EXTENSION_NOT_AVAILABLE" in codes
-    assert "SCOPE_EXTENSION_UNRESOLVED_WORK" in codes
-    assert error_metadata(ErrorCode.SCOPE_EXTENSION_NOT_AVAILABLE).description == (
-        "Project scope extension is not available."
-    )
-    assert error_metadata(ErrorCode.SCOPE_EXTENSION_UNRESOLVED_WORK).description == (
-        "Project scope extension is blocked by unresolved work."
-    )
 
 
 @pytest.mark.parametrize(

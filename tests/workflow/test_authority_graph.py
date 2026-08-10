@@ -37,7 +37,6 @@ def _snapshot(
         project=ProjectFact(
             project_id=PROJECT_ID,
             name="Authority graph",
-            origin="greenfield",
             created_at=EVALUATED_AT,
         ),
         spec_versions=(
@@ -282,7 +281,6 @@ def test_new_current_spec_makes_historical_acceptance_stale_and_recompilable() -
     )
 
     assert position.available_nodes == ("authority.compile",)
-    assert "vision.generate" not in position.available_nodes
 
 
 def test_conflicting_terminal_decisions_fail_closed() -> None:

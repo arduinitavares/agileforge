@@ -17,6 +17,7 @@ from sqlmodel import SQLModel
 
 _RETAINED_PROMPTS = (
     "backlog.txt",
+    "product_goal.txt",
     "roadmap.txt",
     "spec_validator.txt",
     "specification.txt",
@@ -28,7 +29,7 @@ _RETAINED_PROMPTS = (
 _RETAINED_LEAVES = (
     "adapters.adk.agents.authority",
     "adapters.adk.agents.backlog",
-    "adapters.adk.agents.brownfield",
+    "adapters.adk.agents.product_goal",
     "adapters.adk.agents.roadmap",
     "adapters.adk.agents.spec_validator",
     "adapters.adk.agents.specification",
@@ -39,10 +40,46 @@ _RETAINED_LEAVES = (
 _OBSOLETE_WHEEL_PATHS = (
     "services/agent_workbench/mutation_" + "ledger.py",
     "services/agent_workbench/backlog_refinement_" + "events.py",
+    "models/" + "brown" + "field.py",
+    "services/contracts/" + "brown" + "field.py",
+    "adapters/adk/agents/" + "brown" + "field.py",
+    "utils/" + "brown" + "field_annotations.py",
+    "workflow/definitions/onboarding.py",
+    "workflow/definitions/scope_extension.py",
+    "workflow/requests/onboarding.py",
+    "workflow/requests/scope_extension.py",
+    "workflow/requests/project_shell.py",
+    "workflow/handlers/onboarding.py",
+    "workflow/handlers/scope_extension.py",
+    "workflow/handlers/project_shell.py",
+    "services/agent_workbench/repository_inventory.py",
+    "models/agent_workbench.py",
+    "services/specs/lifecycle_service.py",
+    "services/agent_workbench/backlog_reconciliation.py",
+    "services/agent_workbench/vision_phase.py",
+    "services/vision_runtime.py",
 )
 _OBSOLETE_WHEEL_MODULES = (
     "services.agent_workbench.mutation_" + "ledger",
     "services.agent_workbench.backlog_refinement_" + "events",
+    "models." + "brown" + "field",
+    "services.contracts." + "brown" + "field",
+    "adapters.adk.agents." + "brown" + "field",
+    "utils." + "brown" + "field_annotations",
+    "workflow.definitions.onboarding",
+    "workflow.definitions.scope_extension",
+    "workflow.requests.onboarding",
+    "workflow.requests.scope_extension",
+    "workflow.requests.project_shell",
+    "workflow.handlers.onboarding",
+    "workflow.handlers.scope_extension",
+    "workflow.handlers.project_shell",
+    "services.agent_workbench.repository_inventory",
+    "models.agent_workbench",
+    "services.specs.lifecycle_service",
+    "services.agent_workbench.backlog_reconciliation",
+    "services.agent_workbench.vision_phase",
+    "services.vision_runtime",
 )
 
 
@@ -100,9 +137,7 @@ def _wheel_import_worker(wheel_value: str, repository_root_value: str) -> None:
         }:
             sys.modules.pop(module_name)
     sys.path = [
-        entry
-        for entry in sys.path
-        if Path(entry or ".").resolve() != repository_root
+        entry for entry in sys.path if Path(entry or ".").resolve() != repository_root
     ]
     sys.path.insert(0, str(wheel))
 
@@ -112,8 +147,6 @@ def _wheel_import_worker(wheel_value: str, repository_root_value: str) -> None:
         assert str(wheel) in module.__file__
     for module_name in _OBSOLETE_WHEEL_MODULES:
         assert importlib.util.find_spec(module_name) is None
-    model_module = importlib.import_module("models.agent_workbench")
-    assert not hasattr(model_module, "Cli" + "MutationLedger")
     assert "cli_" + "mutation" + "_ledger" not in SQLModel.metadata.tables
     prompt_root = importlib.resources.files("adapters.adk.prompts")
     for prompt_name in _RETAINED_PROMPTS:
@@ -143,14 +176,11 @@ def test_built_wheel_contains_and_loads_retained_prompt_resources(
 
     with zipfile.ZipFile(wheel) as archive:
         names = set(archive.namelist())
-        model_source = archive.read("models/agent_workbench.py").decode("utf-8")
     expected_resources = {
         f"adapters/adk/prompts/{prompt_name}" for prompt_name in _RETAINED_PROMPTS
     }
     assert expected_resources <= names
     assert set(_OBSOLETE_WHEEL_PATHS).isdisjoint(names)
-    assert "Cli" + "MutationLedger" not in model_source
-    assert "cli_" + "mutation" + "_ledger" not in model_source
 
     process = multiprocessing.get_context("spawn").Process(
         target=_wheel_import_worker,

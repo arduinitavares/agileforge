@@ -46,31 +46,6 @@ _PLACEHOLDERS = {
     "<actor>": "cli-user",
 }
 
-_RETIRED_REQUEST_KINDS = {
-    "abandon_project_shell",
-    "abandon_scope_extension",
-    "decide_amendment_spec_draft",
-    "decide_brownfield_initial_spec",
-    "decide_extension_prd",
-    "decide_initial_spec_draft",
-    "decide_prd",
-    "decide_vision",
-    "record_amendment_spec_draft",
-    "record_brownfield_spec_draft",
-    "record_challenge_artifact",
-    "record_extension_challenge",
-    "record_extension_prd",
-    "record_initial_spec_draft",
-    "record_prd_version",
-    "record_repository_baseline",
-    "record_repository_inventory",
-    "record_vision_draft",
-    "register_initial_scope",
-    "register_scope_extension",
-    "reconcile_scope_extension",
-    "start_scope_extension",
-}
-
 
 def position_fixture() -> WorkflowPosition:
     """Load the transport-shared serialized position fixture."""
@@ -95,7 +70,6 @@ def test_workflow_next_renders_required_and_recovery_only() -> None:
         assert tokens[tokens.index("--actor") + 1] == "<actor>"
     assert "decision_fingerprint" not in serialized
     assert "--expected-" + "state" not in serialized
-    assert "--expected-setup-status" not in serialized
 
 
 def test_zero_command_position_explains_terminal_waiting_and_invalid() -> None:
@@ -116,7 +90,7 @@ def test_zero_command_position_explains_terminal_waiting_and_invalid() -> None:
 
     assert payload["commands"] == []
     assert payload["terminal"] is True
-    assert payload["waiting_nodes"] == ["vision.generate"]
+    assert payload["waiting_nodes"] == ["vision.interview"]
     assert payload["invalid_nodes"] == ["planning.roadmap.generate"]
 
 
@@ -132,11 +106,6 @@ def test_renderer_module_has_no_routing_or_repository_policy() -> None:
         "setup_status",
     ):
         assert forbidden not in source
-
-
-def test_renderer_excludes_retired_transport_request_kinds() -> None:
-    """Do not render compatibility commands for graph modules deleted in Task 9."""
-    assert _RETIRED_REQUEST_KINDS.isdisjoint(COMMAND_PREFIXES)
 
 
 def test_rendered_commands_are_accepted_by_the_cli_parser() -> None:
@@ -351,22 +320,6 @@ def test_delivery_reviews_render_fingerprint_free_semantic_commands() -> None:
     ("request_kind", "expected_flags", "fact_references"),
     [
         (
-            "reconcile_backlog",
-            (),
-            (
-                FactReference(
-                    fact_type="authority",
-                    fact_id="17",
-                    fingerprint="authority-17",
-                ),
-                FactReference(
-                    fact_type="backlog",
-                    fact_id="23",
-                    fingerprint="backlog-23",
-                ),
-            ),
-        ),
-        (
             "apply_story_dependencies",
             ("--story-id", "--dependency"),
             (
@@ -454,7 +407,6 @@ def test_planning_actions_render_task_specific_semantic_commands(
 @pytest.mark.parametrize(
     "request_kind",
     [
-        "reconcile_backlog",
         "apply_story_dependencies",
         "repair_story_readiness",
         "start_sprint",

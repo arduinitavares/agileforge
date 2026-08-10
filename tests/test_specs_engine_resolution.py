@@ -11,7 +11,6 @@ import pytest
     "module_name",
     [
         "services.specs.compiler_service",
-        "services.specs.lifecycle_service",
         "services.specs.story_validation_service",
     ],
 )
@@ -45,7 +44,6 @@ def test_resolve_engine_prefers_live_models_db_get_engine_over_stale_default_bin
     "module_name",
     [
         "services.specs.compiler_service",
-        "services.specs.lifecycle_service",
         "services.specs.story_validation_service",
     ],
 )

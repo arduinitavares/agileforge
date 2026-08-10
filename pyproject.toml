@@ -73,7 +73,7 @@ exclude = [
 addopts = "-m 'not integration' --disable-socket --allow-unix-socket"
 testpaths = ["tests"]
 markers = [
-    "integration: marks tests that call external LLM APIs (deselect with '-m \"not integration\"')",
+    "integration: marks environment-dependent acceptance or external-provider tests",
 ]
 
 [tool.coverage.run]

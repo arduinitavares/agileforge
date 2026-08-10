@@ -48,6 +48,7 @@ _API_STOP_TIMEOUT_SECONDS = 5.0
 _POLL_INTERVAL_SECONDS = 0.05
 _HTTP_TIMEOUT_SECONDS = 1.0
 _PACKAGE_NAME = "agileforge"
+_RETIRED_LABELS = ("brown" + "field", "green" + "field")
 _RESOURCE_PROBE = """
 from importlib.resources import files
 from cli.main import build_parser
@@ -74,19 +75,14 @@ assert position_args.workflow_action == "position"
 assert position_args.project_id == 1
 assert position_args.include_optional is False
 assert position_args.command_handler.__name__ == "_workflow_position"
-transition_args = parser.parse_args(
-    ["project", "abandon", "--project-id", "1", "--graph-version", "graph-v1",
-     "--expected-fact-fingerprint", "f" * 64,
-     "--expected-decision-fingerprint", "d" * 64,
-     "--idempotency-key", "distribution-probe", "--changed-by", "quality-gate",
-     "--request-file", "request.json"]
+create_args = parser.parse_args(
+    ["project", "create", "--name", "Distribution Probe",
+     "--idempotency-key", "distribution-probe", "--actor", "quality-gate"]
 )
-assert transition_args.group == "project"
-assert transition_args.project_action == "abandon"
-assert transition_args.request_kind == "abandon_project_shell"
-assert transition_args.instance_key is None
-assert transition_args.correlation_id is None
-assert transition_args.command_handler.__name__ == "_run_transition"
+assert create_args.group == "project"
+assert create_args.project_action == "create"
+assert create_args.name == "Distribution Probe"
+assert create_args.command_handler.__name__ == "_create_project"
 """
 
 
@@ -311,6 +307,53 @@ def _archive_members(archive: Path) -> set[str]:
             return members
     message = f"unsupported distribution archive: {archive}"
     raise DistributionVerificationError(message)
+
+
+def _archive_text_members(archive: Path) -> tuple[tuple[str, bytes], ...]:
+    """Return regular archive members with distribution roots removed."""
+    if archive.suffix == ".whl":
+        with zipfile.ZipFile(archive) as package:
+            return tuple(
+                (info.filename, package.read(info))
+                for info in package.infolist()
+                if not info.is_dir()
+            )
+    if archive.name.endswith(".tar.gz"):
+        with tarfile.open(archive, mode="r:gz") as package:
+            members: list[tuple[str, bytes]] = []
+            for member in package.getmembers():
+                if not member.isfile():
+                    continue
+                parts = Path(member.name).parts
+                if len(parts) <= 1:
+                    continue
+                extracted = package.extractfile(member)
+                if extracted is not None:
+                    members.append((Path(*parts[1:]).as_posix(), extracted.read()))
+            return tuple(members)
+    message = f"unsupported distribution archive: {archive}"
+    raise DistributionVerificationError(message)
+
+
+def verify_archive_retired_labels_absent(archive: Path) -> None:
+    """Reject retired labels in archive paths and UTF-8 text members."""
+    offenders: list[str] = []
+    for member_name, raw_content in _archive_text_members(archive):
+        if any(label in member_name.casefold() for label in _RETIRED_LABELS):
+            offenders.append(member_name)
+            continue
+        try:
+            content = raw_content.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        if any(label in content.casefold() for label in _RETIRED_LABELS):
+            offenders.append(member_name)
+    if offenders:
+        message = (
+            f"{archive.name} contains retired project setup labels: "
+            f"{', '.join(sorted(offenders))}"
+        )
+        raise DistributionVerificationError(message)
 
 
 def verify_archive_resources(archive: Path) -> None:
@@ -545,6 +588,7 @@ def _verify_artifact(
     parent_environment: Mapping[str, str],
 ) -> None:
     verify_archive_resources(artifact.path)
+    verify_archive_retired_labels_absent(artifact.path)
     layout = IsolationLayout.create(isolation_root / artifact.kind)
     environment = isolated_environment(
         layout,

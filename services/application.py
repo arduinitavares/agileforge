@@ -98,7 +98,6 @@ from workflow.contracts import (
     WorkflowErrorCode,
     WorkflowPosition,
 )
-from workflow.definitions.authority import accepted_current_authority
 from workflow.definitions.planning import (
     candidate_set_fingerprint,
     readiness_fingerprint,
@@ -127,7 +126,6 @@ from workflow.requests import (
     DecideStory,
     DecideVisionReview,
     FulfillProductGoal,
-    ReconcileBacklog,
     RecordAuthorityFeedback,
     RecordDiscoveryArtifact,
     RecordPostSprintTriage,
@@ -310,13 +308,6 @@ class _DeliveryActionInputPort(Protocol):
 
 class _PlanningActionSelectionPort(SemanticTransitionReplayPort, Protocol):
     """Derive guarded planning-action identities from exact durable facts."""
-
-    def prepare_backlog_reconciliation(
-        self,
-        *,
-        project_id: int,
-        decision: NodeDecision,
-    ) -> tuple[int, str, tuple[int, ...]] | None: ...
 
     def prepare_story_dependencies(
         self,
@@ -568,42 +559,6 @@ class PlanningActionSelectionService:
     ) -> TransitionResult | None:
         """Replay exact operator semantics before any current fact read."""
         return DurableTransitionReplayService(engine=self.engine).replay(query)
-
-    def prepare_backlog_reconciliation(
-        self,
-        *,
-        project_id: int,
-        decision: NodeDecision,
-    ) -> tuple[int, str, tuple[int, ...]] | None:
-        """Derive replacement authority and exact affected phase artifacts."""
-        snapshot = self._snapshot(project_id)
-        if snapshot is None:
-            return None
-        authority, conflict = accepted_current_authority(snapshot)
-        authority_target = _integer_fact_reference(decision, "authority")
-        if (
-            conflict
-            or authority is None
-            or authority_target is None
-            or authority_target[0] != authority.authority_id
-            or authority_target[1].fingerprint != authority.authority_fingerprint
-        ):
-            return None
-        references = tuple(
-            item
-            for item in decision.fact_references
-            if item.fact_type in {"vision", "backlog"}
-        )
-        if not references:
-            return None
-        affected_artifact_ids = _matched_phase_artifact_ids(snapshot, references)
-        if affected_artifact_ids is None:
-            return None
-        return (
-            authority.authority_id,
-            authority.authority_fingerprint,
-            affected_artifact_ids,
-        )
 
     def prepare_story_dependencies(
         self,
@@ -1358,10 +1313,6 @@ class _PlanningMutationRequest(FrozenModel):
     idempotency_key: str = Field(min_length=1)
     actor: str = Field(min_length=1)
     correlation_id: str | None = None
-
-
-class BacklogReconcileRequest(_PlanningMutationRequest):
-    """Transport-only request to reconcile graph-selected stale Backlog facts."""
 
 
 class StoryDependencyEdgeRequest(FrozenModel):
@@ -2140,50 +2091,6 @@ class AgileForgeApplication:
                 plan_fingerprint=fingerprint,
                 decision=request.decision,
                 rationale=request.rationale,
-            )
-        )
-
-    def reconcile_backlog(
-        self,
-        request: BacklogReconcileRequest,
-    ) -> TransitionResult:
-        """Reconcile graph-selected stale artifacts under current authority."""
-        selection = self._planning_action_selection
-        if selection is None:
-            return _transition_not_available(None, "backlog.reconcile")
-        replay = self._replay_planning_action(
-            request_kind="reconcile_backlog",
-            request=request,
-            operator_input={},
-        )
-        if replay is not None:
-            return replay
-        position = self.position(project_id=request.project_id)
-        decision = _unique_available_decision(position, "backlog.reconcile")
-        target = (
-            None
-            if decision is None or decision.category is not NodeCategory.AVAILABLE
-            else selection.prepare_backlog_reconciliation(
-                project_id=request.project_id,
-                decision=decision,
-            )
-        )
-        if decision is None or target is None:
-            return _transition_not_available(position, "backlog.reconcile")
-        authority_id, authority_fingerprint, affected_artifact_ids = target
-        return self.transition(
-            ReconcileBacklog(
-                project_id=request.project_id,
-                graph_version=position.graph_version,
-                fact_fingerprint=position.fact_fingerprint,
-                decision_fingerprint=decision.decision_fingerprint,
-                instance_key=decision.instance_key,
-                idempotency_key=request.idempotency_key,
-                actor=request.actor,
-                correlation_id=request.correlation_id,
-                replacement_authority_id=authority_id,
-                replacement_authority_fingerprint=authority_fingerprint,
-                affected_artifact_ids=affected_artifact_ids,
             )
         )
 
@@ -4286,56 +4193,11 @@ def _single_fact_reference(
     return references[0] if len(references) == 1 else None
 
 
-def _matched_phase_artifact_ids(
-    snapshot: WorkflowFactSnapshot,
-    references: tuple[FactReference, ...],
-) -> tuple[int, ...] | None:
-    """Match decision references to exact durable phase artifacts."""
-    matched_ids: list[int] = []
-    for reference in references:
-        try:
-            artifact_id = int(reference.fact_id)
-        except ValueError:
-            return None
-        matching = tuple(
-            item
-            for item in snapshot.phase_artifacts
-            if item.artifact_type == reference.fact_type
-            and item.artifact_id == artifact_id
-            and item.artifact_fingerprint == reference.fingerprint
-        )
-        if len(matching) != 1:
-            return None
-        matched_ids.append(artifact_id)
-    result = tuple(sorted(matched_ids))
-    return result if len(set(result)) == len(references) else None
-
-
-def _backlog_reconciliation_decision_is_transportable(
-    decision: NodeDecision,
-) -> bool:
-    """Validate exact graph references needed by Backlog reconciliation."""
-    if _integer_fact_reference(decision, "authority") is None:
-        return False
-    artifact_references = tuple(
-        item
-        for item in decision.fact_references
-        if item.fact_type in {"vision", "backlog"}
-    )
-    try:
-        artifact_ids = tuple(int(item.fact_id) for item in artifact_references)
-    except ValueError:
-        return False
-    return bool(artifact_ids) and len(set(artifact_ids)) == len(artifact_ids)
-
-
 def planning_action_decision_is_transportable(
     project_id: int,
     decision: NodeDecision,
 ) -> bool:
     """Return whether one planning decision has the references its route needs."""
-    if decision.request_kind == "reconcile_backlog":
-        return _backlog_reconciliation_decision_is_transportable(decision)
     if decision.request_kind == "apply_story_dependencies":
         reference = _single_fact_reference(decision, "story_dependency_source")
         return reference is not None and reference.fact_id == str(project_id)
@@ -4622,7 +4484,6 @@ __all__ = [
     "AuthorityRepairRequest",
     "AuthorityReviewRequest",
     "AuthorityReviewSelectionService",
-    "BacklogReconcileRequest",
     "BacklogReviewRequest",
     "CloseStoryRequest",
     "CompleteTaskRequest",

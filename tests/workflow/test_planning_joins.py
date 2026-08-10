@@ -46,7 +46,7 @@ def _story(
     *,
     accepted: bool = True,
     points: int | None = 3,
-    rank: str | None = "1.1",
+    rank: str | None = "1",
     candidate: bool = True,
 ) -> StoryFact:
     return StoryFact(
@@ -225,7 +225,6 @@ def _snapshot(
         project=ProjectFact(
             project_id=1,
             name="Planning joins",
-            origin="greenfield",
             created_at=EVALUATED_AT,
         ),
         spec_versions=(
@@ -483,7 +482,7 @@ def test_readiness_change_makes_accepted_plan_stale() -> None:
     """Invalidate an accepted Sprint plan after readiness changes."""
     stories = (_story(1),)
     plan = _accepted_plan(stories)
-    changed = (stories[0].model_copy(update={"rank": "1.2"}),)
+    changed = (stories[0].model_copy(update={"rank": "2"}),)
     start = _decision(
         _snapshot(changed, sprint_plan=plan),
         "planning.sprint.start",

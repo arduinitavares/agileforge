@@ -335,19 +335,14 @@ def _snapshot(**overrides: Unpack[_SnapshotOverrides]) -> WorkflowFactSnapshot:
         project=ProjectFact(
             project_id=PROJECT_ID,
             name="Execution graph",
-            origin="greenfield",
             created_at=EVALUATED_AT,
         ),
-        review_decisions=(
-            lineage[1] if review_decisions is None else review_decisions
-        ),
+        review_decisions=(lineage[1] if review_decisions is None else review_decisions),
         planning_artifacts=(
             lineage[0] if planning_artifacts is None else planning_artifacts
         ),
         sprints=sprint_facts,
-        sprint_starts=(
-            lineage[3] if sprint_starts is None else sprint_starts
-        ),
+        sprint_starts=(lineage[3] if sprint_starts is None else sprint_starts),
         stories=stories,
         story_dependencies=dependencies,
         story_dependency_reviews=(
@@ -389,17 +384,13 @@ def _reviewed_sprint_snapshot(
         tasks=(task,),
     )
     completion = _task_completion(base, task)
-    completed_tasks = base.model_copy(
-        update={"task_completions": (completion,)}
-    )
+    completed_tasks = base.model_copy(update={"task_completions": (completion,)})
     story_close = _story_completion(
         completed_tasks,
         story,
         sprint_id=sprint_id,
     )
-    base = completed_tasks.model_copy(
-        update={"story_completions": (story_close,)}
-    )
+    base = completed_tasks.model_copy(update={"story_completions": (story_close,)})
     review_fingerprint = sprint_review_fingerprint(base, sprint_id)
     return base.model_copy(
         update={
@@ -508,9 +499,7 @@ def _combine_execution_history(
     return base.model_copy(
         update={
             field: tuple(
-                item
-                for snapshot in snapshots
-                for item in getattr(snapshot, field)
+                item for snapshot in snapshots for item in getattr(snapshot, field)
             )
             for field in fields
         }
@@ -645,9 +634,7 @@ def test_blocked_dependency_never_guesses_a_task() -> None:
     """Block a Task whose durable prerequisite Story is still open."""
     snapshot = _snapshot(
         stories=(_story(1), _story(2)),
-        tasks=(
-            _task(42, 2).model_copy(update={"dependencies_satisfied": False}),
-        ),
+        tasks=(_task(42, 2).model_copy(update={"dependencies_satisfied": False}),),
         dependencies=(
             StoryDependencyFact(
                 dependency_id=9,
@@ -822,23 +809,38 @@ def test_sprint_review_and_close_are_separate_factual_transitions() -> None:
     """Keep review and closure as distinct persisted transitions."""
     reviewed = _reviewed_snapshot()
     before_review = reviewed.model_copy(update={"sprint_reviews": ()})
-    review = _decision(before_review, "execution.sprint.review")
+    review = _decision(
+        before_review,
+        "execution.sprint.review",
+        f"sprint:{SPRINT_ID}",
+    )
     blocked_close = _decision(before_review, "execution.sprint.close")
-    close = _decision(reviewed, "execution.sprint.close")
+    close = _decision(
+        reviewed,
+        "execution.sprint.close",
+        f"sprint:{SPRINT_ID}",
+    )
     assert review.category is NodeCategory.WAITING
     assert blocked_close.category is NodeCategory.BLOCKED
     assert close.category is NodeCategory.AVAILABLE
-    assert next(
-        ref.fingerprint
-        for ref in close.fact_references
-        if ref.fact_type == "sprint_review"
-    ) == reviewed.sprint_reviews[0].review_fingerprint
+    assert (
+        next(
+            ref.fingerprint
+            for ref in close.fact_references
+            if ref.fact_type == "sprint_review"
+        )
+        == reviewed.sprint_reviews[0].review_fingerprint
+    )
 
 
 def test_sprint_review_waits_after_every_story_is_terminal() -> None:
     """Offer review only after every attached Story is terminal."""
     reviewed = _reviewed_snapshot().model_copy(update={"sprint_reviews": ()})
-    item = _decision(reviewed, "execution.sprint.review")
+    item = _decision(
+        reviewed,
+        "execution.sprint.review",
+        f"sprint:{SPRINT_ID}",
+    )
     assert item.category is NodeCategory.WAITING
     assert item.reason_code == "SPRINT_REVIEW_REQUIRED"
 
@@ -1024,9 +1026,7 @@ def test_older_completed_sprint_conflicting_triage_is_invalid() -> None:
         payload_fingerprint=triage_payload_fingerprint("backlog", payload),
         supersedes_triage_id=None,
     )
-    older = older.model_copy(
-        update={"post_sprint_triage": (existing, conflict)}
-    )
+    older = older.model_copy(update={"post_sprint_triage": (existing, conflict)})
     newer = _completed_sprint_snapshot(
         sprint_id=21,
         story_id=7,

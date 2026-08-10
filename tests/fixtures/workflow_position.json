@@ -5,10 +5,9 @@
   "evaluated_at": "2026-08-03T12:00:00Z",
   "available_nodes": [
     "authority.compile",
-    "authority.repair",
-    "scope_extension.start"
+    "authority.repair"
   ],
-  "waiting_nodes": ["vision.generate"],
+  "waiting_nodes": ["vision.interview"],
   "blocked_nodes": ["backlog.generate"],
   "invalid_nodes": ["planning.roadmap.generate"],
   "terminal": false,
@@ -51,24 +50,10 @@
       "decision_fingerprint": "decision-repair"
     },
     {
-      "node_id": "scope_extension.start",
-      "instance_key": null,
-      "child_graph_id": "scope_extension",
-      "request_kind": "start_scope_extension",
-      "category": "available",
-      "recommendation_kind": "optional_reentry",
-      "reason_code": "SCOPE_EXTENSION_AVAILABLE",
-      "required_inputs": [],
-      "fact_references": [],
-      "blockers": [],
-      "valid_until": null,
-      "decision_fingerprint": "decision-extension"
-    },
-    {
-      "node_id": "vision.generate",
+      "node_id": "vision.interview",
       "instance_key": null,
       "child_graph_id": "vision",
-      "request_kind": "record_vision_draft",
+      "request_kind": "record_vision_interview_turn",
       "category": "waiting",
       "recommendation_kind": "required",
       "reason_code": "UPSTREAM_ATTEMPT_ACTIVE",

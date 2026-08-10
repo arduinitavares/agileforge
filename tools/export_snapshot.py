@@ -13,6 +13,7 @@ from sqlmodel import Session, select
 from models.core import Epic, Feature, Project, Sprint, SprintStory, Theme, UserStory
 from models.db import engine as default_engine
 from models.enums import StoryStatus
+from models.product_definition import VisionArtifact, VisionArtifactDecision
 from models.specs import SpecRegistry
 from services.specs.authority_selection import (
     accepted_compiled_authority,
@@ -80,6 +81,7 @@ class _SnapshotRenderContext:
     all_stories: list[UserStory]
     sprints: list[Sprint]
     sprint_story_map: dict[int, list[int]]
+    vision_statement: str
     spec_content: str
     spec_meta: dict[str, Any]
     authority: SpecAuthorityCompilationSuccess | None
@@ -141,7 +143,8 @@ def export_project_snapshot_html(
         )
 
         approved_spec = _get_latest_approved_spec(session, project_id)
-        spec_content, spec_meta = _resolve_spec_content(project, approved_spec)
+        vision_statement = _get_latest_accepted_vision(session, project_id)
+        spec_content, spec_meta = _resolve_spec_content(approved_spec)
         authority = _load_compiled_authority(session, approved_spec)
 
     render_context = _SnapshotRenderContext(
@@ -153,6 +156,7 @@ def export_project_snapshot_html(
         all_stories=all_stories,
         sprints=sprints,
         sprint_story_map=sprint_story_map,
+        vision_statement=vision_statement,
         spec_content=spec_content,
         spec_meta=spec_meta,
         authority=authority,
@@ -186,8 +190,36 @@ def _get_latest_approved_spec(
     )[0]
 
 
+def _get_latest_accepted_vision(session: Session, project_id: int) -> str:
+    """Return the latest fingerprint-bound accepted Vision statement."""
+    decisions = list(
+        session.exec(
+            select(VisionArtifactDecision).where(
+                VisionArtifactDecision.project_id == project_id,
+                VisionArtifactDecision.decision == "accepted",
+            )
+        ).all()
+    )
+    ordered = sorted(
+        decisions,
+        key=lambda item: (
+            item.decided_at,
+            item.vision_artifact_decision_id or -1,
+        ),
+        reverse=True,
+    )
+    for decision in ordered:
+        artifact = session.get(VisionArtifact, decision.vision_artifact_id)
+        if (
+            artifact is not None
+            and artifact.project_id == project_id
+            and artifact.content_fingerprint == decision.artifact_fingerprint
+        ):
+            return artifact.statement
+    return "(No accepted Vision available)"
+
+
 def _resolve_spec_content(
-    project: Project,
     approved_spec: SpecRegistry | None,
 ) -> tuple[str, dict[str, Any]]:
     if approved_spec:
@@ -202,14 +234,14 @@ def _resolve_spec_content(
         return approved_spec.content, meta
 
     meta: dict[str, Any] = {
-        "status": "draft",
+        "status": "unavailable",
         "spec_version_id": None,
         "approved_by": None,
         "approved_at": None,
         "approval_notes": None,
-        "content_ref": project.spec_file_path,
+        "content_ref": None,
     }
-    return project.technical_spec or "(No technical spec available)", meta
+    return "(No accepted specification available)", meta
 
 
 def _load_compiled_authority(
@@ -371,7 +403,7 @@ def _render_snapshot_html(context: _SnapshotRenderContext) -> str:
             context.stories,
             context.sprint_story_map,
         ),
-        vision_html=_markdown(context.project.vision or "(No vision set)"),
+        vision_html=_markdown(context.vision_statement),
         roadmap_html=roadmap_html,
         spec_status_badge=_render_spec_status_badge(context.spec_meta),
         spec_meta_html=_render_spec_metadata(context.spec_meta),

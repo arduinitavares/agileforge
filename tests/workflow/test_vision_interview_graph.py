@@ -92,7 +92,6 @@ def _snapshot(**changes: object) -> WorkflowFactSnapshot:
         "project": ProjectFact(
             project_id=1,
             name="Vision",
-            origin="greenfield",
             created_at=NOW,
         )
     }

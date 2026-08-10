@@ -14,7 +14,6 @@ from utils.spec_authority_assumptions import (
 )
 from utils.spec_schemas import (
     AuthorityQualityGroupType,
-    AuthorityQualityInvalidatedItem,
     AuthorityQualityMergedItem,
     AuthorityQualityReport,
     AuthorityQualityReviewGroup,
@@ -72,11 +71,6 @@ def apply_authority_quality_gate(
     existing_merged_items = (
         list(existing_quality.merged_items) if existing_quality is not None else []
     )
-    existing_invalidated_items = (
-        list(existing_quality.invalidated_items)
-        if existing_quality is not None
-        else []
-    )
     existing_review_groups = (
         list(existing_quality.review_groups) if existing_quality is not None else []
     )
@@ -91,13 +85,8 @@ def apply_authority_quality_gate(
     review_groups.extend(_near_duplicate_invariant_groups(gated.invariants))
     review_groups.extend(_over_split_groups(gated.invariants))
     review_groups.extend(_noisy_assumption_groups(gated.assumptions))
-    merged_items = _renumber_merged_items(
-        [*existing_merged_items, *merged_items]
-    )
-    invalidated_items = _renumber_invalidated_items(existing_invalidated_items)
-    review_groups = _dedupe_and_cap_groups(
-        [*existing_review_groups, *review_groups]
-    )
+    merged_items = _renumber_merged_items([*existing_merged_items, *merged_items])
+    review_groups = _dedupe_and_cap_groups([*existing_review_groups, *review_groups])
     merged_invariant_count = _removed_count_for_kind(merged_items, "invariant")
     merged_assumption_count = _removed_count_for_kind(merged_items, "assumption")
     original_invariant_count = max(
@@ -121,20 +110,15 @@ def apply_authority_quality_gate(
             if group.group_type == "near_duplicate_invariants"
         ),
         over_split_group_count=sum(
-            1
-            for group in review_groups
-            if group.group_type == "over_split_invariants"
+            1 for group in review_groups if group.group_type == "over_split_invariants"
         ),
         noisy_assumption_group_count=sum(
-            1
-            for group in review_groups
-            if group.group_type == "noisy_assumptions"
+            1 for group in review_groups if group.group_type == "noisy_assumptions"
         ),
     )
     gated.authority_quality = AuthorityQualityReport(
         summary=summary,
         merged_items=merged_items,
-        invalidated_items=invalidated_items,
         review_groups=review_groups,
     )
     return gated
@@ -145,9 +129,7 @@ def _removed_count_for_kind(
     item_kind: str,
 ) -> int:
     return sum(
-        len(item.removed_ids)
-        for item in merged_items
-        if item.item_kind == item_kind
+        len(item.removed_ids) for item in merged_items if item.item_kind == item_kind
     )
 
 
@@ -157,16 +139,6 @@ def _renumber_merged_items(
     return [
         item.model_copy(update={"merge_id": f"AQ-MERGE-{index:03d}"})
         for index, item in enumerate(merged_items, start=1)
-    ]
-
-
-def _renumber_invalidated_items(
-    invalidated_items: list[AuthorityQualityInvalidatedItem],
-) -> list[AuthorityQualityInvalidatedItem]:
-    """Return scope invalidations with stable report-local identities."""
-    return [
-        item.model_copy(update={"invalidation_id": f"AQ-INVALIDATE-{index:03d}"})
-        for index, item in enumerate(invalidated_items, start=1)
     ]
 
 

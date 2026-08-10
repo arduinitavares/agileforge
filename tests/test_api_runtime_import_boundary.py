@@ -82,7 +82,5 @@ def test_api_import_boundary_for_moved_runtime_surfaces() -> None:
     assert not core_imports
     assert not enum_imports
     assert {"AgileForgeApplication", "production_application"} <= application_imports
-    assert {"DecideAuthority", "OpenProjectShell", "TransitionRequest"} <= (
-        request_imports
-    )
+    assert not request_imports
     assert not legacy_agile_imports

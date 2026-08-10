@@ -16,20 +16,11 @@ from models.workflow import (
     BacklogArtifact,
     BacklogArtifactDecision,
     VisionArtifact,
-    VisionArtifactDecision,
     WorkflowTransitionReceipt,
 )
 from services.agent_workbench.backlog_phase import (
     record_backlog_decision_in_session,
     record_backlog_draft_in_session,
-)
-from services.agent_workbench.backlog_reconciliation import (
-    BacklogReconciliationError,
-    reconcile_stale_backlog_in_session,
-)
-from services.agent_workbench.vision_phase import (
-    record_vision_decision_in_session,
-    record_vision_draft_in_session,
 )
 from services.specs.authority_selection import pending_authority_fingerprint
 from workflow.contracts import (
@@ -38,16 +29,12 @@ from workflow.contracts import (
     WorkflowError,
     WorkflowErrorCode,
 )
-from workflow.requests.product_definition import DecideBacklog, DecideVision
+from workflow.requests.product_definition import DecideBacklog
 
 if TYPE_CHECKING:
     from datetime import datetime
 
-    from workflow.requests.product_definition import (
-        ReconcileBacklog,
-        RecordBacklogDraft,
-        RecordVisionDraft,
-    )
+    from workflow.requests.product_definition import RecordBacklogDraft
 
 
 def _success(decision: NodeDecision, output: dict[str, object]) -> TransitionResult:
@@ -176,20 +163,6 @@ def _next_artifact_id(session: Session) -> int:
     return max(latest_vision or 0, latest_backlog or 0) + 1
 
 
-def _vision_review_guards_match(first: DecideVision, second: DecideVision) -> bool:
-    return (
-        first.project_id == second.project_id
-        and first.graph_version == second.graph_version
-        and first.fact_fingerprint == second.fact_fingerprint
-        and first.decision_fingerprint == second.decision_fingerprint
-        and first.instance_key == second.instance_key
-        and first.attempt_id == second.attempt_id
-        and first.attempt_fingerprint == second.attempt_fingerprint
-        and first.vision_artifact_id == second.vision_artifact_id
-        and first.artifact_fingerprint == second.artifact_fingerprint
-    )
-
-
 def _backlog_review_guards_match(first: DecideBacklog, second: DecideBacklog) -> bool:
     return (
         first.project_id == second.project_id
@@ -202,36 +175,6 @@ def _backlog_review_guards_match(first: DecideBacklog, second: DecideBacklog) ->
         and first.backlog_artifact_id == second.backlog_artifact_id
         and first.artifact_fingerprint == second.artifact_fingerprint
     )
-
-
-def validate_decide_vision_review(
-    session: Session,
-    request: DecideVision,
-) -> TransitionResult | None:
-    """Fail closed when exact Vision review guards already reached a decision."""
-    existing = session.exec(
-        select(VisionArtifactDecision).where(
-            col(VisionArtifactDecision.project_id) == request.project_id,
-            col(VisionArtifactDecision.vision_artifact_id)
-            == request.vision_artifact_id,
-        )
-    ).one_or_none()
-    if existing is None:
-        return None
-    receipts = session.exec(
-        select(WorkflowTransitionReceipt).where(
-            col(WorkflowTransitionReceipt.request_kind) == request.kind
-        )
-    ).all()
-    if any(
-        _vision_review_guards_match(
-            DecideVision.model_validate_json(receipt.request_json),
-            request,
-        )
-        for receipt in receipts
-    ):
-        return _conflict("Vision artifact already has a terminal review decision.")
-    return None
 
 
 def validate_decide_backlog_review(
@@ -262,106 +205,6 @@ def validate_decide_backlog_review(
     ):
         return _conflict("Backlog artifact already has a terminal review decision.")
     return None
-
-
-def execute_record_vision_draft(
-    session: Session,
-    request: RecordVisionDraft,
-    decision: NodeDecision,
-    evaluated_at: datetime,
-) -> TransitionResult:
-    """Record host-validated Vision content for exact graph authority facts."""
-    authority = _accepted_authority(
-        session,
-        project_id=request.project_id,
-        authority_id=request.authority_id,
-        authority_fingerprint=request.authority_fingerprint,
-    )
-    expected_parent = _expected_parent(decision, "vision")
-    if (
-        authority is None
-        or not _matches_reference(
-            decision,
-            fact_type="authority",
-            fact_id=request.authority_id,
-            fingerprint=request.authority_fingerprint,
-        )
-        or request.supersedes_vision_artifact_id != expected_parent
-    ):
-        return _conflict("RecordVisionDraft does not target exact graph facts.")
-    try:
-        row = record_vision_draft_in_session(
-            session,
-            project_id=request.project_id,
-            canonical_content=request.canonical_content,
-            content_fingerprint=request.content_fingerprint,
-            supersedes_vision_artifact_id=request.supersedes_vision_artifact_id,
-            user_text=request.user_text,
-            attempt_id=request.attempt_id,
-            attempt_fingerprint=request.attempt_fingerprint,
-            actor=request.actor,
-            recorded_at=evaluated_at,
-        )
-    except ValueError as error:
-        return _conflict(str(error))
-    if row.vision_artifact_id is None:
-        return _conflict("Vision artifact did not receive a durable identity.")
-    return _success(
-        decision,
-        {
-            "vision_artifact_id": row.vision_artifact_id,
-            "content_fingerprint": row.content_fingerprint,
-            "authority_id": request.authority_id,
-        },
-    )
-
-
-def execute_decide_vision(
-    session: Session,
-    request: DecideVision,
-    decision: NodeDecision,
-    evaluated_at: datetime,
-) -> TransitionResult:
-    """Append one decision for the exact waiting Vision artifact."""
-    artifact = session.exec(
-        select(VisionArtifact).where(
-            col(VisionArtifact.project_id) == request.project_id,
-            col(VisionArtifact.vision_artifact_id) == request.vision_artifact_id,
-        )
-    ).one_or_none()
-    if (
-        artifact is None
-        or artifact.content_fingerprint != request.artifact_fingerprint
-        or not _matches_reference(
-            decision,
-            fact_type="vision",
-            fact_id=request.vision_artifact_id,
-            fingerprint=request.artifact_fingerprint,
-        )
-    ):
-        return _conflict("DecideVision does not target the waiting artifact.")
-    try:
-        row = record_vision_decision_in_session(
-            session,
-            artifact=artifact,
-            decision=request.decision,
-            rationale=request.rationale,
-            reviewer=request.actor,
-            idempotency_key=request.idempotency_key,
-            decided_at=evaluated_at,
-        )
-    except ValueError as error:
-        return _conflict(str(error))
-    if row.vision_artifact_decision_id is None:
-        return _conflict("Vision decision did not receive a durable identity.")
-    return _success(
-        decision,
-        {
-            "vision_artifact_decision_id": row.vision_artifact_decision_id,
-            "vision_artifact_id": request.vision_artifact_id,
-            "decision": request.decision,
-        },
-    )
 
 
 def execute_record_backlog_draft(
@@ -480,71 +323,8 @@ def execute_decide_backlog(
     )
 
 
-def execute_reconcile_backlog(
-    session: Session,
-    request: ReconcileBacklog,
-    decision: NodeDecision,
-    evaluated_at: datetime,
-) -> TransitionResult:
-    """Reconcile exactly the stale artifact set selected by the graph."""
-    authority = _accepted_authority(
-        session,
-        project_id=request.project_id,
-        authority_id=request.replacement_authority_id,
-        authority_fingerprint=request.replacement_authority_fingerprint,
-    )
-    referenced_ids = tuple(
-        sorted(
-            int(item.fact_id)
-            for item in decision.fact_references
-            if item.fact_type in {"vision", "backlog"}
-        )
-    )
-    if (
-        authority is None
-        or request.affected_artifact_ids != referenced_ids
-        or not _matches_reference(
-            decision,
-            fact_type="authority",
-            fact_id=request.replacement_authority_id,
-            fingerprint=request.replacement_authority_fingerprint,
-        )
-    ):
-        return _conflict("ReconcileBacklog does not target exact stale facts.")
-    try:
-        row = reconcile_stale_backlog_in_session(
-            session,
-            project_id=request.project_id,
-            replacement_authority_id=request.replacement_authority_id,
-            replacement_authority_fingerprint=(
-                request.replacement_authority_fingerprint
-            ),
-            affected_artifact_ids=request.affected_artifact_ids,
-            reconciled_by=request.actor,
-            reconciled_at=evaluated_at,
-        )
-    except BacklogReconciliationError as error:
-        return _conflict(error.detail)
-    if row.backlog_authority_reconciliation_id is None:
-        return _conflict("Backlog reconciliation did not receive a durable identity.")
-    return _success(
-        decision,
-        {
-            "backlog_authority_reconciliation_id": (
-                row.backlog_authority_reconciliation_id
-            ),
-            "replacement_authority_id": request.replacement_authority_id,
-            "affected_artifact_ids": request.affected_artifact_ids,
-        },
-    )
-
-
 __all__ = [
     "execute_decide_backlog",
-    "execute_decide_vision",
-    "execute_reconcile_backlog",
     "execute_record_backlog_draft",
-    "execute_record_vision_draft",
     "validate_decide_backlog_review",
-    "validate_decide_vision_review",
 ]

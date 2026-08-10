@@ -27,6 +27,7 @@ from services.agent_workbench.authority_projection import (
 from services.agent_workbench.error_codes import ErrorCode, error_metadata
 from tests.authority_assumption_fixtures import historical_v2_compiled_authority
 from tests.typing_helpers import require_id
+from tests.workflow.lifecycle_fixtures import seed_accepted_specification
 from utils.agileforge_spec_profile import (
     TechnicalSpecArtifact,
     canonical_spec_hash,
@@ -120,14 +121,11 @@ def _engine(session: Session) -> Engine:
 
 def _seed_project(
     session: Session,
-    *,
-    spec_file_path: str | None = None,
 ) -> Project:
     """Persist a project used by authority projection tests."""
     project = Project(
         name="Authority Project",
         description="Project for authority projection tests",
-        spec_file_path=spec_file_path,
     )
     session.add(project)
     session.commit()
@@ -142,21 +140,20 @@ def _seed_spec(
     content: str,
     content_ref: str | None = None,
 ) -> SpecRegistry:
-    """Persist an approved spec version."""
-    spec = SpecRegistry(
+    """Persist an accepted specification through the current lifecycle."""
+    try:
+        parsed = json.loads(content)
+    except json.JSONDecodeError:
+        parsed = {"content": content}
+    if not isinstance(parsed, dict):
+        parsed = {"content": parsed}
+    return seed_accepted_specification(
+        session,
         project_id=project_id,
-        spec_hash=_spec_hash(content),
-        content=content,
+        content=json.dumps(parsed),
         content_ref=content_ref,
-        status="approved",
-        approved_at=datetime(2026, 5, 14, tzinfo=UTC),
-        approved_by="tester",
-        approval_notes="approved",
-    )
-    session.add(spec)
-    session.commit()
-    session.refresh(spec)
-    return spec
+        recorded_at=datetime(2026, 5, 14, tzinfo=UTC),
+    ).spec
 
 
 def _seed_authority(  # noqa: PLR0913
@@ -1151,7 +1148,7 @@ def test_authority_status_reports_current_accepted_authority_from_repo_root(
     spec_path = tmp_path / "specs" / "app.json"
     spec_path.parent.mkdir()
     spec_path.write_text(spec_content, encoding="utf-8")
-    project = _seed_project(session, spec_file_path="specs/app.json")
+    project = _seed_project(session)
     project_id = require_id(project.project_id, "project_id")
     spec = _seed_spec(
         session,
@@ -1201,7 +1198,7 @@ def test_authority_status_canonicalizes_structured_spec_disk_hash(
     spec_path = tmp_path / "specs" / "app.json"
     spec_path.parent.mkdir()
     spec_path.write_text(pretty_content, encoding="utf-8")
-    project = _seed_project(session, spec_file_path="specs/app.json")
+    project = _seed_project(session)
     project_id = require_id(project.project_id, "project_id")
     spec = _seed_spec(
         session,
@@ -1519,9 +1516,14 @@ def test_authority_status_marks_disk_spec_hash_drift_stale(
     spec_path = tmp_path / "specs" / "app.json"
     spec_path.parent.mkdir()
     spec_path.write_text(changed_content, encoding="utf-8")
-    project = _seed_project(session, spec_file_path="specs/app.json")
+    project = _seed_project(session)
     project_id = require_id(project.project_id, "project_id")
-    spec = _seed_spec(session, project_id=project_id, content=accepted_content)
+    spec = _seed_spec(
+        session,
+        project_id=project_id,
+        content=accepted_content,
+        content_ref="specs/app.json",
+    )
     _seed_authority(
         session,
         spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
@@ -1586,9 +1588,14 @@ def test_authority_status_fingerprint_changes_on_disk_spec_drift(
     spec_path = tmp_path / "specs" / "app.json"
     spec_path.parent.mkdir()
     spec_path.write_text(accepted_content, encoding="utf-8")
-    project = _seed_project(session, spec_file_path="specs/app.json")
+    project = _seed_project(session)
     project_id = require_id(project.project_id, "project_id")
-    spec = _seed_spec(session, project_id=project_id, content=accepted_content)
+    spec = _seed_spec(
+        session,
+        project_id=project_id,
+        content=accepted_content,
+        content_ref="specs/app.json",
+    )
     _seed_authority(
         session,
         spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
@@ -1614,9 +1621,14 @@ def test_authority_status_marks_missing_disk_spec_stale_with_warning(
     tmp_path: Path,
 ) -> None:
     """Do not report current when the stored disk spec path is missing."""
-    project = _seed_project(session, spec_file_path="specs/missing.md")
+    project = _seed_project(session)
     project_id = require_id(project.project_id, "project_id")
-    spec = _seed_spec(session, project_id=project_id, content="# Spec\n")
+    spec = _seed_spec(
+        session,
+        project_id=project_id,
+        content="# Spec\n",
+        content_ref="specs/missing.md",
+    )
     _seed_authority(
         session,
         spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
@@ -1648,9 +1660,14 @@ def test_authority_status_marks_unreadable_disk_spec_existing_with_warning(
     spec_path.parent.mkdir()
     spec_path.write_text(spec_content, encoding="utf-8")
     resolved_spec_path = spec_path.resolve()
-    project = _seed_project(session, spec_file_path="specs/app.md")
+    project = _seed_project(session)
     project_id = require_id(project.project_id, "project_id")
-    spec = _seed_spec(session, project_id=project_id, content=spec_content)
+    spec = _seed_spec(
+        session,
+        project_id=project_id,
+        content=spec_content,
+        content_ref="specs/app.md",
+    )
     _seed_authority(
         session,
         spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),

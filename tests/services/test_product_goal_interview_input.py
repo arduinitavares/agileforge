@@ -42,7 +42,6 @@ def test_builds_from_the_exact_accepted_vision(
         project=ProjectFact(
             project_id=1,
             name="Goal input",
-            origin="greenfield",
             created_at=NOW,
         ),
         vision_artifacts=(
@@ -158,9 +157,9 @@ def test_build_ignores_malformed_unrelated_workflow_facts(
         1, _goal_interview_decision(), "Refine the current Goal"
     )
 
-    assert ProductGoalInterviewInput.model_validate(
-        payload
-    ).prior_components is not None
+    assert (
+        ProductGoalInterviewInput.model_validate(payload).prior_components is not None
+    )
 
 
 def test_build_propagates_malformed_goal_or_vision_lineage(
@@ -226,9 +225,7 @@ def _goal_snapshot(
         created_at=NOW,
     )
     return WorkflowFactSnapshot(
-        project=ProjectFact(
-            project_id=1, name="Goal input", origin="greenfield", created_at=NOW
-        ),
+        project=ProjectFact(project_id=1, name="Goal input", created_at=NOW),
         vision_artifacts=(vision,),
         vision_artifact_decisions=(
             VisionArtifactDecisionFact(

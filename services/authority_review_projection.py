@@ -13,11 +13,6 @@ from typing import TYPE_CHECKING, Any, Final, cast
 from pydantic import ValidationError
 from sqlmodel import Session, col, select
 
-from models.agent_workbench import (
-    DiscoveryChallengeArtifact,
-    DiscoveryPrd,
-    DiscoverySpecAmendmentDraft,
-)
 from models.core import Project
 from models.specs import SpecRegistry
 from services.agent_workbench.authority_projection import (
@@ -156,7 +151,6 @@ class AuthorityReviewSnapshot:
     structured_spec_snapshot: JsonDict | None
     pending_spec_version_id: int
     compiled_at: str | None
-    scope_discovery: JsonDict | None
     artifact: JsonDict
 
     @property
@@ -202,12 +196,6 @@ class AuthorityReviewSnapshot:
                 "ir_packet_limits": self.ir_packet_limits,
                 "ir_coverage_summary": self.ir_coverage_summary,
             },
-            "scope_discovery_fingerprint": (
-                self.scope_discovery.get("scope_discovery_fingerprint")
-                if self.scope_discovery is not None
-                else None
-            ),
-            "scope_discovery": self.scope_discovery,
         }
 
     @property
@@ -224,6 +212,7 @@ class AuthorityReviewSnapshot:
     def review_token(self) -> str:
         """Return the schema-qualified complete review fingerprint."""
         return f"{_REVIEW_SCHEMA}:{self.review_fingerprint}"
+
 
 @dataclass(frozen=True)
 class _AuthorityEvidence:
@@ -469,7 +458,6 @@ def _build_authority_review_snapshot(
     inputs: _ReviewInputs,
 ) -> AuthorityReviewSnapshot | JsonDict:
     """Build the canonical review snapshot without routing recommendations."""
-    session = inputs.session
     project_id = inputs.project_id
     project = inputs.project
     spec = inputs.spec
@@ -551,11 +539,6 @@ def _build_authority_review_snapshot(
     authority_fingerprint = pending_authority_fingerprint(authority)
     pending_authority_id = authority.authority_id
     source_spec_hash = _normalize_sha256_hash(spec.spec_hash)
-    scope_discovery = _scope_discovery_provenance(
-        session=session,
-        project_id=project_id,
-        amended_spec_hash=source_spec_hash,
-    )
     omission_assessment = coverage_summary["omission_assessment"]
 
     return AuthorityReviewSnapshot(
@@ -589,86 +572,8 @@ def _build_authority_review_snapshot(
         structured_spec_snapshot=_structured_spec_snapshot(source.text),
         pending_spec_version_id=authority.spec_version_id,
         compiled_at=_iso_z(authority.compiled_at),
-        scope_discovery=scope_discovery,
         artifact=artifact,
     )
-
-
-def _scope_discovery_provenance(
-    *,
-    session: Session,
-    project_id: int,
-    amended_spec_hash: str,
-) -> JsonDict | None:
-    """Return Scope Discovery provenance for a pending discovered authority."""
-    draft = session.exec(
-        select(DiscoverySpecAmendmentDraft)
-        .where(
-            DiscoverySpecAmendmentDraft.project_id == project_id,
-            DiscoverySpecAmendmentDraft.amended_spec_hash == amended_spec_hash,
-        )
-        .order_by(col(DiscoverySpecAmendmentDraft.spec_amendment_draft_id).desc())
-    ).first()
-    if draft is None:
-        return None
-    prd = session.get(DiscoveryPrd, draft.prd_id)
-    challenge = session.get(
-        DiscoveryChallengeArtifact,
-        draft.challenge_artifact_id,
-    )
-    if prd is None or challenge is None:
-        return None
-    challenge_payload = _json_object(challenge.content_json)
-    validation_payload = _json_object(draft.validation_json)
-    provenance: JsonDict = {
-        "challenge_artifact": {
-            "challenge_artifact_id": challenge.challenge_artifact_id,
-            "producer": challenge.producer,
-            "readiness": challenge.readiness,
-            "original_idea": challenge.original_idea,
-            "artifact_fingerprint": challenge.artifact_fingerprint,
-            "assumptions": _list_value(challenge_payload, "assumptions"),
-            "non_goals": _list_value(challenge_payload, "non_goals"),
-            "risks": _list_value(challenge_payload, "risks"),
-            "evidence_conflicts": _list_value(
-                challenge_payload,
-                "evidence_conflicts",
-            ),
-            "open_questions": _list_value(challenge_payload, "open_questions"),
-            "glossary_changes": _list_value(challenge_payload, "glossary_changes"),
-        },
-        "prd": {
-            "prd_id": prd.prd_id,
-            "producer": prd.producer,
-            "status": prd.status,
-            "version": prd.version,
-            "title": prd.title,
-            "artifact_fingerprint": prd.artifact_fingerprint,
-            "reviewed_by": prd.reviewed_by,
-        },
-        "spec_amendment": {
-            "spec_amendment_draft_id": draft.spec_amendment_draft_id,
-            "status": draft.status,
-            "artifact_fingerprint": draft.artifact_fingerprint,
-            "base_spec_version_id": draft.base_spec_version_id,
-            "base_spec_hash": draft.base_spec_hash,
-            "amended_spec_hash": draft.amended_spec_hash,
-            "validation": validation_payload,
-        },
-        "readiness": {
-            "challenge_readiness": challenge.readiness,
-            "prd_status": prd.status,
-            "spec_amendment_status": draft.status,
-            "open_questions_status": (
-                "open" if _list_value(challenge_payload, "open_questions") else "closed"
-            ),
-            "evidence_conflict_count": len(
-                _list_value(challenge_payload, "evidence_conflicts")
-            ),
-        },
-    }
-    provenance["scope_discovery_fingerprint"] = canonical_json_hash(provenance)
-    return provenance
 
 
 def _json_object(raw_json: str | None) -> JsonDict:

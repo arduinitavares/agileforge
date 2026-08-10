@@ -71,7 +71,7 @@ class CatalogRecipeRegistry:
 
 def _seed_project(engine: Engine) -> int:
     with Session(engine) as session:
-        project = Project(name="Agentic lifecycle", origin="greenfield")
+        project = Project(name="Agentic lifecycle")
         session.add(project)
         session.commit()
         assert project.project_id is not None
@@ -177,7 +177,6 @@ def test_root_graph_owns_complete_agentic_execution_catalog() -> None:
 
     assert ROOT_GRAPH.agentic_node_ids == marked
     assert len(marked) == EXPECTED_AGENTIC_NODE_COUNT
-    assert "onboarding.brownfield.curation" in marked
 
 
 @pytest.mark.parametrize("node_id", ROOT_GRAPH.agentic_node_ids)

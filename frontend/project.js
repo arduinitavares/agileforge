@@ -38,7 +38,6 @@ const REQUEST_STAGE = {
     record_sprint_plan: 'Sprint',
     record_story_draft: 'Stories',
     record_vision_interview_turn: 'Vision',
-    reconcile_backlog: 'Backlog',
     repair_authority: 'Authority',
     repair_story_readiness: 'Stories',
     review_sprint: 'Review',

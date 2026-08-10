@@ -22,11 +22,7 @@ from services.contracts.story import (
     UserStoryWriterInput,
     UserStoryWriterOutput,
 )
-from services.interview_runtime import hydrate_story_runtime_from_legacy
-from services.story_scope import (
-    _record_matches_story_scope,
-    _requirement_extension_metadata,
-)
+from services.interview_runtime import ensure_interview_subject
 from utils.adk_runner import (
     get_agent_model_info,
     invoke_agent_to_text,
@@ -220,10 +216,7 @@ def _actionable_clarifying_questions(questions: list[str]) -> list[str]:
         normalized = _normalized_question_text(stripped)
         if normalized in _GENERIC_CLARIFYING_QUESTIONS:
             continue
-        if any(
-            phrase in normalized
-            for phrase in _GENERIC_CLARIFYING_QUESTION_PHRASES
-        ):
+        if any(phrase in normalized for phrase in _GENERIC_CLARIFYING_QUESTION_PHRASES):
             continue
         if len(stripped.split()) < _MIN_ACTIONABLE_QUESTION_WORDS:
             continue
@@ -389,18 +382,14 @@ def _evaluate_story_quality(
         )
 
     blocking_findings = [
-        finding
-        for finding in quality_findings
-        if finding.get("severity") == "blocking"
+        finding for finding in quality_findings if finding.get("severity") == "blocking"
     ]
     saveable = (
         output.is_complete
         and not has_questions
         and output.coverage_status == "complete"
         and not blocking_findings
-        and not (
-            story_count > 0 and invest_score_counts.get("Low", 0) == story_count
-        )
+        and not (story_count > 0 and invest_score_counts.get("Low", 0) == story_count)
     )
     return {
         "schema_version": STORY_QUALITY_SCHEMA_VERSION,
@@ -608,9 +597,7 @@ def _with_story_patch_target_context(
     return {
         **request_payload,
         "requirement_context": (
-            request_payload["requirement_context"]
-            + "\n\n"
-            + "\n".join(target_lines)
+            request_payload["requirement_context"] + "\n\n" + "\n".join(target_lines)
         ),
     }
 
@@ -736,14 +723,11 @@ def _validate_story_output_consistency(
     if not will_be_incomplete:
         return None
 
-    actionable_questions = _actionable_clarifying_questions(
-        output.clarifying_questions
-    )
+    actionable_questions = _actionable_clarifying_questions(output.clarifying_questions)
     if actionable_questions:
         return None
-    if (
-        output.coverage_status == "partial_capacity_limited"
-        and any(item.strip() for item in output.remaining_scope)
+    if output.coverage_status == "partial_capacity_limited" and any(
+        item.strip() for item in output.remaining_scope
     ):
         return None
 
@@ -943,18 +927,13 @@ def _get_latest_reusable_story_artifact(
     state: dict[str, Any],
     *,
     parent_requirement: str,
-    extension_metadata: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
-    runtime = hydrate_story_runtime_from_legacy(
+    runtime = ensure_interview_subject(
         state,
-        parent_requirement=parent_requirement,
+        phase="story",
+        subject_key=parent_requirement,
     )
     draft_projection = runtime.get("draft_projection") or {}
-    if not _record_matches_story_scope(
-        draft_projection if isinstance(draft_projection, dict) else None,
-        extension_metadata,
-    ):
-        return None
     attempt_id = draft_projection.get("latest_reusable_attempt_id")
     if not isinstance(attempt_id, str) or not attempt_id:
         return None
@@ -964,8 +943,6 @@ def _get_latest_reusable_story_artifact(
             continue
         if attempt.get("attempt_id") != attempt_id:
             continue
-        if not _record_matches_story_scope(attempt, extension_metadata):
-            continue
         artifact = attempt.get("output_artifact")
         return artifact if isinstance(artifact, dict) else None
     return None
@@ -973,8 +950,6 @@ def _get_latest_reusable_story_artifact(
 
 def _collect_unabsorbed_feedback_text(
     runtime: dict[str, Any],
-    *,
-    extension_metadata: dict[str, Any] | None,
 ) -> list[str]:
     feedback_projection = runtime.get("feedback_projection") or {}
     if not isinstance(feedback_projection, dict):
@@ -989,8 +964,6 @@ def _collect_unabsorbed_feedback_text(
         if not isinstance(item, dict):
             continue
         if item.get("status") != "unabsorbed":
-            continue
-        if not _record_matches_story_scope(item, extension_metadata):
             continue
         text = item.get("text")
         if isinstance(text, str) and text.strip():
@@ -1008,19 +981,15 @@ def build_story_request_payload(
     input_context: StoryInputContext = build_story_input_context(
         state, parent_requirement=parent_requirement
     )
-    runtime = hydrate_story_runtime_from_legacy(
+    runtime = ensure_interview_subject(
         state,
-        parent_requirement=parent_requirement,
-    )
-    extension_metadata = _requirement_extension_metadata(
-        state,
-        parent_requirement=parent_requirement,
+        phase="story",
+        subject_key=parent_requirement,
     )
 
     reusable_artifact = _get_latest_reusable_story_artifact(
         state,
         parent_requirement=parent_requirement,
-        extension_metadata=extension_metadata,
     )
     if reusable_artifact:
         try:
@@ -1038,10 +1007,7 @@ def build_story_request_payload(
                 f"\n\n--- PREVIOUS DRAFT TO REFINE ---\n{reusable_artifact_json}"
             )
 
-    feedback_items = _collect_unabsorbed_feedback_text(
-        runtime,
-        extension_metadata=extension_metadata,
-    )
+    feedback_items = _collect_unabsorbed_feedback_text(runtime)
     if isinstance(current_user_input, str) and current_user_input.strip():
         feedback_items.append(current_user_input)
     if feedback_items:
@@ -1087,10 +1053,7 @@ async def run_story_agent_request(  # noqa: PLR0911
             raw_text = await _invoke_story_agent(attempt_payload)
         except AgentInvocationError as exc:
             validation_errors = exc.validation_errors
-            if (
-                validation_errors
-                and attempt_index < MAX_STORY_SCHEMA_REPAIR_ATTEMPTS
-            ):
+            if validation_errors and attempt_index < MAX_STORY_SCHEMA_REPAIR_ATTEMPTS:
                 attempt_payload = _payload_with_schema_repair_feedback(
                     attempt_payload,
                     error=str(exc),
@@ -1264,10 +1227,7 @@ async def run_story_patch_agent_request(  # noqa: PLR0911
             raw_text = await _invoke_story_patch_agent(attempt_payload)
         except AgentInvocationError as exc:
             validation_errors = exc.validation_errors
-            if (
-                validation_errors
-                and attempt_index < MAX_STORY_SCHEMA_REPAIR_ATTEMPTS
-            ):
+            if validation_errors and attempt_index < MAX_STORY_SCHEMA_REPAIR_ATTEMPTS:
                 attempt_payload = _payload_with_schema_repair_feedback(
                     attempt_payload,
                     error=str(exc),

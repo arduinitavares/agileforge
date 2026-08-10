@@ -81,7 +81,7 @@ if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
 
 EVALUATED_AT = datetime(2026, 8, 2, 12, tzinfo=UTC)
-EXPECTED_REQUEST_VARIANT_COUNT = 58
+EXPECTED_REQUEST_VARIANT_COUNT = 34
 EXPECTED_PLANNING_REQUEST_COUNT = 9
 REPAIRED_STORY_POINTS = 3
 EXPECTED_DEPENDENCY_STORY_COUNT = 3
@@ -688,7 +688,6 @@ def _seed_dependency_review_rows(
         session.add_all(stories)
         foreign_project = Project(
             name="Foreign dependency Project",
-            origin="greenfield",
         )
         session.add(foreign_project)
         session.flush()

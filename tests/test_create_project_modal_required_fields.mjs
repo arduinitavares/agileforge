@@ -29,7 +29,7 @@ test('create modal contains only the human project fields', () => {
     assert.match(modal, /for="modal-project-name"[^>]*>Project Name/);
     assert.match(modal, /for="modal-project-description"[^>]*>Description/);
     assert.match(modal, /for="modal-repository-path"[^>]*>Repository Path/);
-    assert.doesNotMatch(modal, /Origin|setup type|greenfield|brownfield/i);
+    assert.doesNotMatch(modal, /Origin|setup type/i);
 
     const businessControls = [...modal.matchAll(
         /<(?:input|textarea|select)\b[^>]*id="(modal-[^"]+)"[^>]*>/g,

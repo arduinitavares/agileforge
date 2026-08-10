@@ -163,7 +163,7 @@ def _story(
     **options: Unpack[_StoryOptions],
 ) -> StoryFact:
     points = options.get("points", 3)
-    rank = options.get("rank", "1.1")
+    rank = options.get("rank", "1")
     accepted = options.get("accepted", True)
     candidate = options.get("candidate", True)
     return StoryFact(
@@ -302,7 +302,6 @@ def _snapshot(
         project=ProjectFact(
             project_id=PROJECT_ID,
             name="Planning graph",
-            origin="greenfield",
             created_at=EVALUATED_AT,
         ),
         spec_versions=(

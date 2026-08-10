@@ -80,10 +80,8 @@ def test_retained_modules_import_without_deleted_root_composition() -> None:
     """Import current owners without loading the deleted root composition."""
     for module_name in (
         "services.contracts",
-        "services.contracts.as_built",
         "services.contracts.authority",
         "services.contracts.backlog",
-        "services.contracts.brownfield",
         "services.contracts.roadmap",
         "services.contracts.specification",
         "services.contracts.specification_normalizer",
@@ -94,7 +92,6 @@ def test_retained_modules_import_without_deleted_root_composition() -> None:
         "adapters.adk.agents",
         "adapters.adk.agents.authority",
         "adapters.adk.agents.backlog",
-        "adapters.adk.agents.brownfield",
         "adapters.adk.agents.roadmap",
         "adapters.adk.agents.spec_validator",
         "adapters.adk.agents.specification",

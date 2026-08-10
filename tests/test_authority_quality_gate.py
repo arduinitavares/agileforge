@@ -15,9 +15,6 @@ from utils.spec_authority_assumptions import (
     StructuredSpecClaimProvenance,
 )
 from utils.spec_schemas import (
-    AuthorityQualityInvalidatedItem,
-    AuthorityQualityReport,
-    AuthorityQualitySummary,
     DataContractParams,
     Invariant,
     InvariantType,
@@ -193,8 +190,7 @@ def test_quality_gate_merges_exact_duplicate_assumptions_and_groups_noisy() -> N
                 FreeTextAssumption(
                     kind="free_text",
                     text=(
-                        "Python runtime should be confirmed before "
-                        "implementation step."
+                        "Python runtime should be confirmed before implementation step."
                     ),
                 ),
             ],
@@ -317,38 +313,6 @@ def test_quality_gate_noisy_grouping_ignores_structured_assumptions() -> None:
 
     assert gated.authority_quality is not None
     assert gated.authority_quality.summary.noisy_assumption_group_count == 0
-
-
-def test_quality_gate_preserves_and_renumbers_scope_invalidations() -> None:
-    """Quality rebuilds keep scope-extension invalidation history stable."""
-    success = _success(invariants=[])
-    success.authority_quality = AuthorityQualityReport(
-        summary=AuthorityQualitySummary(
-            original_invariant_count=0,
-            final_invariant_count=0,
-            merged_invariant_count=0,
-            merged_assumption_count=0,
-            review_group_count=0,
-            near_duplicate_group_count=0,
-            over_split_group_count=0,
-            noisy_assumption_group_count=0,
-        ),
-        invalidated_items=[
-            AuthorityQualityInvalidatedItem(
-                invalidation_id="temporary",
-                removed_id="ASM-1",
-                assumption_kind="accepted_normative_count",
-                reason="aggregate_claim_invalidated_by_scope_extension",
-            )
-        ],
-    )
-
-    gated = apply_authority_quality_gate(success)
-
-    assert gated.authority_quality is not None
-    assert [
-        item.invalidation_id for item in gated.authority_quality.invalidated_items
-    ] == ["AQ-INVALIDATE-001"]
 
 
 def test_authority_quality_gate_has_no_project_specific_terms() -> None:

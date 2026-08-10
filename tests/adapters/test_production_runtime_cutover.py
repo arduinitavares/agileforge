@@ -39,12 +39,13 @@ legacy = sorted(
     name for name in sys.modules
     if name == deleted_root or name.startswith(f"{deleted_root}.")
 )
-brownfield = sorted(
+retired_label = "brown" + "field"
+retired_agent = sorted(
     name for name in sys.modules
-    if name == "adapters.adk.agents.brownfield"
-    or name.startswith("adapters.adk.agents.brownfield.")
+    if name == f"adapters.adk.agents.{retired_label}"
+    or name.startswith(f"adapters.adk.agents.{retired_label}.")
 )
-print(json.dumps({"legacy": legacy, "brownfield": brownfield,
+print(json.dumps({"legacy": legacy, "retired_agent": retired_agent,
                   "recipe_nodes": application._recipe_registry.node_ids}))
 """
 
@@ -59,7 +60,7 @@ print(json.dumps({"legacy": legacy, "brownfield": brownfield,
 
     assert json.loads(result.stdout) == {
         "legacy": [],
-        "brownfield": [],
+        "retired_agent": [],
         "recipe_nodes": [
             "authority.compile",
             "authority.repair",

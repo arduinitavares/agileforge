@@ -163,8 +163,6 @@ def _compile_rule(
     snapshot: WorkflowFactSnapshot,
     _evaluated_at: datetime,
 ) -> tuple[RuleEvaluation, ...]:
-    if snapshot.project_abandonments:
-        return _evaluation(RuleCategory.SATISFIED, "PROJECT_ABANDONED")
     state = _authority_state(snapshot)
     if state.conflict:
         return _invalid()
@@ -193,8 +191,6 @@ def _review_rule(
     snapshot: WorkflowFactSnapshot,
     _evaluated_at: datetime,
 ) -> tuple[RuleEvaluation, ...]:
-    if snapshot.project_abandonments:
-        return _evaluation(RuleCategory.SATISFIED, "PROJECT_ABANDONED")
     state = _authority_state(snapshot)
     if state.conflict:
         return _invalid()
@@ -228,8 +224,6 @@ def _feedback_rule(
     snapshot: WorkflowFactSnapshot,
     _evaluated_at: datetime,
 ) -> tuple[RuleEvaluation, ...]:
-    if snapshot.project_abandonments:
-        return _evaluation(RuleCategory.SATISFIED, "PROJECT_ABANDONED")
     state = _authority_state(snapshot)
     if state.conflict:
         return _invalid()
@@ -258,8 +252,6 @@ def _repair_rule(
     snapshot: WorkflowFactSnapshot,
     _evaluated_at: datetime,
 ) -> tuple[RuleEvaluation, ...]:
-    if snapshot.project_abandonments:
-        return _evaluation(RuleCategory.SATISFIED, "PROJECT_ABANDONED")
     state = _authority_state(snapshot)
     if state.conflict:
         return _invalid()
@@ -344,6 +336,7 @@ AUTHORITY_NODES: tuple[NodeSpec, ...] = (
         ),
     ),
 )
+
 
 def authority_graph() -> WorkflowGraph:
     """Return the isolated Authority graph."""

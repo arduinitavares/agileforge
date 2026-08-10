@@ -61,7 +61,6 @@ def test_builds_initial_input_from_project_and_human_text_only(engine: Engine) -
         project = Project(
             name="Vision input",
             description="Human intent only.",
-            origin="greenfield",
         )
         session.add(project)
         session.commit()
@@ -247,7 +246,6 @@ def test_build_initial_queries_only_vision_input_tables(
         project = Project(
             name="Vision input isolation",
             description="Only Vision facts may be read.",
-            origin="greenfield",
         )
         session.add(project)
         session.commit()
@@ -273,7 +271,7 @@ def test_build_revision_adds_only_validated_goal_guard_tables(
 ) -> None:
     """Revision input adds only the durable Goal rows needed by its guard."""
     with Session(engine) as session:
-        project = Project(name="Vision revision input", origin="greenfield")
+        project = Project(name="Vision revision input")
         session.add(project)
         session.flush()
         _seed_open_revision(session, project)

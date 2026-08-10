@@ -36,7 +36,6 @@ from workflow.graph import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
     from datetime import datetime
 
     from workflow.facts import (
@@ -56,26 +55,6 @@ _TERMINAL_TASK_STATUSES = frozenset({"Done", "Cancelled"})
 _SPRINT_INTEGRITY_REASONS = frozenset(
     {"SPRINT_STORY_COMPLETION_CONFLICT", "WORKFLOW_FACT_CONFLICT"}
 )
-
-
-def _after_abandonment(
-    rule: Callable[
-        [WorkflowFactSnapshot, datetime],
-        tuple[RuleEvaluation, ...],
-    ],
-) -> Callable[
-    [WorkflowFactSnapshot, datetime],
-    tuple[RuleEvaluation, ...],
-]:
-    def guarded(
-        snapshot: WorkflowFactSnapshot,
-        evaluated_at: datetime,
-    ) -> tuple[RuleEvaluation, ...]:
-        if snapshot.project_abandonments:
-            return (RuleEvaluation(RuleCategory.SATISFIED, "PROJECT_ABANDONED"),)
-        return rule(snapshot, evaluated_at)
-
-    return guarded
 
 
 def _blocked(
@@ -1080,7 +1059,7 @@ EXECUTION_NODES: tuple[NodeSpec, ...] = (
             InputField(name="acceptance_result", value_type="string"),
             InputField(name="checklist_result", value_type="object"),
         ),
-        evaluate_rule=_after_abandonment(_task_rule),
+        evaluate_rule=_task_rule,
     ),
     NodeSpec(
         node_id="execution.story.close",
@@ -1093,7 +1072,7 @@ EXECUTION_NODES: tuple[NodeSpec, ...] = (
             InputField(name="evidence", value_type="string"),
             InputField(name="known_gaps", value_type="string"),
         ),
-        evaluate_rule=_after_abandonment(_story_rule),
+        evaluate_rule=_story_rule,
     ),
     NodeSpec(
         node_id="execution.sprint.review",
@@ -1101,7 +1080,7 @@ EXECUTION_NODES: tuple[NodeSpec, ...] = (
         request_kind="review_sprint",
         recommendation_kind=RecommendationKind.REQUIRED,
         required_inputs=(),
-        evaluate_rule=_after_abandonment(_sprint_review_rule),
+        evaluate_rule=_sprint_review_rule,
     ),
     NodeSpec(
         node_id="execution.sprint.close",
@@ -1109,7 +1088,7 @@ EXECUTION_NODES: tuple[NodeSpec, ...] = (
         request_kind="close_sprint",
         recommendation_kind=RecommendationKind.REQUIRED,
         required_inputs=(),
-        evaluate_rule=_after_abandonment(_sprint_close_rule),
+        evaluate_rule=_sprint_close_rule,
     ),
     NodeSpec(
         node_id="execution.post_sprint_triage",
@@ -1120,7 +1099,7 @@ EXECUTION_NODES: tuple[NodeSpec, ...] = (
             InputField(name="impact", value_type="string"),
             InputField(name="canonical_payload", value_type="object"),
         ),
-        evaluate_rule=_after_abandonment(_triage_rule),
+        evaluate_rule=_triage_rule,
     ),
 )
 

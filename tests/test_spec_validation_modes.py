@@ -12,12 +12,12 @@ from agile_sqlmodel import (
     CompiledSpecAuthority,
     Project,
     SpecAuthorityAcceptance,
-    SpecRegistry,
     UserStory,
 )
 from models.core import Epic, Feature, Theme
 from services.specs.authority_selection import pending_authority_fingerprint
 from tests.typing_helpers import require_id
+from tests.workflow.lifecycle_fixtures import seed_accepted_specification
 from tools import spec_tools
 from tools.spec_tools import validate_story_with_spec_authority
 from utils.spec_schemas import (
@@ -32,19 +32,11 @@ from utils.spec_schemas import (
 
 
 def _create_compiled_spec(session: Session, project_id: int) -> int:
-    spec = SpecRegistry(
+    spec = seed_accepted_specification(
+        session,
         project_id=project_id,
-        content="# Spec",
-        content_ref=None,
-        spec_hash="a" * 64,
-        status="approved",
-        approved_at=datetime.now(UTC),
-        approved_by="tester",
-        approval_notes=None,
-    )
-    session.add(spec)
-    session.commit()
-    session.refresh(spec)
+        content=json.dumps({"title": "Spec"}),
+    ).spec
 
     invariant = Invariant(
         id="INV-0000000000000001",
@@ -746,19 +738,11 @@ def test_hybrid_mode_ignores_policy_boilerplate_when_llm_passes(
     session.commit()
     session.refresh(project)
 
-    spec = SpecRegistry(
+    spec = seed_accepted_specification(
+        session,
         project_id=require_id(project.project_id, "project_id"),
-        content="# Spec",
-        content_ref=None,
-        spec_hash="b" * 64,
-        status="approved",
-        approved_at=datetime.now(UTC),
-        approved_by="tester",
-        approval_notes=None,
-    )
-    session.add(spec)
-    session.commit()
-    session.refresh(spec)
+        content=json.dumps({"title": "Policy spec"}),
+    ).spec
 
     story = _create_orphan_story(session, require_id(project.project_id, "project_id"))
     story.acceptance_criteria = (

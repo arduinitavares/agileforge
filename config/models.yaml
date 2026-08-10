@@ -1,5 +1,4 @@
 models:
-  brownfield_curator: "openrouter/openai/gpt-5.6-luna"
   spec_authority_compiler: "openrouter/openai/gpt-5.6-luna"
   product_vision: "openrouter/openai/gpt-5.6-luna"
   product_goal: "openrouter/openai/gpt-5.6-luna"

@@ -15,7 +15,6 @@ from agile_sqlmodel import (
     CompiledSpecAuthority,
     Project,
     SpecAuthorityAcceptance,
-    SpecRegistry,
     UserStory,
 )
 
@@ -25,6 +24,7 @@ from scripts import apply_story_validation as validation_script
 from services.specs.authority_selection import pending_authority_fingerprint
 from tests.authority_assumption_fixtures import current_v3_compiled_authority_json
 from tests.typing_helpers import require_id
+from tests.workflow.lifecycle_fixtures import seed_accepted_specification
 from utils.runtime_config import clear_runtime_config_cache
 
 if TYPE_CHECKING:
@@ -73,13 +73,10 @@ def _seed_project_with_stories(
     assert project.project_id is not None
 
     if include_spec:
-        session.add(
-            SpecRegistry(
-                project_id=project.project_id,
-                spec_hash="abc123",
-                content="# Approved Spec",
-                status="approved",
-            )
+        seed_accepted_specification(
+            session,
+            project_id=project.project_id,
+            content=json.dumps({"title": "Approved Spec"}),
         )
 
     story_ids: list[int] = []
@@ -122,15 +119,11 @@ def test_invariant_summary_uses_exact_accepted_valid_authority(
     session.commit()
     session.refresh(project)
     project_id = require_id(project.project_id, "project_id")
-    spec = SpecRegistry(
+    spec = seed_accepted_specification(
+        session,
         project_id=project_id,
-        spec_hash="summary-spec",
-        content="# Summary",
-        status="approved",
-    )
-    session.add(spec)
-    session.commit()
-    session.refresh(spec)
+        content=json.dumps({"title": "Summary"}),
+    ).spec
     spec_version_id = require_id(spec.spec_version_id, "spec_version_id")
     session.add(
         CompiledSpecAuthority(

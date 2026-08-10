@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import date, timedelta
 from typing import TYPE_CHECKING
 
@@ -10,10 +11,6 @@ from sqlalchemy import event
 from sqlmodel import Session, SQLModel, create_engine, select
 
 from agile_sqlmodel import (
-    BrownfieldScanAttempt,
-    BrownfieldSourceArtifact,
-    BrownfieldSpecApproval,
-    BrownfieldSpecDraftAttempt,
     CompiledSpecAuthority,
     Project,
     ProjectTeam,
@@ -30,6 +27,7 @@ from models.core import Epic, Feature, Team, Theme
 from repositories.project import ProjectDeletionConflictError
 from scripts.delete_project import delete_project, resolve_db_path
 from tests.typing_helpers import require_id
+from tests.workflow.lifecycle_fixtures import seed_accepted_specification
 from utils.runtime_config import RuntimeConfigError, clear_runtime_config_cache
 
 if TYPE_CHECKING:
@@ -156,14 +154,11 @@ def test_delete_project_allows_pre_acceptance_authority_shell(tmp_path: Path) ->
         session.flush()
         project_id = require_id(project.project_id, "project_id")
 
-        spec = SpecRegistry(
+        spec = seed_accepted_specification(
+            session,
             project_id=project_id,
-            spec_hash="spec-hash",
-            content="# Spec",
-            status="approved",
-        )
-        session.add(spec)
-        session.flush()
+            content=json.dumps({"title": "Pre-authority specification"}),
+        ).spec
         spec_version_id = require_id(spec.spec_version_id, "spec_version_id")
 
         session.add(
@@ -199,14 +194,11 @@ def test_delete_project_preserves_historically_accepted_authority(
         session.flush()
         project_id = require_id(project.project_id, "project_id")
 
-        spec = SpecRegistry(
+        spec = seed_accepted_specification(
+            session,
             project_id=project_id,
-            spec_hash="accepted-spec-hash",
-            content="# Accepted spec",
-            status="approved",
-        )
-        session.add(spec)
-        session.flush()
+            content=json.dumps({"title": "Accepted authority specification"}),
+        ).spec
         spec_version_id = require_id(spec.spec_version_id, "spec_version_id")
 
         authority = CompiledSpecAuthority(
@@ -245,71 +237,6 @@ def test_delete_project_preserves_historically_accepted_authority(
         assert session.get(SpecRegistry, spec_version_id) is not None
         assert session.get(CompiledSpecAuthority, authority_id) is not None
         assert session.get(SpecAuthorityAcceptance, acceptance_id) is not None
-
-
-def test_delete_project_removes_brownfield_artifacts(tmp_path: Path) -> None:
-    """Ensure delete_project clears brownfield artifact records before project."""
-    db_path = tmp_path / "delete_project_brownfield.db"
-    engine = _create_sqlite_engine(db_path)
-
-    with Session(engine) as session:
-        project = Project(name="Brownfield Project")
-        session.add(project)
-        session.flush()
-        project_id = require_id(project.project_id, "project_id")
-
-        session.add(
-            BrownfieldSourceArtifact(
-                project_id=project_id,
-                attempt_id="source-attempt-1",
-                artifact_fingerprint="source-fingerprint-1",
-                request_hash="source-request-hash-1",
-            )
-        )
-        session.add(
-            BrownfieldScanAttempt(
-                project_id=project_id,
-                attempt_id="scan-attempt-1",
-                artifact_fingerprint="scan-artifact-fingerprint-1",
-                source_fingerprint="source-fingerprint-1",
-                repo_path=str(tmp_path / "repo"),
-                request_hash="scan-request-hash-1",
-            )
-        )
-        session.add(
-            BrownfieldSpecDraftAttempt(
-                project_id=project_id,
-                attempt_id="draft-attempt-1",
-                artifact_fingerprint="draft-artifact-fingerprint-1",
-                origin="scan",
-                source_fingerprint="source-fingerprint-1",
-                scan_attempt_id="scan-attempt-1",
-                scan_fingerprint="scan-fingerprint-1",
-                request_hash="draft-request-hash-1",
-            )
-        )
-        session.add(
-            BrownfieldSpecApproval(
-                project_id=project_id,
-                approval_attempt_id="approval-attempt-1",
-                approval_fingerprint="approval-fingerprint-1",
-                draft_attempt_id="draft-attempt-1",
-                draft_fingerprint="draft-fingerprint-1",
-                scan_fingerprint="scan-fingerprint-1",
-                source_fingerprint="source-fingerprint-1",
-                spec_hash="spec-hash-1",
-            )
-        )
-        session.commit()
-
-    delete_project(project_id, str(db_path))
-
-    with Session(engine) as session:
-        assert session.exec(select(Project)).first() is None
-        assert session.exec(select(BrownfieldSpecApproval)).first() is None
-        assert session.exec(select(BrownfieldSpecDraftAttempt)).first() is None
-        assert session.exec(select(BrownfieldScanAttempt)).first() is None
-        assert session.exec(select(BrownfieldSourceArtifact)).first() is None
 
 
 def test_resolve_db_path_prefers_explicit_argument(

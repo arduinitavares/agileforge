@@ -7,7 +7,7 @@ from typing import Annotated, Literal
 
 from pydantic import Field, field_validator, model_validator
 
-from workflow.contracts import FactReference, FrozenModel, JsonObject
+from workflow.contracts import FrozenModel, JsonObject
 
 _DATETIME = _datetime.datetime
 
@@ -17,60 +17,8 @@ class ProjectFact(FrozenModel):
 
     project_id: int
     name: str
-    description: str | None
+    description: str | None = None
     created_at: _DATETIME
-
-
-class ProjectAbandonmentFact(FrozenModel):
-    """Recorded abandonment of a project."""
-
-    project_abandonment_id: int
-    project_id: int
-    reason: str
-    abandoned_by: str
-    abandoned_at: _DATETIME
-
-
-class DiscoveryRunFact(FrozenModel):
-    """Discovery run lifecycle state."""
-
-    discovery_run_id: int
-    project_id: int
-    purpose: Literal["initial", "extension"]
-    ordinal: int
-    created_at: _DATETIME
-    closed_at: _DATETIME | None
-    base_spec_version_id: int | None = None
-    base_spec_hash: str | None = None
-
-
-class DiscoveryRunAbandonmentFact(FrozenModel):
-    """Recorded abandonment of a discovery run."""
-
-    discovery_run_abandonment_id: int
-    project_id: int
-    discovery_run_id: int
-    reason: str
-    abandoned_by: str
-    abandoned_at: _DATETIME
-
-
-class ChallengeArtifactFact(FrozenModel):
-    """Immutable challenge artifact version."""
-
-    challenge_artifact_id: int
-    discovery_run_id: int
-    content_fingerprint: str
-    supersedes_id: int | None
-
-
-class PrdVersionFact(FrozenModel):
-    """Immutable PRD version."""
-
-    prd_version_id: int
-    discovery_run_id: int
-    content_fingerprint: str
-    supersedes_id: int | None
 
 
 class ReviewDecisionFact(FrozenModel):
@@ -78,8 +26,6 @@ class ReviewDecisionFact(FrozenModel):
 
     decision_id: int
     artifact_type: Literal[
-        "prd",
-        "spec_draft",
         "authority",
         "vision",
         "backlog",
@@ -91,49 +37,6 @@ class ReviewDecisionFact(FrozenModel):
     artifact_fingerprint: str
     decision: Literal["accepted", "rejected", "feedback"]
     decided_at: _DATETIME
-
-
-class SpecDraftFact(FrozenModel):
-    """Immutable specification draft version."""
-
-    spec_draft_id: int
-    discovery_run_id: int
-    kind: Literal["initial", "amendment"]
-    content_fingerprint: str
-    base_spec_version_id: int | None
-    base_spec_hash: str | None
-    supersedes_id: int | None
-
-
-class InitialScopeRegistrationFact(FrozenModel):
-    """Registration of the accepted initial scope."""
-
-    registration_id: int
-    discovery_run_id: int
-    spec_draft_id: int
-    spec_version_id: int
-    spec_hash: str
-
-
-class ScopeExtensionRegistrationFact(FrozenModel):
-    """Registration of one accepted amendment draft."""
-
-    registration_id: int
-    discovery_run_id: int
-    spec_draft_id: int
-    spec_version_id: int
-    spec_hash: str
-
-
-class ScopeExtensionReconciliationFact(FrozenModel):
-    """Downstream facts reconciled to one replacement authority."""
-
-    reconciliation_id: int
-    discovery_run_id: int
-    replacement_authority_id: int
-    replacement_authority_fingerprint: str
-    artifact_references: tuple[FactReference, ...]
-    reconciled_at: _DATETIME
 
 
 class VisionRevisionIntentFact(FrozenModel):
@@ -322,27 +225,6 @@ class SpecVersionFact(FrozenModel):
     supersedes_spec_version_id: int | None = None
 
 
-class RepositoryBaselineFact(FrozenModel):
-    """Versioned repository identity captured for brownfield onboarding."""
-
-    repository_baseline_id: int
-    repository_path: str
-    git_commit: str | None
-    dirty: bool
-    content_fingerprint: str
-
-
-class RepositoryInventoryFact(FrozenModel):
-    """Complete repository inventory and separate bounded model selection."""
-
-    repository_inventory_id: int
-    repository_baseline_id: int
-    content_fingerprint: str
-    file_count: int
-    total_bytes: int
-    selected_for_model: tuple[str, ...]
-
-
 class AuthorityFact(FrozenModel):
     """Compiled authority associated with a specification version."""
 
@@ -382,21 +264,6 @@ class PhaseArtifactFact(FrozenModel):
         "feedback",
         "superseded",
     ]
-
-
-class BacklogReconciliationFact(FrozenModel):
-    """Explicit reconciliation of stale product-definition artifacts."""
-
-    reconciliation_id: int
-    replacement_authority_id: int
-    replacement_authority_fingerprint: str
-    affected_artifact_ids: tuple[int, ...]
-    affected_artifacts_fingerprint: str
-    reconciled_by: str
-    audit_event_id: int
-    audit_event_action: Literal["backlog_authority_reconciled"]
-    audit_event_fingerprint: str
-    reconciled_at: _DATETIME
 
 
 class BacklogRequirementFact(FrozenModel):
@@ -623,16 +490,7 @@ class WorkflowFactSnapshot(FrozenModel):
     """Complete immutable fact snapshot used to evaluate one project graph."""
 
     project: ProjectFact
-    project_abandonments: tuple[ProjectAbandonmentFact, ...] = ()
-    discovery_runs: tuple[DiscoveryRunFact, ...] = ()
-    discovery_run_abandonments: tuple[DiscoveryRunAbandonmentFact, ...] = ()
-    challenge_artifacts: tuple[ChallengeArtifactFact, ...] = ()
-    prd_versions: tuple[PrdVersionFact, ...] = ()
     review_decisions: tuple[ReviewDecisionFact, ...] = ()
-    spec_drafts: tuple[SpecDraftFact, ...] = ()
-    initial_registrations: tuple[InitialScopeRegistrationFact, ...] = ()
-    extension_registrations: tuple[ScopeExtensionRegistrationFact, ...] = ()
-    scope_extension_reconciliations: tuple[ScopeExtensionReconciliationFact, ...] = ()
     vision_revision_intents: tuple[VisionRevisionIntentFact, ...] = ()
     vision_interview_turns: tuple[VisionInterviewTurnFact, ...] = ()
     vision_artifacts: tuple[VisionArtifactFact, ...] = ()
@@ -645,12 +503,9 @@ class WorkflowFactSnapshot(FrozenModel):
     specification_candidates: tuple[SpecificationCandidateFact, ...] = ()
     specification_decisions: tuple[SpecificationDecisionFact, ...] = ()
     spec_versions: tuple[SpecVersionFact, ...] = ()
-    repository_baselines: tuple[RepositoryBaselineFact, ...] = ()
-    repository_inventories: tuple[RepositoryInventoryFact, ...] = ()
     authorities: tuple[AuthorityFact, ...] = ()
     authority_feedback: tuple[AuthorityFeedbackFact, ...] = ()
     phase_artifacts: tuple[PhaseArtifactFact, ...] = ()
-    backlog_reconciliations: tuple[BacklogReconciliationFact, ...] = ()
     backlog_requirements: tuple[BacklogRequirementFact, ...] = ()
     planning_artifacts: tuple[PlanningArtifactFact, ...] = ()
     sprints: tuple[SprintFact, ...] = ()

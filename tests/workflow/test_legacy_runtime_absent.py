@@ -48,7 +48,7 @@ _FORBIDDEN_LITERALS = (
     "STATE" + "_REGISTRY",
     "fsm" + "_state",
     "AGILEFORGE" + "_SESSION_DB_URL",
-    "GreenfieldDiscovery" + "Context",
+    "Green" + "fieldDiscovery" + "Context",
     "context" + "_key",
 )
 

@@ -552,9 +552,7 @@ def _accept_discovery_and_specification(journey: _Journey) -> tuple[int, str]:
     position, review = _assert_next(
         domain, project_id, "specification.review", NodeCategory.WAITING
     )
-    candidate_id, candidate_fingerprint = _reference(
-        review, "specification_candidate"
-    )
+    candidate_id, candidate_fingerprint = _reference(review, "specification_candidate")
     accepted = domain.transition(
         DecideSpecification(
             **_guards(position, "specification.review"),
@@ -570,9 +568,7 @@ def _accept_discovery_and_specification(journey: _Journey) -> tuple[int, str]:
     position, compile_decision = _assert_next(
         domain, project_id, "authority.compile", NodeCategory.AVAILABLE
     )
-    spec_version_id, registered_hash = _reference(
-        compile_decision, "spec_version"
-    )
+    spec_version_id, registered_hash = _reference(compile_decision, "spec_version")
     assert registered_hash == specification_hash
     return spec_version_id, specification_hash
 
@@ -997,8 +993,8 @@ def _assert_next_cycle_and_fulfill_goal(journey: _Journey) -> None:
     assert "vision.interview" not in next_position.available_nodes
 
 
-def test_root_graph_has_exact_v2_lifecycle_order_without_retired_nodes() -> None:
-    """Expose one product lifecycle without setup or reconciliation wrappers."""
+def test_root_graph_has_exact_v2_lifecycle_order() -> None:
+    """Expose one product lifecycle in the approved order."""
     assert ROOT_GRAPH.graph_version == "agileforge.workflow.v2"
     assert tuple(child.child_graph_id for child in ROOT_GRAPH.root.children) == (
         "vision",
@@ -1009,13 +1005,6 @@ def test_root_graph_has_exact_v2_lifecycle_order_without_retired_nodes() -> None
         "planning",
         "execution",
     )
-    assert {
-        "onboarding.greenfield",
-        "onboarding.brownfield.curation",
-        "onboarding.abandon_shell",
-        "scope_extension.start",
-        "scope_extension.reconcile",
-    }.isdisjoint(node.node_id for node in ROOT_GRAPH.root.iter_nodes())
 
 
 def test_provider_free_persisted_v2_journey_reaches_triage_and_next_goal(
@@ -1025,9 +1014,7 @@ def test_provider_free_persisted_v2_journey_reaches_triage_and_next_goal(
     journey = _new_journey(engine)
     _accept_initial_vision(journey)
     _accept_initial_goal(journey)
-    spec_version_id, specification_hash = _accept_discovery_and_specification(
-        journey
-    )
+    spec_version_id, specification_hash = _accept_discovery_and_specification(journey)
     _accept_authority(journey, spec_version_id, specification_hash)
     requirements = (
         "Persist the primary lifecycle boundary",

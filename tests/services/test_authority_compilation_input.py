@@ -209,7 +209,6 @@ def _seed_spec(engine: Engine) -> SpecRegistry:
             Project(
                 project_id=PROJECT_ID,
                 name="Authority compiler input",
-                origin="brownfield",
             )
         )
         candidate = _seed_candidate(
@@ -353,7 +352,6 @@ def test_builds_from_graph_registered_spec_with_escaped_unicode(
             Project(
                 project_id=PROJECT_ID,
                 name="Authority compiler input",
-                origin="brownfield",
             )
         )
         candidate = _seed_candidate(

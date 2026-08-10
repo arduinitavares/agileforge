@@ -24,6 +24,7 @@ def test_repository_binding_registers_immutable_persisted_fields() -> None:
         "detached_head",
         "dirty",
         "status_fingerprint",
+        "status_entries_json",
         "remotes_json",
         "warnings_json",
         "probe_version",

@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
-import pytest
-
 from adapters.adk.agents.vision import root_agent
 from adapters.adk.recipes import (
     AgenticRecipeNodes,
     AttemptCompletionContext,
     RecipeOutput,
-    UnknownAdkRecipeError,
     _vision_interview_output_adapter,
     build_agentic_recipe_registry,
 )
@@ -67,8 +64,6 @@ def test_recipe_catalog_excludes_legacy_vision_and_adapts_interview_output() -> 
         normalized_input={"mode": "initial", "user_response": "Build a tool."},
     )
 
-    with pytest.raises(UnknownAdkRecipeError):
-        registry.require("vision.generate")
     interview = registry.require("vision.interview").output_adapter(
         RecipeOutput(
             payload={

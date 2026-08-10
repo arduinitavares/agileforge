@@ -35,7 +35,6 @@ from services.specs.authority_quality import apply_authority_quality_gate
 from services.specs.authority_selection import (
     accepted_compiled_authority,
     compiled_authority_by_id,
-    latest_accepted_authority_decision,
     latest_compiled_authority,
     latest_compiled_authority_for_project,
 )
@@ -66,7 +65,6 @@ from utils.spec_authority_assumptions import (
     is_structured_assumption,
 )
 from utils.spec_schemas import (
-    AuthorityQualityInvalidatedItem,
     AuthorityQualityMergedItem,
     AuthorityQualityReport,
     AuthorityQualityReviewGroup,
@@ -219,8 +217,6 @@ class CompilationScope(StrEnum):
     FULL_SPEC = "full_spec"
     FOCUSED_ITEM = "focused_item"
     REPAIR_ITEM = "repair_item"
-    ACCEPTED_BASE = "accepted_base"
-    EXTENSION_ONLY = "extension_only"
 
 
 @dataclass(frozen=True)
@@ -353,15 +349,6 @@ class _FocusedRepairCandidate:
     observed_source_level: str | None
     reason: str
     source_excerpt: str | None = None
-
-
-@dataclass(frozen=True)
-class _ScopeExtensionCompileMarker:
-    """Scope-extension metadata stored on amended spec rows."""
-
-    base_spec_version_id: int
-    base_spec_hash: str
-    added_source_item_ids: list[str]
 
 
 class _CompilerFailureOptions(TypedDict, total=False):
@@ -1271,61 +1258,6 @@ def _source_metadata_retry_commands(spec_version: SpecRegistry) -> list[str]:
     return [f"agileforge workflow next --project-id {spec_version.project_id}"]
 
 
-def _scope_extension_marker_from_notes(  # noqa: PLR0911
-    notes: str | None,
-) -> _ScopeExtensionCompileMarker | None:
-    """Parse amended spec scope-extension marker from approval notes."""
-    if not notes:
-        return None
-    prefix = "scope_extension_start_recovery="
-    for line in notes.splitlines():
-        if not line.startswith(prefix):
-            continue
-        try:
-            payload = json.loads(line.removeprefix(prefix))
-        except json.JSONDecodeError:
-            return None
-        if not isinstance(payload, dict):
-            return None
-        base_spec_version_id = payload.get("base_spec_version_id")
-        base_spec_hash = payload.get("base_spec_hash")
-        added_source_item_ids = payload.get("added_source_item_ids")
-        if not isinstance(base_spec_version_id, int):
-            return None
-        if not isinstance(base_spec_hash, str):
-            return None
-        if not isinstance(added_source_item_ids, list) or not all(
-            isinstance(item_id, str) for item_id in added_source_item_ids
-        ):
-            return None
-        typed_added_source_item_ids = [
-            str(item_id) for item_id in added_source_item_ids
-        ]
-        return _ScopeExtensionCompileMarker(
-            base_spec_version_id=base_spec_version_id,
-            base_spec_hash=base_spec_hash,
-            added_source_item_ids=typed_added_source_item_ids,
-        )
-    return None
-
-
-def _extension_only_artifact(
-    artifact: TechnicalSpecArtifact,
-    *,
-    added_source_item_ids: list[str],
-) -> TechnicalSpecArtifact:
-    """Return a structured spec containing only added scope-extension items."""
-    added = set(added_source_item_ids)
-    focused = artifact.model_copy(deep=True)
-    focused.items = [item for item in focused.items if item.id in added]
-    focused.relations = [
-        relation
-        for relation in focused.relations
-        if relation.from_ in added and relation.to in added
-    ]
-    return focused
-
-
 def _source_metadata_failure_detail_fields(
     failure: SpecAuthorityCompilationFailure,
     *,
@@ -1833,23 +1765,13 @@ def _merge_compilation_successes(
     if not compilations:
         raise _EmptyCompilerSuccessMergeError()
 
-    invalidated_items = _validate_and_filter_scope_assumptions(compilations)
+    _validate_scope_assumptions(compilations)
     successes = [compilation.success for compilation in compilations]
     merged_assumptions = _dedupe_assumptions(
         [
             assumption
             for compilation in compilations
             for assumption in compilation.success.assumptions
-            if not (
-                _is_aggregate_assumption(assumption)
-                and _is_invalidated_accepted_base_aggregate(
-                    compilation,
-                    has_extension_only=any(
-                        candidate.scope == CompilationScope.EXTENSION_ONLY
-                        for candidate in compilations
-                    ),
-                )
-            )
         ]
     )
     _ground_merged_assumptions(merged_assumptions, final_spec=final_spec)
@@ -1894,22 +1816,16 @@ def _merge_compilation_successes(
                 final_invariant_count=len(merged_invariants),
                 merged_assumptions=merged_assumptions,
                 merged_source_map=merged_source_map,
-                invalidated_items=invalidated_items,
             ),
         }
     )
     return SpecAuthorityCompilationSuccess.model_validate(merged_payload)
 
 
-def _validate_and_filter_scope_assumptions(
+def _validate_scope_assumptions(
     compilations: Sequence[ScopedCompilationSuccess],
-) -> list[AuthorityQualityInvalidatedItem]:
-    """Reject partial aggregates and record accepted-base invalidations."""
-    has_extension_only = any(
-        compilation.scope == CompilationScope.EXTENSION_ONLY
-        for compilation in compilations
-    )
-    invalidated_items: list[AuthorityQualityInvalidatedItem] = []
+) -> None:
+    """Reject aggregate assumptions emitted by partial compilations."""
     assumption_index = 0
     for compilation in compilations:
         for assumption in compilation.success.assumptions:
@@ -1919,7 +1835,6 @@ def _validate_and_filter_scope_assumptions(
             if compilation.scope in {
                 CompilationScope.FOCUSED_ITEM,
                 CompilationScope.REPAIR_ITEM,
-                CompilationScope.EXTENSION_ONLY,
             }:
                 raise _AssumptionClaimMergeError(
                     reason="ASSUMPTION_CLAIM_SCOPE_INVALID",
@@ -1928,20 +1843,6 @@ def _validate_and_filter_scope_assumptions(
                         f"is invalid for {compilation.scope.value} scope."
                     ),
                 )
-            if (
-                has_extension_only
-                and compilation.scope == CompilationScope.ACCEPTED_BASE
-            ):
-                invalidated_items.append(
-                    AuthorityQualityInvalidatedItem(
-                        invalidation_id="AQ-INVALIDATE-000",
-                        item_kind="assumption",
-                        removed_id=f"ASM-{assumption_index}",
-                        assumption_kind=assumption.kind,
-                        reason="aggregate_claim_invalidated_by_scope_extension",
-                    )
-                )
-    return invalidated_items
 
 
 def _is_aggregate_assumption(assumption: AuthorityAssumption) -> bool:
@@ -1950,15 +1851,6 @@ def _is_aggregate_assumption(assumption: AuthorityAssumption) -> bool:
         assumption,
         AcceptedNormativeCountAssumptionClaim | AcceptedNormativeSetAssumptionClaim,
     )
-
-
-def _is_invalidated_accepted_base_aggregate(
-    compilation: ScopedCompilationSuccess,
-    *,
-    has_extension_only: bool,
-) -> bool:
-    """Return whether this input's aggregate assumptions are stale by construction."""
-    return has_extension_only and compilation.scope == CompilationScope.ACCEPTED_BASE
 
 
 def _ground_merged_assumptions(
@@ -1995,7 +1887,6 @@ def _merge_authority_quality_reports(
     final_invariant_count: int,
     merged_assumptions: list[AuthorityAssumption],
     merged_source_map: list[SourceMapEntry],
-    invalidated_items: list[AuthorityQualityInvalidatedItem],
 ) -> dict[str, object] | None:
     """Merge host-derived quality metadata from all normalized outputs."""
     cross_success_merges = _cross_success_invariant_merges(successes)
@@ -2004,7 +1895,7 @@ def _merge_authority_quality_reports(
         for success in successes
         if success.authority_quality is not None
     ]
-    if not reports and not cross_success_merges and not invalidated_items:
+    if not reports and not cross_success_merges:
         return None
 
     merged_items = [item for report in reports for item in report.merged_items]
@@ -2026,10 +1917,6 @@ def _merge_authority_quality_reports(
         successes,
         merged_assumptions=merged_assumptions,
     )
-    all_invalidated_items = [
-        item for report in reports for item in report.invalidated_items
-    ]
-    all_invalidated_items.extend(invalidated_items)
     merged_invariant_removed_count = sum(
         len(item.removed_ids) for item in merged_items if item.item_kind == "invariant"
     )
@@ -2062,10 +1949,6 @@ def _merge_authority_quality_reports(
         merged_items=[
             item.model_copy(update={"merge_id": f"AQ-MERGE-{index:03d}"})
             for index, item in enumerate(merged_items, start=1)
-        ],
-        invalidated_items=[
-            item.model_copy(update={"invalidation_id": f"AQ-INVALIDATE-{index:03d}"})
-            for index, item in enumerate(all_invalidated_items, start=1)
         ],
         review_groups=[
             group.model_copy(update={"group_id": f"AQ-GROUP-{index:03d}"})
@@ -3387,309 +3270,6 @@ def _invoke_compiler_for_version(  # noqa: C901, PLR0911, PLR0912, PLR0913
     )
 
 
-def _scope_extension_compile_failure(
-    spec_version: SpecRegistry,
-    *,
-    reason: str,
-    blocking_gap: str,
-) -> _CompilerInvocationResult:
-    """Return a fail-closed scope-extension compile failure."""
-    failure = _compiler_failure_result(
-        project_id=spec_version.project_id,
-        spec_version_id=spec_version.spec_version_id,
-        content_ref=spec_version.content_ref,
-        failure_stage="scope_extension_base_authority",
-        error=ErrorCode.SPEC_COMPILE_FAILED.value,
-        reason=reason,
-        blocking_gaps=[blocking_gap],
-    )
-    return _CompilerInvocationResult(
-        failure=_attach_schema_retry_metadata(
-            failure,
-            attempted=False,
-            reason=None,
-            attempts=0,
-        )
-    )
-
-
-def _latest_matching_base_authority(
-    session: Session,
-    *,
-    marker: _ScopeExtensionCompileMarker,
-    acceptance: SpecAuthorityAcceptance,
-) -> CompiledSpecAuthority | None:
-    """Return a base authority only when it still matches the accepted decision."""
-    authority = accepted_compiled_authority(
-        session,
-        project_id=acceptance.project_id,
-        spec_version_id=acceptance.spec_version_id,
-    )
-    if (
-        authority is not None
-        and authority.spec_version_id == marker.base_spec_version_id
-    ):
-        return authority
-    return None
-
-
-def _accepted_base_authority_for_scope_extension(  # noqa: PLR0911
-    session: Session,
-    *,
-    spec_version: SpecRegistry,
-    marker: _ScopeExtensionCompileMarker,
-) -> SpecAuthorityCompilationSuccess | _CompilerInvocationResult:
-    """Load the accepted base authority referenced by a scope-extension marker."""
-    base_spec = session.get(SpecRegistry, marker.base_spec_version_id)
-    if base_spec is None or base_spec.project_id != spec_version.project_id:
-        return _scope_extension_compile_failure(
-            spec_version,
-            reason="SCOPE_EXTENSION_BASE_SPEC_NOT_FOUND",
-            blocking_gap=(
-                "Scope extension base authority reuse failed: "
-                f"base spec {marker.base_spec_version_id} was not found "
-                "for this project."
-            ),
-        )
-    if base_spec.spec_hash != marker.base_spec_hash:
-        return _scope_extension_compile_failure(
-            spec_version,
-            reason="SCOPE_EXTENSION_BASE_SPEC_HASH_MISMATCH",
-            blocking_gap=(
-                "Scope extension base authority reuse failed: "
-                f"base spec {marker.base_spec_version_id} hash changed."
-            ),
-        )
-
-    acceptance = latest_accepted_authority_decision(
-        session,
-        project_id=spec_version.project_id,
-        spec_version_id=marker.base_spec_version_id,
-    )
-    if acceptance is None:
-        return _scope_extension_compile_failure(
-            spec_version,
-            reason="SCOPE_EXTENSION_BASE_AUTHORITY_NOT_ACCEPTED",
-            blocking_gap=(
-                "Scope extension base authority reuse failed: "
-                f"base spec {marker.base_spec_version_id} has no accepted "
-                "authority decision."
-            ),
-        )
-    if acceptance.spec_hash != marker.base_spec_hash:
-        return _scope_extension_compile_failure(
-            spec_version,
-            reason="SCOPE_EXTENSION_BASE_AUTHORITY_HASH_MISMATCH",
-            blocking_gap=(
-                "Scope extension base authority reuse failed: "
-                f"accepted decision for base spec {marker.base_spec_version_id} "
-                "does not match the marker hash."
-            ),
-        )
-
-    authority = _latest_matching_base_authority(
-        session,
-        marker=marker,
-        acceptance=acceptance,
-    )
-    if authority is None:
-        return _scope_extension_compile_failure(
-            spec_version,
-            reason="SCOPE_EXTENSION_BASE_AUTHORITY_ACCEPTANCE_MISMATCH",
-            blocking_gap=(
-                "Scope extension base authority reuse failed: "
-                f"base spec {marker.base_spec_version_id} compiled authority "
-                "does not match its accepted decision."
-            ),
-        )
-
-    load_result = load_compiled_artifact(authority)
-    if not load_result.ok or load_result.artifact is None:
-        return _scope_extension_compile_failure(
-            spec_version,
-            reason="SCOPE_EXTENSION_BASE_AUTHORITY_INVALID",
-            blocking_gap=(
-                "Scope extension base authority reuse failed: "
-                f"base spec {marker.base_spec_version_id} compiled artifact "
-                f"is not usable ({load_result.status})."
-            ),
-        )
-    return load_result.artifact
-
-
-def _scope_extension_normalized_failure(
-    spec_version: SpecRegistry,
-    *,
-    raw_json: str,
-    output: SpecAuthorityCompilerOutput,
-    coverage_repair_item_ids: tuple[str, ...] = (),
-) -> _CompilerInvocationResult:
-    """Convert a scope-extension normalized failure into a persisted result."""
-    failure = cast("SpecAuthorityCompilationFailure", output.root)
-    failure_result = _normalized_failure_result(
-        spec_version,
-        raw_json=raw_json,
-        failure=failure,
-    )
-    if coverage_repair_item_ids:
-        failure_result = _with_coverage_repair_diagnostics(
-            failure_result,
-            coverage_repair_attempted=True,
-            coverage_repair_item_ids=coverage_repair_item_ids,
-            coverage_repair_result=_coverage_repair_result(output),
-        )
-    return _CompilerInvocationResult(
-        failure=_attach_schema_retry_metadata(
-            failure_result,
-            attempted=False,
-            reason=None,
-            attempts=0,
-        )
-    )
-
-
-def _invoke_scope_extension_compiler_for_version(  # noqa: C901, PLR0911, PLR0913
-    session: Session,
-    *,
-    spec_version: SpecRegistry,
-    spec_content: str,
-    marker: _ScopeExtensionCompileMarker,
-    compiler_model: str | None,
-    lease_guard: Callable[[str], bool] | None,
-) -> _CompilerInvocationResult:
-    """Compile only added scope and merge it with accepted base authority."""
-    base_authority = _accepted_base_authority_for_scope_extension(
-        session,
-        spec_version=spec_version,
-        marker=marker,
-    )
-    if isinstance(base_authority, _CompilerInvocationResult):
-        return base_authority
-    try:
-        artifact = TechnicalSpecArtifact.model_validate_json(spec_content)
-    except ValidationError as exc:
-        return _scope_extension_compile_failure(
-            spec_version,
-            reason="SCOPE_EXTENSION_AMENDED_SPEC_INVALID",
-            blocking_gap=f"Scope extension amended spec is invalid: {exc}",
-        )
-
-    extension_artifact = _extension_only_artifact(
-        artifact,
-        added_source_item_ids=marker.added_source_item_ids,
-    )
-    if len(extension_artifact.items) != len(set(marker.added_source_item_ids)):
-        return _scope_extension_compile_failure(
-            spec_version,
-            reason="SCOPE_EXTENSION_ADDED_ITEMS_MISSING",
-            blocking_gap=(
-                "Scope extension marker references added items that are not "
-                "present in the amended spec."
-            ),
-        )
-
-    extension_invocation = _invoke_compiler_for_version(
-        spec_version,
-        spec_content=canonical_spec_json(extension_artifact),
-        compiler_model=compiler_model,
-        lease_guard=lease_guard,
-    )
-    if extension_invocation.failure is not None:
-        return extension_invocation
-    extension_authority = extension_invocation.success
-    if extension_authority is None:
-        raise _compiler_invocation_returned_no_success_artifact_error()
-
-    try:
-        merged_success = _merge_compilation_successes(
-            [
-                ScopedCompilationSuccess(
-                    scope=CompilationScope.ACCEPTED_BASE,
-                    success=base_authority,
-                ),
-                ScopedCompilationSuccess(
-                    scope=CompilationScope.EXTENSION_ONLY,
-                    success=extension_authority,
-                ),
-            ],
-            final_spec=artifact,
-        )
-    except _AssumptionClaimMergeError as exc:
-        merge_failure = _merge_failure_output(exc)
-        return _scope_extension_normalized_failure(
-            spec_version,
-            raw_json=merge_failure.model_dump_json(),
-            output=merge_failure,
-        )
-    merged_raw_json = SpecAuthorityCompilerOutput(root=merged_success).model_dump_json()
-    merged_output = normalize_compiler_output(
-        merged_raw_json,
-        source_text=spec_content,
-        source_format=_detect_spec_source_format(spec_content),
-    )
-    if isinstance(merged_output.root, SpecAuthorityCompilationFailure):
-        return _scope_extension_normalized_failure(
-            spec_version,
-            raw_json=merged_raw_json,
-            output=merged_output,
-        )
-
-    item_ids = _iterative_authority_item_ids(artifact)
-    missing_item_ids = _missing_iterative_authority_item_ids(
-        merged_output.root,
-        item_ids=item_ids,
-    )
-    if missing_item_ids:
-        added = set(marker.added_source_item_ids)
-        base_missing = [item_id for item_id in missing_item_ids if item_id not in added]
-        if base_missing:
-            coverage_output = _structured_missing_authority_failure(
-                missing_item_ids=base_missing,
-                focused_failures=[],
-                total_item_count=len(item_ids),
-            )
-            return _scope_extension_normalized_failure(
-                spec_version,
-                raw_json=coverage_output.model_dump_json(),
-                output=coverage_output,
-            )
-        repaired_output = _repair_missing_iterative_authority(
-            artifact=artifact,
-            existing_successes=[
-                ScopedCompilationSuccess(
-                    scope=CompilationScope.ACCEPTED_BASE,
-                    success=base_authority,
-                ),
-                ScopedCompilationSuccess(
-                    scope=CompilationScope.EXTENSION_ONLY,
-                    success=extension_authority,
-                ),
-            ],
-            missing_item_ids=missing_item_ids,
-            project_id=spec_version.project_id,
-            spec_version_id=spec_version.spec_version_id,
-            compiler_model=compiler_model,
-        )
-        if isinstance(repaired_output.root, SpecAuthorityCompilationFailure):
-            return _scope_extension_normalized_failure(
-                spec_version,
-                raw_json=repaired_output.model_dump_json(),
-                output=repaired_output,
-                coverage_repair_item_ids=tuple(missing_item_ids),
-            )
-        merged_output = repaired_output
-
-    return _CompilerInvocationResult(
-        success=cast("SpecAuthorityCompilationSuccess", merged_output.root),
-        schema_retry_attempted=extension_invocation.schema_retry_attempted,
-        schema_retry_reason=extension_invocation.schema_retry_reason,
-        schema_retry_attempts=extension_invocation.schema_retry_attempts,
-        schema_retry_failure_details=(
-            extension_invocation.schema_retry_failure_details
-        ),
-    )
-
-
 def _persist_compiled_authority(  # noqa: PLR0913
     session: Session,
     *,
@@ -3784,23 +3364,12 @@ def _compile_spec_authority_for_version_in_session(  # noqa: PLR0913
         return spec_content_result
     spec_content, content_source = spec_content_result
 
-    marker = _scope_extension_marker_from_notes(context.spec_version.approval_notes)
-    if marker is None:
-        invocation = _invoke_compiler_for_version(
-            context.spec_version,
-            spec_content=spec_content,
-            compiler_model=compiler_model,
-            lease_guard=lease_guard,
-        )
-    else:
-        invocation = _invoke_scope_extension_compiler_for_version(
-            session,
-            spec_version=context.spec_version,
-            spec_content=spec_content,
-            marker=marker,
-            compiler_model=compiler_model,
-            lease_guard=lease_guard,
-        )
+    invocation = _invoke_compiler_for_version(
+        context.spec_version,
+        spec_content=spec_content,
+        compiler_model=compiler_model,
+        lease_guard=lease_guard,
+    )
     if invocation.failure is not None:
         return invocation.failure
     compiled = invocation.success

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING
 
 import pytest  # noqa: TC002
@@ -10,13 +11,13 @@ from agile_sqlmodel import (
     CompiledSpecAuthority,
     Project,
     SpecAuthorityAcceptance,
-    SpecRegistry,
     UserStory,
 )
 from scripts import build_validation_benchmark_cases as builder
 from services.specs.authority_selection import pending_authority_fingerprint
 from tests.authority_assumption_fixtures import current_v3_compiled_authority_json
 from tests.typing_helpers import require_id
+from tests.workflow.lifecycle_fixtures import seed_accepted_specification
 
 if TYPE_CHECKING:
     from sqlmodel import Session
@@ -86,15 +87,11 @@ def test_strict_spec_resolution_requires_exact_accepted_valid_authority(
     session.commit()
     session.refresh(project)
     project_id = require_id(project.project_id, "project_id")
-    spec = SpecRegistry(
+    spec = seed_accepted_specification(
+        session,
         project_id=project_id,
-        spec_hash="builder-spec",
-        content="# Builder",
-        status="approved",
-    )
-    session.add(spec)
-    session.commit()
-    session.refresh(spec)
+        content=json.dumps({"title": "Builder"}),
+    ).spec
     spec_version_id = require_id(spec.spec_version_id, "spec_version_id")
     story = UserStory(
         project_id=project_id,

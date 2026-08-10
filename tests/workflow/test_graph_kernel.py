@@ -50,7 +50,6 @@ def _snapshot(
         project=ProjectFact(
             project_id=7,
             name="Kernel Test",
-            origin="brownfield",
             created_at=EVALUATED_AT - timedelta(days=1),
         ),
         stories=stories,
@@ -172,10 +171,10 @@ def test_satisfied_category_does_not_leak_to_public_decisions() -> None:
 
 
 def test_optional_reentry_does_not_make_terminal_project_unfinished() -> None:
-    """Keep optional scope extension visible without reopening required work."""
+    """Keep optional work visible without reopening required work."""
     graph = _graph(
         _node(
-            "scope_extension.start",
+            "test.optional_reentry",
             RuleEvaluation(
                 category=RuleCategory.AVAILABLE,
                 reason_code="OPTIONAL_EXTENSION",
@@ -187,7 +186,7 @@ def test_optional_reentry_does_not_make_terminal_project_unfinished() -> None:
     position = graph.evaluate(_snapshot(), EVALUATED_AT)
 
     assert position.terminal is True
-    assert position.available_nodes == ("scope_extension.start",)
+    assert position.available_nodes == ("test.optional_reentry",)
     assert position.decisions[0].recommendation_kind is (
         RecommendationKind.OPTIONAL_REENTRY
     )
@@ -358,37 +357,40 @@ def test_lease_decision_changes_exactly_at_expiry() -> None:
 
 
 def test_root_definition_has_named_children_in_lifecycle_order() -> None:
-    """Expose the approved hierarchy and ordered Task 8 onboarding paths."""
+    """Expose the approved hierarchy and ordered lifecycle paths."""
     assert tuple(child.child_graph_id for child in ROOT_GRAPH.root.children) == (
-        "onboarding",
-        "authority",
         "vision",
+        "product_goal",
+        "product_discovery",
+        "authority",
         "backlog",
         "planning",
         "execution",
-        "scope_extension",
     )
     (
-        onboarding,
-        authority,
         vision,
+        product_goal,
+        product_discovery,
+        authority,
         backlog,
         planning,
         execution,
-        scope_extension,
     ) = ROOT_GRAPH.root.children
-    assert tuple(node.node_id for node in onboarding.nodes) == (
-        "onboarding.greenfield.challenge",
-        "onboarding.greenfield.prd",
-        "onboarding.greenfield.prd_review",
-        "onboarding.greenfield.initial_spec",
-        "onboarding.greenfield.initial_spec_review",
-        "onboarding.brownfield.baseline",
-        "onboarding.brownfield.inventory",
-        "onboarding.brownfield.curation",
-        "onboarding.brownfield.initial_spec_review",
-        "onboarding.initial_scope_registration",
-        "onboarding.abandon_shell",
+    assert tuple(node.node_id for node in vision.nodes) == (
+        "vision.interview",
+        "vision.review",
+        "vision.revision.start",
+    )
+    assert tuple(node.node_id for node in product_goal.nodes) == (
+        "goal.interview",
+        "goal.review",
+        "goal.fulfill",
+        "goal.abandon",
+    )
+    assert tuple(node.node_id for node in product_discovery.nodes) == (
+        "discovery.record",
+        "specification.record",
+        "specification.review",
     )
     assert tuple(node.node_id for node in authority.nodes) == (
         "authority.compile",
@@ -396,14 +398,9 @@ def test_root_definition_has_named_children_in_lifecycle_order() -> None:
         "authority.feedback",
         "authority.repair",
     )
-    assert tuple(node.node_id for node in vision.nodes) == (
-        "vision.generate",
-        "vision.review",
-    )
     assert tuple(node.node_id for node in backlog.nodes) == (
         "backlog.generate",
         "backlog.review",
-        "backlog.reconcile",
     )
     assert tuple(node.node_id for node in planning.nodes) == (
         "planning.roadmap.generate",
@@ -422,18 +419,6 @@ def test_root_definition_has_named_children_in_lifecycle_order() -> None:
         "execution.sprint.review",
         "execution.sprint.close",
         "execution.post_sprint_triage",
-    )
-    assert tuple(node.node_id for node in scope_extension.nodes) == (
-        "scope_extension.start",
-        "scope_extension.challenge",
-        "scope_extension.prd",
-        "scope_extension.prd_review",
-        "scope_extension.spec",
-        "scope_extension.spec_review",
-        "scope_extension.registration",
-        "scope_extension.authority",
-        "scope_extension.reconciliation",
-        "scope_extension.abandon",
     )
 
 

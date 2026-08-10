@@ -615,8 +615,7 @@ def test_runtime_modules_import_new_model_boundaries() -> None:
     assert "from models.core" not in api_text
     assert "from models.enums" not in api_text
     assert (
-        "from models.db import ensure_business_db_ready, get_engine"
-        in application_text
+        "from models.db import ensure_business_db_ready, get_engine" in application_text
     )
     assert "from models.db import get_engine" in project_repo_text
     assert "from models.enums import StoryStatus" in story_close_text
@@ -644,19 +643,8 @@ def test_runtime_modules_import_new_core_project_boundary() -> None:
         root / "services" / "specs" / "compiler_service.py",
         "agile_sqlmodel",
     )
-    lifecycle_core_imports = _imported_names_from(
-        root / "services" / "specs" / "lifecycle_service.py",
-        "models.core",
-    )
-    lifecycle_agile_imports = _imported_names_from(
-        root / "services" / "specs" / "lifecycle_service.py",
-        "agile_sqlmodel",
-    )
-
     assert {"Project"} <= compiler_core_imports
     assert "Project" not in compiler_agile_imports
-    assert {"Project"} <= lifecycle_core_imports
-    assert "Project" not in lifecycle_agile_imports
 
 
 def test_runtime_modules_import_new_core_link_boundary() -> None:

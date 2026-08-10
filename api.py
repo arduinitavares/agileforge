@@ -32,7 +32,6 @@ from services.application import (
     AuthorityFeedbackRequest,
     AuthorityRepairRequest,
     AuthorityReviewRequest,
-    BacklogReconcileRequest,
     BacklogReviewRequest,
     CloseStoryRequest,
     CompleteTaskRequest,
@@ -231,10 +230,6 @@ class SprintPlanningApiRequest(MutationApiRequest):
         return value
 
 
-class BacklogReconcileApiRequest(MutationApiRequest):
-    """Transport metadata only for graph-selected Backlog reconciliation."""
-
-
 class StoryDependenciesApplyApiRequest(MutationApiRequest):
     """Strict operator-reviewed Story dependency semantics."""
 
@@ -374,7 +369,6 @@ SEMANTIC_API_PATHS: dict[str, str] = {
     "record_specification_candidate": "specifications",
     "record_sprint_plan": "sprint/generate",
     "record_vision_interview_turn": "vision/respond",
-    "reconcile_backlog": "backlog/reconcile",
     "repair_authority": "authority/repair",
     "repair_story_readiness": "story/readiness/repair",
     "review_sprint": "sprint/review",
@@ -1307,19 +1301,6 @@ def decide_project_sprint_plan(
                 rationale=req.rationale,
                 **_metadata(req),
             )
-        )
-    )
-
-
-@app.post("/api/projects/{project_id}/backlog/reconcile")
-def reconcile_project_backlog(
-    project_id: int,
-    req: BacklogReconcileApiRequest,
-) -> dict[str, object]:
-    """Reconcile exact graph-selected stale artifacts under current authority."""
-    return _result_payload(
-        _application().reconcile_backlog(
-            BacklogReconcileRequest(project_id=project_id, **_metadata(req))
         )
     )
 

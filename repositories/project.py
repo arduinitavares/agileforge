@@ -5,20 +5,9 @@ import logging
 from sqlalchemy import delete, or_, update
 from sqlmodel import Session, col, select
 
-from models.agent_workbench import (
-    DiscoveryChallengeArtifact,
-    DiscoveryPrd,
-    DiscoverySpecAmendmentDraft,
-)
 from models.authority_curation import (
     AuthorityCurationAttempt,
     AuthorityFeedbackAttempt,
-)
-from models.brownfield import (
-    BrownfieldScanAttempt,
-    BrownfieldSourceArtifact,
-    BrownfieldSpecApproval,
-    BrownfieldSpecDraftAttempt,
 )
 from models.core import (
     Epic,
@@ -53,9 +42,7 @@ from models.workflow import WorkflowNodeAttempt, WorkflowNodeAttemptOutcome
 
 logger: logging.Logger = logging.getLogger(name=__name__)
 
-PROJECT_DELETION_CONFLICT_MESSAGE = (
-    "Project deletion blocked by cross-project discovery references."
-)
+PROJECT_DELETION_CONFLICT_MESSAGE = "Project deletion blocked by retained references."
 
 
 class ProjectDeletionConflictError(RuntimeError):
@@ -66,71 +53,6 @@ class ProjectDeletionConflictError(RuntimeError):
         super().__init__(PROJECT_DELETION_CONFLICT_MESSAGE)
         self.project_id = project_id
         self.references = references
-
-
-def _project_discovery_conflicts(
-    session: Session,
-    project_id: int,
-) -> tuple[str, ...]:
-    """Return non-null discovery FKs owned outside the project being deleted."""
-    challenge_ids = list(
-        session.exec(
-            select(DiscoveryChallengeArtifact.challenge_artifact_id).where(
-                DiscoveryChallengeArtifact.project_id == project_id
-            )
-        ).all()
-    )
-    prd_ids = list(
-        session.exec(
-            select(DiscoveryPrd.prd_id).where(DiscoveryPrd.project_id == project_id)
-        ).all()
-    )
-
-    conflicts: list[str] = []
-    if challenge_ids:
-        if (
-            session.exec(
-                select(DiscoveryPrd.prd_id).where(
-                    DiscoveryPrd.project_id != project_id,
-                    col(DiscoveryPrd.challenge_artifact_id).in_(challenge_ids),
-                )
-            ).first()
-            is not None
-        ):
-            conflicts.append("discovery_prds.challenge_artifact_id")
-        if (
-            session.exec(
-                select(DiscoverySpecAmendmentDraft.spec_amendment_draft_id).where(
-                    DiscoverySpecAmendmentDraft.project_id != project_id,
-                    col(DiscoverySpecAmendmentDraft.challenge_artifact_id).in_(
-                        challenge_ids
-                    ),
-                )
-            ).first()
-            is not None
-        ):
-            conflicts.append("discovery_spec_amendment_drafts.challenge_artifact_id")
-    if prd_ids and (
-        session.exec(
-            select(DiscoverySpecAmendmentDraft.spec_amendment_draft_id).where(
-                DiscoverySpecAmendmentDraft.project_id != project_id,
-                col(DiscoverySpecAmendmentDraft.prd_id).in_(prd_ids),
-            )
-        ).first()
-        is not None
-    ):
-        conflicts.append("discovery_spec_amendment_drafts.prd_id")
-    return tuple(conflicts)
-
-
-def _ensure_project_discovery_deletable(session: Session, project_id: int) -> None:
-    """Reject deletion before mutation when another project depends on its data."""
-    conflicts = _project_discovery_conflicts(session, project_id)
-    if conflicts:
-        raise ProjectDeletionConflictError(
-            project_id=project_id,
-            references=conflicts,
-        )
 
 
 def _ensure_project_authority_deletable(session: Session, project_id: int) -> None:
@@ -239,48 +161,6 @@ def _delete_project_curation_rows(session: Session, project_id: int) -> None:
             col(AuthorityFeedbackAttempt.project_id) == project_id
         )
     )
-
-
-def _delete_project_brownfield_rows(session: Session, project_id: int) -> None:
-    """Delete brownfield rows from the current schema."""
-    row_types = (
-        BrownfieldSpecApproval,
-        BrownfieldSpecDraftAttempt,
-        BrownfieldScanAttempt,
-        BrownfieldSourceArtifact,
-    )
-    for row_type in row_types:
-        for row in session.exec(
-            select(row_type).where(row_type.project_id == project_id)
-        ).all():
-            session.delete(row)
-
-
-def _delete_project_discovery_rows(session: Session, project_id: int) -> None:
-    """Delete discovery artifact chains that reference a project."""
-    prd_ids = list(
-        session.exec(
-            select(DiscoveryPrd.prd_id).where(DiscoveryPrd.project_id == project_id)
-        ).all()
-    )
-    session.exec(
-        delete(DiscoverySpecAmendmentDraft).where(
-            col(DiscoverySpecAmendmentDraft.project_id) == project_id
-        )
-    )
-    if prd_ids:
-        session.exec(
-            update(DiscoveryPrd)
-            .where(col(DiscoveryPrd.supersedes_prd_id).in_(prd_ids))
-            .values(supersedes_prd_id=None)
-        )
-    session.exec(delete(DiscoveryPrd).where(col(DiscoveryPrd.project_id) == project_id))
-    session.exec(
-        delete(DiscoveryChallengeArtifact).where(
-            col(DiscoveryChallengeArtifact.project_id) == project_id
-        )
-    )
-
 
 
 def _delete_task_execution_logs(
@@ -444,9 +324,7 @@ def _delete_project_lifecycle_rows(session: Session, project: Project) -> None:
     session.add(project)
     session.flush()
     session.exec(
-        delete(RepositoryBinding).where(
-            col(RepositoryBinding.project_id) == project_id
-        )
+        delete(RepositoryBinding).where(col(RepositoryBinding.project_id) == project_id)
     )
 
 
@@ -557,7 +435,6 @@ class ProjectRepository:
                 return False
 
             _ensure_project_authority_deletable(session, project_id)
-            _ensure_project_discovery_deletable(session, project_id)
             _delete_project_lifecycle_rows(session, project)
 
             sprints = session.exec(
@@ -574,9 +451,7 @@ class ProjectRepository:
 
             _delete_project_acceptances(session, project_id)
 
-            _delete_project_brownfield_rows(session, project_id)
             _delete_project_curation_rows(session, project_id)
-            _delete_project_discovery_rows(session, project_id)
 
             _delete_project_personas(session, project_id)
 

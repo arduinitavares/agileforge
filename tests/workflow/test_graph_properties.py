@@ -18,30 +18,18 @@ from workflow.contracts import (
 from workflow.facts import (
     AuthorityFact,
     AuthorityFeedbackFact,
-    BacklogReconciliationFact,
     BacklogRequirementFact,
-    ChallengeArtifactFact,
     DiscoveryArtifactFact,
-    DiscoveryRunAbandonmentFact,
-    DiscoveryRunFact,
-    InitialScopeRegistrationFact,
     NodeAttemptFact,
     PhaseArtifactFact,
     PlanningArtifactFact,
     PostSprintTriageFact,
-    PrdVersionFact,
     ProductGoalArtifactDecisionFact,
     ProductGoalArtifactFact,
     ProductGoalInterviewTurnFact,
     ProductGoalOutcomeFact,
-    ProjectAbandonmentFact,
     ProjectFact,
-    RepositoryBaselineFact,
-    RepositoryInventoryFact,
     ReviewDecisionFact,
-    ScopeExtensionReconciliationFact,
-    ScopeExtensionRegistrationFact,
-    SpecDraftFact,
     SpecificationCandidateFact,
     SpecificationDecisionFact,
     SpecVersionFact,
@@ -79,68 +67,7 @@ AUTHORITATIVE_SNAPSHOT_VARIANTS: tuple[tuple[str, object], ...] = (
         ProjectFact(
             project_id=24,
             name="Changed Project",
-            origin="brownfield",
             created_at=EVALUATED_AT - timedelta(hours=2),
-        ),
-    ),
-    (
-        "project_abandonments",
-        (
-            ProjectAbandonmentFact(
-                project_abandonment_id=1,
-                project_id=23,
-                reason="Superseded",
-                abandoned_by="reviewer",
-                abandoned_at=EVALUATED_AT,
-            ),
-        ),
-    ),
-    (
-        "discovery_runs",
-        (
-            DiscoveryRunFact(
-                discovery_run_id=2,
-                project_id=23,
-                purpose="initial",
-                ordinal=1,
-                created_at=EVALUATED_AT - timedelta(minutes=30),
-                closed_at=None,
-            ),
-        ),
-    ),
-    (
-        "discovery_run_abandonments",
-        (
-            DiscoveryRunAbandonmentFact(
-                discovery_run_abandonment_id=3,
-                project_id=23,
-                discovery_run_id=2,
-                reason="Restarted",
-                abandoned_by="reviewer",
-                abandoned_at=EVALUATED_AT,
-            ),
-        ),
-    ),
-    (
-        "challenge_artifacts",
-        (
-            ChallengeArtifactFact(
-                challenge_artifact_id=4,
-                discovery_run_id=2,
-                content_fingerprint="sha256:challenge",
-                supersedes_id=None,
-            ),
-        ),
-    ),
-    (
-        "prd_versions",
-        (
-            PrdVersionFact(
-                prd_version_id=5,
-                discovery_run_id=2,
-                content_fingerprint="sha256:prd",
-                supersedes_id=None,
-            ),
         ),
     ),
     (
@@ -148,68 +75,11 @@ AUTHORITATIVE_SNAPSHOT_VARIANTS: tuple[tuple[str, object], ...] = (
         (
             ReviewDecisionFact(
                 decision_id=6,
-                artifact_type="prd",
+                artifact_type="vision",
                 artifact_id=5,
                 artifact_fingerprint="sha256:prd",
                 decision="accepted",
                 decided_at=EVALUATED_AT,
-            ),
-        ),
-    ),
-    (
-        "spec_drafts",
-        (
-            SpecDraftFact(
-                spec_draft_id=7,
-                discovery_run_id=2,
-                kind="initial",
-                content_fingerprint="sha256:spec-draft",
-                base_spec_version_id=None,
-                base_spec_hash=None,
-                supersedes_id=None,
-            ),
-        ),
-    ),
-    (
-        "initial_registrations",
-        (
-            InitialScopeRegistrationFact(
-                registration_id=8,
-                discovery_run_id=2,
-                spec_draft_id=7,
-                spec_version_id=9,
-                spec_hash="sha256:spec-version",
-            ),
-        ),
-    ),
-    (
-        "extension_registrations",
-        (
-            ScopeExtensionRegistrationFact(
-                registration_id=80,
-                discovery_run_id=2,
-                spec_draft_id=7,
-                spec_version_id=9,
-                spec_hash="sha256:spec-version",
-            ),
-        ),
-    ),
-    (
-        "scope_extension_reconciliations",
-        (
-            ScopeExtensionReconciliationFact(
-                reconciliation_id=81,
-                discovery_run_id=2,
-                replacement_authority_id=12,
-                replacement_authority_fingerprint="sha256:authority",
-                artifact_references=(
-                    FactReference(
-                        fact_type="backlog",
-                        fact_id="13",
-                        fingerprint="sha256:backlog",
-                    ),
-                ),
-                reconciled_at=EVALUATED_AT,
             ),
         ),
     ),
@@ -420,31 +290,6 @@ AUTHORITATIVE_SNAPSHOT_VARIANTS: tuple[tuple[str, object], ...] = (
         ),
     ),
     (
-        "repository_baselines",
-        (
-            RepositoryBaselineFact(
-                repository_baseline_id=10,
-                repository_path="/evidence/repository",
-                git_commit="a" * 40,
-                dirty=False,
-                content_fingerprint="sha256:baseline",
-            ),
-        ),
-    ),
-    (
-        "repository_inventories",
-        (
-            RepositoryInventoryFact(
-                repository_inventory_id=11,
-                repository_baseline_id=10,
-                content_fingerprint="sha256:inventory",
-                file_count=2,
-                total_bytes=20,
-                selected_for_model=("README.md",),
-            ),
-        ),
-    ),
-    (
         "authorities",
         (
             AuthorityFact(
@@ -476,23 +321,6 @@ AUTHORITATIVE_SNAPSHOT_VARIANTS: tuple[tuple[str, object], ...] = (
                 artifact_id="vision:11",
                 artifact_fingerprint="sha256:vision",
                 status="accepted",
-            ),
-        ),
-    ),
-    (
-        "backlog_reconciliations",
-        (
-            BacklogReconciliationFact(
-                reconciliation_id=12,
-                replacement_authority_id=10,
-                replacement_authority_fingerprint="sha256:authority",
-                affected_artifact_ids=(11,),
-                affected_artifacts_fingerprint="sha256:reconciliation",
-                reconciled_by="reviewer",
-                audit_event_id=16,
-                audit_event_action="backlog_authority_reconciled",
-                audit_event_fingerprint="sha256:reconciliation-audit",
-                reconciled_at=EVALUATED_AT,
             ),
         ),
     ),
@@ -699,7 +527,6 @@ def _snapshot(*, name: str = "Properties") -> WorkflowFactSnapshot:
         project=ProjectFact(
             project_id=23,
             name=name,
-            origin="greenfield",
             created_at=EVALUATED_AT - timedelta(hours=1),
         )
     )

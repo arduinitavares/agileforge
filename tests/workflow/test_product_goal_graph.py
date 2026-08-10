@@ -90,7 +90,6 @@ def _snapshot(
         project=ProjectFact(
             project_id=1,
             name="Goal graph",
-            origin="greenfield",
             created_at=NOW,
         ),
         vision_artifacts=(vision,),
@@ -232,10 +231,7 @@ def test_mixed_goal_lineage_advertises_no_goal_or_downstream_action() -> None:
     assert decisions["goal.review"].category is NodeCategory.INVALID
     assert decisions["goal.review"].reason_code == "WORKFLOW_FACT_CONFLICT"
     assert accepted_current_goal(conflicted) is None
-    assert {
-        node_id.split(".", maxsplit=1)[0]
-        for node_id in advertised
-    }.isdisjoint(
+    assert {node_id.split(".", maxsplit=1)[0] for node_id in advertised}.isdisjoint(
         {
             "goal",
             "discovery",

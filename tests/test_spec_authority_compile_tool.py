@@ -35,6 +35,7 @@ from services.specs.compiler_service import (
 from services.specs.compiler_service import (
     UpdateSpecAndCompileAuthorityInput as ServiceUpdateSpecAndCompileAuthorityInput,
 )
+from tests.workflow.lifecycle_fixtures import seed_accepted_specification
 from tools import spec_tools
 from tools.spec_tools import (
     CheckSpecAuthorityStatusInput,
@@ -43,9 +44,7 @@ from tools.spec_tools import (
     GetCompiledAuthorityInput,
     PreviewSpecAuthorityInput,
     UpdateSpecAndCompileAuthorityInput,
-    approve_spec_version,
     compile_spec_authority_for_version,
-    register_spec_version,
 )
 from utils import failure_artifacts
 from utils.failure_artifacts import AgentInvocationError
@@ -137,23 +136,20 @@ def compiler_stub(monkeypatch: pytest.MonkeyPatch) -> object:
     return raw_json
 
 
-def test_compile_tool_blocks_unapproved_spec(
-    session: Session, sample_project: Project, sample_spec_content: str
-) -> None:
-    """Compilation should fail for unapproved spec versions."""
-    del session
-    reg_result = register_spec_version(
-        {"project_id": sample_project.project_id, "content": sample_spec_content},
-        tool_context=None,
+def _accepted_spec_id(
+    session: Session,
+    project: Project,
+    content: str,
+) -> int:
+    """Persist current-lifecycle specification lineage and return its ID."""
+    assert project.project_id is not None
+    lineage = seed_accepted_specification(
+        session,
+        project_id=project.project_id,
+        content=json.dumps({"specification": content}),
     )
-
-    result = compile_spec_authority_for_version(
-        {"spec_version_id": reg_result["spec_version_id"]},
-        tool_context=None,
-    )
-
-    assert result["success"] is False
-    assert "not approved" in result["error"].lower()
+    assert lineage.spec.spec_version_id is not None
+    return lineage.spec.spec_version_id
 
 
 def test_tool_compile_input_models_alias_service_models() -> None:
@@ -363,16 +359,7 @@ def test_compile_tool_compiles_and_returns_summary(
 ) -> None:
     """Compilation should create authority and return summary payload."""
     del compiler_stub
-    reg_result = register_spec_version(
-        {"project_id": sample_project.project_id, "content": sample_spec_content},
-        tool_context=None,
-    )
-    spec_version_id = reg_result["spec_version_id"]
-
-    approve_spec_version(
-        {"spec_version_id": spec_version_id, "approved_by": "tester"},
-        tool_context=None,
-    )
+    spec_version_id = _accepted_spec_id(session, sample_project, sample_spec_content)
 
     result = compile_spec_authority_for_version(
         {"spec_version_id": spec_version_id},
@@ -395,9 +382,6 @@ def test_compile_tool_compiles_and_returns_summary(
 
     assert authority is not None
 
-    session.refresh(sample_project)
-    assert sample_project.compiled_authority_json is not None
-
 
 def test_compile_tool_returns_cached_when_already_compiled(
     session: Session,
@@ -407,16 +391,7 @@ def test_compile_tool_returns_cached_when_already_compiled(
 ) -> None:
     """Compilation tool should be idempotent for existing authority."""
     del compiler_stub
-    reg_result = register_spec_version(
-        {"project_id": sample_project.project_id, "content": sample_spec_content},
-        tool_context=None,
-    )
-    spec_version_id = reg_result["spec_version_id"]
-
-    approve_spec_version(
-        {"spec_version_id": spec_version_id, "approved_by": "tester"},
-        tool_context=None,
-    )
+    spec_version_id = _accepted_spec_id(session, sample_project, sample_spec_content)
 
     first = compile_spec_authority_for_version(
         {"spec_version_id": spec_version_id},
@@ -432,65 +407,6 @@ def test_compile_tool_returns_cached_when_already_compiled(
     assert result["success"] is True
     assert result["cached"] is True
     assert result["authority_id"] == first["authority_id"]
-
-    session.refresh(sample_project)
-    assert sample_project.compiled_authority_json is not None
-
-
-def test_compile_tool_uses_content_ref_when_content_empty(
-    session: Session,
-    sample_project: Project,
-    tmp_path: Path,
-    compiler_stub: object,
-) -> None:
-    """Compilation should load spec content from content_ref when needed."""
-    del compiler_stub
-    spec_path = tmp_path / "spec.md"
-    spec_path.write_text(
-        """
-# Spec v1
-
-## API
-- Endpoint: /v1/data
-
-## Invariants
-- Requests MUST include a token.
-""",
-        encoding="utf-8",
-    )
-
-    reg_result = register_spec_version(
-        {
-            "project_id": sample_project.project_id,
-            "content": "",
-            "content_ref": str(spec_path),
-        },
-        tool_context=None,
-    )
-    spec_version_id = reg_result["spec_version_id"]
-
-    approve_spec_version(
-        {"spec_version_id": spec_version_id, "approved_by": "tester"},
-        tool_context=None,
-    )
-
-    result = compile_spec_authority_for_version(
-        {"spec_version_id": spec_version_id},
-        tool_context=None,
-    )
-
-    assert result["success"] is True
-    assert result["content_source"] == "content_ref"
-
-    authority = session.exec(
-        select(CompiledSpecAuthority).where(
-            CompiledSpecAuthority.spec_version_id == spec_version_id
-        )
-    ).first()
-
-    assert authority is not None
-    scope_themes = json.loads(authority.scope_themes)
-    assert len(scope_themes) >= 1
 
 
 def _build_raw_compiler_output(excerpt: str, field_name: str) -> str:
@@ -526,16 +442,7 @@ def test_compile_persists_compiled_artifact_and_normalized_ids(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Compilation should persist normalized artifact and deterministic IDs."""
-    reg_result = register_spec_version(
-        {"project_id": sample_project.project_id, "content": sample_spec_content},
-        tool_context=None,
-    )
-    spec_version_id = reg_result["spec_version_id"]
-
-    approve_spec_version(
-        {"spec_version_id": spec_version_id, "approved_by": "tester"},
-        tool_context=None,
-    )
+    spec_version_id = _accepted_spec_id(session, sample_project, sample_spec_content)
 
     raw_json = _build_raw_compiler_output(
         excerpt="The payload must include user_id.",
@@ -594,16 +501,7 @@ def test_compile_cache_hit_does_not_change_compiled_artifact(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Cache hits reuse one row; forced recompilation appends exact history."""
-    reg_result = register_spec_version(
-        {"project_id": sample_project.project_id, "content": sample_spec_content},
-        tool_context=None,
-    )
-    spec_version_id = reg_result["spec_version_id"]
-
-    approve_spec_version(
-        {"spec_version_id": spec_version_id, "approved_by": "tester"},
-        tool_context=None,
-    )
+    spec_version_id = _accepted_spec_id(session, sample_project, sample_spec_content)
 
     raw_json_1 = _build_raw_compiler_output(
         excerpt="The payload must include user_id.",
@@ -685,16 +583,7 @@ def test_compile_persists_invocation_failure_artifact(
     tmp_path: Path,
 ) -> None:
     """Verify compile persists invocation failure artifact."""
-    del session
-    reg_result = register_spec_version(
-        {"project_id": sample_project.project_id, "content": sample_spec_content},
-        tool_context=None,
-    )
-    spec_version_id = reg_result["spec_version_id"]
-    approve_spec_version(
-        {"spec_version_id": spec_version_id, "approved_by": "tester"},
-        tool_context=None,
-    )
+    spec_version_id = _accepted_spec_id(session, sample_project, sample_spec_content)
 
     monkeypatch.setattr(failure_artifacts, "LOGS_DIR", tmp_path / "logs")
     monkeypatch.setattr(
@@ -730,16 +619,7 @@ def test_compile_persists_normalizer_failure_artifact(
     tmp_path: Path,
 ) -> None:
     """Verify compile persists normalizer failure artifact."""
-    del session
-    reg_result = register_spec_version(
-        {"project_id": sample_project.project_id, "content": sample_spec_content},
-        tool_context=None,
-    )
-    spec_version_id = reg_result["spec_version_id"]
-    approve_spec_version(
-        {"spec_version_id": spec_version_id, "approved_by": "tester"},
-        tool_context=None,
-    )
+    spec_version_id = _accepted_spec_id(session, sample_project, sample_spec_content)
 
     monkeypatch.setattr(failure_artifacts, "LOGS_DIR", tmp_path / "logs")
     monkeypatch.setattr(

@@ -1,7 +1,6 @@
 # tests/test_alignment_evidence_persistence.py
 """Tests for alignment findings persisted in ValidationEvidence."""
 
-import hashlib
 import json
 from datetime import UTC, datetime
 from typing import Any
@@ -19,10 +18,9 @@ from agile_sqlmodel import (
 )
 from models.core import Epic, Feature, Theme
 from services.specs.authority_selection import pending_authority_fingerprint
+from tests.workflow.lifecycle_fixtures import seed_accepted_specification
 from tools import spec_tools
 from tools.spec_tools import (
-    approve_spec_version,
-    register_spec_version,
     validate_story_with_spec_authority,
 )
 from utils.spec_schemas import (
@@ -46,20 +44,12 @@ def project_with_spec(session: Session, engine: Engine) -> tuple[Project, int]:
     session.refresh(project)
     project_id = _require_id(project.project_id, "project.project_id")
 
-    spec_content = "# Spec\n\n## Invariants\n- Stories MUST NOT include web features."
-    spec_hash = hashlib.sha256(spec_content.encode()).hexdigest()
-
-    # Create spec registry entry
-    spec_version = SpecRegistry(
+    lineage = seed_accepted_specification(
+        session,
         project_id=project_id,
-        content=spec_content,
-        spec_hash=spec_hash,
-        status="approved",
-        approved_by="tester",
+        content=json.dumps({"invariants": ["Stories MUST NOT include web features."]}),
     )
-    session.add(spec_version)
-    session.commit()
-    session.refresh(spec_version)
+    spec_version = lineage.spec
     spec_version_id = _require_id(
         spec_version.spec_version_id,
         "spec_version.spec_version_id",
@@ -215,17 +205,15 @@ def test_alignment_warning_persisted(engine: Engine, session: Session) -> None:
     session.commit()
     session.refresh(project)
 
-    # Create an approved spec + precompiled authority with zero invariants.
-    reg: dict[str, Any] = register_spec_version(
-        {
-            "project_id": project.project_id,
-            "content": "# Spec\n\n## Notes\n- No requirements here",
-        },
-        tool_context=None,
+    assert project.project_id is not None
+    lineage = seed_accepted_specification(
+        session,
+        project_id=project.project_id,
+        content=json.dumps({"notes": ["No requirements here"]}),
     )
-    spec_version_id = reg["spec_version_id"]
-    approve_spec_version(
-        {"spec_version_id": spec_version_id, "approved_by": "tester"}, tool_context=None
+    spec_version_id = _require_id(
+        lineage.spec.spec_version_id,
+        "spec_version.spec_version_id",
     )
 
     zero_invariant_artifact = SpecAuthorityCompilationSuccess(

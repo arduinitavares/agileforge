@@ -13,7 +13,6 @@ from agile_sqlmodel import (
     CompiledSpecAuthority,
     Project,
     SpecAuthorityAcceptance,
-    SpecRegistry,
     UserStory,
 )
 from models.core import Epic, Feature, Theme
@@ -21,6 +20,7 @@ from scripts import export_benchmark_for_labeling as exporter
 from scripts import import_human_labels as importer
 from services.specs.authority_selection import pending_authority_fingerprint
 from tests.typing_helpers import require_id
+from tests.workflow.lifecycle_fixtures import seed_accepted_specification
 from utils.spec_schemas import (
     Invariant,
     InvariantType,
@@ -75,19 +75,11 @@ def _seed_case_data(session: Session) -> tuple[int, int]:
     session.refresh(story)
     story_id = require_id(story.story_id, "story_id")
 
-    spec = SpecRegistry(
+    spec = seed_accepted_specification(
+        session,
         project_id=project_id,
-        content="# Spec",
-        content_ref=None,
-        spec_hash="a" * 64,
-        status="approved",
-        approved_at=datetime.now(UTC),
-        approved_by="tester",
-        approval_notes=None,
-    )
-    session.add(spec)
-    session.commit()
-    session.refresh(spec)
+        content=json.dumps({"title": "Label spec"}),
+    ).spec
     spec_version_id = require_id(spec.spec_version_id, "spec_version_id")
 
     session.add(

@@ -22,8 +22,7 @@ class BacklogItem(BaseModel):
         Field(
             min_length=3,
             description=(
-                "action-oriented Project Backlog Item title describing remaining work. "
-                "In brownfield contexts this is not the capability name."
+                "Action-oriented Project Backlog Item title describing remaining work."
             ),
         ),
     ]
@@ -41,7 +40,7 @@ class BacklogItem(BaseModel):
         Field(
             default=None,
             description=(
-                "Optional model-authored brownfield hint. This is advisory only; "
+                "Optional model-authored capability hint. This is advisory only; "
                 "the host derives authoritative annotation."
             ),
         ),

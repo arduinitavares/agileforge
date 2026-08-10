@@ -339,9 +339,7 @@ def _record(
             updated_components=request.components,
             project_vision_statement=request.statement,
             is_complete=request.complete,
-            clarifying_questions=(
-                () if request.complete else ("Who is the user?",)
-            ),
+            clarifying_questions=(() if request.complete else ("Who is the user?",)),
             attempt_id=attempt_id,
             attempt_fingerprint=attempt_fingerprint,
         )
@@ -438,7 +436,7 @@ def test_incomplete_then_complete_turn_creates_one_pending_vision(
 ) -> None:
     """Incomplete turns persist without an artifact; completion creates one review."""
     with Session(engine) as session:
-        project = Project(name="Vision transitions", origin="greenfield")
+        project = Project(name="Vision transitions")
         session.add(project)
         session.commit()
         assert project.project_id is not None
@@ -472,7 +470,7 @@ def test_incomplete_then_complete_turn_creates_one_pending_vision(
 def test_replay_uses_persisted_after_turn_instance_key(engine: Engine) -> None:
     """A lost later interview start replays without caller-held instance metadata."""
     with Session(engine) as session:
-        project = Project(name="Vision replay", origin="greenfield")
+        project = Project(name="Vision replay")
         session.add(project)
         session.commit()
         assert project.project_id is not None
@@ -528,7 +526,7 @@ def test_application_replay_normalizes_retry_user_text_before_position_read(
 ) -> None:
     """Padded retries use the same Vision input boundary as persisted starts."""
     with Session(engine) as session:
-        project = Project(name="Vision replay normalization", origin="greenfield")
+        project = Project(name="Vision replay normalization")
         session.add(project)
         session.commit()
         assert project.project_id is not None
@@ -588,7 +586,7 @@ def test_application_replay_normalizes_retry_user_text_before_position_read(
 def test_review_accepts_one_vision_exactly_once(engine: Engine) -> None:
     """A review decision targets the graph-selected artifact and is idempotent."""
     with Session(engine) as session:
-        project = Project(name="Vision review", origin="greenfield")
+        project = Project(name="Vision review")
         session.add(project)
         session.commit()
         assert project.project_id is not None
@@ -634,7 +632,7 @@ def test_review_accepts_one_vision_exactly_once(engine: Engine) -> None:
 def test_feedback_reopens_the_same_vision_interview(engine: Engine) -> None:
     """Feedback records one decision and returns the human to Vision interviewing."""
     with Session(engine) as session:
-        project = Project(name="Vision feedback", origin="greenfield")
+        project = Project(name="Vision feedback")
         session.add(project)
         session.commit()
         assert project.project_id is not None
@@ -678,7 +676,7 @@ def test_feedback_reopens_the_same_vision_interview(engine: Engine) -> None:
 def test_accepted_revision_creates_only_a_new_vision(engine: Engine) -> None:
     """Revision completion and acceptance create Vision without a Product Goal."""
     with Session(engine) as session:
-        project = Project(name="Vision revision", origin="greenfield")
+        project = Project(name="Vision revision")
         session.add(project)
         session.commit()
         assert project.project_id is not None
@@ -770,9 +768,7 @@ def test_accepted_revision_creates_only_a_new_vision(engine: Engine) -> None:
             item.product_goal_artifact_id
             for item in snapshot.product_goal_artifact_decisions
             if item.decision == "accepted"
-        } - {
-            item.product_goal_artifact_id for item in snapshot.product_goal_outcomes
-        }
+        } - {item.product_goal_artifact_id for item in snapshot.product_goal_outcomes}
         current_specs = tuple(
             item for item in snapshot.spec_versions if item.status == "approved"
         )

@@ -1662,10 +1662,6 @@ def test_projection_fails_closed_for_ambiguous_discovery_without_cache_fallback(
                 recorded_at=NOW + timedelta(seconds=9),
             )
         )
-        project = session.get(Project, project_id)
-        assert project is not None
-        project.vision = "incorrect mutable cache"
-        session.add(project)
         session.commit()
 
     result = _data(

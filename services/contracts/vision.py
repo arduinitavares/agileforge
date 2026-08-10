@@ -116,46 +116,7 @@ class VisionInterviewOutput(BaseModel):
         return self
 
 
-class LegacyVisionInput(BaseModel):
-    """Temporary legacy agent input retained until the Task 5 root cutover."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    user_raw_text: str
-    specification_content: str
-    prior_vision_state: str
-    compiled_authority: str
-
-
-class LegacyVisionOutput(BaseModel):
-    """Temporary legacy agent output retained until the Task 5 root cutover."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    updated_components: VisionComponents
-    product_vision_statement: str
-    is_complete: bool
-    clarifying_questions: list[str]
-
-
-class LegacyVisionRecipeInput(LegacyVisionInput):
-    """Host-bound legacy input that can produce one RecordVisionDraft payload."""
-
-    authority_id: int
-    authority_fingerprint: str
-    supersedes_vision_artifact_id: int | None = None
-
-
-InputSchema = LegacyVisionInput
-OutputSchema = LegacyVisionOutput
-
-
 __all__ = [
-    "InputSchema",
-    "LegacyVisionInput",
-    "LegacyVisionOutput",
-    "LegacyVisionRecipeInput",
-    "OutputSchema",
     "VisionComponents",
     "VisionInterviewInput",
     "VisionInterviewOutput",

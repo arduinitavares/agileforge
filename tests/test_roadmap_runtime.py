@@ -15,7 +15,7 @@ def test_build_roadmap_input_context_strips_refinement_metadata() -> None:
     """Roadmap input must not leak refinement-only item fields to the schema."""
     state = {
         "product_vision_assessment": {
-            "product_vision_statement": "A safe brownfield Cartola workflow.",
+            "product_vision_statement": "A safe Cartola workflow.",
         },
         "pending_spec_content": "SPEC",
         "compiled_authority_cached": {"authority": True},
@@ -25,15 +25,11 @@ def test_build_roadmap_input_context_strips_refinement_metadata() -> None:
                 "requirement": "Validate Captain-Aware Optimization Contract",
                 "authority_ref": "REQ.captain-aware-optimization",
                 "capability_hint": "Captain Aware Optimization",
-                "as_built_annotation": {
-                    "schema_version": "agileforge.brownfield_annotation.v1",
-                    "match_tier": "exact",
-                    "match_basis": ["authority_ref"],
-                },
+                "source_annotation": {"match_tier": "exact"},
                 "value_driver": "Strategic",
                 "justification": "Verify the existing captain multiplier contract.",
                 "estimated_effort": "M",
-                "technical_note": "Brownfield verification item.",
+                "technical_note": "Verification item.",
                 "item_id": "item-001",
                 "item_fingerprint": "sha256:item",
                 "classification": "verification",
@@ -51,7 +47,7 @@ def test_build_roadmap_input_context_strips_refinement_metadata() -> None:
     assert isinstance(backlog_items, list)
     item = cast("dict[str, object]", backlog_items[0])
     assert isinstance(item, dict)
-    assert "as_built_annotation" not in item
+    assert "source_annotation" not in item
     assert "item_id" not in item
     assert "item_fingerprint" not in item
     assert "classification" not in item
@@ -83,7 +79,7 @@ def test_build_roadmap_input_context_retains_prior_roadmap_without_mode_flags() 
     ]
     state = {
         "product_vision_assessment": {
-            "product_vision_statement": "A safe brownfield workflow.",
+            "product_vision_statement": "A safe workflow.",
         },
         "pending_spec_content": "SPEC",
         "compiled_authority_cached": {"authority": True},
@@ -114,7 +110,6 @@ def test_build_roadmap_input_context_retains_prior_roadmap_without_mode_flags() 
 
     assert "generation_mode" not in input_context
     assert "locked_roadmap_shape" not in input_context
-    assert "scope_extension" not in input_context
     assert parsed.prior_roadmap_state == json.dumps(
         existing_roadmap,
         ensure_ascii=False,

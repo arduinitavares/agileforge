@@ -8,10 +8,7 @@ from typing import TYPE_CHECKING, cast
 import pytest
 
 from cli import main as cli_main
-from cli.workflow_commands import (
-    workflow_next,
-    workflow_position,
-)
+from cli.workflow_commands import workflow_next
 from tests.adapters.test_command_renderer import position_fixture
 from workflow.contracts import WorkflowPosition
 
@@ -313,27 +310,6 @@ def test_semantic_text_cli_rejects_whitespace_before_application_call(
 
 
 @pytest.mark.parametrize(
-    "command",
-    [
-        "project abandon",
-        "project initial-spec --project-id 41",
-        "brownfield curate",
-        "scope register",
-        "scope extension start",
-        "discovery challenge record",
-        "discovery prd record",
-        "discovery spec record",
-        "vision generate",
-        "vision decide",
-    ],
-)
-def test_retired_cli_parser_branches_are_absent(command: str) -> None:
-    """Reject retired command families at parser selection."""
-    with pytest.raises(ValueError, match="invalid choice"):
-        cli_main.build_parser().parse_args(shlex.split(command))
-
-
-@pytest.mark.parametrize(
     ("group", "extra"),
     [
         ("backlog", []),
@@ -491,11 +467,6 @@ def test_story_review_requires_exact_instance_selector() -> None:
     ("command", "request_type_name"),
     [
         (
-            "backlog reconcile --project-id 41 "
-            "--idempotency-key reconcile-41 --actor operator",
-            "BacklogReconcileRequest",
-        ),
-        (
             "story dependencies apply --project-id 41 "
             "--story-id 7 --story-id 9 "
             "--dependency '9:7:Story 9 requires Story 7.' "
@@ -528,7 +499,6 @@ def test_planning_action_commands_use_task_specific_semantics(
         def __getattr__(self, name: str) -> object:
             if name not in {
                 "apply_story_dependencies",
-                "reconcile_backlog",
                 "repair_story_readiness",
                 "start_sprint",
             }:
@@ -608,8 +578,6 @@ def test_story_readiness_cli_rejects_invalid_repairs(
 @pytest.mark.parametrize(
     "command",
     [
-        "backlog reconcile --project-id 41 --request-file request.json "
-        "--idempotency-key reconcile-41 --actor operator",
         "story dependencies apply --project-id 41 --story-id 7 "
         "--request-file request.json --idempotency-key dependencies-41 "
         "--actor operator",
@@ -621,7 +589,7 @@ def test_story_readiness_cli_rejects_invalid_repairs(
     ],
 )
 def test_planning_action_commands_reject_request_file(command: str) -> None:
-    """Remove generic JSON request files from all four planning actions."""
+    """Remove generic JSON request files from planning actions."""
     with pytest.raises(ValueError, match="unrecognized arguments"):
         cli_main.build_parser().parse_args(shlex.split(command))
 
@@ -996,23 +964,6 @@ def test_workflow_next_reads_position_once() -> None:
         "authority.compile",
         "authority.repair",
     ]
-
-
-def test_workflow_position_can_include_optional_decisions() -> None:
-    """Include optional re-entry only when explicitly requested."""
-    application = _FakeApplication(position_fixture())
-
-    payload = workflow_position(
-        application=application,
-        project_id=41,
-        include_optional=True,
-    )
-
-    assert application.position_calls == [41]
-    decisions = cast("list[dict[str, object]]", payload["decisions"])
-    assert "scope_extension.start" in {
-        cast("str", item["node_id"]) for item in decisions
-    }
 
 
 def test_cli_adapter_has_no_repository_or_legacy_routing_imports() -> None:

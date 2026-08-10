@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
@@ -12,9 +13,22 @@ from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance, SpecReg
 from services.specs import authority_selection
 from tests.authority_assumption_fixtures import current_v3_compiled_authority_json
 from tests.typing_helpers import require_id
+from tests.workflow.lifecycle_fixtures import seed_accepted_specification
+from workflow.fingerprints import canonical_json, canonical_stored_json_hash
 
 if TYPE_CHECKING:
     from sqlmodel import Session
+
+_SELECTION_HASH = canonical_stored_json_hash(canonical_json({"title": "selection"}))
+
+
+def _spec(session: Session, *, project_id: int, title: str) -> SpecRegistry:
+    """Persist one current-lifecycle accepted specification."""
+    return seed_accepted_specification(
+        session,
+        project_id=project_id,
+        content=json.dumps({"title": title}),
+    ).spec
 
 
 def _history(
@@ -25,15 +39,11 @@ def _history(
     session.commit()
     session.refresh(project)
     project_id = require_id(project.project_id, "project_id")
-    spec = SpecRegistry(
+    spec = _spec(
+        session,
         project_id=project_id,
-        spec_hash="sha256:selection",
-        content="selection",
-        status="approved",
+        title="selection",
     )
-    session.add(spec)
-    session.commit()
-    session.refresh(spec)
     spec_version_id = require_id(spec.spec_version_id, "spec_version_id")
     rows = [
         CompiledSpecAuthority(
@@ -100,22 +110,17 @@ def test_latest_compiled_authority_for_project_prefers_newest_spec_then_row(
     project_id = require_id(project.project_id, "project_id")
     other_project_id = require_id(other_project.project_id, "project_id")
     specs = [
-        SpecRegistry(
+        _spec(
+            session,
             project_id=owner_id,
-            spec_hash=spec_hash,
-            content=spec_hash,
-            status="approved",
+            title=title,
         )
-        for owner_id, spec_hash in (
-            (project_id, "sha256:selected-old"),
-            (project_id, "sha256:selected-new"),
-            (other_project_id, "sha256:other"),
+        for owner_id, title in (
+            (project_id, "selected-old"),
+            (project_id, "selected-new"),
+            (other_project_id, "other"),
         )
     ]
-    session.add_all(specs)
-    session.commit()
-    for spec in specs:
-        session.refresh(spec)
 
     def authority(spec: SpecRegistry, prompt: str) -> CompiledSpecAuthority:
         return CompiledSpecAuthority(
@@ -168,7 +173,7 @@ def test_compiled_authority_for_acceptance_uses_exact_pending_id(
         decided_by="test",
         compiler_version=accepted_row.compiler_version,
         prompt_hash=accepted_row.prompt_hash,
-        spec_hash="sha256:selection",
+        spec_hash=_SELECTION_HASH,
         pending_authority_id=accepted_row.authority_id,
     )
 
@@ -196,7 +201,7 @@ def test_latest_accepted_authority_decision_orders_by_time_then_id(
             decided_at=when,
             compiler_version=authority.compiler_version,
             prompt_hash=authority.prompt_hash,
-            spec_hash="sha256:selection",
+            spec_hash=_SELECTION_HASH,
             pending_authority_id=authority.authority_id,
         )
         for status, when, authority in (
@@ -224,15 +229,11 @@ def test_latest_accepted_authority_decision_for_project_orders_across_specs(
 ) -> None:
     """Project recovery selects accepted decisions by time, then insertion id."""
     project_id, spec_version_id, old, _ = _history(session)
-    other_spec = SpecRegistry(
+    other_spec = _spec(
+        session,
         project_id=project_id,
-        spec_hash="sha256:selection-other",
-        content="other",
-        status="approved",
+        title="selection-other",
     )
-    session.add(other_spec)
-    session.commit()
-    session.refresh(other_spec)
     other_spec_version_id = require_id(
         other_spec.spec_version_id,
         "spec_version_id",
@@ -270,13 +271,13 @@ def test_latest_accepted_authority_decision_for_project_orders_across_specs(
                 spec_version_id,
                 decided_at - timedelta(seconds=1),
                 old,
-                "sha256:selection",
+                _SELECTION_HASH,
             ),
             (
                 spec_version_id,
                 decided_at,
                 old,
-                "sha256:selection",
+                _SELECTION_HASH,
             ),
             (
                 other_spec_version_id,
@@ -312,7 +313,7 @@ def test_accepted_compiled_authority_selects_exact_accepted_row(
         decided_by="test",
         compiler_version=accepted.compiler_version,
         prompt_hash=accepted.prompt_hash,
-        spec_hash="sha256:selection",
+        spec_hash=_SELECTION_HASH,
         pending_authority_id=accepted.authority_id,
     )
     session.add(acceptance)
@@ -358,7 +359,7 @@ def test_accepted_compiled_authority_uses_latest_deterministic_decision(
             decided_at=decided_at,
             compiler_version=authority.compiler_version,
             prompt_hash=authority.prompt_hash,
-            spec_hash="sha256:selection",
+            spec_hash=_SELECTION_HASH,
             pending_authority_id=authority.authority_id,
         )
         for authority in (first, second)
@@ -394,7 +395,7 @@ def test_accepted_compiled_authority_rejects_foreign_project_spec(
             decided_by="test",
             compiler_version=accepted.compiler_version,
             prompt_hash=accepted.prompt_hash,
-            spec_hash="sha256:selection",
+            spec_hash=_SELECTION_HASH,
             pending_authority_id=accepted.authority_id,
         )
     )
@@ -415,15 +416,11 @@ def test_accepted_compiled_authority_rejects_acceptance_authority_spec_mismatch(
 ) -> None:
     """A mismatched acceptance target never falls back to another row."""
     project_id, spec_version_id, _, accepted = _history(session)
-    other_spec = SpecRegistry(
+    other_spec = _spec(
+        session,
         project_id=project_id,
-        spec_hash="sha256:other-spec",
-        content="other",
-        status="approved",
+        title="other-spec",
     )
-    session.add(other_spec)
-    session.commit()
-    session.refresh(other_spec)
     other_authority = CompiledSpecAuthority(
         spec_version_id=require_id(other_spec.spec_version_id, "spec_version_id"),
         compiler_version="3.0.0",
@@ -446,7 +443,7 @@ def test_accepted_compiled_authority_rejects_acceptance_authority_spec_mismatch(
             decided_by="test",
             compiler_version=other_authority.compiler_version,
             prompt_hash=other_authority.prompt_hash,
-            spec_hash="sha256:selection",
+            spec_hash=_SELECTION_HASH,
             pending_authority_id=other_authority.authority_id,
         )
     )
@@ -486,7 +483,7 @@ def test_accepted_compiled_authority_rejects_acceptance_provenance_mismatch(
         decided_by="test",
         compiler_version=authority.compiler_version,
         prompt_hash=authority.prompt_hash,
-        spec_hash="sha256:selection",
+        spec_hash=_SELECTION_HASH,
         pending_authority_id=authority.authority_id,
     )
     setattr(acceptance, field_name, replacement)
@@ -552,7 +549,7 @@ def test_accepted_v3_authority_requires_acceptance_fingerprint(
             decided_by="test",
             compiler_version=authority.compiler_version,
             prompt_hash=authority.prompt_hash,
-            spec_hash="sha256:selection",
+            spec_hash=_SELECTION_HASH,
             pending_authority_id=authority.authority_id,
             authority_fingerprint=None,
         )
@@ -588,7 +585,7 @@ def test_accepted_v3_authority_rejects_post_acceptance_artifact_mutation(
         decided_by="test",
         compiler_version=authority.compiler_version,
         prompt_hash=authority.prompt_hash,
-        spec_hash="sha256:selection",
+        spec_hash=_SELECTION_HASH,
         pending_authority_id=authority.authority_id,
         authority_fingerprint=authority_selection.pending_authority_fingerprint(
             authority

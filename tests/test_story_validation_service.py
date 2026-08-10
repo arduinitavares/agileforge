@@ -1,5 +1,6 @@
 """Tests for story validation service."""
 
+import json
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
@@ -17,6 +18,7 @@ from services.agent_workbench.authority_projection import (
     pending_authority_fingerprint,
 )
 from tests.typing_helpers import require_id
+from tests.workflow.lifecycle_fixtures import seed_accepted_specification
 from utils.spec_schemas import (
     ForbiddenCapabilityParams,
     Invariant,
@@ -27,6 +29,20 @@ from utils.spec_schemas import (
     SpecAuthorityCompilerOutput,
     ValidationEvidence,
 )
+
+
+def _accepted_spec(
+    session: Session,
+    *,
+    project_id: int,
+    title: str,
+) -> SpecRegistry:
+    """Persist one accepted current-lifecycle specification."""
+    return seed_accepted_specification(
+        session,
+        project_id=project_id,
+        content=json.dumps({"title": title}),
+    ).spec
 
 
 def test_services_package_exports_validate_story_with_spec_authority() -> None:
@@ -96,18 +112,11 @@ def test_story_validation_blocks_malformed_v3_before_checks_or_evidence(
     session.commit()
     session.refresh(story)
 
-    spec_version = SpecRegistry(
+    spec_version = _accepted_spec(
+        session,
         project_id=project_id,
-        content="# Spec",
-        content_ref=None,
-        spec_hash="a" * 64,
-        status="approved",
-        approved_at=datetime.now(UTC),
-        approved_by="tester",
+        title="Malformed authority",
     )
-    session.add(spec_version)
-    session.commit()
-    session.refresh(spec_version)
     spec_version_id = require_id(spec_version.spec_version_id, "spec_version_id")
 
     authority = CompiledSpecAuthority(
@@ -228,16 +237,14 @@ def test_story_validation_stays_on_exact_accepted_row_with_newer_pending_candida
         story_description="Description",
         acceptance_criteria="Criteria",
     )
-    spec = SpecRegistry(
+    spec = _accepted_spec(
+        session,
         project_id=project_id,
-        content="# Spec",
-        spec_hash="pinned",
-        status="approved",
+        title="Pinned validation",
     )
-    session.add_all([story, spec])
+    session.add(story)
     session.commit()
     session.refresh(story)
-    session.refresh(spec)
     spec_version_id = require_id(spec.spec_version_id, "spec_version_id")
     rows = [
         CompiledSpecAuthority(
@@ -324,16 +331,14 @@ def test_story_validation_moves_only_to_exact_newly_accepted_row(
         story_description="Description",
         acceptance_criteria="Criteria",
     )
-    spec = SpecRegistry(
+    spec = _accepted_spec(
+        session,
         project_id=project_id,
-        content="# Spec",
-        spec_hash="accepted-v3",
-        status="approved",
+        title="Accepted v3 validation",
     )
-    session.add_all([story, spec])
+    session.add(story)
     session.commit()
     session.refresh(story)
-    session.refresh(spec)
     spec_version_id = require_id(spec.spec_version_id, "spec_version_id")
     rows = [
         CompiledSpecAuthority(
@@ -597,19 +602,11 @@ def test_persist_validation_evidence_updates_story_and_acceptance(
     session.commit()
     session.refresh(story)
 
-    spec_version = SpecRegistry(
+    spec_version = _accepted_spec(
+        session,
         project_id=project_id,
-        content="# Spec",
-        content_ref=None,
-        spec_hash="a" * 64,
-        status="approved",
-        approved_at=datetime.now(UTC),
-        approved_by="tester",
-        approval_notes=None,
+        title="Evidence",
     )
-    session.add(spec_version)
-    session.commit()
-    session.refresh(spec_version)
     spec_version_id = require_id(spec_version.spec_version_id, "spec_version_id")
 
     evidence = ValidationEvidence(
@@ -654,19 +651,11 @@ def test_validate_story_with_spec_authority_uses_service_owned_defaults(
     session.commit()
     session.refresh(story)
 
-    spec_version = SpecRegistry(
+    spec_version = _accepted_spec(
+        session,
         project_id=project_id,
-        content="# Spec",
-        content_ref=None,
-        spec_hash="b" * 64,
-        status="approved",
-        approved_at=datetime.now(UTC),
-        approved_by="tester",
-        approval_notes=None,
+        title="Service defaults",
     )
-    session.add(spec_version)
-    session.commit()
-    session.refresh(spec_version)
     spec_version_id = require_id(spec_version.spec_version_id, "spec_version_id")
 
     authority_artifact = SpecAuthorityCompilationSuccess(

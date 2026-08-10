@@ -604,7 +604,7 @@ def test_runner_loads_vision_input_from_persisted_attempt(
 ) -> None:
     """Completion ignores a mutated in-memory start request after persistence."""
     with Session(engine) as session:
-        project = Project(name="Persisted Vision", origin="greenfield")
+        project = Project(name="Persisted Vision")
         session.add(project)
         session.commit()
         assert project.project_id is not None

@@ -32,41 +32,25 @@ from workflow.handlers import (
     AttemptStartState,
     as_utc,
     execute_abandon_product_goal,
-    execute_abandon_project_shell,
     execute_begin_vision_revision,
     execute_compile_authority,
     execute_create_project,
     execute_decide_authority,
     execute_decide_backlog,
-    execute_decide_brownfield_initial_spec,
-    execute_decide_initial_spec_draft,
-    execute_decide_prd,
     execute_decide_product_goal_review,
     execute_decide_specification,
-    execute_decide_vision,
     execute_decide_vision_review,
     execute_execution_request,
     execute_fulfill_product_goal,
-    execute_open_project_shell,
     execute_planning_request,
-    execute_reconcile_backlog,
     execute_record_authority_feedback,
     execute_record_backlog_draft,
-    execute_record_brownfield_spec_draft,
-    execute_record_challenge_artifact,
     execute_record_discovery_artifact,
-    execute_record_initial_spec_draft,
-    execute_record_prd_version,
     execute_record_product_goal_interview_turn,
-    execute_record_repository_baseline,
     execute_record_repository_binding,
-    execute_record_repository_inventory,
     execute_record_specification_candidate,
-    execute_record_vision_draft,
     execute_record_vision_interview_turn,
-    execute_register_initial_scope,
     execute_repair_authority,
-    execute_scope_extension_request,
     execute_start_node_attempt,
     load_attempt,
     load_attempt_outcome,
@@ -75,13 +59,10 @@ from workflow.handlers import (
     record_success_outcome,
     validate_decide_authority_review,
     validate_decide_backlog_review,
-    validate_decide_vision_review,
     validate_planning_review,
 )
 from workflow.requests import (
     AbandonProductGoal,
-    AbandonProjectShell,
-    AbandonScopeExtension,
     ApplyStoryDependencies,
     BeginVisionRevision,
     CloseSprint,
@@ -89,53 +70,31 @@ from workflow.requests import (
     CompileAuthority,
     CompleteTask,
     CreateProject,
-    DecideAmendmentSpecDraft,
     DecideAuthority,
     DecideBacklog,
-    DecideBrownfieldInitialSpec,
-    DecideExtensionPrd,
-    DecideInitialSpecDraft,
-    DecidePrd,
     DecideProductGoalReview,
     DecideRoadmap,
     DecideSpecification,
     DecideSprintPlan,
     DecideStory,
-    DecideVision,
     DecideVisionReview,
     FailNodeAttempt,
     FulfillProductGoal,
-    OpenProjectShell,
-    ReconcileBacklog,
-    ReconcileScopeExtension,
-    RecordAmendmentSpecDraft,
     RecordAuthorityFeedback,
     RecordBacklogDraft,
-    RecordBrownfieldSpecDraft,
-    RecordChallengeArtifact,
     RecordDiscoveryArtifact,
-    RecordExtensionChallenge,
-    RecordExtensionPrd,
-    RecordInitialSpecDraft,
     RecordPostSprintTriage,
-    RecordPrdVersion,
     RecordProductGoalInterviewTurn,
-    RecordRepositoryBaseline,
     RecordRepositoryBinding,
-    RecordRepositoryInventory,
     RecordRoadmapDraft,
     RecordSpecificationCandidate,
     RecordSprintPlan,
     RecordStoryDraft,
-    RecordVisionDraft,
     RecordVisionInterviewTurn,
-    RegisterInitialScope,
-    RegisterScopeExtension,
     RepairAuthority,
     RepairStoryReadiness,
     ReviewSprint,
     StartNodeAttempt,
-    StartScopeExtension,
     StartSprint,
     TransitionRequest,
 )
@@ -164,27 +123,8 @@ class AdkRecipeRegistryProtocol(Protocol):
 _SQLITE_BUSY_TIMEOUT_MS = 1_000
 _SQLITE_LOCK_MESSAGES = ("database is locked", "database table is locked")
 
-type _ExistingPositionedRequest = (
-    AbandonProjectShell
-    | RecordChallengeArtifact
-    | RecordPrdVersion
-    | DecidePrd
-    | RecordInitialSpecDraft
-    | DecideInitialSpecDraft
-    | RegisterInitialScope
-)
 type _AuthorityRequest = (
     CompileAuthority | DecideAuthority | RecordAuthorityFeedback | RepairAuthority
-)
-type _ProductDefinitionRequest = (
-    RecordVisionDraft
-    | DecideVision
-    | RecordBacklogDraft
-    | DecideBacklog
-    | ReconcileBacklog
-    | RecordVisionInterviewTurn
-    | DecideVisionReview
-    | BeginVisionRevision
 )
 type _ProductGoalRequest = (
     RecordProductGoalInterviewTurn
@@ -195,6 +135,10 @@ type _ProductGoalRequest = (
 type _ProductDiscoveryRequest = (
     RecordDiscoveryArtifact | RecordSpecificationCandidate | DecideSpecification
 )
+type _VisionRequest = (
+    RecordVisionInterviewTurn | DecideVisionReview | BeginVisionRevision
+)
+type _BacklogRequest = RecordBacklogDraft | DecideBacklog
 type _PlanningRequest = (
     RecordRoadmapDraft
     | DecideRoadmap
@@ -209,40 +153,17 @@ type _PlanningRequest = (
 type _ExecutionRequest = (
     CompleteTask | CloseStory | ReviewSprint | CloseSprint | RecordPostSprintTriage
 )
-type _ScopeExtensionRequest = (
-    StartScopeExtension
-    | RecordExtensionChallenge
-    | RecordExtensionPrd
-    | DecideExtensionPrd
-    | RecordAmendmentSpecDraft
-    | DecideAmendmentSpecDraft
-    | RegisterScopeExtension
-    | ReconcileScopeExtension
-    | AbandonScopeExtension
-)
 type _PositionedTransitionRequest = (
-    _ExistingPositionedRequest
-    | RecordRepositoryBaseline
-    | RecordRepositoryInventory
-    | RecordBrownfieldSpecDraft
-    | DecideBrownfieldInitialSpec
-    | CompileAuthority
-    | DecideAuthority
-    | RecordAuthorityFeedback
-    | RepairAuthority
-    | RecordVisionDraft
-    | DecideVision
-    | RecordBacklogDraft
-    | DecideBacklog
-    | ReconcileBacklog
+    _AuthorityRequest
     | RecordVisionInterviewTurn
     | DecideVisionReview
     | BeginVisionRevision
     | _ProductGoalRequest
     | _ProductDiscoveryRequest
+    | RecordBacklogDraft
+    | DecideBacklog
     | _PlanningRequest
     | _ExecutionRequest
-    | _ScopeExtensionRequest
 )
 
 
@@ -343,10 +264,7 @@ class WorkflowDomain:
                 session.rollback()
                 if isinstance(
                     request,
-                    RegisterInitialScope
-                    | RegisterScopeExtension
-                    | ReconcileScopeExtension
-                    | CompleteTask
+                    CompleteTask
                     | CloseStory
                     | ReviewSprint
                     | CloseSprint
@@ -384,7 +302,6 @@ class WorkflowDomain:
         if isinstance(
             request,
             DecideAuthority
-            | DecideVision
             | DecideVisionReview
             | DecideBacklog
             | DecideRoadmap
@@ -399,8 +316,6 @@ class WorkflowDomain:
                 return existing.immediate_result
             if isinstance(request, DecideAuthority):
                 review_failure = validate_decide_authority_review(session, request)
-            elif isinstance(request, DecideVision):
-                review_failure = validate_decide_vision_review(session, request)
             elif isinstance(request, DecideVisionReview):
                 review_failure = None
             elif isinstance(request, DecideBacklog):
@@ -492,8 +407,7 @@ class WorkflowDomain:
         receipt = session.exec(
             select(WorkflowTransitionReceipt).where(
                 col(WorkflowTransitionReceipt.request_kind) == request_kind,
-                col(WorkflowTransitionReceipt.idempotency_key)
-                == idempotency_key,
+                col(WorkflowTransitionReceipt.idempotency_key) == idempotency_key,
             )
         ).one_or_none()
         if receipt is None:
@@ -531,13 +445,6 @@ class WorkflowDomain:
         """Dispatch only after the receipt claim and all position guards."""
         if isinstance(request, CreateProject | RecordRepositoryBinding):
             return self._execute_project_request(session, request, evaluated_at)
-        if isinstance(request, OpenProjectShell):
-            return execute_open_project_shell(
-                session,
-                request,
-                self._graph,
-                evaluated_at,
-            )
         if isinstance(request, StartNodeAttempt):
             return self._execute_start_attempt(session, request, evaluated_at)
         if isinstance(request, FailNodeAttempt):
@@ -925,87 +832,50 @@ class WorkflowDomain:
         decision: NodeDecision,
         evaluated_at: datetime,
     ) -> TransitionResult:
-        """Run the existing request-specific invariant handler."""
-        result = self._execute_execution_or_scope(
-            session,
-            request,
-            decision,
-            evaluated_at,
-        )
-        if result is not None:
-            return result
-        result = self._execute_product_definition_cycle(
-            session,
-            request,
-            decision,
-            evaluated_at,
-        )
-        if result is not None:
-            return result
-        return self._execute_prior_positioned(
-            session,
-            request,
-            decision,
-            evaluated_at,
-        )
-
-    def _execute_prior_positioned(
-        self,
-        session: Session,
-        request: _PositionedTransitionRequest,
-        decision_or_failure: NodeDecision,
-        evaluated_at: datetime,
-    ) -> TransitionResult:
-        """Dispatch positioned request families implemented before Tasks 12-13."""
+        """Dispatch one request through its retained lifecycle workstream."""
         if isinstance(
             request,
             CompleteTask
             | CloseStory
             | ReviewSprint
             | CloseSprint
-            | RecordPostSprintTriage
-            | StartScopeExtension
-            | RecordExtensionChallenge
-            | RecordExtensionPrd
-            | DecideExtensionPrd
-            | RecordAmendmentSpecDraft
-            | DecideAmendmentSpecDraft
-            | RegisterScopeExtension
-            | ReconcileScopeExtension
-            | AbandonScopeExtension,
+            | RecordPostSprintTriage,
         ):
-            message = "A recent request reached the prior-family dispatcher."
-            raise TypeError(message)
-        if isinstance(
+            result = execute_execution_request(session, request, decision, evaluated_at)
+        elif isinstance(
+            request,
+            RecordProductGoalInterviewTurn
+            | DecideProductGoalReview
+            | FulfillProductGoal
+            | AbandonProductGoal,
+        ):
+            result = self._dispatch_product_goal(
+                session, request, decision, evaluated_at
+            )
+        elif isinstance(
+            request,
+            RecordDiscoveryArtifact
+            | RecordSpecificationCandidate
+            | DecideSpecification,
+        ):
+            result = self._dispatch_product_discovery(
+                session, request, decision, evaluated_at
+            )
+        elif isinstance(
             request,
             CompileAuthority
             | DecideAuthority
             | RecordAuthorityFeedback
             | RepairAuthority,
         ):
-            result = self._execute_authority_request(
-                session,
-                request,
-                decision_or_failure,
-                evaluated_at,
-            )
+            result = self._dispatch_authority(session, request, decision, evaluated_at)
         elif isinstance(
             request,
-            RecordVisionDraft
-            | DecideVision
-            | RecordVisionInterviewTurn
-            | DecideVisionReview
-            | BeginVisionRevision
-            | RecordBacklogDraft
-            | DecideBacklog
-            | ReconcileBacklog,
+            RecordVisionInterviewTurn | DecideVisionReview | BeginVisionRevision,
         ):
-            result = self._execute_product_definition_request(
-                session,
-                request,
-                decision_or_failure,
-                evaluated_at,
-            )
+            result = self._dispatch_vision(session, request, decision, evaluated_at)
+        elif isinstance(request, RecordBacklogDraft | DecideBacklog):
+            result = self._dispatch_backlog(session, request, decision, evaluated_at)
         elif isinstance(
             request,
             RecordRoadmapDraft
@@ -1018,98 +888,13 @@ class WorkflowDomain:
             | DecideSprintPlan
             | StartSprint,
         ):
-            result = execute_planning_request(
-                session,
-                request,
-                decision_or_failure,
-                evaluated_at,
-            )
-        elif isinstance(request, RecordRepositoryBaseline):
-            result = execute_record_repository_baseline(
-                session,
-                request,
-                decision_or_failure,
-                evaluated_at,
-            )
-        elif isinstance(request, RecordRepositoryInventory):
-            result = execute_record_repository_inventory(
-                session,
-                request,
-                decision_or_failure,
-                evaluated_at,
-            )
-        elif isinstance(request, RecordBrownfieldSpecDraft):
-            result = execute_record_brownfield_spec_draft(
-                session,
-                request,
-                decision_or_failure,
-                evaluated_at,
-            )
-        elif isinstance(request, DecideBrownfieldInitialSpec):
-            result = execute_decide_brownfield_initial_spec(
-                session,
-                request,
-                decision_or_failure,
-                evaluated_at,
-            )
-        elif isinstance(
-            request,
-            AbandonProjectShell
-            | RecordChallengeArtifact
-            | RecordPrdVersion
-            | DecidePrd
-            | RecordInitialSpecDraft
-            | DecideInitialSpecDraft
-            | RegisterInitialScope,
-        ):
-            result = self._execute_existing_positioned(
-                session,
-                request,
-                decision_or_failure,
-                evaluated_at,
-            )
+            result = execute_planning_request(session, request, decision, evaluated_at)
         else:
-            message = "Unsupported positioned request reached the prior dispatcher."
-            raise TypeError(message)
+            assert_never(request)
         return result
 
     @staticmethod
-    def _execute_product_definition_cycle(
-        session: Session,
-        request: _PositionedTransitionRequest,
-        decision: NodeDecision,
-        evaluated_at: datetime,
-    ) -> TransitionResult | None:
-        """Execute the isolated Product Goal and discovery cycle request families."""
-        if isinstance(
-            request,
-            RecordProductGoalInterviewTurn
-            | DecideProductGoalReview
-            | FulfillProductGoal
-            | AbandonProductGoal,
-        ):
-            return WorkflowDomain._execute_product_goal_request(
-                session,
-                request,
-                decision,
-                evaluated_at,
-            )
-        if isinstance(
-            request,
-            RecordDiscoveryArtifact
-            | RecordSpecificationCandidate
-            | DecideSpecification,
-        ):
-            return WorkflowDomain._execute_product_discovery_request(
-                session,
-                request,
-                decision,
-                evaluated_at,
-            )
-        return None
-
-    @staticmethod
-    def _execute_product_goal_request(
+    def _dispatch_product_goal(
         session: Session,
         request: _ProductGoalRequest,
         decision: NodeDecision,
@@ -1121,27 +906,20 @@ class WorkflowDomain:
             )
         if isinstance(request, DecideProductGoalReview):
             return execute_decide_product_goal_review(
-                session,
-                request,
-                decision,
-                evaluated_at,
+                session, request, decision, evaluated_at
             )
         if isinstance(request, FulfillProductGoal):
             return execute_fulfill_product_goal(
-                session,
-                request,
-                decision,
-                evaluated_at,
+                session, request, decision, evaluated_at
             )
-        return execute_abandon_product_goal(
-            session,
-            request,
-            decision,
-            evaluated_at,
-        )
+        if isinstance(request, AbandonProductGoal):
+            return execute_abandon_product_goal(
+                session, request, decision, evaluated_at
+            )
+        assert_never(request)
 
     @staticmethod
-    def _execute_product_discovery_request(
+    def _dispatch_product_discovery(
         session: Session,
         request: _ProductDiscoveryRequest,
         decision: NodeDecision,
@@ -1149,58 +927,72 @@ class WorkflowDomain:
     ) -> TransitionResult:
         if isinstance(request, RecordDiscoveryArtifact):
             return execute_record_discovery_artifact(
-                session,
-                request,
-                decision,
-                evaluated_at,
+                session, request, decision, evaluated_at
             )
         if isinstance(request, RecordSpecificationCandidate):
             return execute_record_specification_candidate(
                 session, request, decision, evaluated_at
             )
-        return execute_decide_specification(session, request, decision, evaluated_at)
+        if isinstance(request, DecideSpecification):
+            return execute_decide_specification(
+                session, request, decision, evaluated_at
+            )
+        assert_never(request)
 
     @staticmethod
-    def _execute_execution_or_scope(
+    def _dispatch_authority(
         session: Session,
-        request: _PositionedTransitionRequest,
+        request: _AuthorityRequest,
         decision: NodeDecision,
         evaluated_at: datetime,
-    ) -> TransitionResult | None:
-        """Execute recent execution and scope-extension request families."""
-        if isinstance(
-            request,
-            CompleteTask
-            | CloseStory
-            | ReviewSprint
-            | CloseSprint
-            | RecordPostSprintTriage,
-        ):
-            return execute_execution_request(
-                session,
-                request,
-                decision,
-                evaluated_at,
+    ) -> TransitionResult:
+        if isinstance(request, CompileAuthority):
+            return execute_compile_authority(session, request, decision, evaluated_at)
+        if isinstance(request, DecideAuthority):
+            return execute_decide_authority(session, request, decision, evaluated_at)
+        if isinstance(request, RecordAuthorityFeedback):
+            return execute_record_authority_feedback(
+                session, request, decision, evaluated_at
             )
-        if isinstance(
-            request,
-            StartScopeExtension
-            | RecordExtensionChallenge
-            | RecordExtensionPrd
-            | DecideExtensionPrd
-            | RecordAmendmentSpecDraft
-            | DecideAmendmentSpecDraft
-            | RegisterScopeExtension
-            | ReconcileScopeExtension
-            | AbandonScopeExtension,
-        ):
-            return execute_scope_extension_request(
-                session,
-                request,
-                decision,
-                evaluated_at,
+        if isinstance(request, RepairAuthority):
+            return execute_repair_authority(session, request, decision, evaluated_at)
+        assert_never(request)
+
+    @staticmethod
+    def _dispatch_vision(
+        session: Session,
+        request: _VisionRequest,
+        decision: NodeDecision,
+        evaluated_at: datetime,
+    ) -> TransitionResult:
+        if isinstance(request, RecordVisionInterviewTurn):
+            return execute_record_vision_interview_turn(
+                session, request, decision, evaluated_at
             )
-        return None
+        if isinstance(request, DecideVisionReview):
+            return execute_decide_vision_review(
+                session, request, decision, evaluated_at
+            )
+        if isinstance(request, BeginVisionRevision):
+            return execute_begin_vision_revision(
+                session, request, decision, evaluated_at
+            )
+        assert_never(request)
+
+    @staticmethod
+    def _dispatch_backlog(
+        session: Session,
+        request: _BacklogRequest,
+        decision: NodeDecision,
+        evaluated_at: datetime,
+    ) -> TransitionResult:
+        if isinstance(request, RecordBacklogDraft):
+            return execute_record_backlog_draft(
+                session, request, decision, evaluated_at
+            )
+        if isinstance(request, DecideBacklog):
+            return execute_decide_backlog(session, request, decision, evaluated_at)
+        assert_never(request)
 
     def _guarded_decision(
         self,
@@ -1218,167 +1010,6 @@ class WorkflowDomain:
         if failure is not None:
             return failure
         return self._available_decision(before, request)
-
-    @staticmethod
-    def _execute_authority_request(
-        session: Session,
-        request: _AuthorityRequest,
-        decision: NodeDecision,
-        evaluated_at: datetime,
-    ) -> TransitionResult:
-        """Dispatch the four closed authority transition variants."""
-        if isinstance(request, CompileAuthority):
-            return execute_compile_authority(
-                session,
-                request,
-                decision,
-                evaluated_at,
-            )
-        if isinstance(request, DecideAuthority):
-            return execute_decide_authority(
-                session,
-                request,
-                decision,
-                evaluated_at,
-            )
-        if isinstance(request, RecordAuthorityFeedback):
-            return execute_record_authority_feedback(
-                session,
-                request,
-                decision,
-                evaluated_at,
-            )
-        if isinstance(request, RepairAuthority):
-            return execute_repair_authority(
-                session,
-                request,
-                decision,
-                evaluated_at,
-            )
-        assert_never(request)
-
-    @staticmethod
-    def _execute_product_definition_request(
-        session: Session,
-        request: _ProductDefinitionRequest,
-        decision: NodeDecision,
-        evaluated_at: datetime,
-    ) -> TransitionResult:
-        """Dispatch the five closed Vision and Backlog transition variants."""
-        if isinstance(
-            request,
-            RecordVisionInterviewTurn | DecideVisionReview | BeginVisionRevision,
-        ):
-            return WorkflowDomain._execute_isolated_vision_request(
-                session,
-                request,
-                decision,
-                evaluated_at,
-            )
-        if isinstance(request, RecordVisionDraft):
-            return execute_record_vision_draft(
-                session,
-                request,
-                decision,
-                evaluated_at,
-            )
-        if isinstance(request, DecideVision):
-            return execute_decide_vision(session, request, decision, evaluated_at)
-        if isinstance(request, RecordBacklogDraft):
-            return execute_record_backlog_draft(
-                session,
-                request,
-                decision,
-                evaluated_at,
-            )
-        if isinstance(request, DecideBacklog):
-            return execute_decide_backlog(session, request, decision, evaluated_at)
-        if isinstance(request, ReconcileBacklog):
-            return execute_reconcile_backlog(session, request, decision, evaluated_at)
-        assert_never(request)
-
-    @staticmethod
-    def _execute_isolated_vision_request(
-        session: Session,
-        request: RecordVisionInterviewTurn | DecideVisionReview | BeginVisionRevision,
-        decision: NodeDecision,
-        evaluated_at: datetime,
-    ) -> TransitionResult:
-        """Dispatch the three commands in the isolated Vision lifecycle."""
-        if isinstance(request, RecordVisionInterviewTurn):
-            return execute_record_vision_interview_turn(
-                session, request, decision, evaluated_at
-            )
-        if isinstance(request, DecideVisionReview):
-            return execute_decide_vision_review(
-                session, request, decision, evaluated_at
-            )
-        if isinstance(request, BeginVisionRevision):
-            return execute_begin_vision_revision(
-                session, request, decision, evaluated_at
-            )
-        assert_never(request)
-
-    @staticmethod
-    def _execute_existing_positioned(
-        session: Session,
-        request: _ExistingPositionedRequest,
-        decision: NodeDecision,
-        evaluated_at: datetime,
-    ) -> TransitionResult:
-        """Dispatch established shell and greenfield requests."""
-        if isinstance(request, AbandonProjectShell):
-            result = execute_abandon_project_shell(
-                session,
-                request,
-                decision,
-                evaluated_at,
-            )
-        elif isinstance(request, RecordChallengeArtifact):
-            result = execute_record_challenge_artifact(
-                session,
-                request,
-                decision,
-                evaluated_at,
-            )
-        elif isinstance(request, RecordPrdVersion):
-            result = execute_record_prd_version(
-                session,
-                request,
-                decision,
-                evaluated_at,
-            )
-        elif isinstance(request, DecidePrd):
-            result = execute_decide_prd(
-                session,
-                request,
-                decision,
-                evaluated_at,
-            )
-        elif isinstance(request, RecordInitialSpecDraft):
-            result = execute_record_initial_spec_draft(
-                session,
-                request,
-                decision,
-                evaluated_at,
-            )
-        elif isinstance(request, DecideInitialSpecDraft):
-            result = execute_decide_initial_spec_draft(
-                session,
-                request,
-                decision,
-                evaluated_at,
-            )
-        elif isinstance(request, RegisterInitialScope):
-            result = execute_register_initial_scope(
-                session,
-                request,
-                decision,
-                evaluated_at,
-            )
-        else:
-            assert_never(request)
-        return result
 
     def _position_in_session(
         self,
@@ -1444,14 +1075,11 @@ class WorkflowDomain:
         human_review_waiting = isinstance(
             request,
             DecideAuthority
-            | DecideVision
             | DecideVisionReview
             | DecideBacklog
             | DecideRoadmap
             | DecideStory
             | DecideSprintPlan
-            | DecideExtensionPrd
-            | DecideAmendmentSpecDraft
             | DecideProductGoalReview
             | DecideSpecification
             | ReviewSprint,

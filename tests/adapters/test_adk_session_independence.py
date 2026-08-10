@@ -35,6 +35,8 @@ async def _create_session(service: DatabaseSessionService) -> None:
         user_id=ADK_EXECUTION_TRACE_IDENTITY.user_id,
         session_id="999",
     )
+
+
 def test_deleting_adk_trace_database_does_not_change_domain_position(
     engine: Engine,
     tmp_path: Path,
@@ -48,7 +50,7 @@ def test_deleting_adk_trace_database_does_not_change_domain_position(
     )
     clear_runtime_config_cache()
     with Session(engine) as session:
-        project = Project(name="Trace independent", origin="greenfield")
+        project = Project(name="Trace independent")
         session.add(project)
         session.commit()
         assert project.project_id is not None

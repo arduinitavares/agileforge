@@ -14,18 +14,6 @@ from workflow.requests.execution import (
     RecordPostSprintTriage,
     ReviewSprint,
 )
-from workflow.requests.onboarding import (
-    DecideBrownfieldInitialSpec,
-    DecideInitialSpecDraft,
-    DecidePrd,
-    RecordBrownfieldSpecDraft,
-    RecordChallengeArtifact,
-    RecordInitialSpecDraft,
-    RecordPrdVersion,
-    RecordRepositoryBaseline,
-    RecordRepositoryInventory,
-    RegisterInitialScope,
-)
 from workflow.requests.planning import (
     ApplyStoryDependencies,
     DecideRoadmap,
@@ -37,13 +25,7 @@ from workflow.requests.planning import (
     RepairStoryReadiness,
     StartSprint,
 )
-from workflow.requests.product_definition import (
-    DecideBacklog,
-    DecideVision,
-    ReconcileBacklog,
-    RecordBacklogDraft,
-    RecordVisionDraft,
-)
+from workflow.requests.product_definition import DecideBacklog, RecordBacklogDraft
 from workflow.requests.product_discovery import (
     DecideSpecification,
     RecordDiscoveryArtifact,
@@ -60,19 +42,6 @@ from workflow.requests.project import (
     RecordRepositoryBinding,
     RepositoryBindingInput,
 )
-from workflow.requests.project_shell import AbandonProjectShell, OpenProjectShell
-from workflow.requests.scope_extension import (
-    AbandonScopeExtension,
-    DecideAmendmentSpecDraft,
-    DecideExtensionPrd,
-    ReconcileScopeExtension,
-    RecordAmendmentSpecDraft,
-    RecordExtensionChallenge,
-    RecordExtensionPrd,
-    RegisterScopeExtension,
-    ScopeExtensionArtifactReference,
-    StartScopeExtension,
-)
 from workflow.requests.vision import (
     BeginVisionRevision,
     DecideVisionReview,
@@ -82,24 +51,10 @@ from workflow.requests.vision import (
 type TransitionRequest = (
     CreateProject
     | RecordRepositoryBinding
-    | OpenProjectShell
-    | AbandonProjectShell
-    | RecordChallengeArtifact
-    | RecordRepositoryBaseline
-    | RecordRepositoryInventory
-    | RecordBrownfieldSpecDraft
-    | DecideBrownfieldInitialSpec
-    | RecordPrdVersion
-    | DecidePrd
-    | RecordInitialSpecDraft
-    | DecideInitialSpecDraft
-    | RegisterInitialScope
     | CompileAuthority
     | DecideAuthority
     | RecordAuthorityFeedback
     | RepairAuthority
-    | RecordVisionDraft
-    | DecideVision
     | RecordVisionInterviewTurn
     | DecideVisionReview
     | BeginVisionRevision
@@ -112,7 +67,6 @@ type TransitionRequest = (
     | DecideSpecification
     | RecordBacklogDraft
     | DecideBacklog
-    | ReconcileBacklog
     | RecordRoadmapDraft
     | DecideRoadmap
     | RecordStoryDraft
@@ -127,23 +81,12 @@ type TransitionRequest = (
     | ReviewSprint
     | CloseSprint
     | RecordPostSprintTriage
-    | StartScopeExtension
-    | RecordExtensionChallenge
-    | RecordExtensionPrd
-    | DecideExtensionPrd
-    | RecordAmendmentSpecDraft
-    | DecideAmendmentSpecDraft
-    | RegisterScopeExtension
-    | ReconcileScopeExtension
-    | AbandonScopeExtension
     | StartNodeAttempt
     | FailNodeAttempt
 )
 
 __all__ = [
     "AbandonProductGoal",
-    "AbandonProjectShell",
-    "AbandonScopeExtension",
     "ApplyStoryDependencies",
     "BeginVisionRevision",
     "CloseSprint",
@@ -151,55 +94,32 @@ __all__ = [
     "CompileAuthority",
     "CompleteTask",
     "CreateProject",
-    "DecideAmendmentSpecDraft",
     "DecideAuthority",
     "DecideBacklog",
-    "DecideBrownfieldInitialSpec",
-    "DecideExtensionPrd",
-    "DecideInitialSpecDraft",
-    "DecidePrd",
     "DecideProductGoalReview",
     "DecideRoadmap",
     "DecideSpecification",
     "DecideSprintPlan",
     "DecideStory",
-    "DecideVision",
     "DecideVisionReview",
     "FailNodeAttempt",
     "FulfillProductGoal",
-    "OpenProjectShell",
-    "ReconcileBacklog",
-    "ReconcileScopeExtension",
-    "RecordAmendmentSpecDraft",
     "RecordAuthorityFeedback",
     "RecordBacklogDraft",
-    "RecordBrownfieldSpecDraft",
-    "RecordChallengeArtifact",
     "RecordDiscoveryArtifact",
-    "RecordExtensionChallenge",
-    "RecordExtensionPrd",
-    "RecordInitialSpecDraft",
     "RecordPostSprintTriage",
-    "RecordPrdVersion",
     "RecordProductGoalInterviewTurn",
-    "RecordRepositoryBaseline",
     "RecordRepositoryBinding",
-    "RecordRepositoryInventory",
     "RecordRoadmapDraft",
     "RecordSpecificationCandidate",
     "RecordSprintPlan",
     "RecordStoryDraft",
-    "RecordVisionDraft",
     "RecordVisionInterviewTurn",
-    "RegisterInitialScope",
-    "RegisterScopeExtension",
     "RepairAuthority",
     "RepairStoryReadiness",
     "RepositoryBindingInput",
     "ReviewSprint",
-    "ScopeExtensionArtifactReference",
     "StartNodeAttempt",
-    "StartScopeExtension",
     "StartSprint",
     "TransitionRequest",
 ]

@@ -49,8 +49,6 @@ models:
   spec_validator: "openrouter/openai/gpt-5-mini"
   backlog_primer: "openrouter/openai/gpt-5-mini"
   sprint_planner: "openrouter/openai/gpt-5-mini"
-  brownfield_curator: "openrouter/openai/gpt-5-mini"
-
 story_pipeline:
   mode: "single"
 """.lstrip(),

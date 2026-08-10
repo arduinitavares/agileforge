@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib
 import importlib.util
 import re
 from pathlib import Path
@@ -36,7 +35,7 @@ _ROUTING_LITERALS = (
     "STATE" + "_REGISTRY",
     "fsm" + "_state",
     "AGILEFORGE" + "_SESSION_DB_URL",
-    "GreenfieldDiscovery" + "Context",
+    "Green" + "fieldDiscovery" + "Context",
     "context" + "_key",
 )
 _OBSOLETE_LITERALS = (
@@ -52,6 +51,7 @@ _OBSOLETE_LITERALS = (
     "mutation " + "ledger",
 )
 _OBSOLETE_MODULES = (
+    "models.agent_" + "workbench",
     "services.agent_workbench.authority_" + "review",
     "services.agent_workbench.authority_" + "regenerate",
     "services.agent_workbench.fake_" + "mutation",
@@ -113,8 +113,6 @@ def test_obsolete_review_runtime_modules_and_paths_are_absent() -> None:
         assert importlib.util.find_spec(module_name) is None
     for relative_path in _OBSOLETE_PATHS:
         assert not (_ROOT / relative_path).exists()
-    model_module = importlib.import_module("models.agent_workbench")
-    assert not hasattr(model_module, "Cli" + "MutationLedger")
 
 
 def test_all_tracked_current_surfaces_enforce_the_hard_break() -> None:

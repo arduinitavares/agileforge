@@ -297,8 +297,6 @@ def _roadmap_generate_rule(
     snapshot: WorkflowFactSnapshot,
     _evaluated_at: datetime,
 ) -> tuple[RuleEvaluation, ...]:
-    if snapshot.project_abandonments:
-        return (RuleEvaluation(RuleCategory.SATISFIED, "PROJECT_ABANDONED"),)
     lineage = _accepted_backlog(snapshot)
     if lineage.conflict:
         return (RuleEvaluation(RuleCategory.INVALID, "WORKFLOW_FACT_CONFLICT"),)
@@ -323,8 +321,6 @@ def _roadmap_review_rule(
     snapshot: WorkflowFactSnapshot,
     _evaluated_at: datetime,
 ) -> tuple[RuleEvaluation, ...]:
-    if snapshot.project_abandonments:
-        return (RuleEvaluation(RuleCategory.SATISFIED, "PROJECT_ABANDONED"),)
     state = _artifact_state(snapshot, "roadmap")
     if state.conflict:
         return (RuleEvaluation(RuleCategory.INVALID, "WORKFLOW_FACT_CONFLICT"),)
@@ -389,8 +385,6 @@ def _story_generate_rule(
     snapshot: WorkflowFactSnapshot,
     _evaluated_at: datetime,
 ) -> tuple[RuleEvaluation, ...]:
-    if snapshot.project_abandonments:
-        return (RuleEvaluation(RuleCategory.SATISFIED, "PROJECT_ABANDONED"),)
     roadmap, conflict = _accepted_current_roadmap(snapshot)
     if conflict:
         return (RuleEvaluation(RuleCategory.INVALID, "WORKFLOW_FACT_CONFLICT"),)
@@ -469,8 +463,6 @@ def _story_review_rule(
     snapshot: WorkflowFactSnapshot,
     _evaluated_at: datetime,
 ) -> tuple[RuleEvaluation, ...]:
-    if snapshot.project_abandonments:
-        return (RuleEvaluation(RuleCategory.SATISFIED, "PROJECT_ABANDONED"),)
     roadmap, roadmap_conflict = _accepted_current_roadmap(snapshot)
     lineage = _accepted_backlog(snapshot)
     evaluations: list[RuleEvaluation] = []
@@ -688,8 +680,6 @@ def _story_dependencies_rule(
     snapshot: WorkflowFactSnapshot,
     _evaluated_at: datetime,
 ) -> tuple[RuleEvaluation, ...]:
-    if snapshot.project_abandonments:
-        return (RuleEvaluation(RuleCategory.SATISFIED, "PROJECT_ABANDONED"),)
     stories = _candidate_stories(snapshot)
     if not stories:
         return _blocked(
@@ -711,8 +701,6 @@ def _story_readiness_rule(
     snapshot: WorkflowFactSnapshot,
     _evaluated_at: datetime,
 ) -> tuple[RuleEvaluation, ...]:
-    if snapshot.project_abandonments:
-        return (RuleEvaluation(RuleCategory.SATISFIED, "PROJECT_ABANDONED"),)
     stories = _candidate_stories(snapshot)
     if any(not story.content_accepted for story in stories):
         return _blocked(
@@ -964,8 +952,6 @@ def _sprint_plan_rule(
     snapshot: WorkflowFactSnapshot,
     _evaluated_at: datetime,
 ) -> tuple[RuleEvaluation, ...]:
-    if snapshot.project_abandonments:
-        return (RuleEvaluation(RuleCategory.SATISFIED, "PROJECT_ABANDONED"),)
     joined = _sprint_join(snapshot)
     if isinstance(joined, RuleEvaluation):
         return (joined,)
@@ -988,8 +974,6 @@ def _sprint_review_rule(
     snapshot: WorkflowFactSnapshot,
     _evaluated_at: datetime,
 ) -> tuple[RuleEvaluation, ...]:
-    if snapshot.project_abandonments:
-        return (RuleEvaluation(RuleCategory.SATISFIED, "PROJECT_ABANDONED"),)
     state = _artifact_state(snapshot, "sprint_plan")
     if state.conflict:
         return (RuleEvaluation(RuleCategory.INVALID, "WORKFLOW_FACT_CONFLICT"),)
@@ -1093,8 +1077,6 @@ def _sprint_start_rule(
     snapshot: WorkflowFactSnapshot,
     _evaluated_at: datetime,
 ) -> tuple[RuleEvaluation, ...]:
-    if snapshot.project_abandonments:
-        return (RuleEvaluation(RuleCategory.SATISFIED, "PROJECT_ABANDONED"),)
     if any(item.status == "active" for item in snapshot.sprints):
         return (RuleEvaluation(RuleCategory.SATISFIED, "SPRINT_ALREADY_ACTIVE"),)
     state = _artifact_state(snapshot, "sprint_plan")

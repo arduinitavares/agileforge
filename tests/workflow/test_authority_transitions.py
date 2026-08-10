@@ -10,11 +10,6 @@ import pytest
 from pydantic import TypeAdapter, ValidationError
 from sqlmodel import Session, select
 
-from models.agent_workbench import (
-    DiscoveryChallengeArtifact,
-    DiscoveryPrd,
-    DiscoverySpecAmendmentDraft,
-)
 from models.authority_curation import AuthorityFeedbackAttempt
 from models.core import Project
 from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance, SpecRegistry
@@ -277,83 +272,12 @@ def _approve_replacement_spec(
     return replacement.spec_version_id, replacement.spec_hash
 
 
-def _seed_scope_discovery_review_evidence(
-    session: Session,
-    *,
-    project_id: int,
-    spec_version_id: int,
-    spec_hash: str,
-    spec_path: Path,
-) -> int:
-    challenge = DiscoveryChallengeArtifact(
-        project_id=project_id,
-        producer="task-9-review",
-        readiness="ready_for_prd",
-        original_idea="Bind authority review to all evidence.",
-        content_json=json.dumps(
-            {
-                "assumptions": ["Review evidence remains immutable."],
-                "non_goals": [],
-                "risks": ["Persisted evidence can change after review."],
-                "evidence_conflicts": [],
-                "open_questions": [],
-                "glossary_changes": [],
-            }
-        ),
-        artifact_fingerprint="sha256:challenge-review-evidence",
-        request_hash="sha256:challenge-review-request",
-        idempotency_key="challenge-review-evidence",
-    )
-    session.add(challenge)
-    session.flush()
-    assert challenge.challenge_artifact_id is not None
-    prd = DiscoveryPrd(
-        project_id=project_id,
-        challenge_artifact_id=challenge.challenge_artifact_id,
-        producer="task-9-review",
-        status="accepted",
-        version="1",
-        title="Authority review evidence",
-        content_json=json.dumps({"summary": "Bind every review input."}),
-        artifact_fingerprint="sha256:prd-review-evidence",
-        request_hash="sha256:prd-review-request",
-        idempotency_key="prd-review-evidence",
-        reviewed_by="reviewer",
-        reviewed_at=EVALUATED_AT,
-    )
-    session.add(prd)
-    session.flush()
-    assert prd.prd_id is not None
-    session.add(
-        DiscoverySpecAmendmentDraft(
-            project_id=project_id,
-            prd_id=prd.prd_id,
-            challenge_artifact_id=challenge.challenge_artifact_id,
-            status="accepted",
-            amendment_file=str(spec_path),
-            content_json=spec_path.read_text(encoding="utf-8"),
-            validation_json=json.dumps({"valid": True, "blocking_issues": []}),
-            artifact_fingerprint="sha256:amendment-review-evidence",
-            request_hash="sha256:amendment-review-request",
-            idempotency_key="amendment-review-evidence",
-            base_spec_version_id=spec_version_id,
-            base_spec_hash=spec_hash,
-            amended_spec_hash=spec_hash,
-            reviewed_by="reviewer",
-            reviewed_at=EVALUATED_AT,
-        )
-    )
-    session.commit()
-    return challenge.challenge_artifact_id
-
-
 def _tamper_review_input(
     session: Session,
     *,
     target: str,
     project_id: int,
     authority_id: int,
-    challenge_id: int,
 ) -> None:
     authority = session.get(CompiledSpecAuthority, authority_id)
     assert authority is not None
@@ -371,13 +295,6 @@ def _tamper_review_input(
             [{"id": "REJ-tampered", "text": "Changed review classification."}]
         )
         session.add(authority)
-    elif target == "scope_discovery":
-        challenge = session.get(DiscoveryChallengeArtifact, challenge_id)
-        assert challenge is not None
-        payload = json.loads(challenge.content_json)
-        payload["risks"].append("Changed after the review token was issued.")
-        challenge.content_json = json.dumps(payload)
-        session.add(challenge)
     elif target == "project_review_context":
         project = session.get(Project, project_id)
         assert project is not None
@@ -652,9 +569,6 @@ def test_decision_binds_exact_pending_authority_and_review_fingerprint(
     assert accepted.ok is True
     assert accepted.position is not None
     assert accepted.position.available_nodes == ()
-    assert "vision.generate" not in {
-        item.node_id for item in accepted.position.decisions
-    }
     with Session(engine) as session:
         row = session.exec(select(SpecAuthorityAcceptance)).one()
         assert row.review_fingerprint == review.review_fingerprint
@@ -667,7 +581,6 @@ def test_decision_binds_exact_pending_authority_and_review_fingerprint(
         "pending_authority",
         "compiler_invariants",
         "compiler_coverage",
-        "scope_discovery",
         "project_review_context",
     ],
 )
@@ -689,13 +602,6 @@ def test_decide_rejects_every_persisted_review_fingerprint_tamper(
     )
     assert compiled.ok is True
     with Session(engine) as session:
-        challenge_id = _seed_scope_discovery_review_evidence(
-            session,
-            project_id=project_id,
-            spec_version_id=spec_version_id,
-            spec_hash=spec_hash,
-            spec_path=spec_path,
-        )
         review = build_authority_review_snapshot_in_session(
             session,
             project_id=project_id,
@@ -723,7 +629,6 @@ def test_decide_rejects_every_persisted_review_fingerprint_tamper(
             target=tamper_target,
             project_id=project_id,
             authority_id=authority_id,
-            challenge_id=challenge_id,
         )
 
     result = domain.transition(request)

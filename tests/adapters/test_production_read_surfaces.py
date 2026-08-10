@@ -312,7 +312,7 @@ def _assert_facts_only_authority_payload(value: object) -> None:
 
 
 def _seed_project(session: Session, *, name: str = "Read projection") -> int:
-    project = Project(name=name, origin="greenfield")
+    project = Project(name=name)
     session.add(project)
     session.commit()
     session.refresh(project)
@@ -693,7 +693,7 @@ def test_every_project_scoped_read_uses_project_not_found(
         projection.authority_review(project_id=missing_project_id),
         projection.artifact_history(
             project_id=missing_project_id,
-            node_id="vision.generate",
+            node_id="vision.interview",
         ),
         projection.story_pending(project_id=missing_project_id),
         projection.story_dependencies_inspect(project_id=missing_project_id),
@@ -738,7 +738,7 @@ def test_existing_project_keeps_empty_artifact_history_success(
 
     result = projection.artifact_history(
         project_id=project_id,
-        node_id="vision.generate",
+        node_id="vision.interview",
     )
 
     assert result["ok"] is True

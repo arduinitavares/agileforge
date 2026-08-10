@@ -13,9 +13,7 @@ from sqlalchemy.engine import Engine
 from sqlmodel import SQLModel, create_engine
 
 from models import (
-    agent_workbench,
     authority_curation,
-    brownfield,
     core,
     events,
     product_definition,
@@ -38,9 +36,7 @@ _CURRENT_MODEL_MODULES: tuple[ModuleType, ...] = (
     product_definition,
     repository,
     workflow,
-    agent_workbench,
     authority_curation,
-    brownfield,
 )
 
 

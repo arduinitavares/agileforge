@@ -10,7 +10,6 @@ These tests verify that:
 4. Appropriate errors are raised when spec content is missing or authority acceptance fails.
 """
 
-import hashlib
 import json
 import logging
 from datetime import UTC, datetime
@@ -37,6 +36,7 @@ from services.contracts.specification import (
 )
 from services.specs.authority_selection import pending_authority_fingerprint
 from tests.typing_helpers import require_id
+from tests.workflow.lifecycle_fixtures import seed_accepted_specification
 from tools import spec_tools
 from utils.spec_schemas import (
     Invariant,
@@ -104,22 +104,14 @@ def _create_spec_and_compiled_authority(
 ) -> tuple[SpecRegistry, CompiledSpecAuthority]:
     """Create a spec version with compiled authority, optionally accepted."""
     spec_content = "# Spec v1\n\n## Scope\n- Feature A\n\n## Invariants\n- The payload must include user_id."
-    spec_hash = hashlib.sha256(spec_content.encode("utf-8")).hexdigest()
     prompt_hash = compute_prompt_hash(SPEC_AUTHORITY_COMPILER_INSTRUCTIONS)
 
-    spec_version = SpecRegistry(
+    spec_version = seed_accepted_specification(
+        session,
         project_id=project_id,
-        spec_hash=spec_hash,
-        content=spec_content,
-        content_ref=None,
-        status="approved",
-        approved_at=datetime.now(UTC),
-        approved_by="tester",
-        approval_notes="approved",
-    )
-    session.add(spec_version)
-    session.commit()
-    session.refresh(spec_version)
+        content=json.dumps({"specification": spec_content}),
+    ).spec
+    spec_hash = spec_version.spec_hash
 
     compiled = CompiledSpecAuthority(
         spec_version_id=require_id(spec_version.spec_version_id, "spec_version_id"),
@@ -174,22 +166,14 @@ def _create_spec_with_failure_authority(
 ) -> tuple[SpecRegistry, CompiledSpecAuthority, SpecAuthorityAcceptance]:
     """Create a spec version with accepted status but a FAILURE compiled artifact."""
     spec_content = "# Bad Spec\nIncomplete content."
-    spec_hash = hashlib.sha256(spec_content.encode("utf-8")).hexdigest()
     prompt_hash = compute_prompt_hash(SPEC_AUTHORITY_COMPILER_INSTRUCTIONS)
 
-    spec_version = SpecRegistry(
+    spec_version = seed_accepted_specification(
+        session,
         project_id=project_id,
-        spec_hash=spec_hash,
-        content=spec_content,
-        content_ref=None,
-        status="approved",
-        approved_at=datetime.now(UTC),
-        approved_by="tester",
-        approval_notes="approved",
-    )
-    session.add(spec_version)
-    session.commit()
-    session.refresh(spec_version)
+        content=json.dumps({"specification": spec_content}),
+    ).spec
+    spec_hash = spec_version.spec_hash
 
     # Create compiled authority with FAILURE artifact
     compiled = CompiledSpecAuthority(

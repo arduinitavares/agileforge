@@ -52,7 +52,6 @@ class ErrorCode(StrEnum):
     AUTHORITY_REPAIR_INTENT_INVALID = "AUTHORITY_REPAIR_INTENT_INVALID"
     AUTHORITY_REPAIR_TARGET_NOT_FOUND = "AUTHORITY_REPAIR_TARGET_NOT_FOUND"
     STALE_STATE = "STALE_STATE"
-    STALE_SETUP_STATUS = "STALE_SETUP_STATUS"
     STALE_SPEC_HASH = "STALE_SPEC_HASH"
     STALE_SPEC_VERSION = "STALE_SPEC_VERSION"
     STALE_ARTIFACT_FINGERPRINT = "STALE_ARTIFACT_FINGERPRINT"
@@ -78,48 +77,6 @@ class ErrorCode(StrEnum):
     TRIAGE_REQUIRED_FIELD_MISSING = "TRIAGE_REQUIRED_FIELD_MISSING"
     TRIAGE_FIELD_INVALID = "TRIAGE_FIELD_INVALID"
     BACKLOG_SOURCE_UNAVAILABLE = "BACKLOG_SOURCE_UNAVAILABLE"
-    SCOPE_EXTENSION_NOT_AVAILABLE = "SCOPE_EXTENSION_NOT_AVAILABLE"
-    SCOPE_EXTENSION_BASE_SPEC_MISMATCH = "SCOPE_EXTENSION_BASE_SPEC_MISMATCH"
-    SCOPE_EXTENSION_UNRESOLVED_WORK = "SCOPE_EXTENSION_UNRESOLVED_WORK"
-    SCOPE_EXTENSION_NOT_ADDITIVE = "SCOPE_EXTENSION_NOT_ADDITIVE"
-    SCOPE_EXTENSION_NO_ADDED_ITEMS = "SCOPE_EXTENSION_NO_ADDED_ITEMS"
-    CHALLENGE_ARTIFACT_FILE_NOT_FOUND = "CHALLENGE_ARTIFACT_FILE_NOT_FOUND"
-    CHALLENGE_ARTIFACT_INVALID = "CHALLENGE_ARTIFACT_INVALID"
-    CHALLENGE_PRODUCER_INVALID = "CHALLENGE_PRODUCER_INVALID"
-    PRD_FILE_NOT_FOUND = "PRD_FILE_NOT_FOUND"
-    PRD_DRAFT_INVALID = "PRD_DRAFT_INVALID"
-    PRD_PRODUCER_INVALID = "PRD_PRODUCER_INVALID"
-    PRD_SOURCE_CHALLENGE_NOT_FOUND = "PRD_SOURCE_CHALLENGE_NOT_FOUND"
-    PRD_SOURCE_CHALLENGE_NOT_READY = "PRD_SOURCE_CHALLENGE_NOT_READY"
-    PRD_NOT_FOUND = "PRD_NOT_FOUND"
-    PRD_REVIEW_STATE_INVALID = "PRD_REVIEW_STATE_INVALID"
-    PRD_ACCEPTED_IMMUTABLE = "PRD_ACCEPTED_IMMUTABLE"
-    PRD_SUPERSEDES_NOT_FOUND = "PRD_SUPERSEDES_NOT_FOUND"
-    PRD_SUPERSEDES_NOT_ACCEPTED = "PRD_SUPERSEDES_NOT_ACCEPTED"
-    SPEC_AMENDMENT_SOURCE_PRD_NOT_ACCEPTED = (
-        "SPEC_AMENDMENT_SOURCE_PRD_NOT_ACCEPTED"
-    )
-    SPEC_AMENDMENT_NOT_FOUND = "SPEC_AMENDMENT_NOT_FOUND"
-    SPEC_AMENDMENT_REVIEW_STATE_INVALID = "SPEC_AMENDMENT_REVIEW_STATE_INVALID"
-    SPEC_AMENDMENT_NOT_ACCEPTED = "SPEC_AMENDMENT_NOT_ACCEPTED"
-    GREENFIELD_DISCOVERY_REQUIRED = "GREENFIELD_DISCOVERY_REQUIRED"
-    GREENFIELD_DISCOVERY_NOT_FOUND = "GREENFIELD_DISCOVERY_NOT_FOUND"
-    GREENFIELD_SPEC_AMENDMENT_NOT_ACCEPTED = (
-        "GREENFIELD_SPEC_AMENDMENT_NOT_ACCEPTED"
-    )
-    BROWNFIELD_SOURCE_FILE_NOT_FOUND = "BROWNFIELD_SOURCE_FILE_NOT_FOUND"
-    BROWNFIELD_REPO_PATH_NOT_FOUND = "BROWNFIELD_REPO_PATH_NOT_FOUND"
-    BROWNFIELD_SOURCE_NOT_FOUND = "BROWNFIELD_SOURCE_NOT_FOUND"
-    BROWNFIELD_SCAN_NOT_FOUND = "BROWNFIELD_SCAN_NOT_FOUND"
-    BROWNFIELD_DRAFT_NOT_FOUND = "BROWNFIELD_DRAFT_NOT_FOUND"
-    BROWNFIELD_DRAFT_STALE = "BROWNFIELD_DRAFT_STALE"
-    BROWNFIELD_DRAFT_INCOMPLETE = "BROWNFIELD_DRAFT_INCOMPLETE"
-    BROWNFIELD_SOURCE_SUPERSEDED = "BROWNFIELD_SOURCE_SUPERSEDED"
-    BROWNFIELD_APPROVAL_CHAIN_MISMATCH = "BROWNFIELD_APPROVAL_CHAIN_MISMATCH"
-    BROWNFIELD_CURATED_SPEC_ALREADY_REGISTERED = (
-        "BROWNFIELD_CURATED_SPEC_ALREADY_REGISTERED"
-    )
-    BROWNFIELD_APPROVAL_STALE_GUARD = "BROWNFIELD_APPROVAL_STALE_GUARD"
 
 
 _ERROR_REGISTRY: dict[ErrorCode, ErrorMetadata] = {
@@ -315,17 +272,11 @@ _ERROR_REGISTRY: dict[ErrorCode, ErrorMetadata] = {
         retryable=True,
         description="Expected workflow state did not match.",
     ),
-    ErrorCode.STALE_SETUP_STATUS: ErrorMetadata(
-        code=ErrorCode.STALE_SETUP_STATUS.value,
-        default_exit_code=3,
-        retryable=True,
-        description="Expected setup status did not match.",
-    ),
     ErrorCode.STALE_SPEC_HASH: ErrorMetadata(
         code=ErrorCode.STALE_SPEC_HASH.value,
         default_exit_code=3,
         retryable=True,
-        description="Expected setup spec hash did not match.",
+        description="Expected specification hash did not match.",
     ),
     ErrorCode.STALE_SPEC_VERSION: ErrorMetadata(
         code=ErrorCode.STALE_SPEC_VERSION.value,
@@ -459,227 +410,6 @@ _ERROR_REGISTRY: dict[ErrorCode, ErrorMetadata] = {
         retryable=False,
         description="Backlog source data is unavailable.",
     ),
-    ErrorCode.SCOPE_EXTENSION_NOT_AVAILABLE: ErrorMetadata(
-        code=ErrorCode.SCOPE_EXTENSION_NOT_AVAILABLE.value,
-        default_exit_code=4,
-        retryable=False,
-        description="Project scope extension is not available.",
-    ),
-    ErrorCode.SCOPE_EXTENSION_BASE_SPEC_MISMATCH: ErrorMetadata(
-        code=ErrorCode.SCOPE_EXTENSION_BASE_SPEC_MISMATCH.value,
-        default_exit_code=3,
-        retryable=True,
-        description="Scope extension base spec guard did not match.",
-    ),
-    ErrorCode.SCOPE_EXTENSION_UNRESOLVED_WORK: ErrorMetadata(
-        code=ErrorCode.SCOPE_EXTENSION_UNRESOLVED_WORK.value,
-        default_exit_code=4,
-        retryable=False,
-        description="Project scope extension is blocked by unresolved work.",
-    ),
-    ErrorCode.SCOPE_EXTENSION_NOT_ADDITIVE: ErrorMetadata(
-        code=ErrorCode.SCOPE_EXTENSION_NOT_ADDITIVE.value,
-        default_exit_code=2,
-        retryable=False,
-        description="Scope extension amendment is not additive.",
-    ),
-    ErrorCode.SCOPE_EXTENSION_NO_ADDED_ITEMS: ErrorMetadata(
-        code=ErrorCode.SCOPE_EXTENSION_NO_ADDED_ITEMS.value,
-        default_exit_code=2,
-        retryable=False,
-        description="Scope extension amendment adds no source items.",
-    ),
-    ErrorCode.CHALLENGE_ARTIFACT_FILE_NOT_FOUND: ErrorMetadata(
-        code=ErrorCode.CHALLENGE_ARTIFACT_FILE_NOT_FOUND.value,
-        default_exit_code=2,
-        retryable=False,
-        description="Challenge artifact file was not found.",
-    ),
-    ErrorCode.CHALLENGE_ARTIFACT_INVALID: ErrorMetadata(
-        code=ErrorCode.CHALLENGE_ARTIFACT_INVALID.value,
-        default_exit_code=2,
-        retryable=False,
-        description="Challenge artifact payload is invalid.",
-    ),
-    ErrorCode.CHALLENGE_PRODUCER_INVALID: ErrorMetadata(
-        code=ErrorCode.CHALLENGE_PRODUCER_INVALID.value,
-        default_exit_code=2,
-        retryable=False,
-        description="Challenge artifact producer is not allowed.",
-    ),
-    ErrorCode.PRD_FILE_NOT_FOUND: ErrorMetadata(
-        code=ErrorCode.PRD_FILE_NOT_FOUND.value,
-        default_exit_code=2,
-        retryable=False,
-        description="PRD draft file was not found.",
-    ),
-    ErrorCode.PRD_DRAFT_INVALID: ErrorMetadata(
-        code=ErrorCode.PRD_DRAFT_INVALID.value,
-        default_exit_code=2,
-        retryable=False,
-        description="PRD draft payload is invalid.",
-    ),
-    ErrorCode.PRD_PRODUCER_INVALID: ErrorMetadata(
-        code=ErrorCode.PRD_PRODUCER_INVALID.value,
-        default_exit_code=2,
-        retryable=False,
-        description="PRD draft producer is not allowed.",
-    ),
-    ErrorCode.PRD_SOURCE_CHALLENGE_NOT_FOUND: ErrorMetadata(
-        code=ErrorCode.PRD_SOURCE_CHALLENGE_NOT_FOUND.value,
-        default_exit_code=4,
-        retryable=False,
-        description="Source Challenge Artifact was not found.",
-    ),
-    ErrorCode.PRD_SOURCE_CHALLENGE_NOT_READY: ErrorMetadata(
-        code=ErrorCode.PRD_SOURCE_CHALLENGE_NOT_READY.value,
-        default_exit_code=4,
-        retryable=False,
-        description="Source Challenge Artifact is not ready for PRD drafting.",
-    ),
-    ErrorCode.PRD_NOT_FOUND: ErrorMetadata(
-        code=ErrorCode.PRD_NOT_FOUND.value,
-        default_exit_code=4,
-        retryable=False,
-        description="PRD was not found.",
-    ),
-    ErrorCode.PRD_REVIEW_STATE_INVALID: ErrorMetadata(
-        code=ErrorCode.PRD_REVIEW_STATE_INVALID.value,
-        default_exit_code=4,
-        retryable=False,
-        description="PRD review command is invalid for the current PRD status.",
-    ),
-    ErrorCode.PRD_ACCEPTED_IMMUTABLE: ErrorMetadata(
-        code=ErrorCode.PRD_ACCEPTED_IMMUTABLE.value,
-        default_exit_code=4,
-        retryable=False,
-        description="Accepted PRDs cannot be modified in place.",
-    ),
-    ErrorCode.PRD_SUPERSEDES_NOT_FOUND: ErrorMetadata(
-        code=ErrorCode.PRD_SUPERSEDES_NOT_FOUND.value,
-        default_exit_code=4,
-        retryable=False,
-        description="Superseded PRD was not found.",
-    ),
-    ErrorCode.PRD_SUPERSEDES_NOT_ACCEPTED: ErrorMetadata(
-        code=ErrorCode.PRD_SUPERSEDES_NOT_ACCEPTED.value,
-        default_exit_code=4,
-        retryable=False,
-        description="Superseded PRD must be accepted.",
-    ),
-    ErrorCode.SPEC_AMENDMENT_SOURCE_PRD_NOT_ACCEPTED: ErrorMetadata(
-        code=ErrorCode.SPEC_AMENDMENT_SOURCE_PRD_NOT_ACCEPTED.value,
-        default_exit_code=4,
-        retryable=False,
-        description="Spec Amendment Drafts require an accepted PRD.",
-    ),
-    ErrorCode.SPEC_AMENDMENT_NOT_FOUND: ErrorMetadata(
-        code=ErrorCode.SPEC_AMENDMENT_NOT_FOUND.value,
-        default_exit_code=4,
-        retryable=False,
-        description="Spec Amendment was not found.",
-    ),
-    ErrorCode.SPEC_AMENDMENT_REVIEW_STATE_INVALID: ErrorMetadata(
-        code=ErrorCode.SPEC_AMENDMENT_REVIEW_STATE_INVALID.value,
-        default_exit_code=4,
-        retryable=False,
-        description=(
-            "Spec Amendment review command is invalid for the current status."
-        ),
-    ),
-    ErrorCode.SPEC_AMENDMENT_NOT_ACCEPTED: ErrorMetadata(
-        code=ErrorCode.SPEC_AMENDMENT_NOT_ACCEPTED.value,
-        default_exit_code=4,
-        retryable=False,
-        description="Scope extension start requires an accepted Spec Amendment.",
-    ),
-    ErrorCode.GREENFIELD_DISCOVERY_REQUIRED: ErrorMetadata(
-        code=ErrorCode.GREENFIELD_DISCOVERY_REQUIRED.value,
-        default_exit_code=4,
-        retryable=False,
-        description="Greenfield project creation requires completed Scope Discovery.",
-    ),
-    ErrorCode.GREENFIELD_DISCOVERY_NOT_FOUND: ErrorMetadata(
-        code=ErrorCode.GREENFIELD_DISCOVERY_NOT_FOUND.value,
-        default_exit_code=4,
-        retryable=False,
-        description="Greenfield discovery artifact was not found.",
-    ),
-    ErrorCode.GREENFIELD_SPEC_AMENDMENT_NOT_ACCEPTED: ErrorMetadata(
-        code=ErrorCode.GREENFIELD_SPEC_AMENDMENT_NOT_ACCEPTED.value,
-        default_exit_code=4,
-        retryable=False,
-        description="Greenfield project creation requires an accepted spec draft.",
-    ),
-}
-
-_BROWNFIELD_ERROR_REGISTRY: dict[str, ErrorMetadata] = {
-    "BROWNFIELD_SOURCE_FILE_NOT_FOUND": ErrorMetadata(
-        code="BROWNFIELD_SOURCE_FILE_NOT_FOUND",
-        default_exit_code=2,
-        retryable=False,
-        description="Brownfield source file was not found.",
-    ),
-    "BROWNFIELD_REPO_PATH_NOT_FOUND": ErrorMetadata(
-        code="BROWNFIELD_REPO_PATH_NOT_FOUND",
-        default_exit_code=2,
-        retryable=False,
-        description="Brownfield repository path was not found.",
-    ),
-    "BROWNFIELD_SOURCE_NOT_FOUND": ErrorMetadata(
-        code="BROWNFIELD_SOURCE_NOT_FOUND",
-        default_exit_code=4,
-        retryable=False,
-        description="Brownfield source attempt was not found.",
-    ),
-    "BROWNFIELD_SCAN_NOT_FOUND": ErrorMetadata(
-        code="BROWNFIELD_SCAN_NOT_FOUND",
-        default_exit_code=4,
-        retryable=False,
-        description="Brownfield scan attempt was not found.",
-    ),
-    "BROWNFIELD_DRAFT_NOT_FOUND": ErrorMetadata(
-        code="BROWNFIELD_DRAFT_NOT_FOUND",
-        default_exit_code=4,
-        retryable=False,
-        description="Brownfield draft attempt was not found.",
-    ),
-    "BROWNFIELD_DRAFT_STALE": ErrorMetadata(
-        code="BROWNFIELD_DRAFT_STALE",
-        default_exit_code=3,
-        retryable=True,
-        description="Brownfield draft fingerprint or freshness guard is stale.",
-    ),
-    "BROWNFIELD_DRAFT_INCOMPLETE": ErrorMetadata(
-        code="BROWNFIELD_DRAFT_INCOMPLETE",
-        default_exit_code=4,
-        retryable=False,
-        description="Brownfield draft is incomplete or not reusable.",
-    ),
-    "BROWNFIELD_SOURCE_SUPERSEDED": ErrorMetadata(
-        code="BROWNFIELD_SOURCE_SUPERSEDED",
-        default_exit_code=3,
-        retryable=True,
-        description="A newer brownfield source or scan superseded the draft chain.",
-    ),
-    "BROWNFIELD_APPROVAL_CHAIN_MISMATCH": ErrorMetadata(
-        code="BROWNFIELD_APPROVAL_CHAIN_MISMATCH",
-        default_exit_code=3,
-        retryable=True,
-        description="Brownfield approval chain does not match current source and scan.",
-    ),
-    "BROWNFIELD_CURATED_SPEC_ALREADY_REGISTERED": ErrorMetadata(
-        code="BROWNFIELD_CURATED_SPEC_ALREADY_REGISTERED",
-        default_exit_code=10,
-        retryable=False,
-        description="Curated brownfield spec is already registered.",
-    ),
-    "BROWNFIELD_APPROVAL_STALE_GUARD": ErrorMetadata(
-        code="BROWNFIELD_APPROVAL_STALE_GUARD",
-        default_exit_code=3,
-        retryable=True,
-        description="Brownfield approval stale guards do not match workflow state.",
-    ),
 }
 
 
@@ -692,22 +422,12 @@ def _normalize_code(code: ErrorCode | str) -> ErrorCode:
 
 def error_metadata(code: ErrorCode | str) -> ErrorMetadata:
     """Return stable metadata for a registered error code."""
-    if isinstance(code, ErrorCode) and code.value in _BROWNFIELD_ERROR_REGISTRY:
-        return _BROWNFIELD_ERROR_REGISTRY[code.value]
-    if isinstance(code, str) and code in _BROWNFIELD_ERROR_REGISTRY:
-        return _BROWNFIELD_ERROR_REGISTRY[code]
     return _ERROR_REGISTRY[_normalize_code(code)]
 
 
 def registered_error_codes() -> set[str]:
     """Return the complete registered CLI error code set."""
-    return {
-        metadata.code
-        for metadata in (
-            *_ERROR_REGISTRY.values(),
-            *_BROWNFIELD_ERROR_REGISTRY.values(),
-        )
-    }
+    return {metadata.code for metadata in _ERROR_REGISTRY.values()}
 
 
 def workbench_error(

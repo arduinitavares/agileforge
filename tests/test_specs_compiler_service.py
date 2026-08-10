@@ -775,30 +775,6 @@ def test_compiled_authority_artifact_json_round_trips_through_loader() -> None:
     assert result.artifact.scope_themes == success.scope_themes
 
 
-def test_scope_extension_marker_from_spec_notes() -> None:
-    """Compiler can discover scope-extension metadata from amended spec notes."""
-    from services.specs import compiler_service  # noqa: PLC0415
-
-    base_spec_version_id = 3
-    notes = (
-        "Required compiler precondition for pending authority generation\n"
-        "scope_extension_start_recovery="
-        '{"added_source_item_ids":["REQ.new"],'
-        '"base_spec_hash":"sha256:base",'
-        '"base_spec_version_id":3,'
-        '"idempotency_key":"scope-1",'
-        '"request_fingerprint":"sha256:req",'
-        '"spec_file":"/tmp/spec.json"}'
-    )
-
-    marker = compiler_service._scope_extension_marker_from_notes(notes)
-
-    assert marker is not None
-    assert marker.base_spec_version_id == base_spec_version_id
-    assert marker.base_spec_hash == "sha256:base"
-    assert marker.added_source_item_ids == ["REQ.new"]
-
-
 def test_load_compiled_artifact_raw_sniffs_missing_schema_version() -> None:
     """Verify stored artifacts without schema_version fail closed as unsupported."""
     from services.specs.compiler_service import load_compiled_artifact  # noqa: PLC0415
@@ -2097,7 +2073,7 @@ def test_compile_spec_authority_for_version_persists_authority(
     )
     assert result["content_source"] == "content"
     assert result["compiler_version"] is not None
-    assert sample_project.compiled_authority_json is None
+    assert not hasattr(sample_project, "compiled_authority_json")
     assert tool_context.state["compiled_authority_cached"] is not None
 
     authority = session.exec(
@@ -2332,53 +2308,8 @@ def test_merge_compilation_successes_remaps_later_assumption_review_ids() -> Non
 
 
 @pytest.mark.parametrize(
-    ("claim", "assumption_kind"),
-    [
-        (
-            _true_count_claim(count=1, source_item_ids=["REQ.alpha"]),
-            "accepted_normative_count",
-        ),
-        (
-            _true_set_claim(item_ids=["REQ.alpha"]),
-            "accepted_normative_set",
-        ),
-    ],
-)
-def test_scope_extension_invalidates_base_aggregate_claim(
-    claim: dict[str, object],
-    assumption_kind: str,
-) -> None:
-    """Extension-only input removes stale accepted-base aggregate claims."""
-    from services.specs import compiler_service  # noqa: PLC0415
-
-    merged = compiler_service._merge_compilation_successes(
-        [
-            compiler_service.ScopedCompilationSuccess(
-                scope=compiler_service.CompilationScope.ACCEPTED_BASE,
-                success=_scope_merge_success(claim),
-            ),
-            compiler_service.ScopedCompilationSuccess(
-                scope=compiler_service.CompilationScope.EXTENSION_ONLY,
-                success=_scope_merge_success(_item_status_claim("REQ.beta")),
-            ),
-        ],
-        final_spec=_scope_merge_spec("REQ.alpha", "REQ.beta"),
-    )
-
-    assert all(assumption.kind != assumption_kind for assumption in merged.assumptions)
-    assert merged.authority_quality is not None
-    assert merged.authority_quality.invalidated_items[0].removed_id == "ASM-1"
-    assert (
-        merged.authority_quality.invalidated_items[0].assumption_kind == assumption_kind
-    )
-    assert merged.authority_quality.invalidated_items[0].reason == (
-        "aggregate_claim_invalidated_by_scope_extension"
-    )
-
-
-@pytest.mark.parametrize(
     "scope",
-    ["FOCUSED_ITEM", "REPAIR_ITEM", "EXTENSION_ONLY"],
+    ["FOCUSED_ITEM", "REPAIR_ITEM"],
 )
 @pytest.mark.parametrize(
     "claim",
@@ -2874,232 +2805,6 @@ def test_compile_spec_authority_repairs_missing_coverage_and_persists(
     assert len(rows) == 1
 
 
-def test_compile_spec_authority_scope_extension_reuses_base_authority(
-    session: Session,
-    sample_project: Project,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Scope extensions compile only added items and merge accepted base authority."""
-    from services.specs import compiler_service  # noqa: PLC0415
-
-    project_id = require_id(sample_project.project_id, "project_id")
-    base_payload = _accepted_multi_item_spec_profile_payload()
-    base_payload["items"] = [cast("list[dict[str, object]]", base_payload["items"])[0]]
-    base_normalized = normalize_spec_content_for_registry(json.dumps(base_payload))
-    base_spec = _create_spec_version(
-        session,
-        project_id=project_id,
-        content=base_normalized.content,
-    )
-    base_spec.spec_hash = base_normalized.spec_hash
-    session.add(base_spec)
-    session.commit()
-    session.refresh(base_spec)
-
-    def success_payload(
-        source_item_id: str,
-        source_level: SpecAuthoritySourceLevel,
-        invariant_id: str,
-    ) -> str:
-        payload = json.loads(_behavioral_payload_json(source_item_id, source_level))
-        payload["invariants"][0]["id"] = invariant_id
-        payload["source_map"][0]["invariant_id"] = invariant_id
-        return json.dumps(payload)
-
-    base_authority = _create_compiled_authority(
-        session,
-        spec_version_id=require_id(base_spec.spec_version_id, "spec_version_id"),
-        artifact_json=success_payload(
-            "REQ.todo-create",
-            "MUST",
-            "INV-babe000000000001",
-        ),
-    )
-    session.add(
-        SpecAuthorityAcceptance(
-            project_id=project_id,
-            spec_version_id=require_id(base_spec.spec_version_id, "spec_version_id"),
-            status="accepted",
-            policy="manual",
-            decided_by="tester",
-            decided_at=datetime.now(UTC),
-            rationale="Accepted base authority.",
-            compiler_version=base_authority.compiler_version,
-            prompt_hash=base_authority.prompt_hash,
-            spec_hash=base_spec.spec_hash,
-            pending_authority_id=base_authority.authority_id,
-            authority_fingerprint=pending_authority_fingerprint(base_authority),
-        )
-    )
-    session.commit()
-
-    amended_normalized = normalize_spec_content_for_registry(
-        json.dumps(_accepted_multi_item_spec_profile_payload())
-    )
-    marker = {
-        "added_source_item_ids": ["REQ.todo-toggle"],
-        "base_spec_hash": base_spec.spec_hash,
-        "base_spec_version_id": base_spec.spec_version_id,
-        "idempotency_key": "scope-ext-compile",
-        "request_fingerprint": "sha256:req",
-        "spec_file": "specs/amended.json",
-    }
-    amended_spec = _create_spec_version(
-        session,
-        project_id=project_id,
-        content=amended_normalized.content,
-    )
-    amended_spec.spec_hash = amended_normalized.spec_hash
-    amended_spec.approval_notes = (
-        "Required compiler precondition for pending authority generation\n"
-        "scope_extension_start_recovery="
-        + json.dumps(marker, sort_keys=True, separators=(",", ":"))
-    )
-    session.add(amended_spec)
-    session.commit()
-    session.refresh(amended_spec)
-
-    full_amended_compile_attempted = False
-    extension_item_compile_attempted = False
-
-    def fake_invoke(**kwargs: object) -> str:
-        nonlocal full_amended_compile_attempted, extension_item_compile_attempted
-        spec_content = cast("str", kwargs["spec_content"])
-        item_ids = [item["id"] for item in json.loads(spec_content)["items"]]
-        if "REQ.todo-create" in item_ids and "REQ.todo-toggle" in item_ids:
-            full_amended_compile_attempted = True
-            return _raw_compiler_failure_json()
-        if item_ids == ["REQ.todo-toggle"]:
-            extension_item_compile_attempted = True
-            return success_payload(
-                "REQ.todo-toggle",
-                "MUST_NOT",
-                "INV-cafe000000000001",
-            )
-        return _raw_compiler_failure_json()
-
-    monkeypatch.setattr(
-        compiler_service,
-        "_invoke_spec_authority_compiler",
-        fake_invoke,
-    )
-
-    result = compiler_service.compile_spec_authority_for_version_with_engine(
-        engine=cast("Engine", session.get_bind()),
-        spec_version_id=require_id(amended_spec.spec_version_id, "spec_version_id"),
-        force_recompile=True,
-    )
-
-    assert result["success"] is True
-    assert full_amended_compile_attempted is False
-    assert extension_item_compile_attempted is True
-    rows = session.exec(
-        select(CompiledSpecAuthority).where(
-            CompiledSpecAuthority.spec_version_id == amended_spec.spec_version_id
-        )
-    ).all()
-    assert len(rows) == 1
-    compiled_json = rows[0].compiled_artifact_json
-    assert compiled_json is not None
-    compiled = SpecAuthorityCompilerOutput.model_validate_json(compiled_json)
-    assert isinstance(compiled.root, SpecAuthorityCompilationSuccess)
-    source_ids = {invariant.source_item_id for invariant in compiled.root.invariants}
-    assert {"REQ.todo-create", "REQ.todo-toggle"} <= source_ids
-
-
-def test_compile_spec_authority_scope_extension_rejects_stale_base_authority(
-    session: Session,
-    sample_project: Project,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Scope extension base reuse fails closed on accepted artifact mismatch."""
-    from services.specs import compiler_service  # noqa: PLC0415
-
-    project_id = require_id(sample_project.project_id, "project_id")
-    base_normalized = normalize_spec_content_for_registry(
-        _canonical_agileforge_spec_profile_json()
-    )
-    base_spec = _create_spec_version(
-        session,
-        project_id=project_id,
-        content=base_normalized.content,
-    )
-    base_spec.spec_hash = base_normalized.spec_hash
-    session.add(base_spec)
-    session.commit()
-    session.refresh(base_spec)
-    base_authority = _create_compiled_authority(
-        session,
-        spec_version_id=require_id(base_spec.spec_version_id, "spec_version_id"),
-        artifact_json=_stored_compiled_success_json(),
-    )
-    session.add(
-        SpecAuthorityAcceptance(
-            project_id=project_id,
-            spec_version_id=require_id(base_spec.spec_version_id, "spec_version_id"),
-            status="accepted",
-            policy="manual",
-            decided_by="tester",
-            decided_at=datetime.now(UTC),
-            rationale="Accepted base authority.",
-            compiler_version=base_authority.compiler_version,
-            prompt_hash=base_authority.prompt_hash,
-            spec_hash=base_spec.spec_hash,
-            pending_authority_id=base_authority.authority_id,
-            authority_fingerprint="sha256:stale",
-        )
-    )
-    session.commit()
-
-    amended_normalized = normalize_spec_content_for_registry(
-        json.dumps(_accepted_multi_item_spec_profile_payload())
-    )
-    amended_spec = _create_spec_version(
-        session,
-        project_id=project_id,
-        content=amended_normalized.content,
-    )
-    amended_spec.spec_hash = amended_normalized.spec_hash
-    amended_spec.approval_notes = (
-        "Required compiler precondition for pending authority generation\n"
-        "scope_extension_start_recovery="
-        + json.dumps(
-            {
-                "added_source_item_ids": ["REQ.todo-toggle"],
-                "base_spec_hash": base_spec.spec_hash,
-                "base_spec_version_id": base_spec.spec_version_id,
-                "idempotency_key": "scope-ext-stale-base",
-                "request_fingerprint": "sha256:req",
-                "spec_file": "specs/amended.json",
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-    )
-    session.add(amended_spec)
-    session.commit()
-    session.refresh(amended_spec)
-
-    def fail_if_compiler_called(**_kwargs: object) -> str:
-        pytest.fail("scope-extension base mismatch must not invoke compiler")
-
-    monkeypatch.setattr(
-        compiler_service,
-        "_invoke_spec_authority_compiler",
-        fail_if_compiler_called,
-    )
-
-    result = compiler_service.compile_spec_authority_for_version_with_engine(
-        engine=cast("Engine", session.get_bind()),
-        spec_version_id=require_id(amended_spec.spec_version_id, "spec_version_id"),
-        force_recompile=True,
-    )
-
-    assert result["success"] is False
-    assert result["error"] == "SPEC_COMPILE_FAILED"
-    assert result["reason"] == "SCOPE_EXTENSION_BASE_AUTHORITY_ACCEPTANCE_MISMATCH"
-
-
 def test_compile_spec_authority_does_not_repair_over_promotion(
     session: Session,
     sample_project: Project,
@@ -3311,9 +3016,7 @@ def test_compile_spec_authority_for_version_iteratively_persists_must_coverage(
             == require_id(spec_row.spec_version_id, "spec_version_id")
         )
     ).one()
-    load_result = compiler_service.load_compiled_artifact(
-        authority
-    )
+    load_result = compiler_service.load_compiled_artifact(authority)
     assert load_result.status == "success"
     assert load_result.artifact is not None
     covered_item_ids = {
@@ -3770,7 +3473,7 @@ def test_compile_spec_authority_for_version_returns_cached_authority(
         == existing.compiled_artifact_json
     )
     session.refresh(sample_project)
-    assert sample_project.compiled_authority_json is None
+    assert not hasattr(sample_project, "compiled_authority_json")
 
 
 def test_force_recompile_inserts_without_mutating_existing_history(
@@ -3849,7 +3552,7 @@ def test_force_recompile_inserts_without_mutating_existing_history(
     assert preserved_acceptance is not None
     assert preserved_acceptance.model_dump() == before_acceptance
     assert result["authority_id"] == rows[1].authority_id
-    assert sample_project.compiled_authority_json is None
+    assert not hasattr(sample_project, "compiled_authority_json")
 
 
 def test_force_recompile_inserts_when_existing_row_has_no_terminal_decision(
@@ -3945,7 +3648,7 @@ def test_compile_spec_authority_for_version_rejects_unsupported_cached_authority
     ]
     assert "compiled_authority_cached" not in tool_context.state
     session.refresh(sample_project)
-    assert sample_project.compiled_authority_json is None
+    assert not hasattr(sample_project, "compiled_authority_json")
 
 
 @pytest.mark.parametrize(
@@ -3990,9 +3693,6 @@ def test_compile_spec_authority_for_version_rejects_invalid_cached_authority(  #
     session.add(authority)
     session.commit()
     session.refresh(authority)
-    sample_project.compiled_authority_json = '{"preserved":true}'
-    session.add(sample_project)
-    session.commit()
     tool_context = make_tool_context()
 
     result = compiler_service.compile_spec_authority_for_version_with_engine(
@@ -4011,7 +3711,7 @@ def test_compile_spec_authority_for_version_rejects_invalid_cached_authority(  #
     )
     assert "compiled_authority_cached" not in tool_context.state
     session.refresh(sample_project)
-    assert sample_project.compiled_authority_json == '{"preserved":true}'
+    assert not hasattr(sample_project, "compiled_authority_json")
 
 
 def test_compile_spec_authority_for_version_uses_content_ref_when_content_empty(
@@ -4756,7 +4456,7 @@ def test_get_compiled_authority_by_version_returns_existing_error_messages(
         "success": False,
         "error": (
             f"Spec version {spec_version_id} does not belong to "
-                f"project {other_project_id} (mismatch)"
+            f"project {other_project_id} (mismatch)"
         ),
     }
 

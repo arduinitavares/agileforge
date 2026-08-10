@@ -26,6 +26,7 @@ from services.agent_workbench.authority_projection import (
     pending_authority_fingerprint,
 )
 from tests.typing_helpers import require_id
+from tests.workflow.lifecycle_fixtures import seed_accepted_specification
 from tools.export_snapshot import export_project_snapshot_html
 from utils.spec_schemas import (
     Invariant,
@@ -45,9 +46,6 @@ def _insert_basic_project(session: Session) -> Project:
     project = Project(
         name="Test Project",
         description="Demo",
-        vision="Vision **bold**",
-        roadmap="Roadmap text",
-        technical_spec="Fallback spec",
     )
     session.add(project)
     session.commit()
@@ -136,18 +134,12 @@ def _insert_current_sprint(
 def _insert_approved_spec_with_authority(
     session: Session, project_id: int
 ) -> SpecRegistry:
-    spec = SpecRegistry(
+    spec = seed_accepted_specification(
+        session,
         project_id=project_id,
-        spec_hash="hash123",
-        content="# Spec\n## Section",
+        content=json.dumps({"title": "Spec", "section": "Snapshot"}),
         content_ref="specs/test.md",
-        status="approved",
-        approved_by="reviewer@example.com",
-        approval_notes="Looks good",
-    )
-    session.add(spec)
-    session.commit()
-    session.refresh(spec)
+    ).spec
 
     success = SpecAuthorityCompilationSuccess(
         scope_themes=["Payments"],
@@ -188,6 +180,20 @@ def _insert_approved_spec_with_authority(
     session.commit()
 
     return spec
+
+
+def _insert_accepted_spec(
+    session: Session,
+    *,
+    project_id: int,
+    title: str,
+) -> SpecRegistry:
+    """Persist one accepted current-lifecycle specification."""
+    return seed_accepted_specification(
+        session,
+        project_id=project_id,
+        content=json.dumps({"title": title}),
+    ).spec
 
 
 def _snapshot_authority(
@@ -235,15 +241,11 @@ def test_snapshot_loader_uses_exact_acceptance_bound_row(
 
     project = _insert_basic_project(session)
     project_id = require_id(project.project_id, "project_id")
-    spec = SpecRegistry(
+    spec = _insert_accepted_spec(
+        session,
         project_id=project_id,
-        spec_hash="snapshot-accepted",
-        content="# Spec",
-        status="approved",
+        title="snapshot-accepted",
     )
-    session.add(spec)
-    session.commit()
-    session.refresh(spec)
     spec_version_id = require_id(spec.spec_version_id, "spec_version_id")
     _snapshot_authority(
         session,
@@ -293,15 +295,11 @@ def test_snapshot_loader_rejects_post_acceptance_valid_artifact_mutation(
 
     project = _insert_basic_project(session)
     project_id = require_id(project.project_id, "project_id")
-    spec = SpecRegistry(
+    spec = _insert_accepted_spec(
+        session,
         project_id=project_id,
-        spec_hash="snapshot-mutated",
-        content="# Spec",
-        status="approved",
+        title="snapshot-mutated",
     )
-    session.add(spec)
-    session.commit()
-    session.refresh(spec)
     accepted = _snapshot_authority(
         session,
         spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
@@ -351,15 +349,11 @@ def test_snapshot_loader_without_acceptance_uses_newest_row(
 
     project = _insert_basic_project(session)
     project_id = require_id(project.project_id, "project_id")
-    spec = SpecRegistry(
+    spec = _insert_accepted_spec(
+        session,
         project_id=project_id,
-        spec_hash="snapshot-pending",
-        content="# Spec",
-        status="approved",
+        title="snapshot-pending",
     )
-    session.add(spec)
-    session.commit()
-    session.refresh(spec)
     spec_version_id = require_id(spec.spec_version_id, "spec_version_id")
     _snapshot_authority(
         session,
@@ -388,15 +382,11 @@ def test_snapshot_loader_missing_exact_accepted_row_fails_closed(
 
     project = _insert_basic_project(session)
     project_id = require_id(project.project_id, "project_id")
-    spec = SpecRegistry(
+    spec = _insert_accepted_spec(
+        session,
         project_id=project_id,
-        spec_hash="snapshot-missing-accepted",
-        content="# Spec",
-        status="approved",
+        title="snapshot-missing-accepted",
     )
-    session.add(spec)
-    session.commit()
-    session.refresh(spec)
     spec_version_id = require_id(spec.spec_version_id, "spec_version_id")
     pending = _snapshot_authority(
         session,
@@ -431,15 +421,11 @@ def test_export_snapshot_dangling_acceptance_writes_no_file(
     with Session(engine) as session:
         project = _insert_basic_project(session)
         project_id = require_id(project.project_id, "project_id")
-        spec = SpecRegistry(
+        spec = _insert_accepted_spec(
+            session,
             project_id=project_id,
-            spec_hash="snapshot-dangling",
-            content="# Spec",
-            status="approved",
+            title="snapshot-dangling",
         )
-        session.add(spec)
-        session.commit()
-        session.refresh(spec)
         pending = _snapshot_authority(
             session,
             spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
@@ -499,10 +485,8 @@ def test_export_snapshot_html_basic(engine: Engine, tmp_path: Path) -> None:
     assert output_path.exists()
     assert "Test Project" in html
     assert "product vision" in html
-    assert "Vision" in html
-    # Spec content renders as markdown <h1> or falls back to <pre> with raw text
-    assert "<h1>Spec</h1>" in html or "# Spec" in html
-    assert "toc-level-2" in html
+    assert "Deliver one verified product increment." in html
+    assert "Snapshot" in html
     assert "Current Sprint Refined Stories" in html
     assert "Project Backlog (All Stories)" in html
     assert "Payments" in html
@@ -562,10 +546,10 @@ def test_export_snapshot_only_refined_current_sprint_stories(
     assert "Total 1" in html
 
 
-def test_export_snapshot_falls_back_to_project_spec(
+def test_export_snapshot_reports_missing_accepted_spec(
     engine: Engine, tmp_path: Path
 ) -> None:
-    """Verify export snapshot falls back to project spec."""
+    """Do not reconstruct specification content from removed Project fields."""
     with Session(engine) as session:
         project = _insert_basic_project(session)
 
@@ -576,7 +560,7 @@ def test_export_snapshot_falls_back_to_project_spec(
     )
 
     html = output_path.read_text(encoding="utf-8")
-    assert "Fallback spec" in html
+    assert "No accepted specification available" in html
 
 
 def test_export_snapshot_command_writes_file(engine: Engine, tmp_path: Path) -> None:
@@ -601,15 +585,11 @@ def test_export_snapshot_rejects_malformed_v3_before_writing(
     with Session(engine) as session:
         project = _insert_basic_project(session)
         project_id = require_id(project.project_id, "project_id")
-        spec = SpecRegistry(
+        spec = _insert_accepted_spec(
+            session,
             project_id=project_id,
-            spec_hash="snapshot-invalid",
-            content="# Approved spec",
-            status="approved",
+            title="snapshot-invalid",
         )
-        session.add(spec)
-        session.commit()
-        session.refresh(spec)
         session.add(
             CompiledSpecAuthority(
                 spec_version_id=require_id(

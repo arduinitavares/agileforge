@@ -9,12 +9,12 @@ from agile_sqlmodel import (
     CompiledSpecAuthority,
     Project,
     SpecAuthorityAcceptance,
-    SpecRegistry,
 )
 from scripts import dry_run_story_validation as dry_run
 from services.specs.authority_selection import pending_authority_fingerprint
 from tests.authority_assumption_fixtures import current_v3_compiled_authority_json
 from tests.typing_helpers import require_id
+from tests.workflow.lifecycle_fixtures import seed_accepted_specification
 
 if TYPE_CHECKING:
     from sqlmodel import Session
@@ -29,15 +29,11 @@ def test_load_accepted_invariants_uses_exact_valid_authority(
     session.commit()
     session.refresh(project)
     project_id = require_id(project.project_id, "project_id")
-    spec = SpecRegistry(
+    spec = seed_accepted_specification(
+        session,
         project_id=project_id,
-        spec_hash="dry-run-spec",
-        content="# Dry run",
-        status="approved",
-    )
-    session.add(spec)
-    session.commit()
-    session.refresh(spec)
+        content=json.dumps({"title": "Dry run"}),
+    ).spec
     spec_version_id = require_id(spec.spec_version_id, "spec_version_id")
     session.add(
         CompiledSpecAuthority(

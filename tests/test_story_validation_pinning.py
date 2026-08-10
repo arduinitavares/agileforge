@@ -33,13 +33,12 @@ from models.core import Epic, Feature, Theme
 from services.agent_workbench.authority_projection import (
     pending_authority_fingerprint,
 )
+from tests.workflow.lifecycle_fixtures import seed_accepted_specification
 from tools import spec_tools
 from tools.spec_tools import (
     VALIDATOR_VERSION,
     ValidateStoryInput,
-    approve_spec_version,
     compile_spec_authority,
-    register_spec_version,
     validate_story_with_spec_authority,
 )
 from utils.spec_schemas import (
@@ -98,6 +97,20 @@ def _fake_compilation_artifact() -> SpecAuthorityCompilationSuccess:
         compiler_version="3.0.0",
         prompt_hash="a" * 64,
     )
+
+
+def _accepted_spec(
+    session: Session,
+    *,
+    project_id: int,
+    content: str,
+) -> SpecRegistry:
+    """Persist an accepted specification through the current lifecycle."""
+    return seed_accepted_specification(
+        session,
+        project_id=project_id,
+        content=json.dumps({"specification": content}),
+    ).spec
 
 
 def _create_feature_hierarchy(
@@ -168,16 +181,12 @@ def compiled_spec(session: Session, sample_project: Project) -> SpecRegistry:
 - Auth token required for all operations
 - Maximum 10 items per page
 """
-    reg_result = register_spec_version(
-        {"project_id": sample_project.project_id, "content": spec_content},
-        tool_context=None,
+    spec = _accepted_spec(
+        session,
+        project_id=_require_id(sample_project.project_id, "project_id"),
+        content=spec_content,
     )
-    spec_version_id = reg_result["spec_version_id"]
-
-    approve_spec_version(
-        {"spec_version_id": spec_version_id, "approved_by": "test_reviewer"},
-        tool_context=None,
-    )
+    spec_version_id = _require_id(spec.spec_version_id, "spec_version_id")
 
     with patch(
         "tools.spec_tools._extract_spec_authority_llm",
@@ -188,8 +197,6 @@ def compiled_spec(session: Session, sample_project: Project) -> SpecRegistry:
             tool_context=None,
         )
 
-    spec = session.get(SpecRegistry, spec_version_id)
-    assert spec is not None
     authority = session.get(CompiledSpecAuthority, compile_result["authority_id"])
     assert authority is not None
     session.add(
@@ -414,45 +421,22 @@ class TestFailFastIfNotCompiled:
         assert result["success"] is False
         assert "not found" in result["error"].lower()
 
-    def test_validation_fails_for_uncompiled_spec(
-        self, sample_project: Project, sample_story: UserStory, engine: Engine
-    ) -> None:
-        """Clear error when spec exists but is not compiled."""
-        spec_tools.engine = engine
-
-        reg_result = register_spec_version(
-            {"project_id": sample_project.project_id, "content": "Draft spec content"},
-            tool_context=None,
-        )
-        spec_version_id = reg_result["spec_version_id"]
-
-        result = validate_story_with_spec_authority(
-            {"story_id": sample_story.story_id, "spec_version_id": spec_version_id},
-            tool_context=None,
-        )
-
-        assert result["success"] is False
-        assert "not compiled" in result["error"].lower()
-
     def test_validation_fails_for_approved_but_uncompiled_spec(
-        self, sample_project: Project, sample_story: UserStory, engine: Engine
+        self,
+        session: Session,
+        sample_project: Project,
+        sample_story: UserStory,
+        engine: Engine,
     ) -> None:
         """Approved but uncompiled spec fails with clear message."""
         spec_tools.engine = engine
 
-        reg_result = register_spec_version(
-            {
-                "project_id": sample_project.project_id,
-                "content": "Approved but not compiled",
-            },
-            tool_context=None,
+        spec = _accepted_spec(
+            session,
+            project_id=_require_id(sample_project.project_id, "project_id"),
+            content="Approved but not compiled",
         )
-        spec_version_id = reg_result["spec_version_id"]
-
-        approve_spec_version(
-            {"spec_version_id": spec_version_id, "approved_by": "reviewer"},
-            tool_context=None,
-        )
+        spec_version_id = _require_id(spec.spec_version_id, "spec_version_id")
 
         result = validate_story_with_spec_authority(
             {"story_id": sample_story.story_id, "spec_version_id": spec_version_id},
@@ -753,15 +737,14 @@ class TestWrongSpecVersionIdFails:
         session.commit()
         session.refresh(other_project)
 
-        reg_result = register_spec_version(
-            {"project_id": other_project.project_id, "content": "Other project spec"},
-            tool_context=None,
+        other_spec = _accepted_spec(
+            session,
+            project_id=_require_id(other_project.project_id, "other project_id"),
+            content="Other project spec",
         )
-        other_spec_id = reg_result["spec_version_id"]
-
-        approve_spec_version(
-            {"spec_version_id": other_spec_id, "approved_by": "reviewer"},
-            tool_context=None,
+        other_spec_id = _require_id(
+            other_spec.spec_version_id,
+            "other spec_version_id",
         )
         with patch(
             "tools.spec_tools._extract_spec_authority_llm",

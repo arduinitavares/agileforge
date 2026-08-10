@@ -461,9 +461,7 @@ def _record_discovery(
     ).ok
     recorded = domain.position(project_id)
     specification = next(
-        item
-        for item in recorded.decisions
-        if item.node_id == "specification.record"
+        item for item in recorded.decisions if item.node_id == "specification.record"
     )
     reference = specification.fact_references[0]
     assert reference.fact_type == "discovery"
@@ -824,9 +822,10 @@ def test_accepted_goal_outcome_replays_and_opposite_writes_nothing(
     )
     result = outcome_domain.transition(fulfill)
     assert result.ok
-    assert outcome_domain.transition(fulfill).model_dump() == result.model_copy(
-        update={"replayed": True}
-    ).model_dump()
+    assert (
+        outcome_domain.transition(fulfill).model_dump()
+        == result.model_copy(update={"replayed": True}).model_dump()
+    )
 
     opposite = AbandonProductGoal(
         project_id=fulfill.project_id,
@@ -1191,8 +1190,6 @@ def test_discovery_and_pending_specification_follow_exact_active_lineage(
         ) == (int(discovery.fact_id), discovery.fingerprint)
         assert stored_candidate.base_spec_version_id is None
         assert stored_candidate.base_spec_hash is None
-        snapshot = WorkflowFactRepository(session).load(project_id)
-    assert snapshot.prd_versions == ()
 
 
 @pytest.mark.parametrize("terminal_decision", ["rejected", "feedback"])
@@ -1327,8 +1324,8 @@ def test_later_goal_replaces_the_registered_specification_atomically(
     with Session(engine) as session:
         first_spec = session.exec(select(SpecRegistry)).one()
         assert first_spec.status == "approved"
-        assert (
-            first_spec.source_specification_candidate_id == int(first_candidate.fact_id)
+        assert first_spec.source_specification_candidate_id == int(
+            first_candidate.fact_id
         )
         assert first_spec.spec_hash == canonical_stored_json_hash(first_spec.content)
         first_spec_id = first_spec.spec_version_id

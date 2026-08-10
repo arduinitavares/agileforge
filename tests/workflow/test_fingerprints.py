@@ -30,7 +30,6 @@ def test_fact_fingerprint_is_stable_for_equivalent_snapshots() -> None:
         project=ProjectFact(
             project_id=3,
             name="MyFinance",
-            origin="brownfield",
             created_at=created,
         )
     )
@@ -46,7 +45,6 @@ def test_attempt_changes_full_fingerprint_but_not_business_fingerprint() -> None
         project=ProjectFact(
             project_id=3,
             name="MyFinance",
-            origin="brownfield",
             created_at=created,
         )
     )
@@ -84,7 +82,6 @@ def test_business_fact_changes_both_fingerprints() -> None:
         project=ProjectFact(
             project_id=3,
             name="MyFinance",
-            origin="brownfield",
             created_at=created,
         )
     )
@@ -103,7 +100,6 @@ def test_incomplete_vision_turn_changes_business_fact_fingerprint() -> None:
         project=ProjectFact(
             project_id=3,
             name="MyFinance",
-            origin="brownfield",
             created_at=created,
         ),
         vision_interview_turns=(
@@ -145,7 +141,6 @@ def test_incomplete_product_goal_turn_changes_business_fact_fingerprint() -> Non
         project=ProjectFact(
             project_id=3,
             name="MyFinance",
-            origin="brownfield",
             created_at=created,
         ),
         product_goal_interview_turns=(
@@ -181,15 +176,13 @@ def test_incomplete_product_goal_turn_changes_business_fact_fingerprint() -> Non
     assert business_fact_fingerprint(snapshot) != business_fact_fingerprint(completed)
 
 
-def test_product_goal_decision_state_changes_business_fingerprint_before_discovery(
-) -> None:
+def test_goal_decision_changes_business_fingerprint_before_discovery() -> None:
     """Goal review state is authoritative even before discovery is recorded."""
     created = datetime(2026, 8, 2, 12, tzinfo=UTC)
     pending = WorkflowFactSnapshot(
         project=ProjectFact(
             project_id=3,
             name="MyFinance",
-            origin="brownfield",
             created_at=created,
         )
     )
@@ -214,8 +207,7 @@ def test_product_goal_decision_state_changes_business_fingerprint_before_discove
     }
 
     fingerprints = {
-        business_fact_fingerprint(snapshot)
-        for snapshot in (pending, *states.values())
+        business_fact_fingerprint(snapshot) for snapshot in (pending, *states.values())
     }
 
     assert not pending.discovery_artifacts

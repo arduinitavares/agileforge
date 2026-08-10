@@ -224,7 +224,6 @@ def test_create_project_request_accepts_only_semantic_fields() -> None:
 @pytest.mark.parametrize(
     ("field", "value"),
     [
-        ("origin", "greenfield"),
         ("changed_by", "legacy-actor"),
         ("fact_fingerprint", "facts"),
         ("repository_metadata", {"head_sha": "caller-owned"}),
@@ -477,9 +476,6 @@ class _FakeApiApplication:
     def decide_sprint_plan(self, request: object) -> TransitionResult:
         return self._record_delivery_request(request)
 
-    def reconcile_backlog(self, request: object) -> TransitionResult:
-        return self._record_delivery_request(request)
-
     def apply_story_dependencies(self, request: object) -> TransitionResult:
         return self._record_delivery_request(request)
 
@@ -712,17 +708,6 @@ class _PlanningActionSelection:
         self.replay_queries.append(query)
         return self.replay_result
 
-    def prepare_backlog_reconciliation(
-        self,
-        *,
-        project_id: int,
-        decision: NodeDecision,
-    ) -> tuple[int, str, tuple[int, ...]]:
-        self.prepare_calls.append(
-            ("reconcile_backlog", project_id, decision.decision_fingerprint, None)
-        )
-        return 17, "authority-current", (5, 7)
-
     def prepare_story_dependencies(
         self,
         *,
@@ -946,19 +931,6 @@ def _delivery_decision(
     "case",
     [
         (
-            "reconcile_backlog",
-            "BacklogReconcileRequest",
-            "reconcile_backlog",
-            "backlog.reconcile",
-            {},
-            {
-                "replacement_authority_id": 17,
-                "replacement_authority_fingerprint": "authority-current",
-                "affected_artifact_ids": [5, 7],
-            },
-            {},
-        ),
-        (
             "apply_story_dependencies",
             "StoryDependenciesApplyRequest",
             "apply_story_dependencies",
@@ -1091,7 +1063,6 @@ def test_planning_action_application_derives_internal_guards(
 @pytest.mark.parametrize(
     ("method_name", "request_type_name", "request_kind", "request_fields"),
     [
-        ("reconcile_backlog", "BacklogReconcileRequest", "reconcile_backlog", {}),
         (
             "apply_story_dependencies",
             "StoryDependenciesApplyRequest",
@@ -1818,62 +1789,6 @@ def test_story_readiness_application_rejects_noncanonical_rank(rank: str) -> Non
                 "actor": "operator",
             }
         )
-
-
-def test_planning_selection_derives_backlog_reconciliation_from_durable_facts(
-    engine: "Engine",
-) -> None:
-    """Resolve replacement authority and exact artifacts without caller input."""
-    project_id = _seed_accepted_backlog(engine)
-    with Session(engine) as session:
-        snapshot = WorkflowFactRepository(session).load(project_id)
-    authority = next(item for item in snapshot.authorities if item.status == "accepted")
-    backlog = next(
-        item
-        for item in snapshot.phase_artifacts
-        if item.artifact_type == "backlog" and item.status == "accepted"
-    )
-    decision = NodeDecision(
-        node_id="backlog.reconcile",
-        child_graph_id="backlog",
-        request_kind="reconcile_backlog",
-        category=NodeCategory.AVAILABLE,
-        recommendation_kind=RecommendationKind.REQUIRED,
-        reason_code="BACKLOG_RECONCILIATION_REQUIRED",
-        decision_fingerprint="decision-reconcile",
-        fact_references=(
-            FactReference(
-                fact_type="authority",
-                fact_id=str(authority.authority_id),
-                fingerprint=authority.authority_fingerprint,
-            ),
-            FactReference(
-                fact_type="backlog",
-                fact_id=str(backlog.artifact_id),
-                fingerprint=backlog.artifact_fingerprint,
-            ),
-        ),
-    )
-    service_type = application_module.PlanningActionSelectionService
-    service = service_type(engine=engine)
-
-    target = service.prepare_backlog_reconciliation(
-        project_id=project_id,
-        decision=decision,
-    )
-
-    assert target == (
-        authority.authority_id,
-        authority.authority_fingerprint,
-        (int(backlog.artifact_id),),
-    )
-    assert (
-        service.prepare_backlog_reconciliation(
-            project_id=project_id,
-            decision=decision.model_copy(update={"fact_references": ()}),
-        )
-        is None
-    )
 
 
 def test_planning_selection_derives_dependency_and_readiness_guards(
@@ -3583,10 +3498,6 @@ _REQUEST_KIND_FACT_REFERENCE_ROWS = {
         ("sprint_close", "31", "sprint-close-31"),
     ),
     "record_post_sprint_triage": (("sprint_closure", "31", "sprint-close-31"),),
-    "reconcile_backlog": (
-        ("authority", "17", "authority-17"),
-        ("backlog", "23", "backlog-23"),
-    ),
     "apply_story_dependencies": (
         ("story_dependency_source", "41", "dependency-source-41"),
     ),
@@ -3752,31 +3663,6 @@ def test_api_adapter_does_not_import_legacy_routing_authority() -> None:
     source = (Path(__file__).parents[2] / "api.py").read_text()
     assert "from services.workflow import WorkflowService" not in source
     assert "ReadOnlySessionReader" not in source
-
-
-@pytest.mark.parametrize(
-    "path",
-    [
-        "/api/projects/41/project/abandon",
-        "/api/projects/41/brownfield/curate",
-        "/api/projects/41/brownfield/baseline/record",
-        "/api/projects/41/brownfield/inventory/record",
-        "/api/projects/41/brownfield/spec/decide",
-        "/api/projects/41/scope/register",
-        "/api/projects/41/scope/extension/start",
-        "/api/projects/41/scope/extension/prd/record",
-        "/api/projects/41/scope/extension/spec/decide",
-        "/api/projects/41/discovery/prd/record",
-        "/api/projects/41/discovery/prd/decide",
-        "/api/projects/41/vision/generate",
-        "/api/projects/41/vision/decide",
-    ],
-)
-def test_retired_mutation_api_routes_are_absent(path: str) -> None:
-    """Do not preserve HTTP compatibility for retired lifecycle concepts."""
-    response = TestClient(api_module.app).post(path, json={})
-
-    assert response.status_code == HTTPStatus.NOT_FOUND
 
 
 @pytest.mark.parametrize(
@@ -4018,11 +3904,6 @@ def test_delivery_review_api_rejects_caller_owned_guards(
     ("path", "payload", "request_type_name"),
     [
         (
-            "/api/projects/41/backlog/reconcile",
-            {},
-            "BacklogReconcileRequest",
-        ),
-        (
             "/api/projects/41/story/dependencies/apply",
             {
                 "selected_story_ids": [7, 9],
@@ -4084,8 +3965,6 @@ def test_planning_action_api_uses_task_specific_semantic_requests(
 @pytest.mark.parametrize(
     ("path", "payload", "internal_field", "value"),
     [
-        ("/api/projects/41/backlog/reconcile", {}, "semantic_input", {}),
-        ("/api/projects/41/backlog/reconcile", {}, "affected_artifact_ids", [7]),
         (
             "/api/projects/41/story/dependencies/apply",
             {"selected_story_ids": [7], "reviewed_edges": []},
@@ -4527,7 +4406,6 @@ def test_position_advertises_only_executable_semantic_api_routes(
 @pytest.mark.parametrize(
     "request_kind",
     [
-        "reconcile_backlog",
         "apply_story_dependencies",
         "repair_story_readiness",
         "start_sprint",
@@ -4785,8 +4663,8 @@ def test_agentic_application_retry_reaches_durable_start_receipt_when_stale() ->
     prior_result = TransitionResult(
         ok=True,
         replayed=True,
-        applied_node_id="vision.generate",
-        output={"vision_artifact_id": 17},
+        applied_node_id="vision.interview",
+        output={"vision_interview_turn_id": 17},
         position=stale_position,
     )
 
@@ -4830,7 +4708,7 @@ def test_agentic_application_retry_reaches_durable_start_receipt_when_stale() ->
             graph_version="agileforge.workflow.v2",
             fact_fingerprint="facts-before-completion",
             decision_fingerprint="decision-vision",
-            node_id="vision.generate",
+            node_id="vision.interview",
             input_payload={"prompt": "draft"},
             model_id="offline/model",
             idempotency_key="dashboard-vision-41",
