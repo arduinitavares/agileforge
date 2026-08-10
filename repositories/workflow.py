@@ -29,9 +29,11 @@ from models.product_definition import (
     SpecificationDecision,
     VisionArtifact,
     VisionArtifactDecision,
+    VisionEvidenceSnapshot,
     VisionInterviewTurn,
     VisionRevisionIntent,
 )
+from models.repository import RepositoryBinding
 from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance, SpecRegistry
 from models.workflow import (
     BacklogArtifact,
@@ -55,6 +57,7 @@ from models.workflow import (
 from services.contracts.sprint import (
     SprintPlannerOutput,
 )
+from services.contracts.vision_evidence import VisionEvidenceBundle
 from services.specs.authority_selection import pending_authority_fingerprint
 from utils.spec_schemas import SpecAuthorityCompilationSuccess
 from utils.task_metadata import TaskMetadata, serialize_task_metadata
@@ -100,6 +103,7 @@ from workflow.facts import (
     TaskFact,
     VisionArtifactDecisionFact,
     VisionArtifactFact,
+    VisionEvidenceSnapshotFact,
     VisionInterviewTurnFact,
     VisionRevisionIntentFact,
     WorkflowFactSnapshot,
@@ -123,6 +127,7 @@ if TYPE_CHECKING:
     from datetime import datetime
 
 _JSON_OBJECT = TypeAdapter(dict[str, JsonValue])
+_JSON_OBJECT_LIST = TypeAdapter(list[dict[str, JsonValue]])
 _STRING_LIST = TypeAdapter(list[str])
 _INT_LIST = TypeAdapter(list[int])
 _DEPENDENCY_EDGE_LIST = TypeAdapter(list[StoryDependencyReviewEdgeFact])
@@ -203,6 +208,7 @@ class _ProductDefinitionFactLoad:
     """Validated immutable product-definition facts from one Project."""
 
     revision_intents: tuple[VisionRevisionIntentFact, ...]
+    evidence_snapshots: tuple[VisionEvidenceSnapshotFact, ...]
     interview_turns: tuple[VisionInterviewTurnFact, ...]
     visions: tuple[VisionArtifactFact, ...]
     vision_decisions: tuple[VisionArtifactDecisionFact, ...]
@@ -220,6 +226,7 @@ class _VisionFactLoad:
     """Validated immutable Vision lineage and its durable source evidence."""
 
     revision_intents: tuple[VisionRevisionIntentFact, ...]
+    evidence_snapshots: tuple[VisionEvidenceSnapshotFact, ...]
     interview_turns: tuple[VisionInterviewTurnFact, ...]
     visions: tuple[VisionArtifactFact, ...]
     vision_decisions: tuple[VisionArtifactDecisionFact, ...]
@@ -326,6 +333,7 @@ class WorkflowFactRepository:
             )
             return WorkflowFactSnapshot(
                 project=project,
+                vision_evidence_snapshots=vision_load.evidence_snapshots,
                 vision_artifacts=vision_load.visions,
                 vision_artifact_decisions=vision_load.vision_decisions,
             )
@@ -434,6 +442,7 @@ class WorkflowFactRepository:
                 )
             ),
             vision_revision_intents=product_definition.revision_intents,
+            vision_evidence_snapshots=product_definition.evidence_snapshots,
             vision_interview_turns=product_definition.interview_turns,
             vision_artifacts=product_definition.visions,
             vision_artifact_decisions=product_definition.vision_decisions,
@@ -581,6 +590,7 @@ class WorkflowFactRepository:
         specification_decisions = self._specification_decisions(project_id, candidates)
         return _ProductDefinitionFactLoad(
             revision_intents=vision_load.revision_intents,
+            evidence_snapshots=vision_load.evidence_snapshots,
             interview_turns=vision_load.interview_turns,
             visions=vision_load.visions,
             vision_decisions=vision_load.vision_decisions,
@@ -607,14 +617,102 @@ class WorkflowFactRepository:
         }
         attempts = {item.attempt_id: item.attempt_fingerprint for item in node_attempts}
         revisions = self._vision_revision_intents(project_id, accepted_visions)
+        snapshots = self._vision_evidence_snapshots(project_id, attempts)
         turns = self._vision_interview_turns(project_id, revisions, attempts)
         self._validate_vision_artifact_sources(visions, turns)
         return _VisionFactLoad(
             revision_intents=tuple(revisions.values()),
+            evidence_snapshots=snapshots,
             interview_turns=tuple(turns.values()),
             visions=tuple(visions.values()),
             vision_decisions=tuple(decisions.values()),
         )
+
+    def _vision_evidence_snapshots(
+        self,
+        project_id: int,
+        attempts: dict[int, str],
+    ) -> tuple[VisionEvidenceSnapshotFact, ...]:
+        """Load exact, validated evidence snapshots for one Project."""
+        binding_ids = frozenset(
+            self._required_id(row.repository_binding_id, "repository binding")
+            for row in self._session.exec(
+                select(RepositoryBinding)
+                .where(col(RepositoryBinding.project_id) == project_id)
+                .order_by(col(RepositoryBinding.repository_binding_id)),
+                execution_options=self._query_options(),
+            ).all()
+        )
+        rows = self._session.exec(
+            select(VisionEvidenceSnapshot)
+            .where(col(VisionEvidenceSnapshot.project_id) == project_id)
+            .order_by(col(VisionEvidenceSnapshot.vision_evidence_snapshot_id)),
+            execution_options=self._query_options(),
+        ).all()
+        facts: list[VisionEvidenceSnapshotFact] = []
+        for row in rows:
+            identifier = self._required_id(
+                row.vision_evidence_snapshot_id,
+                "Vision evidence snapshot",
+            )
+            self._require_product_condition(
+                row.workflow_node_attempt_id in attempts,
+                "Vision evidence snapshot references a missing or cross-Project "
+                "workflow attempt.",
+            )
+            if row.repository_binding_id is not None:
+                self._require_product_condition(
+                    row.repository_binding_id in binding_ids,
+                    "Vision evidence snapshot references a missing or cross-Project "
+                    "repository binding.",
+                )
+            try:
+                evidence_json = _JSON_OBJECT.validate_json(row.evidence_json)
+                evidence = VisionEvidenceBundle.model_validate(evidence_json)
+            except ValidationError as exc:
+                message = f"Vision evidence snapshot {identifier} JSON is invalid."
+                raise self._error(message) from exc
+            if canonical_json(evidence_json) != row.evidence_json:
+                message = (
+                    f"Vision evidence snapshot {identifier} JSON is not canonical."
+                )
+                raise self._error(message)
+            if evidence.evidence_fingerprint != row.evidence_fingerprint:
+                message = (
+                    f"Vision evidence snapshot {identifier} fingerprint changed."
+                )
+                raise self._error(message)
+            try:
+                warnings = _JSON_OBJECT_LIST.validate_json(row.warnings_json)
+            except ValidationError as exc:
+                message = (
+                    f"Vision evidence snapshot {identifier} warnings JSON is invalid."
+                )
+                raise self._error(message) from exc
+            if canonical_json(warnings) != row.warnings_json:
+                message = (
+                    f"Vision evidence snapshot {identifier} warnings JSON is not "
+                    "canonical."
+                )
+                raise self._error(message)
+            evidence_warnings = [
+                warning.model_dump(mode="json") for warning in evidence.warnings
+            ]
+            if warnings != evidence_warnings:
+                message = f"Vision evidence snapshot {identifier} warnings changed."
+                raise self._error(message)
+            facts.append(
+                VisionEvidenceSnapshotFact(
+                    vision_evidence_snapshot_id=identifier,
+                    repository_binding_id=row.repository_binding_id,
+                    workflow_node_attempt_id=row.workflow_node_attempt_id,
+                    evidence=evidence_json,
+                    evidence_fingerprint=row.evidence_fingerprint,
+                    warnings=tuple(warnings),
+                    created_at=row.created_at,
+                )
+            )
+        return tuple(facts)
 
     def _vision_artifacts(
         self,
@@ -3543,6 +3641,7 @@ class VisionInputContext:
     vision_decisions: tuple[VisionArtifactDecisionFact, ...]
     revision_intents: tuple[VisionRevisionIntentFact, ...]
     interview_turns: tuple[VisionInterviewTurnFact, ...]
+    evidence_snapshots: tuple[VisionEvidenceSnapshotFact, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -3559,7 +3658,7 @@ class VisionInputFactRepository(WorkflowFactRepository):
     """Read the narrow, canonical fact projection used by Vision host input."""
 
     def load_context(self, project_id: int) -> VisionInputContext:
-        """Load Project identity and Vision rows without attempts or other domains."""
+        """Load Project identity and validated durable Vision rows."""
         self._identity_token = object()
         with self._session.no_autoflush:
             project = self._project(project_id)
@@ -3576,7 +3675,16 @@ class VisionInputFactRepository(WorkflowFactRepository):
                 if item.decision == "accepted"
             }
             revisions = self._vision_revision_intents(project_id, accepted_visions)
-            turns = self._vision_interview_turns(project_id, revisions, None)
+            attempts = self._node_attempts(project_id)
+            snapshots = self._vision_evidence_snapshots(
+                project_id,
+                {item.attempt_id: item.attempt_fingerprint for item in attempts},
+            )
+            turns = self._vision_interview_turns(
+                project_id,
+                revisions,
+                {item.attempt_id: item.attempt_fingerprint for item in attempts},
+            )
             self._validate_vision_artifact_sources(visions, turns)
         return VisionInputContext(
             project=project,
@@ -3585,6 +3693,7 @@ class VisionInputFactRepository(WorkflowFactRepository):
             vision_decisions=tuple(decisions.values()),
             revision_intents=tuple(revisions.values()),
             interview_turns=tuple(turns.values()),
+            evidence_snapshots=snapshots,
         )
 
     def has_active_product_goal(self, context: VisionInputContext) -> bool:

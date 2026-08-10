@@ -50,6 +50,18 @@ class VisionRevisionIntentFact(FrozenModel):
     initiated_at: _DATETIME
 
 
+class VisionEvidenceSnapshotFact(FrozenModel):
+    """Immutable evidence used to generate one Vision draft lineage."""
+
+    vision_evidence_snapshot_id: int
+    repository_binding_id: int | None
+    workflow_node_attempt_id: int
+    evidence: JsonObject
+    evidence_fingerprint: str
+    warnings: tuple[JsonObject, ...]
+    created_at: _DATETIME
+
+
 class VisionInterviewTurnFact(FrozenModel):
     """Immutable initial or revision interview turn."""
 
@@ -492,6 +504,7 @@ class WorkflowFactSnapshot(FrozenModel):
     project: ProjectFact
     review_decisions: tuple[ReviewDecisionFact, ...] = ()
     vision_revision_intents: tuple[VisionRevisionIntentFact, ...] = ()
+    vision_evidence_snapshots: tuple[VisionEvidenceSnapshotFact, ...] = ()
     vision_interview_turns: tuple[VisionInterviewTurnFact, ...] = ()
     vision_artifacts: tuple[VisionArtifactFact, ...] = ()
     vision_artifact_decisions: tuple[VisionArtifactDecisionFact, ...] = ()

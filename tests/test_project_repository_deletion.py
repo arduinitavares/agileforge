@@ -20,6 +20,7 @@ from models.product_definition import (
     SpecificationDecision,
     VisionArtifact,
     VisionArtifactDecision,
+    VisionEvidenceSnapshot,
     VisionInterviewTurn,
     VisionRevisionIntent,
 )
@@ -27,9 +28,10 @@ from models.repository import RepositoryBinding
 from models.specs import SpecRegistry
 from models.workflow import WorkflowNodeAttempt, WorkflowNodeAttemptOutcome
 from repositories.project import ProjectRepository
+from services.contracts.vision_evidence import VisionEvidenceBundle, VisionEvidenceItem
 from tests.workflow.lifecycle_fixtures import seed_accepted_specification
-from workflow.contracts import GRAPH_VERSION
-from workflow.fingerprints import canonical_hash
+from workflow.contracts import GRAPH_VERSION, JsonObject
+from workflow.fingerprints import canonical_hash, canonical_json
 
 if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
@@ -42,6 +44,7 @@ _PRODUCT_MODELS = (
     VisionInterviewTurn,
     VisionArtifactDecision,
     VisionArtifact,
+    VisionEvidenceSnapshot,
     ProductGoalOutcome,
     ProductGoalArtifactDecision,
     ProductGoalArtifact,
@@ -71,6 +74,45 @@ def _repository_binding(project_id: int) -> RepositoryBinding:
         probe_version="agileforge.repository-probe.v1",
         inspected_at=datetime(2026, 8, 9, 12, tzinfo=UTC),
         recorded_by="operator@example.com",
+    )
+
+
+def _vision_evidence_snapshot(
+    project_id: int,
+    attempt: WorkflowNodeAttempt,
+    repository_binding_id: int,
+) -> VisionEvidenceSnapshot:
+    """Create one valid immutable snapshot bound to the deletion fixture."""
+    content: JsonObject = {"project_name": "Populated lineage"}
+    item = VisionEvidenceItem(
+        evidence_id="project-metadata",
+        kind="project_metadata",
+        relative_path=None,
+        content_fingerprint=canonical_hash(content),
+        trust="operator_provided",
+        content=content,
+        truncated=False,
+    )
+    payload = {
+        "schema_version": "agileforge.vision-evidence.v1",
+        "items": [item.model_dump(mode="json")],
+        "warnings": [],
+    }
+    evidence = VisionEvidenceBundle(
+        schema_version="agileforge.vision-evidence.v1",
+        items=(item,),
+        warnings=(),
+        evidence_fingerprint=canonical_hash(payload),
+    )
+    assert attempt.workflow_node_attempt_id is not None
+    return VisionEvidenceSnapshot(
+        project_id=project_id,
+        repository_binding_id=repository_binding_id,
+        workflow_node_attempt_id=attempt.workflow_node_attempt_id,
+        evidence_json=canonical_json(evidence.model_dump(mode="json")),
+        evidence_fingerprint=evidence.evidence_fingerprint,
+        warnings_json="[]",
+        created_at=datetime(2026, 8, 9, 13, 3, 15, tzinfo=UTC),
     )
 
 
@@ -140,6 +182,13 @@ def _seed_populated_product_lineage(session: Session) -> int:
     session.add(attempt)
     session.flush()
     assert attempt.workflow_node_attempt_id is not None
+    session.add(
+        _vision_evidence_snapshot(
+            project_id,
+            attempt,
+            binding.repository_binding_id,
+        )
+    )
     turn = VisionInterviewTurn(
         project_id=project_id,
         mode="revision",

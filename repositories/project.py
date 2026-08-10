@@ -33,6 +33,7 @@ from models.product_definition import (
     SpecificationDecision,
     VisionArtifact,
     VisionArtifactDecision,
+    VisionEvidenceSnapshot,
     VisionInterviewTurn,
     VisionRevisionIntent,
 )
@@ -310,6 +311,11 @@ def _delete_project_lifecycle_rows(session: Session, project: Project) -> None:
     ):
         session.exec(delete(model).where(col(model.project_id) == project_id))
     _delete_project_vision_rows(session, project_id)
+    session.exec(
+        delete(VisionEvidenceSnapshot).where(
+            col(VisionEvidenceSnapshot.project_id) == project_id
+        )
+    )
     session.exec(
         delete(WorkflowNodeAttemptOutcome).where(
             col(WorkflowNodeAttemptOutcome.project_id) == project_id

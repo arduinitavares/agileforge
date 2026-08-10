@@ -47,6 +47,7 @@ from models.product_definition import (
     ProductGoalOutcome,
     SpecificationCandidate,
     SpecificationDecision,
+    VisionEvidenceSnapshot,
     VisionInterviewTurn,
     VisionRevisionIntent,
 )
@@ -95,6 +96,7 @@ __all__ = [
     "TimeFrame",
     "UserStory",
     "UserStoryDependency",
+    "VisionEvidenceSnapshot",
     "VisionInterviewTurn",
     "VisionRevisionIntent",
     "WorkflowEvent",

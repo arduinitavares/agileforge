@@ -46,6 +46,44 @@ class VisionRevisionIntent(SQLModel, table=True):
     initiated_at: datetime = Field(default_factory=utc_now, nullable=False)
 
 
+class VisionEvidenceSnapshot(SQLModel, table=True):
+    """Immutable collector evidence used by one successful Vision generation."""
+
+    __tablename__ = "vision_evidence_snapshots"
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id",
+            "vision_evidence_snapshot_id",
+            name="uq_vision_evidence_snapshot_project_id",
+        ),
+        ForeignKeyConstraint(
+            ["project_id", "workflow_node_attempt_id"],
+            [
+                "workflow_node_attempts.project_id",
+                "workflow_node_attempts.workflow_node_attempt_id",
+            ],
+            name="fk_vision_evidence_snapshot_attempt",
+        ),
+        ForeignKeyConstraint(
+            ["project_id", "repository_binding_id"],
+            [
+                "repository_bindings.project_id",
+                "repository_bindings.repository_binding_id",
+            ],
+            name="fk_vision_evidence_snapshot_repository_binding",
+        ),
+    )
+
+    vision_evidence_snapshot_id: int | None = Field(default=None, primary_key=True)
+    project_id: int = Field(foreign_key="projects.project_id", index=True)
+    repository_binding_id: int | None = Field(default=None, index=True)
+    workflow_node_attempt_id: int = Field(index=True)
+    evidence_json: str = Field(sa_type=Text)
+    evidence_fingerprint: str = Field(index=True)
+    warnings_json: str = Field(sa_type=Text)
+    created_at: datetime = Field(default_factory=utc_now, nullable=False)
+
+
 class VisionInterviewTurn(SQLModel, table=True):
     """One immutable user/agent interview turn for initial or revision Vision work."""
 
