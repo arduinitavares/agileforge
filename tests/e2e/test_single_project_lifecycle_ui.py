@@ -42,7 +42,6 @@ type JsonObject = dict[str, JsonValue]
 pytestmark = pytest.mark.allow_hosts(["127.0.0.1"])
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
-_ARTIFACT_ROOT = _PROJECT_ROOT / "artifacts" / "ui" / "single-project-lifecycle"
 _PROJECT_ID = 1
 _HTTP_OK = 200
 _HTTP_CREATED = 201
@@ -664,7 +663,6 @@ def dashboard_harness() -> Iterator[DashboardHarness]:
         launch_nonce=launch_nonce,
     )
     wait_for_readiness(child, expected=expected, timeout=15)
-    _ARTIFACT_ROOT.mkdir(parents=True, exist_ok=True)
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
         try:
@@ -1042,7 +1040,7 @@ def test_desktop_human_single_lifecycle(
     _assert_no_horizontal_overflow(page)
     page.locator("#authority-panel").scroll_into_view_if_needed()
     _assert_no_control_overlap(page)
-    screenshot = _ARTIFACT_ROOT / "desktop-1440x900.png"
+    screenshot = tmp_path / "desktop-1440x900.png"
     page.screenshot(path=screenshot, full_page=False, animations="disabled")
     _assert_screenshot_size(screenshot, _DESKTOP_VIEWPORT)
     assert fake.api_errors == []
@@ -1131,7 +1129,7 @@ def test_mobile_dirty_repository_wraps_without_overflow(
     _assert_no_horizontal_overflow(page)
     page.locator("#repository-panel").scroll_into_view_if_needed()
     _assert_no_control_overlap(page)
-    screenshot = _ARTIFACT_ROOT / "mobile-390x844.png"
+    screenshot = tmp_path / "mobile-390x844.png"
     page.screenshot(path=screenshot, full_page=False, animations="disabled")
     _assert_screenshot_size(screenshot, _MOBILE_VIEWPORT)
     assert fake.api_errors == []
