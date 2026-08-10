@@ -14,18 +14,24 @@ from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from git import Git
 from git.exc import GitCommandError
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, TypeAdapter
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    TypeAdapter,
+    ValidationError,
+)
 
-from adapters.adk.model_roles import AGENTIC_MODEL_ROLES
 from repositories.project import ProjectRepository
 from services.agent_workbench.version import agileforge_version
 from services.application import (
-    AgenticActionRequest,
     AgileForgeApplication,
     AuthorityCompileRequest,
     AuthorityRepairRequest,
     AuthorityReviewRequest,
     CreateProjectCommand,
+    DeliveryActionRequest,
     DiscoveryArtifactRequest,
     ProductGoalOutcomeRequest,
     ProductGoalResponseRequest,
@@ -39,7 +45,6 @@ from services.application import (
     VisionRevisionRequest,
     production_application,
 )
-from utils.model_config import get_model_id
 from utils.runtime_controls import UI_LAUNCH_NONCE_ENV
 from workflow.contracts import (
     JsonObject,
@@ -52,7 +57,6 @@ from workflow.contracts import (
 )
 from workflow.requests import TransitionRequest
 
-_TRANSITION_REQUEST = TypeAdapter(TransitionRequest)
 _FRONTEND_ROOT = files("frontend")
 
 
@@ -151,19 +155,17 @@ class AuthorityDecisionApiRequest(MutationApiRequest):
     rationale: DecisionRationale
 
 
-class AgenticActionApiRequest(MutationApiRequest):
-    """Semantic input for one retained agentic delivery leaf."""
+class DeliveryActionApiRequest(MutationApiRequest):
+    """Transport metadata and optional semantic decision selector only."""
 
     instance_key: str | None = None
-    input_payload: JsonObject
-    model_id: str | None = Field(default=None, min_length=1)
 
 
 class PositionedTransitionApiRequest(MutationApiRequest):
-    """Semantic fields for one retained fixed delivery route."""
+    """Operator-owned semantic fields for one retained non-agentic route."""
 
     instance_key: str | None = None
-    input_payload: JsonObject
+    semantic_input: JsonObject
 
 
 class DashboardConfig(BaseModel):
@@ -180,62 +182,25 @@ class DashboardConfig(BaseModel):
     launch_nonce: str | None = None
 
 
-AGENTIC_API_PATHS: dict[str, str] = {
-    "record_brownfield_spec_draft": "brownfield/curate",
-    "compile_authority": "authority/compile",
-    "repair_authority": "authority/repair",
-    "record_vision_draft": "vision/generate",
+DELIVERY_API_PATHS: dict[str, str] = {
     "record_backlog_draft": "backlog/generate",
     "record_roadmap_draft": "roadmap/generate",
     "record_story_draft": "story/generate",
-    "record_sprint_plan": "sprint/generate",
-}
-
-_AGENTIC_NODE_IDS: dict[str, str] = {
-    "record_brownfield_spec_draft": "onboarding.brownfield.curation",
-    "compile_authority": "authority.compile",
-    "repair_authority": "authority.repair",
-    "record_vision_draft": "vision.generate",
-    "record_backlog_draft": "backlog.generate",
-    "record_roadmap_draft": "planning.roadmap.generate",
-    "record_story_draft": "planning.story.generate",
-    "record_sprint_plan": "planning.sprint.plan",
 }
 
 POSITIONED_API_PATHS: dict[str, str] = {
-    "abandon_project_shell": "project/abandon",
-    "abandon_scope_extension": "scope/extension/abandon",
     "apply_story_dependencies": "story/dependencies/apply",
     "close_sprint": "sprint/close",
     "close_story": "story/close",
     "complete_task": "sprint/task/complete",
-    "decide_amendment_spec_draft": "scope/extension/spec/decide",
     "decide_backlog": "backlog/decide",
-    "decide_brownfield_initial_spec": "brownfield/spec/decide",
-    "decide_extension_prd": "scope/extension/prd/decide",
-    "decide_initial_spec_draft": "discovery/spec/decide",
-    "decide_prd": "discovery/prd/decide",
     "decide_roadmap": "roadmap/decide",
     "decide_sprint_plan": "sprint/decide",
     "decide_story": "story/decide",
-    "decide_vision": "vision/decide",
     "reconcile_backlog": "backlog/reconcile",
-    "reconcile_scope_extension": "scope/extension/reconcile",
-    "record_amendment_spec_draft": "scope/extension/spec/record",
-    "record_authority_feedback": "authority/feedback",
-    "record_challenge_artifact": "discovery/challenge/record",
-    "record_extension_challenge": "scope/extension/challenge/record",
-    "record_extension_prd": "scope/extension/prd/record",
-    "record_initial_spec_draft": "discovery/spec/record",
     "record_post_sprint_triage": "sprint/triage",
-    "record_prd_version": "discovery/prd/record",
-    "record_repository_baseline": "brownfield/baseline/record",
-    "record_repository_inventory": "brownfield/inventory/record",
-    "register_initial_scope": "scope/register",
-    "register_scope_extension": "scope/extension/register",
     "repair_story_readiness": "story/readiness/repair",
     "review_sprint": "sprint/review",
-    "start_scope_extension": "scope/extension/start",
     "start_sprint": "sprint/start",
 }
 
@@ -254,6 +219,8 @@ SEMANTIC_API_PATHS: dict[str, str] = {
     "record_vision_interview_turn": "vision/respond",
     "repair_authority": "authority/repair",
 }
+
+_TRANSITION_REQUEST = TypeAdapter(TransitionRequest)
 
 
 def _application() -> AgileForgeApplication:
@@ -293,8 +260,22 @@ def build_positioned_transition_request(
     position: WorkflowPosition,
     decision: NodeDecision,
 ) -> TransitionRequest:
-    """Build an exact typed request for one route-fixed request kind."""
-    payload = dict(req.input_payload)
+    """Add host-owned workflow guards to retained operator semantics."""
+    forbidden = {
+        "actor",
+        "correlation_id",
+        "decision_fingerprint",
+        "fact_fingerprint",
+        "graph_version",
+        "idempotency_key",
+        "instance_key",
+        "kind",
+        "project_id",
+    }
+    if forbidden.intersection(req.semantic_input):
+        message = "semantic_input must not contain host-owned workflow guards."
+        raise ValueError(message)
+    payload = dict(req.semantic_input)
     payload.update(
         {
             "kind": request_kind,
@@ -368,9 +349,9 @@ def _workflow_actions(position: WorkflowPosition) -> list[JsonObject]:
         if request_kind in SEMANTIC_API_PATHS:
             endpoint = SEMANTIC_API_PATHS[request_kind]
             transport = "semantic"
-        elif request_kind in AGENTIC_API_PATHS:
-            endpoint = AGENTIC_API_PATHS[request_kind]
-            transport = "agentic"
+        elif request_kind in DELIVERY_API_PATHS:
+            endpoint = DELIVERY_API_PATHS[request_kind]
+            transport = "semantic"
         elif request_kind in POSITIONED_API_PATHS:
             endpoint = POSITIONED_API_PATHS[request_kind]
             transport = "positioned"
@@ -797,7 +778,7 @@ def _artifact_history(
 @app.get("/api/projects/{project_id}/vision/history")
 def get_vision_history(project_id: int) -> dict[str, object]:
     """Return durable Vision attempt history."""
-    return _artifact_history(project_id=project_id, node_id="vision.generate")
+    return _artifact_history(project_id=project_id, node_id="vision.interview")
 
 
 @app.get("/api/projects/{project_id}/backlog/history")
@@ -975,54 +956,14 @@ def decide_project_authority(
     )
 
 
-def _run_agentic(
-    *,
+def _delivery_request(
     project_id: int,
-    node_id: str,
-    req: AgenticActionApiRequest,
-) -> dict[str, object]:
-    application = _application()
-    request_kind = next(
-        kind
-        for kind, mapped_node_id in _AGENTIC_NODE_IDS.items()
-        if mapped_node_id == node_id
-    )
-    position, decision = _current_decision(
-        application,
+    req: DeliveryActionApiRequest,
+) -> DeliveryActionRequest:
+    return DeliveryActionRequest(
         project_id=project_id,
-        request_kind=request_kind,
         instance_key=req.instance_key,
-    )
-    if decision is None:
-        return _result_payload(_transition_not_available(position, request_kind))
-    result = application.run_agentic_action(
-        AgenticActionRequest(
-            project_id=project_id,
-            graph_version=position.graph_version,
-            fact_fingerprint=position.fact_fingerprint,
-            decision_fingerprint=decision.decision_fingerprint,
-            node_id=node_id,
-            instance_key=decision.instance_key,
-            input_payload=req.input_payload,
-            model_id=req.model_id or get_model_id(AGENTIC_MODEL_ROLES[node_id]),
-            idempotency_key=req.idempotency_key,
-            actor=req.actor,
-            correlation_id=req.correlation_id,
-        )
-    )
-    return _result_payload(result)
-
-
-@app.post("/api/projects/{project_id}/brownfield/curate")
-def curate_brownfield_project(
-    project_id: int,
-    req: AgenticActionApiRequest,
-) -> dict[str, object]:
-    """Run the dedicated Brownfield curator through a durable attempt."""
-    return _run_agentic(
-        project_id=project_id,
-        node_id="onboarding.brownfield.curation",
-        req=req,
+        **_metadata(req),
     )
 
 
@@ -1052,60 +993,36 @@ def repair_project_authority(
     )
 
 
-@app.post("/api/projects/{project_id}/vision/generate")
-def generate_project_vision(
-    project_id: int,
-    req: AgenticActionApiRequest,
-) -> dict[str, object]:
-    """Generate Vision through the graph recipe."""
-    return _run_agentic(project_id=project_id, node_id="vision.generate", req=req)
-
-
 @app.post("/api/projects/{project_id}/backlog/generate")
 def generate_project_backlog(
     project_id: int,
-    req: AgenticActionApiRequest,
+    req: DeliveryActionApiRequest,
 ) -> dict[str, object]:
-    """Generate Backlog through the graph recipe."""
-    return _run_agentic(project_id=project_id, node_id="backlog.generate", req=req)
+    """Generate Backlog from host-prepared durable input."""
+    return _result_payload(
+        _application().generate_backlog(_delivery_request(project_id, req))
+    )
 
 
 @app.post("/api/projects/{project_id}/roadmap/generate")
 def generate_project_roadmap(
     project_id: int,
-    req: AgenticActionApiRequest,
+    req: DeliveryActionApiRequest,
 ) -> dict[str, object]:
-    """Generate Roadmap through the graph recipe."""
-    return _run_agentic(
-        project_id=project_id,
-        node_id="planning.roadmap.generate",
-        req=req,
+    """Generate Roadmap from host-prepared durable input."""
+    return _result_payload(
+        _application().generate_roadmap(_delivery_request(project_id, req))
     )
 
 
 @app.post("/api/projects/{project_id}/story/generate")
 def generate_project_story(
     project_id: int,
-    req: AgenticActionApiRequest,
+    req: DeliveryActionApiRequest,
 ) -> dict[str, object]:
-    """Generate Story drafts through the graph recipe."""
-    return _run_agentic(
-        project_id=project_id,
-        node_id="planning.story.generate",
-        req=req,
-    )
-
-
-@app.post("/api/projects/{project_id}/sprint/generate")
-def generate_project_sprint(
-    project_id: int,
-    req: AgenticActionApiRequest,
-) -> dict[str, object]:
-    """Generate a Sprint plan through the graph recipe."""
-    return _run_agentic(
-        project_id=project_id,
-        node_id="planning.sprint.plan",
-        req=req,
+    """Generate Story drafts from host-prepared durable input."""
+    return _result_payload(
+        _application().generate_story(_delivery_request(project_id, req))
     )
 
 
@@ -1116,8 +1033,6 @@ type PositionedRoute = Callable[
 
 
 def _positioned_route(request_kind: str) -> PositionedRoute:
-    """Build one FastAPI handler with a fixed closed request discriminator."""
-
     def route(
         project_id: int,
         req: PositionedTransitionApiRequest,
@@ -1131,13 +1046,21 @@ def _positioned_route(request_kind: str) -> PositionedRoute:
         )
         if decision is None:
             return _result_payload(_transition_not_available(position, request_kind))
-        request = build_positioned_transition_request(
-            project_id,
-            request_kind,
-            req,
-            position,
-            decision,
-        )
+        try:
+            request = build_positioned_transition_request(
+                project_id,
+                request_kind,
+                req,
+                position,
+                decision,
+            )
+        except ValidationError as error:
+            raise HTTPException(
+                status_code=422,
+                detail=error.errors(include_url=False),
+            ) from error
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
         return _result_payload(application.transition(request))
 
     route.__name__ = f"transition_{request_kind}"
@@ -1150,14 +1073,6 @@ for _request_kind, _route_suffix in POSITIONED_API_PATHS.items():
         f"/api/projects/{{project_id}}/{_route_suffix}",
         _positioned_route(_request_kind),
         methods=["POST"],
-    )
-
-
-async def delete_project_story(_project_id: int, _parent_requirement: str) -> None:
-    """Reject the removed direct Story mutation used by the old benchmark."""
-    raise HTTPException(
-        status_code=410,
-        detail="Direct Story deletion is not part of the workflow graph API.",
     )
 
 

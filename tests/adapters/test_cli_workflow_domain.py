@@ -96,6 +96,76 @@ def test_semantic_lifecycle_commands_parse(command: str) -> None:
     assert not hasattr(parsed, "changed_by")
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        "project abandon",
+        "project initial-spec --project-id 41",
+        "brownfield curate",
+        "scope register",
+        "scope extension start",
+        "discovery challenge record",
+        "discovery prd record",
+        "discovery spec record",
+        "vision generate",
+        "vision decide",
+    ],
+)
+def test_retired_cli_parser_branches_are_absent(command: str) -> None:
+    """Reject retired command families at parser selection."""
+    with pytest.raises(ValueError, match="invalid choice"):
+        cli_main.build_parser().parse_args(shlex.split(command))
+
+
+@pytest.mark.parametrize(
+    "group",
+    ["backlog", "roadmap", "story"],
+)
+def test_retained_agentic_commands_parse_without_model_owned_input(group: str) -> None:
+    """Accept host-prepared delivery commands with transport metadata only."""
+    parsed = cli_main.build_parser().parse_args(
+        [
+            group,
+            "generate",
+            "--project-id",
+            "41",
+            "--idempotency-key",
+            f"{group}-41",
+            "--actor",
+            "operator",
+        ]
+    )
+
+    assert not hasattr(parsed, "input_file")
+    assert not hasattr(parsed, "model_id")
+
+
+@pytest.mark.parametrize("flag", ["--input-file", "--model-id"])
+def test_removed_agentic_cli_flags_fail_parser_validation(flag: str) -> None:
+    """Reject model-owned input and model overrides at the CLI parser."""
+    with pytest.raises(ValueError, match="unrecognized arguments"):
+        cli_main.build_parser().parse_args(
+            [
+                "backlog",
+                "generate",
+                "--project-id",
+                "41",
+                "--idempotency-key",
+                "backlog-41",
+                "--actor",
+                "operator",
+                flag,
+                "caller-owned",
+            ]
+        )
+
+
+def test_unprepared_sprint_generation_parser_branch_is_absent() -> None:
+    """Do not advertise Sprint generation before capacity input is durable."""
+    with pytest.raises(ValueError, match="invalid choice"):
+        cli_main.build_parser().parse_args(["sprint", "generate"])
+
+
 def test_version_does_not_compose_production_application(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],

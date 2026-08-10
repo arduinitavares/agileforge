@@ -11,20 +11,18 @@ from typing import Literal, NoReturn, Protocol, cast
 
 from pydantic import TypeAdapter, ValidationError
 
-from adapters.adk.model_roles import AGENTIC_MODEL_ROLES
 from cli.workflow_commands import (
-    AGENTIC_REQUEST_KINDS,
     COMMAND_PREFIXES,
     workflow_next,
     workflow_position,
 )
 from services.agent_workbench.version import agileforge_version
 from services.application import (
-    AgenticActionRequest,
     AuthorityCompileRequest,
     AuthorityRepairRequest,
     AuthorityReviewRequest,
     CreateProjectCommand,
+    DeliveryActionRequest,
     DiscoveryArtifactRequest,
     ProductGoalOutcomeRequest,
     ProductGoalResponseRequest,
@@ -39,7 +37,6 @@ from services.application import (
     production_application,
 )
 from utils.logging_config import configure_logging
-from utils.model_config import get_model_id
 from workflow.contracts import (
     JsonObject,
     NodeCategory,
@@ -54,17 +51,6 @@ from workflow.requests import TransitionRequest
 _JSON_OBJECT = TypeAdapter(JsonObject)
 _TRANSITION_REQUEST = TypeAdapter(TransitionRequest)
 
-_AGENTIC_REQUEST_NODES: dict[str, str] = {
-    "record_brownfield_spec_draft": "onboarding.brownfield.curation",
-    "compile_authority": "authority.compile",
-    "repair_authority": "authority.repair",
-    "record_vision_draft": "vision.generate",
-    "record_backlog_draft": "backlog.generate",
-    "record_roadmap_draft": "planning.roadmap.generate",
-    "record_story_draft": "planning.story.generate",
-    "record_sprint_plan": "planning.sprint.plan",
-}
-
 _SEMANTIC_REQUEST_KINDS = frozenset(
     {
         "abandon_product_goal",
@@ -76,8 +62,11 @@ _SEMANTIC_REQUEST_KINDS = frozenset(
         "decide_vision_review",
         "fulfill_product_goal",
         "record_discovery_artifact",
+        "record_backlog_draft",
         "record_product_goal_interview_turn",
+        "record_roadmap_draft",
         "record_specification_candidate",
+        "record_story_draft",
         "record_vision_interview_turn",
         "repair_authority",
     }
@@ -90,8 +79,6 @@ class _ReadProjection(Protocol):
     def project_list(self) -> JsonObject: ...
 
     def project_show(self, *, project_id: int) -> JsonObject: ...
-
-    def project_initial_spec(self, *, project_id: int) -> JsonObject: ...
 
     def repository_status(self, *, project_id: int) -> JsonObject: ...
 
@@ -190,13 +177,6 @@ class _Application(Protocol):
         """Apply one typed transition."""
         ...
 
-    def run_agentic_action(
-        self,
-        request: AgenticActionRequest,
-    ) -> TransitionResult:
-        """Run one exact graph-selected ADK action."""
-        ...
-
     def create_project(self, request: CreateProjectCommand) -> TransitionResult: ...
 
     def respond_to_vision(self, request: VisionResponseRequest) -> TransitionResult: ...
@@ -257,6 +237,12 @@ class _Application(Protocol):
 
     def repair_authority(self, request: AuthorityRepairRequest) -> TransitionResult: ...
 
+    def generate_backlog(self, request: DeliveryActionRequest) -> TransitionResult: ...
+
+    def generate_roadmap(self, request: DeliveryActionRequest) -> TransitionResult: ...
+
+    def generate_story(self, request: DeliveryActionRequest) -> TransitionResult: ...
+
 
 type CommandHandler = Callable[[argparse.Namespace, _Application], int]
 
@@ -295,11 +281,6 @@ def _add_transition_leaf(
     _add_mutation_metadata(parser)
     parser.add_argument("--instance-key")
     parser.set_defaults(request_kind=request_kind)
-    if request_kind in AGENTIC_REQUEST_KINDS:
-        parser.add_argument("--input-file", required=True)
-        parser.add_argument("--model-id")
-        parser.set_defaults(command_handler=_run_agentic)
-        return
     parser.add_argument("--request-file", required=True)
     parser.set_defaults(command_handler=_run_transition)
 
@@ -359,7 +340,7 @@ def _install_artifact_history_reads(
     branches: dict[tuple[str, ...], argparse._SubParsersAction],
 ) -> None:
     for group, node_id in (
-        ("vision", "vision.generate"),
+        ("vision", "vision.interview"),
         ("backlog", "backlog.generate"),
         ("roadmap", "planning.roadmap.generate"),
     ):
@@ -563,6 +544,14 @@ def _install_lifecycle_mutations(
     authority_decide.add_argument("--rationale", required=True)
     _semantic_leaf(branches[("authority",)], "repair", _authority_repair)
 
+    for group, handler in (
+        ("backlog", _backlog_generate),
+        ("roadmap", _roadmap_generate),
+        ("story", _story_generate),
+    ):
+        generate = _semantic_leaf(branches[(group,)], "generate", handler)
+        generate.add_argument("--instance-key")
+
 
 def build_parser() -> argparse.ArgumentParser:
     """Build the graph-backed command tree."""
@@ -586,9 +575,6 @@ def build_parser() -> argparse.ArgumentParser:
     project_show = project_sub.add_parser("show")
     project_show.add_argument("--project-id", type=int, required=True)
     project_show.set_defaults(command_handler=_project_show)
-    project_initial_spec = project_sub.add_parser("initial-spec")
-    project_initial_spec.add_argument("--project-id", type=int, required=True)
-    project_initial_spec.set_defaults(command_handler=_project_initial_spec)
     create = project_sub.add_parser("create")
     create.add_argument("--name", required=True)
     create.add_argument("--description")
@@ -596,9 +582,6 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument("--idempotency-key", required=True)
     create.add_argument("--actor", required=True)
     create.set_defaults(command_handler=_create_project)
-    abandon = project_sub.add_parser("abandon")
-    _add_transition_leaf(abandon, request_kind="abandon_project_shell")
-
     workflow = subparsers.add_parser("workflow")
     workflow_sub = workflow.add_subparsers(dest="workflow_action", required=True)
     next_command = workflow_sub.add_parser("next")
@@ -635,15 +618,6 @@ def _project_list(_args: argparse.Namespace, application: _Application) -> int:
 
 def _project_show(args: argparse.Namespace, application: _Application) -> int:
     return _emit_read(application.reads.project_show(project_id=args.project_id))
-
-
-def _project_initial_spec(
-    args: argparse.Namespace,
-    application: _Application,
-) -> int:
-    return _emit_read(
-        application.reads.project_initial_spec(project_id=args.project_id)
-    )
 
 
 def _repository_status(args: argparse.Namespace, application: _Application) -> int:
@@ -1012,6 +986,28 @@ def _authority_repair(args: argparse.Namespace, application: _Application) -> in
     )
 
 
+def _delivery_action_request(args: argparse.Namespace) -> DeliveryActionRequest:
+    return DeliveryActionRequest(
+        project_id=args.project_id,
+        instance_key=args.instance_key,
+        idempotency_key=args.idempotency_key,
+        actor=args.actor,
+        correlation_id=args.correlation_id,
+    )
+
+
+def _backlog_generate(args: argparse.Namespace, application: _Application) -> int:
+    return _emit_result(application.generate_backlog(_delivery_action_request(args)))
+
+
+def _roadmap_generate(args: argparse.Namespace, application: _Application) -> int:
+    return _emit_result(application.generate_roadmap(_delivery_action_request(args)))
+
+
+def _story_generate(args: argparse.Namespace, application: _Application) -> int:
+    return _emit_result(application.generate_story(_delivery_action_request(args)))
+
+
 def _workflow_next(args: argparse.Namespace, application: _Application) -> int:
     _write_json(workflow_next(application=application, project_id=args.project_id))
     return 0
@@ -1107,31 +1103,6 @@ def _run_transition(args: argparse.Namespace, application: _Application) -> int:
     )
     request = _TRANSITION_REQUEST.validate_python(payload)
     return _emit_result(application.transition(request))
-
-
-def _run_agentic(args: argparse.Namespace, application: _Application) -> int:
-    request_kind = cast("str", args.request_kind)
-    node_id = _AGENTIC_REQUEST_NODES[request_kind]
-    position, decision = _current_decision(application, args)
-    if decision is None:
-        return _emit_result(_unavailable_result(position, request_kind))
-    model_id = args.model_id or get_model_id(AGENTIC_MODEL_ROLES[node_id])
-    result = application.run_agentic_action(
-        AgenticActionRequest(
-            project_id=args.project_id,
-            graph_version=position.graph_version,
-            fact_fingerprint=position.fact_fingerprint,
-            decision_fingerprint=decision.decision_fingerprint,
-            node_id=node_id,
-            instance_key=decision.instance_key,
-            input_payload=_read_json_object(args.input_file),
-            model_id=model_id,
-            idempotency_key=args.idempotency_key,
-            actor=args.actor,
-            correlation_id=args.correlation_id,
-        )
-    )
-    return _emit_result(result)
 
 
 def _emit_result(result: TransitionResult) -> int:

@@ -5,23 +5,40 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import cache
 from importlib import import_module
-from typing import TYPE_CHECKING, Literal, Protocol, TypedDict, Unpack, cast
+from typing import TYPE_CHECKING, Any, Literal, Protocol, TypedDict, Unpack, cast
 
-from pydantic import Field
-from sqlmodel import Session
+from pydantic import Field, TypeAdapter, ValidationError
+from sqlmodel import Session, col, select
 
 from adapters.adk.model_roles import AGENTIC_MODEL_ROLES
 from adapters.git.repository_probe import GitPythonRepositoryProbe
+from models.product_definition import ProductGoalArtifact, VisionArtifact
 from models.specs import CompiledSpecAuthority, SpecRegistry
+from models.workflow import (
+    BacklogArtifact,
+    BacklogArtifactDecision,
+    RoadmapArtifact,
+    RoadmapArtifactDecision,
+    StoryArtifact,
+    StoryArtifactDecision,
+)
 from services.agent_workbench.authority_projection import pending_authority_fingerprint
 from services.authority_compilation_input import AuthorityCompilationInputService
 from services.authority_review_projection import (
     AuthorityReviewSnapshot,
     build_authority_review_snapshot_in_session,
 )
+from services.contracts.backlog import InputSchema as BacklogInput
+from services.contracts.backlog import OutputSchema as BacklogOutput
 from services.contracts.product_goal import ProductGoalInterviewInput
+from services.contracts.roadmap import RoadmapBuilderInput, RoadmapBuilderOutput
+from services.contracts.story import UserStoryWriterInput, UserStoryWriterOutput
 from services.contracts.vision import VisionInterviewInput
-from services.node_attempt_replay import NodeAttemptReplayQuery, TransitionReplayQuery
+from services.node_attempt_replay import (
+    DurableNodeAttemptReplayService,
+    NodeAttemptReplayQuery,
+    TransitionReplayQuery,
+)
 from services.product_goal_interview_input import ProductGoalInterviewInputService
 from services.project_lifecycle import (
     CreateProjectCommand,
@@ -29,6 +46,9 @@ from services.project_lifecycle import (
     RepositoryAttachmentCommand,
     RepositoryRefreshCommand,
 )
+from services.roadmap_runtime import build_roadmap_input_context
+from services.story_linkage import normalize_requirement_key
+from services.story_runtime import build_story_input_context
 from services.vision_interview_input import VisionInterviewInputService
 from utils.model_config import get_model_id
 from workflow.contracts import (
@@ -42,6 +62,7 @@ from workflow.contracts import (
     WorkflowErrorCode,
     WorkflowPosition,
 )
+from workflow.fingerprints import canonical_hash, canonical_json
 from workflow.requests import (
     AbandonProductGoal,
     BeginVisionRevision,
@@ -60,6 +81,8 @@ if TYPE_CHECKING:
 
     from adapters.adk.recipes import AdkRecipeRegistry
     from workflow.requests import TransitionRequest
+
+_JSON_OBJECT = TypeAdapter(JsonObject)
 
 
 class WorkflowDomainPort(Protocol):
@@ -163,6 +186,20 @@ class _AuthorityRepairInputPort(Protocol):
     ) -> JsonObject | None: ...
 
 
+class _DeliveryActionInputPort(Protocol):
+    """Host preparation for retained delivery-generation actions."""
+
+    def replay(self, query: NodeAttemptReplayQuery) -> TransitionResult | None: ...
+
+    def build(
+        self,
+        *,
+        project_id: int,
+        decision: NodeDecision,
+        node_id: str,
+    ) -> JsonObject | None: ...
+
+
 @dataclass(frozen=True)
 class AuthorityReviewSelectionService:
     """Build one facts-only review identity from durable authority state."""
@@ -255,6 +292,56 @@ class AuthorityRepairInputService:
 
 
 @dataclass(frozen=True)
+class _DeliveryLineage:
+    """Exact durable source rows shared by retained delivery inputs."""
+
+    authority: CompiledSpecAuthority
+    goal: ProductGoalArtifact
+    spec: SpecRegistry
+    vision: VisionArtifact
+
+
+@dataclass(frozen=True)
+class DeliveryActionInputService:
+    """Prepare retained delivery model input from exact durable graph facts."""
+
+    engine: Engine
+
+    def replay(self, query: NodeAttemptReplayQuery) -> TransitionResult | None:
+        """Replay an exact delivery attempt before rebuilding current input."""
+        return DurableNodeAttemptReplayService(engine=self.engine).replay(query)
+
+    def build(
+        self,
+        *,
+        project_id: int,
+        decision: NodeDecision,
+        node_id: str,
+    ) -> JsonObject | None:
+        """Build one typed payload, or fail closed when durable input is incomplete."""
+        if node_id == "planning.sprint.plan":
+            return None
+        payload: JsonObject | None = None
+        try:
+            with Session(self.engine) as session:
+                lineage = _delivery_lineage(
+                    session,
+                    project_id=project_id,
+                    decision=decision,
+                )
+                if lineage is not None:
+                    if node_id == "backlog.generate":
+                        payload = _backlog_input(session, decision, lineage)
+                    elif node_id == "planning.roadmap.generate":
+                        payload = _roadmap_input(session, decision, lineage)
+                    elif node_id == "planning.story.generate":
+                        payload = _story_input(session, decision, lineage)
+        except (ValidationError, ValueError):
+            return None
+        return payload
+
+
+@dataclass(frozen=True)
 class ProductGoalLifecycleServices:
     """Host-owned services for the isolated Product Goal child graph."""
 
@@ -270,6 +357,7 @@ class _LifecycleServiceOptions(TypedDict, total=False):
     authority_compilation_input: _AuthorityCompilationInputPort | None
     authority_review_selection: _AuthorityReviewSelectionPort | None
     authority_repair_input: _AuthorityRepairInputPort | None
+    delivery_action_input: _DeliveryActionInputPort | None
 
 
 class _ReadProjectionPort(Protocol):
@@ -280,8 +368,6 @@ class _ReadProjectionPort(Protocol):
     def project_show(self, *, project_id: int) -> JsonObject: ...
 
     def repository_status(self, *, project_id: int) -> JsonObject: ...
-
-    def project_initial_spec(self, *, project_id: int) -> JsonObject: ...
 
     def vision_status(self, *, project_id: int) -> JsonObject: ...
 
@@ -397,7 +483,7 @@ _LEASE_SECONDS = 300
 
 
 class AgenticActionRequest(FrozenModel):
-    """Exact transport-supplied request for one agentic graph decision."""
+    """Internal host-prepared request for one agentic graph decision."""
 
     project_id: int
     graph_version: str
@@ -409,6 +495,16 @@ class AgenticActionRequest(FrozenModel):
     model_id: str
     idempotency_key: str
     actor: str
+    correlation_id: str | None = None
+
+
+class DeliveryActionRequest(FrozenModel):
+    """Semantic delivery request with no caller-owned model input."""
+
+    project_id: int
+    instance_key: str | None = None
+    idempotency_key: str = Field(min_length=1)
+    actor: str = Field(min_length=1)
     correlation_id: str | None = None
 
 
@@ -606,6 +702,7 @@ class AgileForgeApplication:
             "authority_review_selection"
         )
         self._authority_repair_input = lifecycle_services.get("authority_repair_input")
+        self._delivery_action_input = lifecycle_services.get("delivery_action_input")
         self._project_lifecycle: ProjectLifecycleService | None = None
 
     @property
@@ -740,6 +837,89 @@ class AgileForgeApplication:
                 actor=request.actor,
                 correlation_id=request.correlation_id,
             ),
+        )
+
+    def generate_backlog(self, request: DeliveryActionRequest) -> TransitionResult:
+        """Generate Backlog from host-prepared durable workflow facts."""
+        return self._run_delivery_action(
+            request,
+            node_id="backlog.generate",
+        )
+
+    def generate_roadmap(self, request: DeliveryActionRequest) -> TransitionResult:
+        """Generate Roadmap from host-prepared durable workflow facts."""
+        return self._run_delivery_action(
+            request,
+            node_id="planning.roadmap.generate",
+        )
+
+    def generate_story(self, request: DeliveryActionRequest) -> TransitionResult:
+        """Generate one Story set from its exact durable requirement instance."""
+        return self._run_delivery_action(
+            request,
+            node_id="planning.story.generate",
+        )
+
+    def generate_sprint(self, request: DeliveryActionRequest) -> TransitionResult:
+        """Fail closed until a durable Sprint capacity input contract exists."""
+        return self._run_delivery_action(
+            request,
+            node_id="planning.sprint.plan",
+        )
+
+    def _run_delivery_action(
+        self,
+        request: DeliveryActionRequest,
+        *,
+        node_id: str,
+    ) -> TransitionResult:
+        input_service = self._delivery_action_input
+        if input_service is None:
+            return _transition_not_available(None, node_id)
+        replay = input_service.replay(
+            NodeAttemptReplayQuery(
+                project_id=request.project_id,
+                graph_version=None,
+                fact_fingerprint=None,
+                decision_fingerprint=None,
+                node_id=node_id,
+                instance_key=request.instance_key,
+                idempotency_key=request.idempotency_key,
+                actor=request.actor,
+                correlation_id=request.correlation_id,
+            )
+        )
+        if replay is not None:
+            return replay
+        position = self.position(project_id=request.project_id)
+        decision = _unique_available_decision(
+            position,
+            node_id,
+            instance_key=request.instance_key,
+        )
+        if decision is None or decision.category is not NodeCategory.AVAILABLE:
+            return _transition_not_available(position, node_id)
+        input_payload = input_service.build(
+            project_id=request.project_id,
+            decision=decision,
+            node_id=node_id,
+        )
+        if input_payload is None:
+            return _transition_not_available(position, node_id)
+        return self.run_agentic_action(
+            AgenticActionRequest(
+                project_id=request.project_id,
+                graph_version=position.graph_version,
+                fact_fingerprint=position.fact_fingerprint,
+                decision_fingerprint=decision.decision_fingerprint,
+                node_id=node_id,
+                instance_key=decision.instance_key,
+                input_payload=input_payload,
+                model_id=get_model_id(AGENTIC_MODEL_ROLES[node_id]),
+                idempotency_key=request.idempotency_key,
+                actor=request.actor,
+                correlation_id=request.correlation_id,
+            )
         )
 
     def respond_to_vision(
@@ -1485,9 +1665,421 @@ def _guarded_product_goal_interview_decision(
     )
 
 
+def _integer_fact_reference(
+    decision: NodeDecision,
+    fact_type: str,
+) -> tuple[int, FactReference] | None:
+    reference = _single_fact_reference(decision, fact_type)
+    if reference is None:
+        return None
+    try:
+        return int(reference.fact_id), reference
+    except ValueError:
+        return None
+
+
+def _optional_fact_reference(
+    decision: NodeDecision,
+    fact_type: str,
+) -> tuple[bool, FactReference | None]:
+    references = tuple(
+        item for item in decision.fact_references if item.fact_type == fact_type
+    )
+    return (len(references) <= 1, references[0] if references else None)
+
+
+def _delivery_lineage(
+    session: Session,
+    *,
+    project_id: int,
+    decision: NodeDecision,
+) -> _DeliveryLineage | None:
+    authority_target = _integer_fact_reference(decision, "authority")
+    goal_target = _integer_fact_reference(decision, "product_goal")
+    if authority_target is None or goal_target is None:
+        return None
+    authority_id, authority_reference = authority_target
+    goal_id, goal_reference = goal_target
+    authority = session.get(CompiledSpecAuthority, authority_id)
+    goal = session.get(ProductGoalArtifact, goal_id)
+    spec = (
+        None
+        if authority is None
+        else session.get(SpecRegistry, authority.spec_version_id)
+    )
+    vision = (
+        None if goal is None else session.get(VisionArtifact, goal.vision_artifact_id)
+    )
+    if (
+        authority is None
+        or goal is None
+        or spec is None
+        or vision is None
+        or authority.compiled_artifact_json is None
+        or pending_authority_fingerprint(authority) != authority_reference.fingerprint
+        or goal.project_id != project_id
+        or goal.product_goal_artifact_id != goal_id
+        or goal.content_fingerprint != goal_reference.fingerprint
+        or vision.project_id != project_id
+        or vision.vision_artifact_id != goal.vision_artifact_id
+        or vision.content_fingerprint != goal.vision_fingerprint
+        or spec.project_id != project_id
+        or spec.status != "approved"
+        or spec.source_vision_artifact_id != goal.vision_artifact_id
+        or spec.source_vision_fingerprint != goal.vision_fingerprint
+        or spec.source_product_goal_artifact_id != goal_id
+        or spec.source_product_goal_fingerprint != goal.content_fingerprint
+    ):
+        return None
+    return _DeliveryLineage(
+        authority=authority,
+        goal=goal,
+        spec=spec,
+        vision=vision,
+    )
+
+
+def _canonical_artifact(
+    content_json: str,
+    fingerprint: str,
+) -> JsonObject | None:
+    try:
+        content = _JSON_OBJECT.validate_json(content_json)
+    except ValidationError:
+        return None
+    if (
+        canonical_json(content) != content_json
+        or canonical_hash(content) != fingerprint
+    ):
+        return None
+    return content
+
+
+def _backlog_input(
+    session: Session,
+    decision: NodeDecision,
+    lineage: _DeliveryLineage,
+) -> JsonObject | None:
+    valid_prior, prior_reference = _optional_fact_reference(decision, "backlog")
+    if not valid_prior:
+        return None
+    prior_state = "NO_HISTORY"
+    user_input: str | None = None
+    if prior_reference is not None:
+        try:
+            prior_id = int(prior_reference.fact_id)
+        except ValueError:
+            return None
+        prior = session.get(BacklogArtifact, prior_id)
+        if (
+            prior is None
+            or prior.project_id != lineage.goal.project_id
+            or prior.content_fingerprint != prior_reference.fingerprint
+            or prior.product_goal_artifact_id != lineage.goal.product_goal_artifact_id
+            or prior.product_goal_fingerprint != lineage.goal.content_fingerprint
+        ):
+            return None
+        prior_content = _canonical_artifact(
+            prior.canonical_content_json,
+            prior.content_fingerprint,
+        )
+        if prior_content is None:
+            return None
+        BacklogOutput.model_validate(prior_content)
+        prior_state = prior.canonical_content_json
+        review = session.exec(
+            select(BacklogArtifactDecision).where(
+                col(BacklogArtifactDecision.project_id) == prior.project_id,
+                col(BacklogArtifactDecision.backlog_artifact_id) == prior_id,
+            )
+        ).one_or_none()
+        if review is not None and review.decision in {"feedback", "rejected"}:
+            user_input = review.rationale
+    payload = BacklogInput(
+        product_vision_statement=lineage.vision.statement,
+        product_goal_statement=lineage.goal.statement,
+        technical_spec=lineage.spec.content,
+        compiled_authority=cast("str", lineage.authority.compiled_artifact_json),
+        prior_backlog_state=prior_state,
+        user_input=user_input,
+    )
+    return _JSON_OBJECT.validate_python(payload.model_dump(mode="json"))
+
+
+def _required_backlog(
+    session: Session,
+    decision: NodeDecision,
+    lineage: _DeliveryLineage,
+) -> tuple[BacklogArtifact, BacklogOutput] | None:
+    target = _integer_fact_reference(decision, "backlog")
+    if target is None:
+        return None
+    backlog_id, reference = target
+    backlog = session.get(BacklogArtifact, backlog_id)
+    if (
+        backlog is None
+        or backlog.project_id != lineage.goal.project_id
+        or backlog.content_fingerprint != reference.fingerprint
+        or backlog.authority_id != lineage.authority.authority_id
+        or backlog.authority_fingerprint
+        != pending_authority_fingerprint(lineage.authority)
+        or backlog.product_goal_artifact_id != lineage.goal.product_goal_artifact_id
+        or backlog.product_goal_fingerprint != lineage.goal.content_fingerprint
+    ):
+        return None
+    content = _canonical_artifact(
+        backlog.canonical_content_json,
+        backlog.content_fingerprint,
+    )
+    if content is None:
+        return None
+    return backlog, BacklogOutput.model_validate(content)
+
+
+def _required_roadmap(
+    session: Session,
+    decision: NodeDecision,
+    backlog: BacklogArtifact,
+) -> tuple[RoadmapArtifact, RoadmapBuilderOutput] | None:
+    target = _integer_fact_reference(decision, "roadmap")
+    if target is None:
+        return None
+    roadmap_id, reference = target
+    roadmap = session.get(RoadmapArtifact, roadmap_id)
+    if (
+        roadmap is None
+        or roadmap.project_id != backlog.project_id
+        or roadmap.content_fingerprint != reference.fingerprint
+        or roadmap.backlog_artifact_id != backlog.backlog_artifact_id
+        or roadmap.backlog_artifact_fingerprint != backlog.content_fingerprint
+    ):
+        return None
+    content = _canonical_artifact(
+        roadmap.canonical_content_json,
+        roadmap.content_fingerprint,
+    )
+    if content is None:
+        return None
+    return roadmap, RoadmapBuilderOutput.model_validate(content)
+
+
+def _roadmap_input(
+    session: Session,
+    decision: NodeDecision,
+    lineage: _DeliveryLineage,
+) -> JsonObject | None:
+    backlog_source = _required_backlog(session, decision, lineage)
+    valid_prior, prior_reference = _optional_fact_reference(decision, "roadmap")
+    if backlog_source is None or not valid_prior:
+        return None
+    backlog, backlog_output = backlog_source
+    prior_output: RoadmapBuilderOutput | None = None
+    user_input: str | None = None
+    if prior_reference is not None:
+        try:
+            prior_id = int(prior_reference.fact_id)
+        except ValueError:
+            return None
+        prior = session.get(RoadmapArtifact, prior_id)
+        if (
+            prior is None
+            or prior.project_id != backlog.project_id
+            or prior.content_fingerprint != prior_reference.fingerprint
+            or prior.backlog_artifact_id != backlog.backlog_artifact_id
+            or prior.backlog_artifact_fingerprint != backlog.content_fingerprint
+        ):
+            return None
+        prior_content = _canonical_artifact(
+            prior.canonical_content_json,
+            prior.content_fingerprint,
+        )
+        if prior_content is None:
+            return None
+        prior_output = RoadmapBuilderOutput.model_validate(prior_content)
+        review = session.exec(
+            select(RoadmapArtifactDecision).where(
+                col(RoadmapArtifactDecision.project_id) == prior.project_id,
+                col(RoadmapArtifactDecision.roadmap_artifact_id) == prior_id,
+            )
+        ).one_or_none()
+        if review is not None and review.decision in {"feedback", "rejected"}:
+            user_input = review.rationale
+    state: dict[str, Any] = {
+        "product_vision_assessment": {
+            "product_vision_statement": lineage.vision.statement
+        },
+        "backlog_items": [
+            item.model_dump(mode="json") for item in backlog_output.backlog_items
+        ],
+        "pending_spec_content": lineage.spec.content,
+        "compiled_authority_cached": lineage.authority.compiled_artifact_json,
+    }
+    if prior_output is not None:
+        state["roadmap_releases"] = [
+            item.model_dump(mode="json") for item in prior_output.roadmap_releases
+        ]
+    context = build_roadmap_input_context(state, user_input=user_input)
+    payload = RoadmapBuilderInput.model_validate(context)
+    return _JSON_OBJECT.validate_python(payload.model_dump(mode="json"))
+
+
+def _story_outputs(
+    session: Session,
+    *,
+    project_id: int,
+    roadmap: RoadmapArtifact,
+) -> dict[str, object]:
+    rows = session.exec(
+        select(StoryArtifact)
+        .where(col(StoryArtifact.project_id) == project_id)
+        .order_by(
+            col(StoryArtifact.requirement_id),
+            col(StoryArtifact.version_number),
+        )
+    ).all()
+    latest = {row.requirement_id: row for row in rows}
+    decisions = session.exec(
+        select(StoryArtifactDecision).where(
+            col(StoryArtifactDecision.project_id) == project_id
+        )
+    ).all()
+    decisions_by_id = {item.story_artifact_id: item for item in decisions}
+    outputs: dict[str, object] = {}
+    for row in latest.values():
+        artifact_id = row.story_artifact_id
+        if (
+            artifact_id is None
+            or row.roadmap_artifact_id != roadmap.roadmap_artifact_id
+            or row.roadmap_artifact_fingerprint != roadmap.content_fingerprint
+        ):
+            continue
+        review = decisions_by_id.get(artifact_id)
+        if review is not None and review.decision != "accepted":
+            continue
+        content = _canonical_artifact(
+            row.canonical_content_json,
+            row.content_fingerprint,
+        )
+        if content is None:
+            continue
+        output = UserStoryWriterOutput.model_validate(content)
+        outputs[output.parent_requirement] = output.model_dump(mode="json")
+    return outputs
+
+
+def _story_input(
+    session: Session,
+    decision: NodeDecision,
+    lineage: _DeliveryLineage,
+) -> JsonObject | None:
+    backlog_source = _required_backlog(session, decision, lineage)
+    requirement_reference = _single_fact_reference(decision, "backlog_requirement")
+    if backlog_source is None or requirement_reference is None:
+        message = "Story input requires exact Backlog and requirement references."
+        raise ValueError(message)
+    backlog, backlog_output = backlog_source
+    roadmap_source = _required_roadmap(session, decision, backlog)
+    if roadmap_source is None:
+        message = "Story input requires an exact accepted Roadmap reference."
+        raise ValueError(message)
+    roadmap, roadmap_output = roadmap_source
+    requirement_id = requirement_reference.fact_id
+    if (
+        requirement_reference.fingerprint != backlog.content_fingerprint
+        or decision.instance_key != f"requirement:{requirement_id}"
+    ):
+        message = "Story requirement selection does not match durable Backlog facts."
+        raise ValueError(message)
+    requirement = next(
+        (
+            item
+            for item in backlog_output.backlog_items
+            if normalize_requirement_key(item.requirement) == requirement_id
+        ),
+        None,
+    )
+    if requirement is None:
+        message = "Story requirement is absent from the durable Backlog."
+        raise ValueError(message)
+    state: dict[str, Any] = {
+        "roadmap_releases": [
+            item.model_dump(mode="json") for item in roadmap_output.roadmap_releases
+        ],
+        "pending_spec_content": lineage.spec.content,
+        "compiled_authority_cached": lineage.authority.compiled_artifact_json,
+        "story_outputs": _story_outputs(
+            session,
+            project_id=backlog.project_id,
+            roadmap=roadmap,
+        ),
+    }
+    context = build_story_input_context(
+        state,
+        parent_requirement=requirement.requirement,
+    )
+    context["requirement_context"] = (
+        f"{context['requirement_context']}\n"
+        f"Backlog priority: {requirement.priority}\n"
+        f"Business justification: {requirement.justification}\n"
+        f"Technical note: {requirement.technical_note or 'None'}"
+    )
+    valid_prior, prior_reference = _optional_fact_reference(decision, "story")
+    if not valid_prior:
+        message = "Story input has ambiguous prior Story references."
+        raise ValueError(message)
+    if prior_reference is not None:
+        try:
+            prior_id = int(prior_reference.fact_id)
+        except ValueError as error:
+            message = "Prior Story reference is not a durable integer identity."
+            raise ValueError(message) from error
+        prior = session.get(StoryArtifact, prior_id)
+        if (
+            prior is None
+            or prior.project_id != backlog.project_id
+            or prior.requirement_id != requirement_id
+            or prior.roadmap_artifact_id != roadmap.roadmap_artifact_id
+            or prior.roadmap_artifact_fingerprint != roadmap.content_fingerprint
+            or prior.content_fingerprint != prior_reference.fingerprint
+        ):
+            message = "Prior Story reference does not match durable lineage."
+            raise ValueError(message)
+        prior_content = _canonical_artifact(
+            prior.canonical_content_json,
+            prior.content_fingerprint,
+        )
+        if prior_content is None:
+            message = "Prior Story content is not canonical."
+            raise ValueError(message)
+        UserStoryWriterOutput.model_validate(prior_content)
+        review = session.exec(
+            select(StoryArtifactDecision).where(
+                col(StoryArtifactDecision.project_id) == prior.project_id,
+                col(StoryArtifactDecision.story_artifact_id) == prior_id,
+            )
+        ).one_or_none()
+        review_context = (
+            ""
+            if review is None
+            else (
+                f"\nReview outcome: {review.decision}"
+                f"\nReview rationale: {review.rationale}"
+            )
+        )
+        context["requirement_context"] = (
+            f"{context['requirement_context']}\n\n"
+            f"Previous durable Story draft: {prior.canonical_content_json}"
+            f"{review_context}"
+        )
+    payload = UserStoryWriterInput.model_validate(context)
+    return _JSON_OBJECT.validate_python(payload.model_dump(mode="json"))
+
+
 def _unique_available_decision(
     position: WorkflowPosition,
     node_id: str,
+    *,
+    instance_key: str | None = None,
 ) -> NodeDecision | None:
     """Return one current command decision without accepting an ambiguous position."""
     candidates = tuple(
@@ -1495,6 +2087,7 @@ def _unique_available_decision(
         for item in position.decisions
         if item.node_id == node_id
         and item.category in {NodeCategory.AVAILABLE, NodeCategory.WAITING}
+        and (instance_key is None or item.instance_key == instance_key)
     )
     return candidates[0] if len(candidates) == 1 else None
 
@@ -1618,6 +2211,7 @@ def production_application() -> AgileForgeApplication:
         authority_compilation_input=AuthorityCompilationInputService(engine=engine),
         authority_review_selection=AuthorityReviewSelectionService(engine=engine),
         authority_repair_input=AuthorityRepairInputService(engine=engine),
+        delivery_action_input=DeliveryActionInputService(engine=engine),
     )
     application.set_project_lifecycle(
         ProjectLifecycleService(
@@ -1638,6 +2232,8 @@ __all__ = [
     "AuthorityReviewRequest",
     "AuthorityReviewSelectionService",
     "CreateProjectCommand",
+    "DeliveryActionInputService",
+    "DeliveryActionRequest",
     "DiscoveryArtifactRequest",
     "ProductGoalInterviewRequest",
     "ProductGoalLifecycleServices",

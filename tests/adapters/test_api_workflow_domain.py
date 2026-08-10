@@ -13,10 +13,8 @@ import api as api_module
 from api import (
     AuthorityDecisionApiRequest,
     CreateProjectRequest,
-    PositionedTransitionApiRequest,
     build_authority_decision_request,
     build_create_project_command,
-    build_positioned_transition_request,
 )
 from cli.workflow_commands import COMMAND_PREFIXES
 from services.application import (
@@ -25,13 +23,26 @@ from services.application import (
     AuthorityCompileRequest,
     AuthorityReviewRequest,
     CreateProjectCommand,
+    DeliveryActionInputService,
+    DeliveryActionRequest,
     ProductGoalLifecycleServices,
     ProductGoalResponseRequest,
     VisionResponseRequest,
 )
+from services.contracts.backlog import InputSchema as BacklogInput
+from services.contracts.roadmap import RoadmapBuilderInput
+from services.contracts.story import UserStoryWriterInput
 from services.node_attempt_replay import NodeAttemptReplayQuery, TransitionReplayQuery
 from tests.adapters.test_command_renderer import position_fixture
+from tests.workflow.test_planning_transitions import (
+    _domain as planning_domain,
+)
+from tests.workflow.test_planning_transitions import (
+    _record_and_accept_roadmap,
+    _seed_accepted_backlog,
+)
 from workflow.contracts import (
+    FactReference,
     JsonObject,
     NodeCategory,
     NodeDecision,
@@ -41,9 +52,11 @@ from workflow.contracts import (
     WorkflowErrorCode,
     WorkflowPosition,
 )
-from workflow.requests import DecideVision, StartNodeAttempt, TransitionRequest
+from workflow.requests import StartNodeAttempt, TransitionRequest
 
 if TYPE_CHECKING:
+    from sqlalchemy.engine import Engine
+
     from adapters.adk.recipes import AdkRecipeRegistry
 
 PROJECT_ID = 41
@@ -231,6 +244,32 @@ class _FakeApiApplication:
             position=self._position,
         )
 
+    def run_agentic_action(
+        self,
+        request: AgenticActionRequest,
+    ) -> TransitionResult:
+        self.requests.append(request)
+        return self._transition_result or TransitionResult(
+            ok=True,
+            position=self._position,
+        )
+
+    def generate_backlog(self, request: object) -> TransitionResult:
+        return self._record_delivery_request(request)
+
+    def generate_roadmap(self, request: object) -> TransitionResult:
+        return self._record_delivery_request(request)
+
+    def generate_story(self, request: object) -> TransitionResult:
+        return self._record_delivery_request(request)
+
+    def _record_delivery_request(self, request: object) -> TransitionResult:
+        self.requests.append(request)
+        return self._transition_result or TransitionResult(
+            ok=True,
+            position=self._position,
+        )
+
     def decide_authority(self, request: AuthorityReviewRequest) -> TransitionResult:
         self.requests.append(request)
         return self._transition_result or TransitionResult(
@@ -336,9 +375,46 @@ class _AuthorityInput:
         pytest.fail("replayed Authority compile rebuilt current input")
 
 
+class _DeliveryInput:
+    def __init__(self, payload: JsonObject | None) -> None:
+        self.payload = payload
+        self.replay_queries: list[NodeAttemptReplayQuery] = []
+        self.build_calls: list[tuple[int, str, str]] = []
+
+    def replay(self, query: NodeAttemptReplayQuery) -> None:
+        self.replay_queries.append(query)
+
+    def build(
+        self,
+        *,
+        project_id: int,
+        decision: NodeDecision,
+        node_id: str,
+    ) -> JsonObject | None:
+        self.build_calls.append((project_id, decision.decision_fingerprint, node_id))
+        return self.payload
+
+
 class _CapturingApplication(AgileForgeApplication):
     def __init__(self, domain: _BoundaryDomain) -> None:
         super().__init__(workflow_domain=domain, vision_interview_input=_VisionInput())
+        self.agent_requests: list[AgenticActionRequest] = []
+
+    def run_agentic_action(self, request: AgenticActionRequest) -> TransitionResult:
+        self.agent_requests.append(request)
+        return TransitionResult(ok=True)
+
+
+class _CapturingDeliveryApplication(AgileForgeApplication):
+    def __init__(
+        self,
+        domain: _BoundaryDomain,
+        delivery_input: _DeliveryInput,
+    ) -> None:
+        super().__init__(
+            workflow_domain=domain,
+            delivery_action_input=delivery_input,
+        )
         self.agent_requests: list[AgenticActionRequest] = []
 
     def run_agentic_action(self, request: AgenticActionRequest) -> TransitionResult:
@@ -370,6 +446,24 @@ def _vision_decision(fingerprint: str) -> NodeDecision:
         recommendation_kind=RecommendationKind.REQUIRED,
         reason_code="VISION_INTERVIEW_REQUIRED",
         decision_fingerprint=fingerprint,
+    )
+
+
+def _delivery_decision(
+    *,
+    node_id: str,
+    request_kind: str,
+    instance_key: str | None = None,
+) -> NodeDecision:
+    return NodeDecision(
+        node_id=node_id,
+        instance_key=instance_key,
+        child_graph_id="delivery",
+        request_kind=request_kind,
+        category=NodeCategory.AVAILABLE,
+        recommendation_kind=RecommendationKind.REQUIRED,
+        reason_code="DELIVERY_REQUIRED",
+        decision_fingerprint=f"decision-{node_id}",
     )
 
 
@@ -504,15 +598,161 @@ def test_semantic_authority_compile_replays_before_advanced_position() -> None:
     assert authority_input.replay_queries[0].decision_fingerprint is None
 
 
+@pytest.mark.parametrize(
+    ("method_name", "node_id", "request_kind", "instance_key"),
+    [
+        ("generate_backlog", "backlog.generate", "record_backlog_draft", None),
+        (
+            "generate_roadmap",
+            "planning.roadmap.generate",
+            "record_roadmap_draft",
+            None,
+        ),
+        (
+            "generate_story",
+            "planning.story.generate",
+            "record_story_draft",
+            "requirement:REQ-1",
+        ),
+    ],
+)
+def test_retained_delivery_actions_use_host_prepared_input(
+    method_name: str,
+    node_id: str,
+    request_kind: str,
+    instance_key: str | None,
+) -> None:
+    """Run retained delivery agents without caller-owned model input."""
+    decision = _delivery_decision(
+        node_id=node_id,
+        request_kind=request_kind,
+        instance_key=instance_key,
+    )
+    domain = _BoundaryDomain(_vision_position(decision))
+    delivery_input = _DeliveryInput({"prepared_by": "host"})
+    application = _CapturingDeliveryApplication(domain, delivery_input)
+    request = DeliveryActionRequest(
+        project_id=PROJECT_ID,
+        instance_key=instance_key,
+        idempotency_key=f"{node_id}-41",
+        actor="operator",
+    )
+
+    result = getattr(application, method_name)(request)
+
+    assert result.ok is True
+    assert delivery_input.build_calls == [
+        (PROJECT_ID, decision.decision_fingerprint, node_id)
+    ]
+    assert len(application.agent_requests) == 1
+    assert application.agent_requests[0].input_payload == {"prepared_by": "host"}
+    assert application.agent_requests[0].node_id == node_id
+
+
+def test_sprint_generation_fails_closed_without_host_capacity_input() -> None:
+    """Do not invent a Sprint capacity or invoke the model without one."""
+    decision = _delivery_decision(
+        node_id="planning.sprint.plan",
+        request_kind="record_sprint_plan",
+    )
+    domain = _BoundaryDomain(_vision_position(decision))
+    delivery_input = _DeliveryInput(None)
+    application = _CapturingDeliveryApplication(domain, delivery_input)
+    request = DeliveryActionRequest(
+        project_id=PROJECT_ID,
+        idempotency_key="sprint-41",
+        actor="operator",
+    )
+
+    result = application.generate_sprint(request)
+
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.code is WorkflowErrorCode.TRANSITION_NOT_AVAILABLE
+    assert application.agent_requests == []
+
+
+def test_delivery_input_service_builds_from_durable_facts(engine: "Engine") -> None:
+    """Prepare every callable delivery model contract from persisted lineage."""
+    project_id = _seed_accepted_backlog(engine)
+    domain = planning_domain(engine)
+    service = DeliveryActionInputService(engine=engine)
+    roadmap_decision = next(
+        item
+        for item in domain.position(project_id).decisions
+        if item.node_id == "planning.roadmap.generate"
+    )
+    backlog_decision = NodeDecision(
+        node_id="backlog.generate",
+        child_graph_id="backlog",
+        request_kind="record_backlog_draft",
+        category=NodeCategory.AVAILABLE,
+        recommendation_kind=RecommendationKind.REQUIRED,
+        reason_code="BACKLOG_CORRECTION_AVAILABLE",
+        decision_fingerprint="decision-backlog-correction",
+        fact_references=tuple(
+            reference
+            for reference in roadmap_decision.fact_references
+            if reference.fact_type in {"authority", "backlog", "product_goal"}
+        ),
+    )
+
+    backlog_payload = service.build(
+        project_id=project_id,
+        decision=backlog_decision,
+        node_id="backlog.generate",
+    )
+    roadmap_payload = service.build(
+        project_id=project_id,
+        decision=roadmap_decision,
+        node_id="planning.roadmap.generate",
+    )
+    _record_and_accept_roadmap(domain, project_id)
+    story_decision = next(
+        item
+        for item in domain.position(project_id).decisions
+        if item.node_id == "planning.story.generate"
+    )
+    story_payload = service.build(
+        project_id=project_id,
+        decision=story_decision,
+        node_id="planning.story.generate",
+    )
+
+    assert BacklogInput.model_validate(backlog_payload).prior_backlog_state != (
+        "NO_HISTORY"
+    )
+    assert RoadmapBuilderInput.model_validate(roadmap_payload).backlog_items
+    assert UserStoryWriterInput.model_validate(story_payload).parent_requirement == (
+        "Plan immutable work"
+    )
+    assert (
+        service.build(
+            project_id=project_id,
+            decision=story_decision.model_copy(
+                update={
+                    "node_id": "planning.sprint.plan",
+                    "fact_references": (
+                        FactReference(
+                            fact_type="candidate_set",
+                            fact_id=str(project_id),
+                            fingerprint="candidate-set",
+                        ),
+                    ),
+                }
+            ),
+            node_id="planning.sprint.plan",
+        )
+        is None
+    )
+
+
 _AGENTIC_NODE_IDS = {
-    "record_brownfield_spec_draft": "onboarding.brownfield.curation",
     "compile_authority": "authority.compile",
     "repair_authority": "authority.repair",
-    "record_vision_draft": "vision.generate",
     "record_backlog_draft": "backlog.generate",
     "record_roadmap_draft": "planning.roadmap.generate",
     "record_story_draft": "planning.story.generate",
-    "record_sprint_plan": "planning.sprint.plan",
 }
 
 
@@ -595,36 +835,155 @@ def test_api_adapter_does_not_import_legacy_routing_authority() -> None:
     assert "ReadOnlySessionReader" not in source
 
 
-def test_positioned_api_builder_uses_one_current_decision() -> None:
-    """Prepare retained delivery guards from one current position."""
-    payload = PositionedTransitionApiRequest(
-        idempotency_key="vision-review-41",
-        actor="dashboard-user",
-        correlation_id="corr-api-41",
-        input_payload={
-            "vision_artifact_id": 12,
-            "artifact_fingerprint": "vision-12",
-            "decision": "accepted",
-            "rationale": "Reviewed",
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/projects/41/project/abandon",
+        "/api/projects/41/brownfield/curate",
+        "/api/projects/41/brownfield/baseline/record",
+        "/api/projects/41/brownfield/inventory/record",
+        "/api/projects/41/brownfield/spec/decide",
+        "/api/projects/41/scope/register",
+        "/api/projects/41/scope/extension/start",
+        "/api/projects/41/scope/extension/prd/record",
+        "/api/projects/41/scope/extension/spec/decide",
+        "/api/projects/41/discovery/prd/record",
+        "/api/projects/41/discovery/prd/decide",
+        "/api/projects/41/vision/generate",
+        "/api/projects/41/vision/decide",
+    ],
+)
+def test_retired_mutation_api_routes_are_absent(path: str) -> None:
+    """Do not preserve HTTP compatibility for retired lifecycle concepts."""
+    response = TestClient(api_module.app).post(path, json={})
+
+    assert response.status_code == HTTPStatus.NOT_FOUND
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/projects/41/backlog/generate",
+        "/api/projects/41/roadmap/generate",
+        "/api/projects/41/story/generate",
+    ],
+)
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("input_payload", {"caller": "owned"}),
+        ("model_id", "caller/model"),
+    ],
+)
+def test_retained_delivery_api_rejects_model_owned_input(
+    path: str,
+    field: str,
+    value: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep model input preparation and model selection inside the host."""
+    payload: dict[str, object] = {
+        "idempotency_key": "delivery-41",
+        "actor": "operator",
+        field: value,
+    }
+
+    monkeypatch.setattr(
+        api_module,
+        "_application",
+        lambda: _FakeApiApplication(position=_all_request_kinds_position()),
+    )
+
+    response = TestClient(api_module.app).post(path, json=payload)
+
+    assert response.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+
+
+@pytest.mark.parametrize(
+    ("path", "method_name"),
+    [
+        ("/api/projects/41/backlog/generate", "generate_backlog"),
+        ("/api/projects/41/roadmap/generate", "generate_roadmap"),
+        ("/api/projects/41/story/generate", "generate_story"),
+    ],
+)
+def test_retained_delivery_api_calls_host_prepared_application_method(
+    path: str,
+    method_name: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Route metadata-only delivery requests through semantic methods."""
+    application = _FakeApiApplication(position=_all_request_kinds_position())
+    monkeypatch.setattr(api_module, "_application", lambda: application)
+
+    response = TestClient(api_module.app).post(
+        path,
+        json={"idempotency_key": "delivery-41", "actor": "operator"},
+    )
+
+    assert response.status_code == HTTPStatus.OK
+    assert len(application.requests) == 1
+    assert isinstance(application.requests[0], DeliveryActionRequest)
+    assert method_name.startswith("generate_")
+
+
+def test_retained_non_agentic_delivery_api_uses_semantic_input(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep retained review commands callable without an input_payload envelope."""
+    application = _FakeApiApplication(position=_all_request_kinds_position())
+    monkeypatch.setattr(api_module, "_application", lambda: application)
+
+    response = TestClient(api_module.app).post(
+        "/api/projects/41/backlog/decide",
+        json={
+            "idempotency_key": "backlog-review-41",
+            "actor": "operator",
+            "semantic_input": {
+                "backlog_artifact_id": 7,
+                "artifact_fingerprint": "backlog-7",
+                "decision": "accepted",
+                "rationale": "Reviewed",
+            },
         },
     )
 
-    position = _all_request_kinds_position()
-    decision = next(
-        item for item in position.decisions if item.request_kind == "decide_vision"
-    )
-    request = build_positioned_transition_request(
-        41,
-        "decide_vision",
-        payload,
-        position,
-        decision,
+    assert response.status_code == HTTPStatus.OK
+    assert len(application.requests) == 1
+    request = cast("TransitionRequest", application.requests[0])
+    assert request.kind == "decide_backlog"
+
+
+def test_unprepared_sprint_generation_api_route_is_absent() -> None:
+    """Do not expose Sprint generation before durable capacity input exists."""
+    response = TestClient(api_module.app).post(
+        "/api/projects/41/sprint/generate",
+        json={"idempotency_key": "sprint-41", "actor": "operator"},
     )
 
-    assert isinstance(request, DecideVision)
-    assert request.fact_fingerprint == position.fact_fingerprint
-    assert request.decision_fingerprint == decision.decision_fingerprint
-    assert request.actor == "dashboard-user"
+    assert response.status_code == HTTPStatus.NOT_FOUND
+
+
+def test_retained_non_agentic_delivery_api_rejects_input_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reject the removed generic payload field on retained positioned routes."""
+    monkeypatch.setattr(
+        api_module,
+        "_application",
+        lambda: _FakeApiApplication(position=_all_request_kinds_position()),
+    )
+
+    response = TestClient(api_module.app).post(
+        "/api/projects/41/backlog/decide",
+        json={
+            "idempotency_key": "backlog-review-41",
+            "actor": "operator",
+            "input_payload": {"decision": "accepted"},
+        },
+    )
+
+    assert response.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
 
 
 def test_position_endpoint_delegates_once_and_state_endpoint_is_absent(
@@ -643,10 +1002,10 @@ def test_position_endpoint_delegates_once_and_state_endpoint_is_absent(
     assert client.get("/api/projects/41/state").status_code == HTTPStatus.NOT_FOUND
 
 
-def test_position_advertises_one_fixed_route_for_every_available_request_kind(
+def test_position_advertises_only_executable_semantic_api_routes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Render one exact executable API action for every closed request kind."""
+    """Exclude CLI-only and unavailable actions from the HTTP projection."""
     position = _all_request_kinds_position()
     application = _FakeApiApplication(position=position)
     monkeypatch.setattr(api_module, "_application", lambda: application)
@@ -656,12 +1015,14 @@ def test_position_advertises_one_fixed_route_for_every_available_request_kind(
 
     assert response.status_code == HTTPStatus.OK
     actions = response.json()["actions"]
-    assert len(actions) == len(COMMAND_PREFIXES)
-    assert {item["request_kind"] for item in actions} == set(COMMAND_PREFIXES)
+    expected = (
+        set(api_module.SEMANTIC_API_PATHS)
+        | set(api_module.DELIVERY_API_PATHS)
+        | set(api_module.POSITIONED_API_PATHS)
+    )
+    assert {item["request_kind"] for item in actions} == expected
     assert all(item["endpoint"].startswith("/") is False for item in actions)
-    assert {(item["node_id"], item["instance_key"]) for item in actions} == {
-        (item.node_id, item.instance_key) for item in position.decisions
-    }
+    assert "record_sprint_plan" not in expected
     assert all("decision_fingerprint" not in item for item in actions)
 
 
@@ -686,24 +1047,23 @@ def test_structured_conflict_advertises_actions_for_returned_position(
     client = TestClient(api_module.app)
 
     response = client.post(
-        "/api/projects/41/vision/decide",
+        "/api/projects/41/authority/decision",
         json={
             "idempotency_key": "stale-api-41",
             "actor": "dashboard-user",
-            "instance_key": None,
-            "input_payload": {
-                "vision_artifact_id": 7,
-                "artifact_fingerprint": "vision-7",
-                "decision": "accepted",
-                "rationale": "Reviewed",
-            },
+            "decision": "accepted",
+            "rationale": "Reviewed",
         },
     )
 
     assert response.status_code == HTTPStatus.CONFLICT
     detail = response.json()["detail"]
     assert detail["position"] == position.model_dump(mode="json")
-    assert len(detail["actions"]) == len(COMMAND_PREFIXES)
+    assert {item["request_kind"] for item in detail["actions"]} == (
+        set(api_module.SEMANTIC_API_PATHS)
+        | set(api_module.DELIVERY_API_PATHS)
+        | set(api_module.POSITIONED_API_PATHS)
+    )
 
 
 def test_agentic_application_retry_reaches_durable_start_receipt_when_stale() -> None:

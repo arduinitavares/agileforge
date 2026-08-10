@@ -85,159 +85,39 @@ class CommandRendererRegistry:
 
 COMMAND_PREFIXES: dict[str, tuple[str, ...]] = {
     "abandon_product_goal": ("agileforge", "goal", "abandon"),
-    "abandon_scope_extension": (
-        "agileforge",
-        "scope",
-        "extension",
-        "abandon",
-    ),
     "apply_story_dependencies": ("agileforge", "story", "dependencies", "apply"),
+    "begin_vision_revision": ("agileforge", "vision", "revision"),
     "close_sprint": ("agileforge", "sprint", "close"),
     "close_story": ("agileforge", "story", "close"),
     "compile_authority": ("agileforge", "authority", "compile"),
     "complete_task": ("agileforge", "sprint", "task", "complete"),
-    "decide_amendment_spec_draft": (
-        "agileforge",
-        "scope",
-        "extension",
-        "spec",
-        "decide",
-    ),
     "decide_authority": ("agileforge", "authority", "decide"),
     "decide_backlog": ("agileforge", "backlog", "decide"),
-    "decide_brownfield_initial_spec": (
-        "agileforge",
-        "brownfield",
-        "spec",
-        "decide",
-    ),
-    "decide_extension_prd": (
-        "agileforge",
-        "scope",
-        "extension",
-        "prd",
-        "decide",
-    ),
-    "decide_initial_spec_draft": (
-        "agileforge",
-        "discovery",
-        "spec",
-        "decide",
-    ),
-    "decide_prd": ("agileforge", "discovery", "prd", "decide"),
+    "decide_product_goal_review": ("agileforge", "goal", "review"),
     "decide_roadmap": ("agileforge", "roadmap", "decide"),
+    "decide_specification": ("agileforge", "specification", "review"),
     "decide_sprint_plan": ("agileforge", "sprint", "decide"),
     "decide_story": ("agileforge", "story", "decide"),
-    "decide_vision": ("agileforge", "vision", "decide"),
-    "decide_product_goal_review": ("agileforge", "goal", "review"),
-    "decide_specification": ("agileforge", "specification", "review"),
     "decide_vision_review": ("agileforge", "vision", "review"),
-    "begin_vision_revision": ("agileforge", "vision", "revision"),
-    "reconcile_scope_extension": (
-        "agileforge",
-        "scope",
-        "extension",
-        "reconcile",
-    ),
-    "record_amendment_spec_draft": (
-        "agileforge",
-        "scope",
-        "extension",
-        "spec",
-        "record",
-    ),
-    "record_authority_feedback": ("agileforge", "authority", "feedback"),
+    "fulfill_product_goal": ("agileforge", "goal", "complete"),
+    "reconcile_backlog": ("agileforge", "backlog", "reconcile"),
     "record_backlog_draft": ("agileforge", "backlog", "generate"),
-    "record_brownfield_spec_draft": (
-        "agileforge",
-        "brownfield",
-        "curate",
-    ),
-    "record_challenge_artifact": (
-        "agileforge",
-        "discovery",
-        "challenge",
-        "record",
-    ),
-    "record_extension_challenge": (
-        "agileforge",
-        "scope",
-        "extension",
-        "challenge",
-        "record",
-    ),
-    "record_extension_prd": (
-        "agileforge",
-        "scope",
-        "extension",
-        "prd",
-        "record",
-    ),
-    "record_initial_spec_draft": (
-        "agileforge",
-        "discovery",
-        "spec",
-        "record",
-    ),
+    "record_discovery_artifact": ("agileforge", "discovery", "record"),
     "record_post_sprint_triage": ("agileforge", "sprint", "triage"),
     "record_product_goal_interview_turn": ("agileforge", "goal", "respond"),
-    "record_prd_version": ("agileforge", "discovery", "prd", "record"),
-    "record_repository_baseline": (
-        "agileforge",
-        "brownfield",
-        "baseline",
-        "record",
-    ),
-    "record_repository_inventory": (
-        "agileforge",
-        "brownfield",
-        "inventory",
-        "record",
-    ),
     "record_roadmap_draft": ("agileforge", "roadmap", "generate"),
-    "record_discovery_artifact": ("agileforge", "discovery", "record"),
     "record_specification_candidate": ("agileforge", "specification", "record"),
-    "record_sprint_plan": ("agileforge", "sprint", "generate"),
     "record_story_draft": ("agileforge", "story", "generate"),
-    "record_vision_draft": ("agileforge", "vision", "generate"),
     "record_vision_interview_turn": ("agileforge", "vision", "respond"),
-    "register_initial_scope": ("agileforge", "scope", "register"),
-    "register_scope_extension": (
-        "agileforge",
-        "scope",
-        "extension",
-        "register",
-    ),
     "repair_authority": ("agileforge", "authority", "repair"),
     "repair_story_readiness": ("agileforge", "story", "readiness", "repair"),
     "review_sprint": ("agileforge", "sprint", "review"),
-    "start_scope_extension": ("agileforge", "scope", "extension", "start"),
     "start_sprint": ("agileforge", "sprint", "start"),
-    "fulfill_product_goal": ("agileforge", "goal", "complete"),
 }
-
-AGENTIC_REQUEST_KINDS = frozenset(
-    {
-        "record_brownfield_spec_draft",
-        "compile_authority",
-        "repair_authority",
-        "record_vision_draft",
-        "record_backlog_draft",
-        "record_roadmap_draft",
-        "record_story_draft",
-        "record_sprint_plan",
-    }
-)
-
-
-def _flag(name: str) -> str:
-    return f"--{name.replace('_', '-')}"
 
 
 def _render_command(
     prefix: tuple[str, ...],
-    *,
-    request_kind: str,
 ) -> CommandRender:
     def render(
         position: WorkflowPosition,
@@ -250,10 +130,7 @@ def _render_command(
         ]
         if decision.instance_key is not None:
             command.extend(("--instance-key", decision.instance_key))
-        agentic = request_kind in AGENTIC_REQUEST_KINDS
-        payload_flag = "--input-file" if agentic else "--request-file"
-        payload_name = "<input-file>" if agentic else "<request-file>"
-        command.extend((payload_flag, payload_name))
+        command.extend(("--request-file", "<request-file>"))
         command.extend(
             (
                 "--idempotency-key",
@@ -297,11 +174,22 @@ _SEMANTIC_ARGUMENTS: dict[str, tuple[str, ...]] = {
     ),
     "fulfill_product_goal": ("--rationale", "<rationale>"),
     "record_discovery_artifact": ("--file", "<file>"),
+    "record_backlog_draft": (),
     "record_product_goal_interview_turn": ("--text", "<text>"),
+    "record_roadmap_draft": (),
     "record_specification_candidate": ("--file", "<file>"),
+    "record_story_draft": (),
     "record_vision_interview_turn": ("--text", "<text>"),
     "repair_authority": (),
 }
+
+_DELIVERY_REQUEST_KINDS = frozenset(
+    {
+        "record_backlog_draft",
+        "record_roadmap_draft",
+        "record_story_draft",
+    }
+)
 
 
 def _render_semantic_command(
@@ -310,18 +198,28 @@ def _render_semantic_command(
 ) -> CommandRender:
     def render(
         position: WorkflowPosition,
-        _decision: NodeDecision,
+        decision: NodeDecision,
     ) -> tuple[str, ...]:
-        return (
+        command = [
             *prefix,
             "--project-id",
             str(position.project_id),
-            *_SEMANTIC_ARGUMENTS[request_kind],
-            "--idempotency-key",
-            "<idempotency-key>",
-            "--actor",
-            "<actor>",
+        ]
+        if (
+            request_kind in _DELIVERY_REQUEST_KINDS
+            and decision.instance_key is not None
+        ):
+            command.extend(("--instance-key", decision.instance_key))
+        command.extend(
+            (
+                *_SEMANTIC_ARGUMENTS[request_kind],
+                "--idempotency-key",
+                "<idempotency-key>",
+                "--actor",
+                "<actor>",
+            )
         )
+        return tuple(command)
 
     return render
 
@@ -333,7 +231,7 @@ COMMAND_RENDERERS = CommandRendererRegistry(
             render=(
                 _render_semantic_command(prefix, kind)
                 if kind in _SEMANTIC_ARGUMENTS
-                else _render_command(prefix, request_kind=kind)
+                else _render_command(prefix)
             ),
         )
         for kind, prefix in COMMAND_PREFIXES.items()
@@ -361,7 +259,8 @@ def render_workflow_next(position: WorkflowPosition) -> WorkflowNextPayload:
     candidates = tuple(
         decision
         for decision in position.decisions
-        if (
+        if decision.request_kind in COMMAND_PREFIXES
+        and (
             decision.category is NodeCategory.AVAILABLE
             or (
                 decision.category is NodeCategory.WAITING
@@ -381,12 +280,14 @@ def render_workflow_next(position: WorkflowPosition) -> WorkflowNextPayload:
         decision.request_kind
         for decision in candidates
         if decision.request_kind in _SEMANTIC_ARGUMENTS
+        and decision.request_kind not in _DELIVERY_REQUEST_KINDS
     )
     commands = [
         _decision_payload(position, decision)
         for decision in candidates
         if (
             decision.request_kind not in _SEMANTIC_ARGUMENTS
+            or decision.request_kind in _DELIVERY_REQUEST_KINDS
             or semantic_counts[decision.request_kind] == 1
         )
     ]
@@ -429,7 +330,6 @@ def workflow_position(
 
 
 __all__ = [
-    "AGENTIC_REQUEST_KINDS",
     "COMMAND_PREFIXES",
     "COMMAND_RENDERERS",
     "CommandRenderer",

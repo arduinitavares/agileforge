@@ -15,6 +15,7 @@ from workflow.contracts import (
 )
 
 FIXTURE_PATH = Path(__file__).parents[1] / "fixtures" / "workflow_position.json"
+EXPECTED_STORY_COMMAND_COUNT = 2
 _PLACEHOLDERS = {
     "<input-file>": "input.json",
     "<request-file>": "request.json",
@@ -25,6 +26,31 @@ _PLACEHOLDERS = {
     "<reason>": "changed",
     "<idempotency-key>": "run-41",
     "<actor>": "cli-user",
+}
+
+_RETIRED_REQUEST_KINDS = {
+    "abandon_project_shell",
+    "abandon_scope_extension",
+    "decide_amendment_spec_draft",
+    "decide_brownfield_initial_spec",
+    "decide_extension_prd",
+    "decide_initial_spec_draft",
+    "decide_prd",
+    "decide_vision",
+    "record_amendment_spec_draft",
+    "record_brownfield_spec_draft",
+    "record_challenge_artifact",
+    "record_extension_challenge",
+    "record_extension_prd",
+    "record_initial_spec_draft",
+    "record_prd_version",
+    "record_repository_baseline",
+    "record_repository_inventory",
+    "record_vision_draft",
+    "register_initial_scope",
+    "register_scope_extension",
+    "reconcile_scope_extension",
+    "start_scope_extension",
 }
 
 
@@ -88,17 +114,9 @@ def test_renderer_module_has_no_routing_or_repository_policy() -> None:
         assert forbidden not in source
 
 
-def test_renderer_covers_every_graph_request_kind() -> None:
-    """Keep the command registry complete for every graph-authored decision."""
-    definitions = Path(__file__).parents[2] / "workflow" / "definitions"
-    request_kinds = {
-        match.split('"', maxsplit=2)[1]
-        for path in definitions.glob("*.py")
-        for match in path.read_text().splitlines()
-        if "request_kind=" in match
-    }
-
-    assert set(COMMAND_PREFIXES) == request_kinds
+def test_renderer_excludes_retired_transport_request_kinds() -> None:
+    """Do not render compatibility commands for graph modules deleted in Task 9."""
+    assert _RETIRED_REQUEST_KINDS.isdisjoint(COMMAND_PREFIXES)
 
 
 def test_rendered_commands_are_accepted_by_the_cli_parser() -> None:
@@ -139,6 +157,10 @@ def test_rendered_commands_are_accepted_by_the_cli_parser() -> None:
         assert not hasattr(parsed, "expected_fact_fingerprint")
         assert not hasattr(parsed, "expected_decision_fingerprint")
         assert not hasattr(parsed, "changed_by")
+        assert not hasattr(parsed, "input_file")
+        assert not hasattr(parsed, "model_id")
+        assert "--input-file" not in item["command"]
+        assert "--model-id" not in item["command"]
 
 
 def test_lifecycle_positions_render_semantic_commands() -> None:
@@ -177,6 +199,73 @@ def test_lifecycle_positions_render_semantic_commands() -> None:
 
         assert len(payload["commands"]) == 1
         assert payload["commands"][0]["command"].startswith(command_prefix)
+
+
+def test_sprint_generation_is_not_advertised_without_capacity_contract() -> None:
+    """Keep Sprint planning visible but non-executable until capacity is durable."""
+    decision = NodeDecision(
+        node_id="planning.sprint.plan",
+        child_graph_id="planning",
+        request_kind="record_sprint_plan",
+        category=NodeCategory.AVAILABLE,
+        recommendation_kind=RecommendationKind.REQUIRED,
+        reason_code="SPRINT_PLANNING_REQUIRED",
+        decision_fingerprint="decision-sprint",
+    )
+    position = position_fixture().model_copy(
+        update={
+            "decisions": (decision,),
+            "available_nodes": (decision.node_id,),
+            "waiting_nodes": (),
+            "blocked_nodes": (),
+            "invalid_nodes": (),
+        }
+    )
+
+    payload = render_workflow_next(position)
+
+    assert payload["commands"] == []
+    assert payload["waiting_nodes"] == []
+
+
+def test_story_generation_renders_each_exact_requirement_selector() -> None:
+    """Keep parallel Story work reachable through parser-valid semantic commands."""
+    parser = build_parser()
+    decisions = tuple(
+        NodeDecision(
+            node_id="planning.story.generate",
+            instance_key=f"requirement:req-{index}",
+            child_graph_id="planning",
+            request_kind="record_story_draft",
+            category=NodeCategory.AVAILABLE,
+            recommendation_kind=RecommendationKind.REQUIRED,
+            reason_code="STORY_GENERATION_REQUIRED",
+            decision_fingerprint=f"decision-story-{index}",
+        )
+        for index in range(EXPECTED_STORY_COMMAND_COUNT)
+    )
+    position = position_fixture().model_copy(
+        update={
+            "decisions": decisions,
+            "available_nodes": ("planning.story.generate",),
+            "waiting_nodes": (),
+            "blocked_nodes": (),
+            "invalid_nodes": (),
+        }
+    )
+
+    commands = render_workflow_next(position)["commands"]
+
+    assert len(commands) == EXPECTED_STORY_COMMAND_COUNT
+    for index, item in enumerate(commands):
+        argv = [
+            _PLACEHOLDERS.get(argument, argument)
+            for argument in shlex.split(item["command"])[1:]
+        ]
+        parsed = parser.parse_args(argv)
+        assert parsed.instance_key == f"requirement:req-{index}"
+        assert "--input-file" not in item["command"]
+        assert "--model-id" not in item["command"]
 
 
 def test_ambiguous_semantic_decisions_do_not_render_an_unusable_command() -> None:
