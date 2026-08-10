@@ -1166,6 +1166,29 @@ def test_vision_feedback_keeps_reviewed_candidate_separate_from_revision_chain(
     )
 
 
+@pytest.mark.parametrize(
+    "review_decision",
+    ["feedback", "rejected"],
+)
+def test_nonaccepted_vision_review_reopens_ordinary_language_clarification(
+    engine: Engine,
+    review_decision: str,
+) -> None:
+    """Feedback and rejection return to the human response node, never bootstrap."""
+    seeded = _seed_vision_candidate(engine, decision=review_decision)
+    project_id = _seeded_int(seeded, "project_id")
+
+    position = _root_position(engine, project_id)
+    clarification = next(
+        item for item in position.decisions if item.node_id == "vision.interview"
+    )
+
+    assert clarification.category is NodeCategory.AVAILABLE
+    assert clarification.request_kind == "record_vision_interview_turn"
+    assert [item.name for item in clarification.required_inputs] == ["user_text"]
+    assert "goal.interview" not in position.available_nodes
+
+
 def test_accepted_vision_has_current_artifact_and_no_pending_candidate(
     engine: Engine,
 ) -> None:

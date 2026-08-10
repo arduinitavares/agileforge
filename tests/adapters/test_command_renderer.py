@@ -886,7 +886,7 @@ def test_ambiguous_semantic_decisions_do_not_render_an_unusable_command() -> Non
             request_kind="record_vision_interview_turn",
             category=NodeCategory.AVAILABLE,
             recommendation_kind=RecommendationKind.REQUIRED,
-            reason_code="VISION_INTERVIEW_REQUIRED",
+            reason_code="VISION_CLARIFICATION_REQUIRED",
             decision_fingerprint=f"decision-vision-{index}",
         )
         for index in range(2)

@@ -12,7 +12,7 @@ from sqlmodel import Session
 from repositories.workflow import (
     VisionInputFactRepository,
     WorkflowFactLoadError,
-    select_vision_interview_input,
+    select_vision_input,
 )
 from services.contracts.vision import (
     VisionAgentInput,
@@ -70,7 +70,7 @@ class VisionInputService:
             with Session(self.engine) as session:
                 facts = VisionInputFactRepository(session)
                 context = facts.load_context(project_id)
-                selection = select_vision_interview_input(context)
+                selection = select_vision_input(context)
                 recovery = decision.reason_code == "VISION_EVIDENCE_STALE"
                 if selection.prior_turn is not None and not recovery:
                     message = "Vision bootstrap is not current for this lineage."
@@ -154,7 +154,7 @@ class VisionInputService:
         try:
             with Session(self.engine) as session:
                 context = VisionInputFactRepository(session).load_context(project_id)
-                selection = select_vision_interview_input(context)
+                selection = select_vision_input(context)
         except WorkflowFactLoadError as error:
             raise ValueError(str(error)) from error
         prior = selection.prior_turn

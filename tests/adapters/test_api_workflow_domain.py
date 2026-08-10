@@ -917,7 +917,7 @@ def _vision_decision(fingerprint: str) -> NodeDecision:
         request_kind="record_vision_interview_turn",
         category=NodeCategory.AVAILABLE,
         recommendation_kind=RecommendationKind.REQUIRED,
-        reason_code="VISION_INTERVIEW_REQUIRED",
+        reason_code="VISION_CLARIFICATION_REQUIRED",
         decision_fingerprint=fingerprint,
     )
 

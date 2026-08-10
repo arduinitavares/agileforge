@@ -4015,8 +4015,8 @@ def _vision_lineage_snapshot(
     return matches[0]
 
 
-def select_vision_interview_input(context: VisionInputContext) -> VisionInputSelection:
-    """Select one current Vision interview chain from its narrow fact projection."""
+def select_vision_input(context: VisionInputContext) -> VisionInputSelection:
+    """Select one current grounded Vision chain from its narrow fact projection."""
     artifacts_by_id = {
         item.vision_artifact_id: item for item in context.vision_artifacts
     }

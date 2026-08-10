@@ -84,6 +84,7 @@ def _snapshot(
     authorities: tuple[AuthorityFact, ...] | None = None,
     backlog: PhaseArtifactFact | None = None,
     active_goal: bool = True,
+    vision_decision: Literal["accepted", "feedback", "rejected"] = "accepted",
     attempts: tuple[NodeAttemptFact, ...] = (),
 ) -> WorkflowFactSnapshot:
     vision = VisionArtifactFact(
@@ -171,10 +172,10 @@ def _snapshot(
                 vision_artifact_decision_id=PRODUCT_VISION_ID,
                 vision_artifact_id=PRODUCT_VISION_ID,
                 artifact_fingerprint=PRODUCT_VISION_FINGERPRINT,
-                decision="accepted",
-                rationale="Accepted.",
+                decision=vision_decision,
+                rationale=f"Vision {vision_decision}.",
                 reviewer="operator@example.com",
-                idempotency_key="vision-accepted",
+                idempotency_key=f"vision-{vision_decision}",
                 decided_at=EVALUATED_AT,
             ),
         ),
@@ -215,6 +216,32 @@ def test_backlog_requires_an_active_accepted_goal() -> None:
     assert _decision(_snapshot(active_goal=False), "backlog.generate").reason_code == (
         "ACCEPTED_PRODUCT_GOAL_REQUIRED"
     )
+
+
+@pytest.mark.parametrize(
+    ("vision_decision", "goal_unlocked"),
+    [("accepted", True), ("feedback", False), ("rejected", False)],
+)
+def test_only_human_accepted_vision_unlocks_product_goal(
+    vision_decision: Literal["accepted", "feedback", "rejected"],
+    goal_unlocked: bool,
+) -> None:
+    """Product Goal starts only after the operator accepts the exact Vision."""
+    position = _position(
+        _snapshot(active_goal=False, vision_decision=vision_decision)
+    )
+
+    assert ("goal.interview" in position.available_nodes) is goal_unlocked
+
+
+def test_active_product_goal_blocks_accepted_vision_revision() -> None:
+    """A current Goal prevents an accepted Vision from reopening revision work."""
+    position = _position(_snapshot())
+
+    assert "vision.revision.start" not in position.available_nodes
+    assert "vision.revision.start" not in {
+        item.node_id for item in position.decisions
+    }
 
 
 def test_backlog_generation_references_exact_goal_and_authority() -> None:

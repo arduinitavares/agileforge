@@ -440,7 +440,7 @@ def _interview_rule_for_revision(
     return (
         RuleEvaluation(
             RuleCategory.AVAILABLE,
-            "VISION_REVISION_INTERVIEW_REQUIRED",
+            "VISION_REVISION_CLARIFICATION_REQUIRED",
             instance_key=instance_key,
             fact_references=(_interview_reference(state.open_revision),),
         ),

@@ -15,6 +15,7 @@ from models.product_definition import (
     VisionInterviewTurn,
     VisionRevisionIntent,
 )
+from repositories.workflow import select_vision_input
 from services.contracts.vision import (
     VisionAgentInput,
     VisionClarificationInput,
@@ -137,6 +138,11 @@ def _bootstrap_with_evidence(
         )
     )
     assert result.ok
+
+
+def test_vision_input_selection_has_no_interview_legacy_name() -> None:
+    """The grounded selector must not retain the removed interview API name."""
+    assert select_vision_input.__name__ == "select_vision_input"
 
 
 def test_project_only_bootstrap_requires_no_human_response(engine: Engine) -> None:

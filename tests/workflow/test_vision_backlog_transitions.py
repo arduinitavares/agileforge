@@ -8,9 +8,14 @@ from typing import TYPE_CHECKING
 
 import pytest
 from pydantic import ValidationError
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 from models.core import Project
+from models.product_definition import (
+    VisionEvidenceSnapshot,
+    VisionInterviewTurn,
+    VisionRevisionIntent,
+)
 from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance
 from models.workflow import BacklogArtifact
 from services.agent_workbench.backlog_phase import record_backlog_draft_in_session
@@ -19,8 +24,25 @@ from tests.workflow.lifecycle_fixtures import (
     PersistedSpecificationLineage,
     seed_accepted_specification,
 )
+from tests.workflow.test_vision_interview_transitions import (
+    _domain as _vision_domain,
+)
+from tests.workflow.test_vision_interview_transitions import (
+    _record as _record_vision,
+)
+from tests.workflow.test_vision_interview_transitions import (
+    _RecordRequest as _VisionRecordRequest,
+)
+from tests.workflow.test_vision_interview_transitions import (
+    _review_vision,
+    _VisionReview,
+)
+from tests.workflow.test_vision_interview_transitions import (
+    _start as _start_vision,
+)
 from utils.spec_schemas import SpecAuthorityCompilationSuccess
 from workflow.fingerprints import canonical_hash
+from workflow.requests import BeginVisionRevision
 from workflow.requests.product_definition import RecordBacklogDraft
 
 if TYPE_CHECKING:
@@ -163,6 +185,147 @@ def _seed_project_authority(session: Session) -> _DeliveryLineage:
         specification=specification,
         ordinal=1,
     )
+
+
+def test_vision_bootstrap_accepts_project_without_repository_attachment(
+    engine: Engine,
+) -> None:
+    """Grounded bootstrap persists Project evidence when no repository is bound."""
+    with Session(engine) as session:
+        project = Project(name="Repository-free Vision")
+        session.add(project)
+        session.commit()
+        assert project.project_id is not None
+        project_id = project.project_id
+    domain = _vision_domain(engine)
+    start, attempt = _start_vision(domain, project_id, "repository-free-bootstrap")
+
+    result = _record_vision(
+        engine,
+        domain,
+        start,
+        attempt,
+        request=_VisionRecordRequest(
+            complete=False,
+            key="repository-free-bootstrap-record",
+        ),
+    )
+
+    assert result.ok
+    with Session(engine) as session:
+        snapshot = session.exec(
+            select(VisionEvidenceSnapshot).where(
+                VisionEvidenceSnapshot.project_id == project_id
+            )
+        ).one()
+    assert snapshot.repository_binding_id is None
+
+
+def test_vision_revision_reopens_with_grounded_clarification_reason(
+    engine: Engine,
+) -> None:
+    """An incomplete revision accepts ordinary text under the grounded reason."""
+    with Session(engine) as session:
+        project = Project(name="Vision revision clarification")
+        session.add(project)
+        session.commit()
+        assert project.project_id is not None
+        project_id = project.project_id
+    domain = _vision_domain(engine)
+    initial_start, initial_attempt = _start_vision(
+        domain,
+        project_id,
+        "revision-clarification-initial",
+    )
+    initial = _record_vision(
+        engine,
+        domain,
+        initial_start,
+        initial_attempt,
+        request=_VisionRecordRequest(
+            complete=True,
+            key="revision-clarification-initial-record",
+        ),
+    )
+    vision_id = initial.output["vision_artifact_id"]
+    vision_fingerprint = initial.output["vision_fingerprint"]
+    assert isinstance(vision_id, int)
+    assert isinstance(vision_fingerprint, str)
+    assert _review_vision(
+        domain,
+        project_id,
+        _VisionReview(
+            artifact_id=vision_id,
+            fingerprint=vision_fingerprint,
+            decision="accepted",
+            rationale="Accept initial Vision.",
+            idempotency_key="revision-clarification-accept",
+        ),
+    ).ok
+    revision_position = domain.position(project_id)
+    revision = next(
+        item
+        for item in revision_position.decisions
+        if item.node_id == "vision.revision.start"
+    )
+    assert domain.transition(
+        BeginVisionRevision(
+            project_id=project_id,
+            graph_version=revision_position.graph_version,
+            fact_fingerprint=revision_position.fact_fingerprint,
+            decision_fingerprint=revision.decision_fingerprint,
+            idempotency_key="revision-clarification-open",
+            actor="operator@example.com",
+            source_vision_artifact_id=vision_id,
+            source_vision_fingerprint=vision_fingerprint,
+            reason="Clarify the revised target user.",
+        )
+    ).ok
+    revision_start, revision_attempt = _start_vision(
+        domain,
+        project_id,
+        "revision-clarification-start",
+        node_id="vision.bootstrap",
+        operation="revision",
+    )
+    assert _record_vision(
+        engine,
+        domain,
+        revision_start,
+        revision_attempt,
+        request=_VisionRecordRequest(
+            complete=False,
+            key="revision-clarification-record",
+            operation="revision",
+        ),
+    ).ok
+
+    clarification = next(
+        item
+        for item in domain.position(project_id).decisions
+        if item.node_id == "vision.interview"
+    )
+
+    assert clarification.reason_code == "VISION_REVISION_CLARIFICATION_REQUIRED"
+    assert [item.name for item in clarification.required_inputs] == ["user_text"]
+    with Session(engine) as session:
+        turns = session.exec(
+            select(VisionInterviewTurn).where(
+                VisionInterviewTurn.project_id == project_id
+            )
+        ).all()
+        for turn in turns:
+            if turn.revision_intent_id is not None:
+                turn.revision_intent_id = None
+                session.add(turn)
+        session.flush()
+        for intent in session.exec(
+            select(VisionRevisionIntent).where(
+                VisionRevisionIntent.project_id == project_id
+            )
+        ).all():
+            session.delete(intent)
+        session.commit()
 
 
 def test_backlog_row_persists_exact_goal_and_authority_lineage(engine: Engine) -> None:

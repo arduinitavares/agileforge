@@ -32,6 +32,30 @@ In a branch or linked worktree, use that checkout's `./agileforge-dev`.
 `provider_credentials`, and `child_runtime_environment` without exposing
 credential values.
 
+## Vision Bootstrap Development
+
+Use a fresh profile and database for manual Vision bootstrap development:
+
+```sh
+./agileforge-dev init --profile vision-bootstrap-manual --json
+./agileforge-dev ui --profile vision-bootstrap-manual --port auto
+./agileforge-dev info --profile vision-bootstrap-manual --json
+```
+
+Inspect the reported provenance before any manual mutation. Invoke the
+grounded Vision lifecycle through semantic CLI commands only:
+
+```sh
+./agileforge-dev cli --profile vision-bootstrap-manual -- vision bootstrap
+./agileforge-dev cli --profile vision-bootstrap-manual -- vision respond
+./agileforge-dev cli --profile vision-bootstrap-manual -- vision status
+./agileforge-dev cli --profile vision-bootstrap-manual -- vision review
+```
+
+The operator owns manual acceptance and makes the acceptance decision. Automated
+tests use temporary fixtures only; they never use the manual profile or a real
+repository.
+
 ## Create A Project
 
 Project creation is the only command used before graph position exists:
@@ -96,7 +120,7 @@ The current fixed request kinds map to these prefixes:
 
 | Area | Command prefixes |
 | --- | --- |
-| Vision | `vision respond`, `vision review`, `vision revision` |
+| Vision | `vision bootstrap`, `vision respond`, `vision status`, `vision review`, `vision revision` |
 | Product Goal | `goal respond`, `goal review`, `goal complete`, `goal abandon` |
 | Discovery | `discovery record` |
 | Specification | `specification record`, `specification review` |

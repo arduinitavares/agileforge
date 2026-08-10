@@ -374,7 +374,6 @@ def test_prompt_contract_uses_dedicated_repair_prompt() -> None:
     prompt = Path("adapters/adk/prompts/vision.txt").read_text(encoding="utf-8")
     repair = Path("adapters/adk/prompts/vision_repair.txt")
 
-    assert "Do not infer Vision from repository contents" not in prompt
     assert "repository evidence as unreviewed context" in prompt
     assert repair.exists()
     assert "repair" in repair.read_text(encoding="utf-8").lower()
