@@ -552,7 +552,7 @@ git commit -m "feat: collect bounded vision evidence"
 
 ---
 
-### Task 3: Durable Vision Evidence And Provenance Facts
+### Task 3: Durable Vision Evidence Snapshot Foundation
 
 **Files:**
 - Modify: `models/product_definition.py`
@@ -560,17 +560,22 @@ git commit -m "feat: collect bounded vision evidence"
 - Modify: `workflow/facts.py`
 - Modify: `repositories/workflow.py`
 - Modify: `repositories/project.py`
-- Modify: `tests/workflow/test_vision_interview_transitions.py`
 - Modify: `tests/test_project_repository_deletion.py`
 - Create: `tests/workflow/test_vision_evidence_persistence.py`
 
 **Interfaces:**
 - Consumes: Task 1 contract JSON and existing `WorkflowNodeAttempt` identity.
-- Produces: `VisionEvidenceSnapshot`, expanded `VisionInterviewTurn`, expanded `VisionArtifact`, `VisionEvidenceSnapshotFact`, and expanded Vision turn/artifact facts.
+- Produces: `VisionEvidenceSnapshot`, `VisionEvidenceSnapshotFact`, strict fact loading, and FK-safe Project deletion.
+
+This task is intentionally additive. It does not change `VisionInterviewTurn`,
+`VisionArtifact`, their current facts, or any `mode` consumer. Task 4 removes
+that complete legacy contract atomically across persistence, graph, handlers,
+input preparation, and ADK registration. No compatibility field remains in the
+finished branch.
 
 - [ ] **Step 1: Write failing schema and deletion tests**
 
-Assert fresh schema creation includes `vision_evidence_snapshots`; bootstrap `user_text` is nullable; snapshot, turn, and artifact foreign keys reject cross-Project identities; project deletion removes evidence snapshots in FK-safe order.
+Assert fresh schema creation includes `vision_evidence_snapshots`; snapshot foreign keys reject cross-Project attempt and repository-binding identities; invalid canonical evidence or warning JSON fails strict fact loading; Project deletion removes evidence snapshots before attempts and repository bindings.
 
 ```python
 def test_vision_snapshot_references_same_project_attempt(session: Session) -> None:
@@ -599,15 +604,13 @@ uv run --frozen pytest \
 
 Expected: missing model/table/field failures.
 
-- [ ] **Step 3: Add the fresh-schema models**
+- [ ] **Step 3: Add the fresh-schema snapshot model**
 
-Add `VisionEvidenceSnapshot` with the approved fields and composite same-Project foreign keys. Change `VisionInterviewTurn` to `operation IN ('bootstrap', 'clarification', 'revision')`, make `user_text` nullable, and add `vision_evidence_snapshot_id`, `component_basis_json`, `assumptions_json`, and `conflicts_json`. Add the same snapshot/basis/assumption/conflict provenance to `VisionArtifact`.
-
-Do not retain a `mode` compatibility column. Update all current constructors/tests to the new `operation` field in this task so the repository remains runnable after the commit.
+Add `VisionEvidenceSnapshot` with the approved fields and composite same-Project foreign keys to `WorkflowNodeAttempt` and optional `RepositoryBinding`. Do not modify the current Vision turn or artifact schema in this task.
 
 - [ ] **Step 4: Load strict graph facts**
 
-Add exact fields to facts:
+Add the exact snapshot fact:
 
 ```python
 class VisionEvidenceSnapshotFact(FrozenModel):
@@ -620,18 +623,17 @@ class VisionEvidenceSnapshotFact(FrozenModel):
     created_at: _DATETIME
 ```
 
-Parse persisted JSON with existing strict loader helpers. Reject missing attempt/snapshot identities, cross-Project references, invalid canonical JSON, or fingerprint mismatches as `WorkflowFactLoadError`.
+Parse persisted JSON with existing strict loader helpers. Reject missing attempt or binding identities, cross-Project references, invalid canonical JSON, or fingerprint mismatches as `WorkflowFactLoadError`. Include the snapshot tuple in `WorkflowFactSnapshot` and the narrow Vision projection without changing current turn or artifact facts.
 
 - [ ] **Step 5: Update schema exports and deletion ordering**
 
-Import the new table through `agile_sqlmodel.py`. Delete artifact decisions/artifacts before turns, then snapshots, then attempts. Keep project deletion atomic and add no migration code.
+Import the new table through `agile_sqlmodel.py`. Delete snapshots after current Vision rows but before attempts and repository bindings. Keep Project deletion atomic and add no migration code.
 
 - [ ] **Step 6: Run tests and commit**
 
 ```bash
 uv run --frozen pytest \
   tests/workflow/test_vision_evidence_persistence.py \
-  tests/workflow/test_vision_interview_transitions.py \
   tests/test_project_repository_deletion.py -q
 uv lock --check
 git diff --check
@@ -643,9 +645,8 @@ Expected: all selected tests pass.
 git add models/product_definition.py agile_sqlmodel.py workflow/facts.py \
   repositories/workflow.py repositories/project.py \
   tests/workflow/test_vision_evidence_persistence.py \
-  tests/workflow/test_vision_interview_transitions.py \
   tests/test_project_repository_deletion.py
-git commit -m "feat: persist vision evidence provenance"
+git commit -m "feat: persist vision evidence snapshots"
 ```
 
 ---
