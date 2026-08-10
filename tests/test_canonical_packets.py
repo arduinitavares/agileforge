@@ -15,7 +15,7 @@ from sqlmodel import Session, col, select
 import api as api_module
 from models.core import Project, Sprint, SprintStory, Task, Team, UserStory
 from models.enums import SprintStatus
-from models.product_definition import VisionArtifact
+from models.product_definition import VisionArtifact, VisionInterviewTurn
 from models.specs import (
     CompiledSpecAuthority,
     SpecAuthorityAcceptance,
@@ -401,6 +401,30 @@ def test_packets_fail_closed_on_malformed_durable_vision_lineage(
     ).one()
     vision.components_json = '{"purpose":"tampered"}'
     session.add(vision)
+    session.commit()
+
+    result = DurableReadProjectionService(engine=engine).task_packet(
+        project_id=seed.project_id,
+        sprint_id=seed.sprint_id,
+        task_id=seed.task_id,
+    )
+
+    assert _error_code(result) == "VISION_LINEAGE_INVALID"
+
+
+def test_packets_fail_closed_on_corrupt_vision_source_turn(
+    engine: Engine,
+    session: Session,
+) -> None:
+    """Expose source-turn corruption through the packet error envelope."""
+    seed = _seed_packet_context(session, pinned=False)
+    vision = session.exec(
+        select(VisionArtifact).where(col(VisionArtifact.project_id) == seed.project_id)
+    ).one()
+    turn = session.get(VisionInterviewTurn, vision.source_interview_turn_id)
+    assert turn is not None
+    turn.output_fingerprint = "corrupt"
+    session.add(turn)
     session.commit()
 
     result = DurableReadProjectionService(engine=engine).task_packet(

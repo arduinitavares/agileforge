@@ -303,6 +303,7 @@ def test_concurrent_repository_backed_create_applies_once_and_replays_once(
     service, domain = _service(sqlite_file_engine, probe)
     command = _create_command(repository_path=REPOSITORY_PATH)
     begin_write = domain._begin_write
+    begin_start = Barrier(_CONCURRENT_REQUEST_COUNT, timeout=5)
     identity_lock = Lock()
     session_ids: set[int] = set()
     connection_ids: set[int] = set()
@@ -314,6 +315,7 @@ def test_concurrent_repository_backed_create_applies_once_and_replays_once(
         with identity_lock:
             session_ids.add(id(session))
             connection_ids.add(id(dbapi_connection))
+        begin_start.wait()
         begin_write(session)
 
     monkeypatch.setattr(domain, "_begin_write", observed_begin_write)
@@ -344,10 +346,28 @@ def test_concurrent_repository_backed_create_applies_once_and_replays_once(
 
 def test_concurrent_repository_backed_create_conflicts_on_semantic_input(
     sqlite_file_engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Commit one first attempt and reject a concurrent meaning for its key."""
     probe = _ConcurrentProbe()
-    service, _domain = _service(sqlite_file_engine, probe)
+    service, domain = _service(sqlite_file_engine, probe)
+    begin_write = domain._begin_write
+    begin_start = Barrier(_CONCURRENT_REQUEST_COUNT, timeout=5)
+    identity_lock = Lock()
+    session_ids: set[int] = set()
+    connection_ids: set[int] = set()
+
+    def observed_begin_write(session: Session) -> None:
+        connection = session.connection()
+        dbapi_connection = connection.connection.dbapi_connection
+        assert dbapi_connection is not None
+        with identity_lock:
+            session_ids.add(id(session))
+            connection_ids.add(id(dbapi_connection))
+        begin_start.wait()
+        begin_write(session)
+
+    monkeypatch.setattr(domain, "_begin_write", observed_begin_write)
     commands = (
         _create_command(
             description="First meaning",
@@ -364,6 +384,8 @@ def test_concurrent_repository_backed_create_conflicts_on_semantic_input(
 
     successful_indexes = [index for index, result in enumerate(results) if result.ok]
     conflict_results = [result for result in results if not result.ok]
+    assert len(session_ids) == _CONCURRENT_REQUEST_COUNT
+    assert len(connection_ids) == _CONCURRENT_REQUEST_COUNT
     assert len(successful_indexes) == 1
     assert len(conflict_results) == 1
     assert conflict_results[0].error is not None

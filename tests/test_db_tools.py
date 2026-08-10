@@ -15,6 +15,7 @@ from sqlmodel import Session, select
 
 from agile_sqlmodel import Project, Task, UserStory
 from models.core import Epic, Feature, Theme
+from models.product_definition import VisionInterviewTurn
 from tests.vision_lineage_fixtures import seed_accepted_vision
 from tools.db_tools import (
     CreateOrGetProjectInput,
@@ -24,7 +25,9 @@ from tools.db_tools import (
     create_or_get_project,
     create_task,
     create_user_story,
+    get_story_details,
     persist_roadmap,
+    query_project_structure,
 )
 
 # Add parent directory to path
@@ -248,15 +251,6 @@ def test_create_task(engine: Engine) -> None:
 
 def test_query_project_structure(engine: Engine) -> None:
     """Test querying full Project structure."""
-    from tools.db_tools import (  # noqa: PLC0415
-        CreateOrGetProjectInput,
-        CreateUserStoryInput,
-        create_or_get_project,
-        create_user_story,
-        persist_roadmap,
-        query_project_structure,
-    )
-
     # Setup hierarchy
     project_result = create_or_get_project(
         CreateOrGetProjectInput(
@@ -347,12 +341,43 @@ def test_query_project_structure_fails_closed_on_ambiguous_vision(
             version_number=2,
         )
 
-    from tools.db_tools import query_project_structure  # noqa: PLC0415
-
     result = query_project_structure(project_id)
 
     if result["success"]:
         message = "Ambiguous Vision lineage unexpectedly produced a structure."
+        raise AssertionError(message)
+    failure = cast("QueryProjectStructureFailure", result)
+    assert "Vision lineage is invalid" in failure["error"]
+
+
+def test_query_project_structure_fails_closed_on_corrupt_vision_source_turn(
+    engine: Engine,
+) -> None:
+    """Expose corrupt durable Vision source evidence through the tool envelope."""
+    project_result = create_or_get_project(
+        CreateOrGetProjectInput(
+            project_name="Corrupt Vision Source Project",
+            vision=None,
+            description=None,
+        )
+    )
+    project_id = project_result["project_id"]
+    with Session(engine) as session:
+        artifact = seed_accepted_vision(
+            session,
+            project_id=project_id,
+            statement="Trust immutable Vision evidence.",
+        )
+        turn = session.get(VisionInterviewTurn, artifact.source_interview_turn_id)
+        assert turn is not None
+        turn.output_fingerprint = "corrupt"
+        session.add(turn)
+        session.commit()
+
+    result = query_project_structure(project_id)
+
+    if result["success"]:
+        message = "Corrupt Vision source turn unexpectedly produced a structure."
         raise AssertionError(message)
     failure = cast("QueryProjectStructureFailure", result)
     assert "Vision lineage is invalid" in failure["error"]
@@ -413,8 +438,6 @@ def test_get_story_details(engine: Engine) -> None:
     assert story_id is not None
 
     # Act: Call the get_story_details function
-    from tools.db_tools import get_story_details  # noqa: PLC0415
-
     result = get_story_details(story_id)
 
     # Assert: Verify the returned details
@@ -442,8 +465,6 @@ def test_get_story_details_not_found(engine: Engine) -> None:
     del engine
 
     # Act: Try to fetch a story that doesn't exist
-    from tools.db_tools import get_story_details  # noqa: PLC0415
-
     result = get_story_details(999999)
 
     # Assert: Verify the error message

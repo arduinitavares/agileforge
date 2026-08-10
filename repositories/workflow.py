@@ -259,6 +259,16 @@ class _ProductDefinitionFactLoad:
 
 
 @dataclass(frozen=True)
+class _VisionFactLoad:
+    """Validated immutable Vision lineage and its durable source evidence."""
+
+    revision_intents: tuple[VisionRevisionIntentFact, ...]
+    interview_turns: tuple[VisionInterviewTurnFact, ...]
+    visions: tuple[VisionArtifactFact, ...]
+    vision_decisions: tuple[VisionArtifactDecisionFact, ...]
+
+
+@dataclass(frozen=True)
 class _PlanningArtifactLoad:
     """Planning artifact facts and their validated append-only decisions."""
 
@@ -375,11 +385,14 @@ class WorkflowFactRepository:
         self._identity_token = object()
         with self._session.no_autoflush:
             project = self._project(project_id)
-            visions, decisions = self._vision_artifacts(project_id)
+            vision_load = self._vision_definition(
+                project_id,
+                self._node_attempts(project_id),
+            )
             return WorkflowFactSnapshot(
                 project=project,
-                vision_artifacts=tuple(visions.values()),
-                vision_artifact_decisions=tuple(decisions.values()),
+                vision_artifacts=vision_load.visions,
+                vision_artifact_decisions=vision_load.vision_decisions,
             )
 
     def _load(self, project_id: int) -> WorkflowFactSnapshot:
@@ -929,19 +942,14 @@ class WorkflowFactRepository:
         node_attempts: tuple[NodeAttemptFact, ...],
     ) -> _ProductDefinitionFactLoad:
         """Load staged product-definition records without ADK session state."""
-        visions, vision_decisions = self._vision_artifacts(project_id)
+        vision_load = self._vision_definition(project_id, node_attempts)
+        visions = {
+            item.vision_artifact_id: item for item in vision_load.visions
+        }
+        attempts = {item.attempt_id: item.attempt_fingerprint for item in node_attempts}
         vision_fingerprints = {
             item_id: item.content_fingerprint for item_id, item in visions.items()
         }
-        accepted_visions = {
-            item.vision_artifact_id: item.artifact_fingerprint
-            for item in vision_decisions.values()
-            if item.decision == "accepted"
-        }
-        attempts = {item.attempt_id: item.attempt_fingerprint for item in node_attempts}
-        revisions = self._vision_revision_intents(project_id, accepted_visions)
-        turns = self._vision_interview_turns(project_id, revisions, attempts)
-        self._validate_vision_artifact_sources(visions, turns)
         goal_turns = self._product_goal_interview_turns(
             project_id, vision_fingerprints, attempts
         )
@@ -969,10 +977,10 @@ class WorkflowFactRepository:
         )
         specification_decisions = self._specification_decisions(project_id, candidates)
         return _ProductDefinitionFactLoad(
-            revision_intents=tuple(revisions.values()),
-            interview_turns=tuple(turns.values()),
-            visions=tuple(visions.values()),
-            vision_decisions=tuple(vision_decisions.values()),
+            revision_intents=vision_load.revision_intents,
+            interview_turns=vision_load.interview_turns,
+            visions=vision_load.visions,
+            vision_decisions=vision_load.vision_decisions,
             goal_interview_turns=tuple(goal_turns.values()),
             product_goals=tuple(goals.values()),
             goal_decisions=tuple(decisions.values()),
@@ -980,6 +988,29 @@ class WorkflowFactRepository:
             discoveries=tuple(discoveries.values()),
             specification_candidates=tuple(candidates.values()),
             specification_decisions=tuple(specification_decisions.values()),
+        )
+
+    def _vision_definition(
+        self,
+        project_id: int,
+        node_attempts: tuple[NodeAttemptFact, ...],
+    ) -> _VisionFactLoad:
+        """Load the Vision subset with the same source validation as full facts."""
+        visions, decisions = self._vision_artifacts(project_id)
+        accepted_visions = {
+            item.vision_artifact_id: item.artifact_fingerprint
+            for item in decisions.values()
+            if item.decision == "accepted"
+        }
+        attempts = {item.attempt_id: item.attempt_fingerprint for item in node_attempts}
+        revisions = self._vision_revision_intents(project_id, accepted_visions)
+        turns = self._vision_interview_turns(project_id, revisions, attempts)
+        self._validate_vision_artifact_sources(visions, turns)
+        return _VisionFactLoad(
+            revision_intents=tuple(revisions.values()),
+            interview_turns=tuple(turns.values()),
+            visions=tuple(visions.values()),
+            vision_decisions=tuple(decisions.values()),
         )
 
     def _vision_artifacts(
