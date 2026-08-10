@@ -25,81 +25,169 @@
             },
         };
     </script>
-    <title>Project Workflow | AgileForge</title>
+    <style>
+        html { overflow-x: hidden; }
+        body { min-width: 0; }
+        .material-symbols-outlined { font-size: 20px; line-height: 1; }
+        .break-anywhere { overflow-wrap: anywhere; word-break: break-word; }
+        dialog::backdrop { background: rgb(15 23 42 / 0.55); }
+    </style>
+    <title>Project | AgileForge</title>
 </head>
 
 <body class="min-h-screen bg-paper font-sans text-ink">
-    <header class="border-b border-slate-300 bg-white">
-        <div class="mx-auto flex h-16 max-w-7xl items-center justify-between px-4 sm:px-6 lg:px-8">
-            <div class="flex min-w-0 items-center gap-4">
+    <header class="sticky top-0 z-40 border-b border-slate-300 bg-white">
+        <div class="mx-auto flex h-16 max-w-7xl items-center justify-between gap-4 px-4 sm:px-6 lg:px-8">
+            <div class="flex min-w-0 items-center gap-3">
                 <a href="/dashboard" title="Back to projects"
-                    class="grid size-9 shrink-0 place-items-center border border-slate-300 bg-white text-slate-700 hover:bg-slate-100">
+                    class="grid size-9 shrink-0 place-items-center rounded-lg border border-slate-300 bg-white text-slate-700 hover:bg-slate-100">
                     <span class="material-symbols-outlined" aria-hidden="true">arrow_back</span>
                     <span class="sr-only">Back to projects</span>
                 </a>
                 <div class="min-w-0">
                     <p class="text-xs font-semibold uppercase text-accent">AgileForge</p>
-                    <h1 id="project-page-title" class="truncate text-lg font-bold">Project workflow</h1>
+                    <h1 id="project-page-title" class="truncate text-lg font-bold">Project</h1>
                 </div>
             </div>
-            <button id="refresh-workflow-position" type="button" title="Refresh workflow position"
-                class="grid size-9 shrink-0 place-items-center border border-slate-300 bg-white text-slate-700 hover:bg-slate-100 disabled:opacity-50">
+            <button id="refresh-project" type="button" title="Refresh project"
+                class="grid size-9 shrink-0 place-items-center rounded-lg border border-slate-300 bg-white text-slate-700 hover:bg-slate-100 disabled:cursor-wait disabled:opacity-50">
                 <span class="material-symbols-outlined" aria-hidden="true">refresh</span>
-                <span class="sr-only">Refresh workflow position</span>
+                <span class="sr-only">Refresh project</span>
             </button>
         </div>
     </header>
 
-    <main>
+    <main class="min-w-0">
         <section class="border-b border-slate-300 bg-white">
             <div id="project-summary" class="mx-auto grid max-w-7xl gap-5 px-4 py-6 sm:grid-cols-3 sm:px-6 lg:px-8">
-                <div>
-                    <p class="text-xs font-semibold uppercase text-slate-500">Origin</p>
-                    <p id="project-origin" class="mt-1 text-sm font-medium">Loading</p>
+                <div class="min-w-0">
+                    <p class="text-xs font-semibold uppercase text-slate-500">Description</p>
+                    <p id="project-description" class="mt-1 break-words text-sm font-medium">Loading</p>
                 </div>
-                <div>
-                    <p class="text-xs font-semibold uppercase text-slate-500">Stories</p>
-                    <p id="project-story-count" class="mt-1 text-sm font-medium">Loading</p>
+                <div class="min-w-0">
+                    <p class="text-xs font-semibold uppercase text-slate-500">Product Goal</p>
+                    <p id="project-goal-summary" class="mt-1 break-words text-sm font-medium">Loading</p>
                 </div>
-                <div>
-                    <p class="text-xs font-semibold uppercase text-slate-500">Sprints</p>
-                    <p id="project-sprint-count" class="mt-1 text-sm font-medium">Loading</p>
+                <div class="min-w-0">
+                    <p class="text-xs font-semibold uppercase text-slate-500">Repository</p>
+                    <p id="project-repository-summary" class="mt-1 break-anywhere text-sm font-medium">Loading</p>
                 </div>
             </div>
         </section>
 
-        <section id="workflow-position-panel"
-            class="mx-auto w-full max-w-7xl px-4 py-6 sm:px-6 lg:px-8"
-            aria-live="polite">
-            <p class="text-sm text-slate-500">Loading workflow position.</p>
+        <section class="border-b border-slate-300 bg-slate-100">
+            <div class="mx-auto max-w-7xl px-4 py-4 sm:px-6 lg:px-8">
+                <div id="lifecycle-stage-strip" aria-label="Project lifecycle" aria-live="polite">
+                    <p class="text-sm text-slate-500">Loading lifecycle.</p>
+                </div>
+            </div>
+        </section>
+
+        <div class="mx-auto max-w-7xl px-4 pt-5 sm:px-6 lg:px-8">
+            <p id="project-error" class="hidden rounded-lg border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-800"
+                role="alert"></p>
+        </div>
+
+        <section class="border-b border-slate-300 bg-white" aria-labelledby="vision-heading">
+            <div class="mx-auto max-w-7xl px-4 py-7 sm:px-6 lg:px-8">
+                <div class="mb-5 flex items-center gap-3">
+                    <span class="grid size-9 shrink-0 place-items-center rounded-lg bg-emerald-100 text-emerald-800">
+                        <span class="material-symbols-outlined" aria-hidden="true">visibility</span>
+                    </span>
+                    <div>
+                        <p class="text-xs font-semibold uppercase text-accent">Product direction</p>
+                        <h2 id="vision-heading" class="text-lg font-bold">Project Vision</h2>
+                    </div>
+                </div>
+                <div id="vision-panel" aria-live="polite"><p class="text-sm text-slate-500">Loading Vision.</p></div>
+            </div>
+        </section>
+
+        <section class="border-b border-slate-300 bg-paper" aria-labelledby="goal-heading">
+            <div class="mx-auto max-w-7xl px-4 py-7 sm:px-6 lg:px-8">
+                <div class="mb-5 flex items-center gap-3">
+                    <span class="grid size-9 shrink-0 place-items-center rounded-lg bg-sky-100 text-sky-800">
+                        <span class="material-symbols-outlined" aria-hidden="true">flag</span>
+                    </span>
+                    <div>
+                        <p class="text-xs font-semibold uppercase text-sky-800">Valuable outcome</p>
+                        <h2 id="goal-heading" class="text-lg font-bold">Product Goal</h2>
+                    </div>
+                </div>
+                <div id="goal-panel" aria-live="polite"><p class="text-sm text-slate-500">Loading Product Goal.</p></div>
+            </div>
+        </section>
+
+        <section class="border-b border-slate-300 bg-white" aria-labelledby="discovery-heading">
+            <div class="mx-auto max-w-7xl px-4 py-7 sm:px-6 lg:px-8">
+                <h2 id="discovery-heading" class="text-lg font-bold">Discovery</h2>
+                <div id="discovery-panel" class="mt-4" aria-live="polite"><p class="text-sm text-slate-500">Loading discovery.</p></div>
+            </div>
+        </section>
+
+        <section class="border-b border-slate-300 bg-paper" aria-labelledby="specification-heading">
+            <div class="mx-auto max-w-7xl px-4 py-7 sm:px-6 lg:px-8">
+                <h2 id="specification-heading" class="text-lg font-bold">Specification</h2>
+                <div id="specification-panel" class="mt-4" aria-live="polite"><p class="text-sm text-slate-500">Loading specification.</p></div>
+            </div>
+        </section>
+
+        <section class="border-b border-slate-300 bg-white" aria-labelledby="authority-heading">
+            <div class="mx-auto max-w-7xl px-4 py-7 sm:px-6 lg:px-8">
+                <h2 id="authority-heading" class="text-lg font-bold">Specification Authority</h2>
+                <div id="authority-panel" class="mt-4" aria-live="polite"><p class="text-sm text-slate-500">Loading Authority.</p></div>
+            </div>
+        </section>
+
+        <section class="border-b border-slate-300 bg-paper" aria-labelledby="repository-heading">
+            <div class="mx-auto max-w-7xl px-4 py-7 sm:px-6 lg:px-8">
+                <h2 id="repository-heading" class="text-lg font-bold">Repository</h2>
+                <div id="repository-panel" class="mt-4" aria-live="polite"><p class="text-sm text-slate-500">Loading repository.</p></div>
+            </div>
+        </section>
+
+        <section class="bg-white" aria-labelledby="delivery-heading">
+            <div class="mx-auto max-w-7xl px-4 py-7 sm:px-6 lg:px-8">
+                <h2 id="delivery-heading" class="text-lg font-bold">Delivery</h2>
+                <div id="delivery-panel" class="mt-4" aria-live="polite"><p class="text-sm text-slate-500">Loading delivery state.</p></div>
+            </div>
         </section>
     </main>
 
-    <dialog id="workflow-action-dialog"
-        class="w-[min(42rem,calc(100%-2rem))] border border-slate-300 bg-white p-0 shadow-xl backdrop:bg-slate-950/50">
-        <form id="workflow-action-form" method="dialog">
+    <dialog id="human-action-dialog"
+        class="w-[min(36rem,calc(100%-2rem))] rounded-lg border border-slate-300 bg-white p-0 shadow-xl">
+        <form id="human-action-form" method="dialog">
             <header class="flex items-start justify-between gap-4 border-b border-slate-300 px-5 py-4">
                 <div class="min-w-0">
-                    <p class="text-xs font-semibold uppercase text-accent">Workflow action</p>
-                    <h2 id="workflow-action-title" class="mt-1 break-words text-base font-bold"></h2>
+                    <p id="human-action-kicker" class="text-xs font-semibold uppercase text-accent">Human decision</p>
+                    <h2 id="human-action-title" class="mt-1 break-words text-base font-bold">Confirm action</h2>
                 </div>
-                <button id="workflow-action-cancel-icon" type="button" title="Cancel"
-                    class="grid size-8 shrink-0 place-items-center text-slate-500 hover:bg-slate-100">
+                <button id="human-action-close" type="button" title="Close"
+                    class="grid size-9 shrink-0 place-items-center rounded-lg text-slate-500 hover:bg-slate-100">
                     <span class="material-symbols-outlined" aria-hidden="true">close</span>
-                    <span class="sr-only">Cancel</span>
+                    <span class="sr-only">Close</span>
                 </button>
             </header>
-            <div id="workflow-action-fields" class="max-h-[60vh] space-y-4 overflow-y-auto px-5 py-5"></div>
-            <p id="workflow-action-error" class="hidden px-5 pb-4 text-sm text-red-700" role="alert"></p>
+            <div class="space-y-4 px-5 py-5">
+                <p id="human-action-description" class="text-sm leading-6 text-slate-600"></p>
+                <div id="human-action-rationale-group">
+                    <label id="human-action-rationale-label" for="human-action-rationale" class="text-sm font-semibold">Rationale</label>
+                    <textarea id="human-action-rationale" rows="4"
+                        class="mt-1.5 w-full resize-y rounded-lg border-slate-300 text-sm focus:border-accent focus:ring-accent"></textarea>
+                </div>
+                <div id="human-action-path-group" class="hidden">
+                    <label for="human-action-path" class="text-sm font-semibold">Local repository path</label>
+                    <input id="human-action-path" type="text" autocomplete="off"
+                        class="mt-1.5 w-full rounded-lg border-slate-300 font-mono text-sm focus:border-accent focus:ring-accent" />
+                </div>
+                <p id="human-action-error" class="hidden rounded-lg border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-800"
+                    role="alert"></p>
+            </div>
             <footer class="flex justify-end gap-3 border-t border-slate-300 bg-slate-50 px-5 py-4">
-                <button id="workflow-action-cancel" type="button"
-                    class="border border-slate-300 bg-white px-4 py-2 text-sm font-semibold hover:bg-slate-100">
-                    Cancel
-                </button>
-                <button id="workflow-action-submit" type="submit"
-                    class="bg-accent px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-800 disabled:opacity-50">
-                    Execute
-                </button>
+                <button id="human-action-cancel" type="button"
+                    class="min-h-10 rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold hover:bg-slate-100">Cancel</button>
+                <button id="human-action-submit" type="submit"
+                    class="min-h-10 rounded-lg bg-accent px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-800 disabled:cursor-wait disabled:opacity-60">Confirm</button>
             </footer>
         </form>
     </dialog>
