@@ -432,6 +432,77 @@ def test_semantic_replay_uses_stored_guards_and_conflicts_on_changed_text(
     assert conflict.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
 
 
+def test_semantic_replay_binds_the_requested_instance_selector(
+    engine: Engine,
+) -> None:
+    """Do not replay one Story requirement through another exact selector."""
+    stored = StartNodeAttempt(
+        project_id=41,
+        graph_version="agileforge.workflow.v2",
+        fact_fingerprint="facts-story-a",
+        decision_fingerprint="decision-story-a",
+        idempotency_key="story-replay",
+        actor="operator@example.com",
+        correlation_id="story-correlation",
+        target_node_id="planning.story.generate",
+        target_instance_key="requirement:REQ-A",
+        normalized_input={"parent_requirement": "Requirement A"},
+        model_id=MODEL_ID,
+        execution_settings=EXECUTION_SETTINGS,
+        lease_seconds=LEASE_SECONDS,
+    )
+    persisted = TransitionResult(
+        ok=True,
+        applied_node_id="planning.story.generate",
+    )
+    with Session(engine) as session:
+        session.add(
+            WorkflowTransitionReceipt(
+                request_kind="start_node_attempt",
+                idempotency_key=stored.idempotency_key,
+                request_fingerprint=canonical_hash(stored.model_dump(mode="json")),
+                request_json=canonical_json(stored.model_dump(mode="json")),
+                result_json=canonical_json(persisted.model_dump(mode="json")),
+                started_at=EVALUATED_AT,
+                completed_at=EVALUATED_AT,
+            )
+        )
+        session.commit()
+    service = DurableNodeAttemptReplayService(engine=engine)
+
+    exact = service.replay(
+        NodeAttemptReplayQuery(
+            project_id=stored.project_id,
+            graph_version=None,
+            fact_fingerprint=None,
+            decision_fingerprint=None,
+            node_id=stored.target_node_id,
+            instance_key="requirement:REQ-A",
+            idempotency_key=stored.idempotency_key,
+            actor=stored.actor,
+            correlation_id=stored.correlation_id,
+        )
+    )
+    wrong_requirement = service.replay(
+        NodeAttemptReplayQuery(
+            project_id=stored.project_id,
+            graph_version=None,
+            fact_fingerprint=None,
+            decision_fingerprint=None,
+            node_id=stored.target_node_id,
+            instance_key="requirement:REQ-B",
+            idempotency_key=stored.idempotency_key,
+            actor=stored.actor,
+            correlation_id=stored.correlation_id,
+        )
+    )
+
+    assert exact == persisted.model_copy(update={"replayed": True})
+    assert wrong_requirement is not None
+    assert wrong_requirement.error is not None
+    assert wrong_requirement.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
+
+
 def test_replay_query_returns_terminal_result_after_position_advanced(
     engine: Engine,
 ) -> None:

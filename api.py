@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from collections import Counter
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from importlib.resources import files
@@ -50,6 +51,7 @@ from workflow.contracts import (
     JsonObject,
     NodeCategory,
     NodeDecision,
+    RecommendationKind,
     TransitionResult,
     WorkflowError,
     WorkflowErrorCode,
@@ -220,6 +222,16 @@ SEMANTIC_API_PATHS: dict[str, str] = {
     "repair_authority": "authority/repair",
 }
 
+_ACTIONABLE_WAITING_REQUEST_KINDS = frozenset(
+    {
+        "decide_authority",
+        "decide_product_goal_review",
+        "decide_specification",
+        "decide_vision_review",
+    }
+)
+_SELECTOR_API_REQUEST_KINDS = frozenset(DELIVERY_API_PATHS | POSITIONED_API_PATHS)
+
 _TRANSITION_REQUEST = TypeAdapter(TransitionRequest)
 
 
@@ -340,12 +352,41 @@ def _transition_not_available(
 
 
 def _workflow_actions(position: WorkflowPosition) -> list[JsonObject]:
-    """Advertise one fixed API route for each exact available decision."""
+    """Advertise only decisions that their fixed API route can select exactly."""
+    candidates = tuple(
+        decision
+        for decision in position.decisions
+        if (
+            decision.category is NodeCategory.AVAILABLE
+            or (
+                decision.category is NodeCategory.WAITING
+                and decision.request_kind in _ACTIONABLE_WAITING_REQUEST_KINDS
+            )
+        )
+        and decision.recommendation_kind
+        in {RecommendationKind.REQUIRED, RecommendationKind.RECOVERY}
+        and decision.request_kind
+        in SEMANTIC_API_PATHS | DELIVERY_API_PATHS | POSITIONED_API_PATHS
+    )
+    semantic_counts = Counter(
+        decision.request_kind
+        for decision in candidates
+        if decision.request_kind not in _SELECTOR_API_REQUEST_KINDS
+    )
+    selector_counts = Counter(
+        (decision.request_kind, decision.instance_key)
+        for decision in candidates
+        if decision.request_kind in _SELECTOR_API_REQUEST_KINDS
+    )
     actions: list[JsonObject] = []
-    for decision in position.decisions:
-        if decision.category is not NodeCategory.AVAILABLE:
-            continue
+    for decision in candidates:
         request_kind = decision.request_kind
+        if request_kind in _SELECTOR_API_REQUEST_KINDS:
+            selectable = selector_counts[(request_kind, decision.instance_key)] == 1
+        else:
+            selectable = semantic_counts[request_kind] == 1
+        if not selectable:
+            continue
         if request_kind in SEMANTIC_API_PATHS:
             endpoint = SEMANTIC_API_PATHS[request_kind]
             transport = "semantic"

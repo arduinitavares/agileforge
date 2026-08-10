@@ -899,7 +899,7 @@ def test_post_flush_compile_failure_rolls_back_and_identical_retry_replays(
         assert session.exec(select(CompiledSpecAuthority)).one()
         project = session.get(Project, project_id)
         assert project is not None
-        assert project.compiled_authority_json is None
+        assert not hasattr(project, "compiled_authority_json")
         assert receipt.workflow_transition_receipt_id is not None
         assert result is not None
         msg = "injected after compile writes"
@@ -914,7 +914,7 @@ def test_post_flush_compile_failure_rolls_back_and_identical_retry_replays(
         assert session.exec(select(CompiledSpecAuthority)).all() == []
         project = session.get(Project, project_id)
         assert project is not None
-        assert project.compiled_authority_json is None
+        assert not hasattr(project, "compiled_authority_json")
         assert session.exec(select(WorkflowTransitionReceipt)).all() == []
 
     first = domain.transition(request)

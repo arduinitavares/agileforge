@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, cast
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
+from sqlmodel import Session
 
 import api as api_module
 from api import (
@@ -17,11 +18,15 @@ from api import (
     build_create_project_command,
 )
 from cli.workflow_commands import COMMAND_PREFIXES
+from models.workflow import WorkflowTransitionReceipt
 from services.application import (
     AgenticActionRequest,
     AgileForgeApplication,
     AuthorityCompileRequest,
+    AuthorityRepairInputService,
+    AuthorityRepairRequest,
     AuthorityReviewRequest,
+    AuthorityReviewSelectionService,
     CreateProjectCommand,
     DeliveryActionInputService,
     DeliveryActionRequest,
@@ -52,7 +57,8 @@ from workflow.contracts import (
     WorkflowErrorCode,
     WorkflowPosition,
 )
-from workflow.requests import StartNodeAttempt, TransitionRequest
+from workflow.fingerprints import canonical_hash, canonical_json
+from workflow.requests import DecideAuthority, StartNodeAttempt, TransitionRequest
 
 if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
@@ -376,13 +382,19 @@ class _AuthorityInput:
 
 
 class _DeliveryInput:
-    def __init__(self, payload: JsonObject | None) -> None:
+    def __init__(
+        self,
+        payload: JsonObject | None,
+        replay: TransitionResult | None = None,
+    ) -> None:
         self.payload = payload
+        self.replay_result = replay
         self.replay_queries: list[NodeAttemptReplayQuery] = []
         self.build_calls: list[tuple[int, str, str]] = []
 
-    def replay(self, query: NodeAttemptReplayQuery) -> None:
+    def replay(self, query: NodeAttemptReplayQuery) -> TransitionResult | None:
         self.replay_queries.append(query)
+        return self.replay_result
 
     def build(
         self,
@@ -598,6 +610,125 @@ def test_semantic_authority_compile_replays_before_advanced_position() -> None:
     assert authority_input.replay_queries[0].decision_fingerprint is None
 
 
+def test_semantic_authority_review_replays_or_conflicts_before_advanced_position(
+    engine: "Engine",
+) -> None:
+    """Resolve exact Authority review idempotency before current graph position."""
+    stored = DecideAuthority(
+        project_id=PROJECT_ID,
+        graph_version="agileforge.workflow.v2",
+        fact_fingerprint="facts-authority-review",
+        decision_fingerprint="decision-authority-review",
+        instance_key="authority:17",
+        idempotency_key="authority-review-41",
+        actor="operator",
+        pending_authority_id=17,
+        authority_fingerprint="sha256:authority-17",
+        review_fingerprint="sha256:review-17",
+        decision="accepted",
+        rationale="Authority is complete.",
+    )
+    persisted = TransitionResult(ok=True, applied_node_id="authority.review")
+    _store_completed_receipt(engine, stored, persisted)
+    domain = _BoundaryDomain(_vision_position())
+    application = AgileForgeApplication(
+        workflow_domain=domain,
+        authority_review_selection=AuthorityReviewSelectionService(engine=engine),
+    )
+
+    replay = application.decide_authority(
+        AuthorityReviewRequest(
+            project_id=PROJECT_ID,
+            decision="accepted",
+            rationale="Authority is complete.",
+            idempotency_key="authority-review-41",
+            actor="operator",
+        )
+    )
+    conflict = application.decide_authority(
+        AuthorityReviewRequest(
+            project_id=PROJECT_ID,
+            decision="rejected",
+            rationale="Authority needs repair.",
+            idempotency_key="authority-review-41",
+            actor="operator",
+        )
+    )
+
+    assert replay == persisted.model_copy(update={"replayed": True})
+    assert conflict.error is not None
+    assert conflict.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
+    assert domain.position_calls == []
+
+
+def test_semantic_authority_repair_replays_or_conflicts_before_advanced_position(
+    engine: "Engine",
+) -> None:
+    """Resolve exact Authority repair idempotency before current graph position."""
+    stored = StartNodeAttempt(
+        project_id=PROJECT_ID,
+        graph_version="agileforge.workflow.v2",
+        fact_fingerprint="facts-authority-repair",
+        decision_fingerprint="decision-authority-repair",
+        idempotency_key="authority-repair-41",
+        actor="operator",
+        target_node_id="authority.repair",
+        target_instance_key="authority:17",
+        normalized_input={"source_authority_id": 17},
+        model_id="fake/authority-repair",
+        execution_settings={"timeout_seconds": 120, "max_attempts": 2},
+        lease_seconds=300,
+    )
+    persisted = TransitionResult(ok=True, applied_node_id="authority.repair")
+    _store_completed_receipt(engine, stored, persisted)
+    domain = _BoundaryDomain(_vision_position())
+    application = AgileForgeApplication(
+        workflow_domain=domain,
+        authority_repair_input=AuthorityRepairInputService(engine=engine),
+    )
+
+    replay = application.repair_authority(
+        AuthorityRepairRequest(
+            project_id=PROJECT_ID,
+            idempotency_key="authority-repair-41",
+            actor="operator",
+        )
+    )
+    conflict = application.repair_authority(
+        AuthorityRepairRequest(
+            project_id=PROJECT_ID,
+            idempotency_key="authority-repair-41",
+            actor="different-operator",
+        )
+    )
+
+    assert replay == persisted.model_copy(update={"replayed": True})
+    assert conflict.error is not None
+    assert conflict.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
+    assert domain.position_calls == []
+
+
+def _store_completed_receipt(
+    engine: "Engine",
+    request: TransitionRequest,
+    result: TransitionResult,
+) -> None:
+    request_payload = request.model_dump(mode="json")
+    with Session(engine) as session:
+        session.add(
+            WorkflowTransitionReceipt(
+                request_kind=request.kind,
+                idempotency_key=request.idempotency_key,
+                request_fingerprint=canonical_hash(request_payload),
+                request_json=canonical_json(request_payload),
+                result_json=canonical_json(result.model_dump(mode="json")),
+                started_at=datetime(2026, 8, 9, tzinfo=UTC),
+                completed_at=datetime(2026, 8, 9, tzinfo=UTC),
+            )
+        )
+        session.commit()
+
+
 @pytest.mark.parametrize(
     ("method_name", "node_id", "request_kind", "instance_key"),
     [
@@ -647,6 +778,34 @@ def test_retained_delivery_actions_use_host_prepared_input(
     assert len(application.agent_requests) == 1
     assert application.agent_requests[0].input_payload == {"prepared_by": "host"}
     assert application.agent_requests[0].node_id == node_id
+
+
+def test_story_replay_uses_the_caller_requested_requirement_selector() -> None:
+    """Bind semantic Story replay to its exact requested requirement instance."""
+    conflict = TransitionResult(
+        ok=False,
+        error=WorkflowError(
+            code=WorkflowErrorCode.WORKFLOW_FACT_CONFLICT,
+            message="The idempotency key belongs to another requirement.",
+        ),
+    )
+    domain = _BoundaryDomain(_vision_position())
+    delivery_input = _DeliveryInput(None, replay=conflict)
+    application = _CapturingDeliveryApplication(domain, delivery_input)
+
+    result = application.generate_story(
+        DeliveryActionRequest(
+            project_id=PROJECT_ID,
+            instance_key="requirement:REQ-B",
+            idempotency_key="story-shared-key",
+            actor="operator",
+        )
+    )
+
+    assert result == conflict
+    assert domain.position_calls == []
+    assert delivery_input.replay_queries[0].instance_key == "requirement:REQ-B"
+    assert application.agent_requests == []
 
 
 def test_sprint_generation_fails_closed_without_host_capacity_input() -> None:
@@ -1024,6 +1183,125 @@ def test_position_advertises_only_executable_semantic_api_routes(
     assert all(item["endpoint"].startswith("/") is False for item in actions)
     assert "record_sprint_plan" not in expected
     assert all("decision_fingerprint" not in item for item in actions)
+
+
+def test_position_advertises_waiting_vision_review(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Expose the semantic Vision review while the graph waits for a decision."""
+    decision = NodeDecision(
+        node_id="vision.review",
+        child_graph_id="vision",
+        request_kind="decide_vision_review",
+        category=NodeCategory.WAITING,
+        recommendation_kind=RecommendationKind.REQUIRED,
+        reason_code="VISION_REVIEW_REQUIRED",
+        decision_fingerprint="decision-vision-review",
+    )
+    position = _vision_position(decision).model_copy(
+        update={
+            "available_nodes": (),
+            "waiting_nodes": (decision.node_id,),
+        }
+    )
+    monkeypatch.setattr(
+        api_module,
+        "_application",
+        lambda: _FakeApiApplication(position=position),
+    )
+
+    response = TestClient(api_module.app).get("/api/projects/41/position")
+
+    assert response.status_code == HTTPStatus.OK
+    assert response.json()["actions"] == [
+        {
+            "node_id": "vision.review",
+            "instance_key": None,
+            "request_kind": "decide_vision_review",
+            "endpoint": "vision/review",
+            "transport": "semantic",
+        }
+    ]
+
+
+def test_position_advertises_waiting_authority_review(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Expose the semantic Authority review while the graph waits for a decision."""
+    decision = NodeDecision(
+        node_id="authority.review",
+        instance_key="authority:17",
+        child_graph_id="authority",
+        request_kind="decide_authority",
+        category=NodeCategory.WAITING,
+        recommendation_kind=RecommendationKind.REQUIRED,
+        reason_code="AUTHORITY_REVIEW_REQUIRED",
+        decision_fingerprint="decision-authority-review",
+    )
+    position = _vision_position(decision).model_copy(
+        update={
+            "available_nodes": (),
+            "waiting_nodes": (decision.node_id,),
+        }
+    )
+    monkeypatch.setattr(
+        api_module,
+        "_application",
+        lambda: _FakeApiApplication(position=position),
+    )
+
+    response = TestClient(api_module.app).get("/api/projects/41/position")
+
+    assert response.status_code == HTTPStatus.OK
+    assert response.json()["actions"] == [
+        {
+            "node_id": "authority.review",
+            "instance_key": "authority:17",
+            "request_kind": "decide_authority",
+            "endpoint": "authority/decision",
+            "transport": "semantic",
+        }
+    ]
+
+
+def test_position_omits_ambiguous_unselectable_semantic_actions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Advertise duplicate actions only when the API accepts their exact selector."""
+    vision_decisions = tuple(
+        _vision_decision(f"decision-vision-{index}").model_copy(
+            update={"instance_key": f"after-turn:{index}"}
+        )
+        for index in range(2)
+    )
+    story_decisions = tuple(
+        _delivery_decision(
+            node_id="planning.story.generate",
+            request_kind="record_story_draft",
+            instance_key=f"requirement:req-{index}",
+        ).model_copy(update={"decision_fingerprint": f"decision-story-{index}"})
+        for index in range(2)
+    )
+    decisions = (*vision_decisions, *story_decisions)
+    position = _vision_position(*decisions)
+    monkeypatch.setattr(
+        api_module,
+        "_application",
+        lambda: _FakeApiApplication(position=position),
+    )
+
+    response = TestClient(api_module.app).get("/api/projects/41/position")
+
+    assert response.status_code == HTTPStatus.OK
+    actions = response.json()["actions"]
+    assert [item["request_kind"] for item in actions] == [
+        "record_story_draft",
+        "record_story_draft",
+    ]
+    assert [item["instance_key"] for item in actions] == [
+        "requirement:req-0",
+        "requirement:req-1",
+    ]
 
 
 def test_structured_conflict_advertises_actions_for_returned_position(

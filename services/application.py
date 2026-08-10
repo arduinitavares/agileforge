@@ -36,6 +36,7 @@ from services.contracts.story import UserStoryWriterInput, UserStoryWriterOutput
 from services.contracts.vision import VisionInterviewInput
 from services.node_attempt_replay import (
     DurableNodeAttemptReplayService,
+    DurableTransitionReplayService,
     NodeAttemptReplayQuery,
     TransitionReplayQuery,
 )
@@ -166,6 +167,11 @@ class _AuthorityCompilationInputPort(Protocol):
 class _AuthorityReviewSelectionPort(Protocol):
     """Resolve the exact durable authority review token internally."""
 
+    def replay_transition(
+        self,
+        query: TransitionReplayQuery,
+    ) -> TransitionResult | None: ...
+
     def review_identity(
         self,
         *,
@@ -205,6 +211,13 @@ class AuthorityReviewSelectionService:
     """Build one facts-only review identity from durable authority state."""
 
     engine: Engine
+
+    def replay_transition(
+        self,
+        query: TransitionReplayQuery,
+    ) -> TransitionResult | None:
+        """Replay one completed Authority review before reading current facts."""
+        return DurableTransitionReplayService(engine=self.engine).replay(query)
 
     def review_identity(
         self,
@@ -1524,9 +1537,25 @@ class AgileForgeApplication:
         request: AuthorityReviewRequest,
     ) -> TransitionResult:
         """Resolve current authority and review fingerprints internally."""
+        selection = self._authority_review_selection
+        if selection is not None:
+            replay = selection.replay_transition(
+                TransitionReplayQuery(
+                    request_kind="decide_authority",
+                    project_id=request.project_id,
+                    idempotency_key=request.idempotency_key,
+                    actor=request.actor,
+                    correlation_id=request.correlation_id,
+                    operator_input={
+                        "decision": request.decision,
+                        "rationale": request.rationale,
+                    },
+                )
+            )
+            if replay is not None:
+                return replay
         position = self.position(project_id=request.project_id)
         decision = _unique_available_decision(position, "authority.review")
-        selection = self._authority_review_selection
         identity = (
             None
             if decision is None or selection is None
@@ -1565,23 +1594,19 @@ class AgileForgeApplication:
         request: AuthorityRepairRequest,
     ) -> TransitionResult:
         """Prepare current repair guards and compiler input from durable facts."""
-        position = self.position(project_id=request.project_id)
-        decision = _unique_available_decision(position, "authority.repair")
         input_service = self._authority_repair_input
-        if (
-            decision is None
-            or decision.category is not NodeCategory.AVAILABLE
-            or input_service is None
-        ):
-            return _transition_not_available(position, "authority.repair")
+        if input_service is None:
+            return _transition_not_available(
+                self.position(project_id=request.project_id),
+                "authority.repair",
+            )
         replay = input_service.replay(
             NodeAttemptReplayQuery(
                 project_id=request.project_id,
-                graph_version=position.graph_version,
-                fact_fingerprint=position.fact_fingerprint,
-                decision_fingerprint=decision.decision_fingerprint,
+                graph_version=None,
+                fact_fingerprint=None,
+                decision_fingerprint=None,
                 node_id="authority.repair",
-                instance_key=decision.instance_key,
                 idempotency_key=request.idempotency_key,
                 actor=request.actor,
                 correlation_id=request.correlation_id,
@@ -1589,6 +1614,10 @@ class AgileForgeApplication:
         )
         if replay is not None:
             return replay
+        position = self.position(project_id=request.project_id)
+        decision = _unique_available_decision(position, "authority.repair")
+        if decision is None or decision.category is not NodeCategory.AVAILABLE:
+            return _transition_not_available(position, "authority.repair")
         input_payload = input_service.build(
             project_id=request.project_id,
             decision=decision,

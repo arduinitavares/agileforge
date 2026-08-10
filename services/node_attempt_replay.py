@@ -95,7 +95,11 @@ class DurableNodeAttemptReplayService:
                 actor=query.actor,
                 correlation_id=query.correlation_id,
                 target_node_id=query.node_id,
-                target_instance_key=stored.target_instance_key,
+                target_instance_key=(
+                    stored.target_instance_key
+                    if query.instance_key is None
+                    else query.instance_key
+                ),
                 normalized_input=_replay_normalized_input(stored, query),
                 model_id=stored.model_id,
                 execution_settings=stored.execution_settings,
