@@ -23,7 +23,7 @@ from api import (
     build_create_project_command,
 )
 from cli.workflow_commands import COMMAND_PREFIXES
-from models.core import UserStory
+from models.core import Project, UserStory
 from models.workflow import (
     BacklogArtifact,
     RoadmapArtifact,
@@ -68,6 +68,7 @@ from services.node_attempt_replay import (
     TransitionReplayQuery,
 )
 from services.product_goal_interview_input import ProductGoalInterviewInputService
+from services.read_projections import DurableReadProjectionService
 from tests.adapters.test_command_renderer import position_fixture
 from tests.workflow.execution_fixtures import seed_started_execution
 from tests.workflow.test_execution_transitions import (
@@ -139,6 +140,56 @@ type DeliveryReviewRequest = (
     | SprintPlanReviewRequest
     | StoryReviewRequest
 )
+
+
+@dataclass(frozen=True)
+class _StatusReadApplication:
+    """Expose the real durable status projection to API route tests."""
+
+    reads: DurableReadProjectionService
+
+
+def test_vision_and_goal_status_endpoints_expose_durable_interview_contract(
+    engine: "Engine",
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """HTTP status reads preserve the structured empty interview contract."""
+    with Session(engine) as session:
+        project = Project(name="API interview status")
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+        assert project.project_id is not None
+        project_id = project.project_id
+    application = _StatusReadApplication(
+        reads=DurableReadProjectionService(engine=engine)
+    )
+    monkeypatch.setattr(api_module, "_application", lambda: application)
+    client = TestClient(api_module.app)
+
+    vision = client.get(f"/api/projects/{project_id}/vision/status")
+    goal = client.get(f"/api/projects/{project_id}/goals/status")
+
+    assert vision.status_code == HTTPStatus.OK
+    assert vision.json()["data"] == {
+        "current": None,
+        "transcript": [],
+        "latest_questions": [],
+        "candidate": None,
+        "review": None,
+        "stale_reason": "VISION_NOT_ACCEPTED",
+    }
+    assert goal.status_code == HTTPStatus.OK
+    assert goal.json()["data"] == {
+        "accepted_vision": None,
+        "active": None,
+        "transcript": [],
+        "latest_questions": [],
+        "candidate": None,
+        "review": None,
+        "outcome": None,
+        "stale_reason": "GOAL_NOT_ACTIVE",
+    }
 
 
 def test_create_project_request_accepts_only_semantic_fields() -> None:

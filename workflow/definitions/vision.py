@@ -23,6 +23,7 @@ if TYPE_CHECKING:
         ReviewDecisionFact,
         VisionArtifactDecisionFact,
         VisionArtifactFact,
+        VisionInterviewTurnFact,
         VisionRevisionIntentFact,
         WorkflowFactSnapshot,
     )
@@ -342,12 +343,22 @@ LEGACY_VISION_NODES: tuple[NodeSpec, ...] = (
 
 @dataclass(frozen=True)
 class VisionInterviewState:
-    """Current isolated Vision artifact, decision, and open revision intent."""
+    """Current isolated Vision review context and active interview chain."""
 
     artifact: VisionArtifactFact | None
     decision: VisionArtifactDecisionFact | None
     open_revision: VisionRevisionIntentFact | None
+    transcript: tuple[VisionInterviewTurnFact, ...]
     conflict: bool
+
+
+@dataclass(frozen=True)
+class _VisionReviewSelection:
+    """Validated selected Vision artifact, review, and revision intent."""
+
+    artifact: VisionArtifactFact | None
+    decision: VisionArtifactDecisionFact | None
+    open_revision: VisionRevisionIntentFact | None
 
 
 def _interview_reference(turn: VisionRevisionIntentFact) -> FactReference:
@@ -358,8 +369,56 @@ def _interview_reference(turn: VisionRevisionIntentFact) -> FactReference:
     )
 
 
-def _isolated_vision_state(snapshot: WorkflowFactSnapshot) -> VisionInterviewState:
-    """Derive one current Vision chain without consulting authority or ADK traces."""
+def _vision_turn_chain(
+    turns: tuple[VisionInterviewTurnFact, ...],
+    *,
+    leaf_id: int | None = None,
+    completed_source_ids: frozenset[int] = frozenset(),
+) -> tuple[VisionInterviewTurnFact, ...] | None:
+    """Return one chronological linked chain, optionally after prior artifacts."""
+    if not turns:
+        return ()
+    by_id = {item.vision_interview_turn_id: item for item in turns}
+    prior_ids = {item.prior_turn_id for item in turns if item.prior_turn_id is not None}
+    leaves = [item for item in turns if item.vision_interview_turn_id not in prior_ids]
+    if (
+        len(by_id) != len(turns)
+        or len(leaves) != 1
+        or (leaf_id is not None and leaves[0].vision_interview_turn_id != leaf_id)
+    ):
+        return None
+    leaf = leaves[0]
+    reversed_chain: list[VisionInterviewTurnFact] = []
+    visited: set[int] = set()
+    current: VisionInterviewTurnFact | None = leaf
+    missing_parent = False
+    while current is not None and current.vision_interview_turn_id not in visited:
+        identifier = current.vision_interview_turn_id
+        visited.add(identifier)
+        reversed_chain.append(current)
+        prior_id = current.prior_turn_id
+        missing_parent = prior_id is not None and prior_id not in by_id
+        current = None if prior_id is None else by_id.get(prior_id)
+        if missing_parent:
+            break
+    if missing_parent or current is not None or len(visited) != len(turns):
+        return None
+    chain = tuple(reversed(reversed_chain))
+    cut = max(
+        (
+            index
+            for index, item in enumerate(chain)
+            if item.vision_interview_turn_id in completed_source_ids
+        ),
+        default=-1,
+    )
+    return chain[cut + 1 :]
+
+
+def _vision_review_selection(
+    snapshot: WorkflowFactSnapshot,
+) -> _VisionReviewSelection | None:
+    """Validate and select the sole current Vision artifact lineage."""
     by_id = {item.vision_artifact_id: item for item in snapshot.vision_artifacts}
     children = {
         item.supersedes_vision_artifact_id
@@ -372,20 +431,20 @@ def _isolated_vision_state(snapshot: WorkflowFactSnapshot) -> VisionInterviewSta
         if item.vision_artifact_id not in children
     ]
     if len(current) > 1:
-        return VisionInterviewState(None, None, None, True)
+        return None
     artifact = current[0] if current else None
     decisions = {
         item.vision_artifact_id: item for item in snapshot.vision_artifact_decisions
     }
     if len(decisions) != len(snapshot.vision_artifact_decisions):
-        return VisionInterviewState(None, None, None, True)
+        return None
     for item in snapshot.vision_artifact_decisions:
         referenced = by_id.get(item.vision_artifact_id)
         if (
             referenced is None
             or referenced.content_fingerprint != item.artifact_fingerprint
         ):
-            return VisionInterviewState(None, None, None, True)
+            return None
     open_intents = []
     for intent in snapshot.vision_revision_intents:
         source = by_id.get(intent.source_vision_artifact_id)
@@ -393,7 +452,7 @@ def _isolated_vision_state(snapshot: WorkflowFactSnapshot) -> VisionInterviewSta
             source is None
             or source.content_fingerprint != intent.source_vision_fingerprint
         ):
-            return VisionInterviewState(None, None, None, True)
+            return None
         completed = any(
             turn.mode == "revision"
             and turn.revision_intent_id == intent.vision_revision_intent_id
@@ -406,11 +465,96 @@ def _isolated_vision_state(snapshot: WorkflowFactSnapshot) -> VisionInterviewSta
         if not completed:
             open_intents.append(intent)
     if len(open_intents) > 1:
-        return VisionInterviewState(None, None, None, True)
+        return None
+    open_revision = open_intents[0] if open_intents else None
+    decision = None if artifact is None else decisions.get(artifact.vision_artifact_id)
+    return _VisionReviewSelection(artifact, decision, open_revision)
+
+
+def _vision_transcript(
+    snapshot: WorkflowFactSnapshot,
+    review: _VisionReviewSelection,
+) -> tuple[VisionInterviewTurnFact, ...] | None:
+    """Select only the active interview segment for one Vision review state."""
+    artifact = review.artifact
+    decision = review.decision
+    open_revision = review.open_revision
+    completed_source_ids = frozenset(
+        item.source_interview_turn_id for item in snapshot.vision_artifacts
+    )
+    if open_revision is not None:
+        turns = tuple(
+            item
+            for item in snapshot.vision_interview_turns
+            if item.mode == "revision"
+            and item.revision_intent_id == open_revision.vision_revision_intent_id
+        )
+        transcript = _vision_turn_chain(turns)
+    elif artifact is None:
+        turns = tuple(
+            item
+            for item in snapshot.vision_interview_turns
+            if item.mode == "initial" and item.revision_intent_id is None
+        )
+        transcript = _vision_turn_chain(turns)
+    elif decision is None:
+        source_turn = next(
+            (
+                item
+                for item in snapshot.vision_interview_turns
+                if item.vision_interview_turn_id == artifact.source_interview_turn_id
+            ),
+            None,
+        )
+        if source_turn is None:
+            return None
+        turns = tuple(
+            item
+            for item in snapshot.vision_interview_turns
+            if (item.mode, item.revision_intent_id)
+            == (source_turn.mode, source_turn.revision_intent_id)
+        )
+        transcript = _vision_turn_chain(
+            turns,
+            leaf_id=source_turn.vision_interview_turn_id,
+            completed_source_ids=completed_source_ids
+            - {source_turn.vision_interview_turn_id},
+        )
+    elif decision.decision in {"feedback", "rejected"}:
+        turns = tuple(
+            item
+            for item in snapshot.vision_interview_turns
+            if item.mode == "initial" and item.revision_intent_id is None
+        )
+        transcript = _vision_turn_chain(
+            turns,
+            completed_source_ids=completed_source_ids,
+        )
+    else:
+        transcript = ()
+    if transcript is None or any(
+        item.is_complete and item.vision_interview_turn_id not in completed_source_ids
+        for item in transcript
+    ):
+        return None
+    return transcript
+
+
+def select_vision_interview_state(
+    snapshot: WorkflowFactSnapshot,
+) -> VisionInterviewState:
+    """Derive one current Vision chain without mutable caches or row recency."""
+    review = _vision_review_selection(snapshot)
+    if review is None:
+        return VisionInterviewState(None, None, None, (), True)
+    transcript = _vision_transcript(snapshot, review)
+    if transcript is None:
+        return VisionInterviewState(None, None, None, (), True)
     return VisionInterviewState(
-        artifact,
-        None if artifact is None else decisions.get(artifact.vision_artifact_id),
-        open_intents[0] if open_intents else None,
+        review.artifact,
+        review.decision,
+        review.open_revision,
+        transcript,
         False,
     )
 
@@ -452,7 +596,7 @@ def _vision_interview_rule(
     _evaluated_at: datetime,
 ) -> tuple[RuleEvaluation, ...]:
     """Offer only the isolated human Vision interview lifecycle."""
-    state = _isolated_vision_state(snapshot)
+    state = select_vision_interview_state(snapshot)
     if state.conflict:
         return (RuleEvaluation(RuleCategory.INVALID, "WORKFLOW_FACT_CONFLICT"),)
     if state.open_revision is not None:
@@ -497,7 +641,7 @@ def _vision_interview_review_rule(
     snapshot: WorkflowFactSnapshot,
     _evaluated_at: datetime,
 ) -> tuple[RuleEvaluation, ...]:
-    state = _isolated_vision_state(snapshot)
+    state = select_vision_interview_state(snapshot)
     if state.conflict:
         return (RuleEvaluation(RuleCategory.INVALID, "WORKFLOW_FACT_CONFLICT"),)
     if state.artifact is None or state.decision is not None:
@@ -521,7 +665,7 @@ def _vision_revision_start_rule(
     snapshot: WorkflowFactSnapshot,
     _evaluated_at: datetime,
 ) -> tuple[RuleEvaluation, ...]:
-    state = _isolated_vision_state(snapshot)
+    state = select_vision_interview_state(snapshot)
     if state.conflict:
         return (RuleEvaluation(RuleCategory.INVALID, "WORKFLOW_FACT_CONFLICT"),)
     if (
@@ -600,8 +744,10 @@ __all__ = [
     "VISION_INTERVIEW_NODES",
     "VISION_NODES",
     "PhaseArtifactState",
+    "VisionInterviewState",
     "accepted_current_artifact",
     "artifact_reference",
     "authority_reference",
     "phase_artifact_state",
+    "select_vision_interview_state",
 ]

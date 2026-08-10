@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from workflow.contracts import FactReference, InputField, RecommendationKind
+from workflow.definitions.vision import select_vision_interview_state
 from workflow.graph import AgenticExecutionSpec, NodeSpec, RuleCategory, RuleEvaluation
 
 if TYPE_CHECKING:
@@ -12,10 +14,45 @@ if TYPE_CHECKING:
     from datetime import datetime
 
     from workflow.facts import (
+        ProductGoalArtifactDecisionFact,
         ProductGoalArtifactFact,
+        ProductGoalInterviewTurnFact,
         VisionArtifactFact,
         WorkflowFactSnapshot,
     )
+
+
+@dataclass(frozen=True)
+class ProductGoalInterviewState:
+    """Current Goal review context and active interview chain."""
+
+    vision: VisionArtifactFact | None
+    active: ProductGoalArtifactFact | None
+    candidate: ProductGoalArtifactFact | None
+    decision: ProductGoalArtifactDecisionFact | None
+    transcript: tuple[ProductGoalInterviewTurnFact, ...]
+    conflict: bool
+
+
+@dataclass(frozen=True)
+class _GoalLineage:
+    """Validated Goal artifacts, child links, and exact decisions."""
+
+    goals: tuple[ProductGoalArtifactFact, ...]
+    child_ids: frozenset[int]
+    decisions: dict[int, ProductGoalArtifactDecisionFact]
+
+
+@dataclass(frozen=True)
+class _GoalCurrentSelection:
+    """Selected active Goal or interview identity under one accepted Vision."""
+
+    active: ProductGoalArtifactFact | None
+    candidate: ProductGoalArtifactFact | None
+    decision: ProductGoalArtifactDecisionFact | None
+    goal_number: int | None
+    revision_number: int | None
+    candidate_source_turn_id: int | None
 
 
 def _reference(kind: str, identifier: int, fingerprint: str) -> FactReference:
@@ -63,14 +100,10 @@ def accepted_current_goal(
     snapshot: WorkflowFactSnapshot,
 ) -> ProductGoalArtifactFact | None:
     """Return the sole unresolved accepted Goal under the accepted Vision."""
-    vision = accepted_current_vision(snapshot)
-    if vision is None:
+    state = select_product_goal_interview_state(snapshot)
+    if state.conflict:
         return None
-    accepted = _unresolved_accepted_goals(snapshot, vision)
-    pending = _pending_goals(snapshot, vision)
-    if len(accepted) + len(pending) != 1:
-        return None
-    return accepted[0] if accepted else None
+    return state.active
 
 
 def _unresolved_accepted_goals(
@@ -105,9 +138,7 @@ def lifecycle_is_quiescent(snapshot: WorkflowFactSnapshot) -> bool:
     if any(sprint.status == "active" for sprint in snapshot.sprints):
         return False
     completed_sprint_ids = {
-        sprint.sprint_id
-        for sprint in snapshot.sprints
-        if sprint.status == "completed"
+        sprint.sprint_id for sprint in snapshot.sprints if sprint.status == "completed"
     }
     triaged_sprint_ids = {triage.sprint_id for triage in snapshot.post_sprint_triage}
     if not completed_sprint_ids <= triaged_sprint_ids:
@@ -159,11 +190,245 @@ def _pending_goals(
     return tuple(pending)
 
 
+def _goal_turn_chain(
+    turns: tuple[ProductGoalInterviewTurnFact, ...],
+    *,
+    leaf_id: int | None = None,
+) -> tuple[ProductGoalInterviewTurnFact, ...] | None:
+    """Return one exact chronological Goal interview chain."""
+    if not turns:
+        return ()
+    by_id = {item.product_goal_interview_turn_id: item for item in turns}
+    prior_ids = {item.prior_turn_id for item in turns if item.prior_turn_id is not None}
+    leaves = [
+        item for item in turns if item.product_goal_interview_turn_id not in prior_ids
+    ]
+    if (
+        len(by_id) != len(turns)
+        or len(leaves) != 1
+        or (leaf_id is not None and leaves[0].product_goal_interview_turn_id != leaf_id)
+    ):
+        return None
+    leaf = leaves[0]
+    reversed_chain: list[ProductGoalInterviewTurnFact] = []
+    visited: set[int] = set()
+    current: ProductGoalInterviewTurnFact | None = leaf
+    missing_parent = False
+    while current is not None and current.product_goal_interview_turn_id not in visited:
+        identifier = current.product_goal_interview_turn_id
+        visited.add(identifier)
+        reversed_chain.append(current)
+        prior_id = current.prior_turn_id
+        missing_parent = prior_id is not None and prior_id not in by_id
+        current = None if prior_id is None else by_id.get(prior_id)
+        if missing_parent:
+            break
+    if missing_parent or current is not None or len(visited) != len(turns):
+        return None
+    return tuple(reversed(reversed_chain))
+
+
+def _goal_lineage(
+    snapshot: WorkflowFactSnapshot,
+    vision: VisionArtifactFact,
+) -> _GoalLineage | None:
+    """Validate Goal supersession and decision lineage under one Vision."""
+    goals = tuple(
+        item
+        for item in snapshot.product_goal_artifacts
+        if (item.vision_artifact_id, item.vision_fingerprint)
+        == (vision.vision_artifact_id, vision.content_fingerprint)
+    )
+    by_id = {item.product_goal_artifact_id: item for item in goals}
+    if len(by_id) != len(goals):
+        return None
+    children: dict[int, int] = {}
+    for item in goals:
+        parent_id = item.supersedes_product_goal_artifact_id
+        if parent_id is None:
+            continue
+        parent = by_id.get(parent_id)
+        if (
+            parent is None
+            or parent.goal_number != item.goal_number
+            or parent.revision_number + 1 != item.revision_number
+            or parent_id in children
+        ):
+            return None
+        children[parent_id] = item.product_goal_artifact_id
+    decisions_by_goal: dict[int, ProductGoalArtifactDecisionFact] = {}
+    for item in snapshot.product_goal_artifact_decisions:
+        goal = by_id.get(item.product_goal_artifact_id)
+        if goal is None:
+            continue
+        if (
+            item.product_goal_artifact_id in decisions_by_goal
+            or item.artifact_fingerprint != goal.content_fingerprint
+        ):
+            return None
+        decisions_by_goal[item.product_goal_artifact_id] = item
+    return _GoalLineage(goals, frozenset(children), decisions_by_goal)
+
+
+def _current_goal_selection(
+    snapshot: WorkflowFactSnapshot,
+    vision: VisionArtifactFact,
+    lineage: _GoalLineage,
+) -> _GoalCurrentSelection | None:
+    """Choose graph-current Goal review context and interview identity."""
+    accepted = _unresolved_accepted_goals(snapshot, vision)
+    pending = _pending_goals(snapshot, vision)
+    if len(accepted) + len(pending) > 1:
+        return None
+    active = accepted[0] if accepted else None
+    if active is not None:
+        return (
+            None
+            if active.product_goal_artifact_id in lineage.child_ids
+            else _GoalCurrentSelection(
+                active,
+                None,
+                lineage.decisions.get(active.product_goal_artifact_id),
+                None,
+                None,
+                None,
+            )
+        )
+    if pending:
+        candidate = pending[0]
+        return _GoalCurrentSelection(
+            None,
+            candidate,
+            None,
+            candidate.goal_number,
+            candidate.revision_number,
+            candidate.source_interview_turn_id,
+        )
+    reviewed = tuple(
+        item
+        for item in lineage.goals
+        if item.product_goal_artifact_id not in lineage.child_ids
+        and (selected := lineage.decisions.get(item.product_goal_artifact_id))
+        is not None
+        and selected.decision in {"feedback", "rejected"}
+    )
+    if len(reviewed) > 1:
+        return None
+    if reviewed:
+        candidate = reviewed[0]
+        return _GoalCurrentSelection(
+            None,
+            candidate,
+            lineage.decisions[candidate.product_goal_artifact_id],
+            candidate.goal_number,
+            candidate.revision_number + 1,
+            None,
+        )
+    return _GoalCurrentSelection(
+        None,
+        None,
+        None,
+        max((item.goal_number for item in lineage.goals), default=0) + 1,
+        1,
+        None,
+    )
+
+
+def _goal_state_under_vision(
+    snapshot: WorkflowFactSnapshot,
+    vision: VisionArtifactFact,
+) -> ProductGoalInterviewState:
+    """Select current Goal state after accepted Vision selection."""
+    lineage = _goal_lineage(snapshot, vision)
+    current = (
+        None if lineage is None else _current_goal_selection(snapshot, vision, lineage)
+    )
+    if lineage is None or current is None:
+        return ProductGoalInterviewState(vision, None, None, None, (), True)
+    if current.active is not None:
+        return ProductGoalInterviewState(
+            vision,
+            current.active,
+            None,
+            current.decision,
+            (),
+            False,
+        )
+    if current.goal_number is None or current.revision_number is None:
+        return ProductGoalInterviewState(vision, None, None, None, (), True)
+    selected_identity = (current.goal_number, current.revision_number)
+    artifact_identities = {
+        (item.goal_number, item.revision_number) for item in lineage.goals
+    }
+    unmaterialized_identities = {
+        (item.goal_number, item.revision_number)
+        for item in snapshot.product_goal_interview_turns
+        if (item.vision_artifact_id, item.vision_fingerprint)
+        == (vision.vision_artifact_id, vision.content_fingerprint)
+        and (item.goal_number, item.revision_number) not in artifact_identities
+    }
+    if unmaterialized_identities - {selected_identity}:
+        return ProductGoalInterviewState(vision, None, None, None, (), True)
+    turns = tuple(
+        item
+        for item in snapshot.product_goal_interview_turns
+        if (
+            item.vision_artifact_id,
+            item.vision_fingerprint,
+            item.goal_number,
+            item.revision_number,
+        )
+        == (
+            vision.vision_artifact_id,
+            vision.content_fingerprint,
+            current.goal_number,
+            current.revision_number,
+        )
+    )
+    transcript = _goal_turn_chain(
+        turns,
+        leaf_id=current.candidate_source_turn_id,
+    )
+    artifact_source_ids = {
+        item.source_interview_turn_id for item in snapshot.product_goal_artifacts
+    }
+    if transcript is None or any(
+        item.is_complete
+        and item.product_goal_interview_turn_id not in artifact_source_ids
+        for item in transcript
+    ):
+        return ProductGoalInterviewState(vision, None, None, None, (), True)
+    return ProductGoalInterviewState(
+        vision,
+        None,
+        current.candidate,
+        current.decision,
+        transcript,
+        False,
+    )
+
+
+def select_product_goal_interview_state(
+    snapshot: WorkflowFactSnapshot,
+) -> ProductGoalInterviewState:
+    """Select Goal review and interview facts using graph lineage only."""
+    vision_state = select_vision_interview_state(snapshot)
+    if vision_state.conflict:
+        return ProductGoalInterviewState(None, None, None, None, (), True)
+    vision = accepted_current_vision(snapshot)
+    if vision is None:
+        return ProductGoalInterviewState(None, None, None, None, (), False)
+    return _goal_state_under_vision(snapshot, vision)
+
+
 def _goal_interview_rule(
     snapshot: WorkflowFactSnapshot,
     _at: datetime,
 ) -> tuple[RuleEvaluation, ...]:
-    vision = accepted_current_vision(snapshot)
+    state = select_product_goal_interview_state(snapshot)
+    if state.conflict:
+        return (RuleEvaluation(RuleCategory.INVALID, "WORKFLOW_FACT_CONFLICT"),)
+    vision = state.vision
     if vision is None:
         return (
             RuleEvaluation(
@@ -171,18 +436,14 @@ def _goal_interview_rule(
                 "PRODUCT_GOAL_VISION_NOT_ACCEPTED",
             ),
         )
-    accepted_goals = _unresolved_accepted_goals(snapshot, vision)
-    pending_goals = _pending_goals(snapshot, vision)
-    if len(accepted_goals) + len(pending_goals) > 1:
-        return (RuleEvaluation(RuleCategory.INVALID, "WORKFLOW_FACT_CONFLICT"),)
-    if accepted_goals:
+    if state.active is not None:
         return (
             RuleEvaluation(
                 RuleCategory.SATISFIED,
                 "PRODUCT_GOAL_INTERVIEW_NOT_READY",
             ),
         )
-    if pending_goals:
+    if state.candidate is not None and state.decision is None:
         return (
             RuleEvaluation(
                 RuleCategory.SATISFIED,
@@ -208,7 +469,10 @@ def _goal_review_rule(
     snapshot: WorkflowFactSnapshot,
     _at: datetime,
 ) -> tuple[RuleEvaluation, ...]:
-    vision = accepted_current_vision(snapshot)
+    state = select_product_goal_interview_state(snapshot)
+    if state.conflict:
+        return (RuleEvaluation(RuleCategory.INVALID, "WORKFLOW_FACT_CONFLICT"),)
+    vision = state.vision
     if vision is None:
         return (
             RuleEvaluation(
@@ -216,18 +480,14 @@ def _goal_review_rule(
                 "PRODUCT_GOAL_REVIEW_NOT_READY",
             ),
         )
-    accepted_goals = _unresolved_accepted_goals(snapshot, vision)
-    pending_goals = _pending_goals(snapshot, vision)
-    if len(accepted_goals) + len(pending_goals) > 1:
-        return (RuleEvaluation(RuleCategory.INVALID, "WORKFLOW_FACT_CONFLICT"),)
-    if len(pending_goals) != 1:
+    if state.candidate is None or state.decision is not None:
         return (
             RuleEvaluation(
                 RuleCategory.SATISFIED,
                 "PRODUCT_GOAL_REVIEW_NOT_PENDING",
             ),
         )
-    goal = pending_goals[0]
+    goal = state.candidate
     return (
         RuleEvaluation(
             RuleCategory.WAITING,
@@ -323,3 +583,13 @@ PRODUCT_GOAL_NODES: tuple[NodeSpec, ...] = (
         evaluate_rule=_outcome_rule("abandoned"),
     ),
 )
+
+
+__all__ = [
+    "PRODUCT_GOAL_NODES",
+    "ProductGoalInterviewState",
+    "accepted_current_goal",
+    "accepted_current_vision",
+    "lifecycle_is_quiescent",
+    "select_product_goal_interview_state",
+]

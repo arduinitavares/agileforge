@@ -38,7 +38,9 @@ from workflow.definitions.product_discovery import select_product_definition_sta
 from workflow.definitions.product_goal import (
     accepted_current_goal,
     accepted_current_vision,
+    select_product_goal_interview_state,
 )
+from workflow.definitions.vision import select_vision_interview_state
 from workflow.fingerprints import canonical_hash
 
 if TYPE_CHECKING:
@@ -48,9 +50,15 @@ if TYPE_CHECKING:
 
     from workflow.facts import (
         DiscoveryArtifactFact,
+        ProductGoalArtifactDecisionFact,
+        ProductGoalArtifactFact,
+        ProductGoalInterviewTurnFact,
         SpecificationCandidateFact,
         SpecificationDecisionFact,
         SprintFact,
+        VisionArtifactDecisionFact,
+        VisionArtifactFact,
+        VisionInterviewTurnFact,
         WorkflowFactSnapshot,
     )
 
@@ -151,6 +159,129 @@ def _specification_review_data(
         "decision": decision.decision,
         "rationale": decision.rationale,
         "reviewer": decision.reviewer,
+    }
+
+
+def _vision_turn_data(turn: VisionInterviewTurnFact) -> JsonObject:
+    """Render one typed immutable Vision interview turn."""
+    return {
+        "vision_interview_turn_id": turn.vision_interview_turn_id,
+        "mode": turn.mode,
+        "turn_number": turn.turn_number,
+        "revision_intent_id": turn.revision_intent_id,
+        "prior_turn_id": turn.prior_turn_id,
+        "user_text": turn.user_text,
+        "statement": turn.vision_statement,
+        "components": turn.components,
+        "is_complete": turn.is_complete,
+        "clarifying_questions": list(turn.clarifying_questions),
+        "output_fingerprint": turn.output_fingerprint,
+        "recorded_at": _iso(turn.recorded_at),
+    }
+
+
+def _vision_candidate_data(artifact: VisionArtifactFact) -> JsonObject:
+    """Render one exact immutable Vision candidate."""
+    return {
+        "vision_artifact_id": artifact.vision_artifact_id,
+        "version_number": artifact.version_number,
+        "fingerprint": artifact.content_fingerprint,
+        "statement": artifact.statement,
+        "components": artifact.components,
+        "supersedes_vision_artifact_id": artifact.supersedes_vision_artifact_id,
+        "source_interview_turn_id": artifact.source_interview_turn_id,
+        "created_by": artifact.created_by,
+        "created_at": _iso(artifact.created_at),
+    }
+
+
+def _vision_review_data(
+    decision: VisionArtifactDecisionFact | None,
+    *,
+    pending: bool,
+) -> JsonObject | None:
+    """Render pending or exact terminal Vision review state."""
+    if decision is None:
+        return {"state": "pending"} if pending else None
+    return {
+        "state": decision.decision,
+        "vision_artifact_decision_id": decision.vision_artifact_decision_id,
+        "decision": decision.decision,
+        "rationale": decision.rationale,
+        "reviewer": decision.reviewer,
+        "decided_at": _iso(decision.decided_at),
+    }
+
+
+def _goal_turn_data(turn: ProductGoalInterviewTurnFact) -> JsonObject:
+    """Render one typed immutable Product Goal interview turn."""
+    return {
+        "product_goal_interview_turn_id": turn.product_goal_interview_turn_id,
+        "vision_artifact_id": turn.vision_artifact_id,
+        "vision_fingerprint": turn.vision_fingerprint,
+        "goal_number": turn.goal_number,
+        "revision_number": turn.revision_number,
+        "prior_turn_id": turn.prior_turn_id,
+        "user_text": turn.user_text,
+        "statement": turn.goal_statement,
+        "components": turn.components,
+        "is_complete": turn.is_complete,
+        "clarifying_questions": list(turn.clarifying_questions),
+        "output_fingerprint": turn.output_fingerprint,
+        "recorded_at": _iso(turn.recorded_at),
+    }
+
+
+def _goal_candidate_data(
+    artifact: ProductGoalArtifactFact,
+    snapshot: WorkflowFactSnapshot,
+) -> JsonObject | None:
+    """Render one Goal candidate with components from its exact source turn."""
+    source = next(
+        (
+            item
+            for item in snapshot.product_goal_interview_turns
+            if item.product_goal_interview_turn_id == artifact.source_interview_turn_id
+        ),
+        None,
+    )
+    if source is None:
+        return None
+    return {
+        "product_goal_artifact_id": artifact.product_goal_artifact_id,
+        "vision_artifact_id": artifact.vision_artifact_id,
+        "vision_fingerprint": artifact.vision_fingerprint,
+        "goal_number": artifact.goal_number,
+        "revision_number": artifact.revision_number,
+        "fingerprint": artifact.content_fingerprint,
+        "statement": artifact.statement,
+        "components": source.components,
+        "supersedes_product_goal_artifact_id": (
+            artifact.supersedes_product_goal_artifact_id
+        ),
+        "source_interview_turn_id": artifact.source_interview_turn_id,
+        "created_by": artifact.created_by,
+        "created_at": _iso(artifact.created_at),
+    }
+
+
+def _goal_review_data(
+    decision: ProductGoalArtifactDecisionFact | None,
+    *,
+    pending: bool,
+) -> JsonObject | None:
+    """Render pending or exact terminal Product Goal review state."""
+    if decision is None:
+        return {"state": "pending"} if pending else None
+    return {
+        "state": decision.decision,
+        "product_goal_artifact_decision_id": (
+            decision.product_goal_artifact_decision_id
+        ),
+        "decision": decision.decision,
+        "rationale": decision.rationale,
+        "reviewer": decision.reviewer,
+        "decided_at": _iso(decision.decided_at),
     }
 
 
@@ -767,54 +898,153 @@ class DurableReadProjectionService:
         )
 
     def vision_status(self, *, project_id: int) -> JsonObject:
-        """Project the current durable Vision without consulting mutable caches."""
+        """Project durable Vision review and active interview state."""
         snapshot = self._snapshot(project_id)
         if isinstance(snapshot, dict):
             return snapshot
-        vision = accepted_current_vision(snapshot)
-        if vision is None:
-            return _success({"current": None, "stale_reason": "VISION_NOT_ACCEPTED"})
-        return _success(
-            {
-                "current": {
-                    "vision_artifact_id": vision.vision_artifact_id,
-                    "fingerprint": vision.content_fingerprint,
-                    "statement": vision.statement,
-                },
-                "stale_reason": None,
-            }
-        )
-
-    def product_goal_status(self, *, project_id: int) -> JsonObject:
-        """Project accepted Goal and durable outcome state from workflow facts."""
-        snapshot = self._snapshot(project_id)
-        if isinstance(snapshot, dict):
-            return snapshot
-        goal = accepted_current_goal(snapshot)
-        if goal is None:
-            resolved = _latest_resolved_goal(snapshot)
+        selection = select_vision_interview_state(snapshot)
+        if selection.conflict:
             return _success(
                 {
-                    "active": None,
-                    "outcome": None if resolved is None else resolved[1],
-                    "stale_reason": (
-                        "GOAL_NOT_ACTIVE" if resolved is None else "GOAL_RESOLVED"
-                    ),
+                    "current": None,
+                    "transcript": [],
+                    "latest_questions": [],
+                    "candidate": None,
+                    "review": None,
+                    "stale_reason": "VISION_FACT_CONFLICT",
                 }
             )
-        return _success(
-            {
-                "active": {
-                    "product_goal_artifact_id": goal.product_goal_artifact_id,
-                    "fingerprint": goal.content_fingerprint,
-                    "statement": goal.statement,
-                    "goal_number": goal.goal_number,
-                    "revision_number": goal.revision_number,
-                },
-                "outcome": None,
-                "stale_reason": None,
+        vision = accepted_current_vision(snapshot)
+        transcript: list[JsonValue] = [
+            _vision_turn_data(item) for item in selection.transcript
+        ]
+        latest_questions: list[JsonValue] = (
+            []
+            if not selection.transcript
+            else list(selection.transcript[-1].clarifying_questions)
+        )
+        candidate = (
+            selection.artifact
+            if selection.decision is None
+            or selection.decision.decision in {"feedback", "rejected"}
+            else None
+        )
+        current_data: JsonObject | None = (
+            None
+            if vision is None
+            else {
+                "vision_artifact_id": vision.vision_artifact_id,
+                "fingerprint": vision.content_fingerprint,
+                "statement": vision.statement,
             }
         )
+        candidate_data: JsonObject | None = (
+            None if candidate is None else _vision_candidate_data(candidate)
+        )
+        data: JsonObject = {
+            "current": current_data,
+            "transcript": transcript,
+            "latest_questions": latest_questions,
+            "candidate": candidate_data,
+            "review": _vision_review_data(
+                selection.decision,
+                pending=candidate is not None and selection.decision is None,
+            ),
+            "stale_reason": None if vision is not None else "VISION_NOT_ACCEPTED",
+        }
+        return _success(data)
+
+    def product_goal_status(self, *, project_id: int) -> JsonObject:
+        """Project Goal review, interview, accepted Vision, and outcome state."""
+        snapshot = self._snapshot(project_id)
+        if isinstance(snapshot, dict):
+            return snapshot
+        selection = select_product_goal_interview_state(snapshot)
+        accepted_vision = selection.vision
+        accepted_vision_data: JsonObject | None = (
+            None
+            if accepted_vision is None
+            else {
+                "vision_artifact_id": accepted_vision.vision_artifact_id,
+                "fingerprint": accepted_vision.content_fingerprint,
+                "statement": accepted_vision.statement,
+            }
+        )
+        if selection.conflict:
+            return _success(
+                {
+                    "accepted_vision": accepted_vision_data,
+                    "active": None,
+                    "transcript": [],
+                    "latest_questions": [],
+                    "candidate": None,
+                    "review": None,
+                    "outcome": None,
+                    "stale_reason": "PRODUCT_GOAL_FACT_CONFLICT",
+                }
+            )
+        goal = selection.active
+        transcript: list[JsonValue] = [
+            _goal_turn_data(item) for item in selection.transcript
+        ]
+        latest_questions: list[JsonValue] = (
+            []
+            if not selection.transcript
+            else list(selection.transcript[-1].clarifying_questions)
+        )
+        candidate_data = (
+            None
+            if selection.candidate is None
+            else _goal_candidate_data(selection.candidate, snapshot)
+        )
+        if selection.candidate is not None and candidate_data is None:
+            return _success(
+                {
+                    "accepted_vision": accepted_vision_data,
+                    "active": None,
+                    "transcript": [],
+                    "latest_questions": [],
+                    "candidate": None,
+                    "review": None,
+                    "outcome": None,
+                    "stale_reason": "PRODUCT_GOAL_FACT_CONFLICT",
+                }
+            )
+        resolved = _latest_resolved_goal(snapshot)
+        active_data: JsonObject | None = (
+            None
+            if goal is None
+            else {
+                "product_goal_artifact_id": goal.product_goal_artifact_id,
+                "fingerprint": goal.content_fingerprint,
+                "statement": goal.statement,
+                "goal_number": goal.goal_number,
+                "revision_number": goal.revision_number,
+            }
+        )
+        outcome_data: JsonObject | None = (
+            None if goal is not None or resolved is None else resolved[1]
+        )
+        data: JsonObject = {
+            "accepted_vision": accepted_vision_data,
+            "active": active_data,
+            "transcript": transcript,
+            "latest_questions": latest_questions,
+            "candidate": candidate_data,
+            "review": _goal_review_data(
+                selection.decision,
+                pending=(
+                    selection.candidate is not None and selection.decision is None
+                ),
+            ),
+            "outcome": outcome_data,
+            "stale_reason": (
+                None
+                if goal is not None
+                else ("GOAL_NOT_ACTIVE" if resolved is None else "GOAL_RESOLVED")
+            ),
+        }
+        return _success(data)
 
     def discovery_status(self, *, project_id: int) -> JsonObject:
         """Project the current durable discovery artifact and exact parents."""

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
@@ -297,6 +298,783 @@ def _error_code(result: JsonObject) -> str:
     return code
 
 
+def _stored_iso(value: datetime) -> str:
+    """Match SQLite's durable naive-datetime representation."""
+    return value.replace(tzinfo=None).isoformat()
+
+
+def _seeded_int(seeded: dict[str, object], key: str) -> int:
+    value = seeded[key]
+    assert isinstance(value, int)
+    return value
+
+
+def _seed_interview_project(engine: Engine) -> dict[str, object]:
+    """Seed one Project and durable attempt used by direct fact fixtures."""
+    with Session(engine) as session:
+        project = Project(
+            name="Interview read contract",
+            description="Durable human review state",
+        )
+        session.add(project)
+        session.flush()
+        assert project.project_id is not None
+        attempt = WorkflowNodeAttempt(
+            project_id=project.project_id,
+            node_id="vision.interview",
+            instance_key=None,
+            graph_version=GRAPH_VERSION,
+            fact_fingerprint="sha256:interview-facts",
+            business_fact_fingerprint="sha256:interview-business",
+            decision_fingerprint="sha256:interview-decision",
+            normalized_input_json="{}",
+            input_fingerprint="sha256:interview-input",
+            model_id="fake/interview-read-contract",
+            execution_settings_json="{}",
+            idempotency_key="interview-read-attempt",
+            actor="operator",
+            correlation_id=None,
+            started_at=NOW,
+            lease_expires_at=NOW + timedelta(minutes=1),
+            attempt_fingerprint="sha256:interview-attempt",
+        )
+        session.add(attempt)
+        session.flush()
+        assert attempt.workflow_node_attempt_id is not None
+        result = {
+            "project_id": project.project_id,
+            "attempt_id": attempt.workflow_node_attempt_id,
+            "attempt_fingerprint": attempt.attempt_fingerprint,
+        }
+        session.commit()
+        return result
+
+
+def _vision_components(*, complete: bool) -> JsonObject:
+    return {
+        "project_name": "AgileForge",
+        "target_user": "Product teams",
+        "problem": "Workflow state is hard to review",
+        "product_category": "Product delivery system",
+        "key_benefit": "Durable review context",
+        "competitors": "Mutable chat history" if complete else None,
+        "differentiator": "Immutable workflow facts" if complete else None,
+    }
+
+
+def _goal_components(*, complete: bool) -> JsonObject:
+    return {
+        "valuable_future_state": "Every review uses durable facts",
+        "beneficiary": "Product operators",
+        "value": "Reliable decisions",
+        "success_signals": ["Exact candidates are reviewable"],
+        "boundaries": ["No mutable cache reads"] if complete else [],
+    }
+
+
+@dataclass(frozen=True)
+class _VisionTurnSeed:
+    """Input values for one direct Vision turn fixture."""
+
+    components: JsonObject
+    statement: str
+    is_complete: bool
+    questions: tuple[str, ...]
+    turn_number: int
+    prior_turn_id: int | None
+    recorded_at: datetime
+
+
+@dataclass(frozen=True)
+class _GoalTurnSeed:
+    """Input values for one direct Product Goal turn fixture."""
+
+    components: JsonObject
+    statement: str
+    is_complete: bool
+    questions: tuple[str, ...]
+    goal_number: int
+    revision_number: int
+    prior_turn_id: int | None
+    recorded_at: datetime
+
+
+def _add_vision_turn(
+    engine: Engine,
+    seeded: dict[str, object],
+    turn_seed: _VisionTurnSeed,
+) -> int:
+    project_id = seeded["project_id"]
+    attempt_id = seeded["attempt_id"]
+    attempt_fingerprint = seeded["attempt_fingerprint"]
+    assert isinstance(project_id, int)
+    assert isinstance(attempt_id, int)
+    assert isinstance(attempt_fingerprint, str)
+    with Session(engine) as session:
+        turn = VisionInterviewTurn(
+            project_id=project_id,
+            mode="initial",
+            turn_number=turn_seed.turn_number,
+            revision_intent_id=None,
+            prior_turn_id=turn_seed.prior_turn_id,
+            user_text=f"Vision answer {turn_seed.turn_number}",
+            components_json=canonical_json(turn_seed.components),
+            vision_statement=turn_seed.statement,
+            is_complete=turn_seed.is_complete,
+            clarifying_questions_json=canonical_json(list(turn_seed.questions)),
+            output_fingerprint=canonical_hash(
+                {
+                    "components_json": turn_seed.components,
+                    "vision_statement": turn_seed.statement,
+                    "is_complete": turn_seed.is_complete,
+                    "clarifying_questions_json": list(turn_seed.questions),
+                }
+            ),
+            workflow_node_attempt_id=attempt_id,
+            attempt_fingerprint=attempt_fingerprint,
+            recorded_at=turn_seed.recorded_at,
+        )
+        session.add(turn)
+        session.commit()
+        session.refresh(turn)
+        assert turn.vision_interview_turn_id is not None
+        return turn.vision_interview_turn_id
+
+
+def _seed_vision_candidate(
+    engine: Engine,
+    *,
+    decision: str | None = None,
+) -> dict[str, object]:
+    seeded = _seed_interview_project(engine)
+    components = _vision_components(complete=True)
+    statement = "Product teams review exact durable workflow state."
+    turn_id = _add_vision_turn(
+        engine,
+        seeded,
+        _VisionTurnSeed(
+            components=components,
+            statement=statement,
+            is_complete=True,
+            questions=(),
+            turn_number=1,
+            prior_turn_id=None,
+            recorded_at=NOW,
+        ),
+    )
+    project_id = seeded["project_id"]
+    assert isinstance(project_id, int)
+    with Session(engine) as session:
+        artifact = VisionArtifact(
+            project_id=project_id,
+            version_number=1,
+            components_json=canonical_json(components),
+            statement=statement,
+            content_fingerprint=canonical_hash(
+                {"components": components, "statement": statement}
+            ),
+            supersedes_vision_artifact_id=None,
+            source_interview_turn_id=turn_id,
+            created_by="operator",
+            created_at=NOW + timedelta(seconds=1),
+        )
+        session.add(artifact)
+        session.flush()
+        assert artifact.vision_artifact_id is not None
+        if decision is not None:
+            session.add(
+                VisionArtifactDecision(
+                    project_id=project_id,
+                    vision_artifact_id=artifact.vision_artifact_id,
+                    artifact_fingerprint=artifact.content_fingerprint,
+                    decision=decision,
+                    rationale=f"Vision {decision} rationale.",
+                    reviewer="vision-reviewer",
+                    idempotency_key=f"vision-{decision}",
+                    decided_at=NOW + timedelta(seconds=2),
+                )
+            )
+        seeded.update(
+            vision_id=artifact.vision_artifact_id,
+            vision_fingerprint=artifact.content_fingerprint,
+            vision_statement=artifact.statement,
+            vision_components=components,
+            vision_turn_id=turn_id,
+        )
+        session.commit()
+    return seeded
+
+
+def _add_goal_turn(
+    engine: Engine,
+    seeded: dict[str, object],
+    turn_seed: _GoalTurnSeed,
+) -> int:
+    project_id = seeded["project_id"]
+    vision_id = seeded["vision_id"]
+    vision_fingerprint = seeded["vision_fingerprint"]
+    attempt_id = seeded["attempt_id"]
+    attempt_fingerprint = seeded["attempt_fingerprint"]
+    assert isinstance(project_id, int)
+    assert isinstance(vision_id, int)
+    assert isinstance(vision_fingerprint, str)
+    assert isinstance(attempt_id, int)
+    assert isinstance(attempt_fingerprint, str)
+    with Session(engine) as session:
+        turn = ProductGoalInterviewTurn(
+            project_id=project_id,
+            vision_artifact_id=vision_id,
+            vision_fingerprint=vision_fingerprint,
+            goal_number=turn_seed.goal_number,
+            revision_number=turn_seed.revision_number,
+            prior_turn_id=turn_seed.prior_turn_id,
+            user_text=(
+                f"Goal answer {turn_seed.goal_number}.{turn_seed.revision_number}"
+            ),
+            components_json=canonical_json(turn_seed.components),
+            goal_statement=turn_seed.statement,
+            is_complete=turn_seed.is_complete,
+            clarifying_questions_json=canonical_json(list(turn_seed.questions)),
+            output_fingerprint=product_goal_interview_output_fingerprint(
+                turn_seed.components,
+                turn_seed.statement,
+                turn_seed.is_complete,
+                turn_seed.questions,
+            ),
+            workflow_node_attempt_id=attempt_id,
+            attempt_fingerprint=attempt_fingerprint,
+            recorded_at=turn_seed.recorded_at,
+        )
+        session.add(turn)
+        session.commit()
+        session.refresh(turn)
+        assert turn.product_goal_interview_turn_id is not None
+        return turn.product_goal_interview_turn_id
+
+
+def _seed_goal_candidate(
+    engine: Engine,
+    *,
+    decision: str | None = None,
+) -> dict[str, object]:
+    seeded = _seed_vision_candidate(engine, decision="accepted")
+    components = _goal_components(complete=True)
+    statement = "Make every product-definition review durable."
+    turn_id = _add_goal_turn(
+        engine,
+        seeded,
+        _GoalTurnSeed(
+            components=components,
+            statement=statement,
+            is_complete=True,
+            questions=(),
+            goal_number=1,
+            revision_number=1,
+            prior_turn_id=None,
+            recorded_at=NOW + timedelta(seconds=3),
+        ),
+    )
+    project_id = seeded["project_id"]
+    vision_id = seeded["vision_id"]
+    vision_fingerprint = seeded["vision_fingerprint"]
+    assert isinstance(project_id, int)
+    assert isinstance(vision_id, int)
+    assert isinstance(vision_fingerprint, str)
+    with Session(engine) as session:
+        artifact = ProductGoalArtifact(
+            project_id=project_id,
+            vision_artifact_id=vision_id,
+            vision_fingerprint=vision_fingerprint,
+            goal_number=1,
+            revision_number=1,
+            statement=statement,
+            content_fingerprint=product_goal_artifact_fingerprint(
+                components, statement
+            ),
+            supersedes_product_goal_artifact_id=None,
+            source_interview_turn_id=turn_id,
+            created_by="operator",
+            created_at=NOW + timedelta(seconds=4),
+        )
+        session.add(artifact)
+        session.flush()
+        assert artifact.product_goal_artifact_id is not None
+        if decision is not None:
+            session.add(
+                ProductGoalArtifactDecision(
+                    project_id=project_id,
+                    product_goal_artifact_id=artifact.product_goal_artifact_id,
+                    artifact_fingerprint=artifact.content_fingerprint,
+                    decision=decision,
+                    rationale=f"Goal {decision} rationale.",
+                    reviewer="goal-reviewer",
+                    idempotency_key=f"goal-{decision}",
+                    decided_at=NOW + timedelta(seconds=5),
+                )
+            )
+        seeded.update(
+            goal_id=artifact.product_goal_artifact_id,
+            goal_fingerprint=artifact.content_fingerprint,
+            goal_statement=artifact.statement,
+            goal_components=components,
+            goal_turn_id=turn_id,
+        )
+        session.commit()
+    return seeded
+
+
+def test_new_project_has_empty_durable_interview_reads(engine: Engine) -> None:
+    """A Project with no interview facts exposes an empty, stable contract."""
+    with Session(engine) as session:
+        project = Project(name="Empty interview state")
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+        assert project.project_id is not None
+        project_id = project.project_id
+
+    reads = DurableReadProjectionService(engine=engine)
+
+    assert _data(reads.vision_status(project_id=project_id)) == {
+        "current": None,
+        "transcript": [],
+        "latest_questions": [],
+        "candidate": None,
+        "review": None,
+        "stale_reason": "VISION_NOT_ACCEPTED",
+    }
+    assert _data(reads.product_goal_status(project_id=project_id)) == {
+        "accepted_vision": None,
+        "active": None,
+        "transcript": [],
+        "latest_questions": [],
+        "candidate": None,
+        "review": None,
+        "outcome": None,
+        "stale_reason": "GOAL_NOT_ACTIVE",
+    }
+
+
+def test_incomplete_vision_turn_exposes_exact_transcript_and_questions(
+    engine: Engine,
+) -> None:
+    """The read contract preserves one incomplete Vision turn verbatim."""
+    seeded = _seed_interview_project(engine)
+    components = _vision_components(complete=False)
+    questions = ("What alternatives do product teams use today?",)
+    statement = "Product teams need durable workflow review."
+    turn_id = _add_vision_turn(
+        engine,
+        seeded,
+        _VisionTurnSeed(
+            components=components,
+            statement=statement,
+            is_complete=False,
+            questions=questions,
+            turn_number=1,
+            prior_turn_id=None,
+            recorded_at=NOW,
+        ),
+    )
+    project_id = seeded["project_id"]
+    assert isinstance(project_id, int)
+
+    data = _data(
+        DurableReadProjectionService(engine=engine).vision_status(project_id=project_id)
+    )
+
+    assert data["transcript"] == [
+        {
+            "vision_interview_turn_id": turn_id,
+            "mode": "initial",
+            "turn_number": 1,
+            "revision_intent_id": None,
+            "prior_turn_id": None,
+            "user_text": "Vision answer 1",
+            "statement": statement,
+            "components": components,
+            "is_complete": False,
+            "clarifying_questions": list(questions),
+            "output_fingerprint": canonical_hash(
+                {
+                    "components_json": components,
+                    "vision_statement": statement,
+                    "is_complete": False,
+                    "clarifying_questions_json": list(questions),
+                }
+            ),
+            "recorded_at": _stored_iso(NOW),
+        }
+    ]
+    assert data["latest_questions"] == list(questions)
+    assert data["candidate"] is None
+    assert data["review"] is None
+
+
+def test_pending_vision_exposes_exact_candidate_and_pending_review(
+    engine: Engine,
+) -> None:
+    """A complete Vision turn projects the immutable candidate it created."""
+    seeded = _seed_vision_candidate(engine)
+    project_id = seeded["project_id"]
+    assert isinstance(project_id, int)
+
+    data = _data(
+        DurableReadProjectionService(engine=engine).vision_status(project_id=project_id)
+    )
+
+    assert data["candidate"] == {
+        "vision_artifact_id": seeded["vision_id"],
+        "version_number": 1,
+        "fingerprint": seeded["vision_fingerprint"],
+        "statement": seeded["vision_statement"],
+        "components": seeded["vision_components"],
+        "supersedes_vision_artifact_id": None,
+        "source_interview_turn_id": seeded["vision_turn_id"],
+        "created_by": "operator",
+        "created_at": _stored_iso(NOW + timedelta(seconds=1)),
+    }
+    assert data["review"] == {"state": "pending"}
+    transcript = data["transcript"]
+    assert isinstance(transcript, list)
+    assert len(transcript) == 1
+    assert data["latest_questions"] == []
+
+
+def test_vision_feedback_keeps_reviewed_candidate_separate_from_revision_chain(
+    engine: Engine,
+) -> None:
+    """Feedback context remains exact while only new turns are current."""
+    seeded = _seed_vision_candidate(engine, decision="feedback")
+    components = _vision_components(complete=False)
+    questions = ("Which differentiator should the revision emphasize?",)
+    revision_turn_id = _add_vision_turn(
+        engine,
+        seeded,
+        _VisionTurnSeed(
+            components=components,
+            statement="Product teams need a sharper durable workflow Vision.",
+            is_complete=False,
+            questions=questions,
+            turn_number=2,
+            prior_turn_id=_seeded_int(seeded, "vision_turn_id"),
+            recorded_at=NOW + timedelta(seconds=3),
+        ),
+    )
+    project_id = seeded["project_id"]
+    assert isinstance(project_id, int)
+
+    data = _data(
+        DurableReadProjectionService(engine=engine).vision_status(project_id=project_id)
+    )
+
+    candidate = _json_object(data["candidate"])
+    assert candidate["vision_artifact_id"] == seeded["vision_id"]
+    assert data["review"] == {
+        "state": "feedback",
+        "vision_artifact_decision_id": 1,
+        "decision": "feedback",
+        "rationale": "Vision feedback rationale.",
+        "reviewer": "vision-reviewer",
+        "decided_at": _stored_iso(NOW + timedelta(seconds=2)),
+    }
+    transcript = data["transcript"]
+    assert isinstance(transcript, list)
+    assert [_json_object(item)["vision_interview_turn_id"] for item in transcript] == [
+        revision_turn_id
+    ]
+    assert data["latest_questions"] == list(questions)
+
+
+def test_accepted_vision_has_current_artifact_and_no_pending_candidate(
+    engine: Engine,
+) -> None:
+    """Acceptance promotes current Vision while preserving terminal review."""
+    seeded = _seed_vision_candidate(engine, decision="accepted")
+    project_id = seeded["project_id"]
+    assert isinstance(project_id, int)
+
+    data = _data(
+        DurableReadProjectionService(engine=engine).vision_status(project_id=project_id)
+    )
+
+    assert data["current"] == {
+        "vision_artifact_id": seeded["vision_id"],
+        "fingerprint": seeded["vision_fingerprint"],
+        "statement": seeded["vision_statement"],
+    }
+    assert data["candidate"] is None
+    assert data["transcript"] == []
+    assert data["latest_questions"] == []
+    assert data["review"] == {
+        "state": "accepted",
+        "vision_artifact_decision_id": 1,
+        "decision": "accepted",
+        "rationale": "Vision accepted rationale.",
+        "reviewer": "vision-reviewer",
+        "decided_at": _stored_iso(NOW + timedelta(seconds=2)),
+    }
+    assert data["stale_reason"] is None
+
+
+def test_incomplete_goal_exposes_accepted_vision_transcript_and_questions(
+    engine: Engine,
+) -> None:
+    """Goal interview reads include immutable accepted Vision context."""
+    seeded = _seed_vision_candidate(engine, decision="accepted")
+    components = _goal_components(complete=False)
+    questions = ("What is outside this Product Goal?",)
+    statement = "Make product-definition reviews durable."
+    turn_id = _add_goal_turn(
+        engine,
+        seeded,
+        _GoalTurnSeed(
+            components=components,
+            statement=statement,
+            is_complete=False,
+            questions=questions,
+            goal_number=1,
+            revision_number=1,
+            prior_turn_id=None,
+            recorded_at=NOW + timedelta(seconds=3),
+        ),
+    )
+    project_id = seeded["project_id"]
+    assert isinstance(project_id, int)
+
+    data = _data(
+        DurableReadProjectionService(engine=engine).product_goal_status(
+            project_id=project_id
+        )
+    )
+
+    assert data["accepted_vision"] == {
+        "vision_artifact_id": seeded["vision_id"],
+        "fingerprint": seeded["vision_fingerprint"],
+        "statement": seeded["vision_statement"],
+    }
+    assert data["transcript"] == [
+        {
+            "product_goal_interview_turn_id": turn_id,
+            "vision_artifact_id": seeded["vision_id"],
+            "vision_fingerprint": seeded["vision_fingerprint"],
+            "goal_number": 1,
+            "revision_number": 1,
+            "prior_turn_id": None,
+            "user_text": "Goal answer 1.1",
+            "statement": statement,
+            "components": components,
+            "is_complete": False,
+            "clarifying_questions": list(questions),
+            "output_fingerprint": product_goal_interview_output_fingerprint(
+                components, statement, False, questions
+            ),
+            "recorded_at": _stored_iso(NOW + timedelta(seconds=3)),
+        }
+    ]
+    assert data["latest_questions"] == list(questions)
+    assert data["candidate"] is None
+    assert data["review"] is None
+
+
+def test_pending_goal_exposes_exact_candidate_and_pending_review(
+    engine: Engine,
+) -> None:
+    """A complete Goal turn projects its exact immutable candidate."""
+    seeded = _seed_goal_candidate(engine)
+    project_id = seeded["project_id"]
+    assert isinstance(project_id, int)
+
+    data = _data(
+        DurableReadProjectionService(engine=engine).product_goal_status(
+            project_id=project_id
+        )
+    )
+
+    assert data["candidate"] == {
+        "product_goal_artifact_id": seeded["goal_id"],
+        "vision_artifact_id": seeded["vision_id"],
+        "vision_fingerprint": seeded["vision_fingerprint"],
+        "goal_number": 1,
+        "revision_number": 1,
+        "fingerprint": seeded["goal_fingerprint"],
+        "statement": seeded["goal_statement"],
+        "components": seeded["goal_components"],
+        "supersedes_product_goal_artifact_id": None,
+        "source_interview_turn_id": seeded["goal_turn_id"],
+        "created_by": "operator",
+        "created_at": _stored_iso(NOW + timedelta(seconds=4)),
+    }
+    assert data["review"] == {"state": "pending"}
+    transcript = data["transcript"]
+    assert isinstance(transcript, list)
+    assert len(transcript) == 1
+    assert data["latest_questions"] == []
+
+
+def test_goal_feedback_keeps_candidate_separate_from_revision_chain(
+    engine: Engine,
+) -> None:
+    """A rejected Goal remains review context while revision turns advance."""
+    seeded = _seed_goal_candidate(engine, decision="feedback")
+    components = _goal_components(complete=False)
+    questions = ("Which boundary should the revision add?",)
+    revision_turn_id = _add_goal_turn(
+        engine,
+        seeded,
+        _GoalTurnSeed(
+            components=components,
+            statement="Make durable reviews narrower and measurable.",
+            is_complete=False,
+            questions=questions,
+            goal_number=1,
+            revision_number=2,
+            prior_turn_id=None,
+            recorded_at=NOW + timedelta(seconds=6),
+        ),
+    )
+    project_id = seeded["project_id"]
+    assert isinstance(project_id, int)
+
+    data = _data(
+        DurableReadProjectionService(engine=engine).product_goal_status(
+            project_id=project_id
+        )
+    )
+
+    candidate = _json_object(data["candidate"])
+    assert candidate["product_goal_artifact_id"] == seeded["goal_id"]
+    assert data["review"] == {
+        "state": "feedback",
+        "product_goal_artifact_decision_id": 1,
+        "decision": "feedback",
+        "rationale": "Goal feedback rationale.",
+        "reviewer": "goal-reviewer",
+        "decided_at": _stored_iso(NOW + timedelta(seconds=5)),
+    }
+    transcript = data["transcript"]
+    assert isinstance(transcript, list)
+    assert [
+        _json_object(item)["product_goal_interview_turn_id"] for item in transcript
+    ] == [revision_turn_id]
+    assert data["latest_questions"] == list(questions)
+
+
+def test_resolved_goal_followed_by_new_interview_excludes_old_candidate(
+    engine: Engine,
+) -> None:
+    """The next Goal transcript does not revive the resolved Goal candidate."""
+    seeded = _seed_goal_candidate(engine, decision="accepted")
+    project_id = seeded["project_id"]
+    goal_id = seeded["goal_id"]
+    goal_fingerprint = seeded["goal_fingerprint"]
+    assert isinstance(project_id, int)
+    assert isinstance(goal_id, int)
+    assert isinstance(goal_fingerprint, str)
+    with Session(engine) as session:
+        session.add(
+            ProductGoalOutcome(
+                project_id=project_id,
+                product_goal_artifact_id=goal_id,
+                artifact_fingerprint=goal_fingerprint,
+                outcome="fulfilled",
+                rationale="The first durable review Goal was fulfilled.",
+                decided_by="goal-owner",
+                idempotency_key="goal-one-fulfilled",
+                decided_at=NOW + timedelta(seconds=6),
+            )
+        )
+        session.commit()
+    components = _goal_components(complete=False)
+    questions = ("What should the next measurable outcome be?",)
+    new_turn_id = _add_goal_turn(
+        engine,
+        seeded,
+        _GoalTurnSeed(
+            components=components,
+            statement="Define the next durable product outcome.",
+            is_complete=False,
+            questions=questions,
+            goal_number=2,
+            revision_number=1,
+            prior_turn_id=None,
+            recorded_at=NOW + timedelta(seconds=7),
+        ),
+    )
+
+    data = _data(
+        DurableReadProjectionService(engine=engine).product_goal_status(
+            project_id=project_id
+        )
+    )
+
+    assert data["active"] is None
+    assert data["candidate"] is None
+    assert data["review"] is None
+    transcript = data["transcript"]
+    assert isinstance(transcript, list)
+    assert [
+        _json_object(item)["product_goal_interview_turn_id"] for item in transcript
+    ] == [new_turn_id]
+    outcome = _json_object(data["outcome"])
+    assert outcome["product_goal_artifact_id"] == goal_id
+    assert data["stale_reason"] == "GOAL_RESOLVED"
+
+
+def test_ambiguous_vision_leaf_fails_closed_with_typed_stale_reason(
+    engine: Engine,
+) -> None:
+    """Two immutable Vision leaves never degrade to latest-row selection."""
+    seeded = _seed_vision_candidate(engine, decision="accepted")
+    components = _vision_components(complete=True)
+    statement = "A conflicting durable Vision leaf."
+    turn_id = _add_vision_turn(
+        engine,
+        seeded,
+        _VisionTurnSeed(
+            components=components,
+            statement=statement,
+            is_complete=True,
+            questions=(),
+            turn_number=2,
+            prior_turn_id=_seeded_int(seeded, "vision_turn_id"),
+            recorded_at=NOW + timedelta(seconds=3),
+        ),
+    )
+    project_id = seeded["project_id"]
+    assert isinstance(project_id, int)
+    with Session(engine) as session:
+        session.add(
+            VisionArtifact(
+                project_id=project_id,
+                version_number=2,
+                components_json=canonical_json(components),
+                statement=statement,
+                content_fingerprint=canonical_hash(
+                    {"components": components, "statement": statement}
+                ),
+                supersedes_vision_artifact_id=None,
+                source_interview_turn_id=turn_id,
+                created_by="operator",
+                created_at=NOW + timedelta(seconds=4),
+            )
+        )
+        session.commit()
+
+    data = _data(
+        DurableReadProjectionService(engine=engine).vision_status(project_id=project_id)
+    )
+
+    assert data == {
+        "current": None,
+        "transcript": [],
+        "latest_questions": [],
+        "candidate": None,
+        "review": None,
+        "stale_reason": "VISION_FACT_CONFLICT",
+    }
+
+
 def _resolve_goal(engine: Engine, seeded: dict[str, object]) -> None:
     """Record the exact terminal outcome for the fixture's accepted first Goal."""
     project_id = seeded["project_id"]
@@ -558,9 +1336,11 @@ def test_projection_fails_closed_for_ambiguous_discovery_without_cache_fallback(
         session.add(project)
         session.commit()
 
-    result = _data(DurableReadProjectionService(engine=engine).discovery_status(
-        project_id=project_id
-    ))
+    result = _data(
+        DurableReadProjectionService(engine=engine).discovery_status(
+            project_id=project_id
+        )
+    )
 
     assert result == {
         "current": None,
@@ -584,7 +1364,16 @@ def test_resolved_goal_and_next_goal_leave_old_product_definition_non_current(
     reads = DurableReadProjectionService(engine=engine)
     resolved = _data(reads.product_goal_status(project_id=project_id))
     assert resolved == {
+        "accepted_vision": {
+            "vision_artifact_id": seeded["vision_id"],
+            "fingerprint": seeded["vision_fingerprint"],
+            "statement": "A durable Vision.",
+        },
         "active": None,
+        "transcript": [],
+        "latest_questions": [],
+        "candidate": None,
+        "review": None,
         "outcome": {
             "product_goal_artifact_id": goal_id,
             "fingerprint": goal_fingerprint,
