@@ -3641,7 +3641,6 @@ class VisionInputContext:
     vision_decisions: tuple[VisionArtifactDecisionFact, ...]
     revision_intents: tuple[VisionRevisionIntentFact, ...]
     interview_turns: tuple[VisionInterviewTurnFact, ...]
-    evidence_snapshots: tuple[VisionEvidenceSnapshotFact, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -3675,16 +3674,7 @@ class VisionInputFactRepository(WorkflowFactRepository):
                 if item.decision == "accepted"
             }
             revisions = self._vision_revision_intents(project_id, accepted_visions)
-            attempts = self._node_attempts(project_id)
-            snapshots = self._vision_evidence_snapshots(
-                project_id,
-                {item.attempt_id: item.attempt_fingerprint for item in attempts},
-            )
-            turns = self._vision_interview_turns(
-                project_id,
-                revisions,
-                {item.attempt_id: item.attempt_fingerprint for item in attempts},
-            )
+            turns = self._vision_interview_turns(project_id, revisions, None)
             self._validate_vision_artifact_sources(visions, turns)
         return VisionInputContext(
             project=project,
@@ -3693,7 +3683,6 @@ class VisionInputFactRepository(WorkflowFactRepository):
             vision_decisions=tuple(decisions.values()),
             revision_intents=tuple(revisions.values()),
             interview_turns=tuple(turns.values()),
-            evidence_snapshots=snapshots,
         )
 
     def has_active_product_goal(self, context: VisionInputContext) -> bool:

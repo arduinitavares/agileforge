@@ -45,6 +45,7 @@ from workflow.facts import (
     TaskFact,
     VisionArtifactDecisionFact,
     VisionArtifactFact,
+    VisionEvidenceSnapshotFact,
     VisionInterviewTurnFact,
     VisionRevisionIntentFact,
     WorkflowFactSnapshot,
@@ -93,6 +94,20 @@ AUTHORITATIVE_SNAPSHOT_VARIANTS: tuple[tuple[str, object], ...] = (
                 reason="Clarify the current direction.",
                 initiated_by="operator",
                 initiated_at=EVALUATED_AT,
+            ),
+        ),
+    ),
+    (
+        "vision_evidence_snapshots",
+        (
+            VisionEvidenceSnapshotFact(
+                vision_evidence_snapshot_id=83,
+                repository_binding_id=84,
+                workflow_node_attempt_id=85,
+                evidence={"project": {"name": "Changed Project"}},
+                evidence_fingerprint="sha256:evidence",
+                warnings=(),
+                created_at=EVALUATED_AT,
             ),
         ),
     ),
