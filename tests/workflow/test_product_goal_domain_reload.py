@@ -21,6 +21,7 @@ from models.product_definition import (
     SpecificationDecision,
     VisionArtifact,
     VisionArtifactDecision,
+    VisionEvidenceSnapshot,
     VisionInterviewTurn,
 )
 from models.specs import SpecRegistry
@@ -98,7 +99,7 @@ def _seed_accepted_vision(engine: Engine, *, name: str = "Goal reload") -> int:
         assert project.project_id is not None
         attempt = WorkflowNodeAttempt(
             project_id=project.project_id,
-            node_id="vision.interview",
+            node_id="vision.bootstrap",
             instance_key=None,
             graph_version=GRAPH_VERSION,
             fact_fingerprint="sha256:facts",
@@ -119,17 +120,54 @@ def _seed_accepted_vision(engine: Engine, *, name: str = "Goal reload") -> int:
         session.flush()
         assert attempt.workflow_node_attempt_id is not None
         components = {"purpose": "durable workflow"}
+        evidence_item = {
+            "evidence_id": "project:metadata",
+            "kind": "project_metadata",
+            "relative_path": None,
+            "content_fingerprint": canonical_hash(
+                {"name": name, "description": None}
+            ),
+            "trust": "operator_provided",
+            "content": {"name": name, "description": None},
+            "truncated": False,
+        }
+        evidence = {
+            "schema_version": "agileforge.vision-evidence.v1",
+            "items": [evidence_item],
+            "warnings": [],
+        }
+        snapshot = VisionEvidenceSnapshot(
+            project_id=project.project_id,
+            repository_binding_id=None,
+            workflow_node_attempt_id=attempt.workflow_node_attempt_id,
+            evidence_json=canonical_json(
+                {
+                    **evidence,
+                    "evidence_fingerprint": canonical_hash(evidence),
+                }
+            ),
+            evidence_fingerprint=canonical_hash(evidence),
+            warnings_json="[]",
+            created_at=NOW,
+        )
+        session.add(snapshot)
+        session.flush()
+        assert snapshot.vision_evidence_snapshot_id is not None
         turn = VisionInterviewTurn(
             project_id=project.project_id,
             operation="bootstrap",
             turn_number=1,
             revision_intent_id=None,
             prior_turn_id=None,
-            user_text="Define Vision",
+            vision_evidence_snapshot_id=snapshot.vision_evidence_snapshot_id,
+            user_text=None,
             components_json=canonical_json(components),
             vision_statement="A durable Vision.",
             is_complete=True,
             clarifying_questions_json="[]",
+            component_basis_json="[]",
+            assumptions_json="[]",
+            conflicts_json="[]",
             output_fingerprint=canonical_hash(
                 {
                     "components_json": components,
@@ -153,6 +191,10 @@ def _seed_accepted_vision(engine: Engine, *, name: str = "Goal reload") -> int:
             content_fingerprint=canonical_hash(
                 {"components": components, "statement": "A durable Vision."}
             ),
+            vision_evidence_snapshot_id=snapshot.vision_evidence_snapshot_id,
+            component_basis_json="[]",
+            assumptions_json="[]",
+            conflicts_json="[]",
             supersedes_vision_artifact_id=None,
             source_interview_turn_id=turn.vision_interview_turn_id,
             created_by="operator",

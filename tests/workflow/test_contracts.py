@@ -111,6 +111,9 @@ def test_contract_enums_are_closed() -> None:
         "ATTEMPT_OBSOLETE",
         "EXTERNAL_EXECUTION_FAILED",
         "SPRINT_CAPACITY_REQUIRED",
+        "REPOSITORY_PROVENANCE_STALE",
+        "REPOSITORY_CHANGED_DURING_EVIDENCE_COLLECTION",
+        "VISION_EVIDENCE_STALE",
     }
 
 

@@ -62,7 +62,7 @@ if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
 
 EVALUATED_AT = datetime(2026, 8, 2, 12, tzinfo=UTC)
-EXPECTED_REQUEST_VARIANT_COUNT = 34
+EXPECTED_REQUEST_VARIANT_COUNT = 35
 EXECUTION_REQUESTS = (
     CompleteTask,
     CloseStory,

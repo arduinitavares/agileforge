@@ -415,11 +415,33 @@ def _vision_evidence(project_id: int) -> JsonObject:
     )
 
 
+def _component_basis(components: JsonObject) -> tuple[JsonObject, ...]:
+    """Attribute every complete Journey component to its bounded evidence."""
+    return tuple(
+        {
+            "component": component,
+            "source_kinds": ["evidence"],
+            "evidence_ids": ["project:journey"],
+            "assumption_ids": [],
+        }
+        for component in components
+    )
+
+
 def _accept_initial_vision(journey: _Journey) -> None:
     domain = journey.domain
     project_id = journey.project_id
     evidence = _vision_evidence(project_id)
     evidence_fingerprint = str(evidence["evidence_fingerprint"])
+    components: JsonObject = {
+        "project_name": "Persisted lifecycle",
+        "target_user": "Operators",
+        "problem": "Workflow state can drift",
+        "product_category": "Delivery tool",
+        "key_benefit": "Durable semantic routing",
+        "competitors": "Manual checklists",
+        "differentiator": "Typed persisted facts",
+    }
     position, bootstrap = _assert_next(
         domain, project_id, "vision.bootstrap", NodeCategory.AVAILABLE
     )
@@ -452,19 +474,11 @@ def _accept_initial_vision(journey: _Journey) -> None:
             evidence_fingerprint=evidence_fingerprint,
             evidence_warnings=(),
             repository_binding_id=None,
-            updated_components={
-                "project_name": "Persisted lifecycle",
-                "target_user": "Operators",
-                "problem": "Workflow state can drift",
-                "product_category": "Delivery tool",
-                "key_benefit": "Durable semantic routing",
-                "competitors": "Manual checklists",
-                "differentiator": "Typed persisted facts",
-            },
+            updated_components=components,
             project_vision_statement="A durable product delivery lifecycle.",
             is_complete=True,
             clarifying_questions=(),
-            component_basis=(),
+            component_basis=_component_basis(components),
             assumptions=(),
             conflicts=(),
             attempt_id=_output_int(started, "attempt_id"),

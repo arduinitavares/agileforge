@@ -166,7 +166,7 @@ def test_create_name_only_commits_project_and_opens_vision(engine: Engine) -> No
     assert result.ok is True
     assert result.position is not None
     assert any(
-        item.node_id == "vision.interview" and item.category.value == "available"
+        item.node_id == "vision.bootstrap" and item.category.value == "available"
         for item in result.position.decisions
     )
     with Session(engine) as session:

@@ -897,6 +897,11 @@ class WorkflowFactRepository:
                     row.revision_intent_id is None,
                     "Bootstrap Vision turn cannot have a revision intent.",
                 )
+            elif operation == "revision":
+                self._require_product_condition(
+                    row.revision_intent_id in revisions,
+                    "Revision Vision turn requires an exact Project revision intent.",
+                )
             elif row.revision_intent_id is not None:
                 self._require_product_condition(
                     row.revision_intent_id in revisions,

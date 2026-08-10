@@ -377,6 +377,7 @@ def test_root_definition_has_named_children_in_lifecycle_order() -> None:
         execution,
     ) = ROOT_GRAPH.root.children
     assert tuple(node.node_id for node in vision.nodes) == (
+        "vision.bootstrap",
         "vision.interview",
         "vision.review",
         "vision.revision.start",

@@ -67,7 +67,7 @@ def test_project_model_has_only_current_identity_state() -> None:
 
 
 def test_domain_create_evaluates_the_v2_vision_position(engine: Engine) -> None:
-    """Evaluate creation directly into the v2 Vision interview position."""
+    """Evaluate creation directly into the v2 Vision bootstrap position."""
     domain = WorkflowDomain(
         engine=engine,
         graph=project_graph(),
@@ -85,7 +85,7 @@ def test_domain_create_evaluates_the_v2_vision_position(engine: Engine) -> None:
 
     assert result.ok is True
     assert result.position is not None
-    assert any(item.node_id == "vision.interview" for item in result.position.decisions)
+    assert any(item.node_id == "vision.bootstrap" for item in result.position.decisions)
     project_id = result.output["project_id"]
     assert isinstance(project_id, int)
     with Session(engine) as session:
