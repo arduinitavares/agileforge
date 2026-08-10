@@ -81,7 +81,7 @@ if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
 
 EVALUATED_AT = datetime(2026, 8, 2, 12, tzinfo=UTC)
-EXPECTED_REQUEST_VARIANT_COUNT = 56
+EXPECTED_REQUEST_VARIANT_COUNT = 58
 EXPECTED_PLANNING_REQUEST_COUNT = 9
 REPAIRED_STORY_POINTS = 3
 EXPECTED_DEPENDENCY_STORY_COUNT = 3
@@ -1084,9 +1084,7 @@ def test_stale_authority_roadmap_review_writes_no_terminal_decision(
     position = domain.position(project_id)
     backlog_reference = next(
         item
-        for item in _decision(
-            position, "planning.roadmap.generate"
-        ).fact_references
+        for item in _decision(position, "planning.roadmap.generate").fact_references
         if item.fact_type == "backlog"
     )
     content = _roadmap_content()

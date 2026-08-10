@@ -24,6 +24,8 @@ _PLACEHOLDERS = {
     "<decision>": "accepted",
     "<rationale>": "reviewed",
     "<reason>": "changed",
+    "<max-story-points>": "3",
+    "<team-name>": "Platform",
     "<idempotency-key>": "run-41",
     "<actor>": "cli-user",
 }
@@ -201,8 +203,8 @@ def test_lifecycle_positions_render_semantic_commands() -> None:
         assert payload["commands"][0]["command"].startswith(command_prefix)
 
 
-def test_sprint_generation_is_not_advertised_without_capacity_contract() -> None:
-    """Keep Sprint planning visible but non-executable until capacity is durable."""
+def test_sprint_generation_advertises_parser_valid_capacity_remediation() -> None:
+    """Emit one callable semantic command with an explicit capacity placeholder."""
     decision = NodeDecision(
         node_id="planning.sprint.plan",
         child_graph_id="planning",
@@ -224,8 +226,19 @@ def test_sprint_generation_is_not_advertised_without_capacity_contract() -> None
 
     payload = render_workflow_next(position)
 
-    assert payload["commands"] == []
-    assert payload["waiting_nodes"] == []
+    assert len(payload["commands"]) == 1
+    command = payload["commands"][0]["command"]
+    assert "agileforge sprint generate" in command
+    assert "--max-story-points <max-story-points>" in command
+    assert "--team-name <team-name>" in command
+    assert "--input-file" not in command
+    assert "--model-id" not in command
+    argv = [
+        _PLACEHOLDERS.get(argument, argument) for argument in shlex.split(command)[1:]
+    ]
+    parsed = build_parser().parse_args(argv)
+    assert parsed.max_story_points == int(_PLACEHOLDERS["<max-story-points>"])
+    assert parsed.team_name == "Platform"
 
 
 def test_story_generation_renders_each_exact_requirement_selector() -> None:

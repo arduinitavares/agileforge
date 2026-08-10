@@ -7,11 +7,12 @@ from functools import cache
 from importlib import import_module
 from typing import TYPE_CHECKING, Any, Literal, Protocol, TypedDict, Unpack, cast
 
-from pydantic import Field, TypeAdapter, ValidationError
+from pydantic import Field, TypeAdapter, ValidationError, model_validator
 from sqlmodel import Session, col, select
 
 from adapters.adk.model_roles import AGENTIC_MODEL_ROLES
 from adapters.git.repository_probe import GitPythonRepositoryProbe
+from models.core import UserStory
 from models.product_definition import ProductGoalArtifact, VisionArtifact
 from models.specs import CompiledSpecAuthority, SpecRegistry
 from models.workflow import (
@@ -22,6 +23,7 @@ from models.workflow import (
     StoryArtifact,
     StoryArtifactDecision,
 )
+from repositories.workflow import WorkflowFactLoadError, WorkflowFactRepository
 from services.agent_workbench.authority_projection import pending_authority_fingerprint
 from services.authority_compilation_input import AuthorityCompilationInputService
 from services.authority_review_projection import (
@@ -32,6 +34,10 @@ from services.contracts.backlog import InputSchema as BacklogInput
 from services.contracts.backlog import OutputSchema as BacklogOutput
 from services.contracts.product_goal import ProductGoalInterviewInput
 from services.contracts.roadmap import RoadmapBuilderInput, RoadmapBuilderOutput
+from services.contracts.sprint import (
+    SprintPlannerInput,
+    SprintPlannerStory,
+)
 from services.contracts.story import UserStoryWriterInput, UserStoryWriterOutput
 from services.contracts.vision import VisionInterviewInput
 from services.node_attempt_replay import (
@@ -40,6 +46,7 @@ from services.node_attempt_replay import (
     NodeAttemptReplayQuery,
     TransitionReplayQuery,
 )
+from services.phases.sprint_metrics import build_durable_sprint_metrics
 from services.product_goal_interview_input import ProductGoalInterviewInputService
 from services.project_lifecycle import (
     CreateProjectCommand,
@@ -48,11 +55,19 @@ from services.project_lifecycle import (
     RepositoryRefreshCommand,
 )
 from services.roadmap_runtime import build_roadmap_input_context
+from services.sprint_selection import (
+    SprintSelectionError,
+    derive_group_slot,
+    derive_parent_group,
+    select_sprint_story_rows,
+)
 from services.story_linkage import normalize_requirement_key
 from services.story_runtime import build_story_input_context
 from services.vision_interview_input import VisionInterviewInputService
 from utils.model_config import get_model_id
+from utils.spec_schemas import ValidationEvidence
 from workflow.contracts import (
+    Blocker,
     FactReference,
     FrozenModel,
     JsonObject,
@@ -63,6 +78,7 @@ from workflow.contracts import (
     WorkflowErrorCode,
     WorkflowPosition,
 )
+from workflow.definitions.planning import candidate_set_fingerprint
 from workflow.fingerprints import canonical_hash, canonical_json
 from workflow.requests import (
     AbandonProductGoal,
@@ -81,6 +97,7 @@ if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
 
     from adapters.adk.recipes import AdkRecipeRegistry
+    from workflow.facts import StoryDependencyFact, StoryFact, WorkflowFactSnapshot
     from workflow.requests import TransitionRequest
 
 _JSON_OBJECT = TypeAdapter(JsonObject)
@@ -204,6 +221,20 @@ class _DeliveryActionInputPort(Protocol):
         decision: NodeDecision,
         node_id: str,
     ) -> JsonObject | None: ...
+
+
+class _SprintPlanningInputPort(Protocol):
+    """Host preparation for one semantic Sprint planning request."""
+
+    def replay(self, query: NodeAttemptReplayQuery) -> TransitionResult | None: ...
+
+    def build(
+        self,
+        *,
+        project_id: int,
+        decision: NodeDecision,
+        request: SprintPlanningRequest,
+    ) -> JsonObject | WorkflowError: ...
 
 
 @dataclass(frozen=True)
@@ -355,6 +386,118 @@ class DeliveryActionInputService:
 
 
 @dataclass(frozen=True)
+class SprintPlanningInputService:
+    """Lock exact durable Sprint input before any model execution."""
+
+    engine: Engine
+
+    def replay(self, query: NodeAttemptReplayQuery) -> TransitionResult | None:
+        """Replay a Sprint attempt using stored guards and candidate identity."""
+        return DurableNodeAttemptReplayService(engine=self.engine).replay(query)
+
+    def build(
+        self,
+        *,
+        project_id: int,
+        decision: NodeDecision,
+        request: SprintPlanningRequest,
+    ) -> JsonObject | WorkflowError:
+        """Build an immutable planner envelope from exact current business facts."""
+        try:
+            with Session(self.engine) as session:
+                snapshot = WorkflowFactRepository(session).load(project_id)
+                candidates = tuple(
+                    item for item in snapshot.stories if item.sprint_candidate
+                )
+                current_candidate_fingerprint = candidate_set_fingerprint(
+                    candidates,
+                    snapshot.story_dependencies,
+                )
+                candidate_reference = _single_fact_reference(
+                    decision,
+                    "candidate_set",
+                )
+                if (
+                    candidate_reference is None
+                    or candidate_reference.fact_id != str(project_id)
+                    or candidate_reference.fingerprint != current_candidate_fingerprint
+                ):
+                    return _sprint_input_error(
+                        code="SPRINT_CANDIDATE_SET_STALE",
+                        message=(
+                            "The Sprint decision does not reference the exact current "
+                            "candidate set."
+                        ),
+                    )
+                capacity = _resolve_sprint_capacity(
+                    snapshot=snapshot,
+                    requested_capacity=request.max_story_points,
+                )
+                if capacity is None:
+                    return _sprint_capacity_error()
+                capacity_points, capacity_source, capacity_basis = capacity
+                selection_rows = _sprint_selection_rows(
+                    session,
+                    project_id=project_id,
+                    candidates=candidates,
+                    dependencies=snapshot.story_dependencies,
+                )
+                selection = select_sprint_story_rows(
+                    selection_rows,
+                    max_story_points=capacity_points,
+                    selected_story_ids=list(request.selected_story_ids),
+                )
+                planner_stories = [
+                    row["planner_story"] for row in selection.selected_rows
+                ]
+                planner_input = SprintPlannerInput(
+                    available_stories=planner_stories,
+                    capacity_points=capacity_points,
+                    capacity_source=capacity_source,
+                    capacity_basis=capacity_basis,
+                    user_context=request.guidance,
+                    include_task_decomposition=request.include_task_decomposition,
+                )
+                valid_parent, parent_reference = _optional_fact_reference(
+                    decision,
+                    "sprint_plan",
+                )
+                if not valid_parent:
+                    return _sprint_input_error(
+                        code="SPRINT_PLAN_PARENT_AMBIGUOUS",
+                        message="The Sprint decision has ambiguous plan lineage.",
+                    )
+                supersedes_id = (
+                    None if parent_reference is None else int(parent_reference.fact_id)
+                )
+                return _JSON_OBJECT.validate_python(
+                    {
+                        "planner_input": planner_input.model_dump(mode="json"),
+                        "capacity_points": capacity_points,
+                        "capacity_source": capacity_source,
+                        "capacity_basis": capacity_basis,
+                        "requested_max_story_points": request.max_story_points,
+                        "requested_story_ids": list(request.selected_story_ids),
+                        "locked_story_ids": selection.selected_story_ids,
+                        "team_name": request.team_name,
+                        "include_task_decomposition": (
+                            request.include_task_decomposition
+                        ),
+                        "guidance": request.guidance,
+                        "candidate_set_fingerprint": (current_candidate_fingerprint),
+                        "supersedes_sprint_plan_artifact_id": supersedes_id,
+                    }
+                )
+        except SprintSelectionError as error:
+            return _sprint_input_error(code=error.code, message=str(error))
+        except (TypeError, ValueError, ValidationError, WorkflowFactLoadError) as error:
+            return _sprint_input_error(
+                code="SPRINT_INPUT_INVALID",
+                message=str(error) or type(error).__name__,
+            )
+
+
+@dataclass(frozen=True)
 class ProductGoalLifecycleServices:
     """Host-owned services for the isolated Product Goal child graph."""
 
@@ -371,6 +514,7 @@ class _LifecycleServiceOptions(TypedDict, total=False):
     authority_review_selection: _AuthorityReviewSelectionPort | None
     authority_repair_input: _AuthorityRepairInputPort | None
     delivery_action_input: _DeliveryActionInputPort | None
+    sprint_planning_input: _SprintPlanningInputPort | None
 
 
 class _ReadProjectionPort(Protocol):
@@ -519,6 +663,31 @@ class DeliveryActionRequest(FrozenModel):
     idempotency_key: str = Field(min_length=1)
     actor: str = Field(min_length=1)
     correlation_id: str | None = None
+
+
+class SprintPlanningRequest(FrozenModel):
+    """Semantic Sprint planning input with no caller-owned execution evidence."""
+
+    project_id: int
+    guidance: str | None = None
+    selected_story_ids: tuple[int, ...] = ()
+    max_story_points: int | None = Field(default=None, gt=0)
+    include_task_decomposition: bool = True
+    team_name: str = Field(min_length=1)
+    idempotency_key: str = Field(min_length=1)
+    actor: str = Field(min_length=1)
+    correlation_id: str | None = None
+
+    @model_validator(mode="after")
+    def validate_selected_story_ids(self) -> SprintPlanningRequest:
+        """Reject duplicate or non-positive manual Story identities."""
+        if any(story_id <= 0 for story_id in self.selected_story_ids):
+            message = "selected_story_ids must contain positive Story IDs."
+            raise ValueError(message)
+        if len(set(self.selected_story_ids)) != len(self.selected_story_ids):
+            message = "selected_story_ids must not contain duplicates."
+            raise ValueError(message)
+        return self
 
 
 class VisionInterviewRequest(FrozenModel):
@@ -716,6 +885,7 @@ class AgileForgeApplication:
         )
         self._authority_repair_input = lifecycle_services.get("authority_repair_input")
         self._delivery_action_input = lifecycle_services.get("delivery_action_input")
+        self._sprint_planning_input = lifecycle_services.get("sprint_planning_input")
         self._project_lifecycle: ProjectLifecycleService | None = None
 
     @property
@@ -873,11 +1043,51 @@ class AgileForgeApplication:
             node_id="planning.story.generate",
         )
 
-    def generate_sprint(self, request: DeliveryActionRequest) -> TransitionResult:
-        """Fail closed until a durable Sprint capacity input contract exists."""
-        return self._run_delivery_action(
-            request,
-            node_id="planning.sprint.plan",
+    def generate_sprint(self, request: SprintPlanningRequest) -> TransitionResult:
+        """Plan one Sprint from host-resolved capacity and exact durable candidates."""
+        input_service = self._sprint_planning_input
+        if input_service is None:
+            return _transition_not_available(None, "planning.sprint.plan")
+        replay = input_service.replay(
+            NodeAttemptReplayQuery(
+                project_id=request.project_id,
+                graph_version=None,
+                fact_fingerprint=None,
+                decision_fingerprint=None,
+                node_id="planning.sprint.plan",
+                idempotency_key=request.idempotency_key,
+                actor=request.actor,
+                correlation_id=request.correlation_id,
+                semantic_input=_sprint_replay_input(request),
+            )
+        )
+        if replay is not None:
+            return replay
+        position = self.position(project_id=request.project_id)
+        decision = _unique_available_decision(position, "planning.sprint.plan")
+        if decision is None or decision.category is not NodeCategory.AVAILABLE:
+            return _transition_not_available(position, "planning.sprint.plan")
+        prepared = input_service.build(
+            project_id=request.project_id,
+            decision=decision,
+            request=request,
+        )
+        if isinstance(prepared, WorkflowError):
+            return TransitionResult(ok=False, position=position, error=prepared)
+        return self.run_agentic_action(
+            AgenticActionRequest(
+                project_id=request.project_id,
+                graph_version=position.graph_version,
+                fact_fingerprint=position.fact_fingerprint,
+                decision_fingerprint=decision.decision_fingerprint,
+                node_id="planning.sprint.plan",
+                instance_key=decision.instance_key,
+                input_payload=prepared,
+                model_id=get_model_id(AGENTIC_MODEL_ROLES["planning.sprint.plan"]),
+                idempotency_key=request.idempotency_key,
+                actor=request.actor,
+                correlation_id=request.correlation_id,
+            )
         )
 
     def _run_delivery_action(
@@ -2104,6 +2314,199 @@ def _story_input(
     return _JSON_OBJECT.validate_python(payload.model_dump(mode="json"))
 
 
+type _SprintCapacity = tuple[
+    int,
+    Literal["user_override", "project_metrics"],
+    str,
+]
+
+
+def _resolve_sprint_capacity(
+    *,
+    snapshot: WorkflowFactSnapshot,
+    requested_capacity: int | None,
+) -> _SprintCapacity | None:
+    """Resolve capacity from an explicit limit or completed-Sprint metrics."""
+    if requested_capacity is not None:
+        return (
+            requested_capacity,
+            "user_override",
+            f"{requested_capacity} points provided by the operator.",
+        )
+    metrics = build_durable_sprint_metrics(snapshot)
+    recommendation = metrics.get("recommendation")
+    if not isinstance(recommendation, dict):
+        return None
+    points = recommendation.get("recommended_next_sprint_points")
+    source_points = recommendation.get("source_completed_points")
+    sample_size = recommendation.get("sample_size")
+    if (
+        isinstance(points, bool)
+        or not isinstance(points, int)
+        or points <= 0
+        or not isinstance(source_points, list)
+        or not all(
+            isinstance(value, int) and not isinstance(value, bool)
+            for value in source_points
+        )
+        or isinstance(sample_size, bool)
+        or not isinstance(sample_size, int)
+        or sample_size <= 0
+        or len(source_points) != sample_size
+    ):
+        return None
+    return (
+        points,
+        "project_metrics",
+        (
+            f"{points} points, based on the last {sample_size} completed "
+            f"Sprints: {', '.join(str(value) for value in source_points)}."
+        ),
+    )
+
+
+def _sprint_selection_rows(
+    session: Session,
+    *,
+    project_id: int,
+    candidates: tuple[StoryFact, ...],
+    dependencies: tuple[StoryDependencyFact, ...],
+) -> list[dict[str, Any]]:
+    """Convert exact candidate rows and evidence to deterministic selector input."""
+    candidate_ids = {item.story_id for item in candidates}
+    stories = session.exec(
+        select(UserStory).where(
+            col(UserStory.project_id) == project_id,
+            col(UserStory.story_id).in_(candidate_ids),
+        )
+    ).all()
+    stories_by_id = {
+        story.story_id: story for story in stories if story.story_id is not None
+    }
+    if set(stories_by_id) != candidate_ids:
+        message = "Current Sprint candidate rows are incomplete."
+        raise ValueError(message)
+    prerequisites: dict[int, list[int]] = {story_id: [] for story_id in candidate_ids}
+    for dependency in dependencies:
+        if dependency.status != "active" or dependency.dependent_story_id not in (
+            candidate_ids
+        ):
+            continue
+        prerequisites[dependency.dependent_story_id].append(
+            dependency.prerequisite_story_id
+        )
+    rows: list[dict[str, Any]] = []
+    for candidate in candidates:
+        story = stories_by_id[candidate.story_id]
+        if (
+            story.project_id != project_id
+            or story.is_superseded
+            or not story.is_refined
+            or story.accepted_spec_version_id is None
+            or story.story_points != candidate.story_points
+            or story.rank != candidate.rank
+            or story.story_points is None
+            or story.story_points <= 0
+        ):
+            message = (
+                f"Story {candidate.story_id} no longer matches its candidate facts."
+            )
+            raise ValueError(message)
+        priority = _sprint_story_priority(story)
+        evaluated_ids, boundary_summaries = _sprint_validation_evidence(story)
+        prerequisite_ids = sorted(set(prerequisites[candidate.story_id]))
+        blocked_by_ids = [
+            story_id for story_id in prerequisite_ids if story_id in candidate_ids
+        ]
+        planner_story = SprintPlannerStory(
+            story_id=candidate.story_id,
+            story_title=story.title,
+            priority=priority,
+            story_points=story.story_points,
+            parent_group=derive_parent_group(priority),
+            group_slot=derive_group_slot(priority),
+            story_description=story.story_description or story.title,
+            acceptance_criteria_items=_sprint_acceptance_items(
+                story.acceptance_criteria
+            ),
+            persona=story.persona,
+            source_requirement=story.source_requirement,
+            prerequisite_story_ids=prerequisite_ids,
+            blocked_by_story_ids=blocked_by_ids,
+            dependency_status="blocked" if blocked_by_ids else "ready",
+            evaluated_invariant_ids=evaluated_ids,
+            story_compliance_boundary_summaries=boundary_summaries,
+        )
+        rows.append(
+            {
+                "story_id": candidate.story_id,
+                "priority": priority,
+                "story_points": story.story_points,
+                "blocked_by_story_ids": blocked_by_ids,
+                "planner_story": planner_story.model_dump(mode="json"),
+            }
+        )
+    return rows
+
+
+def _sprint_story_priority(story: UserStory) -> int:
+    """Parse one durable Story rank into the selector's numeric priority."""
+    try:
+        priority = int(story.rank or "")
+    except ValueError as error:
+        message = f"Story {story.story_id} has a non-numeric rank."
+        raise ValueError(message) from error
+    if priority <= 0:
+        message = f"Story {story.story_id} has a non-positive rank."
+        raise ValueError(message)
+    return priority
+
+
+def _sprint_validation_evidence(story: UserStory) -> tuple[list[str], list[str]]:
+    """Extract model-visible invariant and boundary evidence from one Story row."""
+    if story.validation_evidence is None:
+        return [], []
+    evidence = ValidationEvidence.model_validate_json(story.validation_evidence)
+    summaries = [
+        item.message
+        for item in (*evidence.alignment_warnings, *evidence.alignment_failures)
+    ]
+    return list(evidence.evaluated_invariant_ids), summaries
+
+
+def _sprint_acceptance_items(value: str | None) -> list[str]:
+    """Return durable acceptance criteria as compact model-visible lines."""
+    if value is None:
+        return []
+    return [
+        line.lstrip("-* \t").strip()
+        for line in value.splitlines()
+        if line.lstrip("-* \t").strip()
+    ]
+
+
+def _sprint_input_error(*, code: str, message: str) -> WorkflowError:
+    """Return one structured deterministic host-preparation failure."""
+    return WorkflowError(
+        code=WorkflowErrorCode.WORKFLOW_FACT_CONFLICT,
+        message=message,
+        blockers=(Blocker(code=code, message=message),),
+    )
+
+
+def _sprint_capacity_error() -> WorkflowError:
+    """Return the public remediation when no positive capacity can be resolved."""
+    message = (
+        "Sprint planning requires --max-story-points because durable completed-"
+        "Sprint metrics do not provide a recommendation."
+    )
+    return WorkflowError(
+        code=WorkflowErrorCode.SPRINT_CAPACITY_REQUIRED,
+        message=message,
+        blockers=(Blocker(code="SPRINT_CAPACITY_REQUIRED", message=message),),
+    )
+
+
 def _unique_available_decision(
     position: WorkflowPosition,
     node_id: str,
@@ -2145,6 +2548,17 @@ def _transition_not_available(
             message=f"No unique {node_id} transition is currently available.",
         ),
     )
+
+
+def _sprint_replay_input(request: SprintPlanningRequest) -> JsonObject:
+    """Return only caller semantics replaced during durable replay comparison."""
+    return {
+        "requested_max_story_points": request.max_story_points,
+        "requested_story_ids": list(request.selected_story_ids),
+        "team_name": request.team_name,
+        "include_task_decomposition": request.include_task_decomposition,
+        "guidance": request.guidance,
+    }
 
 
 def _stale_vision_interview(position: WorkflowPosition) -> TransitionResult:
@@ -2241,6 +2655,7 @@ def production_application() -> AgileForgeApplication:
         authority_review_selection=AuthorityReviewSelectionService(engine=engine),
         authority_repair_input=AuthorityRepairInputService(engine=engine),
         delivery_action_input=DeliveryActionInputService(engine=engine),
+        sprint_planning_input=SprintPlanningInputService(engine=engine),
     )
     application.set_project_lifecycle(
         ProjectLifecycleService(
@@ -2275,6 +2690,8 @@ __all__ = [
     "RepositoryRefreshRequest",
     "SpecificationCandidateRequest",
     "SpecificationReviewRequest",
+    "SprintPlanningInputService",
+    "SprintPlanningRequest",
     "VisionInterviewRequest",
     "VisionResponseRequest",
     "VisionReviewRequest",

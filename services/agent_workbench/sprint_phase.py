@@ -72,6 +72,7 @@ class RecordSprintPlanInput:
     plan_fingerprint: str
     candidate_set_fingerprint: str
     supersedes_sprint_plan_artifact_id: int | None
+    include_task_decomposition: bool
     actor: str
     recorded_at: datetime
 
@@ -123,9 +124,7 @@ def _selected_sprint_stories(
     inputs: RecordSprintPlanInput,
 ) -> dict[int, UserStory]:
     stories = session.exec(
-        select(UserStory).where(
-            col(UserStory.story_id).in_(inputs.selected_story_ids)
-        )
+        select(UserStory).where(col(UserStory.story_id).in_(inputs.selected_story_ids))
     ).all()
     stories_by_id = {
         story.story_id: story for story in stories if story.story_id is not None
@@ -236,6 +235,8 @@ def _ensure_planned_sprint(
 def _validate_sprint_task_plan(
     plan: SprintPlannerOutput,
     stories_by_id: dict[int, UserStory],
+    *,
+    include_task_decomposition: bool,
 ) -> None:
     allowed_invariants = {
         story_id: _planning_story_invariant_ids(story)
@@ -259,7 +260,7 @@ def _validate_sprint_task_plan(
     }
     decomposition_errors = validate_task_decomposition_quality(
         plan,
-        include_task_decomposition=True,
+        include_task_decomposition=include_task_decomposition,
         has_acceptance_criteria_by_story={
             story_id: bool(items) for story_id, items in acceptance_items.items()
         },
@@ -269,6 +270,11 @@ def _validate_sprint_task_plan(
         raise ValueError(
             "Sprint task decomposition failed: " + "; ".join(decomposition_errors)
         )
+    if not include_task_decomposition and any(
+        selected.tasks for selected in plan.selected_stories
+    ):
+        message = "Sprint plan contains tasks when decomposition was disabled."
+        raise ValueError(message)
 
 
 def _replace_sprint_story_tasks(
@@ -317,9 +323,7 @@ def _add_sprint_plan_artifact(
         canonical_task_plan_json=canonical_json(inputs.canonical_task_plan),
         plan_fingerprint=inputs.plan_fingerprint,
         candidate_set_fingerprint=inputs.candidate_set_fingerprint,
-        supersedes_sprint_plan_artifact_id=(
-            inputs.supersedes_sprint_plan_artifact_id
-        ),
+        supersedes_sprint_plan_artifact_id=(inputs.supersedes_sprint_plan_artifact_id),
         created_by=inputs.actor,
         created_at=inputs.recorded_at,
     )
@@ -366,7 +370,11 @@ def record_sprint_plan_in_session(
     if sprint_id is None:
         message = "Sprint did not receive a durable identity."
         raise ValueError(message)
-    _validate_sprint_task_plan(plan, stories_by_id)
+    _validate_sprint_task_plan(
+        plan,
+        stories_by_id,
+        include_task_decomposition=inputs.include_task_decomposition,
+    )
     _replace_sprint_story_tasks(
         session,
         sprint_id,
@@ -452,8 +460,7 @@ def _selected_dependency_review_id(
     existing = session.exec(
         select(StoryDependencyReview).where(
             StoryDependencyReview.project_id == command.project_id,
-            StoryDependencyReview.source_fingerprint
-            == dependency.source_fingerprint,
+            StoryDependencyReview.source_fingerprint == dependency.source_fingerprint,
         )
     ).one_or_none()
     if existing is None:
@@ -504,8 +511,7 @@ def start_sprint_in_session(
         or plan.candidate_set_fingerprint != command.candidate_set_fingerprint
         or plan_decision is None
         or plan_decision.project_id != command.project_id
-        or plan_decision.sprint_plan_artifact_id
-        != command.sprint_plan_artifact_id
+        or plan_decision.sprint_plan_artifact_id != command.sprint_plan_artifact_id
         or plan_decision.plan_fingerprint != command.plan_fingerprint
         or plan_decision.decision != "accepted"
     ):
@@ -537,9 +543,7 @@ def start_sprint_in_session(
             sprint_id=command.sprint_id,
             team_id=sprint.team_id,
             sprint_plan_artifact_id=command.sprint_plan_artifact_id,
-            sprint_plan_artifact_decision_id=(
-                command.sprint_plan_artifact_decision_id
-            ),
+            sprint_plan_artifact_decision_id=(command.sprint_plan_artifact_decision_id),
             story_dependency_review_id=dependency_review_id,
             plan_fingerprint=command.plan_fingerprint,
             candidate_set_fingerprint=command.candidate_set_fingerprint,
@@ -574,9 +578,7 @@ def start_sprint_in_session(
             project_id=command.project_id,
             sprint_id=command.sprint_id,
             sprint_plan_artifact_id=command.sprint_plan_artifact_id,
-            sprint_plan_artifact_decision_id=(
-                command.sprint_plan_artifact_decision_id
-            ),
+            sprint_plan_artifact_decision_id=(command.sprint_plan_artifact_decision_id),
             story_dependency_review_id=dependency_review_id,
             plan_fingerprint=command.plan_fingerprint,
             candidate_set_fingerprint=command.candidate_set_fingerprint,

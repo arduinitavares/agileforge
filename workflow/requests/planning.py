@@ -145,6 +145,7 @@ class RecordSprintPlan(PositionedRequest):
     plan_fingerprint: str = Field(min_length=1)
     candidate_set_fingerprint: str = Field(min_length=1)
     supersedes_sprint_plan_artifact_id: int | None = None
+    include_task_decomposition: bool = True
 
     @model_validator(mode="after")
     def validate_selected_story_ids(self) -> Self:

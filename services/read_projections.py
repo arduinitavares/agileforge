@@ -31,6 +31,7 @@ from services.packets.canonical import (
     build_story_packet,
     build_task_packet,
 )
+from services.phases.sprint_metrics import build_durable_sprint_metrics
 from services.specs.compiler_service import load_compiled_artifact
 from workflow.contracts import JsonObject, JsonValue
 from workflow.definitions.product_discovery import select_product_definition_state
@@ -1183,24 +1184,24 @@ class DurableReadProjectionService:
         )
 
     def sprint_metrics(self, *, project_id: int) -> JsonObject:
-        """Return deterministic counts from durable Sprint execution facts."""
+        """Return deterministic Sprint metrics and capacity recommendation."""
         snapshot_or_error = self._snapshot(project_id)
         if isinstance(snapshot_or_error, dict):
             return snapshot_or_error
         snapshot = snapshot_or_error
-        completed_ids = {
-            item.sprint_id for item in snapshot.sprints if item.status == "completed"
-        }
-        return _success(
+        metrics = _validated(build_durable_sprint_metrics(snapshot))
+        metrics.update(
             {
-                "project_id": project_id,
                 "sprint_count": len(snapshot.sprints),
-                "completed_sprint_count": len(completed_ids),
+                "completed_sprint_count": sum(
+                    item.status == "completed" for item in snapshot.sprints
+                ),
                 "task_count": len(snapshot.tasks),
                 "completed_task_count": len(snapshot.task_completions),
                 "story_completion_count": len(snapshot.story_completions),
             }
         )
+        return _success(metrics)
 
     def sprint_status(
         self,

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
+import pytest
 from google.adk import Context, Workflow
 from google.adk.workflow import node
 from sqlmodel import Session, col, select
@@ -501,6 +502,119 @@ def test_semantic_replay_binds_the_requested_instance_selector(
     assert wrong_requirement is not None
     assert wrong_requirement.error is not None
     assert wrong_requirement.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
+
+
+@pytest.mark.parametrize(
+    "semantic_input",
+    [
+        {
+            "requested_max_story_points": 8,
+            "requested_story_ids": [11, 12],
+            "team_name": "Platform",
+            "include_task_decomposition": False,
+            "guidance": "Keep the exact cohort.",
+        },
+        {
+            "requested_max_story_points": 5,
+            "requested_story_ids": [11],
+            "team_name": "Platform",
+            "include_task_decomposition": False,
+            "guidance": "Keep the exact cohort.",
+        },
+        {
+            "requested_max_story_points": 5,
+            "requested_story_ids": [11, 12],
+            "team_name": "Platform",
+            "include_task_decomposition": False,
+            "guidance": "Changed guidance.",
+        },
+    ],
+)
+def test_sprint_semantic_replay_conflicts_on_changed_request_identity(
+    engine: Engine,
+    semantic_input: JsonObject,
+) -> None:
+    """Bind Sprint replay to capacity, requested cohort, and guidance."""
+    original_semantics: JsonObject = {
+        "requested_max_story_points": 5,
+        "requested_story_ids": [11, 12],
+        "team_name": "Platform",
+        "include_task_decomposition": False,
+        "guidance": "Keep the exact cohort.",
+    }
+    stored = StartNodeAttempt(
+        project_id=41,
+        graph_version="agileforge.workflow.v2",
+        fact_fingerprint="facts-before-sprint-plan",
+        decision_fingerprint="decision-before-sprint-plan",
+        idempotency_key="sprint-semantic-replay",
+        actor="operator@example.com",
+        correlation_id="sprint-correlation",
+        target_node_id="planning.sprint.plan",
+        normalized_input={
+            "planner_input": {"available_stories": [{"story_id": 11}]},
+            "capacity_points": 5,
+            "capacity_source": "user_override",
+            "capacity_basis": "5 points provided by the operator.",
+            **original_semantics,
+            "locked_story_ids": [11, 12],
+            "candidate_set_fingerprint": "sha256:locked-candidates",
+            "supersedes_sprint_plan_artifact_id": None,
+        },
+        model_id=MODEL_ID,
+        execution_settings=EXECUTION_SETTINGS,
+        lease_seconds=LEASE_SECONDS,
+    )
+    persisted = TransitionResult(
+        ok=True,
+        applied_node_id="planning.sprint.plan",
+    )
+    with Session(engine) as session:
+        session.add(
+            WorkflowTransitionReceipt(
+                request_kind="start_node_attempt",
+                idempotency_key=stored.idempotency_key,
+                request_fingerprint=canonical_hash(stored.model_dump(mode="json")),
+                request_json=canonical_json(stored.model_dump(mode="json")),
+                result_json=canonical_json(persisted.model_dump(mode="json")),
+                started_at=EVALUATED_AT,
+                completed_at=EVALUATED_AT,
+            )
+        )
+        session.commit()
+    service = DurableNodeAttemptReplayService(engine=engine)
+
+    replay = service.replay(
+        NodeAttemptReplayQuery(
+            project_id=stored.project_id,
+            graph_version=None,
+            fact_fingerprint=None,
+            decision_fingerprint=None,
+            node_id=stored.target_node_id,
+            idempotency_key=stored.idempotency_key,
+            actor=stored.actor,
+            correlation_id=stored.correlation_id,
+            semantic_input=original_semantics,
+        )
+    )
+    conflict = service.replay(
+        NodeAttemptReplayQuery(
+            project_id=stored.project_id,
+            graph_version=None,
+            fact_fingerprint=None,
+            decision_fingerprint=None,
+            node_id=stored.target_node_id,
+            idempotency_key=stored.idempotency_key,
+            actor=stored.actor,
+            correlation_id=stored.correlation_id,
+            semantic_input=semantic_input,
+        )
+    )
+
+    assert replay == persisted.model_copy(update={"replayed": True})
+    assert conflict is not None
+    assert conflict.error is not None
+    assert conflict.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
 
 
 def test_replay_query_returns_terminal_result_after_position_advanced(

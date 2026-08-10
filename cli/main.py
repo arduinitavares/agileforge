@@ -31,6 +31,7 @@ from services.application import (
     RepositoryRefreshRequest,
     SpecificationCandidateRequest,
     SpecificationReviewRequest,
+    SprintPlanningRequest,
     VisionResponseRequest,
     VisionReviewRequest,
     VisionRevisionRequest,
@@ -66,6 +67,7 @@ _SEMANTIC_REQUEST_KINDS = frozenset(
         "record_product_goal_interview_turn",
         "record_roadmap_draft",
         "record_specification_candidate",
+        "record_sprint_plan",
         "record_story_draft",
         "record_vision_interview_turn",
         "repair_authority",
@@ -242,6 +244,8 @@ class _Application(Protocol):
     def generate_roadmap(self, request: DeliveryActionRequest) -> TransitionResult: ...
 
     def generate_story(self, request: DeliveryActionRequest) -> TransitionResult: ...
+
+    def generate_sprint(self, request: SprintPlanningRequest) -> TransitionResult: ...
 
 
 type CommandHandler = Callable[[argparse.Namespace, _Application], int]
@@ -551,6 +555,22 @@ def _install_lifecycle_mutations(
     ):
         generate = _semantic_leaf(branches[(group,)], "generate", handler)
         generate.add_argument("--instance-key")
+
+    sprint_generate = _semantic_leaf(
+        branches[("sprint",)],
+        "generate",
+        _sprint_generate,
+    )
+    sprint_generate.add_argument("--input", dest="user_input")
+    sprint_generate.add_argument("--selected-story-ids", nargs="+", type=int)
+    sprint_generate.add_argument("--max-story-points", type=int)
+    sprint_generate.add_argument(
+        "--no-task-decomposition",
+        action="store_false",
+        dest="include_task_decomposition",
+        default=True,
+    )
+    sprint_generate.add_argument("--team-name", required=True)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1006,6 +1026,24 @@ def _roadmap_generate(args: argparse.Namespace, application: _Application) -> in
 
 def _story_generate(args: argparse.Namespace, application: _Application) -> int:
     return _emit_result(application.generate_story(_delivery_action_request(args)))
+
+
+def _sprint_generate(args: argparse.Namespace, application: _Application) -> int:
+    return _emit_result(
+        application.generate_sprint(
+            SprintPlanningRequest(
+                project_id=args.project_id,
+                guidance=args.user_input,
+                selected_story_ids=tuple(args.selected_story_ids or ()),
+                max_story_points=args.max_story_points,
+                include_task_decomposition=args.include_task_decomposition,
+                team_name=args.team_name,
+                idempotency_key=args.idempotency_key,
+                actor=args.actor,
+                correlation_id=args.correlation_id,
+            )
+        )
+    )
 
 
 def _workflow_next(args: argparse.Namespace, application: _Application) -> int:

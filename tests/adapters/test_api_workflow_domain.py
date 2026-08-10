@@ -19,6 +19,7 @@ from api import (
 )
 from cli.workflow_commands import COMMAND_PREFIXES
 from models.workflow import WorkflowTransitionReceipt
+from repositories.workflow import WorkflowFactRepository
 from services.application import (
     AgenticActionRequest,
     AgileForgeApplication,
@@ -32,19 +33,28 @@ from services.application import (
     DeliveryActionRequest,
     ProductGoalLifecycleServices,
     ProductGoalResponseRequest,
+    SprintPlanningInputService,
+    SprintPlanningRequest,
     VisionResponseRequest,
+    WorkflowDomainPort,
 )
 from services.contracts.backlog import InputSchema as BacklogInput
 from services.contracts.roadmap import RoadmapBuilderInput
+from services.contracts.sprint import SprintPlannerInput
 from services.contracts.story import UserStoryWriterInput
 from services.node_attempt_replay import NodeAttemptReplayQuery, TransitionReplayQuery
 from tests.adapters.test_command_renderer import position_fixture
-from tests.workflow.test_planning_transitions import (
-    _domain as planning_domain,
+from tests.workflow.test_execution_transitions import (
+    _complete_execution_sprint_with_unselected_story,
 )
 from tests.workflow.test_planning_transitions import (
+    _apply_current_dependencies,
     _record_and_accept_roadmap,
+    _record_and_accept_story,
     _seed_accepted_backlog,
+)
+from tests.workflow.test_planning_transitions import (
+    _domain as planning_domain,
 )
 from workflow.contracts import (
     FactReference,
@@ -57,6 +67,7 @@ from workflow.contracts import (
     WorkflowErrorCode,
     WorkflowPosition,
 )
+from workflow.definitions.planning import candidate_set_fingerprint
 from workflow.fingerprints import canonical_hash, canonical_json
 from workflow.requests import DecideAuthority, StartNodeAttempt, TransitionRequest
 
@@ -269,6 +280,9 @@ class _FakeApiApplication:
     def generate_story(self, request: object) -> TransitionResult:
         return self._record_delivery_request(request)
 
+    def generate_sprint(self, request: object) -> TransitionResult:
+        return self._record_delivery_request(request)
+
     def _record_delivery_request(self, request: object) -> TransitionResult:
         self.requests.append(request)
         return self._transition_result or TransitionResult(
@@ -426,6 +440,23 @@ class _CapturingDeliveryApplication(AgileForgeApplication):
         super().__init__(
             workflow_domain=domain,
             delivery_action_input=delivery_input,
+        )
+        self.agent_requests: list[AgenticActionRequest] = []
+
+    def run_agentic_action(self, request: AgenticActionRequest) -> TransitionResult:
+        self.agent_requests.append(request)
+        return TransitionResult(ok=True)
+
+
+class _CapturingSprintApplication(AgileForgeApplication):
+    def __init__(
+        self,
+        domain: WorkflowDomainPort,
+        sprint_input: SprintPlanningInputService,
+    ) -> None:
+        super().__init__(
+            workflow_domain=domain,
+            sprint_planning_input=sprint_input,
         )
         self.agent_requests: list[AgenticActionRequest] = []
 
@@ -808,17 +839,18 @@ def test_story_replay_uses_the_caller_requested_requirement_selector() -> None:
     assert application.agent_requests == []
 
 
-def test_sprint_generation_fails_closed_without_host_capacity_input() -> None:
-    """Do not invent a Sprint capacity or invoke the model without one."""
-    decision = _delivery_decision(
-        node_id="planning.sprint.plan",
-        request_kind="record_sprint_plan",
+def test_sprint_generation_fails_closed_without_host_capacity_input(
+    engine: "Engine",
+) -> None:
+    """Require explicit or durable metrics capacity before model execution."""
+    domain, project_id, _story_id = _sprint_ready_project(engine)
+    application = _CapturingSprintApplication(
+        domain,
+        SprintPlanningInputService(engine=engine),
     )
-    domain = _BoundaryDomain(_vision_position(decision))
-    delivery_input = _DeliveryInput(None)
-    application = _CapturingDeliveryApplication(domain, delivery_input)
-    request = DeliveryActionRequest(
-        project_id=PROJECT_ID,
+    request = SprintPlanningRequest(
+        project_id=project_id,
+        team_name="Platform",
         idempotency_key="sprint-41",
         actor="operator",
     )
@@ -827,8 +859,179 @@ def test_sprint_generation_fails_closed_without_host_capacity_input() -> None:
 
     assert result.ok is False
     assert result.error is not None
-    assert result.error.code is WorkflowErrorCode.TRANSITION_NOT_AVAILABLE
+    assert result.error.code is WorkflowErrorCode.SPRINT_CAPACITY_REQUIRED
     assert application.agent_requests == []
+
+
+def _sprint_ready_project(
+    engine: "Engine",
+) -> tuple[WorkflowDomainPort, int, int]:
+    project_id = _seed_accepted_backlog(engine)
+    domain = planning_domain(engine)
+    _record_and_accept_roadmap(domain, project_id)
+    _artifact_id, story_id = _record_and_accept_story(domain, project_id)
+    _apply_current_dependencies(
+        engine,
+        domain,
+        project_id,
+        idempotency_key="review-sprint-dependencies",
+    )
+    return domain, project_id, story_id
+
+
+def test_explicit_sprint_capacity_locks_exact_durable_cohort(
+    engine: "Engine",
+) -> None:
+    """Persist host capacity and exact current candidates before model execution."""
+    domain, project_id, story_id = _sprint_ready_project(engine)
+    application = _CapturingSprintApplication(
+        domain,
+        SprintPlanningInputService(engine=engine),
+    )
+    capacity_points = 3
+
+    result = application.generate_sprint(
+        SprintPlanningRequest(
+            project_id=project_id,
+            guidance="Prioritize durable replay.",
+            selected_story_ids=(story_id,),
+            max_story_points=capacity_points,
+            include_task_decomposition=False,
+            team_name="Platform",
+            idempotency_key="sprint-explicit",
+            actor="operator",
+        )
+    )
+
+    assert result.ok is True
+    assert len(application.agent_requests) == 1
+    envelope = application.agent_requests[0].input_payload
+    planner_input = SprintPlannerInput.model_validate(envelope["planner_input"])
+    assert [item.story_id for item in planner_input.available_stories] == [story_id]
+    assert planner_input.capacity_points == capacity_points
+    assert planner_input.capacity_source == "user_override"
+    assert planner_input.user_context == "Prioritize durable replay."
+    assert envelope["capacity_points"] == capacity_points
+    assert envelope["capacity_source"] == "user_override"
+    assert envelope["locked_story_ids"] == [story_id]
+    assert envelope["requested_story_ids"] == [story_id]
+    assert envelope["team_name"] == "Platform"
+    assert envelope["include_task_decomposition"] is False
+    assert envelope["guidance"] == "Prioritize durable replay."
+    assert isinstance(envelope["candidate_set_fingerprint"], str)
+
+
+def test_completed_sprint_metrics_supply_host_capacity(engine: "Engine") -> None:
+    """Use completed Story points when current durable metrics recommend capacity."""
+    _domain, project_id, _sprint_id, _story_id, future_story_id, *_rest = (
+        _complete_execution_sprint_with_unselected_story(engine)
+    )
+    with Session(engine) as session:
+        snapshot = WorkflowFactRepository(session).load(project_id)
+    candidates = tuple(item for item in snapshot.stories if item.sprint_candidate)
+    previous_plan = max(
+        (
+            item
+            for item in snapshot.planning_artifacts
+            if item.artifact_type == "sprint_plan"
+        ),
+        key=lambda item: item.artifact_id,
+    )
+    decision = _delivery_decision(
+        node_id="planning.sprint.plan",
+        request_kind="record_sprint_plan",
+    ).model_copy(
+        update={
+            "fact_references": (
+                FactReference(
+                    fact_type="sprint_plan",
+                    fact_id=str(previous_plan.artifact_id),
+                    fingerprint=previous_plan.artifact_fingerprint,
+                ),
+                FactReference(
+                    fact_type="candidate_set",
+                    fact_id=str(project_id),
+                    fingerprint=candidate_set_fingerprint(
+                        candidates,
+                        snapshot.story_dependencies,
+                    ),
+                ),
+            )
+        }
+    )
+
+    envelope = SprintPlanningInputService(engine=engine).build(
+        project_id=project_id,
+        decision=decision,
+        request=SprintPlanningRequest(
+            project_id=project_id,
+            selected_story_ids=(future_story_id,),
+            team_name="Platform",
+            idempotency_key="sprint-metrics-capacity",
+            actor="operator",
+        ),
+    )
+
+    assert isinstance(envelope, dict)
+    planner_input = SprintPlannerInput.model_validate(envelope["planner_input"])
+    assert planner_input.capacity_source == "project_metrics"
+    assert planner_input.capacity_points > 0
+    assert envelope["requested_max_story_points"] is None
+    assert envelope["locked_story_ids"] == [future_story_id]
+    assert "completed Sprints" in planner_input.capacity_basis
+
+
+def test_invalid_manual_sprint_selection_fails_before_model(
+    engine: "Engine",
+) -> None:
+    """Reject non-candidate manual Story IDs deterministically."""
+    domain, project_id, _story_id = _sprint_ready_project(engine)
+    application = _CapturingSprintApplication(
+        domain,
+        SprintPlanningInputService(engine=engine),
+    )
+
+    result = application.generate_sprint(
+        SprintPlanningRequest(
+            project_id=project_id,
+            selected_story_ids=(999_999,),
+            max_story_points=3,
+            team_name="Platform",
+            idempotency_key="sprint-invalid-selection",
+            actor="operator",
+        )
+    )
+
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
+    assert result.error.blockers[0].code == "SPRINT_SELECTION_INVALID"
+    assert application.agent_requests == []
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"max_story_points": 0},
+        {"selected_story_ids": (7, 7)},
+        {"selected_story_ids": (-1,)},
+    ],
+)
+def test_invalid_sprint_semantics_fail_validation(
+    overrides: dict[str, object],
+) -> None:
+    """Reject invalid capacity and manual selection before durable reads."""
+    with pytest.raises(ValidationError):
+        SprintPlanningRequest.model_validate(
+            {
+                "project_id": PROJECT_ID,
+                "max_story_points": 3,
+                "team_name": "Platform",
+                "idempotency_key": "sprint-invalid",
+                "actor": "operator",
+                **overrides,
+            }
+        )
 
 
 def test_delivery_input_service_builds_from_durable_facts(engine: "Engine") -> None:
@@ -1113,14 +1316,46 @@ def test_retained_non_agentic_delivery_api_uses_semantic_input(
     assert request.kind == "decide_backlog"
 
 
-def test_unprepared_sprint_generation_api_route_is_absent() -> None:
-    """Do not expose Sprint generation before durable capacity input exists."""
+def test_semantic_sprint_generation_api_is_strict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Expose only task-specific Sprint planning semantics over HTTP."""
+    application = _FakeApiApplication(position=_all_request_kinds_position())
+    monkeypatch.setattr(api_module, "_application", lambda: application)
+    payload = {
+        "user_input": "Prioritize replay safety.",
+        "selected_story_ids": [7, 9],
+        "max_story_points": 8,
+        "include_task_decomposition": False,
+        "team_name": "Platform",
+        "idempotency_key": "sprint-41",
+        "actor": "operator",
+    }
+
     response = TestClient(api_module.app).post(
         "/api/projects/41/sprint/generate",
-        json={"idempotency_key": "sprint-41", "actor": "operator"},
+        json=payload,
     )
 
-    assert response.status_code == HTTPStatus.NOT_FOUND
+    assert response.status_code == HTTPStatus.OK
+    assert len(application.requests) == 1
+    request = cast("SprintPlanningRequest", application.requests[0])
+    assert request.guidance == payload["user_input"]
+    assert request.selected_story_ids == (7, 9)
+
+    for extra_field in (
+        "model_id",
+        "input_payload",
+        "candidate_set_fingerprint",
+        "graph_version",
+        "sprint_duration_days",
+        "team_velocity_assumption",
+    ):
+        rejected = TestClient(api_module.app).post(
+            "/api/projects/41/sprint/generate",
+            json={**payload, extra_field: "caller-owned"},
+        )
+        assert rejected.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
 
 
 def test_retained_non_agentic_delivery_api_rejects_input_payload(
@@ -1181,7 +1416,7 @@ def test_position_advertises_only_executable_semantic_api_routes(
     )
     assert {item["request_kind"] for item in actions} == expected
     assert all(item["endpoint"].startswith("/") is False for item in actions)
-    assert "record_sprint_plan" not in expected
+    assert "record_sprint_plan" in expected
     assert all("decision_fingerprint" not in item for item in actions)
 
 

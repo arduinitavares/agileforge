@@ -41,6 +41,7 @@ from services.application import (
     RepositoryRefreshRequest,
     SpecificationCandidateRequest,
     SpecificationReviewRequest,
+    SprintPlanningRequest,
     VisionResponseRequest,
     VisionReviewRequest,
     VisionRevisionRequest,
@@ -163,6 +164,16 @@ class DeliveryActionApiRequest(MutationApiRequest):
     instance_key: str | None = None
 
 
+class SprintPlanningApiRequest(MutationApiRequest):
+    """Strict operator-owned Sprint planning semantics."""
+
+    user_input: str | None = None
+    selected_story_ids: list[int] = Field(default_factory=list)
+    max_story_points: int | None = Field(default=None, gt=0)
+    include_task_decomposition: bool = True
+    team_name: str = Field(min_length=1)
+
+
 class PositionedTransitionApiRequest(MutationApiRequest):
     """Operator-owned semantic fields for one retained non-agentic route."""
 
@@ -218,6 +229,7 @@ SEMANTIC_API_PATHS: dict[str, str] = {
     "record_discovery_artifact": "discovery",
     "record_product_goal_interview_turn": "goals/respond",
     "record_specification_candidate": "specifications",
+    "record_sprint_plan": "sprint/generate",
     "record_vision_interview_turn": "vision/respond",
     "repair_authority": "authority/repair",
 }
@@ -1064,6 +1076,27 @@ def generate_project_story(
     """Generate Story drafts from host-prepared durable input."""
     return _result_payload(
         _application().generate_story(_delivery_request(project_id, req))
+    )
+
+
+@app.post("/api/projects/{project_id}/sprint/generate")
+def generate_project_sprint(
+    project_id: int,
+    req: SprintPlanningApiRequest,
+) -> dict[str, object]:
+    """Generate one host-prepared Sprint plan from operator semantics."""
+    return _result_payload(
+        _application().generate_sprint(
+            SprintPlanningRequest(
+                project_id=project_id,
+                guidance=req.user_input,
+                selected_story_ids=tuple(req.selected_story_ids),
+                max_story_points=req.max_story_points,
+                include_task_decomposition=req.include_task_decomposition,
+                team_name=req.team_name,
+                **_metadata(req),
+            )
+        )
     )
 
 

@@ -15,6 +15,8 @@ from cli.workflow_commands import (
 from tests.adapters.test_command_renderer import position_fixture
 from workflow.contracts import WorkflowPosition
 
+SPRINT_CAPACITY_POINTS = 8
+
 
 @pytest.mark.parametrize(
     "command",
@@ -160,10 +162,62 @@ def test_removed_agentic_cli_flags_fail_parser_validation(flag: str) -> None:
         )
 
 
-def test_unprepared_sprint_generation_parser_branch_is_absent() -> None:
-    """Do not advertise Sprint generation before capacity input is durable."""
-    with pytest.raises(ValueError, match="invalid choice"):
-        cli_main.build_parser().parse_args(["sprint", "generate"])
+def test_semantic_sprint_generation_command_parses() -> None:
+    """Accept only operator-owned Sprint planning semantics."""
+    parsed = cli_main.build_parser().parse_args(
+        [
+            "sprint",
+            "generate",
+            "--project-id",
+            "41",
+            "--input",
+            "Prioritize durable replay.",
+            "--selected-story-ids",
+            "7",
+            "9",
+            "--max-story-points",
+            str(SPRINT_CAPACITY_POINTS),
+            "--no-task-decomposition",
+            "--team-name",
+            "Platform",
+            "--idempotency-key",
+            "sprint-41",
+            "--actor",
+            "operator",
+        ]
+    )
+
+    assert parsed.user_input == "Prioritize durable replay."
+    assert parsed.selected_story_ids == [7, 9]
+    assert parsed.max_story_points == SPRINT_CAPACITY_POINTS
+    assert parsed.include_task_decomposition is False
+    assert parsed.team_name == "Platform"
+    assert not hasattr(parsed, "model_id")
+
+
+@pytest.mark.parametrize(
+    "flag",
+    ["--sprint-duration-days", "--team-velocity-assumption", "--model-id"],
+)
+def test_removed_sprint_generation_flags_fail_parser_validation(flag: str) -> None:
+    """Reject calendar, velocity, and model controls at the Sprint CLI boundary."""
+    with pytest.raises(ValueError, match="unrecognized arguments"):
+        cli_main.build_parser().parse_args(
+            [
+                "sprint",
+                "generate",
+                "--project-id",
+                "41",
+                "--team-name",
+                "Platform",
+                "--idempotency-key",
+                "sprint-41",
+                "--actor",
+                "operator",
+                flag,
+                "caller-owned",
+            ]
+        )
 
 
 def test_version_does_not_compose_production_application(

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import pytest
@@ -26,6 +28,7 @@ from adapters.adk.recipes import (
 )
 from utils.spec_schemas import SpecAuthorityCompilationSuccess
 from workflow.definitions.root import ROOT_GRAPH
+from workflow.fingerprints import canonical_hash
 from workflow.requests import (
     CompileAuthority,
     RecordBacklogDraft,
@@ -128,18 +131,6 @@ REQUEST_CASES: tuple[
             "canonical_content": {"stories": []},
             "content_fingerprint": "sha256:story",
             "supersedes_story_artifact_id": None,
-        },
-    ),
-    (
-        "planning.sprint.plan",
-        RecordSprintPlan,
-        {
-            "team_name": "Platform",
-            "selected_story_ids": [13],
-            "canonical_task_plan": {"tasks": []},
-            "plan_fingerprint": "sha256:plan",
-            "candidate_set_fingerprint": "sha256:candidates",
-            "supersedes_sprint_plan_artifact_id": None,
         },
     ),
 )
@@ -275,6 +266,170 @@ def test_complete_registry_adapts_each_output_to_its_typed_request(
     assert request.attempt_fingerprint == COMPLETION_CONTEXT.attempt_fingerprint
 
 
+def _sprint_attempt_input() -> JsonObject:
+    planner_input: JsonObject = {
+        "available_stories": [
+            {
+                "story_id": 11,
+                "story_title": "First locked Story",
+                "priority": 1,
+                "story_points": 2,
+                "story_description": "Deliver the first locked Story.",
+            },
+            {
+                "story_id": 12,
+                "story_title": "Second locked Story",
+                "priority": 2,
+                "story_points": 3,
+                "story_description": "Deliver the second locked Story.",
+            },
+        ],
+        "capacity_points": 5,
+        "capacity_source": "user_override",
+        "capacity_basis": "5 points provided by the operator.",
+        "user_context": "Keep the cohort exact.",
+        "include_task_decomposition": False,
+    }
+    return {
+        "planner_input": planner_input,
+        "capacity_points": 5,
+        "capacity_source": "user_override",
+        "capacity_basis": "5 points provided by the operator.",
+        "requested_max_story_points": 5,
+        "requested_story_ids": [11, 12],
+        "locked_story_ids": [11, 12],
+        "team_name": "Platform",
+        "include_task_decomposition": False,
+        "guidance": "Keep the cohort exact.",
+        "candidate_set_fingerprint": "sha256:candidates",
+        "supersedes_sprint_plan_artifact_id": 7,
+    }
+
+
+def _sprint_output() -> JsonObject:
+    return {
+        "sprint_goal": "Deliver the exact locked cohort.",
+        "sprint_number": 2,
+        "selected_stories": [
+            {
+                "story_id": 11,
+                "story_title": "First locked Story",
+                "tasks": [],
+                "reason_for_selection": "Host locked this Story.",
+            },
+            {
+                "story_id": 12,
+                "story_title": "Second locked Story",
+                "tasks": [],
+                "reason_for_selection": "Host locked this Story.",
+            },
+        ],
+        "deselected_stories": [],
+        "capacity_analysis": {
+            "capacity_points": 5,
+            "capacity_source": "user_override",
+            "capacity_basis": "5 points provided by the operator.",
+            "selected_count": 2,
+            "story_points_used": 5,
+            "remaining_capacity_points": 0,
+            "commitment_note": "The locked cohort fits.",
+            "reasoning": "The exact host-selected Stories consume five points.",
+        },
+    }
+
+
+def test_sprint_recipe_builds_record_request_from_host_owned_envelope() -> None:
+    """Bind only validated model planning content to trusted host evidence."""
+    context = replace(
+        COMPLETION_CONTEXT,
+        normalized_input=_sprint_attempt_input(),
+    )
+    output = _sprint_output()
+
+    request = (
+        _complete_registry()
+        .require("planning.sprint.plan")
+        .output_adapter(RecipeOutput(payload=output), context)
+    )
+
+    assert isinstance(request, RecordSprintPlan)
+    assert request.team_name == "Platform"
+    assert request.selected_story_ids == (11, 12)
+    assert request.candidate_set_fingerprint == "sha256:candidates"
+    assert (
+        request.supersedes_sprint_plan_artifact_id
+        == _sprint_attempt_input()["supersedes_sprint_plan_artifact_id"]
+    )
+    assert request.canonical_task_plan == output
+    assert request.plan_fingerprint == canonical_hash(output)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "added_story",
+        "dropped_story",
+        "reordered_stories",
+        "wrong_capacity",
+        "model_candidate_fingerprint",
+        "model_team_name",
+        "unexpected_tasks",
+    ],
+)
+def test_sprint_recipe_rejects_model_owned_or_changed_host_facts(
+    mutation: str,
+) -> None:
+    """Reject any model drift from the locked cohort and host planning policy."""
+    envelope = _sprint_attempt_input()
+    output = deepcopy(_sprint_output())
+    selected = output["selected_stories"]
+    assert isinstance(selected, list)
+    if mutation == "added_story":
+        selected.append(
+            {
+                "story_id": 13,
+                "story_title": "Added Story",
+                "tasks": [],
+                "reason_for_selection": "Model added this Story.",
+            }
+        )
+    elif mutation == "dropped_story":
+        selected.pop()
+    elif mutation == "reordered_stories":
+        selected.reverse()
+    elif mutation == "wrong_capacity":
+        analysis = output["capacity_analysis"]
+        assert isinstance(analysis, dict)
+        analysis["capacity_points"] = 6
+    elif mutation == "model_candidate_fingerprint":
+        output["candidate_set_fingerprint"] = "model-owned"
+    elif mutation == "model_team_name":
+        output["team_name"] = "Model Team"
+    else:
+        first = selected[0]
+        assert isinstance(first, dict)
+        first["tasks"] = [
+            {
+                "description": "Unexpected decomposition",
+                "task_kind": "implementation",
+                "artifact_targets": ["planning module"],
+                "workstream_tags": ["workflow"],
+                "relevant_invariant_ids": [],
+                "checklist_items": ["Run focused tests"],
+            }
+        ]
+    context = replace(
+        COMPLETION_CONTEXT,
+        normalized_input=envelope,
+    )
+
+    with pytest.raises((TypeError, ValueError)):
+        _complete_registry().require("planning.sprint.plan").output_adapter(
+            RecipeOutput(payload=output),
+            context,
+        )
+
+
 def test_backlog_recipe_fans_out_and_joins_before_validated_output() -> None:
     """Run bounded parallel validation branches before one terminal output."""
     workflow = build_backlog_generation_workflow(
@@ -285,9 +440,7 @@ def test_backlog_recipe_fans_out_and_joins_before_validated_output() -> None:
         },
     )
     assert workflow.graph is not None
-    edges = {
-        (edge.from_node.name, edge.to_node.name) for edge in workflow.graph.edges
-    }
+    edges = {(edge.from_node.name, edge.to_node.name) for edge in workflow.graph.edges}
 
     assert edges == {
         (START.name, "generate_backlog"),

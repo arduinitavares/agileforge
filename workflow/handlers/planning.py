@@ -160,8 +160,7 @@ def _current_sprint_plan(
         (
             item
             for item in snapshot.planning_artifacts
-            if item.artifact_type == "sprint_plan"
-            and item.artifact_id == artifact_id
+            if item.artifact_type == "sprint_plan" and item.artifact_id == artifact_id
         ),
         None,
     )
@@ -308,9 +307,7 @@ def execute_record_roadmap_draft(
                 backlog_artifact_fingerprint=request.backlog_artifact_fingerprint,
                 canonical_content=request.canonical_content,
                 content_fingerprint=request.content_fingerprint,
-                supersedes_roadmap_artifact_id=(
-                    request.supersedes_roadmap_artifact_id
-                ),
+                supersedes_roadmap_artifact_id=(request.supersedes_roadmap_artifact_id),
                 actor=request.actor,
                 recorded_at=evaluated_at,
             ),
@@ -416,9 +413,7 @@ def execute_record_story_draft(
                 requirement_text=requirement.requirement,
                 requirement_rank=requirement.rank,
                 roadmap_artifact_id=request.roadmap_artifact_id,
-                roadmap_artifact_fingerprint=(
-                    request.roadmap_artifact_fingerprint
-                ),
+                roadmap_artifact_fingerprint=(request.roadmap_artifact_fingerprint),
                 canonical_content=request.canonical_content,
                 content_fingerprint=request.content_fingerprint,
                 supersedes_story_artifact_id=request.supersedes_story_artifact_id,
@@ -609,6 +604,7 @@ def execute_record_sprint_plan(
                 supersedes_sprint_plan_artifact_id=(
                     request.supersedes_sprint_plan_artifact_id
                 ),
+                include_task_decomposition=request.include_task_decomposition,
                 actor=request.actor,
                 recorded_at=evaluated_at,
             ),

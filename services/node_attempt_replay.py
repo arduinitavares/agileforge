@@ -42,6 +42,7 @@ class NodeAttemptReplayQuery(FrozenModel):
     actor: str
     correlation_id: str | None = None
     user_text: str | None = None
+    semantic_input: JsonObject | None = None
 
 
 class TransitionReplayQuery(FrozenModel):
@@ -160,6 +161,8 @@ def _replay_normalized_input(
     normalized_input = dict(stored.normalized_input)
     if query.user_text is not None:
         normalized_input["user_response"] = query.user_text
+    if query.semantic_input is not None:
+        normalized_input.update(query.semantic_input)
     return normalized_input
 
 
