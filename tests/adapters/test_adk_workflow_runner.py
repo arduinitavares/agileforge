@@ -234,6 +234,59 @@ class TrackingSessionService(InMemorySessionService):
         )
 
 
+class NumericIdCollisionSessionService(TrackingSessionService):
+    """ADK trace store containing every reusable numeric session identity."""
+
+    async def create_session(
+        self,
+        *,
+        app_name: str,
+        user_id: str,
+        state: dict[str, object] | None = None,
+        session_id: str | None = None,
+    ) -> AdkSession:
+        """Reject numeric IDs as stale while accepting durable fingerprints."""
+        if session_id is not None and session_id.isdecimal():
+            await super().create_session(
+                app_name=app_name,
+                user_id=user_id,
+                state=state,
+                session_id=session_id,
+            )
+        return await super().create_session(
+            app_name=app_name,
+            user_id=user_id,
+            state=state,
+            session_id=session_id,
+        )
+
+
+class CollidingSessionService(TrackingSessionService):
+    """ADK trace store that creates then collides on the requested session."""
+
+    async def create_session(
+        self,
+        *,
+        app_name: str,
+        user_id: str,
+        state: dict[str, object] | None = None,
+        session_id: str | None = None,
+    ) -> AdkSession:
+        """Create the trace once, then reproduce ADK's duplicate-ID failure."""
+        await super().create_session(
+            app_name=app_name,
+            user_id=user_id,
+            state=state,
+            session_id=session_id,
+        )
+        return await super().create_session(
+            app_name=app_name,
+            user_id=user_id,
+            state=state,
+            session_id=session_id,
+        )
+
+
 @dataclass(frozen=True)
 class _BacklogLineage:
     project_id: int
@@ -706,10 +759,10 @@ def test_stale_preflight_lease_expiry_returns_durable_obsolete_result(
     async def expire_before_failure(
         _recipe: AdkRecipe,
         *,
-        attempt_id: int,
+        attempt_fingerprint: str,
         input_payload: JsonObject,
     ) -> RecipeOutput:
-        del attempt_id, input_payload
+        del attempt_fingerprint, input_payload
         preflight_runs.append("preflight")
         clock.now_value += timedelta(seconds=LEASE_SECONDS)
         raise VisionAgenticPreflightError(
@@ -758,10 +811,10 @@ def test_stale_preflight_fact_change_returns_durable_obsolete_result(
     async def change_fact_before_failure(
         _recipe: AdkRecipe,
         *,
-        attempt_id: int,
+        attempt_fingerprint: str,
         input_payload: JsonObject,
     ) -> RecipeOutput:
-        del attempt_id, input_payload
+        del attempt_fingerprint, input_payload
         preflight_runs.append("preflight")
         with Session(engine) as session:
             project = session.get(Project, project_id)
@@ -992,7 +1045,38 @@ def test_runner_executes_fake_leaf_and_commits_validated_output(engine: Engine) 
         outcome = _node_outcomes(session, "backlog.generate")[0]
         assert outcome.status == "success"
         assert session.exec(select(BacklogArtifact)).one() is not None
-        assert sessions.created_session_ids == [str(attempt.workflow_node_attempt_id)]
+        assert sessions.created_session_ids == [attempt.attempt_fingerprint]
+
+
+def test_runner_ignores_stale_trace_with_reused_numeric_attempt_id(
+    engine: Engine,
+) -> None:
+    """Key new traces by durable identity when a numeric ID is already present."""
+    lineage = _seed(engine)
+    sessions = NumericIdCollisionSessionService()
+    calls: list[str] = []
+    leaf = CountingLeafAgent(
+        name="counting_backlog",
+        response=_backlog_response(lineage),
+        calls=calls,
+    )
+    runner, domain = _build_runner(
+        engine,
+        project_id=lineage.project_id,
+        leaf=leaf,
+        sessions=sessions,
+    )
+
+    result = runner.run(
+        _decision(domain, lineage.project_id),
+        {"prompt": "build backlog"},
+    )
+
+    assert result.ok is True
+    assert leaf.calls == ["provider"]
+    with Session(engine) as session:
+        attempt = _node_attempts(session, "backlog.generate")[0]
+        assert sessions.created_session_ids == [attempt.attempt_fingerprint]
 
 
 def test_sequential_transport_retry_replays_terminal_result_without_provider(
@@ -1117,6 +1201,40 @@ def test_provider_failure_records_failure_and_returns_external_error(
     with Session(engine) as session:
         outcome = _node_outcomes(session, "backlog.generate")[0]
         assert outcome.status == "failure"
+        assert session.exec(select(BacklogArtifact)).all() == []
+
+
+def test_trace_session_collision_records_failure_without_provider(
+    engine: Engine,
+) -> None:
+    """Close the durable attempt when ADK rejects a duplicate trace session."""
+    lineage = _seed(engine)
+    calls: list[str] = []
+    leaf = CountingLeafAgent(
+        name="counting_backlog",
+        response=_backlog_response(lineage),
+        calls=calls,
+    )
+    runner, domain = _build_runner(
+        engine,
+        project_id=lineage.project_id,
+        leaf=leaf,
+        sessions=CollidingSessionService(),
+    )
+
+    result = runner.run(
+        _decision(domain, lineage.project_id),
+        {"prompt": "build backlog"},
+    )
+
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.code is WorkflowErrorCode.EXTERNAL_EXECUTION_FAILED
+    assert leaf.calls == []
+    with Session(engine) as session:
+        outcome = _node_outcomes(session, "backlog.generate")[0]
+        assert outcome.status == "failure"
+        assert outcome.failure_code == "ADK_EXECUTION_FAILED"
         assert session.exec(select(BacklogArtifact)).all() == []
 
 

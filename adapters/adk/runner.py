@@ -8,6 +8,7 @@ from typing import Protocol
 from uuid import uuid4
 
 from google.adk.apps import App, ResumabilityConfig
+from google.adk.errors.already_exists_error import AlreadyExistsError
 from google.adk.runners import Runner
 from google.adk.sessions import BaseSessionService, DatabaseSessionService
 from google.adk.workflow import NodeTimeoutError
@@ -65,6 +66,7 @@ class WorkflowDomainRunnerPort(Protocol):
 
 _TRANSITION_REQUEST = TypeAdapter(TransitionRequest)
 _ADK_EXECUTION_ERRORS: tuple[type[BaseException], ...] = (
+    AlreadyExistsError,
     DynamicNodeFailError,
     NodeTimeoutError,
     OpenAIError,
@@ -238,7 +240,7 @@ class AdkWorkflowRunner:
             output = asyncio.run(
                 self._run_recipe(
                     recipe,
-                    attempt_id=attempt_id,
+                    attempt_fingerprint=attempt_fingerprint,
                     input_payload=persisted_input,
                 )
             )
@@ -298,7 +300,7 @@ class AdkWorkflowRunner:
         self,
         recipe: AdkRecipe,
         *,
-        attempt_id: int,
+        attempt_fingerprint: str,
         input_payload: JsonObject,
     ) -> RecipeOutput:
         session_service = self._session_service
@@ -307,7 +309,7 @@ class AdkWorkflowRunner:
                 db_url=get_adk_execution_trace_db_target().async_sqlite_url
             )
             self._session_service = session_service
-        session_id = str(attempt_id)
+        session_id = attempt_fingerprint
         await session_service.create_session(
             app_name=self._config.identity.app_name,
             user_id=self._config.identity.user_id,
