@@ -47,6 +47,15 @@ _ALLOWED_PATHS: tuple[str, ...] = (
     "docs/spec/spec.md",
     "specs/spec.md",
 )
+_SOURCE_POLICIES: Final[dict[str, str]] = {
+    "docs/spec/spec.json": "technical_specification_json",
+    "specs/spec.json": "technical_specification_json",
+    "CONTEXT.md": "context_markdown",
+    "README.md": "readme_markdown",
+    "pyproject.toml": "package_metadata_toml",
+    "docs/spec/spec.md": "technical_specification_markdown",
+    "specs/spec.md": "technical_specification_markdown",
+}
 _SCP_REMOTE_RE: re.Pattern[str] = re.compile(
     r"^(?:[^@/:]+@)?(?P<host>[^/:]+):(?P<path>.+)$"
 )
@@ -683,7 +692,7 @@ class VisionEvidenceCollector:
             )
             return None
         try:
-            return resolved.relative_to(worktree).as_posix()
+            resolved_relative = resolved.relative_to(worktree).as_posix()
         except ValueError:
             warnings.append(
                 VisionEvidenceCollector._warning(
@@ -693,6 +702,21 @@ class VisionEvidenceCollector:
                 )
             )
             return None
+        if (
+            resolved_relative not in _SOURCE_POLICIES
+            or _SOURCE_POLICIES[resolved_relative] != _SOURCE_POLICIES[relative_path]
+        ):
+            warnings.append(
+                VisionEvidenceCollector._warning(
+                    code="EVIDENCE_UNREADABLE",
+                    source=relative_path,
+                    message=(
+                        "Approved evidence path resolves to an incompatible source."
+                    ),
+                )
+            )
+            return None
+        return resolved_relative
 
     def _open_descriptor(
         self,
@@ -765,9 +789,20 @@ class VisionEvidenceCollector:
         warnings: list[VisionEvidenceWarning],
     ) -> int | None:
         """Open one nonblocking leaf and retain only regular files."""
-        nonblock = getattr(os, "O_NONBLOCK", 0)
-        if not isinstance(nonblock, int):
-            nonblock = 0
+        nonblock = getattr(os, "O_NONBLOCK", None)
+        if (
+            not isinstance(nonblock, int)
+            or isinstance(nonblock, bool)
+            or nonblock <= 0
+        ):
+            warnings.append(
+                self._warning(
+                    code="EVIDENCE_UNREADABLE",
+                    source=source_path,
+                    message="Platform cannot safely open approved evidence files.",
+                )
+            )
+            return None
         try:
             descriptor = os.open(
                 leaf_name,

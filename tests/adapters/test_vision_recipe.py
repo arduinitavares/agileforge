@@ -796,11 +796,12 @@ def test_completed_clarification_replays_nested_human_response_durably(
     engine: Engine,
 ) -> None:
     """Replay identical ordinary text and conflict on changed text after advancement."""
-    project_id, primary, domain, runner, service = _stale_recipe_runtime(
+    runtime = _stale_recipe_runtime(
         engine,
         "initial",
         fail_recovery=False,
     )
+    project_id, primary, domain, runner, service = runtime
     position = domain.position(project_id)
     bootstrap = next(
         item for item in position.decisions if item.node_id == "vision.bootstrap"
@@ -857,6 +858,73 @@ def test_completed_clarification_replays_nested_human_response_durably(
     assert conflict.error is not None
     assert conflict.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
     assert len(primary.calls) == calls_after_completion
+
+
+def test_application_replays_exact_stale_clarification_failure(
+    engine: Engine,
+) -> None:
+    """Replay the typed stale result through ordinary application input."""
+    project_id, primary, domain, runner, service = _stale_recipe_runtime(
+        engine,
+        "initial",
+        fail_recovery=False,
+    )
+    position = domain.position(project_id)
+    bootstrap = next(
+        item for item in position.decisions if item.node_id == "vision.bootstrap"
+    )
+    assert runner.run(
+        bootstrap,
+        service.build_bootstrap(project_id, bootstrap),
+        guards=AdkRunGuards(
+            position=position,
+            idempotency_key="application-stale-seed",
+            actor="operator@example.com",
+        ),
+    ).ok
+    with Session(engine) as session:
+        project = session.get(Project, project_id)
+        assert project is not None
+        project.description = "Changed after the trusted snapshot."
+        session.add(project)
+        session.commit()
+    position = domain.position(project_id)
+    interview = next(
+        item for item in position.decisions if item.node_id == "vision.interview"
+    )
+    user_text = "Keep the evidence-grounded direction."
+    idempotency_key = "application-stale-replay"
+    calls_before_stale = len(primary.calls)
+    stale = runner.run(
+        interview,
+        service.build_clarification(project_id, interview, user_text),
+        guards=AdkRunGuards(
+            position=position,
+            idempotency_key=idempotency_key,
+            actor="operator@example.com",
+        ),
+    )
+    application = AgileForgeApplication(
+        workflow_domain=domain,
+        vision_input=service,
+    )
+    request = VisionResponseRequest(
+        project_id=project_id,
+        text=user_text,
+        idempotency_key=idempotency_key,
+        actor="operator@example.com",
+    )
+
+    replayed = application.respond_to_vision(request)
+
+    assert stale.error is not None
+    assert stale.error.code is WorkflowErrorCode.VISION_EVIDENCE_STALE
+    assert replayed.ok is False
+    assert replayed.replayed is True
+    assert replayed.error is not None
+    assert replayed.error.code is stale.error.code
+    assert replayed.error.message == stale.error.message
+    assert len(primary.calls) == calls_before_stale
 
 
 def test_initial_bootstrap_failure_retries_without_a_prior_snapshot(

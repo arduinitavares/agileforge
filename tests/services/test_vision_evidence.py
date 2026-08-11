@@ -17,6 +17,7 @@ from services.contracts.vision_evidence import (
     MAX_EVIDENCE_ITEM_BYTES,
     MAX_EVIDENCE_ITEMS,
     MAX_EVIDENCE_TOTAL_BYTES,
+    VisionEvidenceWarning,
 )
 from services.vision_evidence import (
     VisionEvidenceCollectionError,
@@ -347,21 +348,79 @@ def test_stable_in_worktree_symlink_uses_the_approved_source_identity(
     engine: Engine,
     repository: Path,
 ) -> None:
-    """Allow a stable internal target while retaining the allowlisted source path."""
-    target = repository / "docs/README-source.md"
+    """Allow a compatible approved target while retaining the logical identity."""
+    target = repository / "specs/spec.md"
     target.parent.mkdir()
-    target.write_text("Internal repository overview.\n", encoding="utf-8")
-    (repository / "README.md").symlink_to(target.relative_to(repository))
+    target.write_text("Approved technical specification.\n", encoding="utf-8")
+    logical_source = repository / "docs/spec/spec.md"
+    logical_source.parent.mkdir(parents=True)
+    logical_source.symlink_to("../../specs/spec.md")
     project_id = _add_project(engine)
     _bind_repository(engine, project_id=project_id, repository=repository)
 
     bundle = collector.collect(project_id)
 
-    readme = next(item for item in bundle.items if item.kind == "readme")
-    assert readme.evidence_id == "file:README.md"
-    assert readme.relative_path == "README.md"
-    assert readme.content == "Internal repository overview."
+    specification = next(
+        item for item in bundle.items if item.kind == "technical_specification"
+    )
+    assert specification.evidence_id == "file:docs/spec/spec.md"
+    assert specification.relative_path == "docs/spec/spec.md"
+    assert specification.content == "Approved technical specification."
     assert bundle.warnings == ()
+
+
+@pytest.mark.parametrize(
+    ("target_path", "content"),
+    [
+        (".env", "SECRET=must-not-leak\n"),
+        ("src/private.py", "secret = True\n"),
+        ("notes/private.md", "Arbitrary private document.\n"),
+        ("pyproject.toml", "[project]\nname = 'private-package'\n"),
+    ],
+)
+def test_allowlisted_symlink_rejects_incompatible_or_unapproved_targets(
+    collector: VisionEvidenceCollector,
+    engine: Engine,
+    repository: Path,
+    target_path: str,
+    content: str,
+) -> None:
+    """Do not relabel forbidden or cross-policy content as README evidence."""
+    target = repository / target_path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content, encoding="utf-8")
+    (repository / "README.md").symlink_to(target_path)
+    project_id = _add_project(engine)
+    _bind_repository(engine, project_id=project_id, repository=repository)
+
+    bundle = collector.collect(project_id)
+
+    assert "file:README.md" not in {item.evidence_id for item in bundle.items}
+    assert content.strip() not in bundle.model_dump_json()
+    assert "EVIDENCE_UNREADABLE" in {warning.code for warning in bundle.warnings}
+
+
+def test_json_spec_symlink_rejects_approved_markdown_target(
+    collector: VisionEvidenceCollector,
+    engine: Engine,
+    repository: Path,
+) -> None:
+    """Do not parse an approved Markdown spec through the JSON-spec policy."""
+    target = repository / "specs/spec.md"
+    target.parent.mkdir()
+    target.write_text("Approved Markdown specification.\n", encoding="utf-8")
+    logical_source = repository / "docs/spec/spec.json"
+    logical_source.parent.mkdir(parents=True)
+    logical_source.symlink_to("../../specs/spec.md")
+    project_id = _add_project(engine)
+    _bind_repository(engine, project_id=project_id, repository=repository)
+
+    bundle = collector.collect(project_id)
+
+    assert "file:docs/spec/spec.json" not in {
+        item.evidence_id for item in bundle.items
+    }
+    assert "EVIDENCE_UNREADABLE" in {warning.code for warning in bundle.warnings}
 
 
 def test_materially_large_source_reads_only_the_item_limit_plus_sentinel(
@@ -472,6 +531,35 @@ def test_allowlisted_fifo_is_rejected_without_a_blocking_open(
 
     assert "file:README.md" not in {item.evidence_id for item in bundle.items}
     assert [warning.code for warning in bundle.warnings] == ["EVIDENCE_UNREADABLE"]
+
+
+def test_missing_nonblocking_open_capability_fails_before_leaf_open(
+    collector: VisionEvidenceCollector,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fail closed without opening a leaf when O_NONBLOCK is unavailable."""
+    warnings: list[VisionEvidenceWarning] = []
+    open_calls: list[str] = []
+
+    def unexpected_open(*_args: object, **_kwargs: object) -> int:
+        open_calls.append("open")
+        message = "os.open must not run without O_NONBLOCK"
+        raise AssertionError(message)
+
+    monkeypatch.delattr(vision_evidence_module.os, "O_NONBLOCK", raising=False)
+    monkeypatch.setattr(vision_evidence_module.os, "open", unexpected_open)
+
+    descriptor = collector._open_regular_leaf(
+        parent_descriptor=0,
+        leaf_name="README.md",
+        source_path="README.md",
+        no_follow=0,
+        warnings=warnings,
+    )
+
+    assert descriptor is None
+    assert open_calls == []
+    assert [warning.code for warning in warnings] == ["EVIDENCE_UNREADABLE"]
 
 
 def test_descriptor_read_rejects_a_symlink_swapped_after_resolution(

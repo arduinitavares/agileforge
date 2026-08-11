@@ -214,6 +214,9 @@ def _replay_attempt_result(
     ).one_or_none()
     if outcome is None:
         return _replayed_result(receipt)
+    start_result = _receipt_result(receipt)
+    if not start_result.ok:
+        return start_result.model_copy(update={"replayed": True})
     completion_receipt = _terminal_receipt(session, attempt)
     if completion_receipt is None:
         return _fact_conflict("The terminal node attempt has no completion receipt.")
@@ -247,11 +250,15 @@ def _terminal_receipt(
 
 def _replayed_result(receipt: WorkflowTransitionReceipt) -> TransitionResult:
     """Decode one completed durable receipt as an idempotent replay."""
+    return _receipt_result(receipt).model_copy(update={"replayed": True})
+
+
+def _receipt_result(receipt: WorkflowTransitionReceipt) -> TransitionResult:
+    """Decode one completed durable transition receipt."""
     if receipt.result_json is None:
         message = "The idempotency receipt is incomplete."
         raise RuntimeError(message)
-    persisted = TransitionResult.model_validate_json(receipt.result_json)
-    return persisted.model_copy(update={"replayed": True})
+    return TransitionResult.model_validate_json(receipt.result_json)
 
 
 def _fact_conflict(message: str) -> TransitionResult:

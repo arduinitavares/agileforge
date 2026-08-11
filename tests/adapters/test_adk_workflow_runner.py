@@ -20,6 +20,7 @@ from google.adk.workflow import START, node
 from pydantic import TypeAdapter
 from sqlmodel import Session, col, select
 
+from adapters.adk.errors import VisionAgenticPreflightError
 from adapters.adk.recipes import (
     AdkRecipe,
     AdkRecipeRegistry,
@@ -429,12 +430,14 @@ def _observing_vision_leaf(
 
 def _goal_registry(
     leaf: BaseAgent | AdkWorkflow,
+    *,
+    vision_leaf: BaseAgent | None = None,
 ) -> AdkRecipeRegistry:
     return build_agentic_recipe_registry(
         nodes=AgenticRecipeNodes(
             authority_compile=_unused_leaf("unused_authority_compile"),
             authority_repair=_unused_leaf("unused_authority_repair"),
-            vision_interview=_unused_leaf("unused_vision_interview"),
+            vision_interview=vision_leaf or _unused_leaf("unused_vision_interview"),
             vision_repair=_unused_leaf("unused_vision_repair"),
             product_goal=leaf,
             backlog_generation=_unused_leaf("unused_backlog"),
@@ -444,6 +447,48 @@ def _goal_registry(
         ),
         execution_settings=EXECUTION_SETTINGS,
     )
+
+
+def _vision_preflight_runner(
+    engine: Engine,
+    clock: MutableClock,
+    provider_calls: list[str],
+) -> tuple[AdkWorkflowRunner, WorkflowDomain, int]:
+    """Build one provider-free Vision runner with a mutable attempt clock."""
+    with Session(engine) as session:
+        project = Project(name="Vision preflight", description="Original")
+        session.add(project)
+        session.commit()
+        assert project.project_id is not None
+        project_id = project.project_id
+    vision_leaf = CountingLeafAgent(
+        name="counting_vision_provider",
+        response={},
+        calls=provider_calls,
+    )
+    registry = _goal_registry(
+        _unused_leaf("unused_product_goal"),
+        vision_leaf=vision_leaf,
+    )
+    domain = WorkflowDomain(
+        engine=engine,
+        graph=ROOT_GRAPH,
+        clock=clock,
+        adk_recipe_registry=registry,
+    )
+    runner = AdkWorkflowRunner(
+        domain=domain,
+        registry=registry,
+        session_service=TrackingSessionService(),
+        config=AdkExecutionConfig(
+            project_id=project_id,
+            model_id="fake/vision",
+            execution_settings=EXECUTION_SETTINGS,
+            lease_seconds=LEASE_SECONDS,
+            actor="operator@example.com",
+        ),
+    )
+    return runner, domain, project_id
 
 
 def _goal_runner_system(
@@ -624,6 +669,115 @@ def _node_outcomes(
         for outcome in session.exec(select(WorkflowNodeAttemptOutcome)).all()
         if outcome.workflow_node_attempt_id in attempt_ids
     ]
+
+
+def test_stale_preflight_lease_expiry_returns_durable_obsolete_result(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Return the committed obsolete transition when stale preflight loses its lease."""
+    clock = MutableClock(EVALUATED_AT)
+    provider_calls: list[str] = []
+    runner, domain, project_id = _vision_preflight_runner(
+        engine,
+        clock,
+        provider_calls,
+    )
+    position = domain.position(project_id)
+    decision = next(
+        item for item in position.decisions if item.node_id == "vision.bootstrap"
+    )
+    preflight_runs: list[str] = []
+
+    async def expire_before_failure(
+        _recipe: AdkRecipe,
+        *,
+        attempt_id: int,
+        input_payload: JsonObject,
+    ) -> RecipeOutput:
+        del attempt_id, input_payload
+        preflight_runs.append("preflight")
+        clock.now_value += timedelta(seconds=LEASE_SECONDS)
+        raise VisionAgenticPreflightError(
+            code=WorkflowErrorCode.VISION_EVIDENCE_STALE,
+            message="Vision evidence changed before provider execution.",
+        )
+
+    monkeypatch.setattr(runner, "_run_recipe", expire_before_failure)
+    guards = AdkRunGuards(
+        position=position,
+        idempotency_key="vision-preflight-expired",
+        actor="operator@example.com",
+    )
+
+    first = runner.run(decision, {}, guards=guards)
+    replayed = runner.run(decision, {}, guards=guards)
+
+    assert first.error is not None
+    assert first.error.code is WorkflowErrorCode.ATTEMPT_OBSOLETE
+    assert replayed.replayed is True
+    assert replayed.error is not None
+    assert replayed.error.code is first.error.code
+    assert replayed.error.message == first.error.message
+    assert preflight_runs == ["preflight"]
+    assert provider_calls == []
+
+
+def test_stale_preflight_fact_change_returns_durable_obsolete_result(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Return committed obsolescence when business facts change before failure."""
+    clock = MutableClock(EVALUATED_AT)
+    provider_calls: list[str] = []
+    runner, domain, project_id = _vision_preflight_runner(
+        engine,
+        clock,
+        provider_calls,
+    )
+    position = domain.position(project_id)
+    decision = next(
+        item for item in position.decisions if item.node_id == "vision.bootstrap"
+    )
+    preflight_runs: list[str] = []
+
+    async def change_fact_before_failure(
+        _recipe: AdkRecipe,
+        *,
+        attempt_id: int,
+        input_payload: JsonObject,
+    ) -> RecipeOutput:
+        del attempt_id, input_payload
+        preflight_runs.append("preflight")
+        with Session(engine) as session:
+            project = session.get(Project, project_id)
+            assert project is not None
+            project.description = "Changed during stale preflight."
+            session.add(project)
+            session.commit()
+        raise VisionAgenticPreflightError(
+            code=WorkflowErrorCode.VISION_EVIDENCE_STALE,
+            message="Vision evidence changed before provider execution.",
+        )
+
+    monkeypatch.setattr(runner, "_run_recipe", change_fact_before_failure)
+    guards = AdkRunGuards(
+        position=position,
+        idempotency_key="vision-preflight-fact-change",
+        actor="operator@example.com",
+    )
+
+    first = runner.run(decision, {}, guards=guards)
+    replayed = runner.run(decision, {}, guards=guards)
+
+    assert first.error is not None
+    assert first.error.code is WorkflowErrorCode.ATTEMPT_OBSOLETE
+    assert replayed.replayed is True
+    assert replayed.error is not None
+    assert replayed.error.code is first.error.code
+    assert replayed.error.message == first.error.message
+    assert preflight_runs == ["preflight"]
+    assert provider_calls == []
 
 
 def test_runner_loads_vision_input_from_persisted_attempt(

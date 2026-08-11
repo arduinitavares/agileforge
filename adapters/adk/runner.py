@@ -244,6 +244,11 @@ class AdkWorkflowRunner:
                     correlation_id=request.correlation_id,
                 )
             )
+            if (
+                failed.error is not None
+                and failed.error.code is WorkflowErrorCode.ATTEMPT_OBSOLETE
+            ):
+                return failed
             return TransitionResult(
                 ok=False,
                 position=failed.position,

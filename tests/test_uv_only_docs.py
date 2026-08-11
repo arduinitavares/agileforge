@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import re
+import shlex
 from pathlib import Path
+
+from cli.main import build_parser
 
 README_PATH = Path("README.md")
 ENV_EXAMPLE_PATH = Path(".env.example")
@@ -32,6 +35,30 @@ SEMANTIC_MUTATION_DOCS = (
 
 def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
+
+
+def _documented_vision_commands(text: str) -> tuple[tuple[str, ...], ...]:
+    """Extract exact shell argv from the Vision development command block."""
+    section = re.search(
+        r"^## Vision Bootstrap Development\n(?P<body>.*?)(?=^## |\Z)",
+        text,
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    assert section is not None
+    shell_blocks = re.findall(
+        r"^```sh\n(?P<commands>.*?)^```$",
+        section.group("body"),
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    command_block = next(
+        block for block in shell_blocks if "./agileforge-dev cli " in block
+    )
+    normalized = command_block.replace("\\\n", " ")
+    return tuple(
+        tuple(shlex.split(line))
+        for line in normalized.splitlines()
+        if line.strip()
+    )
 
 
 def test_current_operating_docs_gate_has_exact_bounded_scope() -> None:
@@ -121,36 +148,28 @@ def test_docs_separate_stable_and_checkout_local_commands() -> None:
         assert "./agileforge-dev init --profile local --json" in text
 
 
-def test_vision_manual_examples_are_executable_and_catalogued() -> None:
-    """Keep the manual Vision handoff aligned with required CLI arguments."""
+def test_vision_manual_examples_parse_as_semantic_cli_argv() -> None:
+    """Parse exact documented commands after removing only the launcher prefix."""
     text = _read(CLI_MANUAL_PATH)
-    required_examples = (
-        (
-            "vision bootstrap \\\n"
-            "  --project-id 1 \\\n"
-            "  --idempotency-key vision-bootstrap-1 \\\n"
-            "  --actor operator"
-        ),
-        (
-            "vision respond \\\n"
-            "  --project-id 1 \\\n"
-            '  --text "Keep the evidence-grounded direction." \\\n'
-            "  --idempotency-key vision-respond-1 \\\n"
-            "  --actor operator"
-        ),
-        "vision status --project-id 1",
-        (
-            "vision review \\\n"
-            "  --project-id 1 \\\n"
-            "  --decision accepted \\\n"
-            '  --rationale "The evidence and direction are correct." \\\n'
-            "  --idempotency-key vision-review-1 \\\n"
-            "  --actor operator"
-        ),
-    )
+    commands = _documented_vision_commands(text)
 
-    for example in required_examples:
-        assert example in text
+    assert [command[5:7] for command in commands] == [
+        ("vision", "bootstrap"),
+        ("vision", "respond"),
+        ("vision", "status"),
+        ("vision", "review"),
+    ]
+    parser = build_parser()
+    for command in commands:
+        assert command[:3] == ("./agileforge-dev", "cli", "--profile")
+        assert command[4] == "--"
+        parser.parse_args(command[5:])
+
+
+def test_vision_manual_catalog_includes_bootstrap_node() -> None:
+    """Keep the Vision node catalog assertion independent from CLI parsing."""
+    text = _read(CLI_MANUAL_PATH)
+
     assert "vision.bootstrap\nvision.interview" in text
 
 

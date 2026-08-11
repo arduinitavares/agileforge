@@ -690,6 +690,72 @@ def test_replay_query_prefers_terminal_completion_receipt(
     assert replay == completed.model_copy(update={"replayed": True})
 
 
+def test_replay_query_returns_failure_stored_under_original_start_receipt(
+    engine: Engine,
+) -> None:
+    """Replay the exact failed command result instead of failure bookkeeping."""
+    project_id, _authority_id, _authority_fingerprint = _seed_accepted_authority(engine)
+    domain = _domain(engine, MutableClock(EVALUATED_AT), _registry())
+    request = _start_request(domain, project_id, idempotency_key="replay-failure")
+    started = domain.transition(request)
+    attempt_id, attempt_fingerprint = _attempt_identity(started)
+    failed = domain.transition(
+        FailNodeAttempt(
+            project_id=project_id,
+            attempt_id=attempt_id,
+            attempt_fingerprint=attempt_fingerprint,
+            failure_code="PROVIDER_UNAVAILABLE",
+            failure_message="Fake provider failed.",
+            idempotency_key="replay-failure:failure",
+            actor=request.actor,
+            correlation_id=request.correlation_id,
+        )
+    )
+    expected = domain.transition(request)
+
+    replay = DurableNodeAttemptReplayService(engine=engine).replay(
+        _replay_query(request)
+    )
+
+    assert failed.ok is True
+    assert expected.error is not None
+    assert expected.error.code is WorkflowErrorCode.EXTERNAL_EXECUTION_FAILED
+    assert replay == expected
+
+
+def test_replay_query_returns_obsolete_result_from_original_start_receipt(
+    engine: Engine,
+) -> None:
+    """Replay the exact obsolete command result stored under the caller's key."""
+    project_id, _authority_id, _authority_fingerprint = _seed_accepted_authority(engine)
+    clock = MutableClock(EVALUATED_AT)
+    domain = _domain(engine, clock, _registry())
+    request = _start_request(domain, project_id, idempotency_key="replay-obsolete")
+    started = domain.transition(request)
+    attempt_id, attempt_fingerprint = _attempt_identity(started)
+    clock.now_value += timedelta(seconds=LEASE_SECONDS)
+    obsolete = domain.transition(
+        FailNodeAttempt(
+            project_id=project_id,
+            attempt_id=attempt_id,
+            attempt_fingerprint=attempt_fingerprint,
+            failure_code="PROVIDER_UNAVAILABLE",
+            failure_message="Late provider failure.",
+            idempotency_key="replay-obsolete:failure",
+            actor=request.actor,
+            correlation_id=request.correlation_id,
+        )
+    )
+
+    replay = DurableNodeAttemptReplayService(engine=engine).replay(
+        _replay_query(request)
+    )
+
+    assert obsolete.error is not None
+    assert obsolete.error.code is WorkflowErrorCode.ATTEMPT_OBSOLETE
+    assert replay == obsolete.model_copy(update={"replayed": True})
+
+
 def test_live_attempt_changes_target_to_waiting(engine: Engine) -> None:
     """Render a target waiting until its live lease expires."""
     project_id, _authority_id, _authority_fingerprint = _seed_accepted_authority(engine)
