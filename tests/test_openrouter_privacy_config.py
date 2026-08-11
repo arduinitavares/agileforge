@@ -7,9 +7,24 @@ from utils.model_config import (
     OPENROUTER_PROVIDER,
     ZDR_MAX_BACKOFF_SECONDS,
     ZDR_MAX_RETRIES,
+    get_model_token_limit_args,
     get_openrouter_extra_body,
     is_zdr_routing_error,
 )
+
+
+def test_gpt_5_openrouter_models_use_max_completion_tokens() -> None:
+    """Strict GPT-5 routing should retain Luna's supported token parameter."""
+    assert get_model_token_limit_args("openrouter/openai/gpt-5.6-luna", 4096) == {
+        "max_completion_tokens": 4096
+    }
+
+
+def test_non_gpt_5_openrouter_models_keep_max_tokens() -> None:
+    """The inexpensive test model should keep its supported token parameter."""
+    assert get_model_token_limit_args("openrouter/openai/gpt-oss-20b:free", 4096) == {
+        "max_tokens": 4096
+    }
 
 
 def test_openrouter_extra_body_includes_provider(

@@ -11,18 +11,23 @@ from google.adk.models.lite_llm import LiteLlm
 
 from adapters.adk.prompts import load_prompt
 from services.contracts.backlog import InputSchema, OutputSchema
-from utils.model_config import get_model_id, get_openrouter_extra_body
+from utils.model_config import (
+    get_model_id,
+    get_model_token_limit_args,
+    get_openrouter_extra_body,
+)
 from utils.runtime_config import get_backlog_primer_max_tokens, get_openrouter_api_key
 
 BACKLOG_INSTRUCTIONS = load_prompt("backlog.txt")
 
 _max_tokens = get_backlog_primer_max_tokens()
+_model_id = get_model_id("backlog_primer")
 model: LiteLlm = LiteLlm(
-    model=get_model_id("backlog_primer"),
+    model=_model_id,
     api_key=get_openrouter_api_key(),
     drop_params=True,
     extra_body=get_openrouter_extra_body(),
-    max_tokens=_max_tokens,
+    **get_model_token_limit_args(_model_id, _max_tokens),
 )
 
 root_agent: Agent = Agent(

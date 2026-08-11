@@ -8,18 +8,23 @@ from services.contracts.product_goal import (
     ProductGoalInterviewInput,
     ProductGoalInterviewOutput,
 )
-from utils.model_config import get_model_id, get_openrouter_extra_body
+from utils.model_config import (
+    get_model_id,
+    get_model_token_limit_args,
+    get_openrouter_extra_body,
+)
 from utils.runtime_config import (
     get_openrouter_api_key,
     get_vision_interviewer_max_tokens,
 )
 
+_model_id = get_model_id("product_goal")
 model: LiteLlm = LiteLlm(
-    model=get_model_id("product_goal"),
+    model=_model_id,
     api_key=get_openrouter_api_key(),
     drop_params=True,
     extra_body=get_openrouter_extra_body(),
-    max_tokens=get_vision_interviewer_max_tokens(),
+    **get_model_token_limit_args(_model_id, get_vision_interviewer_max_tokens()),
 )
 
 root_agent: Agent = Agent(

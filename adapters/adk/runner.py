@@ -13,6 +13,7 @@ from google.adk.sessions import BaseSessionService, DatabaseSessionService
 from google.adk.workflow import NodeTimeoutError
 from google.adk.workflow._errors import DynamicNodeFailError
 from google.genai import types
+from openai import OpenAIError
 from pydantic import TypeAdapter
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -63,6 +64,17 @@ class WorkflowDomainRunnerPort(Protocol):
 
 
 _TRANSITION_REQUEST = TypeAdapter(TransitionRequest)
+_ADK_EXECUTION_ERRORS: tuple[type[BaseException], ...] = (
+    DynamicNodeFailError,
+    NodeTimeoutError,
+    OpenAIError,
+    KeyError,
+    OSError,
+    RuntimeError,
+    SQLAlchemyError,
+    TypeError,
+    ValueError,
+)
 
 
 @dataclass(frozen=True)
@@ -254,16 +266,7 @@ class AdkWorkflowRunner:
                 position=failed.position,
                 error=WorkflowError(code=error.code, message=error.message),
             )
-        except (
-            DynamicNodeFailError,
-            NodeTimeoutError,
-            KeyError,
-            OSError,
-            RuntimeError,
-            SQLAlchemyError,
-            TypeError,
-            ValueError,
-        ) as error:
+        except _ADK_EXECUTION_ERRORS as error:
             failed = self._domain.transition(
                 FailNodeAttempt(
                     project_id=self._config.project_id,

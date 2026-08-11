@@ -15,7 +15,11 @@ from services.contracts.vision import (
     VisionModelInput,
     VisionRepairInput,
 )
-from utils.model_config import get_model_id, get_openrouter_extra_body
+from utils.model_config import (
+    get_model_id,
+    get_model_token_limit_args,
+    get_openrouter_extra_body,
+)
 from utils.runtime_config import (
     get_openrouter_api_key,
     get_vision_interviewer_max_tokens,
@@ -26,12 +30,13 @@ repair_instructions = load_prompt("vision_repair.txt")
 
 # --- Initialize Model with drop_params to prevent logging issues ---
 _max_tokens = get_vision_interviewer_max_tokens()
+_model_id = get_model_id("product_vision")
 model: LiteLlm = LiteLlm(
-    model=get_model_id("product_vision"),
+    model=_model_id,
     api_key=get_openrouter_api_key(),
     drop_params=True,  # Prevent passing unsupported params that trigger logging
     extra_body=get_openrouter_extra_body(),
-    max_tokens=_max_tokens,
+    **get_model_token_limit_args(_model_id, _max_tokens),
 )
 
 

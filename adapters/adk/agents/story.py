@@ -9,7 +9,11 @@ from services.contracts.story import (
     UserStoryWriterInput,
     UserStoryWriterOutput,
 )
-from utils.model_config import get_model_id, get_openrouter_extra_body
+from utils.model_config import (
+    get_model_id,
+    get_model_token_limit_args,
+    get_openrouter_extra_body,
+)
 from utils.runtime_config import get_openrouter_api_key, get_story_writer_max_tokens
 
 USER_STORY_WRITER_INSTRUCTIONS = load_prompt("story.txt")
@@ -19,12 +23,13 @@ USER_STORY_PATCH_INSTRUCTIONS = load_prompt("story_patch.txt")
 def _create_story_writer_model() -> LiteLlm:
     """Create the configured Story Writer model."""
     _max_tokens = get_story_writer_max_tokens()
+    model_id = get_model_id("user_story_writer")
     return LiteLlm(
-        model=get_model_id("user_story_writer"),
+        model=model_id,
         api_key=get_openrouter_api_key(),
         drop_params=True,
         extra_body=get_openrouter_extra_body(),
-        max_tokens=_max_tokens,
+        **get_model_token_limit_args(model_id, _max_tokens),
     )
 
 

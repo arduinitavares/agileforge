@@ -14,6 +14,7 @@ from utils.runtime_config import get_bool_env, load_runtime_env
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _DEFAULT_CONFIG_RESOURCE = files("config").joinpath("models.yaml")
+_OPENROUTER_OPENAI_GPT_5_PREFIX = "openrouter/openai/gpt-5"
 
 load_runtime_env()
 
@@ -171,6 +172,13 @@ def _get_provider_config() -> dict[str, Any]:
 def get_openrouter_extra_body() -> dict[str, Any]:
     """Return extra_body for OpenRouter requests with privacy routing."""
     return {"provider": _get_provider_config()}
+
+
+def get_model_token_limit_args(model_id: str, token_limit: int) -> dict[str, int]:
+    """Return the token-limit argument supported by the configured model family."""
+    if model_id.startswith(_OPENROUTER_OPENAI_GPT_5_PREFIX):
+        return {"max_completion_tokens": token_limit}
+    return {"max_tokens": token_limit}
 
 
 def get_story_pipeline_mode() -> str:

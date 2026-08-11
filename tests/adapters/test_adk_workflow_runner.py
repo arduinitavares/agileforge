@@ -17,6 +17,7 @@ from google.adk.events import Event
 from google.adk.sessions import InMemorySessionService
 from google.adk.sessions import Session as AdkSession
 from google.adk.workflow import START, node
+from openai import OpenAIError
 from pydantic import TypeAdapter
 from sqlmodel import Session, col, select
 
@@ -120,6 +121,19 @@ class FakeLeafAgent(BaseAgent):
         if self.failure_message is not None:
             raise RuntimeError(self.failure_message)
         yield Event(author=self.name, output=self.response)
+
+
+class ProviderSdkFailureLeafAgent(BaseAgent):
+    """Provider-free leaf reproducing one OpenAI-compatible SDK failure."""
+
+    async def _run_async_impl(
+        self,
+        ctx: InvocationContext,
+    ) -> AsyncGenerator[Event, None]:
+        del ctx
+        message = "provider routing failed"
+        raise OpenAIError(message)
+        yield
 
 
 class CountingLeafAgent(BaseAgent):
@@ -1089,6 +1103,32 @@ def test_provider_failure_records_failure_and_returns_external_error(
             response={},
             failure_message="provider unavailable",
         ),
+        sessions=TrackingSessionService(),
+    )
+
+    result = runner.run(
+        _decision(domain, lineage.project_id),
+        {"prompt": "build backlog"},
+    )
+
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.code is WorkflowErrorCode.EXTERNAL_EXECUTION_FAILED
+    with Session(engine) as session:
+        outcome = _node_outcomes(session, "backlog.generate")[0]
+        assert outcome.status == "failure"
+        assert session.exec(select(BacklogArtifact)).all() == []
+
+
+def test_provider_sdk_failure_records_failure_and_returns_external_error(
+    engine: Engine,
+) -> None:
+    """Close the durable attempt when an OpenAI-compatible SDK call fails."""
+    lineage = _seed(engine)
+    runner, domain = _build_runner(
+        engine,
+        project_id=lineage.project_id,
+        leaf=ProviderSdkFailureLeafAgent(name="provider_sdk_failure"),
         sessions=TrackingSessionService(),
     )
 
