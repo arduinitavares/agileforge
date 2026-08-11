@@ -57,6 +57,24 @@ def _evidence_bundle(*, content: str = "Repository context") -> VisionEvidenceBu
     )
 
 
+def test_components_normalize_omitted_progressive_values_to_none() -> None:
+    """Missing progressive Vision components should mean not known yet."""
+    components = VisionComponents(
+        project_name="String Calculator Lab",
+        product_category="Developer exercise",
+    )
+
+    assert components.model_dump() == {
+        "project_name": "String Calculator Lab",
+        "target_user": None,
+        "problem": None,
+        "product_category": "Developer exercise",
+        "key_benefit": None,
+        "competitors": None,
+        "differentiator": None,
+    }
+
+
 def test_bootstrap_input_and_agent_envelope_are_strict() -> None:
     """Bootstrap has no snapshot or preflight lineage."""
     bootstrap = VisionBootstrapInput(

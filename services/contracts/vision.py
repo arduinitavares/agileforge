@@ -69,13 +69,13 @@ class VisionComponents(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    project_name: str | None
-    target_user: str | None
-    problem: str | None
-    product_category: str | None
-    key_benefit: str | None
-    competitors: str | None
-    differentiator: str | None
+    project_name: str | None = None
+    target_user: str | None = None
+    problem: str | None = None
+    product_category: str | None = None
+    key_benefit: str | None = None
+    competitors: str | None = None
+    differentiator: str | None = None
 
     @field_validator("*", mode="before")
     @classmethod

@@ -425,6 +425,50 @@ def test_schema_bearing_leaf_accepts_bootstrap_and_clarification(
     assert '"host"' not in request_text
 
 
+def test_schema_bearing_leaf_accepts_omitted_unknown_components() -> None:
+    """Normalize omitted progressive components before semantic validation."""
+    omitted = {
+        "target_user",
+        "problem",
+        "key_benefit",
+        "competitors",
+        "differentiator",
+    }
+    partial = _draft(complete=False)
+    components = partial["components"]
+    assert isinstance(components, dict)
+    partial["components"] = {
+        key: value for key, value in components.items() if key not in omitted
+    }
+    basis = partial["component_basis"]
+    assert isinstance(basis, list)
+    partial["component_basis"] = [
+        item
+        for item in basis
+        if isinstance(item, dict) and item.get("component") not in omitted
+    ]
+    question = _JSON_OBJECT.validate_python(
+        {
+            "question_id": "question:direction",
+            "text": "Who benefits, and what should become meaningfully different?",
+            "affected_components": sorted(omitted),
+            "conflict_ids": [],
+        }
+    )
+    partial["clarifying_questions"] = [question]
+    primary = _provider_leaf("primary", partial)
+    workflow = build_vision_workflow(
+        primary_leaf=primary,
+        execution_settings=EXECUTION_SETTINGS,
+    )
+
+    result = asyncio.run(_run_workflow_async(workflow, _bootstrap_input()))
+
+    normalized = result.payload["components"]
+    assert isinstance(normalized, dict)
+    assert all(normalized[name] is None for name in omitted)
+
+
 @pytest.mark.parametrize("complete", [False, True])
 def test_incomplete_and_complete_outputs(complete: bool) -> None:
     """Preserve complete and incomplete model decisions without extra calls."""
