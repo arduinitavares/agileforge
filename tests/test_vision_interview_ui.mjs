@@ -326,6 +326,61 @@ test('Vision response submits ordinary text without question identity', async ()
     assert.equal(submit.disabled, false);
 });
 
+test('Vision response shows pending state and ignores duplicate submission', async () => {
+    const pendingResponses = [];
+    const label = { textContent: 'Send response' };
+    const submit = {
+        disabled: false,
+        querySelector() { return label; },
+        setAttribute() {},
+        removeAttribute() {},
+    };
+    const textarea = {
+        disabled: false,
+        value: 'Clarify the target team.',
+    };
+    const context = loadFrontend({
+        elements: { 'vision-response': textarea },
+        fetchImpl: (...args) => new Promise((resolve) => {
+            pendingResponses.push({ args, resolve });
+        }),
+    });
+    vm.runInContext(`
+        selectedProjectId = 9;
+        lifecycleState.actions = [{
+            request_kind: 'record_vision_interview_turn',
+            endpoint: 'vision/respond',
+        }];
+    `, context);
+    context.installInteractions();
+    const form = {
+        dataset: { interviewScope: 'vision' },
+        querySelector() { return submit; },
+    };
+    const event = {
+        target: form,
+        preventDefault() {},
+    };
+
+    const first = context.__documentListeners.submit(event);
+    const second = context.__documentListeners.submit(event);
+
+    assert.equal(form.dataset.submitting, 'true');
+    assert.equal(submit.disabled, true);
+    assert.equal(textarea.disabled, true);
+    assert.equal(label.textContent, 'Sending...');
+    assert.equal(pendingResponses.length, 1);
+    pendingResponses[0].resolve({
+        ok: false,
+        text: async () => JSON.stringify({ message: 'Expected test stop.' }),
+    });
+    await Promise.all([first, second]);
+    assert.equal(form.dataset.submitting, undefined);
+    assert.equal(submit.disabled, false);
+    assert.equal(textarea.disabled, false);
+    assert.equal(label.textContent, 'Send response');
+});
+
 test('Vision generation disables immediately and ignores a second submission', async () => {
     const pendingResponses = [];
     const context = loadFrontend({

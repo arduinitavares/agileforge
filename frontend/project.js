@@ -392,7 +392,7 @@ function interviewFormMarkup(scope, questions, transcript, label) {
                 class="mt-2 w-full resize-y rounded-lg border-slate-300 text-sm leading-6 focus:border-accent focus:ring-accent"></textarea>
             <div class="mt-3 flex justify-end">
                 <button type="submit" class="${BUTTON_PRIMARY}">
-                    <span class="material-symbols-outlined" aria-hidden="true">send</span><span>Send response</span>
+                    <span class="material-symbols-outlined" aria-hidden="true">send</span><span data-interview-submit-label aria-live="polite">Send response</span>
                 </button>
             </div>
         </form>
@@ -1074,6 +1074,7 @@ function installInteractions() {
         const scope = form?.dataset?.interviewScope;
         if (!scope) return;
         event.preventDefault();
+        if (form.dataset.submitting === 'true') return;
         const textarea = document.getElementById(`${scope}-response`);
         const text = textarea?.value.trim() ?? '';
         if (!text) return;
@@ -1081,7 +1082,13 @@ function installInteractions() {
             ? 'record_vision_interview_turn'
             : 'record_product_goal_interview_turn';
         const submit = form.querySelector('button[type="submit"]');
+        const submitLabel = submit?.querySelector?.('[data-interview-submit-label]');
+        const idleLabel = submitLabel?.textContent ?? 'Send response';
+        form.dataset.submitting = 'true';
         if (submit) submit.disabled = true;
+        submit?.setAttribute?.('aria-busy', 'true');
+        if (submitLabel) submitLabel.textContent = 'Sending...';
+        if (textarea) textarea.disabled = true;
         setProjectError('');
         try {
             await postAction(findAction(lifecycleState.actions, requestKind), { text });
@@ -1089,7 +1096,11 @@ function installInteractions() {
         } catch (error) {
             setProjectError(error.message);
         } finally {
+            delete form.dataset.submitting;
             if (submit) submit.disabled = false;
+            submit?.removeAttribute?.('aria-busy');
+            if (submitLabel) submitLabel.textContent = idleLabel;
+            if (textarea) textarea.disabled = false;
         }
     });
 
