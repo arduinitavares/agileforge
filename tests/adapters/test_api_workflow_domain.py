@@ -604,11 +604,11 @@ class _VisionInput:
 
 
 class _ProductGoalInput:
-    def __init__(self, replay: TransitionResult) -> None:
+    def __init__(self, replay: TransitionResult | None = None) -> None:
         self.replay_result = replay
         self.replay_queries: list[NodeAttemptReplayQuery] = []
 
-    def replay(self, query: NodeAttemptReplayQuery) -> TransitionResult:
+    def replay(self, query: NodeAttemptReplayQuery) -> TransitionResult | None:
         self.replay_queries.append(query)
         return self.replay_result
 
@@ -621,8 +621,11 @@ class _ProductGoalInput:
         decision: NodeDecision,
         user_text: str,
     ) -> JsonObject:
-        del project_id, decision, user_text
-        pytest.fail("replayed Goal response rebuilt current input")
+        return {
+            "project_id": project_id,
+            "decision": decision.decision_fingerprint,
+            "user_response": user_text,
+        }
 
 
 class _DiscoverySelection:
@@ -861,6 +864,22 @@ class _CapturingApplication(AgileForgeApplication):
         return TransitionResult(ok=True)
 
 
+class _CapturingProductGoalApplication(AgileForgeApplication):
+    def __init__(self, domain: _BoundaryDomain) -> None:
+        super().__init__(
+            workflow_domain=domain,
+            product_goal_services=ProductGoalLifecycleServices(
+                interview_input=_ProductGoalInput(),
+                discovery_selection=_DiscoverySelection(),
+            ),
+        )
+        self.agent_requests: list[AgenticActionRequest] = []
+
+    def run_agentic_action(self, request: AgenticActionRequest) -> TransitionResult:
+        self.agent_requests.append(request)
+        return TransitionResult(ok=True)
+
+
 class _CapturingDeliveryApplication(AgileForgeApplication):
     def __init__(
         self,
@@ -910,14 +929,36 @@ def _vision_position(*decisions: NodeDecision) -> WorkflowPosition:
     )
 
 
-def _vision_decision(fingerprint: str) -> NodeDecision:
+def _vision_decision(
+    fingerprint: str,
+    *,
+    instance_key: str | None = None,
+) -> NodeDecision:
     return NodeDecision(
         node_id="vision.interview",
+        instance_key=instance_key,
         child_graph_id="vision",
         request_kind="record_vision_interview_turn",
         category=NodeCategory.AVAILABLE,
         recommendation_kind=RecommendationKind.REQUIRED,
         reason_code="VISION_CLARIFICATION_REQUIRED",
+        decision_fingerprint=fingerprint,
+    )
+
+
+def _product_goal_decision(
+    fingerprint: str,
+    *,
+    instance_key: str | None = None,
+) -> NodeDecision:
+    return NodeDecision(
+        node_id="goal.interview",
+        instance_key=instance_key,
+        child_graph_id="product_goal",
+        request_kind="record_product_goal_interview_turn",
+        category=NodeCategory.AVAILABLE,
+        recommendation_kind=RecommendationKind.REQUIRED,
+        reason_code="PRODUCT_GOAL_CLARIFICATION_REQUIRED",
         decision_fingerprint=fingerprint,
     )
 
@@ -2211,6 +2252,29 @@ def test_semantic_vision_response_replays_before_advanced_position() -> None:
     assert vision_input.replay_queries[0].graph_version is None
 
 
+def test_semantic_vision_response_forwards_graph_selected_instance_key() -> None:
+    """Start the exact repeated Vision interview instance selected by the graph."""
+    decision = _vision_decision(
+        "decision-vision-after-turn-1",
+        instance_key="after-turn:1",
+    )
+    domain = _BoundaryDomain(_vision_position(decision))
+    application = _CapturingApplication(domain)
+
+    result = application.respond_to_vision(
+        VisionResponseRequest(
+            project_id=PROJECT_ID,
+            text="A durable product direction.",
+            idempotency_key="vision-41",
+            actor="operator",
+        )
+    )
+
+    assert result.ok is True
+    assert len(application.agent_requests) == 1
+    assert application.agent_requests[0].instance_key == "after-turn:1"
+
+
 def test_semantic_product_goal_response_replays_before_advanced_position() -> None:
     """Recover a Goal receipt before rejecting its now-advanced position."""
     replayed = TransitionResult(
@@ -2239,6 +2303,29 @@ def test_semantic_product_goal_response_replays_before_advanced_position() -> No
     assert domain.position_calls == []
     assert goal_input.replay_queries[0].user_text == "A measurable future state."
     assert goal_input.replay_queries[0].fact_fingerprint is None
+
+
+def test_semantic_product_goal_response_forwards_graph_selected_instance_key() -> None:
+    """Start the exact repeated Goal interview instance selected by the graph."""
+    decision = _product_goal_decision(
+        "decision-goal-after-turn-1",
+        instance_key="after-turn:1",
+    )
+    domain = _BoundaryDomain(_vision_position(decision))
+    application = _CapturingProductGoalApplication(domain)
+
+    result = application.respond_to_product_goal(
+        ProductGoalResponseRequest(
+            project_id=PROJECT_ID,
+            text="Deliver one measurable outcome.",
+            idempotency_key="goal-41",
+            actor="operator",
+        )
+    )
+
+    assert result.ok is True
+    assert len(application.agent_requests) == 1
+    assert application.agent_requests[0].instance_key == "after-turn:1"
 
 
 def test_semantic_authority_compile_replays_before_advanced_position() -> None:

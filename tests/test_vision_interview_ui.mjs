@@ -196,6 +196,7 @@ test('incomplete Vision draft shows safe provenance, questions, and one response
     assert.match(markup, /Product teams need durable review\./);
     assert.equal((markup.match(/<textarea\b/g) ?? []).length, 1);
     assert.match(markup, /id="vision-response"/);
+    assert.match(markup, /id="vision-response-status"/);
     assert.doesNotMatch(markup, /question-secret-id|JSON|fingerprint|graph|model|evidence_id/i);
     assert.doesNotMatch(markup, /<script>|<img|<svg|<em>/i);
 });
@@ -379,6 +380,58 @@ test('Vision response shows pending state and ignores duplicate submission', asy
     assert.equal(submit.disabled, false);
     assert.equal(textarea.disabled, false);
     assert.equal(label.textContent, 'Send response');
+});
+
+test('Vision response shows an inline failure and preserves operator text', async () => {
+    const submit = {
+        disabled: false,
+        querySelector() { return null; },
+        setAttribute() {},
+        removeAttribute() {},
+    };
+    const textarea = {
+        disabled: false,
+        value: 'Keep this response available for retry.',
+    };
+    const status = { hidden: true, textContent: '' };
+    const context = loadFrontend({
+        elements: {
+            'vision-response': textarea,
+            'vision-response-status': status,
+        },
+        fetchImpl: async () => ({
+            ok: false,
+            text: async () => JSON.stringify({
+                message: 'The requested node is not currently available.',
+            }),
+        }),
+    });
+    vm.runInContext(`
+        selectedProjectId = 9;
+        lifecycleState.actions = [{
+            request_kind: 'record_vision_interview_turn',
+            endpoint: 'vision/respond',
+        }];
+    `, context);
+    context.installInteractions();
+    const form = {
+        dataset: { interviewScope: 'vision' },
+        querySelector() { return submit; },
+    };
+
+    await context.__documentListeners.submit({
+        target: form,
+        preventDefault() {},
+    });
+
+    assert.equal(status.hidden, false);
+    assert.equal(
+        status.textContent,
+        'Response was not sent. The requested node is not currently available.',
+    );
+    assert.equal(textarea.value, 'Keep this response available for retry.');
+    assert.equal(textarea.disabled, false);
+    assert.equal(submit.disabled, false);
 });
 
 test('Vision generation disables immediately and ignores a second submission', async () => {

@@ -390,6 +390,8 @@ function interviewFormMarkup(scope, questions, transcript, label) {
             <label for="${scope}-response" class="text-sm font-semibold">Your response</label>
             <textarea id="${scope}-response" rows="6" required
                 class="mt-2 w-full resize-y rounded-lg border-slate-300 text-sm leading-6 focus:border-accent focus:ring-accent"></textarea>
+            <p id="${scope}-response-status" hidden role="alert" aria-live="assertive"
+                class="mt-3 rounded-lg border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-800"></p>
             <div class="mt-3 flex justify-end">
                 <button type="submit" class="${BUTTON_PRIMARY}">
                     <span class="material-symbols-outlined" aria-hidden="true">send</span><span data-interview-submit-label aria-live="polite">Send response</span>
@@ -714,6 +716,13 @@ function setProjectError(message) {
     if (!error) return;
     error.textContent = message;
     error.classList.toggle('hidden', !message);
+}
+
+function setInterviewStatus(scope, message) {
+    const status = document.getElementById(`${scope}-response-status`);
+    if (!status) return;
+    status.textContent = message;
+    status.hidden = !message;
 }
 
 function renderDashboard() {
@@ -1090,11 +1099,13 @@ function installInteractions() {
         if (submitLabel) submitLabel.textContent = 'Sending...';
         if (textarea) textarea.disabled = true;
         setProjectError('');
+        setInterviewStatus(scope, '');
         try {
             await postAction(findAction(lifecycleState.actions, requestKind), { text });
             await loadDashboard();
         } catch (error) {
             setProjectError(error.message);
+            setInterviewStatus(scope, `Response was not sent. ${error.message}`);
         } finally {
             delete form.dataset.submitting;
             if (submit) submit.disabled = false;
