@@ -6,7 +6,8 @@ import hashlib
 import json
 from datetime import datetime
 from enum import StrEnum
-from typing import TYPE_CHECKING, Annotated, Any, Final, Literal, Self
+from importlib import import_module
+from typing import TYPE_CHECKING, Annotated, Any, Final, Literal, Self, cast
 
 from pydantic import BaseModel, ConfigDict, Field, RootModel, model_validator
 
@@ -24,6 +25,8 @@ from utils.spec_authority_ir import (
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+
+    from services.contracts.authority_input_v2 import AuthorityInputV2
 
 _DATETIME_TYPE = datetime
 MIN_STORY_POINTS = 1
@@ -139,13 +142,6 @@ class ValidationEvidence(BaseModel):
     ]
 
 
-class _SpecAuthoritySourceSelectionError(ValueError):
-    """Raised when compiler input provides both or neither source fields."""
-
-    def __init__(self) -> None:
-        super().__init__("Provide exactly one of spec_source or spec_content_ref.")
-
-
 class _InvariantParameterTypeError(ValueError):
     """Raised when an invariant payload uses parameters for the wrong type."""
 
@@ -184,55 +180,29 @@ class _StoryDescriptionBenefitError(ValueError):
 
 
 class SpecAuthorityCompilerInput(BaseModel):
-    """Input schema for spec_authority_compiler_agent."""
+    """Typed-only input schema for the Specification Authority compiler."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
-    spec_source: Annotated[
-        str | None,
-        Field(
-            default=None,
-            description=(
-                "Raw specification text. Provide exactly one of "
-                "spec_source or spec_content_ref."
-            ),
-        ),
+    schema_version: Literal["agileforge.authority-compiler-input.v2"] = (
+        "agileforge.authority-compiler-input.v2"
+    )
+    authority_input: AuthorityInputV2
+    project_id: Annotated[int, Field(gt=0)]
+    spec_version_id: Annotated[int, Field(gt=0)]
+    specification_fingerprint: Annotated[
+        str,
+        Field(pattern=r"^sha256:[0-9a-f]{64}$"),
     ]
-    spec_content_ref: Annotated[
-        str | None,
-        Field(
-            default=None,
-            description=(
-                "Path or identifier for spec content. Provide exactly "
-                "one of spec_source or spec_content_ref."
-            ),
-        ),
-    ]
-    domain_hint: Annotated[
-        str | None,
-        Field(default=None, description="Optional domain hint for extraction."),
-    ]
-    project_id: Annotated[
-        int | None,
-        Field(default=None, description="Optional Project identifier."),
-    ]
-    spec_version_id: Annotated[
-        int | None,
-        Field(default=None, description="Optional spec version identifier."),
-    ]
-    spec_source_format: Annotated[
-        Literal["agileforge.spec.v1"],
-        Field(description=("Input format: canonical agileforge.spec.v1 JSON.")),
-    ] = "agileforge.spec.v1"
 
-    @model_validator(mode="after")
-    def validate_exactly_one_source(self) -> SpecAuthorityCompilerInput:
-        """Require exactly one of inline spec content or a content reference."""
-        has_source = bool(self.spec_source and self.spec_source.strip())
-        has_ref = bool(self.spec_content_ref and self.spec_content_ref.strip())
-        if has_source == has_ref:
-            raise _SpecAuthoritySourceSelectionError
-        return self
+
+_authority_input_v2_model = cast(
+    "type[BaseModel]",
+    import_module("services.contracts.authority_input_v2").AuthorityInputV2,
+)
+SpecAuthorityCompilerInput.model_rebuild(
+    _types_namespace={"AuthorityInputV2": _authority_input_v2_model}
+)
 
 
 class InvariantType(StrEnum):

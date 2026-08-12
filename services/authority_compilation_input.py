@@ -6,20 +6,18 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from pydantic import TypeAdapter
-from sqlmodel import Session
+from sqlmodel import Session, select
 
+from models.product_definition import SpecificationCandidate
 from models.specs import SpecRegistry
+from services.contracts.authority_input_v2 import build_authority_input_v2
 from services.node_attempt_replay import (
     DurableNodeAttemptReplayService,
     NodeAttemptReplayQuery,
 )
-from services.specs.profile_content import (
-    SpecContentNormalizationError,
-    normalize_spec_content_for_registry,
-)
+from services.specs.candidate_contract import load_candidate_contract
 from utils.spec_schemas import SpecAuthorityCompilerInput
 from workflow.contracts import FactReference, JsonObject, NodeDecision, TransitionResult
-from workflow.fingerprints import canonical_stored_json_hash
 
 if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
@@ -66,30 +64,58 @@ class AuthorityCompilationInputService:
             if decision.instance_key != expected_instance_key:
                 message = "The compile decision instance does not match its spec."
                 raise AuthorityCompilationInputError(message)
+
+            candidate = session.exec(
+                select(SpecificationCandidate).where(
+                    SpecificationCandidate.project_id == project_id,
+                    SpecificationCandidate.specification_candidate_id
+                    == spec.source_specification_candidate_id,
+                    SpecificationCandidate.candidate_fingerprint
+                    == spec.source_specification_candidate_fingerprint,
+                    SpecificationCandidate.payload_fingerprint == spec.spec_hash,
+                )
+            ).one_or_none()
+            if candidate is None:
+                message = (
+                    "The approved spec source candidate does not match exact identity."
+                )
+                raise AuthorityCompilationInputError(message)
             try:
-                normalized = normalize_spec_content_for_registry(spec.content)
-            except SpecContentNormalizationError as error:
-                message = "The registered spec content is not valid agileforge.spec.v1."
-                raise AuthorityCompilationInputError(message) from error
-            try:
-                registered_content_hash = canonical_stored_json_hash(spec.content)
+                payload, envelope = load_candidate_contract(
+                    candidate.canonical_envelope_json,
+                    expected_candidate_fingerprint=candidate.candidate_fingerprint,
+                )
             except (TypeError, ValueError) as error:
-                message = "The registered spec content does not match its stored hash."
+                message = "The approved spec candidate envelope is invalid."
                 raise AuthorityCompilationInputError(message) from error
-            if registered_content_hash != spec.spec_hash:
-                message = "The registered spec content does not match its stored hash."
+
+            if not (
+                candidate.vision_artifact_id == spec.source_vision_artifact_id
+                == envelope.accepted_vision_id
+                and candidate.vision_fingerprint == spec.source_vision_fingerprint
+                == envelope.accepted_vision_fingerprint
+                and candidate.product_goal_artifact_id
+                == spec.source_product_goal_artifact_id
+                == envelope.accepted_product_goal_id
+                and candidate.product_goal_fingerprint
+                == spec.source_product_goal_fingerprint
+                == envelope.accepted_product_goal_fingerprint
+                and candidate.payload_fingerprint == spec.spec_hash
+                == envelope.payload_fingerprint
+            ):
+                message = "The approved spec source candidate has mismatched lineage."
                 raise AuthorityCompilationInputError(message)
             expected_spec_hash = spec.spec_hash
 
         compiler_input = SpecAuthorityCompilerInput(
-            spec_source=normalized.content,
-            spec_content_ref=None,
-            domain_hint=None,
+            authority_input=build_authority_input_v2(payload),
             project_id=project_id,
             spec_version_id=spec_version_id,
+            specification_fingerprint=expected_spec_hash,
         )
         return _JSON_OBJECT.validate_python(
             {
+                "project_id": project_id,
                 "spec_version_id": spec_version_id,
                 "expected_spec_hash": expected_spec_hash,
                 "compiler_model": compiler_model,
