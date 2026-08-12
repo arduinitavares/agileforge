@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from typing import TYPE_CHECKING
 
 import pytest
 from pydantic import ValidationError
@@ -13,8 +14,11 @@ from services.contracts.authority_input_v2 import (
 )
 from utils.agileforge_spec_profile_v2 import SpecificationPayload
 
+if TYPE_CHECKING:
+    from workflow.contracts import JsonObject
 
-def _payload_data() -> dict[str, object]:
+
+def _payload_data() -> JsonObject:
     return {
         "schema_version": "agileforge.spec.v2",
         "artifact_id": "SPEC.authority-input",

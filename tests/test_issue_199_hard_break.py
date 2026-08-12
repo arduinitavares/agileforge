@@ -1,4 +1,3 @@
-# tests/test_issue_199_hard_break.py
 """Structural regression contract for the issue #199 lifecycle hard break."""
 
 from __future__ import annotations

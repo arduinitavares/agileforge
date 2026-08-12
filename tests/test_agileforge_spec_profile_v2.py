@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from typing import TYPE_CHECKING
 
 import pytest
 from pydantic import ValidationError
@@ -16,10 +17,13 @@ from utils.agileforge_spec_profile_v2 import (
     rendered_markdown_hash,
 )
 
+if TYPE_CHECKING:
+    from workflow.contracts import JsonObject
+
 EXPECTED_SCOPED_TERM_COUNT = 2
 
 
-def _payload() -> dict[str, object]:
+def _payload() -> JsonObject:
     return {
         "schema_version": SCHEMA_VERSION,
         "artifact_id": "SPEC.cartola",
@@ -113,7 +117,7 @@ def test_payload_parses_closed_v2_items_without_lifecycle_status() -> None:
         ("verification", "browser-test"),
     ],
 )
-def test_payload_rejects_closed_item_fields(field: str, value: object) -> None:
+def test_payload_rejects_closed_item_fields(field: str, value: str) -> None:
     """Item categories, levels, and verification methods remain closed values."""
     invalid = _payload()
     items = invalid["items"]

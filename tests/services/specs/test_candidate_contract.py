@@ -11,6 +11,7 @@ from pydantic import ValidationError
 from services.specs.candidate_contract import (
     CandidateBuildInput,
     CandidateKind,
+    CandidateSourceKind,
     CandidateSourceManifestEntry,
     SpecificationCandidateEnvelope,
     StableIdReplacement,
@@ -81,7 +82,7 @@ def _envelope(**overrides: object) -> SpecificationCandidateEnvelope:
         "source_manifest": (
             CandidateSourceManifestEntry(
                 source_id="SRC.goal",
-                kind="product_goal",
+                kind=CandidateSourceKind.PRODUCT_GOAL,
                 fingerprint=_fingerprint("goal"),
             ),
         ),
@@ -175,7 +176,7 @@ def test_complete_review_view_includes_envelope_evidence_and_changes_with_it() -
         source_manifest=(
             CandidateSourceManifestEntry(
                 source_id="SRC.goal",
-                kind="product_goal",
+                kind=CandidateSourceKind.PRODUCT_GOAL,
                 fingerprint=_fingerprint("changed-goal"),
             ),
         )
@@ -212,7 +213,7 @@ def test_source_and_attempt_metadata_are_closed_and_validated() -> None:
     with pytest.raises(ValidationError):
         CandidateSourceManifestEntry(
             source_id="",
-            kind="product_goal",
+            kind=CandidateSourceKind.PRODUCT_GOAL,
             fingerprint="sha256:goal",
         )
 
