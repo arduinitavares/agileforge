@@ -38,6 +38,11 @@ profile per target:
 - `acceptance-asa`
 - `acceptance-myfinance`
 
+The Specification v2 cutover does not migrate the former Discovery or
+Specification tables. Each name above must resolve to a newly initialized
+profile and empty business database tied to the reviewed SHA. Stop if a profile
+contains records from a pre-v2 checkout.
+
 Initialize and inspect the selected profile:
 
 ```sh
@@ -96,7 +101,9 @@ For every advertised command:
 
 AgileForge derives and validates internal guards from the current durable
 position. Operators provide only task-specific semantic fields and transport
-metadata such as idempotency key and actor.
+metadata such as idempotency key and actor. Do not enter raw JSON, file or
+Markdown paths, candidate IDs, hashes, fingerprints, or lineage fields for
+Specification authoring or review.
 
 Use a distinct idempotency key for each distinct request. Stop when a fully
 instantiated advertised command cannot parse or when a newly selected semantic
@@ -109,21 +116,35 @@ For each target, collect evidence in this order:
 1. Create the Project with the target repository path.
 2. Complete and accept the Vision interview.
 3. Complete and accept one Product Goal.
-4. Record Discovery evidence.
-5. Record and accept a Specification Candidate.
-6. Compile, review, and accept Authority.
-7. Generate and accept Backlog.
-8. Generate and accept Roadmap.
-9. Generate and accept Stories.
-10. Review Story dependencies and readiness.
-11. Generate, review, and start a Sprint plan.
-12. Complete Tasks and close Stories.
-13. Review and close the Sprint.
-14. Record post-Sprint triage.
-15. Fulfill or abandon the Product Goal through the graph.
+4. Perform any useful Discovery activities, such as `grill-with-docs`, research,
+   repository inspection, ADR review, or a prototype. Record them only as source
+   provenance; they are not an artifact or lifecycle gate.
+5. Execute the host-owned `specification author` command advertised by
+   `workflow next`.
+6. Verify the review packet contains the complete canonical
+   `agileforge.spec.v2` payload, deterministic Markdown, direct Vision and
+   Product Goal lineage, source and producer evidence, attempt identity,
+   amendment base and diff when applicable, and exact payload, view, and
+   candidate fingerprints.
+7. Have the human accept, reject, or provide feedback on that exact
+   Specification candidate.
+8. Compile Authority from the accepted typed payload.
+9. Review and accept the compiled Authority through its separate human gate.
+10. Generate and accept Backlog.
+11. Generate and accept Roadmap.
+12. Generate and accept Stories.
+13. Review Story dependencies and readiness.
+14. Generate, review, and start a Sprint plan.
+15. Complete Tasks and close Stories.
+16. Review and close the Sprint.
+17. Record post-Sprint triage.
+18. Fulfill or abandon the Product Goal through the graph.
 
 At each boundary record durable IDs, fingerprints, human decisions, model IDs
 for model-backed nodes, and the before/after Workflow Position.
+
+Confirm that no Discovery node, command, endpoint, or dashboard state appears.
+Do not treat a Markdown or file projection as Specification or Authority input.
 
 ## Target Notes
 
@@ -211,5 +232,11 @@ Stop and report without repair when:
 - a newly selected semantic command is rejected as stale before another
   mutation changes the position
 - a provider result cannot pass the declared schema
+- a pre-v2 profile or database is selected
+- any transport requests raw Specification JSON, a file path, Markdown, an ID,
+  a hash, a fingerprint, or lineage data from the human
+- a Discovery artifact, gate, API, CLI command, or UI control appears
+- Authority compilation accepts anything except the exact accepted typed v2
+  payload
 - target repository state changes without Operator ownership
 - credential values appear in captured evidence

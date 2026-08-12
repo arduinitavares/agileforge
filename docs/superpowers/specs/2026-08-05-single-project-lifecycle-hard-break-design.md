@@ -1,11 +1,12 @@
 # Single Project Lifecycle Hard-Break Design
 
 **Date:** 2026-08-05
-**Status:** Approved
+**Status:** Approved; amended 2026-08-11 by issue #199
 **Supersedes:** `2026-08-02-domain-workflow-graph-hard-break-design.md`
 **Scope:** Project creation, initial Vision and Product Goal, optional repository
-attachment, deterministic local repository inspection, Authority sequencing,
-workflow convergence, and removal of the former dual-origin setup architecture
+attachment, deterministic local repository inspection, canonical Specification
+v2 authoring, Authority sequencing, workflow convergence, and removal of the
+former dual-origin setup and Discovery-gate architectures
 
 ## Summary
 
@@ -13,9 +14,10 @@ AgileForge will have one Project lifecycle. A Project is created with a name. A
 local Git repository may be attached during creation or later, but repository
 attachment does not select a different workflow. The first product step is an
 interactive Project Vision interview. After a human accepts Vision, a separate
-Product Goal interview defines the objective that scopes discovery.
+Product Goal interview defines the objective that scopes Specification
+authoring and any optional Discovery activities.
 
-The existing product-definition and delivery sequence remains intact. Vision
+The retained product-definition and delivery stages remain intact. Vision
 and Product Goal use separate focused interviews and separate review decisions.
 Expanded, the lifecycle is:
 
@@ -26,10 +28,11 @@ Create Project (Name)
 -> Human Review And Acceptance Of Project Vision
 -> Product Goal Interview
 -> Human Review And Acceptance Of Product Goal
--> Grill Me With Docs
--> To Spec
+-> Optional Grill Me With Docs, Research, Or Prototype Work
+-> Host-Owned To-Spec Specification Authoring
 -> Human Specification Review And Acceptance
--> Specification Authority Compile, Review, And Acceptance
+-> Typed Specification Authority Compile
+-> Human Authority Review And Acceptance
 -> Product Backlog Extract/Generate, Refine, Review, And Acceptance
 -> Roadmap Generate, Refine, Review, And Acceptance
 -> User Stories Generate, Refine, Dependency Review, And Acceptance
@@ -53,12 +56,22 @@ deleting or collapsing downstream artifacts and human decisions.
 
 Repository attachment is an orthogonal capability. It records a small,
 deterministic snapshot without reading repository content, building a complete
-inventory, calling a model, using a network service, or blocking discovery.
+inventory, calling a model, using a network service, or blocking product work.
 
 This is a hard break. The former origin field, specialized setup paths, global
 repository reconstruction machinery, compatibility routes, persistence models,
 tests, prompts, and active documentation are deleted rather than deprecated.
 No data migration or compatibility mode is provided.
+
+Issue #199 adds a second approved hard break. Discovery remains useful work:
+interviews, `grill-with-docs`, research, repository evidence, ADRs, and
+prototypes can supply provenance to Specification authoring. AgileForge stores
+no Discovery artifact and exposes no Discovery graph gate, API, CLI command, or
+UI state. The host prepares one typed `agileforge.spec.v2` payload and immutable
+candidate envelope for `to-spec`, renders Markdown for review, binds the human
+decision to the exact candidate fingerprint, and sends only the accepted typed
+payload to Authority compilation. Development and acceptance profiles must be
+recreated under the new schema.
 
 ## Problem
 
@@ -91,10 +104,11 @@ Project must use the same product-development flow.
   abandoned.
 - Allow one local Git repository to be attached during creation or later.
 - Inspect repository identity and working-tree state without provider calls.
-- Preserve `grill-me-with-docs`, `to spec`, specification and authority review,
-  Product Backlog extraction and refinement, Roadmap, User Story
-  generation and refinement, dependency review, Sprint planning and review,
-  execution, closure, and post-Sprint triage behavior.
+- Preserve `grill-me-with-docs` as an optional source activity, `to-spec` as the
+  single semantic Specification authoring boundary, separate Specification and
+  Authority review, Product Backlog extraction and refinement, Roadmap, User
+  Story generation and refinement, dependency review, Sprint planning and
+  review, execution, closure, and post-Sprint triage behavior.
 - Keep repository inspection behind a small replaceable interface.
 - Support Git worktrees and detached HEADs.
 - Allow dirty repositories while making their state explicit and fingerprinted.
@@ -116,10 +130,11 @@ Project must use the same product-development flow.
 - No import or migration of existing AgileForge Project records.
 - No deletion or collapse of Project Vision, Product Goal, Product Backlog,
   Roadmap, User Story refinement, Sprint review, or execution stages.
-- No redesign of the established discovery, specification, extraction,
-  planning, or execution stages beyond making Vision the first product step,
-  placing Authority after accepted specification, and reconnecting every stage
-  to one lifecycle.
+- No removal of interviews, research, repository evidence, ADR review,
+  prototypes, or `grill-me-with-docs` as ways to understand a Product Goal.
+- No parsing of Markdown, files, GitHub issues, or arbitrary text into an
+  accepted Specification or Authority input.
+- No collapse of the separate human Specification and Authority review gates.
 
 Feature-level implementation assessment is a separate follow-up module. It will
 compare one accepted desired outcome and its accepted Specification Authority
@@ -205,8 +220,8 @@ The initial and recurring lineage is explicit:
 Project
 -> accepted Vision
 -> accepted Product Goal
--> accepted Grill Me With Docs discovery artifact
--> accepted To Spec specification
+-> host-owned To-Spec Specification candidate
+-> accepted typed Specification
 -> accepted Specification Authority
 -> accepted Product Backlog changes
 -> Roadmap
@@ -221,10 +236,22 @@ them in place.
 Vision is Project-owned, not Authority-owned. Its generation request, graph
 rule, persistence record, and fingerprint therefore have no Authority
 prerequisite or Authority lineage fields. Product Goal references the accepted
-Vision. Specification references the accepted Vision, Product Goal, and
-discovery artifact. Authority references the accepted specification. Product
-Backlog changes reference both the accepted Product Goal and Authority. Roadmap,
-Stories, and Sprint artifacts retain their downstream lineage guards.
+Vision. A Specification candidate references the accepted Vision and Product
+Goal directly. Its source manifest may cite optional Discovery activities, but
+no Discovery artifact sits in the lineage. `SpecRegistry` references the exact
+accepted candidate and payload fingerprint. Authority compiles that typed
+payload. Product Backlog changes reference both the accepted Product Goal and
+Authority. Roadmap, Stories, and Sprint artifacts retain their downstream
+lineage guards.
+
+The canonical `agileforge.spec.v2` payload contains only semantic fields. An
+immutable host-owned envelope binds direct Vision and Product Goal lineage,
+source manifest, accepted fact and producer input fingerprints, producer,
+model, and prompt versions, workflow attempt identity, amendment base and
+deterministic diff, canonical payload fingerprint, rendered-review fingerprint,
+and final candidate fingerprint. Initial candidates have no base. Amendments
+pin the exact accepted base version and payload hash and represent the full
+resulting Specification.
 
 ### Repository Binding
 
@@ -331,7 +358,7 @@ setup blocker.
    immutable Vision candidate.
 4. Human feedback resumes the Vision interview without accepting the artifact.
 5. Human acceptance records the Vision decision and unlocks the Product Goal
-   interview, not discovery or Authority.
+   interview, not Specification authoring or Authority.
 
 ### Product Goal Interview And Review
 
@@ -344,26 +371,36 @@ setup blocker.
    success, and boundaries, AgileForge produces one immutable Goal candidate.
 4. Human feedback creates another revision of that Goal candidate.
 5. Human acceptance records the single active Product Goal and unlocks
-   `grill-me-with-docs` discovery.
+   host-owned Specification authoring. Optional `grill-me-with-docs`, research,
+   repository inspection, ADR review, and prototypes may supply source material
+   without becoming workflow gates.
 6. A later Goal interview remains unavailable until the active Goal has an
    explicit fulfilled or abandoned outcome.
 7. Goal fulfillment or abandonment is a separate fingerprint-bound human
    decision. It cannot be inferred from Sprint state or generated by a model.
 
-### Discovery, Specification, And Authority
+### Specification And Authority
 
-1. `grill-me-with-docs` receives the accepted Vision and Product Goal as
-   baseline context and gathers goal-specific documents, constraints, examples,
-   edge cases, and unresolved decisions.
-2. `to spec` converts that accepted discovery output into a desired-behavior
-   specification.
-3. A human reviews and accepts the exact specification version.
-4. Authority compilation converts only that accepted specification into
-   versioned invariants and guardrails. It does not invent Vision or Product
-   Goal content.
-5. A human reviews and accepts, rejects, or provides feedback on the compiled
-   Authority.
-6. Accepted Authority unlocks Product Backlog extraction and refinement,
+1. The host captures the accepted Vision and Product Goal plus any selected
+   source provenance. Discovery activities may gather goal-specific documents,
+   constraints, examples, edge cases, and unresolved decisions, but they do not
+   create a persisted artifact or gate.
+2. The host starts `specification.author` with the exact source facts, producer
+   input fingerprint, model and prompt configuration, and accepted amendment
+   base when one exists. The human supplies no raw JSON, file, Markdown, ID,
+   hash, fingerprint, or lineage field.
+3. The `to-spec` producer returns one typed `agileforge.spec.v2` payload. The
+   host validates it, builds the immutable envelope, computes amendment diff and
+   fingerprints, persists one candidate, and renders complete deterministic
+   Markdown.
+4. A human reviews and accepts, rejects, or provides feedback on the exact
+   candidate fingerprint. Acceptance does not rewrite the payload or envelope.
+5. Authority compilation consumes only the accepted typed payload. It never
+   consumes Markdown, a file, a GitHub issue, arbitrary text, or provenance
+   prose as normative input.
+6. A human separately reviews and accepts, rejects, or provides feedback on the
+   compiled Authority fingerprint.
+7. Accepted Authority unlocks Product Backlog extraction and refinement,
    followed by Roadmap, User Stories, Sprint planning, and execution.
 
 Authority therefore never gates the initial Vision interview. It gates
@@ -375,7 +412,7 @@ Product Goal. Repeating weekly feature work is refined under that Goal and does
 not recreate the Project, rerun the Vision interview, or create another Product
 Goal. After the Goal is fulfilled or abandoned, AgileForge starts a new Goal
 interview under the accepted Vision; the accepted replacement then follows the
-same discovery, specification, Authority, and backlog-admission sequence.
+same Specification, Authority, and backlog-admission sequence.
 
 ### Later Repository Attachment
 
@@ -415,6 +452,14 @@ The Project page provides familiar attach, replace, and refresh commands. It
 does not expose graph node identifiers, raw JSON, Git object plumbing, or model
 configuration for setup.
 
+The Project page has no Discovery card, form, status, or fetch. After Product
+Goal acceptance, it starts host-owned Specification authoring and displays the
+complete deterministic v2 review packet: canonical payload, rendered Markdown,
+direct Vision and Product Goal lineage, source and producer evidence, attempt
+identity, amendment base and diff, fingerprints, and decision state. The human
+supplies only a decision and rationale. Authority compilation and the separate
+Authority review remain distinct controls.
+
 ### Agent CLI
 
 The CLI exposes task-specific structured commands:
@@ -429,6 +474,9 @@ agileforge goal status --project-id ...
 agileforge goal review --project-id ... --decision ...
 agileforge goal complete --project-id ... --rationale ...
 agileforge goal abandon --project-id ... --rationale ...
+agileforge specification author --project-id ...
+agileforge specification status --project-id ...
+agileforge specification review --project-id ... --decision ... --rationale ...
 agileforge repository attach --project-id ... --path ...
 agileforge repository status --project-id ...
 agileforge repository refresh --project-id ...
@@ -438,7 +486,10 @@ Mutating commands retain graph, fact, decision, idempotency, and actor guards.
 Vision and Goal responses return their current components, completion status,
 and focused questions in structured output. Repository responses include
 provenance, warnings, and typed errors. The agent never supplies derived commit,
-dirty-state, remote, artifact-fingerprint, or workflow-guard data.
+dirty-state, remote, artifact-fingerprint, workflow-guard, candidate identity,
+Specification fingerprint, or lineage data. `specification author` accepts no
+raw payload, file, or Markdown input. `specification review` resolves the exact
+graph-selected candidate.
 
 `goal complete` records the `fulfilled` outcome. Both Goal outcome commands
 require a human rationale and resolve the exact active Goal internally; the
@@ -494,6 +545,11 @@ Implementation removes rather than adapts the former architecture:
 - specialized repository reconstruction models and tables;
 - specialized curation and current-state agents, recipes, prompts, contracts,
   commands, endpoints, services, annotations, and caches;
+- `DiscoveryArtifact`, its persistence and fact models, foreign-key hop,
+  workflow node, request, handler, selection service, projections, API and CLI
+  routes, dashboard state, and behavior-preserving tests;
+- raw Specification JSON, file, Markdown, and plain-text registration or
+  compiler inputs, plus active runtime support for `agileforge.spec.v1`;
 - compatibility aliases, translation layers, and migration code;
 - specialized UI controls and copy;
 - tests whose only purpose is preserving retired behavior; and
@@ -511,9 +567,10 @@ the cleanup. Git history and external issue history are not rewritten.
 
 ## Database And Runtime Cutover
 
-This feature provides no schema migration. Development and acceptance profiles
-must initialize fresh business and trace databases. The worktree-local
-`agileforge-dev` launcher remains the supported test boundary.
+These hard breaks provide no schema migration. Development and acceptance
+profiles must initialize fresh business and trace databases, including the
+Specification v2 candidate, registry, and direct-lineage schema. The
+worktree-local `agileforge-dev` launcher remains the supported test boundary.
 
 caRtola, ASA Deep Process Control Advisory System, and MyFinance are recreated
 through the common Project path for acceptance. Their old AgileForge rows are
@@ -547,7 +604,13 @@ Provider-free temporary-repository tests cover:
 - Vision acceptance is fingerprint-bound and unlocks only the Product Goal
   interview.
 - Product Goal acceptance is separately fingerprint-bound and unlocks
-  discovery.
+  host-owned Specification authoring directly.
+- Specification candidates bind direct accepted Vision and Product Goal
+  lineage, canonical v2 payload bytes, and the immutable envelope.
+- Initial candidates have no base. Amendments pin an exact accepted base and
+  expose the deterministic diff, including justified removals and replacements.
+- Specification decisions target one exact candidate fingerprint and never
+  rewrite payload or envelope bytes.
 - Exactly one accepted Product Goal is active at a time.
 - A later Product Goal can begin under the accepted Vision only after the active
   Goal is fulfilled or abandoned.
@@ -573,6 +636,14 @@ Provider-free temporary-repository tests cover:
 - Human Vision review shows only the exact Vision candidate.
 - Accepted Vision opens a separate guided Product Goal interview.
 - Human Goal review shows the exact Goal candidate and accepted parent Vision.
+- The Project page and transports expose no Discovery artifact, gate, command,
+  endpoint, card, form, status, or fetch.
+- Specification authoring accepts no human-authored raw JSON, file, Markdown,
+  ID, hash, fingerprint, or lineage field.
+- Human Specification review displays the complete v2 payload and envelope
+  evidence before decision controls.
+- Authority compilation receives only the accepted typed v2 payload, and human
+  Authority review remains a separate gate.
 - Human forms never request commit, dirty state, remotes, or fingerprints.
 - Project pages expose attach, replace, and refresh repository actions.
 - Playwright verifies creation and attachment on desktop and mobile viewports.
@@ -581,12 +652,13 @@ Provider-free temporary-repository tests cover:
 
 - A whole-tree case-insensitive scan finds neither retired origin label.
 - Package-resource tests prove deleted prompts and agents are absent.
-- Project Vision interview and review, `grill-me-with-docs`, `to spec`,
-  specification and authority review, Product Backlog, Roadmap, User Story
+- Project Vision interview and review, optional `grill-me-with-docs`, `to-spec`,
+  Specification and Authority review, Product Backlog, Roadmap, User Story
   refinement and dependency review, Sprint planning and review, execution,
   closure, and post-Sprint triage contract tests remain green.
-- Graph tests prove that Vision is available before Authority and Authority is
-  unavailable until an exact specification version has human acceptance.
+- Graph tests prove that accepted Product Goal enables `specification.author`
+  directly, no Discovery node exists, and Authority remains unavailable until
+  an exact Specification candidate has human acceptance.
 - A clean-source wheel and sdist contain no retired modules or resources.
 - `uv run --frozen pyrepo-check --all` passes without typing suppressions.
 - `git diff --check` passes.
@@ -605,10 +677,11 @@ For each of caRtola, ASA Deep Process Control Advisory System, and MyFinance:
    call;
 7. conduct and human-review the Vision;
 8. conduct and human-review the Product Goal under the accepted Vision;
-9. verify accepted Vision and Product Goal unlock `grill-me-with-docs` rather
-   than Authority compilation; and
-10. stop before further paid discovery unless the operator explicitly approves
-   that repository's real feature test.
+9. verify accepted Vision and Product Goal unlock host-owned Specification
+   authoring while any `grill-me-with-docs` work remains optional source
+   activity rather than a gate; and
+10. stop before further paid authoring or research unless the operator
+   explicitly approves that repository's real feature test.
 
 ## Acceptance Criteria
 
@@ -618,21 +691,28 @@ For each of caRtola, ASA Deep Process Control Advisory System, and MyFinance:
   creation.
 - Project creation requires no Product Goal or provider call.
 - Human Vision acceptance unlocks only the Product Goal interview.
-- Human Product Goal acceptance unlocks discovery.
+- Human Product Goal acceptance unlocks host-owned Specification authoring.
 - One accepted Product Goal remains active until a human records it fulfilled
   or abandoned; weekly features do not create replacement Goals.
-- Authority compilation occurs only after human acceptance of a `to spec`
-  specification and before Product Backlog extraction.
+- Authority compilation occurs only after human acceptance of an exact typed
+  v2 Specification candidate and before Product Backlog extraction.
 - Authority never gates or authors the initial Project Vision.
+- Discovery remains optional activity and provenance. No Discovery model,
+  artifact, foreign key, graph node, API, CLI command, projection, dashboard
+  state, or acceptance gate exists.
+- The canonical `agileforge.spec.v2` payload and immutable envelope bind the
+  exact human Specification review. Markdown and files are output projections
+  only.
+- Authority compilation consumes only the exact accepted typed payload, and a
+  separate human Authority decision remains mandatory before Backlog work.
 - The deterministic probe performs no content scan, network call, or model call.
 - Dirty and detached repositories are represented honestly without blocking.
 - The Project domain, database schema, CLI, API, frontend, tests, package, and
   active documentation contain no retired origin vocabulary or specialized
   setup machinery.
 - No compatibility or migration path exists.
-- The established discovery-to-execution behavior, including every named
-  artifact and human review stage in the expanded lifecycle, remains covered
-  and passing.
+- The retained Specification-to-execution behavior and every human review stage
+  in the expanded lifecycle remain covered and passing.
 - The three named acceptance repositories can be recreated and attached through
   the same operator and agent surfaces.
 

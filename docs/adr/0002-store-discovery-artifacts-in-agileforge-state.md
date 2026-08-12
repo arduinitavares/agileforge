@@ -1,5 +1,11 @@
 # Store discovery artifacts in AgileForge state
 
+**Status:** Superseded by
+[ADR 0003](0003-make-to-spec-the-canonical-specification-boundary.md)
+
+This ADR records the former Challenge Artifact and PRD design. ADR 0003 removes
+that persisted intermediate chain from the active single-Project lifecycle.
+
 AgileForge stores challenge artifacts and PRDs in AgileForge-owned project state, with optional markdown export for human review. Workflow gates read that state, not loose markdown files or chat history, so AgileForge can prove readiness, producer provenance, PRD acceptance, and promotion into spec amendment without trusting an external document path as the source of truth.
 
 Accepted PRD versions are immutable. Any change after acceptance creates a new draft version that may supersede the prior accepted PRD, preserving the audit chain from challenge artifact to PRD to spec amendment.

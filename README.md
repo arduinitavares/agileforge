@@ -12,9 +12,23 @@ execution governed by reviewed specification authority.
 One durable Project owns one ordered lifecycle:
 
 ```text
-Vision -> Product Goal -> Discovery -> Specification -> Authority
-       -> Backlog -> Roadmap -> Stories -> Sprint -> Execution -> Triage
+Vision -> Product Goal -> Specification Authoring -> Specification Review
+       -> Typed Authority Compile -> Authority Review -> Backlog -> Roadmap
+       -> Stories -> Sprint -> Execution -> Triage
 ```
+
+After a human accepts a Product Goal, AgileForge prepares the inputs for the
+`to-spec` producer and records one immutable `agileforge.spec.v2` candidate.
+The semantic payload and its host-owned lineage envelope are fingerprinted
+together. A human reviews that exact candidate before Authority compilation,
+then reviews the compiled Authority through a separate gate.
+
+Discovery is optional work such as interviews, `grill-with-docs`, research,
+repository evidence, ADRs, and prototypes. It may contribute source provenance
+to a Specification, but AgileForge does not persist a Discovery artifact or
+expose a Discovery workflow gate, API, CLI command, or dashboard card. Markdown
+and files are review projections only; they are never accepted as Specification
+input or compiled into Authority.
 
 `WorkflowDomain.position(project_id)` derives available, waiting, blocked,
 invalid, or terminal nodes from durable Project facts. Commands submit typed
@@ -22,8 +36,9 @@ requests through `WorkflowDomain.transition(request)`. ADK recipes execute
 eligible model work; they do not own routing state.
 
 The current model-backed nodes cover Vision and Product Goal interviews,
-authority compilation and repair, Backlog, Roadmap, Story, and Sprint
-generation. Human review decisions remain explicit workflow transitions.
+Specification authoring, Authority compilation and repair, Backlog, Roadmap,
+Story, and Sprint generation. Human Specification and Authority review
+decisions remain separate explicit workflow transitions.
 
 ## Architecture
 
@@ -31,6 +46,10 @@ generation. Human review decisions remain explicit workflow transitions.
   transition guards.
 - **Specification authority**: reviewed compiler output constrains downstream
   planning and execution.
+- **Canonical Specification**: a typed v2 payload contains semantics while an
+  immutable envelope binds direct Vision and Product Goal lineage, source and
+  producer evidence, attempt identity, amendment base and diff, and exact
+  payload, review-view, and candidate fingerprints.
 - **Durable Project facts**: process restarts and execution-trace resets do not
   alter workflow position.
 - **Schema validation**: Pydantic and SQLModel define transport and persistence
@@ -80,7 +99,13 @@ Provenance: `./agileforge-dev info --profile local --json`
 Execute the command template returned by `workflow next`. AgileForge derives and
 validates internal guards from the current durable position. Operators provide
 only task-specific semantic fields and transport metadata such as idempotency key
-and actor. Use a new idempotency key for each distinct request.
+and actor. Humans never enter raw workflow JSON, file paths, Markdown,
+fingerprints, or lineage identifiers for Specification authoring or review. Use
+a new idempotency key for each distinct request.
+
+The Specification v2 cutover is a hard break. Initialize a fresh profile and
+business database when moving from a checkout that used the former Discovery or
+Specification schema; AgileForge does not migrate or read those records.
 
 Start the checkout-local dashboard:
 

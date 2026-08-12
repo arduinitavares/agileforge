@@ -40,8 +40,7 @@ def test_acceptance_checklist_names_each_retained_stage() -> None:
     for term in (
         "Vision",
         "Product Goal",
-        "Discovery",
-        "Specification Candidate",
+        "Specification candidate",
         "Authority",
         "Backlog",
         "Roadmap",
@@ -50,6 +49,8 @@ def test_acceptance_checklist_names_each_retained_stage() -> None:
         "post-Sprint triage",
     ):
         assert term in text
+    assert "Discovery activities" in text
+    assert "not an artifact or lifecycle gate" in text
 
 
 def test_acceptance_checklist_uses_current_cli_entrypoints() -> None:
