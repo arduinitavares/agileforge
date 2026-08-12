@@ -110,6 +110,43 @@ test('workflow position renders plain-language routing without internal guards',
     assert.doesNotMatch(markup, /agileforge\.workflow|sha256:/);
 });
 
+test('workflow position distinguishes prerequisite waiting from human review', () => {
+    const context = loadFrontend();
+    const prerequisiteMarkup = context.workflowPositionMarkup(
+        {
+            decisions: [
+                {
+                    child_graph_id: 'authority',
+                    request_kind: 'compile_authority',
+                    category: 'waiting',
+                    reason_code: 'WAITING_FOR_REGISTERED_SPEC',
+                },
+            ],
+        },
+        [],
+    );
+    const reviewMarkup = context.workflowPositionMarkup(
+        {
+            decisions: [
+                {
+                    child_graph_id: 'authority',
+                    request_kind: 'decide_authority',
+                    category: 'waiting',
+                    reason_code: 'AUTHORITY_REVIEW_REQUIRED',
+                },
+            ],
+        },
+        [action('decide_authority', 'authority/decision')],
+    );
+
+    assert.match(prerequisiteMarkup, />Authority</);
+    assert.match(prerequisiteMarkup, />Waiting</);
+    assert.match(prerequisiteMarkup, /Waiting for registered Specification\./);
+    assert.doesNotMatch(prerequisiteMarkup, /In progress|A human decision is pending/);
+    assert.match(reviewMarkup, /In progress/);
+    assert.match(reviewMarkup, /A human decision is pending\./);
+});
+
 test('semantic mutations contain transport metadata and human input only', () => {
     const context = loadFrontend();
     assert.equal(typeof context.semanticMutationPayload, 'function');

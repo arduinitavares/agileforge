@@ -149,16 +149,27 @@ function decisionRank(category) {
     }[category] ?? 0;
 }
 
-function stageStatus(category) {
+function isActionableDecision(decision, actions) {
+    return findAction(actions, decision?.request_kind) !== null;
+}
+
+function stageStatus(decision, actions) {
+    const category = decision?.category;
+    if (category === 'waiting') {
+        return isActionableDecision(decision, actions) ? 'In progress' : 'Waiting';
+    }
     return {
         available: 'Ready',
-        waiting: 'In progress',
         blocked: 'Waiting',
         invalid: 'Needs attention',
     }[category] ?? 'Upcoming';
 }
 
-function stageTone(category) {
+function stageTone(decision, actions) {
+    const category = decision?.category;
+    if (category === 'waiting' && !isActionableDecision(decision, actions)) {
+        return 'border-slate-300 bg-white text-slate-700';
+    }
     return {
         available: 'border-emerald-300 bg-emerald-50 text-emerald-900',
         waiting: 'border-sky-300 bg-sky-50 text-sky-900',
@@ -167,13 +178,28 @@ function stageTone(category) {
     }[category] ?? 'border-slate-300 bg-white text-slate-600';
 }
 
-function stageReason(decision) {
+function waitingReason(decision) {
+    const words = String(decision?.reason_code ?? '')
+        .toLowerCase()
+        .split('_')
+        .filter(Boolean)
+        .map((word) => (word === 'spec' ? 'Specification' : word));
+    if (words.length === 0) return 'Finish the previous stage first.';
+    const sentence = words.join(' ');
+    return `${sentence[0].toUpperCase()}${sentence.slice(1)}.`;
+}
+
+function stageReason(decision, actions) {
     const blockers = Array.isArray(decision?.blockers) ? decision.blockers : [];
     const blocker = blockers.find((item) => typeof item?.message === 'string');
     if (blocker) return blocker.message;
+    if (decision?.category === 'waiting') {
+        return isActionableDecision(decision, actions)
+            ? 'A human decision is pending.'
+            : waitingReason(decision);
+    }
     return {
         available: 'Ready for your input.',
-        waiting: 'A human decision is pending.',
         blocked: 'Finish the previous stage first.',
         invalid: 'Resolve the current lifecycle conflict.',
     }[decision?.category] ?? 'This stage follows the current work.';
@@ -210,11 +236,10 @@ function workflowPositionMarkup(position, actions = []) {
                 <p class="mt-1 text-xs text-emerald-700">Complete</p>
             </li>`;
         }
-        const category = decision?.category;
-        return `<li class="min-w-0 rounded-lg border px-3 py-2 ${stageTone(category)}">
+        return `<li class="min-w-0 rounded-lg border px-3 py-2 ${stageTone(decision, actions)}">
             <p class="break-words text-xs font-semibold">${escapeWorkflowText(stage)}</p>
-            <p class="mt-1 text-xs font-medium">${stageStatus(category)}</p>
-            ${decision ? `<p class="mt-1 break-words text-xs leading-4 opacity-80">${escapeWorkflowText(stageReason(decision))}</p>` : ''}
+            <p class="mt-1 text-xs font-medium">${stageStatus(decision, actions)}</p>
+            ${decision ? `<p class="mt-1 break-words text-xs leading-4 opacity-80">${escapeWorkflowText(stageReason(decision, actions))}</p>` : ''}
         </li>`;
     }).join('')}</ol>`;
 }
