@@ -500,4 +500,5 @@ class ProjectPersona(SQLModel, table=True):
     )
 
 
+_PRODUCT_DEFINITION_MODELS: ModuleType = import_module("models.product_definition")
 _SPEC_MODELS: ModuleType = import_module("models.specs")
