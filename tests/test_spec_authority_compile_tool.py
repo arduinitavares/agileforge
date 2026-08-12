@@ -1,642 +1,139 @@
-"""Tests for the Spec Authority compile tool used by the workflow adapter."""
+"""Tests for the typed Specification Authority tool adapters."""
 
-import asyncio
-import json
-from pathlib import Path
+from __future__ import annotations
+
+from typing import Any
 
 import pytest
-from sqlmodel import Session, select
 
-from adapters.adk.prompts.specification import (
-    SPEC_AUTHORITY_COMPILER_INSTRUCTIONS,
-    SPEC_AUTHORITY_COMPILER_VERSION,
-)
-from agile_sqlmodel import CompiledSpecAuthority, Project
-from services.contracts.specification import (
-    compute_invariant_id_from_payload,
-    compute_prompt_hash,
-)
-from services.specs.compiler_service import (
-    CheckSpecAuthorityStatusInput as ServiceCheckSpecAuthorityStatusInput,
-)
-from services.specs.compiler_service import (
-    CompileSpecAuthorityForVersionInput as ServiceCompileSpecAuthorityForVersionInput,
-)
-from services.specs.compiler_service import (
-    CompileSpecAuthorityInput as ServiceCompileSpecAuthorityInput,
-)
-from services.specs.compiler_service import (
-    GetCompiledAuthorityInput as ServiceGetCompiledAuthorityInput,
-)
-from services.specs.compiler_service import (
-    PreviewSpecAuthorityInput as ServicePreviewSpecAuthorityInput,
-)
-from services.specs.compiler_service import (
-    UpdateSpecAndCompileAuthorityInput as ServiceUpdateSpecAndCompileAuthorityInput,
-)
-from tests.workflow.lifecycle_fixtures import seed_accepted_specification
+from services.specs import compiler_service
 from tools import spec_tools
-from tools.spec_tools import (
-    CheckSpecAuthorityStatusInput,
-    CompileSpecAuthorityForVersionInput,
-    CompileSpecAuthorityInput,
-    GetCompiledAuthorityInput,
-    PreviewSpecAuthorityInput,
-    UpdateSpecAndCompileAuthorityInput,
-    compile_spec_authority_for_version,
-)
-from utils import failure_artifacts
-from utils.failure_artifacts import AgentInvocationError
-from utils.spec_schemas import (
-    Invariant,
-    InvariantType,
-    RequiredFieldParams,
-    SourceMapEntry,
-    SpecAuthorityCompilationSuccess,
-    SpecAuthorityCompilerOutput,
-)
-
-_INSTRUCTION_REQUIRED_TERMS = (
-    "agileforge.compiled_authority.v3",
-    '"kind": "free_text"',
-    '"kind": "item_status"',
-    '"kind": "accepted_normative_count"',
-    '"kind": "accepted_normative_set"',
-    "source_map.location",
-    "source_map.excerpt",
-    "semantic fields only",
-    "Do not put source_item_id or source_level inside parameters.",
-)
-_INSTRUCTION_FORBIDDEN_TERMS = (
-    'USER_INTERACTION => parameters: {"source_item_id"',
-    'STATE_TRANSITION => parameters: {"source_item_id"',
-    'DATA_CONTRACT => parameters: {"source_item_id"',
-    'ROUTE_CONTRACT => parameters: {"source_item_id"',
-    'VISIBILITY_RULE => parameters: {"source_item_id"',
-)
 
 
-def _assert_v3_instruction_contract(instructions: str) -> None:
-    """Assert the durable v3 instruction contract without prose-coupling."""
-    for required_term in _INSTRUCTION_REQUIRED_TERMS:
-        assert required_term in instructions
-
-    assert '"schema_version": "agileforge.compiled_authority.v3"' in instructions
-    assert 'USER_INTERACTION => invariant: {"type": "USER_INTERACTION"' in instructions
-
-    for forbidden_term in _INSTRUCTION_FORBIDDEN_TERMS:
-        assert forbidden_term not in instructions
-
-
-@pytest.fixture
-def sample_project(session: Session) -> Project:
-    """Create a project without spec."""
-    project = Project(
-        name="Compile Tool Project",
-        description="Project for compile tool tests",
-        vision="Keep spec authority deterministic",
-    )
-    session.add(project)
-    session.commit()
-    session.refresh(project)
-    return project
-
-
-@pytest.fixture
-def sample_spec_content() -> str:
-    """Sample spec content for testing."""
-    return """
-# Technical Specification v1
-
-## Scope
-- Feature A: User authentication
-- Feature B: Data export
-
-## Invariants
-- All API calls MUST require auth token.
-- Export formats SHALL be CSV or JSON only.
-"""
-
-
-@pytest.fixture
-def compiler_stub(monkeypatch: pytest.MonkeyPatch) -> object:
-    """Stub compiler agent to avoid real LLM calls."""
-    raw_json = _build_raw_compiler_output(
-        excerpt="The payload must include user_id.",
-        field_name="user_id",
-    )
-    monkeypatch.setattr(
-        spec_tools,
-        "_invoke_spec_authority_compiler",
-        lambda **_: raw_json,
-    )
-    return raw_json
-
-
-def _accepted_spec_id(
-    session: Session,
-    project: Project,
-    content: str,
-) -> int:
-    """Persist current-lifecycle specification lineage and return its ID."""
-    assert project.project_id is not None
-    lineage = seed_accepted_specification(
-        session,
-        project_id=project.project_id,
-        content=json.dumps({"specification": content}),
-    )
-    assert lineage.spec.spec_version_id is not None
-    return lineage.spec.spec_version_id
-
-
-def test_tool_compile_input_models_alias_service_models() -> None:
-    """Tool-facing compiler input models should be compatibility aliases."""
-    assert PreviewSpecAuthorityInput is ServicePreviewSpecAuthorityInput
-    assert CompileSpecAuthorityInput is ServiceCompileSpecAuthorityInput
+def test_tool_exports_service_owned_typed_input_models() -> None:
+    """Tool callers share the active service contracts by identity."""
     assert (
-        CompileSpecAuthorityForVersionInput
-        is ServiceCompileSpecAuthorityForVersionInput
+        spec_tools.CompileSpecAuthorityForVersionInput
+        is compiler_service.CompileSpecAuthorityForVersionInput
     )
     assert (
-        UpdateSpecAndCompileAuthorityInput is ServiceUpdateSpecAndCompileAuthorityInput
+        spec_tools.CheckSpecAuthorityStatusInput
+        is compiler_service.CheckSpecAuthorityStatusInput
     )
-    assert CheckSpecAuthorityStatusInput is ServiceCheckSpecAuthorityStatusInput
-    assert GetCompiledAuthorityInput is ServiceGetCompiledAuthorityInput
+    assert (
+        spec_tools.GetCompiledAuthorityInput
+        is compiler_service.GetCompiledAuthorityInput
+    )
 
 
-def test_tool_runtime_helpers_delegate_to_compiler_service(
+def test_compile_tool_delegates_only_version_selection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Legacy tool helper names should forward directly to compiler_service."""
-    captured: dict[str, object] = {}
+    """The tool forwards an approved version selector and no Specification bytes."""
+    captured: dict[str, Any] = {}
+    expected = {"success": True, "authority_id": 19}
 
-    def fake_run_async_task(coro: object) -> str:
-        captured["run_async_task"] = coro
-        return "ran"
-
-    def fake_extract_compiler_response_text(events: object) -> str:
-        captured["extract_compiler_response_text"] = events
-        return "text"
-
-    async def fake_invoke_async(input_payload: object) -> str:
-        captured["invoke_async"] = input_payload
-        return "async-raw-json"
-
-    def fake_invoke(
-        spec_content: str,
-        content_ref: str | None,
-        project_id: int | None,
-        spec_version_id: int | None,
-    ) -> str:
-        captured["invoke"] = {
-            "spec_content": spec_content,
-            "content_ref": content_ref,
-            "project_id": project_id,
-            "spec_version_id": spec_version_id,
-        }
-        return "raw-json"
-
-    monkeypatch.setattr(
-        spec_tools,
-        "_service_run_async_task",
-        fake_run_async_task,
-        raising=False,
-    )
-    monkeypatch.setattr(
-        spec_tools,
-        "_service_extract_compiler_response_text",
-        fake_extract_compiler_response_text,
-        raising=False,
-    )
-    monkeypatch.setattr(
-        spec_tools,
-        "_service_invoke_spec_authority_compiler_async",
-        fake_invoke_async,
-        raising=False,
-    )
-    monkeypatch.setattr(
-        spec_tools,
-        "_service_invoke_spec_authority_compiler",
-        fake_invoke,
-        raising=False,
-    )
-
-    async def _coro_token() -> str:
-        return "token"
-
-    coro_token = _coro_token()
-    payload_token = object()
-    events_token = [object()]
-
-    try:
-        assert spec_tools._run_async_task(coro_token) == "ran"
-        assert captured["run_async_task"] is coro_token
-    finally:
-        coro_token.close()
-
-    assert spec_tools._extract_compiler_response_text(events_token) == "text"
-    assert captured["extract_compiler_response_text"] == events_token
-
-    assert (
-        asyncio.run(spec_tools._invoke_spec_authority_compiler_async(payload_token))
-        == "async-raw-json"
-    )
-    assert captured["invoke_async"] is payload_token
-
-    assert (
-        spec_tools._invoke_spec_authority_compiler(
-            spec_content="spec text",
-            content_ref="spec.md",
-            project_id=7,
-            spec_version_id=11,
-        )
-        == "raw-json"
-    )
-    assert captured["invoke"] == {
-        "spec_content": "spec text",
-        "content_ref": "spec.md",
-        "project_id": 7,
-        "spec_version_id": 11,
-    }
-
-
-def test_tool_compiler_failure_and_extractor_helpers_delegate_to_service(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Tool compatibility helpers should forward failure shaping and extraction."""
-    captured: dict[str, object] = {}
-    failure_result = {"success": False, "error": "boom"}
-    extractor_result = object()
-
-    def fake_failure(**kwargs: object) -> object:
-        captured["failure"] = kwargs
-        return failure_result
-
-    def fake_extract(
+    def compile_stub(
+        params: object,
         *,
-        spec_content: str,
-        content_ref: str | None,
-        project_id: int,
-        spec_version_id: int,
-    ) -> object:
-        captured["extract"] = {
-            "spec_content": spec_content,
-            "content_ref": content_ref,
-            "project_id": project_id,
-            "spec_version_id": spec_version_id,
-        }
-        return extractor_result
+        tool_context: object | None,
+    ) -> dict[str, Any]:
+        captured["params"] = params
+        captured["tool_context"] = tool_context
+        return expected
 
     monkeypatch.setattr(
         spec_tools,
-        "_service_compiler_failure_result",
-        fake_failure,
-        raising=False,
+        "_compile_spec_authority_for_version",
+        compile_stub,
     )
-    monkeypatch.setattr(
-        spec_tools,
-        "_service_extract_spec_authority_llm",
-        fake_extract,
-        raising=False,
-    )
-
-    assert (
-        spec_tools._compiler_failure_result(
-            project_id=3,
-            spec_version_id=5,
-            content_ref="spec.md",
-            failure_stage="compile",
-            error="boom",
-            reason="bad data",
-            raw_output="{}",
-            blocking_gaps=["gap"],
-            exception=None,
-        )
-        == failure_result
-    )
-    assert captured["failure"] == {
-        "project_id": 3,
-        "spec_version_id": 5,
-        "content_ref": "spec.md",
-        "failure_stage": "compile",
-        "error": "boom",
-        "reason": "bad data",
-        "raw_output": "{}",
-        "blocking_gaps": ["gap"],
-        "exception": None,
-    }
-
-    assert (
-        spec_tools._extract_spec_authority_llm(
-            spec_content="spec text",
-            content_ref="spec.md",
-            project_id=13,
-            spec_version_id=21,
-        )
-        is extractor_result
-    )
-    assert captured["extract"] == {
-        "spec_content": "spec text",
-        "content_ref": "spec.md",
-        "project_id": 13,
-        "spec_version_id": 21,
-    }
-
-
-def test_compiler_instructions_require_v3_typed_assumption_contract() -> None:
-    """Compiler instructions must require v3 typed assumptions and provenance."""
-    _assert_v3_instruction_contract(SPEC_AUTHORITY_COMPILER_INSTRUCTIONS)
-
-
-def test_compile_tool_compiles_and_returns_summary(
-    session: Session,
-    sample_project: Project,
-    sample_spec_content: str,
-    compiler_stub: object,
-) -> None:
-    """Compilation should create authority and return summary payload."""
-    del compiler_stub
-    spec_version_id = _accepted_spec_id(session, sample_project, sample_spec_content)
-
-    result = compile_spec_authority_for_version(
-        {"spec_version_id": spec_version_id},
-        tool_context=None,
-    )
-
-    assert result["success"] is True
-    assert result["cached"] is False
-    assert result["spec_version_id"] == spec_version_id
-    assert result["compiler_version"] == SPEC_AUTHORITY_COMPILER_VERSION
-    assert len(result["prompt_hash"]) == 64  # noqa: PLR2004
-    assert result["scope_themes_count"] >= 1
-    assert result["invariants_count"] >= 1
-
-    authority = session.exec(
-        select(CompiledSpecAuthority).where(
-            CompiledSpecAuthority.spec_version_id == spec_version_id
-        )
-    ).first()
-
-    assert authority is not None
-
-
-def test_compile_tool_returns_cached_when_already_compiled(
-    session: Session,
-    sample_project: Project,
-    sample_spec_content: str,
-    compiler_stub: object,
-) -> None:
-    """Compilation tool should be idempotent for existing authority."""
-    del compiler_stub
-    spec_version_id = _accepted_spec_id(session, sample_project, sample_spec_content)
-
-    first = compile_spec_authority_for_version(
-        {"spec_version_id": spec_version_id},
-        tool_context=None,
-    )
-    assert first["success"] is True
-
-    result = compile_spec_authority_for_version(
-        {"spec_version_id": spec_version_id},
-        tool_context=None,
-    )
-
-    assert result["success"] is True
-    assert result["cached"] is True
-    assert result["authority_id"] == first["authority_id"]
-
-
-def _build_raw_compiler_output(excerpt: str, field_name: str) -> str:
-    """Build a raw compiler JSON output (pre-normalization)."""
-    invariant = Invariant(
-        id="INV-0000000000000000",
-        type=InvariantType.REQUIRED_FIELD,
-        parameters=RequiredFieldParams(field_name=field_name),
-    )
-    success = SpecAuthorityCompilationSuccess(
-        scope_themes=["Scope"],
-        invariants=[invariant],
-        eligible_feature_rules=[],
-        gaps=[],
-        assumptions=[],
-        source_map=[
-            SourceMapEntry(
-                invariant_id=invariant.id,
-                excerpt=excerpt,
-                location=None,
-            )
-        ],
-        compiler_version="0.0.0",
-        prompt_hash="0" * 64,
-    )
-    return SpecAuthorityCompilerOutput(root=success).model_dump_json()
-
-
-def test_compile_persists_compiled_artifact_and_normalized_ids(
-    session: Session,
-    sample_project: Project,
-    sample_spec_content: str,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Compilation should persist normalized artifact and deterministic IDs."""
-    spec_version_id = _accepted_spec_id(session, sample_project, sample_spec_content)
-
-    raw_json = _build_raw_compiler_output(
-        excerpt="The payload must include user_id.",
-        field_name="user_id",
-    )
-    monkeypatch.setattr(
-        spec_tools,
-        "_invoke_spec_authority_compiler",
-        lambda **_: raw_json,
-    )
-
-    result = compile_spec_authority_for_version(
-        {"spec_version_id": spec_version_id},
-        tool_context=None,
-    )
-    assert result["success"] is True
-
-    session.expire_all()
-    authority = session.exec(
-        select(CompiledSpecAuthority).where(
-            CompiledSpecAuthority.spec_version_id == spec_version_id
-        )
-    ).first()
-
-    assert authority is not None
-    assert authority.compiled_artifact_json
-
-    parsed = SpecAuthorityCompilerOutput.model_validate_json(
-        authority.compiled_artifact_json
-    )
-    assert isinstance(parsed.root, SpecAuthorityCompilationSuccess)
-
-    expected_prompt_hash = compute_prompt_hash(SPEC_AUTHORITY_COMPILER_INSTRUCTIONS)
-    assert parsed.root.prompt_hash == expected_prompt_hash
-    assert authority.prompt_hash == expected_prompt_hash
-
-    for inv in parsed.root.invariants:
-        entry = next(
-            (e for e in parsed.root.source_map if e.invariant_id == inv.id), None
-        )
-        assert entry is not None
-        expected_id = compute_invariant_id_from_payload(
-            inv.type,
-            inv.parameters,
-            source_item_id=inv.source_item_id,
-            source_level=inv.source_level,
-        )
-        assert inv.id == expected_id
-        assert entry.invariant_id == expected_id
-
-
-def test_compile_cache_hit_does_not_change_compiled_artifact(
-    session: Session,
-    sample_project: Project,
-    sample_spec_content: str,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Cache hits reuse one row; forced recompilation appends exact history."""
-    spec_version_id = _accepted_spec_id(session, sample_project, sample_spec_content)
-
-    raw_json_1 = _build_raw_compiler_output(
-        excerpt="The payload must include user_id.",
-        field_name="user_id",
-    )
-    raw_json_2 = _build_raw_compiler_output(
-        excerpt="The payload must include account_id.",
-        field_name="account_id",
-    )
-
-    call_count = {"count": 0}
-
-    def _fake_invoke(**_: object) -> str:
-        call_count["count"] += 1
-        return raw_json_1 if call_count["count"] == 1 else raw_json_2
-
-    monkeypatch.setattr(
-        spec_tools,
-        "_invoke_spec_authority_compiler",
-        _fake_invoke,
-    )
-
-    first = compile_spec_authority_for_version(
-        {"spec_version_id": spec_version_id},
-        tool_context=None,
-    )
-    assert first["success"] is True
-
-    session.expire_all()
-    authority = session.exec(
-        select(CompiledSpecAuthority).where(
-            CompiledSpecAuthority.spec_version_id == spec_version_id
-        )
-    ).first()
-    assert authority is not None
-    artifact_first = authority.compiled_artifact_json
-
-    second = compile_spec_authority_for_version(
-        {"spec_version_id": spec_version_id},
-        tool_context=None,
-    )
-    assert second["success"] is True
-    assert second["cached"] is True
-    assert call_count["count"] == 1
-
-    session.expire_all()
-    rows = session.exec(
-        select(CompiledSpecAuthority).where(
-            CompiledSpecAuthority.spec_version_id == spec_version_id
-        )
-    ).all()
-    assert len(rows) == 1
-    assert rows[0].compiled_artifact_json == artifact_first
-
-    third = compile_spec_authority_for_version(
-        {"spec_version_id": spec_version_id, "force_recompile": True},
-        tool_context=None,
-    )
-    assert third["success"] is True
-    assert call_count["count"] == 2  # noqa: PLR2004
-
-    session.expire_all()
-    rows = session.exec(
-        select(CompiledSpecAuthority)
-        .where(CompiledSpecAuthority.spec_version_id == spec_version_id)
-        .order_by(CompiledSpecAuthority.authority_id)
-    ).all()
-    assert len(rows) == 2  # noqa: PLR2004
-    assert rows[0].compiled_artifact_json == artifact_first
-    assert rows[1].compiled_artifact_json != artifact_first
-    assert third["authority_id"] == rows[1].authority_id
-
-
-def test_compile_persists_invocation_failure_artifact(
-    session: Session,
-    sample_project: Project,
-    sample_spec_content: str,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Verify compile persists invocation failure artifact."""
-    spec_version_id = _accepted_spec_id(session, sample_project, sample_spec_content)
-
-    monkeypatch.setattr(failure_artifacts, "LOGS_DIR", tmp_path / "logs")
-    monkeypatch.setattr(
-        failure_artifacts, "FAILURES_DIR", tmp_path / "logs" / "failures"
-    )
-    monkeypatch.setattr(
-        spec_tools,
-        "_invoke_spec_authority_compiler",
-        lambda **_: (_ for _ in ()).throw(
-            AgentInvocationError("provider timeout", partial_output='{"partial": true}')
+    result = spec_tools.compile_spec_authority_for_version(
+        spec_tools.CompileSpecAuthorityForVersionToolInput(
+            spec_version_id=17,
+            force_recompile=True,
         ),
-    )
-
-    result = compile_spec_authority_for_version(
-        {"spec_version_id": spec_version_id},
         tool_context=None,
     )
 
-    assert result["success"] is False
-    assert result["error"] == "SPEC_COMPILER_INVOCATION_FAILED"
-    assert result["failure_stage"] == "invocation_exception"
-    artifact = failure_artifacts.read_failure_artifact(result["failure_artifact_id"])
-    assert artifact is not None
-    assert artifact["project_id"] == sample_project.project_id
-    assert artifact["raw_output"] == '{"partial": true}'
+    assert result is expected
+    assert captured == {
+        "params": {"spec_version_id": 17, "force_recompile": True},
+        "tool_context": None,
+    }
 
 
-def test_compile_persists_normalizer_failure_artifact(
-    session: Session,
-    sample_project: Project,
-    sample_spec_content: str,
+def test_authority_gate_adapter_delegates_review_request(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
 ) -> None:
-    """Verify compile persists normalizer failure artifact."""
-    spec_version_id = _accepted_spec_id(session, sample_project, sample_spec_content)
+    """The downstream gate preserves its review request parameters."""
+    captured: dict[str, Any] = {}
 
-    monkeypatch.setattr(failure_artifacts, "LOGS_DIR", tmp_path / "logs")
-    monkeypatch.setattr(
-        failure_artifacts, "FAILURES_DIR", tmp_path / "logs" / "failures"
-    )
-    monkeypatch.setattr(
-        spec_tools,
-        "_invoke_spec_authority_compiler",
-        lambda **_: "{}",
-    )
+    def ensure_stub(
+        project_id: int,
+        *,
+        recompile: bool,
+        tool_context: object | None,
+    ) -> int:
+        captured.update(
+            project_id=project_id,
+            recompile=recompile,
+            tool_context=tool_context,
+        )
+        return 23
 
-    result = compile_spec_authority_for_version(
-        {"spec_version_id": spec_version_id},
+    monkeypatch.setattr(spec_tools, "_ensure_accepted_spec_authority", ensure_stub)
+    expected_authority_id = 23
+
+    result = spec_tools.ensure_accepted_spec_authority(
+        11,
+        recompile=True,
         tool_context=None,
     )
 
-    assert result["success"] is False
-    assert result["failure_stage"] == "output_validation"
-    artifact = failure_artifacts.read_failure_artifact(result["failure_artifact_id"])
-    assert artifact is not None
-    assert artifact["project_id"] == sample_project.project_id
-    assert artifact["raw_output"] == "{}"
-    assert artifact["validation_errors"]
+    assert result == expected_authority_id
+    assert captured == {
+        "project_id": 11,
+        "recompile": True,
+        "tool_context": None,
+    }
+
+
+@pytest.mark.parametrize(
+    ("adapter_name", "delegate_name", "params"),
+    [
+        (
+            "check_spec_authority_status",
+            "_check_spec_authority_status",
+            {"project_id": 7},
+        ),
+        (
+            "get_compiled_authority_by_version",
+            "_get_compiled_authority_by_version",
+            {"project_id": 7, "spec_version_id": 13},
+        ),
+    ],
+)
+def test_read_tools_delegate_without_mutating_payload(
+    monkeypatch: pytest.MonkeyPatch,
+    adapter_name: str,
+    delegate_name: str,
+    params: dict[str, int],
+) -> None:
+    """Read adapters preserve exact typed selection parameters."""
+    captured: dict[str, Any] = {}
+
+    def read_stub(
+        received: object,
+        *,
+        tool_context: object | None,
+    ) -> dict[str, Any]:
+        captured.update(params=received, tool_context=tool_context)
+        return {"success": True}
+
+    monkeypatch.setattr(spec_tools, delegate_name, read_stub)
+    context = object()
+
+    result = getattr(spec_tools, adapter_name)(params, tool_context=context)
+
+    assert result == {"success": True}
+    assert captured == {"params": params, "tool_context": context}
