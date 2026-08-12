@@ -217,6 +217,26 @@ def test_source_and_attempt_metadata_are_closed_and_validated() -> None:
         )
 
 
+def test_payload_source_notes_must_reference_the_host_manifest() -> None:
+    """A provider cannot invent source identities outside persisted host input."""
+    payload_data = _payload().model_dump(mode="json")
+    items = payload_data["items"]
+    assert isinstance(items, list)
+    first = items[0]
+    assert isinstance(first, dict)
+    first["source_notes"] = [
+        {
+            "source_id": "SRC.untrusted",
+            "kind": "external_summary",
+            "text": "Provider-invented provenance.",
+        }
+    ]
+    payload = SpecificationPayload.model_validate(payload_data)
+
+    with pytest.raises(ValueError, match="source manifest"):
+        _envelope(payload=payload)
+
+
 def test_amendment_diff_is_deterministic_and_pins_the_exact_base() -> None:
     """Amendments retain a full result and explicit stable-ID change evidence."""
     base = _payload()

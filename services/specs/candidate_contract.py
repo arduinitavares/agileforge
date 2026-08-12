@@ -508,6 +508,18 @@ def build_candidate_envelope(
     base_payload_fingerprint = metadata.base_payload_fingerprint
     removal_justifications = metadata.removal_justifications
     stable_id_replacements = metadata.stable_id_replacements
+    manifest_source_ids = {item.source_id for item in source_manifest}
+    unknown_source_ids = sorted(
+        {
+            note.source_id
+            for item in payload.items
+            for note in item.source_notes
+            if note.source_id not in manifest_source_ids
+        }
+    )
+    if unknown_source_ids:
+        message = "payload source notes are absent from the host source manifest"
+        raise ValueError(message)
     if candidate_kind is CandidateKind.INITIAL:
         if (
             base_payload is not None
