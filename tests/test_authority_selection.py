@@ -14,13 +14,9 @@ from services.specs import authority_selection
 from tests.authority_assumption_fixtures import current_v3_compiled_authority_json
 from tests.typing_helpers import require_id
 from tests.workflow.lifecycle_fixtures import seed_accepted_specification
-from workflow.fingerprints import canonical_json, canonical_stored_json_hash
 
 if TYPE_CHECKING:
     from sqlmodel import Session
-
-_SELECTION_HASH = canonical_stored_json_hash(canonical_json({"title": "selection"}))
-
 
 def _spec(session: Session, *, project_id: int, title: str) -> SpecRegistry:
     """Persist one current-lifecycle accepted specification."""
@@ -29,6 +25,15 @@ def _spec(session: Session, *, project_id: int, title: str) -> SpecRegistry:
         project_id=project_id,
         content=json.dumps({"title": title}),
     ).spec
+
+
+def _registry_hash(session: Session, *, spec_version_id: int) -> str:
+    """Return the exact accepted v2 payload fingerprint for one registry row."""
+    spec = session.get(SpecRegistry, spec_version_id)
+    assert spec is not None
+    assert spec.source_specification_candidate_id is not None
+    assert spec.source_specification_candidate_fingerprint is not None
+    return spec.spec_hash
 
 
 def _history(
@@ -50,7 +55,9 @@ def _history(
             spec_version_id=spec_version_id,
             compiler_version="3.0.0",
             prompt_hash=prompt,
-            compiled_artifact_json=f'{{"prompt_hash":"{prompt}"}}',
+            compiled_artifact_json=current_v3_compiled_authority_json(
+                prompt_hash=prompt,
+            ),
             scope_themes="[]",
             invariants="[]",
             eligible_feature_ids="[]",
@@ -173,7 +180,7 @@ def test_compiled_authority_for_acceptance_uses_exact_pending_id(
         decided_by="test",
         compiler_version=accepted_row.compiler_version,
         prompt_hash=accepted_row.prompt_hash,
-        spec_hash=_SELECTION_HASH,
+        spec_hash=_registry_hash(session, spec_version_id=spec_version_id),
         pending_authority_id=accepted_row.authority_id,
     )
 
@@ -201,7 +208,7 @@ def test_latest_accepted_authority_decision_orders_by_time_then_id(
             decided_at=when,
             compiler_version=authority.compiler_version,
             prompt_hash=authority.prompt_hash,
-            spec_hash=_SELECTION_HASH,
+            spec_hash=_registry_hash(session, spec_version_id=spec_version_id),
             pending_authority_id=authority.authority_id,
         )
         for status, when, authority in (
@@ -271,13 +278,13 @@ def test_latest_accepted_authority_decision_for_project_orders_across_specs(
                 spec_version_id,
                 decided_at - timedelta(seconds=1),
                 old,
-                _SELECTION_HASH,
+                _registry_hash(session, spec_version_id=spec_version_id),
             ),
             (
                 spec_version_id,
                 decided_at,
                 old,
-                _SELECTION_HASH,
+                _registry_hash(session, spec_version_id=spec_version_id),
             ),
             (
                 other_spec_version_id,
@@ -313,8 +320,11 @@ def test_accepted_compiled_authority_selects_exact_accepted_row(
         decided_by="test",
         compiler_version=accepted.compiler_version,
         prompt_hash=accepted.prompt_hash,
-        spec_hash=_SELECTION_HASH,
+        spec_hash=_registry_hash(session, spec_version_id=spec_version_id),
         pending_authority_id=accepted.authority_id,
+        authority_fingerprint=authority_selection.pending_authority_fingerprint(
+            accepted
+        ),
     )
     session.add(acceptance)
     session.commit()
@@ -359,8 +369,11 @@ def test_accepted_compiled_authority_uses_latest_deterministic_decision(
             decided_at=decided_at,
             compiler_version=authority.compiler_version,
             prompt_hash=authority.prompt_hash,
-            spec_hash=_SELECTION_HASH,
+            spec_hash=_registry_hash(session, spec_version_id=spec_version_id),
             pending_authority_id=authority.authority_id,
+            authority_fingerprint=authority_selection.pending_authority_fingerprint(
+                authority
+            ),
         )
         for authority in (first, second)
     ]
@@ -395,7 +408,7 @@ def test_accepted_compiled_authority_rejects_foreign_project_spec(
             decided_by="test",
             compiler_version=accepted.compiler_version,
             prompt_hash=accepted.prompt_hash,
-            spec_hash=_SELECTION_HASH,
+            spec_hash=_registry_hash(session, spec_version_id=spec_version_id),
             pending_authority_id=accepted.authority_id,
         )
     )
@@ -443,7 +456,7 @@ def test_accepted_compiled_authority_rejects_acceptance_authority_spec_mismatch(
             decided_by="test",
             compiler_version=other_authority.compiler_version,
             prompt_hash=other_authority.prompt_hash,
-            spec_hash=_SELECTION_HASH,
+            spec_hash=_registry_hash(session, spec_version_id=spec_version_id),
             pending_authority_id=other_authority.authority_id,
         )
     )
@@ -483,7 +496,7 @@ def test_accepted_compiled_authority_rejects_acceptance_provenance_mismatch(
         decided_by="test",
         compiler_version=authority.compiler_version,
         prompt_hash=authority.prompt_hash,
-        spec_hash=_SELECTION_HASH,
+        spec_hash=_registry_hash(session, spec_version_id=spec_version_id),
         pending_authority_id=authority.authority_id,
     )
     setattr(acceptance, field_name, replacement)
@@ -549,7 +562,7 @@ def test_accepted_v3_authority_requires_acceptance_fingerprint(
             decided_by="test",
             compiler_version=authority.compiler_version,
             prompt_hash=authority.prompt_hash,
-            spec_hash=_SELECTION_HASH,
+            spec_hash=_registry_hash(session, spec_version_id=spec_version_id),
             pending_authority_id=authority.authority_id,
             authority_fingerprint=None,
         )
@@ -585,7 +598,7 @@ def test_accepted_v3_authority_rejects_post_acceptance_artifact_mutation(
         decided_by="test",
         compiler_version=authority.compiler_version,
         prompt_hash=authority.prompt_hash,
-        spec_hash=_SELECTION_HASH,
+        spec_hash=_registry_hash(session, spec_version_id=spec_version_id),
         pending_authority_id=authority.authority_id,
         authority_fingerprint=authority_selection.pending_authority_fingerprint(
             authority

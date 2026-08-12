@@ -20,6 +20,7 @@ from tests.workflow.lifecycle_fixtures import seed_accepted_specification
 from tools import spec_tools
 from tools.spec_tools import validate_story_with_spec_authority
 from utils.spec_schemas import (
+    AlignmentFinding,
     ForbiddenCapabilityParams,
     Invariant,
     InvariantType,
@@ -388,7 +389,7 @@ def test_hybrid_mode_fails_when_deterministic_alignment_fails(
         "_run_deterministic_alignment_checks",
         lambda *_args, **_kwargs: (
             [
-                spec_tools.AlignmentFinding(
+                AlignmentFinding(
                     code="FORBIDDEN_CAPABILITY",
                     invariant="INV-1",
                     capability="cloud",

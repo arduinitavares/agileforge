@@ -707,11 +707,21 @@ def test_pinned_packet_rejects_foreign_spec_and_missing_acceptance(
     reads = DurableReadProjectionService(engine=engine)
     foreign_project = Project(name="Foreign Spec Owner")
     session.add(foreign_project)
-    session.flush()
-    spec = session.get(SpecRegistry, seed.spec_version_id)
-    assert spec is not None
-    spec.project_id = _required_id(foreign_project.project_id, "foreign_project_id")
-    session.add(spec)
+    session.commit()
+    session.refresh(foreign_project)
+    foreign_lineage = seed_accepted_specification(
+        session,
+        project_id=_required_id(foreign_project.project_id, "foreign_project_id"),
+        content=json.dumps({"requirements": ["A foreign specification."]}),
+    )
+    foreign_spec_id = _required_id(
+        foreign_lineage.spec.spec_version_id,
+        "foreign_spec_version_id",
+    )
+    story = session.get(UserStory, seed.story_id)
+    assert story is not None
+    story.accepted_spec_version_id = foreign_spec_id
+    session.add(story)
     session.commit()
 
     foreign_owned = reads.task_packet(
@@ -721,8 +731,12 @@ def test_pinned_packet_rejects_foreign_spec_and_missing_acceptance(
     )
     assert _error_code(foreign_owned) == "SPEC_VERSION_NOT_FOUND"
 
-    spec.project_id = seed.project_id
-    session.add(spec)
+    spec = session.get(SpecRegistry, seed.spec_version_id)
+    assert spec is not None
+    assert spec.source_specification_candidate_id is not None
+    assert spec.source_specification_candidate_fingerprint is not None
+    story.accepted_spec_version_id = seed.spec_version_id
+    session.add(story)
     acceptance = session.exec(
         select(SpecAuthorityAcceptance).where(
             col(SpecAuthorityAcceptance.project_id) == seed.project_id,
