@@ -26,7 +26,6 @@ from services.application import (
     CompleteTaskRequest,
     CreateProjectCommand,
     DeliveryActionRequest,
-    DiscoveryArtifactRequest,
     PostSprintTriageRequest,
     ProductGoalOutcomeRequest,
     ProductGoalResponseRequest,
@@ -34,7 +33,7 @@ from services.application import (
     RepositoryAttachRequest,
     RepositoryRefreshRequest,
     RoadmapReviewRequest,
-    SpecificationCandidateRequest,
+    SpecificationAuthoringRequest,
     SpecificationReviewRequest,
     SprintCloseRequest,
     SprintPlanningRequest,
@@ -74,8 +73,6 @@ class _ReadProjection(Protocol):
     def vision_status(self, *, project_id: int) -> JsonObject: ...
 
     def product_goal_status(self, *, project_id: int) -> JsonObject: ...
-
-    def discovery_status(self, *, project_id: int) -> JsonObject: ...
 
     def specification_review(self, *, project_id: int) -> JsonObject: ...
 
@@ -200,14 +197,9 @@ class _Application(Protocol):
         request: RepositoryRefreshRequest,
     ) -> TransitionResult: ...
 
-    def record_discovery(
+    def author_specification(
         self,
-        request: DiscoveryArtifactRequest,
-    ) -> TransitionResult: ...
-
-    def record_specification_candidate(
-        self,
-        request: SpecificationCandidateRequest,
+        request: SpecificationAuthoringRequest,
     ) -> TransitionResult: ...
 
     def review_specification(
@@ -466,7 +458,6 @@ def _install_read_commands(
         "vision",
         "goal",
         "repository",
-        "discovery",
         "specification",
         "backlog",
         "roadmap",
@@ -485,7 +476,6 @@ def _install_read_commands(
         ("vision", _vision_status),
         ("goal", _goal_status),
         ("repository", _repository_status),
-        ("discovery", _discovery_status),
         ("specification", _specification_status),
     ):
         status_read = branches[(group,)].add_parser("status")
@@ -653,14 +643,9 @@ def _install_lifecycle_mutations(
     repository_attach.add_argument("--path", required=True)
     _semantic_leaf(branches[("repository",)], "refresh", _repository_refresh)
 
-    discovery_record = _semantic_leaf(
-        branches[("discovery",)], "record", _discovery_record
+    _semantic_leaf(
+        branches[("specification",)], "author", _specification_author
     )
-    discovery_record.add_argument("--file", required=True)
-    specification_record = _semantic_leaf(
-        branches[("specification",)], "record", _specification_record
-    )
-    specification_record.add_argument("--file", required=True)
     specification_review = _semantic_leaf(
         branches[("specification",)], "review", _specification_review
     )
@@ -804,10 +789,6 @@ def _vision_status(args: argparse.Namespace, application: _Application) -> int:
 
 def _goal_status(args: argparse.Namespace, application: _Application) -> int:
     return _emit_read(application.reads.product_goal_status(project_id=args.project_id))
-
-
-def _discovery_status(args: argparse.Namespace, application: _Application) -> int:
-    return _emit_read(application.reads.discovery_status(project_id=args.project_id))
 
 
 def _specification_status(
@@ -1081,29 +1062,14 @@ def _repository_refresh(args: argparse.Namespace, application: _Application) -> 
     )
 
 
-def _discovery_record(args: argparse.Namespace, application: _Application) -> int:
-    return _emit_result(
-        application.record_discovery(
-            DiscoveryArtifactRequest(
-                project_id=args.project_id,
-                canonical_content=_read_json_object(args.file),
-                idempotency_key=args.idempotency_key,
-                actor=args.actor,
-                correlation_id=args.correlation_id,
-            )
-        )
-    )
-
-
-def _specification_record(
+def _specification_author(
     args: argparse.Namespace,
     application: _Application,
 ) -> int:
     return _emit_result(
-        application.record_specification_candidate(
-            SpecificationCandidateRequest(
+        application.author_specification(
+            SpecificationAuthoringRequest(
                 project_id=args.project_id,
-                canonical_content=_read_json_object(args.file),
                 idempotency_key=args.idempotency_key,
                 actor=args.actor,
                 correlation_id=args.correlation_id,

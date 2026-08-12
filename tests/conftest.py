@@ -88,6 +88,11 @@ def engine(test_db_url: str) -> Iterator[Engine]:  # pylint: disable=redefined-o
     yield _engine
 
     # Cleanup
+    # SQLite cannot topologically drop the intentionally cyclic immutable
+    # Specification candidate/registry lineage while FK checks are enabled.
+    # Disable enforcement only for schema teardown; every test runs with it on.
+    with _engine.connect() as connection:
+        connection.exec_driver_sql("PRAGMA foreign_keys=OFF")
     SQLModel.metadata.drop_all(_engine)
 
 

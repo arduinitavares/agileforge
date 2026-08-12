@@ -133,13 +133,7 @@ _SEMANTIC_TEXT_COMMANDS = (
             " --idempotency-key refresh-myfinance-1 --actor acceptance-agent"
         ),
         (
-            "agileforge discovery record --project-id 1"
-            " --file /tmp/agileforge-acceptance/discovery.json"
-            " --idempotency-key discovery-myfinance-1 --actor acceptance-agent"
-        ),
-        (
-            "agileforge specification record --project-id 1"
-            " --file /tmp/agileforge-acceptance/specification.json"
+            "agileforge specification author --project-id 1"
             " --idempotency-key spec-myfinance-1 --actor acceptance-agent"
         ),
         (

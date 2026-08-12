@@ -31,7 +31,11 @@ from sqlmodel import Session, col, select
 from adapters.adk.model_roles import AGENTIC_MODEL_ROLES
 from adapters.git.repository_probe import GitPythonRepositoryProbe
 from models.core import UserStory
-from models.product_definition import ProductGoalArtifact, VisionArtifact
+from models.product_definition import (
+    ProductGoalArtifact,
+    SpecificationCandidate,
+    VisionArtifact,
+)
 from models.specs import CompiledSpecAuthority, SpecRegistry
 from models.workflow import (
     BacklogArtifact,
@@ -74,6 +78,7 @@ from services.project_lifecycle import (
     RepositoryRefreshCommand,
 )
 from services.roadmap_runtime import build_roadmap_input_context
+from services.specs.candidate_contract import load_candidate_contract
 from services.sprint_selection import (
     SprintSelectionError,
     derive_group_slot,
@@ -88,6 +93,7 @@ from services.vision_evidence import (
     VisionEvidenceErrorCode,
 )
 from services.vision_input import VisionInputService
+from utils.agileforge_spec_profile_v2 import canonical_spec_json
 from utils.model_config import get_model_id
 from utils.spec_schemas import ValidationEvidence
 from workflow.contracts import (
@@ -131,9 +137,7 @@ from workflow.requests import (
     DecideVisionReview,
     FulfillProductGoal,
     RecordAuthorityFeedback,
-    RecordDiscoveryArtifact,
     RecordPostSprintTriage,
-    RecordSpecificationCandidate,
     RepairStoryReadiness,
     ReviewSprint,
     StartSprint,
@@ -226,10 +230,17 @@ class _ProductGoalInterviewInputPort(Protocol):
     ) -> JsonObject: ...
 
 
-class _ProductDiscoverySelectionPort(Protocol):
-    """Resolve replacement specification lineage from canonical durable facts."""
+class _SpecificationAuthoringInputPort(Protocol):
+    """Host preparation for one exact to-spec authoring attempt."""
 
-    def resolve_specification_supersedes(self, project_id: int) -> int | None: ...
+    def replay(self, query: NodeAttemptReplayQuery) -> TransitionResult | None: ...
+
+    def build(
+        self,
+        *,
+        project_id: int,
+        decision: NodeDecision,
+    ) -> JsonObject: ...
 
 
 class _AuthorityCompilationInputPort(Protocol):
@@ -929,6 +940,7 @@ class _DeliveryLineage:
     authority: CompiledSpecAuthority
     goal: ProductGoalArtifact
     spec: SpecRegistry
+    spec_payload_json: str
     vision: VisionArtifact
 
 
@@ -1089,7 +1101,6 @@ class ProductGoalLifecycleServices:
     """Host-owned services for the isolated Product Goal child graph."""
 
     interview_input: _ProductGoalInterviewInputPort
-    discovery_selection: _ProductDiscoverySelectionPort
 
 
 class _LifecycleServiceOptions(TypedDict, total=False):
@@ -1097,6 +1108,7 @@ class _LifecycleServiceOptions(TypedDict, total=False):
 
     vision_input: _VisionInputPort | None
     product_goal_services: ProductGoalLifecycleServices | None
+    specification_authoring_input: _SpecificationAuthoringInputPort | None
     authority_compilation_input: _AuthorityCompilationInputPort | None
     authority_review_selection: _AuthorityReviewSelectionPort | None
     authority_repair_input: _AuthorityRepairInputPort | None
@@ -1119,8 +1131,6 @@ class _ReadProjectionPort(Protocol):
     def vision_status(self, *, project_id: int) -> JsonObject: ...
 
     def product_goal_status(self, *, project_id: int) -> JsonObject: ...
-
-    def discovery_status(self, *, project_id: int) -> JsonObject: ...
 
     def specification_status(self, *, project_id: int) -> JsonObject: ...
 
@@ -1560,23 +1570,10 @@ class ProductGoalOutcomeRequest(FrozenModel):
     correlation_id: str | None = None
 
 
-class DiscoveryArtifactRequest(FrozenModel):
-    """Semantic discovery content for the graph-selected active Product Goal."""
+class SpecificationAuthoringRequest(FrozenModel):
+    """Transport metadata for one host-prepared to-spec attempt."""
 
     project_id: int
-    canonical_content: JsonObject
-    content_ref: str | None = None
-    idempotency_key: str = Field(min_length=1)
-    actor: str = Field(min_length=1)
-    correlation_id: str | None = None
-
-
-class SpecificationCandidateRequest(FrozenModel):
-    """Semantic specification candidate content with host-derived lineage."""
-
-    project_id: int
-    canonical_content: JsonObject
-    content_ref: str | None = None
     idempotency_key: str = Field(min_length=1)
     actor: str = Field(min_length=1)
     correlation_id: str | None = None
@@ -1696,6 +1693,9 @@ class AgileForgeApplication:
         self._read_projection = read_projection
         self._vision_input = lifecycle_services.get("vision_input")
         self._product_goal_services = lifecycle_services.get("product_goal_services")
+        self._specification_authoring_input = lifecycle_services.get(
+            "specification_authoring_input"
+        )
         self._authority_compilation_input = lifecycle_services.get(
             "authority_compilation_input"
         )
@@ -3142,88 +3142,50 @@ class AgileForgeApplication:
             )
         )
 
-    def record_discovery(
+    def author_specification(
         self,
-        request: DiscoveryArtifactRequest,
+        request: SpecificationAuthoringRequest,
     ) -> TransitionResult:
-        """Record semantic discovery content under graph-selected durable parents."""
-        replay = self._replay_product_goal_transition(
-            TransitionReplayQuery(
-                request_kind="record_discovery_artifact",
-                project_id=request.project_id,
-                idempotency_key=request.idempotency_key,
-                actor=request.actor,
-                correlation_id=request.correlation_id,
-                operator_input={
-                    "canonical_content": request.canonical_content,
-                    "content_ref": request.content_ref,
-                },
-            )
-        )
-        if replay is not None:
-            return replay
-        position = self.position(project_id=request.project_id)
-        decision = _unique_available_decision(position, "discovery.record")
-        if decision is None:
-            return _transition_not_available(position, "discovery.record")
-        return self.transition(
-            RecordDiscoveryArtifact(
-                project_id=request.project_id,
-                graph_version=position.graph_version,
-                fact_fingerprint=position.fact_fingerprint,
-                decision_fingerprint=decision.decision_fingerprint,
-                idempotency_key=request.idempotency_key,
-                actor=request.actor,
-                correlation_id=request.correlation_id,
-                canonical_content=request.canonical_content,
-                content_ref=request.content_ref,
-            )
-        )
-
-    def record_specification_candidate(
-        self,
-        request: SpecificationCandidateRequest,
-    ) -> TransitionResult:
-        """Record semantic specification content with host-derived lineage."""
-        replay = self._replay_product_goal_transition(
-            TransitionReplayQuery(
-                request_kind="record_specification_candidate",
-                project_id=request.project_id,
-                idempotency_key=request.idempotency_key,
-                actor=request.actor,
-                correlation_id=request.correlation_id,
-                operator_input={
-                    "canonical_content": request.canonical_content,
-                    "content_ref": request.content_ref,
-                },
-            )
-        )
-        if replay is not None:
-            return replay
-        position = self.position(project_id=request.project_id)
-        decision = _unique_available_decision(position, "specification.record")
-        if decision is None:
-            return _transition_not_available(position, "specification.record")
-        services = self._product_goal_services
-        if services is None:
-            message = "Specification candidates require an injected lineage selector."
+        """Run one exact host-prepared to-spec attempt for the current Goal."""
+        input_service = self._specification_authoring_input
+        if input_service is None:
+            message = "Specification authoring requires an injected input builder."
             raise RuntimeError(message)
-        return self.transition(
-            RecordSpecificationCandidate(
+        replay = input_service.replay(
+            NodeAttemptReplayQuery(
+                project_id=request.project_id,
+                graph_version=None,
+                fact_fingerprint=None,
+                decision_fingerprint=None,
+                node_id="specification.author",
+                idempotency_key=request.idempotency_key,
+                actor=request.actor,
+                correlation_id=request.correlation_id,
+            )
+        )
+        if replay is not None:
+            return replay
+        position = self.position(project_id=request.project_id)
+        decision = _unique_available_decision(position, "specification.author")
+        if decision is None or decision.category is not NodeCategory.AVAILABLE:
+            return _transition_not_available(position, "specification.author")
+        model_id = get_model_id(AGENTIC_MODEL_ROLES["specification.author"])
+        return self.run_agentic_action(
+            AgenticActionRequest(
                 project_id=request.project_id,
                 graph_version=position.graph_version,
                 fact_fingerprint=position.fact_fingerprint,
                 decision_fingerprint=decision.decision_fingerprint,
+                node_id="specification.author",
+                instance_key=decision.instance_key,
+                input_payload=input_service.build(
+                    project_id=request.project_id,
+                    decision=decision,
+                ),
+                model_id=model_id,
                 idempotency_key=request.idempotency_key,
                 actor=request.actor,
                 correlation_id=request.correlation_id,
-                canonical_content=request.canonical_content,
-                content_ref=request.content_ref,
-                supersedes_specification_candidate_id=(
-                    services.discovery_selection.resolve_specification_supersedes(
-                        request.project_id
-                    )
-                ),
             )
         )
 
@@ -3271,7 +3233,7 @@ class AgileForgeApplication:
                 actor=request.actor,
                 correlation_id=request.correlation_id,
                 specification_candidate_id=int(reference.fact_id),
-                specification_fingerprint=reference.fingerprint,
+                candidate_fingerprint=reference.fingerprint,
                 decision=request.decision,
                 rationale=request.rationale,
             )
@@ -3582,13 +3544,35 @@ def _delivery_lineage(
         if authority is None
         else session.get(SpecRegistry, authority.spec_version_id)
     )
+    candidate = (
+        None
+        if spec is None
+        else session.get(
+            SpecificationCandidate,
+            spec.source_specification_candidate_id,
+        )
+    )
     vision = (
         None if goal is None else session.get(VisionArtifact, goal.vision_artifact_id)
     )
+    try:
+        payload, envelope = (
+            (None, None)
+            if candidate is None
+            else load_candidate_contract(
+                candidate.canonical_envelope_json,
+                expected_candidate_fingerprint=candidate.candidate_fingerprint,
+            )
+        )
+    except (TypeError, ValueError):
+        return None
     if (
         authority is None
         or goal is None
         or spec is None
+        or candidate is None
+        or payload is None
+        or envelope is None
         or vision is None
         or authority.compiled_artifact_json is None
         or pending_authority_fingerprint(authority) != authority_reference.fingerprint
@@ -3604,12 +3588,26 @@ def _delivery_lineage(
         or spec.source_vision_fingerprint != goal.vision_fingerprint
         or spec.source_product_goal_artifact_id != goal_id
         or spec.source_product_goal_fingerprint != goal.content_fingerprint
+        or candidate.project_id != project_id
+        or candidate.specification_candidate_id
+        != spec.source_specification_candidate_id
+        or candidate.candidate_fingerprint
+        != spec.source_specification_candidate_fingerprint
+        or candidate.payload_fingerprint != spec.spec_hash
+        or envelope.payload_fingerprint != spec.spec_hash
+        or candidate.vision_artifact_id != spec.source_vision_artifact_id
+        or candidate.vision_fingerprint != spec.source_vision_fingerprint
+        or candidate.product_goal_artifact_id
+        != spec.source_product_goal_artifact_id
+        or candidate.product_goal_fingerprint
+        != spec.source_product_goal_fingerprint
     ):
         return None
     return _DeliveryLineage(
         authority=authority,
         goal=goal,
         spec=spec,
+        spec_payload_json=canonical_spec_json(payload),
         vision=vision,
     )
 
@@ -3673,7 +3671,7 @@ def _backlog_input(
     payload = BacklogInput(
         product_vision_statement=lineage.vision.statement,
         product_goal_statement=lineage.goal.statement,
-        technical_spec=lineage.spec.content,
+        technical_spec=lineage.spec_payload_json,
         compiled_authority=cast("str", lineage.authority.compiled_artifact_json),
         prior_backlog_state=prior_state,
         user_input=user_input,
@@ -3786,7 +3784,7 @@ def _roadmap_input(
         "backlog_items": [
             item.model_dump(mode="json") for item in backlog_output.backlog_items
         ],
-        "pending_spec_content": lineage.spec.content,
+        "pending_spec_content": lineage.spec_payload_json,
         "compiled_authority_cached": lineage.authority.compiled_artifact_json,
     }
     if prior_output is not None:
@@ -3880,7 +3878,7 @@ def _story_input(
         "roadmap_releases": [
             item.model_dump(mode="json") for item in roadmap_output.roadmap_releases
         ],
-        "pending_spec_content": lineage.spec.content,
+        "pending_spec_content": lineage.spec_payload_json,
         "compiled_authority_cached": lineage.authority.compiled_artifact_json,
         "story_outputs": _story_outputs(
             session,
@@ -4484,6 +4482,9 @@ def production_application() -> AgileForgeApplication:
     from adapters.adk.agents.specification import (  # noqa: PLC0415
         build_spec_authority_compiler_agent,
     )
+    from adapters.adk.agents.specification_author import (  # noqa: PLC0415
+        root_agent as specification_author_agent,
+    )
     from adapters.adk.agents.sprint import root_agent as sprint_agent  # noqa: PLC0415
     from adapters.adk.agents.story import (  # noqa: PLC0415
         create_user_story_writer_agent,
@@ -4496,11 +4497,11 @@ def production_application() -> AgileForgeApplication:
         build_agentic_recipe_registry,
     )
     from models.db import ensure_business_db_ready, get_engine  # noqa: PLC0415
-    from services.product_discovery_selection import (  # noqa: PLC0415
-        ProductDiscoverySelectionService,
-    )
     from services.read_projections import (  # noqa: PLC0415
         DurableReadProjectionService,
+    )
+    from services.specification_authoring_input import (  # noqa: PLC0415
+        SpecificationAuthoringInputService,
     )
     from workflow.clock import SystemClock  # noqa: PLC0415
     from workflow.definitions.root import project_graph  # noqa: PLC0415
@@ -4522,6 +4523,7 @@ def production_application() -> AgileForgeApplication:
             vision_interview=vision_interview_agent,
             vision_repair=vision_repair_agent,
             product_goal=product_goal_interview_agent,
+            specification_author=specification_author_agent,
             backlog_generation=backlog_agent,
             roadmap_generation=roadmap_agent,
             story_generation=create_user_story_writer_agent(),
@@ -4548,7 +4550,9 @@ def production_application() -> AgileForgeApplication:
         ),
         product_goal_services=ProductGoalLifecycleServices(
             interview_input=ProductGoalInterviewInputService(engine=engine),
-            discovery_selection=ProductDiscoverySelectionService(engine=engine),
+        ),
+        specification_authoring_input=SpecificationAuthoringInputService(
+            engine=engine
         ),
         authority_compilation_input=AuthorityCompilationInputService(engine=engine),
         authority_review_selection=AuthorityReviewSelectionService(engine=engine),
@@ -4585,7 +4589,6 @@ __all__ = [
     "DeliveryActionInputService",
     "DeliveryActionRequest",
     "DeliveryReviewSelectionService",
-    "DiscoveryArtifactRequest",
     "ExecutionActionSelectionService",
     "PlanningActionSelectionService",
     "PostSprintTriageRequest",
@@ -4600,7 +4603,7 @@ __all__ = [
     "RepositoryRefreshRequest",
     "RoadmapReviewRequest",
     "SemanticTransitionReplayPort",
-    "SpecificationCandidateRequest",
+    "SpecificationAuthoringRequest",
     "SpecificationReviewRequest",
     "SprintCloseRequest",
     "SprintPlanReviewRequest",

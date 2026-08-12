@@ -80,10 +80,22 @@ def _attempt(
         instance_key=None,
         graph_version=GRAPH_VERSION,
         fact_fingerprint=f"sha256:fixture-facts-{project_id}-{ordinal}",
-        business_fact_fingerprint=f"sha256:fixture-business-{project_id}-{ordinal}",
+        business_fact_fingerprint=canonical_hash(
+            {
+                "kind": "fixture-business-facts",
+                "project_id": project_id,
+                "ordinal": ordinal,
+            }
+        ),
         decision_fingerprint=f"sha256:fixture-decision-{project_id}-{ordinal}",
         normalized_input_json="{}",
-        input_fingerprint=f"sha256:fixture-input-{project_id}-{ordinal}",
+        input_fingerprint=canonical_hash(
+            {
+                "kind": "fixture-model-input",
+                "project_id": project_id,
+                "ordinal": ordinal,
+            }
+        ),
         model_id="fake/product-definition",
         execution_settings_json="{}",
         idempotency_key=f"fixture-{node_id}-{project_id}-{ordinal}",
@@ -450,25 +462,18 @@ def seed_accepted_specification(
             accepted_product_goal_fingerprint=goal.content_fingerprint,
             source_manifest=(
                 CandidateSourceManifestEntry(
-                    source_id=f"VISION.{vision_id}",
+                    source_id=f"SRC.vision.{vision_id}",
                     kind=CandidateSourceKind.VISION,
                     fingerprint=vision.content_fingerprint,
                 ),
                 CandidateSourceManifestEntry(
-                    source_id=f"GOAL.{goal_id}",
+                    source_id=f"SRC.product-goal.{goal_id}",
                     kind=CandidateSourceKind.PRODUCT_GOAL,
                     fingerprint=goal.content_fingerprint,
                 ),
             ),
-            accepted_fact_fingerprint=canonical_hash(
-                {
-                    "vision": vision.content_fingerprint,
-                    "product_goal": goal.content_fingerprint,
-                }
-            ),
-            producer_input_fingerprint=canonical_hash(
-                {"project_id": project_id, "ordinal": ordinal, "content": parsed}
-            ),
+            accepted_fact_fingerprint=candidate_attempt.business_fact_fingerprint,
+            producer_input_fingerprint=candidate_attempt.input_fingerprint,
             producer_capability="to-spec",
             producer_version="fixture-v2",
             model_id="fake/product-definition",

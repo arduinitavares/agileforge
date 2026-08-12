@@ -37,7 +37,6 @@ from services.application import (
     CompleteTaskRequest,
     CreateProjectCommand,
     DeliveryActionRequest,
-    DiscoveryArtifactRequest,
     PostSprintTriageRequest,
     ProductGoalOutcomeRequest,
     ProductGoalResponseRequest,
@@ -45,7 +44,7 @@ from services.application import (
     RepositoryAttachRequest,
     RepositoryRefreshRequest,
     RoadmapReviewRequest,
-    SpecificationCandidateRequest,
+    SpecificationAuthoringRequest,
     SpecificationReviewRequest,
     SprintCloseRequest,
     SprintPlanningRequest,
@@ -170,13 +169,6 @@ class GoalOutcomeApiRequest(MutationApiRequest):
     """One semantic Product Goal outcome rationale."""
 
     rationale: SemanticText
-
-
-class ArtifactRecordApiRequest(MutationApiRequest):
-    """Caller-owned discovery or specification content only."""
-
-    canonical_content: JsonObject
-    content_ref: str | None = None
 
 
 class RepositoryAttachApiRequest(MutationApiRequest):
@@ -367,9 +359,8 @@ SEMANTIC_API_PATHS: dict[str, str] = {
     "decide_vision_review": "vision/review",
     "fulfill_product_goal": "goals/complete",
     "generate_vision_bootstrap": "vision/bootstrap",
-    "record_discovery_artifact": "discovery",
     "record_product_goal_interview_turn": "goals/respond",
-    "record_specification_candidate": "specifications",
+    "author_specification": "specifications/author",
     "record_sprint_plan": "sprint/generate",
     "record_vision_interview_turn": "vision/respond",
     "repair_authority": "authority/repair",
@@ -805,42 +796,16 @@ def abandon_product_goal(
     return _product_goal_outcome(project_id, req, "abandoned")
 
 
-@app.post("/api/projects/{project_id}/discovery")
-def record_discovery(
+@app.post("/api/projects/{project_id}/specifications/author")
+def author_specification(
     project_id: int,
-    req: ArtifactRecordApiRequest,
+    req: MutationApiRequest,
 ) -> dict[str, object]:
-    """Record caller-owned discovery content under host-derived lineage."""
+    """Run one exact Specification-authoring action from host context."""
     return _result_payload(
-        _application().record_discovery(
-            DiscoveryArtifactRequest(
+        _application().author_specification(
+            SpecificationAuthoringRequest(
                 project_id=project_id,
-                canonical_content=req.canonical_content,
-                content_ref=req.content_ref,
-                **_metadata(req),
-            )
-        )
-    )
-
-
-@app.get("/api/projects/{project_id}/discovery")
-def get_discovery(project_id: int) -> dict[str, object]:
-    """Return current durable discovery content."""
-    return _read_payload(_application().reads.discovery_status(project_id=project_id))
-
-
-@app.post("/api/projects/{project_id}/specifications")
-def record_specification(
-    project_id: int,
-    req: ArtifactRecordApiRequest,
-) -> dict[str, object]:
-    """Record a specification candidate under host-derived lineage."""
-    return _result_payload(
-        _application().record_specification_candidate(
-            SpecificationCandidateRequest(
-                project_id=project_id,
-                canonical_content=req.canonical_content,
-                content_ref=req.content_ref,
                 **_metadata(req),
             )
         )

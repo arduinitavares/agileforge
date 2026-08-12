@@ -46,12 +46,11 @@ from services.application import (
     DeliveryActionInputService,
     DeliveryActionRequest,
     DeliveryReviewSelectionService,
-    DiscoveryArtifactRequest,
     ProductGoalLifecycleServices,
     ProductGoalResponseRequest,
     ProductGoalReviewRequest,
     RoadmapReviewRequest,
-    SpecificationCandidateRequest,
+    SpecificationAuthoringRequest,
     SpecificationReviewRequest,
     SprintPlanningInputService,
     SprintPlanningRequest,
@@ -71,7 +70,6 @@ from services.node_attempt_replay import (
     NodeAttemptReplayQuery,
     TransitionReplayQuery,
 )
-from services.product_goal_interview_input import ProductGoalInterviewInputService
 from services.read_projections import DurableReadProjectionService
 from tests.adapters.test_command_renderer import position_fixture
 from tests.workflow.execution_fixtures import seed_started_execution
@@ -120,9 +118,7 @@ from workflow.requests import (
     DecideSprintPlan,
     DecideStory,
     RecordAuthorityFeedback,
-    RecordDiscoveryArtifact,
     RecordPostSprintTriage,
-    RecordSpecificationCandidate,
     ReviewSprint,
     StartNodeAttempt,
     TransitionRequest,
@@ -297,6 +293,22 @@ def test_create_project_api_rejects_unknown_or_internal_fields(
                 "actor": "operator",
             },
             "model_id",
+        ),
+        (
+            "/api/projects/41/specifications/author",
+            {
+                "idempotency_key": "specification-41",
+                "actor": "operator",
+            },
+            "canonical_content",
+        ),
+        (
+            "/api/projects/41/specifications/author",
+            {
+                "idempotency_key": "specification-41",
+                "actor": "operator",
+            },
+            "content_ref",
         ),
         (
             "/api/projects/41/vision/review",
@@ -531,6 +543,12 @@ class _FakeApiApplication:
     ) -> TransitionResult:
         return self._record_delivery_request(request)
 
+    def author_specification(
+        self,
+        request: SpecificationAuthoringRequest,
+    ) -> TransitionResult:
+        return self._record_delivery_request(request)
+
     def record_authority_feedback(
         self,
         request: AuthorityFeedbackRequest,
@@ -626,11 +644,6 @@ class _ProductGoalInput:
             "decision": decision.decision_fingerprint,
             "user_response": user_text,
         }
-
-
-class _DiscoverySelection:
-    def resolve_specification_supersedes(self, project_id: int) -> None:
-        del project_id
 
 
 class _AuthorityInput:
@@ -870,7 +883,6 @@ class _CapturingProductGoalApplication(AgileForgeApplication):
             workflow_domain=domain,
             product_goal_services=ProductGoalLifecycleServices(
                 interview_input=_ProductGoalInput(),
-                discovery_selection=_DiscoverySelection(),
             ),
         )
         self.agent_requests: list[AgenticActionRequest] = []
@@ -2286,7 +2298,6 @@ def test_semantic_product_goal_response_replays_before_advanced_position() -> No
         workflow_domain=domain,
         product_goal_services=ProductGoalLifecycleServices(
             interview_input=goal_input,
-            discovery_selection=_DiscoverySelection(),
         ),
     )
 
@@ -2472,7 +2483,6 @@ def test_semantic_product_goal_review_rejects_a_replaced_candidate() -> None:
         workflow_domain=domain,
         product_goal_services=ProductGoalLifecycleServices(
             interview_input=_ProductGoalInput(TransitionResult(ok=True)),
-            discovery_selection=_DiscoverySelection(),
         ),
     )
 
@@ -2516,7 +2526,6 @@ def test_semantic_specification_review_rejects_a_replaced_candidate() -> None:
         workflow_domain=domain,
         product_goal_services=ProductGoalLifecycleServices(
             interview_input=_ProductGoalInput(TransitionResult(ok=True)),
-            discovery_selection=_DiscoverySelection(),
         ),
     )
 
@@ -2688,107 +2697,6 @@ def test_semantic_authority_feedback_derives_rejected_identity_from_position() -
     assert request.pending_authority_id == expected_authority_id
     assert request.authority_fingerprint == "sha256:authority-17"
     assert request.feedback == {"text": "Narrow the identity invariant."}
-
-
-def test_discovery_content_replays_or_conflicts_before_advanced_position(
-    engine: "Engine",
-) -> None:
-    """Bind replay identity to submitted content, not its file reference."""
-    stored = RecordDiscoveryArtifact(
-        project_id=PROJECT_ID,
-        graph_version="agileforge.workflow.v2",
-        fact_fingerprint="facts-discovery",
-        decision_fingerprint="decision-discovery",
-        idempotency_key="discovery-41",
-        actor="operator",
-        canonical_content={"research": "interviews"},
-        content_ref="fixtures/discovery.json",
-    )
-    persisted = TransitionResult(ok=True, applied_node_id="discovery.record")
-    _store_completed_receipt(engine, stored, persisted)
-    domain = _BoundaryDomain(_vision_position())
-    application = AgileForgeApplication(
-        workflow_domain=domain,
-        product_goal_services=ProductGoalLifecycleServices(
-            interview_input=ProductGoalInterviewInputService(engine=engine),
-            discovery_selection=_DiscoverySelection(),
-        ),
-    )
-
-    replay = application.record_discovery(
-        DiscoveryArtifactRequest(
-            project_id=PROJECT_ID,
-            canonical_content={"research": "interviews"},
-            content_ref="fixtures/discovery.json",
-            idempotency_key="discovery-41",
-            actor="operator",
-        )
-    )
-    conflict = application.record_discovery(
-        DiscoveryArtifactRequest(
-            project_id=PROJECT_ID,
-            canonical_content={"research": "changed content"},
-            content_ref="fixtures/discovery.json",
-            idempotency_key="discovery-41",
-            actor="operator",
-        )
-    )
-
-    assert replay == persisted.model_copy(update={"replayed": True})
-    assert conflict.error is not None
-    assert conflict.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
-    assert domain.position_calls == []
-
-
-def test_specification_content_replays_or_conflicts_before_advanced_position(
-    engine: "Engine",
-) -> None:
-    """Resolve canonical specification content before current lineage lookup."""
-    stored = RecordSpecificationCandidate(
-        project_id=PROJECT_ID,
-        graph_version="agileforge.workflow.v2",
-        fact_fingerprint="facts-specification",
-        decision_fingerprint="decision-specification",
-        idempotency_key="specification-41",
-        actor="operator",
-        canonical_content={"title": "Accepted candidate"},
-        content_ref="fixtures/specification.json",
-        supersedes_specification_candidate_id=17,
-    )
-    persisted = TransitionResult(ok=True, applied_node_id="specification.record")
-    _store_completed_receipt(engine, stored, persisted)
-    domain = _BoundaryDomain(_vision_position())
-    application = AgileForgeApplication(
-        workflow_domain=domain,
-        product_goal_services=ProductGoalLifecycleServices(
-            interview_input=ProductGoalInterviewInputService(engine=engine),
-            discovery_selection=_DiscoverySelection(),
-        ),
-    )
-
-    replay = application.record_specification_candidate(
-        SpecificationCandidateRequest(
-            project_id=PROJECT_ID,
-            canonical_content={"title": "Accepted candidate"},
-            content_ref="fixtures/specification.json",
-            idempotency_key="specification-41",
-            actor="operator",
-        )
-    )
-    conflict = application.record_specification_candidate(
-        SpecificationCandidateRequest(
-            project_id=PROJECT_ID,
-            canonical_content={"title": "Changed candidate"},
-            content_ref="fixtures/specification.json",
-            idempotency_key="specification-41",
-            actor="operator",
-        )
-    )
-
-    assert replay == persisted.model_copy(update={"replayed": True})
-    assert conflict.error is not None
-    assert conflict.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
-    assert domain.position_calls == []
 
 
 def test_semantic_authority_repair_replays_or_conflicts_before_advanced_position(
@@ -4859,6 +4767,33 @@ def test_authority_endpoint_submits_exact_typed_request(
     request = cast("AuthorityReviewRequest", application.requests[0])
     assert isinstance(request, AuthorityReviewRequest)
     assert request.actor == "dashboard-user"
+
+
+def test_specification_author_endpoint_submits_only_transport_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep semantic payload, lineage, and fingerprints host-owned."""
+    application = _FakeApiApplication()
+    monkeypatch.setattr(api_module, "_application", lambda: application)
+
+    response = TestClient(api_module.app).post(
+        "/api/projects/41/specifications/author",
+        json={
+            "idempotency_key": "author-api-41",
+            "actor": "dashboard-user",
+            "correlation_id": "corr-api-41",
+        },
+    )
+
+    assert response.status_code == HTTPStatus.OK
+    request = application.requests[0]
+    assert isinstance(request, SpecificationAuthoringRequest)
+    assert request.model_dump(mode="json") == {
+        "project_id": PROJECT_ID,
+        "idempotency_key": "author-api-41",
+        "actor": "dashboard-user",
+        "correlation_id": "corr-api-41",
+    }
 
 
 @pytest.mark.parametrize(
