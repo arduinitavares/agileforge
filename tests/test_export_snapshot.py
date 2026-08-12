@@ -21,6 +21,7 @@ from agile_sqlmodel import (
     UserStory,
 )
 from models.core import Epic, Feature, Team, Theme
+from models.product_definition import SpecificationCandidate
 from scripts.export_snapshot import export_snapshot_command
 from services.agent_workbench.authority_projection import (
     pending_authority_fingerprint,
@@ -138,7 +139,6 @@ def _insert_approved_spec_with_authority(
         session,
         project_id=project_id,
         content=json.dumps({"title": "Spec", "section": "Snapshot"}),
-        content_ref="specs/test.md",
     ).spec
 
     success = SpecAuthorityCompilationSuccess(
@@ -487,10 +487,45 @@ def test_export_snapshot_html_basic(engine: Engine, tmp_path: Path) -> None:
     assert "product vision" in html
     assert "Deliver one verified product increment." in html
     assert "Snapshot" in html
+    assert "Candidate Envelope" in html
+    assert "Source Manifest" in html
+    assert "Candidate fingerprint" in html
     assert "Current Sprint Refined Stories" in html
     assert "Project Backlog (All Stories)" in html
     assert "Payments" in html
     assert "INV-0123456789abcdef" in html
+
+
+def test_export_snapshot_rejects_tampered_specification_candidate_before_writing(
+    engine: Engine,
+    tmp_path: Path,
+) -> None:
+    """The export never falls back when the registry candidate bytes are invalid."""
+    with Session(engine) as session:
+        project = _insert_basic_project(session)
+        project_id = require_id(project.project_id, "project_id")
+        lineage = seed_accepted_specification(
+            session,
+            project_id=project_id,
+            content=json.dumps({"title": "tampered-candidate"}),
+        )
+        candidate = session.get(
+            SpecificationCandidate,
+            lineage.specification_candidate_id,
+        )
+        assert candidate is not None
+        candidate.canonical_envelope_json = '{"payload":{},"envelope":{}}'
+        session.add(candidate)
+        session.commit()
+
+    with pytest.raises(ValueError, match="SPECIFICATION_CANDIDATE_INVALID"):
+        export_project_snapshot_html(
+            project_id=project_id,
+            output_dir=tmp_path,
+            engine_override=engine,
+        )
+
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_export_snapshot_only_refined_current_sprint_stories(

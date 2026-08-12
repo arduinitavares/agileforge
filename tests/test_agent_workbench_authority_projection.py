@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, cast
 
 import pytest
@@ -15,6 +13,7 @@ from sqlmodel import select
 import utils.authority_curation_trace as trace_mod
 from models.authority_curation import AuthorityCurationAttempt, AuthorityFeedbackAttempt
 from models.core import Project
+from models.product_definition import SpecificationCandidate
 from models.specs import (
     CompiledSpecAuthority,
     SpecAuthorityAcceptance,
@@ -28,11 +27,6 @@ from services.agent_workbench.error_codes import ErrorCode, error_metadata
 from tests.authority_assumption_fixtures import historical_v2_compiled_authority
 from tests.typing_helpers import require_id
 from tests.workflow.lifecycle_fixtures import seed_accepted_specification
-from utils.agileforge_spec_profile import (
-    TechnicalSpecArtifact,
-    canonical_spec_hash,
-    canonical_spec_json,
-)
 from utils.spec_schemas import (
     Invariant,
     InvariantType,
@@ -42,76 +36,14 @@ from utils.spec_schemas import (
 )
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from sqlalchemy.engine import Engine
     from sqlmodel import Session
 
 NOT_FOUND_EXIT_CODE: Final[int] = 4
 AUTHORITY_ERROR_EXIT_CODE: Final[int] = 4
 TRACE_MUTATION_EVENT_ID: Final[int] = 647
-
-
-def _spec_hash(content: str) -> str:
-    """Return the persisted SHA-256 hash for spec content."""
-    try:
-        artifact = TechnicalSpecArtifact.model_validate(json.loads(content))
-    except (json.JSONDecodeError, ValueError):
-        return hashlib.sha256(content.encode("utf-8")).hexdigest()
-    return canonical_spec_hash(artifact)
-
-
-def _structured_spec_content(
-    *,
-    artifact_id: str = "SPEC.authority-projection",
-    title: str = "Authority Projection Spec",
-    statement: str = "The review output must include guard tokens.",
-) -> str:
-    """Return canonical structured spec content for disk-hash tests."""
-    payload = _agileforge_spec_profile_payload()
-    payload["artifact_id"] = artifact_id
-    payload["title"] = title
-    items = payload["items"]
-    assert isinstance(items, list)
-    first_item = cast("dict[str, Any]", items[0])
-    assert isinstance(first_item, dict)
-    first_item["statement"] = statement
-    first_item["acceptance"] = [statement]
-    return canonical_spec_json(TechnicalSpecArtifact.model_validate(payload))
-
-
-def _legacy_spec_hash(content: str) -> str:
-    """Return the legacy raw SHA-256 hash for non-structured spec content."""
-    return hashlib.sha256(content.encode("utf-8")).hexdigest()
-
-
-def _agileforge_spec_profile_payload() -> dict[str, object]:
-    return {
-        "schema_version": "agileforge.spec.v1",
-        "artifact_id": "SPEC.authority-projection",
-        "title": "Authority Projection Spec",
-        "status": "draft",
-        "version": "0.1.0",
-        "created_at": "2026-05-17T12:00:00Z",
-        "updated_at": "2026-05-17T12:00:00Z",
-        "summary": "Authority status preserves structured spec hashes.",
-        "problem_statement": "Status needs stable structured spec hashes.",
-        "items": [
-            {
-                "id": "REQ.guard-tokens",
-                "type": "REQ",
-                "status": "draft",
-                "title": "Guard token packet evidence",
-                "statement": "The review output must include guard tokens.",
-                "level": "MUST",
-                "verification": "inspection",
-                "acceptance": [
-                    "The authority review packet includes guard token evidence."
-                ],
-            },
-        ],
-        "relations": [],
-        "controlled_terms": [],
-        "external_references": [],
-    }
 
 
 def _engine(session: Session) -> Engine:
@@ -138,7 +70,6 @@ def _seed_spec(
     *,
     project_id: int,
     content: str,
-    content_ref: str | None = None,
 ) -> SpecRegistry:
     """Persist an accepted specification through the current lifecycle."""
     try:
@@ -151,7 +82,6 @@ def _seed_spec(
         session,
         project_id=project_id,
         content=json.dumps(parsed),
-        content_ref=content_ref,
         recorded_at=datetime(2026, 5, 14, tzinfo=UTC),
     ).spec
 
@@ -193,10 +123,6 @@ def _compiled_authority_json(
     compiler_version: str = "3.0.0",
     prompt_hash: str = "a" * 64,
 ) -> str:
-    from services.specs.compiler_service import (  # noqa: PLC0415
-        _compiled_authority_artifact_json,
-    )
-
     success = SpecAuthorityCompilationSuccess(
         scope_themes=["Authority projection"],
         domain="agent workbench",
@@ -223,7 +149,12 @@ def _compiled_authority_json(
         ir_schema_version=None,
         ir_provenance=None,
     )
-    return _compiled_authority_artifact_json(success)
+    return json.dumps(
+        success.model_dump(mode="json"),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
 
 
 def _accept_spec(
@@ -1135,26 +1066,17 @@ def test_authority_status_treats_newer_acceptance_after_rejection_as_current(
     assert result["data"]["pending_authority_id"] is None
 
 
-def test_authority_status_reports_current_accepted_authority_from_repo_root(
+def test_authority_status_reports_current_accepted_authority_candidate(
     session: Session,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Return current authority when latest, accepted, compiled, and disk match."""
-    unrelated_cwd = tmp_path / "elsewhere"
-    unrelated_cwd.mkdir()
-    monkeypatch.chdir(unrelated_cwd)
-    spec_content = _structured_spec_content()
-    spec_path = tmp_path / "specs" / "app.json"
-    spec_path.parent.mkdir()
-    spec_path.write_text(spec_content, encoding="utf-8")
+    """Return current Authority with its exact canonical candidate source."""
     project = _seed_project(session)
     project_id = require_id(project.project_id, "project_id")
     spec = _seed_spec(
         session,
         project_id=project_id,
-        content=spec_content,
-        content_ref="specs/app.json",
+        content=json.dumps({"title": "accepted-authority-candidate"}),
     )
     authority = _seed_authority(
         session,
@@ -1175,39 +1097,42 @@ def test_authority_status_reports_current_accepted_authority_from_repo_root(
     assert result["data"]["pending_authority_id"] is None
     assert result["data"]["pending_authority_fingerprint"] is None
     assert result["data"]["invariant_count"] == 1
-    assert result["data"]["disk_spec"]["resolved_path"] == str(spec_path.resolve())
-    assert result["data"]["disk_spec"]["sha256"] == spec.spec_hash.removeprefix(
-        "sha256:"
+    source = result["data"]["specification_source"]
+    assert source["status"] == "valid"
+    assert source["source_specification_candidate_id"] == (
+        spec.source_specification_candidate_id
     )
-    assert result["data"]["disk_spec"]["matches_accepted"] is True
+    assert source["candidate_fingerprint"] == (
+        spec.source_specification_candidate_fingerprint
+    )
+    assert source["payload_fingerprint"] == spec.spec_hash
+    assert source["matches_accepted"] is True
+    assert source["canonical_payload"]["schema_version"] == "agileforge.spec.v2"
+    assert source["candidate_envelope"]["candidate_fingerprint"] == (
+        spec.source_specification_candidate_fingerprint
+    )
     assert result["data"]["authority_fingerprint"].startswith("sha256:")
 
 
-def test_authority_status_canonicalizes_structured_spec_disk_hash(
+def test_authority_status_rejects_tampered_candidate_without_file_fallback(
     session: Session,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Pretty structured spec JSON on disk matches canonical accepted hash."""
-    unrelated_cwd = tmp_path / "elsewhere"
-    unrelated_cwd.mkdir()
-    monkeypatch.chdir(unrelated_cwd)
-    artifact = TechnicalSpecArtifact.model_validate(_agileforge_spec_profile_payload())
-    spec_content = canonical_spec_json(artifact)
-    pretty_content = json.dumps(json.loads(spec_content), indent=2)
-    spec_path = tmp_path / "specs" / "app.json"
-    spec_path.parent.mkdir()
-    spec_path.write_text(pretty_content, encoding="utf-8")
+    """Invalid candidate bytes make status stale without raw-file recovery."""
     project = _seed_project(session)
     project_id = require_id(project.project_id, "project_id")
     spec = _seed_spec(
         session,
         project_id=project_id,
-        content=spec_content,
-        content_ref="specs/app.json",
+        content=json.dumps({"title": "tampered-authority-candidate"}),
     )
-    spec.spec_hash = canonical_spec_hash(artifact)
-    session.add(spec)
+    candidate = session.get(
+        SpecificationCandidate,
+        spec.source_specification_candidate_id,
+    )
+    assert candidate is not None
+    candidate.canonical_envelope_json = '{"payload":{},"envelope":{}}'
+    session.add(candidate)
     session.commit()
     _seed_authority(
         session,
@@ -1219,10 +1144,10 @@ def test_authority_status_canonicalizes_structured_spec_disk_hash(
     result = service.status(project_id=project_id)
 
     assert result["ok"] is True
-    assert result["data"]["status"] == "current"
-    assert result["data"]["reason"] == "accepted_authority_current"
-    assert result["data"]["disk_spec"]["sha256"] == canonical_spec_hash(artifact)
-    assert result["data"]["disk_spec"]["matches_accepted"] is True
+    assert result["data"]["status"] == "stale"
+    assert result["data"]["reason"] == "specification_source_invalid"
+    assert result["data"]["specification_source"]["status"] == "invalid"
+    assert result["warnings"][0]["code"] == "SPECIFICATION_SOURCE_INVALID"
 
 
 def test_authority_status_uses_latest_accepted_decision(
@@ -1396,7 +1321,7 @@ def test_authority_status_unsupported_schema_preserves_status_payload_shape(
     assert data["accepted_spec_version_id"] == accepted_spec.spec_version_id
     assert data["authority_id"] == accepted_authority.authority_id
     assert data["pending_authority_id"] == pending_authority.authority_id
-    assert data["disk_spec"]["status"] == "not_configured"
+    assert data["specification_source"]["status"] == "valid"
     assert data["authority_fingerprint"].startswith("sha256:")
     assert data["pending_authority_fingerprint"].startswith("sha256:")
 
@@ -1498,50 +1423,6 @@ def test_authority_status_marks_missing_accepted_spec_stale_without_authority(
     assert result["data"]["latest_spec_version_id"] == latest_spec.spec_version_id
 
 
-def test_authority_status_marks_disk_spec_hash_drift_stale(
-    session: Session,
-    tmp_path: Path,
-) -> None:
-    """Mark accepted authority stale when the repo-root spec file drifts."""
-    accepted_content = _structured_spec_content(
-        artifact_id="SPEC.accepted",
-        title="Accepted Spec",
-        statement="The accepted spec must remain current.",
-    )
-    changed_content = _structured_spec_content(
-        artifact_id="SPEC.changed",
-        title="Changed Spec",
-        statement="The changed spec must be detected.",
-    )
-    spec_path = tmp_path / "specs" / "app.json"
-    spec_path.parent.mkdir()
-    spec_path.write_text(changed_content, encoding="utf-8")
-    project = _seed_project(session)
-    project_id = require_id(project.project_id, "project_id")
-    spec = _seed_spec(
-        session,
-        project_id=project_id,
-        content=accepted_content,
-        content_ref="specs/app.json",
-    )
-    _seed_authority(
-        session,
-        spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
-    )
-    _accept_spec(session, project_id=project_id, spec=spec)
-    service = AuthorityProjectionService(engine=_engine(session), repo_root=tmp_path)
-
-    result = service.status(project_id=project_id)
-
-    assert result["ok"] is True
-    assert result["data"]["status"] == "stale"
-    assert result["data"]["reason"] == "disk_spec_hash_mismatch"
-    assert result["data"]["disk_spec"]["sha256"] == _spec_hash(
-        changed_content
-    ).removeprefix("sha256:")
-    assert result["data"]["disk_spec"]["matches_accepted"] is False
-
-
 def test_authority_status_fingerprint_changes_on_latest_spec_drift(
     session: Session,
     tmp_path: Path,
@@ -1570,31 +1451,17 @@ def test_authority_status_fingerprint_changes_on_latest_spec_drift(
     )
 
 
-def test_authority_status_fingerprint_changes_on_disk_spec_drift(
+def test_authority_status_fingerprint_changes_on_candidate_tamper(
     session: Session,
     tmp_path: Path,
 ) -> None:
-    """Include disk spec hash state in the authority fingerprint."""
-    accepted_content = _structured_spec_content(
-        artifact_id="SPEC.accepted",
-        title="Accepted Spec",
-        statement="The accepted spec must remain current.",
-    )
-    changed_content = _structured_spec_content(
-        artifact_id="SPEC.changed",
-        title="Changed Spec",
-        statement="The changed spec must be detected.",
-    )
-    spec_path = tmp_path / "specs" / "app.json"
-    spec_path.parent.mkdir()
-    spec_path.write_text(accepted_content, encoding="utf-8")
+    """Include canonical candidate validity in the Authority fingerprint."""
     project = _seed_project(session)
     project_id = require_id(project.project_id, "project_id")
     spec = _seed_spec(
         session,
         project_id=project_id,
-        content=accepted_content,
-        content_ref="specs/app.json",
+        content=json.dumps({"title": "fingerprinted-candidate"}),
     )
     _seed_authority(
         session,
@@ -1604,96 +1471,67 @@ def test_authority_status_fingerprint_changes_on_disk_spec_drift(
     service = AuthorityProjectionService(engine=_engine(session), repo_root=tmp_path)
     current_result = service.status(project_id=project_id)
 
-    spec_path.write_text(changed_content, encoding="utf-8")
+    candidate = session.get(
+        SpecificationCandidate,
+        spec.source_specification_candidate_id,
+    )
+    assert candidate is not None
+    candidate.canonical_envelope_json = '{"payload":{},"envelope":{}}'
+    session.add(candidate)
+    session.commit()
     drift_result = service.status(project_id=project_id)
 
     assert current_result["data"]["status"] == "current"
     assert drift_result["data"]["status"] == "stale"
-    assert drift_result["data"]["stale_reason"] == "disk_spec_hash_mismatch"
+    assert drift_result["data"]["stale_reason"] == "specification_source_invalid"
     assert (
         current_result["data"]["authority_fingerprint"]
         != drift_result["data"]["authority_fingerprint"]
     )
 
 
-def test_authority_status_marks_missing_disk_spec_stale_with_warning(
+def test_authority_status_marks_missing_candidate_stale_with_warning(
     session: Session,
     tmp_path: Path,
 ) -> None:
-    """Do not report current when the stored disk spec path is missing."""
+    """Do not report current when the exact registry candidate is missing."""
     project = _seed_project(session)
     project_id = require_id(project.project_id, "project_id")
     spec = _seed_spec(
         session,
         project_id=project_id,
-        content="# Spec\n",
-        content_ref="specs/missing.md",
+        content=json.dumps({"title": "missing-candidate"}),
     )
     _seed_authority(
         session,
         spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
     )
     _accept_spec(session, project_id=project_id, spec=spec)
+    session.exec(cast("Any", text("PRAGMA foreign_keys=OFF")))
+    session.exec(
+        cast(
+            "Any",
+            text(
+                "DELETE FROM specification_candidates "
+                "WHERE specification_candidate_id = :candidate_id"
+            ),
+        ),
+        params={"candidate_id": spec.source_specification_candidate_id},
+    )
+    session.commit()
     service = AuthorityProjectionService(engine=_engine(session), repo_root=tmp_path)
 
     result = service.status(project_id=project_id)
 
     assert result["ok"] is True
     assert result["data"]["status"] == "stale"
-    assert result["data"]["reason"] == "disk_spec_missing"
-    assert result["data"]["stale_reason"] == "disk_spec_missing"
-    assert result["data"]["disk_spec"]["exists"] is False
-    assert result["warnings"][0]["code"] == "DISK_SPEC_MISSING"
-    assert result["warnings"][0]["details"]["resolved_path"] == str(
-        (tmp_path / "specs" / "missing.md").resolve()
-    )
-
-
-def test_authority_status_marks_unreadable_disk_spec_existing_with_warning(
-    session: Session,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Report unreadable disk specs as existing without a usable hash."""
-    spec_content = "# Accepted\n"
-    spec_path = tmp_path / "specs" / "app.md"
-    spec_path.parent.mkdir()
-    spec_path.write_text(spec_content, encoding="utf-8")
-    resolved_spec_path = spec_path.resolve()
-    project = _seed_project(session)
-    project_id = require_id(project.project_id, "project_id")
-    spec = _seed_spec(
-        session,
-        project_id=project_id,
-        content=spec_content,
-        content_ref="specs/app.md",
-    )
-    _seed_authority(
-        session,
-        spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
-    )
-    _accept_spec(session, project_id=project_id, spec=spec)
-    original_read_bytes = Path.read_bytes
-
-    def fake_read_bytes(path: Path) -> bytes:
-        if path == resolved_spec_path:
-            message = "permission denied"
-            raise OSError(message)
-        return original_read_bytes(path)
-
-    monkeypatch.setattr(Path, "read_bytes", fake_read_bytes)
-    service = AuthorityProjectionService(engine=_engine(session), repo_root=tmp_path)
-
-    result = service.status(project_id=project_id)
-
-    assert result["ok"] is True
-    assert result["data"]["status"] == "stale"
-    assert result["data"]["reason"] == "disk_spec_unreadable"
-    assert result["data"]["disk_spec"]["status"] == "unreadable"
-    assert result["data"]["disk_spec"]["exists"] is True
-    assert result["data"]["disk_spec"]["sha256"] is None
-    assert result["data"]["disk_spec"]["matches_accepted"] is None
-    assert result["warnings"][0]["code"] == "DISK_SPEC_UNREADABLE"
+    assert result["data"]["reason"] == "specification_source_missing"
+    assert result["data"]["stale_reason"] == "specification_source_missing"
+    assert result["data"]["specification_source"]["status"] == "missing"
+    assert result["warnings"][0]["code"] == "SPECIFICATION_SOURCE_MISSING"
+    assert result["warnings"][0]["details"][
+        "source_specification_candidate_id"
+    ] == spec.source_specification_candidate_id
 
 
 def test_invariants_requires_accepted_authority_by_default(

@@ -23,6 +23,7 @@ from services.authority_review_projection import (
     AuthorityReviewSnapshot,
     build_authority_review_snapshot_in_session,
 )
+from services.contracts.specification import SPEC_AUTHORITY_COMPILER_PROMPT_HASH
 from services.specs import compiler_service
 from services.specs.compiler_service import (
     compile_spec_authority_for_version_in_session,
@@ -32,6 +33,7 @@ from utils.spec_schemas import (
     Invariant,
     InvariantType,
     RequiredFieldParams,
+    SourceMapEntry,
     SpecAuthorityCompilationSuccess,
 )
 from workflow.clock import FixedClock
@@ -76,20 +78,26 @@ def _success_artifact() -> SpecAuthorityCompilationSuccess:
     return SpecAuthorityCompilationSuccess(
         scope_themes=["Authority graph"],
         invariants=[
-            Invariant(
-                id="INV-0123456789abcdef",
-                type=InvariantType.REQUIRED_FIELD,
-                parameters=RequiredFieldParams(field_name="project_id"),
+                Invariant(
+                    id="INV-0123456789abcdef",
+                    type=InvariantType.REQUIRED_FIELD,
+                    source_item_id="REQ.authority.review",
+                    source_level="MUST",
+                    parameters=RequiredFieldParams(field_name="project_id"),
             )
         ],
         eligible_feature_rules=[],
         gaps=[],
         assumptions=[],
-        source_map=[],
-        compiler_version="3.0.0",
-        prompt_hash=compiler_service.compute_prompt_hash(
-            compiler_service.SPEC_AUTHORITY_COMPILER_INSTRUCTIONS
-        ),
+        source_map=[
+            SourceMapEntry(
+                invariant_id="INV-0123456789abcdef",
+                excerpt="Every Project MUST review compiled authority.",
+                location="REQ.authority.review",
+            )
+        ],
+        compiler_version=compiler_service.SPEC_AUTHORITY_COMPILER_VERSION,
+        prompt_hash=SPEC_AUTHORITY_COMPILER_PROMPT_HASH,
     )
 
 
@@ -102,22 +110,18 @@ def _domain(engine: Engine) -> WorkflowDomain:
 
 
 def _seed_current_spec(engine: Engine, spec_path: Path) -> tuple[int, int, str]:
+    _ = spec_path
     content = json.dumps(
         {
-            "schema_version": "agileforge.spec.v1",
+            "schema_version": "agileforge.spec.v2",
             "artifact_id": "SPEC.authority",
             "title": "Authority workflow",
-            "status": "draft",
-            "version": "0.1",
-            "created_at": "2026-08-02",
-            "updated_at": "2026-08-02",
             "summary": "Authority workflow scope.",
             "problem_statement": "Authority must be reviewed from durable facts.",
             "items": [
                 {
                     "id": "REQ.authority.review",
                     "type": "REQ",
-                    "status": "accepted",
                     "level": "MUST",
                     "title": "Review authority",
                     "statement": "Every Project MUST review compiled authority.",
@@ -128,15 +132,8 @@ def _seed_current_spec(engine: Engine, spec_path: Path) -> tuple[int, int, str]:
             "relations": [],
             "controlled_terms": [],
             "external_references": [],
-            "rendering": {
-                "markdown_profile": "agileforge.spec_markdown.v1",
-                "rendered_markdown_sha256": None,
-            },
         }
     )
-    normalized = compiler_service.normalize_spec_content_for_registry(content)
-    content = normalized.content
-    spec_path.write_text(content, encoding="utf-8")
     with Session(engine) as session:
         project = Project(name=f"Authority {spec_path.stem}")
         session.add(project)
@@ -146,12 +143,10 @@ def _seed_current_spec(engine: Engine, spec_path: Path) -> tuple[int, int, str]:
             session,
             project_id=project.project_id,
             content=content,
-            content_ref=str(spec_path),
             recorded_at=EVALUATED_AT - timedelta(minutes=1),
         )
         spec = lineage.spec
         assert spec.spec_version_id is not None
-        assert spec.spec_hash == normalized.spec_hash
         return project.project_id, spec.spec_version_id, spec.spec_hash
 
 
@@ -192,9 +187,7 @@ def _install_fake_compiler(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         compiler_service,
         "_invoke_compiler_for_version",
-        lambda *_args, **_kwargs: compiler_service._CompilerInvocationResult(
-            success=_success_artifact()
-        ),
+        lambda *_args, **_kwargs: _success_artifact(),
     )
 
 
@@ -252,23 +245,35 @@ def _approve_replacement_spec(
 ) -> tuple[int, str]:
     old_spec = session.get(SpecRegistry, old_spec_version_id)
     assert old_spec is not None
-    payload = json.loads(old_spec.content)
-    payload["artifact_id"] = "SPEC.authority.replacement"
-    payload["version"] = "0.2"
-    payload["summary"] = "Replacement authority workflow scope."
-    normalized = compiler_service.normalize_spec_content_for_registry(
-        json.dumps(payload)
-    )
+    payload = {
+        "schema_version": "agileforge.spec.v2",
+        "artifact_id": "SPEC.authority.replacement",
+        "title": "Replacement authority workflow",
+        "summary": "Replacement authority workflow scope.",
+        "problem_statement": "Authority must follow the replacement payload.",
+        "items": [
+            {
+                "id": "REQ.authority.review",
+                "type": "REQ",
+                "level": "MUST",
+                "title": "Review replacement authority",
+                "statement": "Every Project MUST review replacement authority.",
+                "verification": "system-test",
+                "acceptance": ["A terminal replacement review is stored."],
+            }
+        ],
+        "relations": [],
+        "controlled_terms": [],
+        "external_references": [],
+    }
     lineage = seed_accepted_specification(
         session,
         project_id=project_id,
-        content=normalized.content,
-        content_ref=None,
+        content=json.dumps(payload),
         recorded_at=EVALUATED_AT + timedelta(minutes=2),
     )
     replacement = lineage.spec
     assert replacement.spec_version_id is not None
-    assert replacement.spec_hash == normalized.spec_hash
     return replacement.spec_version_id, replacement.spec_hash
 
 
@@ -539,6 +544,19 @@ def test_decision_binds_exact_pending_authority_and_review_fingerprint(
         assert isinstance(review, AuthorityReviewSnapshot)
         assert review.pending_authority_id is not None
         assert review.authority_fingerprint is not None
+        assert review.source_content is not None
+        assert "## Candidate Envelope" in review.source_content
+        assert "### Source Manifest" in review.source_content
+        assert review.structured_spec_snapshot is not None
+        assert review.structured_spec_snapshot["format"] == "agileforge.spec.v2"
+        assert review.structured_spec_snapshot["canonical_payload"][
+            "schema_version"
+        ] == "agileforge.spec.v2"
+        reviewed_spec = session.get(SpecRegistry, spec_version_id)
+        assert reviewed_spec is not None
+        assert review.structured_spec_snapshot["candidate_envelope"][
+            "candidate_fingerprint"
+        ] == reviewed_spec.source_specification_candidate_fingerprint
 
     stale = domain.transition(
         DecideAuthority(

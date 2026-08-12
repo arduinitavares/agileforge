@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from json import JSONDecodeError
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, cast
 
 from sqlmodel import Session, select
@@ -15,6 +13,7 @@ from sqlmodel import Session, select
 from models import db as model_db
 from models.authority_curation import AuthorityCurationAttempt, AuthorityFeedbackAttempt
 from models.core import Project
+from models.product_definition import SpecificationCandidate
 from models.specs import (
     CompiledSpecAuthority,
     SpecAuthorityAcceptance,
@@ -35,19 +34,23 @@ from services.specs.authority_selection import (
 from services.specs.authority_selection import (
     pending_authority_fingerprint as canonical_pending_authority_fingerprint,
 )
+from services.specs.candidate_contract import (
+    SpecificationCandidateEnvelope,
+    load_candidate_contract,
+)
 from services.specs.compiler_service import (
     CompiledAuthorityReadFailure,
     compiled_authority_read_failure,
     load_compiled_artifact,
 )
-from services.specs.profile_content import (
-    SpecContentNormalizationError,
-    normalize_spec_content_for_registry,
-)
+from utils.agileforge_spec_profile_v2 import canonical_spec_json
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from sqlalchemy.engine import Engine
 
+    from utils.agileforge_spec_profile_v2 import SpecificationPayload
     from utils.spec_schemas import SpecAuthorityCompilationSuccess
 
 JsonDict = dict[str, Any]
@@ -85,7 +88,7 @@ class _StatusContext:
     project_id: int
     project: Project
     selection: _AuthoritySelection
-    disk_spec: JsonDict
+    specification_source: JsonDict
     classification: _StatusClassification
     invariant_count: int
     feedback_curation: JsonDict
@@ -220,31 +223,35 @@ def _spec_version_not_found_error(project_id: int, spec_version_id: int) -> Json
     )
 
 
-def _disk_spec_warning(disk_spec: JsonDict) -> WorkbenchWarning | None:
-    """Return a structured warning for missing or unreadable disk specs."""
-    status = disk_spec["status"]
+def _specification_source_warning(
+    specification_source: JsonDict,
+) -> WorkbenchWarning | None:
+    """Return a warning when the exact accepted candidate cannot be loaded."""
+    status = specification_source["status"]
     if status == "missing":
         return WorkbenchWarning(
-            code="DISK_SPEC_MISSING",
-            message="Stored specification path could not be found on disk.",
+            code="SPECIFICATION_SOURCE_MISSING",
+            message="The registry's exact specification candidate is unavailable.",
             details={
-                "path": disk_spec["path"],
-                "resolved_path": disk_spec["resolved_path"],
+                "spec_version_id": specification_source["spec_version_id"],
+                "source_specification_candidate_id": specification_source[
+                    "source_specification_candidate_id"
+                ],
             },
-            remediation=["Restore the specification file or update the stored path."],
+            remediation=["Restore the exact accepted specification candidate."],
         )
-    if status == "unreadable":
+    if status == "invalid":
         return WorkbenchWarning(
-            code="DISK_SPEC_UNREADABLE",
-            message="Stored specification path could not be read.",
+            code="SPECIFICATION_SOURCE_INVALID",
+            message="The registry's specification candidate is invalid.",
             details={
-                "path": disk_spec["path"],
-                "resolved_path": disk_spec["resolved_path"],
-                "error": disk_spec["error"],
+                "spec_version_id": specification_source["spec_version_id"],
+                "source_specification_candidate_id": specification_source[
+                    "source_specification_candidate_id"
+                ],
+                "error": specification_source["error"],
             },
-            remediation=[
-                "Check file permissions or update the stored specification path."
-            ],
+            remediation=["Restore the exact canonical candidate envelope."],
         )
     return None
 
@@ -334,7 +341,7 @@ def _authority_status_fingerprint(
             "latest_spec": _spec_fingerprint_payload(selection.latest_spec),
             "accepted": _accepted_fingerprint_payload(accepted),
             "compiled": _authority_fingerprint_payload(authority),
-            "disk_spec": context.disk_spec,
+            "specification_source": context.specification_source,
             "invariant_count": context.invariant_count,
         }
     )
@@ -363,7 +370,21 @@ def _spec_fingerprint_payload(spec: SpecRegistry | None) -> JsonDict | None:
         "project_id": spec.project_id,
         "spec_hash": spec.spec_hash,
         "status": spec.status,
-        "content_ref": spec.content_ref,
+        "source_specification_candidate_id": (
+            spec.source_specification_candidate_id
+        ),
+        "source_specification_candidate_fingerprint": (
+            spec.source_specification_candidate_fingerprint
+        ),
+        "source_vision_artifact_id": spec.source_vision_artifact_id,
+        "source_vision_fingerprint": spec.source_vision_fingerprint,
+        "source_product_goal_artifact_id": (
+            spec.source_product_goal_artifact_id
+        ),
+        "source_product_goal_fingerprint": (
+            spec.source_product_goal_fingerprint
+        ),
+        "supersedes_spec_version_id": spec.supersedes_spec_version_id,
         "created_at": spec.created_at,
         "approved_at": spec.approved_at,
     }
@@ -375,15 +396,15 @@ def _resolve_status(
     project_id: int,
     project: Project,
     selection: _AuthoritySelection,
-    disk_spec: JsonDict,
+    specification_source: JsonDict,
 ) -> JsonDict:
-    """Classify status according to accepted, compiled, latest, and disk state."""
+    """Classify status using accepted, compiled, and candidate-source state."""
     data, warnings = _build_status_data(
         session=session,
         project_id=project_id,
         project=project,
         selection=selection,
-        disk_spec=disk_spec,
+        specification_source=specification_source,
     )
     return _success(data, warnings)
 
@@ -394,14 +415,17 @@ def _build_status_data(
     project_id: int,
     project: Project,
     selection: _AuthoritySelection,
-    disk_spec: JsonDict,
+    specification_source: JsonDict,
 ) -> tuple[JsonDict, list[WorkbenchWarning]]:
     """Build the stable status payload and warnings."""
-    classification = _classify_status(selection=selection, disk_spec=disk_spec)
+    classification = _classify_status(
+        selection=selection,
+        specification_source=specification_source,
+    )
     invariant_count, warnings = _invariant_count(selection.authority)
-    disk_warning = _disk_spec_warning(disk_spec)
-    if disk_warning is not None:
-        warnings.append(disk_warning)
+    source_warning = _specification_source_warning(specification_source)
+    if source_warning is not None:
+        warnings.append(source_warning)
     feedback_curation = _feedback_curation_for_selection(
         session,
         project_id=project_id,
@@ -411,7 +435,7 @@ def _build_status_data(
         project_id=project_id,
         project=project,
         selection=selection,
-        disk_spec=disk_spec,
+        specification_source=specification_source,
         classification=classification,
         invariant_count=invariant_count,
         feedback_curation=feedback_curation,
@@ -591,7 +615,7 @@ def _latest_feedback_and_curation(
 def _classify_status(
     *,
     selection: _AuthoritySelection,
-    disk_spec: JsonDict,
+    specification_source: JsonDict,
 ) -> _StatusClassification:
     """Return the current authority status and reason."""
     if (
@@ -634,8 +658,12 @@ def _classify_status(
         status = "stale"
         reason = "latest_spec_hash_mismatch"
         stale_reason = reason
-    elif (disk_classification := _disk_stale_classification(disk_spec)) is not None:
-        return disk_classification
+    elif (
+        source_classification := _specification_source_stale_classification(
+            specification_source
+        )
+    ) is not None:
+        return source_classification
     elif not selection.authority_trusted:
         status = "stale"
         reason = "accepted_authority_identity_mismatch"
@@ -670,15 +698,17 @@ def _decision_sort_key(decision: SpecAuthorityAcceptance) -> tuple[datetime, int
     return decided_at, decision.id or 0
 
 
-def _disk_stale_classification(disk_spec: JsonDict) -> _StatusClassification | None:
-    """Return disk-spec stale classification when disk state invalidates authority."""
+def _specification_source_stale_classification(
+    specification_source: JsonDict,
+) -> _StatusClassification | None:
+    """Return stale classification for missing or invalid canonical source."""
     reason: str | None = None
-    if disk_spec["status"] == "missing":
-        reason = "disk_spec_missing"
-    elif disk_spec["status"] == "unreadable":
-        reason = "disk_spec_unreadable"
-    elif disk_spec["matches_accepted"] is False:
-        reason = "disk_spec_hash_mismatch"
+    if specification_source["status"] == "missing":
+        reason = "specification_source_missing"
+    elif specification_source["status"] == "invalid":
+        reason = "specification_source_invalid"
+    elif specification_source["matches_accepted"] is False:
+        reason = "specification_source_hash_mismatch"
     if reason is None:
         return None
     return _StatusClassification(status="stale", reason=reason, stale_reason=reason)
@@ -751,7 +781,7 @@ def _status_data(context: _StatusContext) -> JsonDict:
         "pending_authority_fingerprint": _pending_authority_fingerprint(
             pending_authority
         ),
-        "disk_spec": context.disk_spec,
+        "specification_source": context.specification_source,
         "authority_fingerprint": _authority_status_fingerprint(context),
     }
     data.update(context.feedback_curation)
@@ -920,9 +950,9 @@ class AuthorityProjectionService:
         engine: Engine | None = None,
         repo_root: Path | None = None,
     ) -> None:
-        """Initialize the projection with a read-only target engine and repo root."""
+        """Initialize the projection with a read-only target engine."""
         self._engine = engine or model_db.get_engine()
-        self._repo_root = repo_root or Path(__file__).resolve().parents[2]
+        _ = repo_root
 
     def status(self, *, project_id: int) -> JsonDict:
         """Return authority status for a project."""
@@ -932,8 +962,9 @@ class AuthorityProjectionService:
                 return _project_not_found_error(AUTHORITY_STATUS_COMMAND, project_id)
 
             selection = _load_authority_selection(session, project_id=project_id)
-            disk_spec = self._resolve_spec_path(
-                _status_spec_path(selection=selection),
+            specification_source = _resolve_specification_source(
+                session=session,
+                spec=_status_spec(selection=selection),
                 accepted_hash=(
                     selection.accepted.spec_hash
                     if selection.accepted is not None
@@ -945,7 +976,7 @@ class AuthorityProjectionService:
                 project_id=project_id,
                 project=project,
                 selection=selection,
-                disk_spec=disk_spec,
+                specification_source=specification_source,
             )
             unusable = _first_unusable_status_authority(
                 selection,
@@ -989,81 +1020,6 @@ class AuthorityProjectionService:
                 project_id=project_id,
                 spec_version_id=spec_version_id,
             )
-
-    def _resolve_spec_path(
-        self,
-        value: str | None,
-        *,
-        accepted_hash: str | None,
-    ) -> JsonDict:
-        """Resolve and hash a disk spec path relative to the repository root."""
-        if not value:
-            return _disk_spec_payload(
-                value,
-                None,
-                None,
-                accepted_hash,
-            )
-
-        path = Path(value)
-        candidate = path if path.is_absolute() else self._repo_root / path
-        resolved = candidate.resolve()
-        if not resolved.is_file():
-            return _disk_spec_payload(
-                value,
-                resolved,
-                None,
-                accepted_hash,
-                status="missing",
-            )
-
-        try:
-            raw_bytes = resolved.read_bytes()
-        except OSError as exc:
-            payload = _disk_spec_payload(
-                value,
-                resolved,
-                None,
-                accepted_hash,
-                status="unreadable",
-            )
-            payload["error"] = str(exc)
-            return payload
-        try:
-            raw_content = raw_bytes.decode("utf-8", errors="strict")
-        except UnicodeDecodeError as exc:
-            payload = _disk_spec_payload(
-                value,
-                resolved,
-                None,
-                accepted_hash,
-                status="unreadable",
-            )
-            payload["error"] = str(exc)
-            return payload
-        raw_digest = _legacy_sha256(raw_bytes)
-        try:
-            normalized = normalize_spec_content_for_registry(raw_content)
-        except SpecContentNormalizationError as exc:
-            payload = _disk_spec_payload(
-                value,
-                resolved,
-                None,
-                accepted_hash,
-                status="unreadable",
-            )
-            payload["error"] = str(exc)
-            return payload
-        return _disk_spec_payload(
-            value,
-            resolved,
-            _display_disk_hash(
-                raw_digest=raw_digest,
-                normalized_hash=normalized.spec_hash,
-            ),
-            accepted_hash,
-            status="readable",
-        )
 
     def _select_invariants_selection(
         self,
@@ -1178,40 +1134,178 @@ class AuthorityProjectionService:
         )
 
 
-def _status_spec_path(
+def _status_spec(*, selection: _AuthoritySelection) -> SpecRegistry | None:
+    """Return the registry row whose exact candidate source status must inspect."""
+    return selection.accepted_spec or selection.latest_spec
+
+
+def _resolve_specification_source(
     *,
-    selection: _AuthoritySelection,
-) -> str | None:
-    """Return the disk path to inspect for status drift."""
-    if selection.accepted_spec is not None and selection.accepted_spec.content_ref:
-        return selection.accepted_spec.content_ref
-    if selection.latest_spec is not None:
-        return selection.latest_spec.content_ref
-    return None
-
-
-def _disk_spec_payload(
-    raw_path: str | None,
-    resolved: Path | None,
-    digest: str | None,
+    session: Session,
+    spec: SpecRegistry | None,
     accepted_hash: str | None,
-    *,
-    status: str = "not_configured",
 ) -> JsonDict:
-    """Return a stable disk spec hash payload."""
-    exists = status in {"readable", "unreadable"}
+    """Resolve the exact registry candidate and validate its canonical contract."""
+    if spec is None:
+        return _specification_source_payload(
+            spec=None,
+            accepted_hash=accepted_hash,
+            status="not_available",
+        )
+    candidate = session.exec(
+        select(SpecificationCandidate).where(
+            SpecificationCandidate.project_id == spec.project_id,
+            SpecificationCandidate.specification_candidate_id
+            == spec.source_specification_candidate_id,
+            SpecificationCandidate.candidate_fingerprint
+            == spec.source_specification_candidate_fingerprint,
+            SpecificationCandidate.payload_fingerprint == spec.spec_hash,
+        )
+    ).one_or_none()
+    if candidate is None:
+        return _specification_source_payload(
+            spec=spec,
+            accepted_hash=accepted_hash,
+            status="missing",
+        )
+    try:
+        payload, envelope = load_candidate_contract(
+            candidate.canonical_envelope_json,
+            expected_candidate_fingerprint=candidate.candidate_fingerprint,
+        )
+    except (TypeError, ValueError) as exc:
+        return _specification_source_payload(
+            spec=spec,
+            accepted_hash=accepted_hash,
+            status="invalid",
+            candidate=candidate,
+            error=str(exc),
+        )
+    if not _candidate_matches_registry(
+        session=session,
+        spec=spec,
+        candidate=candidate,
+        envelope=envelope,
+    ):
+        return _specification_source_payload(
+            spec=spec,
+            accepted_hash=accepted_hash,
+            status="invalid",
+            candidate=candidate,
+            error="registry, candidate, and canonical envelope identities differ",
+        )
+    return _specification_source_payload(
+        spec=spec,
+        accepted_hash=accepted_hash,
+        status="valid",
+        candidate=candidate,
+        payload=payload,
+        envelope=envelope,
+    )
+
+
+def _candidate_matches_registry(
+    *,
+    session: Session,
+    spec: SpecRegistry,
+    candidate: SpecificationCandidate,
+    envelope: SpecificationCandidateEnvelope,
+) -> bool:
+    """Return whether registry, candidate, envelope, and amendment base agree."""
+    if not (
+        candidate.candidate_kind == envelope.candidate_kind.value
+        and candidate.payload_fingerprint
+        == spec.spec_hash
+        == envelope.payload_fingerprint
+        and candidate.source_manifest_fingerprint
+        == envelope.source_manifest_fingerprint
+        and candidate.producer_input_fingerprint
+        == envelope.producer_input_fingerprint
+        and candidate.rendered_view_fingerprint
+        == envelope.review_view_fingerprint
+        and candidate.workflow_node_attempt_id == envelope.workflow_node_attempt_id
+        and candidate.attempt_fingerprint == envelope.attempt_fingerprint
+        and candidate.vision_artifact_id
+        == spec.source_vision_artifact_id
+        == envelope.accepted_vision_id
+        and candidate.vision_fingerprint
+        == spec.source_vision_fingerprint
+        == envelope.accepted_vision_fingerprint
+        and candidate.product_goal_artifact_id
+        == spec.source_product_goal_artifact_id
+        == envelope.accepted_product_goal_id
+        and candidate.product_goal_fingerprint
+        == spec.source_product_goal_fingerprint
+        == envelope.accepted_product_goal_fingerprint
+        and candidate.base_spec_version_id == envelope.base_specification_id
+        and candidate.base_spec_hash == envelope.base_payload_fingerprint
+        and spec.supersedes_spec_version_id == envelope.base_specification_id
+    ):
+        return False
+    if envelope.base_specification_id is None:
+        return True
+    base = session.get(SpecRegistry, envelope.base_specification_id)
+    return bool(
+        base is not None
+        and base.project_id == spec.project_id
+        and base.spec_hash == envelope.base_payload_fingerprint
+    )
+
+
+def _specification_source_payload(  # noqa: PLR0913
+    *,
+    spec: SpecRegistry | None,
+    accepted_hash: str | None,
+    status: str,
+    candidate: SpecificationCandidate | None = None,
+    payload: SpecificationPayload | None = None,
+    envelope: SpecificationCandidateEnvelope | None = None,
+    error: str | None = None,
+) -> JsonDict:
+    """Return stable canonical specification-source status data."""
+    payload_fingerprint = (
+        envelope.payload_fingerprint
+        if envelope is not None
+        else (candidate.payload_fingerprint if candidate is not None else None)
+    )
     return {
-        "path": raw_path,
-        "resolved_path": str(resolved) if resolved is not None else None,
-        "exists": exists,
         "status": status,
-        "sha256": digest,
+        "spec_version_id": None if spec is None else spec.spec_version_id,
+        "source_specification_candidate_id": (
+            None if spec is None else spec.source_specification_candidate_id
+        ),
+        "candidate_fingerprint": (
+            envelope.candidate_fingerprint
+            if envelope is not None
+            else (
+                candidate.candidate_fingerprint
+                if candidate is not None
+                else (
+                    None
+                    if spec is None
+                    else spec.source_specification_candidate_fingerprint
+                )
+            )
+        ),
+        "payload_fingerprint": payload_fingerprint,
+        "source_manifest_fingerprint": (
+            None if envelope is None else envelope.source_manifest_fingerprint
+        ),
+        "review_view_fingerprint": (
+            None if envelope is None else envelope.review_view_fingerprint
+        ),
         "matches_accepted": (
-            _normalize_hash(digest) == _normalize_hash(accepted_hash)
-            if digest is not None and accepted_hash
+            _normalize_hash(payload_fingerprint) == _normalize_hash(accepted_hash)
+            if payload_fingerprint is not None and accepted_hash is not None
             else None
         ),
-        "error": None,
+        "canonical_payload": (
+            None if payload is None else json.loads(canonical_spec_json(payload))
+        ),
+        "candidate_envelope": (
+            None if envelope is None else envelope.model_dump(mode="json")
+        ),
+        "error": error,
     }
 
 
@@ -1223,18 +1317,6 @@ def _normalize_hash(value: str | None) -> str | None:
     if stripped.startswith("sha256:"):
         return f"sha256:{stripped.removeprefix('sha256:')}"
     return f"sha256:{stripped}"
-
-
-def _legacy_sha256(data: bytes) -> str:
-    """Return the legacy unprefixed disk SHA-256 digest."""
-    return hashlib.sha256(data).hexdigest()
-
-
-def _display_disk_hash(*, raw_digest: str, normalized_hash: str) -> str:
-    """Preserve legacy disk hash shape unless structured canonicalization differs."""
-    if _normalize_hash(raw_digest) == _normalize_hash(normalized_hash):
-        return raw_digest
-    return _normalize_hash(normalized_hash) or normalized_hash
 
 
 def _invariants_success(

@@ -14,6 +14,7 @@ from pydantic import ValidationError
 from sqlmodel import Session, col, select
 
 from models.core import Project
+from models.product_definition import SpecificationCandidate
 from models.specs import SpecRegistry
 from services.agent_workbench.authority_projection import (
     _iso_z,
@@ -23,6 +24,11 @@ from services.agent_workbench.authority_projection import (
 )
 from services.agent_workbench.envelope import error_envelope
 from services.agent_workbench.error_codes import ErrorCode, workbench_error
+from services.specs.candidate_contract import (
+    SpecificationCandidateEnvelope,
+    load_candidate_contract,
+    render_candidate_review_markdown,
+)
 from services.specs.compiler_service import (
     compiled_authority_read_failure,
     compiled_authority_schema_unsupported_details,
@@ -31,16 +37,11 @@ from services.specs.compiler_service import (
 from services.specs.compiler_service import (
     load_compiled_artifact as load_stored_compiled_artifact,
 )
-from services.specs.profile_content import (
-    SpecContentNormalizationError,
-    normalize_spec_content_for_registry,
-)
 from utils import spec_authority_ir as authority_ir
-from utils.agileforge_spec_profile import (
-    TechnicalSpecArtifact,
+from utils.agileforge_spec_profile_v2 import (
+    SpecificationPayload,
     canonical_spec_hash,
-    render_markdown,
-    rendered_markdown_hash,
+    canonical_spec_json,
 )
 from utils.spec_authority_assumptions import (
     AUTHORITY_ASSUMPTION_ADAPTER,
@@ -51,7 +52,6 @@ from utils.spec_authority_assumptions import (
     ItemStatusAssumptionClaim,
     StructuredAuthorityAssumption,
     canonical_assumption_key,
-    ground_assumption,
     is_structured_assumption,
     render_assumption_text,
 )
@@ -95,6 +95,9 @@ STRUCTURED_SPEC_ITEM_PREFIXES: Final[tuple[str, ...]] = (
     "EXAMPLE.",
     "OPEN_QUESTION.",
 )
+_V2_NORMATIVE_TYPES: Final[frozenset[str]] = frozenset(
+    {"REQ", "QUALITY", "CONSTRAINT", "INTERFACE", "DATA"}
+)
 
 
 @dataclass(frozen=True)
@@ -103,6 +106,8 @@ class _SourceLoad:
 
     raw_bytes: bytes
     text: str
+    payload: SpecificationPayload
+    envelope: SpecificationCandidateEnvelope
 
 
 @dataclass(frozen=True)
@@ -381,23 +386,118 @@ def _spec_file_invalid_error(reason: str) -> JsonDict:
     )
 
 
-def _load_source_from_registry(spec: SpecRegistry) -> _SourceLoad | JsonDict:
-    """Normalize the exact approved specification stored in the registry."""
-    try:
-        normalized = normalize_spec_content_for_registry(spec.content)
-    except SpecContentNormalizationError as exc:
-        return _spec_file_invalid_error(str(exc))
-    content_hash = _normalize_sha256_hash(normalized.spec_hash)
-    registry_hash = _normalize_sha256_hash(spec.spec_hash)
-    if content_hash != registry_hash:
-        return _authority_source_changed_error(
-            registry_hash=registry_hash,
-            content_hash=content_hash,
+def _authority_source_unavailable_error(spec: SpecRegistry) -> JsonDict:
+    """Return a closed error when an exact registry source cannot be resolved."""
+    return error_envelope(
+        command=AUTHORITY_REVIEW_COMMAND,
+        error=workbench_error(
+            ErrorCode.AUTHORITY_SOURCE_UNAVAILABLE,
+            message="Approved specification candidate source is unavailable.",
+            details={
+                "project_id": spec.project_id,
+                "spec_version_id": spec.spec_version_id,
+                "source_specification_candidate_id": (
+                    spec.source_specification_candidate_id
+                ),
+                "source_specification_candidate_fingerprint": (
+                    spec.source_specification_candidate_fingerprint
+                ),
+            },
+            remediation=[
+                "Restore the exact accepted candidate before reviewing Authority."
+            ],
+        ),
+    )
+
+
+def _load_source_from_registry(
+    session: Session,
+    spec: SpecRegistry,
+) -> _SourceLoad | JsonDict:
+    """Load the exact canonical v2 candidate named by the registry."""
+    candidate = session.exec(
+        select(SpecificationCandidate).where(
+            SpecificationCandidate.project_id == spec.project_id,
+            SpecificationCandidate.specification_candidate_id
+            == spec.source_specification_candidate_id,
+            SpecificationCandidate.candidate_fingerprint
+            == spec.source_specification_candidate_fingerprint,
+            SpecificationCandidate.payload_fingerprint == spec.spec_hash,
         )
-    source_bytes = normalized.content.encode("utf-8")
+    ).one_or_none()
+    if candidate is None:
+        return _authority_source_unavailable_error(spec)
+    try:
+        payload, envelope = load_candidate_contract(
+            candidate.canonical_envelope_json,
+            expected_candidate_fingerprint=candidate.candidate_fingerprint,
+        )
+    except (TypeError, ValueError) as exc:
+        return _spec_file_invalid_error(str(exc))
+    if not _candidate_matches_registry(
+        session=session,
+        spec=spec,
+        candidate=candidate,
+        envelope=envelope,
+    ):
+        return _authority_source_changed_error(
+            registry_hash=_normalize_sha256_hash(spec.spec_hash),
+            content_hash=_normalize_sha256_hash(candidate.payload_fingerprint),
+        )
+    review_markdown = render_candidate_review_markdown(payload, envelope)
     return _SourceLoad(
-        raw_bytes=source_bytes,
-        text=normalized.content,
+        raw_bytes=review_markdown.encode("utf-8"),
+        text=review_markdown,
+        payload=payload,
+        envelope=envelope,
+    )
+
+
+def _candidate_matches_registry(
+    *,
+    session: Session,
+    spec: SpecRegistry,
+    candidate: SpecificationCandidate,
+    envelope: SpecificationCandidateEnvelope,
+) -> bool:
+    """Return whether registry, candidate, envelope, and amendment base agree."""
+    if not (
+        candidate.candidate_kind == envelope.candidate_kind.value
+        and candidate.payload_fingerprint
+        == spec.spec_hash
+        == envelope.payload_fingerprint
+        and candidate.source_manifest_fingerprint
+        == envelope.source_manifest_fingerprint
+        and candidate.producer_input_fingerprint
+        == envelope.producer_input_fingerprint
+        and candidate.rendered_view_fingerprint
+        == envelope.review_view_fingerprint
+        and candidate.workflow_node_attempt_id == envelope.workflow_node_attempt_id
+        and candidate.attempt_fingerprint == envelope.attempt_fingerprint
+        and candidate.vision_artifact_id
+        == spec.source_vision_artifact_id
+        == envelope.accepted_vision_id
+        and candidate.vision_fingerprint
+        == spec.source_vision_fingerprint
+        == envelope.accepted_vision_fingerprint
+        and candidate.product_goal_artifact_id
+        == spec.source_product_goal_artifact_id
+        == envelope.accepted_product_goal_id
+        and candidate.product_goal_fingerprint
+        == spec.source_product_goal_fingerprint
+        == envelope.accepted_product_goal_fingerprint
+        and candidate.base_spec_version_id == envelope.base_specification_id
+        and candidate.base_spec_hash == envelope.base_payload_fingerprint
+        and spec.supersedes_spec_version_id == envelope.base_specification_id
+    ):
+        return False
+    if envelope.base_specification_id is None:
+        return True
+    base = session.get(SpecRegistry, envelope.base_specification_id)
+    return bool(
+        base is not None
+        and base.project_id == spec.project_id
+        and base.spec_hash == envelope.base_payload_fingerprint
     )
 
 
@@ -463,7 +563,7 @@ def _build_authority_review_snapshot(
     spec = inputs.spec
     authority = inputs.authority
     include_spec = inputs.include_spec
-    source = _load_source_from_registry(spec)
+    source = _load_source_from_registry(inputs.session, spec)
     if not isinstance(source, _SourceLoad):
         return cast("JsonDict", source)
     load_result = load_stored_compiled_artifact(authority)
@@ -480,45 +580,30 @@ def _build_authority_review_snapshot(
     )
     content_truncated = not content_included and len(source.raw_bytes) > source_limit
     compiled_artifact = _load_compiled_artifact(authority)
-    artifact, authority_evidence, classification_evidence = _authority_artifact_payload(
-        authority
+    artifact, _authority_evidence, _classification_evidence = (
+        _authority_artifact_payload(authority)
     )
     artifact_shape_findings = _compiled_artifact_shape_findings(
         authority,
         project_id=project_id,
     )
-    structured_artifact = _structured_artifact_from_text(source.text)
-    if structured_artifact is not None:
-        outline: list[JsonDict] = []
-        coverage_summary: JsonDict = {
-            "covered_sections": 0,
-            "partial_sections": 0,
-            "uncovered_sections": 0,
-            "intentionally_classified_sections": 0,
-            "unclassified_content_blocks": 0,
-            "omission_assessment": "complete",
-        }
-        diagnostics: list[JsonDict] = []
-    else:
-        outline, coverage_summary, diagnostics = _coverage_payload(
-            text=source.text,
-            authority_evidence=authority_evidence,
-            classification_evidence=classification_evidence,
-        )
+    outline: list[JsonDict] = []
+    coverage_summary: JsonDict = {
+        "covered_sections": 0,
+        "partial_sections": 0,
+        "uncovered_sections": 0,
+        "intentionally_classified_sections": 0,
+        "unclassified_content_blocks": 0,
+        "omission_assessment": "complete",
+    }
+    diagnostics: list[JsonDict] = []
     ir_payload = _authority_ir_payload(
         diagnostics=diagnostics,
         artifact=artifact,
         compiled_artifact=compiled_artifact,
-        structured_artifact=structured_artifact,
+        specification_payload=source.payload,
         artifact_shape_findings=artifact_shape_findings,
     )
-    if structured_artifact is None:
-        artifact = _artifact_with_coverage_gaps(
-            artifact,
-            outline=outline,
-            coverage_summary=coverage_summary,
-            diagnostics=diagnostics,
-        )
     artifact = _artifact_with_review_findings(
         artifact,
         review_findings=ir_payload["review_findings"],
@@ -569,7 +654,10 @@ def _build_authority_review_snapshot(
         content_truncated=content_truncated,
         source_content=source.text if content_included else None,
         source_content_sha256=source_content_sha256,
-        structured_spec_snapshot=_structured_spec_snapshot(source.text),
+        structured_spec_snapshot=_structured_spec_snapshot(
+            source.payload,
+            source.envelope,
+        ),
         pending_spec_version_id=authority.spec_version_id,
         compiled_at=_iso_z(authority.compiled_at),
         artifact=artifact,
@@ -598,18 +686,18 @@ def _authority_ir_payload(
     diagnostics: Sequence[Mapping[str, Any]],
     artifact: Mapping[str, Any],
     compiled_artifact: SpecAuthorityCompilationSuccess | None,
-    structured_artifact: TechnicalSpecArtifact | None,
+    specification_payload: SpecificationPayload,
     artifact_shape_findings: Sequence[Mapping[str, Any]],
 ) -> JsonDict:
     """Build public review metadata without host semantic candidate coverage."""
     diagnostic_findings = _diagnostic_review_findings(diagnostics)
     source_ref_findings = _structured_source_ref_findings(
         artifact=artifact,
-        spec_artifact=structured_artifact,
+        specification_payload=specification_payload,
     )
     assumption_findings = _compiled_assumption_findings(
         artifact=compiled_artifact,
-        spec_artifact=structured_artifact,
+        specification_payload=specification_payload,
     )
     rendered_findings = [
         *[_finding_payload(finding) for finding in diagnostic_findings],
@@ -719,28 +807,21 @@ def _finding_payload(finding: authority_ir.AuthorityReviewFinding) -> JsonDict:
     return asdict(finding)
 
 
-def _structured_artifact_from_text(text: str) -> TechnicalSpecArtifact | None:
-    try:
-        return TechnicalSpecArtifact.model_validate_json(text)
-    except (ValueError, ValidationError):
-        return None
-
-
-def _structured_spec_snapshot(spec_content: str) -> JsonDict | None:
-    """Return metadata for canonical AgileForge spec JSON, if present."""
-    artifact = _structured_artifact_from_text(spec_content)
-    if artifact is None:
-        return None
-
-    rendered_markdown = render_markdown(artifact)
+def _structured_spec_snapshot(
+    payload: SpecificationPayload,
+    envelope: SpecificationCandidateEnvelope,
+) -> JsonDict:
+    """Return complete canonical v2 payload and candidate review evidence."""
     return {
-        "format": artifact.schema_version,
-        "artifact_id": artifact.artifact_id,
-        "canonical_spec_sha256": canonical_spec_hash(artifact),
-        "render_profile": artifact.rendering.markdown_profile,
-        "rendered_markdown_sha256": rendered_markdown_hash(rendered_markdown),
-        "item_count": len(artifact.items),
-        "relation_count": len(artifact.relations),
+        "format": payload.schema_version,
+        "artifact_id": payload.artifact_id,
+        "canonical_spec_sha256": canonical_spec_hash(payload),
+        "render_profile": envelope.renderer_version,
+        "rendered_markdown_sha256": envelope.review_view_fingerprint,
+        "item_count": len(payload.items),
+        "relation_count": len(payload.relations),
+        "canonical_payload": json.loads(canonical_spec_json(payload)),
+        "candidate_envelope": envelope.model_dump(mode="json"),
     }
 
 
@@ -798,10 +879,8 @@ def _source_map_entries(source_map: object) -> list[Mapping[str, Any]] | None:
 def _structured_source_ref_findings(
     *,
     artifact: Mapping[str, Any],
-    spec_artifact: TechnicalSpecArtifact | None,
+    specification_payload: SpecificationPayload,
 ) -> list[JsonDict]:
-    if spec_artifact is None:
-        return []
     source_map = artifact.get("source_map")
     source_entries = _source_map_entries(source_map)
     if source_entries is None:
@@ -816,7 +895,7 @@ def _structured_source_ref_findings(
                 "override_allowed": True,
             }
         ]
-    item_ids = {item.id for item in spec_artifact.items}
+    item_ids = {item.id for item in specification_payload.items}
     invalid_locations: list[str] = []
     usable_locations = 0
     for entry in source_entries:
@@ -865,7 +944,7 @@ def _structured_source_ref_findings(
 def _compiled_assumption_findings(
     *,
     artifact: SpecAuthorityCompilationSuccess | None,
-    spec_artifact: TechnicalSpecArtifact | None,
+    specification_payload: SpecificationPayload,
 ) -> list[JsonDict]:
     """Return non-overrideable findings for ungrounded structured claims."""
     if artifact is None:
@@ -874,15 +953,7 @@ def _compiled_assumption_findings(
     for index, assumption in enumerate(artifact.assumptions, start=1):
         if not is_structured_assumption(assumption):
             continue
-        if spec_artifact is None:
-            findings.append(
-                _compiled_claim_source_unavailable_finding(
-                    assumption_index=index,
-                    assumption=assumption,
-                )
-            )
-            continue
-        grounded = ground_assumption(assumption, spec_artifact)
+        grounded = _ground_v2_assumption(assumption, specification_payload)
         if isinstance(grounded, GroundingFailure):
             findings.append(
                 _compiled_claim_mismatch_finding(
@@ -892,6 +963,79 @@ def _compiled_assumption_findings(
                 )
             )
     return findings
+
+
+def _ground_v2_assumption(
+    assumption: StructuredAuthorityAssumption,
+    payload: SpecificationPayload,
+) -> StructuredAuthorityAssumption | GroundingFailure:
+    """Ground legacy typed compiler claims against accepted v2 semantics."""
+    items_by_id = {item.id: item for item in payload.items}
+    accepted_normative_ids = tuple(
+        sorted(
+            item.id
+            for item in payload.items
+            if item.type.value in _V2_NORMATIVE_TYPES
+            and (item.level is None or item.level.value != "INFORMATIVE")
+        )
+    )
+    provenance = assumption.provenance
+    claimed_sources = tuple(provenance.source_item_ids)
+    if provenance.artifact_id != payload.artifact_id:
+        return GroundingFailure(
+            reason="ASSUMPTION_CLAIM_SOURCE_MISMATCH",
+            claim_kind=assumption.kind,
+            claimed_value=assumption.model_dump(mode="json"),
+            actual_value={"artifact_id": payload.artifact_id},
+            artifact_id=provenance.artifact_id,
+            claimed_source_item_ids=claimed_sources,
+            actual_source_item_ids=(),
+        )
+    if isinstance(assumption, ItemStatusAssumptionClaim):
+        item = items_by_id.get(assumption.item_id)
+        actual_sources = (assumption.item_id,) if item is not None else ()
+        actual_status = "accepted" if item is not None else None
+        if (
+            assumption.status.value != actual_status
+            or claimed_sources != actual_sources
+        ):
+            return GroundingFailure(
+                reason=(
+                    "ASSUMPTION_CLAIM_MISMATCH"
+                    if item is not None
+                    else "ASSUMPTION_CLAIM_SOURCE_MISMATCH"
+                ),
+                claim_kind=assumption.kind,
+                claimed_value=assumption.status.value,
+                actual_value=actual_status,
+                artifact_id=payload.artifact_id,
+                claimed_source_item_ids=claimed_sources,
+                actual_source_item_ids=actual_sources,
+            )
+        return assumption
+
+    actual_sources = accepted_normative_ids
+    if isinstance(assumption, AcceptedNormativeCountAssumptionClaim):
+        claimed_value: object = assumption.count
+        actual_value: object = len(accepted_normative_ids)
+    else:
+        claimed_value = assumption.item_ids
+        actual_value = list(accepted_normative_ids)
+    if claimed_sources != actual_sources:
+        reason = "ASSUMPTION_CLAIM_SOURCE_MISMATCH"
+    elif claimed_value != actual_value:
+        reason = "ASSUMPTION_CLAIM_MISMATCH"
+    else:
+        return assumption
+    return GroundingFailure(
+        reason=reason,
+        claim_kind=assumption.kind,
+        claimed_value=claimed_value,
+        actual_value=actual_value,
+        artifact_id=payload.artifact_id,
+        claimed_source_item_ids=claimed_sources,
+        actual_source_item_ids=actual_sources,
+    )
 
 
 def _compiled_claim_source_unavailable_finding(

@@ -13,12 +13,21 @@ from sqlmodel import Session, select
 from models.core import Epic, Feature, Project, Sprint, SprintStory, Theme, UserStory
 from models.db import engine as default_engine
 from models.enums import StoryStatus
-from models.product_definition import VisionArtifact, VisionArtifactDecision
+from models.product_definition import (
+    SpecificationCandidate,
+    VisionArtifact,
+    VisionArtifactDecision,
+)
 from models.specs import SpecRegistry
 from services.specs.authority_selection import (
     accepted_compiled_authority,
     latest_accepted_authority_decision,
     latest_compiled_authority,
+)
+from services.specs.candidate_contract import (
+    SpecificationCandidateEnvelope,
+    load_candidate_contract,
+    render_candidate_review_markdown,
 )
 from services.specs.compiler_service import (
     CompiledAuthorityReadFailure,
@@ -36,6 +45,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from sqlalchemy.engine import Engine
+
+    from utils.agileforge_spec_profile_v2 import SpecificationPayload
 
 
 class _ExportSnapshotError(ValueError):
@@ -68,6 +79,28 @@ class _ExportSnapshotError(ValueError):
             "AUTHORITY_NOT_COMPILED: Accepted compiled authority row is unavailable. "
             f"details={{'project_id': {project_id}, "
             f"'spec_version_id': {spec_version_id}}}."
+        )
+
+    @classmethod
+    def specification_candidate_invalid(cls, reason: str) -> _ExportSnapshotError:
+        """Build a stable pre-write failure for unusable specification source."""
+        return cls(
+            "SPECIFICATION_CANDIDATE_INVALID: Approved specification source is "
+            f"unavailable or invalid. details={{'reason': {reason!r}}}."
+        )
+
+    @classmethod
+    def specification_candidate_missing(cls) -> _ExportSnapshotError:
+        """Build a stable failure when the exact registry source is absent."""
+        return cls.specification_candidate_invalid(
+            "registry source candidate identity does not resolve"
+        )
+
+    @classmethod
+    def specification_candidate_identity(cls) -> _ExportSnapshotError:
+        """Build a stable failure for conflicting durable candidate identity."""
+        return cls.specification_candidate_invalid(
+            "registry, candidate, and canonical envelope identities differ"
         )
 
 
@@ -144,7 +177,7 @@ def export_project_snapshot_html(
 
         approved_spec = _get_latest_approved_spec(session, project_id)
         vision_statement = _get_latest_accepted_vision(session, project_id)
-        spec_content, spec_meta = _resolve_spec_content(approved_spec)
+        spec_content, spec_meta = _resolve_spec_content(session, approved_spec)
         authority = _load_compiled_authority(session, approved_spec)
 
     render_context = _SnapshotRenderContext(
@@ -220,18 +253,25 @@ def _get_latest_accepted_vision(session: Session, project_id: int) -> str:
 
 
 def _resolve_spec_content(
+    session: Session,
     approved_spec: SpecRegistry | None,
 ) -> tuple[str, dict[str, Any]]:
     if approved_spec:
+        payload, envelope = _load_specification_candidate(
+            session,
+            approved_spec,
+        )
         meta: dict[str, Any] = {
             "status": "approved",
             "spec_version_id": approved_spec.spec_version_id,
             "approved_by": approved_spec.approved_by,
             "approved_at": approved_spec.approved_at,
             "approval_notes": approved_spec.approval_notes,
-            "content_ref": approved_spec.content_ref,
+            "candidate_fingerprint": envelope.candidate_fingerprint,
+            "payload_fingerprint": envelope.payload_fingerprint,
+            "source_manifest_fingerprint": envelope.source_manifest_fingerprint,
         }
-        return approved_spec.content, meta
+        return render_candidate_review_markdown(payload, envelope), meta
 
     meta: dict[str, Any] = {
         "status": "unavailable",
@@ -239,9 +279,93 @@ def _resolve_spec_content(
         "approved_by": None,
         "approved_at": None,
         "approval_notes": None,
-        "content_ref": None,
+        "candidate_fingerprint": None,
+        "payload_fingerprint": None,
+        "source_manifest_fingerprint": None,
     }
     return "(No accepted specification available)", meta
+
+
+def _load_specification_candidate(
+    session: Session,
+    spec: SpecRegistry,
+) -> tuple[SpecificationPayload, SpecificationCandidateEnvelope]:
+    """Load and validate the exact candidate named by one registry row."""
+    candidate = session.exec(
+        select(SpecificationCandidate).where(
+            SpecificationCandidate.project_id == spec.project_id,
+            SpecificationCandidate.specification_candidate_id
+            == spec.source_specification_candidate_id,
+            SpecificationCandidate.candidate_fingerprint
+            == spec.source_specification_candidate_fingerprint,
+            SpecificationCandidate.payload_fingerprint == spec.spec_hash,
+        )
+    ).one_or_none()
+    if candidate is None:
+        raise _ExportSnapshotError.specification_candidate_missing()
+    try:
+        payload, envelope = load_candidate_contract(
+            candidate.canonical_envelope_json,
+            expected_candidate_fingerprint=candidate.candidate_fingerprint,
+        )
+    except (TypeError, ValueError) as exc:
+        raise _ExportSnapshotError.specification_candidate_invalid(str(exc)) from exc
+    if not _candidate_matches_registry(
+        session=session,
+        spec=spec,
+        candidate=candidate,
+        envelope=envelope,
+    ):
+        raise _ExportSnapshotError.specification_candidate_identity()
+    return payload, envelope
+
+
+def _candidate_matches_registry(
+    *,
+    session: Session,
+    spec: SpecRegistry,
+    candidate: SpecificationCandidate,
+    envelope: SpecificationCandidateEnvelope,
+) -> bool:
+    """Return whether registry, row, envelope, and amendment base agree exactly."""
+    if not (
+        candidate.candidate_kind == envelope.candidate_kind.value
+        and candidate.payload_fingerprint
+        == spec.spec_hash
+        == envelope.payload_fingerprint
+        and candidate.source_manifest_fingerprint
+        == envelope.source_manifest_fingerprint
+        and candidate.producer_input_fingerprint
+        == envelope.producer_input_fingerprint
+        and candidate.rendered_view_fingerprint
+        == envelope.review_view_fingerprint
+        and candidate.workflow_node_attempt_id == envelope.workflow_node_attempt_id
+        and candidate.attempt_fingerprint == envelope.attempt_fingerprint
+        and candidate.vision_artifact_id
+        == spec.source_vision_artifact_id
+        == envelope.accepted_vision_id
+        and candidate.vision_fingerprint
+        == spec.source_vision_fingerprint
+        == envelope.accepted_vision_fingerprint
+        and candidate.product_goal_artifact_id
+        == spec.source_product_goal_artifact_id
+        == envelope.accepted_product_goal_id
+        and candidate.product_goal_fingerprint
+        == spec.source_product_goal_fingerprint
+        == envelope.accepted_product_goal_fingerprint
+        and candidate.base_spec_version_id == envelope.base_specification_id
+        and candidate.base_spec_hash == envelope.base_payload_fingerprint
+        and spec.supersedes_spec_version_id == envelope.base_specification_id
+    ):
+        return False
+    if envelope.base_specification_id is None:
+        return True
+    base = session.get(SpecRegistry, envelope.base_specification_id)
+    return bool(
+        base is not None
+        and base.project_id == spec.project_id
+        and base.spec_hash == envelope.base_payload_fingerprint
+    )
 
 
 def _load_compiled_authority(
@@ -761,7 +885,11 @@ def _render_spec_metadata(meta: dict[str, Any]) -> str:
         "Approved by": meta.get("approved_by") or "-",
         "Approved at": meta.get("approved_at") or "-",
         "Notes": meta.get("approval_notes") or "-",
-        "Content ref": meta.get("content_ref") or "-",
+        "Candidate fingerprint": meta.get("candidate_fingerprint") or "-",
+        "Payload fingerprint": meta.get("payload_fingerprint") or "-",
+        "Source manifest fingerprint": (
+            meta.get("source_manifest_fingerprint") or "-"
+        ),
     }
     rows = "".join(
         f"<tr><th>{html.escape(str(label))}</th><td>{html.escape(str(value))}</td></tr>"
