@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
@@ -12,7 +13,6 @@ from sqlmodel import Session
 
 from models.core import Project
 from models.product_definition import (
-    DiscoveryArtifact,
     ProductGoalArtifact,
     ProductGoalArtifactDecision,
     ProductGoalInterviewTurn,
@@ -29,6 +29,16 @@ from models.specs import SpecRegistry
 from models.workflow import WorkflowNodeAttempt
 from repositories.workflow import WorkflowFactRepository
 from services.read_projections import DurableReadProjectionService
+from services.specs.candidate_contract import (
+    CandidateBuildInput,
+    CandidateKind,
+    CandidateSourceKind,
+    CandidateSourceManifestEntry,
+    build_candidate_envelope,
+    canonical_candidate_json,
+    render_candidate_review_markdown,
+)
+from utils.agileforge_spec_profile_v2 import SpecificationPayload
 from workflow.contracts import (
     GRAPH_VERSION,
     JsonObject,
@@ -86,7 +96,6 @@ def test_public_product_definition_selection_retains_projection_state(
 
     selection = select_product_definition_state(snapshot)
 
-    assert selection.discovery is not None
     assert selection.specification_candidate is not None
     assert selection.accepted_spec is None
     assert not selection.has_conflict
@@ -141,7 +150,7 @@ def _seed_lineage(
     *,
     goal_number: int = 1,
 ) -> dict[str, object]:
-    """Seed one valid durable Vision, Goal, discovery, and candidate chain."""
+    """Seed one valid durable Vision, Goal, and typed candidate chain."""
     with Session(engine) as session:
         project = Project(
             name="Projection contract",
@@ -156,11 +165,11 @@ def _seed_lineage(
             node_id="vision.bootstrap",
             instance_key=None,
             graph_version=GRAPH_VERSION,
-            fact_fingerprint="sha256:facts",
-            business_fact_fingerprint="sha256:business",
-            decision_fingerprint="sha256:decision",
+            fact_fingerprint=canonical_hash({"facts": goal_number}),
+            business_fact_fingerprint=canonical_hash({"business": goal_number}),
+            decision_fingerprint=canonical_hash({"decision": goal_number}),
             normalized_input_json="{}",
-            input_fingerprint="sha256:input",
+            input_fingerprint=canonical_hash({"input": goal_number}),
             model_id="fake/product-definition",
             execution_settings_json="{}",
             idempotency_key=f"attempt-{goal_number}",
@@ -168,7 +177,7 @@ def _seed_lineage(
             correlation_id=None,
             started_at=NOW,
             lease_expires_at=NOW + timedelta(minutes=1),
-            attempt_fingerprint=f"sha256:attempt-{goal_number}",
+            attempt_fingerprint=canonical_hash({"attempt": goal_number}),
         )
         session.add(attempt)
         session.flush()
@@ -303,39 +312,144 @@ def _seed_lineage(
             )
         )
 
-        discovery_content = {"evidence": "repository facts"}
-        discovery = DiscoveryArtifact(
+        specification_attempt = WorkflowNodeAttempt(
             project_id=project.project_id,
-            vision_artifact_id=vision.vision_artifact_id,
-            vision_fingerprint=vision.content_fingerprint,
-            product_goal_artifact_id=goal.product_goal_artifact_id,
-            product_goal_fingerprint=goal.content_fingerprint,
-            canonical_content_json=canonical_json(discovery_content),
-            content_fingerprint=canonical_hash(discovery_content),
-            content_ref="evidence/discovery.json",
-            producer="grill-me-with-docs",
-            supersedes_discovery_artifact_id=None,
-            recorded_by="operator",
-            recorded_at=NOW + timedelta(seconds=6),
+            node_id="specification.author",
+            instance_key=None,
+            graph_version=GRAPH_VERSION,
+            fact_fingerprint=canonical_hash({"specification": "facts"}),
+            business_fact_fingerprint=canonical_hash(
+                {"specification": "business"}
+            ),
+            decision_fingerprint=canonical_hash({"specification": "decision"}),
+            normalized_input_json="{}",
+            input_fingerprint=canonical_hash({"specification": "input"}),
+            model_id="fake/product-definition",
+            execution_settings_json="{}",
+            idempotency_key=f"specification-attempt-{goal_number}",
+            actor="operator",
+            correlation_id=f"specification-{goal_number}",
+            started_at=NOW + timedelta(seconds=6),
+            lease_expires_at=NOW + timedelta(minutes=1),
+            attempt_fingerprint=canonical_hash(
+                {"specification": "attempt", "goal_number": goal_number}
+            ),
         )
-        session.add(discovery)
+        session.add(specification_attempt)
         session.flush()
-        assert discovery.discovery_artifact_id is not None
-        specification_content = {"title": "Durable specification"}
+        assert specification_attempt.workflow_node_attempt_id is not None
+        specification_payload = SpecificationPayload.model_validate(
+            {
+                "schema_version": "agileforge.spec.v2",
+                "artifact_id": f"SPEC.projection-{goal_number}",
+                "title": "Durable specification",
+                "summary": "Project durable typed specification review data.",
+                "problem_statement": "Operators need exact durable review packets.",
+                "items": [
+                    {
+                        "id": f"GOAL.projection-{goal_number}",
+                        "type": "GOAL",
+                        "title": "Durable review",
+                        "statement": "Expose the exact persisted candidate.",
+                        "acceptance": ["The review packet is deterministic."],
+                        "source_notes": [
+                            {
+                                "source_id": "SRC.goal",
+                                "kind": "interview",
+                                "text": "Accepted Product Goal source.",
+                                "external_ref_id": "EXT.issue-199",
+                            }
+                        ],
+                    },
+                    {
+                        "id": f"REQ.projection-{goal_number}",
+                        "type": "REQ",
+                        "title": "Exact candidate",
+                        "statement": "The packet MUST expose exact v2 bytes.",
+                        "level": "MUST",
+                        "verification": "system-test",
+                        "acceptance": ["Payload and envelope fingerprints match."],
+                    },
+                ],
+                "relations": [
+                    {
+                        "from": f"REQ.projection-{goal_number}",
+                        "type": "satisfies",
+                        "to": f"GOAL.projection-{goal_number}",
+                    }
+                ],
+                "controlled_terms": [],
+                "external_references": [
+                    {
+                        "id": "EXT.issue-199",
+                        "title": "Issue 199",
+                        "url": "https://github.com/arduinitavares/agileforge/issues/199",
+                        "summary": "Approved hard-break contract.",
+                    }
+                ],
+            }
+        )
+        source_manifest = (
+            CandidateSourceManifestEntry(
+                source_id="SRC.vision",
+                kind=CandidateSourceKind.VISION,
+                fingerprint=vision.content_fingerprint,
+            ),
+            CandidateSourceManifestEntry(
+                source_id="SRC.goal",
+                kind=CandidateSourceKind.PRODUCT_GOAL,
+                fingerprint=goal.content_fingerprint,
+            ),
+        )
+        envelope = build_candidate_envelope(
+            payload=specification_payload,
+            metadata=CandidateBuildInput(
+                candidate_kind=CandidateKind.INITIAL,
+                accepted_vision_id=vision.vision_artifact_id,
+                accepted_vision_fingerprint=vision.content_fingerprint,
+                accepted_product_goal_id=goal.product_goal_artifact_id,
+                accepted_product_goal_fingerprint=goal.content_fingerprint,
+                source_manifest=source_manifest,
+                accepted_fact_fingerprint=(
+                    specification_attempt.business_fact_fingerprint
+                ),
+                producer_input_fingerprint=specification_attempt.input_fingerprint,
+                producer_capability="to-spec",
+                producer_version="2.0.0",
+                model_id=specification_attempt.model_id,
+                model_configuration_fingerprint=canonical_hash(
+                    {"model": specification_attempt.model_id}
+                ),
+                prompt_fingerprint=canonical_hash({"prompt": "specification-v2"}),
+                workflow_node_attempt_id=(
+                    specification_attempt.workflow_node_attempt_id
+                ),
+                attempt_fingerprint=specification_attempt.attempt_fingerprint,
+                correlation_id=f"specification-{goal_number}",
+                produced_at=NOW + timedelta(seconds=7),
+            ),
+        )
         candidate = SpecificationCandidate(
             project_id=project.project_id,
+            candidate_kind="initial",
             vision_artifact_id=vision.vision_artifact_id,
             vision_fingerprint=vision.content_fingerprint,
             product_goal_artifact_id=goal.product_goal_artifact_id,
             product_goal_fingerprint=goal.content_fingerprint,
-            discovery_artifact_id=discovery.discovery_artifact_id,
-            discovery_fingerprint=discovery.content_fingerprint,
             base_spec_version_id=None,
             base_spec_hash=None,
-            canonical_content_json=canonical_json(specification_content),
-            content_fingerprint=canonical_hash(specification_content),
-            content_ref="specs/durable.json",
+            canonical_envelope_json=canonical_candidate_json(
+                specification_payload, envelope
+            ),
+            payload_fingerprint=envelope.payload_fingerprint,
+            source_manifest_fingerprint=envelope.source_manifest_fingerprint,
+            producer_input_fingerprint=envelope.producer_input_fingerprint,
+            rendered_view_fingerprint=envelope.review_view_fingerprint,
+            candidate_fingerprint=envelope.candidate_fingerprint,
+            workflow_node_attempt_id=specification_attempt.workflow_node_attempt_id,
+            attempt_fingerprint=specification_attempt.attempt_fingerprint,
             supersedes_specification_candidate_id=None,
+            supersedes_candidate_fingerprint=None,
             recorded_by="operator",
             recorded_at=NOW + timedelta(seconds=7),
         )
@@ -349,16 +463,28 @@ def _seed_lineage(
             "goal_id": goal.product_goal_artifact_id,
             "goal_fingerprint": goal.content_fingerprint,
             "goal_statement": goal.statement,
-            "discovery_id": discovery.discovery_artifact_id,
-            "discovery_fingerprint": discovery.content_fingerprint,
             "candidate_id": candidate.specification_candidate_id,
-            "candidate_fingerprint": candidate.content_fingerprint,
-            "candidate_content_ref": candidate.content_ref,
-            "candidate_content_json": candidate.canonical_content_json,
-            "discovery_content": discovery_content,
-            "specification_content": specification_content,
+            "candidate_fingerprint": candidate.candidate_fingerprint,
+            "payload_fingerprint": candidate.payload_fingerprint,
+            "source_manifest_fingerprint": candidate.source_manifest_fingerprint,
+            "producer_input_fingerprint": candidate.producer_input_fingerprint,
+            "rendered_view_fingerprint": candidate.rendered_view_fingerprint,
+            "specification_payload": specification_payload.model_dump(mode="json"),
+            "rendered_markdown": render_candidate_review_markdown(
+                specification_payload, envelope
+            ),
+            "source_manifest": [
+                item.model_dump(mode="json") for item in envelope.source_manifest
+            ],
+            "accepted_fact_fingerprint": envelope.accepted_fact_fingerprint,
             "attempt_id": attempt.workflow_node_attempt_id,
             "attempt_fingerprint": attempt.attempt_fingerprint,
+            "specification_attempt_id": (
+                specification_attempt.workflow_node_attempt_id
+            ),
+            "specification_attempt_fingerprint": (
+                specification_attempt.attempt_fingerprint
+            ),
         }
         session.commit()
         return result
@@ -387,6 +513,86 @@ def _error_code(result: JsonObject) -> str:
 def _stored_iso(value: datetime) -> str:
     """Match SQLite's durable naive-datetime representation."""
     return value.replace(tzinfo=None).isoformat()
+
+
+def _assert_complete_candidate_projection(
+    candidate: JsonObject,
+    seeded: dict[str, object],
+    *,
+    decision_state: str,
+) -> None:
+    """Assert one packet exposes the full immutable v2 review contract."""
+    assert set(candidate) == {
+        "specification_candidate_id",
+        "envelope_version",
+        "candidate_kind",
+        "canonical_payload",
+        "rendered_markdown",
+        "vision_artifact_id",
+        "vision_fingerprint",
+        "product_goal_artifact_id",
+        "product_goal_fingerprint",
+        "base_spec_version_id",
+        "base_spec_hash",
+        "source_manifest",
+        "source_manifest_fingerprint",
+        "accepted_fact_fingerprint",
+        "producer_input_fingerprint",
+        "producer_capability",
+        "producer_version",
+        "model_id",
+        "model_configuration_fingerprint",
+        "prompt_fingerprint",
+        "workflow_node_attempt_id",
+        "attempt_fingerprint",
+        "correlation_id",
+        "produced_at",
+        "payload_fingerprint",
+        "profile_version",
+        "renderer_version",
+        "rendered_view_fingerprint",
+        "amendment_diff",
+        "candidate_fingerprint",
+        "supersedes_specification_candidate_id",
+        "supersedes_candidate_fingerprint",
+        "decision_state",
+    }
+    assert candidate["canonical_payload"] == seeded["specification_payload"]
+    assert candidate["rendered_markdown"] == seeded["rendered_markdown"]
+    assert candidate["vision_artifact_id"] == seeded["vision_id"]
+    assert candidate["vision_fingerprint"] == seeded["vision_fingerprint"]
+    assert candidate["product_goal_artifact_id"] == seeded["goal_id"]
+    assert candidate["product_goal_fingerprint"] == seeded["goal_fingerprint"]
+    assert candidate["source_manifest"] == seeded["source_manifest"]
+    assert (
+        candidate["source_manifest_fingerprint"]
+        == seeded["source_manifest_fingerprint"]
+    )
+    assert candidate["accepted_fact_fingerprint"] == seeded[
+        "accepted_fact_fingerprint"
+    ]
+    assert candidate["producer_input_fingerprint"] == seeded[
+        "producer_input_fingerprint"
+    ]
+    assert candidate["workflow_node_attempt_id"] == seeded[
+        "specification_attempt_id"
+    ]
+    assert candidate["attempt_fingerprint"] == seeded[
+        "specification_attempt_fingerprint"
+    ]
+    assert candidate["payload_fingerprint"] == seeded["payload_fingerprint"]
+    assert candidate["rendered_view_fingerprint"] == seeded[
+        "rendered_view_fingerprint"
+    ]
+    assert candidate["candidate_fingerprint"] == seeded["candidate_fingerprint"]
+    assert candidate["base_spec_version_id"] is None
+    assert candidate["base_spec_hash"] is None
+    assert candidate["amendment_diff"] is None
+    assert candidate["supersedes_specification_candidate_id"] is None
+    assert candidate["supersedes_candidate_fingerprint"] is None
+    assert candidate["decision_state"] == decision_state
+    assert "content_ref" not in candidate
+    assert "raw_input" not in candidate
 
 
 def _seeded_int(seeded: dict[str, object], key: str) -> int:
@@ -1691,7 +1897,7 @@ def _accept_next_goal(engine: Engine, seeded: dict[str, object]) -> None:
 def test_durable_projections_expose_current_human_content_and_pending_review(
     engine: Engine,
 ) -> None:
-    """Every status read derives current content from the immutable fact chain."""
+    """Pending status and review expose one complete exact v2 candidate packet."""
     seeded = _seed_lineage(engine)
     project_id = seeded["project_id"]
     assert isinstance(project_id, int)
@@ -1709,7 +1915,6 @@ def test_durable_projections_expose_current_human_content_and_pending_review(
     reads = DurableReadProjectionService(engine=engine)
     vision_data = _data(reads.vision_status(project_id=project_id))
     goal_data = _data(reads.product_goal_status(project_id=project_id))
-    discovery_data = _data(reads.discovery_status(project_id=project_id))
     specification_data = _data(reads.specification_status(project_id=project_id))
     review_data = _data(reads.specification_review(project_id=project_id))
 
@@ -1719,16 +1924,19 @@ def test_durable_projections_expose_current_human_content_and_pending_review(
     active_goal = _json_object(goal_data["active"])
     assert active_goal["product_goal_artifact_id"] == goal_id
     assert active_goal["statement"] == goal_statement
-    current_discovery = _json_object(discovery_data["current"])
-    assert current_discovery["canonical_content"] == seeded["discovery_content"]
-    assert current_discovery["content_ref"] == "evidence/discovery.json"
-    assert current_discovery["vision_fingerprint"] == vision_fingerprint
-    assert current_discovery["product_goal_fingerprint"] == goal_fingerprint
     candidate_data = _json_object(specification_data["candidate"])
-    assert candidate_data["canonical_content"] == seeded["specification_content"]
+    _assert_complete_candidate_projection(
+        candidate_data,
+        seeded,
+        decision_state="pending",
+    )
+    assert specification_data["schema_version"] == (
+        "agileforge.specification_review.v2"
+    )
     assert specification_data["current"] is None
     assert review_data["review"] == {"state": "pending"}
     assert review_data["candidate"] == candidate_data
+    assert review_data["schema_version"] == "agileforge.specification_review.v2"
 
 
 @pytest.mark.parametrize(
@@ -1740,24 +1948,22 @@ def test_specification_projections_expose_terminal_review_and_registry_content(
     decision: str,
     expect_registry: bool,
 ) -> None:
-    """Every terminal review preserves exact candidate content and terminal state."""
+    """Terminal reads resolve exact candidate bytes through the registry row."""
     seeded = _seed_lineage(engine)
     project_id = seeded["project_id"]
     candidate_id = seeded["candidate_id"]
     candidate_fingerprint = seeded["candidate_fingerprint"]
-    candidate_content_json = seeded["candidate_content_json"]
-    candidate_content_ref = seeded["candidate_content_ref"]
+    payload_fingerprint = seeded["payload_fingerprint"]
     assert isinstance(project_id, int)
     assert isinstance(candidate_id, int)
     assert isinstance(candidate_fingerprint, str)
-    assert isinstance(candidate_content_json, str)
-    assert isinstance(candidate_content_ref, str)
+    assert isinstance(payload_fingerprint, str)
     with Session(engine) as session:
         session.add(
             SpecificationDecision(
                 project_id=project_id,
                 specification_candidate_id=candidate_id,
-                artifact_fingerprint=candidate_fingerprint,
+                candidate_fingerprint=candidate_fingerprint,
                 decision=decision,
                 rationale="Ready.",
                 reviewer="operator",
@@ -1769,17 +1975,14 @@ def test_specification_projections_expose_terminal_review_and_registry_content(
         if expect_registry:
             registry = SpecRegistry(
                 project_id=project_id,
-                spec_hash=candidate_fingerprint,
-                content=candidate_content_json,
-                content_ref=candidate_content_ref,
+                spec_hash=payload_fingerprint,
                 status="approved",
                 source_specification_candidate_id=candidate_id,
+                source_specification_candidate_fingerprint=candidate_fingerprint,
                 source_vision_artifact_id=seeded["vision_id"],
                 source_vision_fingerprint=seeded["vision_fingerprint"],
                 source_product_goal_artifact_id=seeded["goal_id"],
                 source_product_goal_fingerprint=seeded["goal_fingerprint"],
-                source_discovery_artifact_id=seeded["discovery_id"],
-                source_discovery_fingerprint=seeded["discovery_fingerprint"],
             )
             session.add(registry)
         session.commit()
@@ -1789,6 +1992,9 @@ def test_specification_projections_expose_terminal_review_and_registry_content(
     reads = DurableReadProjectionService(engine=engine)
     status = _data(reads.specification_status(project_id=project_id))
     review = _data(reads.specification_review(project_id=project_id))
+    authority_review = _data(
+        reads.authority_review(project_id=project_id, include_spec="summary")
+    )
 
     current = status["current"]
     if registry is None:
@@ -1797,8 +2003,18 @@ def test_specification_projections_expose_terminal_review_and_registry_content(
     else:
         current = _json_object(current)
         assert current["spec_version_id"] == registry.spec_version_id
-        assert current["spec_hash"] == candidate_fingerprint
-        assert current["canonical_content"] == seeded["specification_content"]
+        assert current["spec_hash"] == payload_fingerprint
+        assert current["source_specification_candidate_id"] == candidate_id
+        assert (
+            current["source_specification_candidate_fingerprint"]
+            == candidate_fingerprint
+        )
+    candidate_projection = _json_object(review["candidate"])
+    _assert_complete_candidate_projection(
+        candidate_projection,
+        seeded,
+        decision_state=decision,
+    )
     assert review["review"] == {
         "state": decision,
         "specification_decision_id": 1,
@@ -1806,53 +2022,26 @@ def test_specification_projections_expose_terminal_review_and_registry_content(
         "rationale": "Ready.",
         "reviewer": "operator",
     }
-
-
-def test_projection_fails_closed_for_ambiguous_discovery_without_cache_fallback(
-    engine: Engine,
-) -> None:
-    """Ambiguous durable leaves expose a typed stale reason, never a latest row."""
-    seeded = _seed_lineage(engine)
-    project_id = seeded["project_id"]
-    vision_id = seeded["vision_id"]
-    vision_fingerprint = seeded["vision_fingerprint"]
-    goal_id = seeded["goal_id"]
-    goal_fingerprint = seeded["goal_fingerprint"]
-    assert isinstance(project_id, int)
-    assert isinstance(vision_id, int)
-    assert isinstance(vision_fingerprint, str)
-    assert isinstance(goal_id, int)
-    assert isinstance(goal_fingerprint, str)
-    extra_content = {"evidence": "a second leaf"}
-    with Session(engine) as session:
-        session.add(
-            DiscoveryArtifact(
-                project_id=project_id,
-                vision_artifact_id=vision_id,
-                vision_fingerprint=vision_fingerprint,
-                product_goal_artifact_id=goal_id,
-                product_goal_fingerprint=goal_fingerprint,
-                canonical_content_json=canonical_json(extra_content),
-                content_fingerprint=canonical_hash(extra_content),
-                content_ref="evidence/second.json",
-                producer="grill-me-with-docs",
-                supersedes_discovery_artifact_id=None,
-                recorded_by="operator",
-                recorded_at=NOW + timedelta(seconds=9),
-            )
+    specifications = authority_review["specifications"]
+    assert isinstance(specifications, list)
+    if registry is None:
+        assert specifications == []
+    else:
+        assert len(specifications) == 1
+        authority_spec = _json_object(specifications[0])
+        assert authority_spec["spec_hash"] == payload_fingerprint
+        _assert_complete_candidate_projection(
+            _json_object(authority_spec["candidate"]),
+            seeded,
+            decision_state="accepted",
         )
-        session.commit()
+        assert "content" not in authority_spec
+        assert "content_ref" not in authority_spec
 
-    result = _data(
-        DurableReadProjectionService(engine=engine).discovery_status(
-            project_id=project_id
-        )
-    )
 
-    assert result == {
-        "current": None,
-        "stale_reason": "DISCOVERY_FACT_CONFLICT",
-    }
+def test_obsolete_product_discovery_selection_service_is_removed() -> None:
+    """The deleted Discovery gate has no standalone selection service."""
+    assert importlib.util.find_spec("services.product_discovery_selection") is None
 
 
 def test_resolved_goal_and_next_goal_leave_old_product_definition_non_current(
@@ -1898,12 +2087,11 @@ def test_resolved_goal_and_next_goal_leave_old_product_definition_non_current(
 
     vision = _data(reads.vision_status(project_id=project_id))
     active = _data(reads.product_goal_status(project_id=project_id))
-    discovery = _data(reads.discovery_status(project_id=project_id))
     specification = _data(reads.specification_status(project_id=project_id))
     assert vision["current"] is not None
     assert active["active"] is not None
-    assert discovery == {"current": None, "stale_reason": "DISCOVERY_NOT_CURRENT"}
     assert specification == {
+        "schema_version": "agileforge.specification_review.v2",
         "current": None,
         "candidate": None,
         "review": None,
@@ -1921,7 +2109,7 @@ def test_malformed_durable_projection_data_returns_typed_error(engine: Engine) -
     with Session(engine) as session:
         candidate = session.get(SpecificationCandidate, candidate_id)
         assert candidate is not None
-        candidate.canonical_content_json = "not-json"
+        candidate.canonical_envelope_json = "not-json"
         session.add(candidate)
         session.commit()
 

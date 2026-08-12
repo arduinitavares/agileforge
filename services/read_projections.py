@@ -11,6 +11,7 @@ from sqlmodel import Session, col, select
 
 from models.core import Project, Sprint, UserStory
 from models.events import TaskExecutionLog
+from models.product_definition import SpecificationCandidate, SpecificationDecision
 from models.repository import RepositoryBinding, repository_binding_fingerprint
 from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance, SpecRegistry
 from models.workflow import WorkflowNodeAttempt, WorkflowNodeAttemptOutcome
@@ -26,6 +27,10 @@ from services.packets.canonical import (
     build_task_packet,
 )
 from services.phases.sprint_metrics import build_durable_sprint_metrics
+from services.specs.candidate_contract import (
+    load_candidate_contract,
+    render_candidate_review_markdown,
+)
 from services.specs.compiler_service import load_compiled_artifact
 from workflow.contracts import JsonObject, JsonValue
 from workflow.definitions.product_discovery import select_product_definition_state
@@ -42,12 +47,12 @@ if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
 
     from workflow.facts import (
-        DiscoveryArtifactFact,
         ProductGoalArtifactDecisionFact,
         ProductGoalArtifactFact,
         ProductGoalInterviewTurnFact,
         SpecificationCandidateFact,
         SpecificationDecisionFact,
+        SpecVersionFact,
         SprintFact,
         VisionArtifactDecisionFact,
         VisionArtifactFact,
@@ -56,7 +61,7 @@ if TYPE_CHECKING:
     )
 
 _JSON_OBJECT = TypeAdapter(JsonObject)
-_AUTO_SPEC_CONTENT_LIMIT_BYTES = 64_000
+_SPECIFICATION_REVIEW_SCHEMA_VERSION = "agileforge.specification_review.v2"
 _VISION_COMPONENT_NAMES: tuple[str, ...] = (
     "project_name",
     "target_user",
@@ -397,36 +402,233 @@ def _goal_review_data(
     }
 
 
-def _discovery_data(discovery: DiscoveryArtifactFact) -> JsonObject:
-    """Render an exact selected discovery fact without mutable Project state."""
+def _specification_candidate_data(
+    candidate: SpecificationCandidate,
+    *,
+    decision_state: str,
+) -> JsonObject:
+    """Load and render one exact immutable v2 candidate review packet."""
+    candidate_id = candidate.specification_candidate_id
+    if candidate_id is None:
+        message = "Specification candidate identity is unavailable."
+        raise ValueError(message)
+    payload, envelope = load_candidate_contract(
+        candidate.canonical_envelope_json,
+        expected_candidate_fingerprint=candidate.candidate_fingerprint,
+    )
+    persisted_envelope_values = (
+        ("candidate kind", candidate.candidate_kind, envelope.candidate_kind.value),
+        (
+            "Vision identity",
+            (candidate.vision_artifact_id, candidate.vision_fingerprint),
+            (
+                envelope.accepted_vision_id,
+                envelope.accepted_vision_fingerprint,
+            ),
+        ),
+        (
+            "Product Goal identity",
+            (
+                candidate.product_goal_artifact_id,
+                candidate.product_goal_fingerprint,
+            ),
+            (
+                envelope.accepted_product_goal_id,
+                envelope.accepted_product_goal_fingerprint,
+            ),
+        ),
+        (
+            "base Specification",
+            (candidate.base_spec_version_id, candidate.base_spec_hash),
+            (
+                envelope.base_specification_id,
+                envelope.base_payload_fingerprint,
+            ),
+        ),
+        (
+            "source manifest fingerprint",
+            candidate.source_manifest_fingerprint,
+            envelope.source_manifest_fingerprint,
+        ),
+        (
+            "producer input fingerprint",
+            candidate.producer_input_fingerprint,
+            envelope.producer_input_fingerprint,
+        ),
+        (
+            "rendered view fingerprint",
+            candidate.rendered_view_fingerprint,
+            envelope.review_view_fingerprint,
+        ),
+        (
+            "payload fingerprint",
+            candidate.payload_fingerprint,
+            envelope.payload_fingerprint,
+        ),
+        (
+            "workflow attempt",
+            (
+                candidate.workflow_node_attempt_id,
+                candidate.attempt_fingerprint,
+            ),
+            (
+                envelope.workflow_node_attempt_id,
+                envelope.attempt_fingerprint,
+            ),
+        ),
+    )
+    for label, persisted, contracted in persisted_envelope_values:
+        if persisted != contracted:
+            message = f"Specification candidate {label} changed."
+            raise ValueError(message)
+    amendment_diff = (
+        None
+        if envelope.amendment_diff is None
+        else _validated(envelope.amendment_diff.model_dump(mode="json"))
+    )
     return {
-        "discovery_artifact_id": discovery.discovery_artifact_id,
-        "fingerprint": discovery.content_fingerprint,
-        "content_ref": discovery.content_ref,
-        "vision_artifact_id": discovery.vision_artifact_id,
-        "vision_fingerprint": discovery.vision_fingerprint,
-        "product_goal_artifact_id": discovery.product_goal_artifact_id,
-        "product_goal_fingerprint": discovery.product_goal_fingerprint,
-        "canonical_content": discovery.canonical_content,
+        "specification_candidate_id": candidate_id,
+        "envelope_version": envelope.envelope_version,
+        "candidate_kind": envelope.candidate_kind.value,
+        "canonical_payload": _validated(payload.model_dump(mode="json")),
+        "rendered_markdown": render_candidate_review_markdown(payload, envelope),
+        "vision_artifact_id": envelope.accepted_vision_id,
+        "vision_fingerprint": envelope.accepted_vision_fingerprint,
+        "product_goal_artifact_id": envelope.accepted_product_goal_id,
+        "product_goal_fingerprint": envelope.accepted_product_goal_fingerprint,
+        "base_spec_version_id": envelope.base_specification_id,
+        "base_spec_hash": envelope.base_payload_fingerprint,
+        "source_manifest": [
+            _validated(item.model_dump(mode="json"))
+            for item in envelope.source_manifest
+        ],
+        "source_manifest_fingerprint": envelope.source_manifest_fingerprint,
+        "accepted_fact_fingerprint": envelope.accepted_fact_fingerprint,
+        "producer_input_fingerprint": envelope.producer_input_fingerprint,
+        "producer_capability": envelope.producer_capability,
+        "producer_version": envelope.producer_version,
+        "model_id": envelope.model_id,
+        "model_configuration_fingerprint": (
+            envelope.model_configuration_fingerprint
+        ),
+        "prompt_fingerprint": envelope.prompt_fingerprint,
+        "workflow_node_attempt_id": envelope.workflow_node_attempt_id,
+        "attempt_fingerprint": envelope.attempt_fingerprint,
+        "correlation_id": envelope.correlation_id,
+        "produced_at": _iso(envelope.produced_at),
+        "payload_fingerprint": envelope.payload_fingerprint,
+        "profile_version": envelope.profile_version,
+        "renderer_version": envelope.renderer_version,
+        "rendered_view_fingerprint": envelope.review_view_fingerprint,
+        "amendment_diff": amendment_diff,
+        "candidate_fingerprint": envelope.candidate_fingerprint,
+        "supersedes_specification_candidate_id": (
+            candidate.supersedes_specification_candidate_id
+        ),
+        "supersedes_candidate_fingerprint": (
+            candidate.supersedes_candidate_fingerprint
+        ),
+        "decision_state": decision_state,
     }
 
 
-def _specification_candidate_data(candidate: SpecificationCandidateFact) -> JsonObject:
-    """Render one exact immutable specification candidate and complete lineage."""
+def _specification_registry_data(
+    spec: SpecRegistry,
+    *,
+    candidate: JsonObject,
+) -> JsonObject:
+    """Project one accepted row as a reference to its exact candidate bytes."""
     return {
-        "specification_candidate_id": candidate.specification_candidate_id,
-        "fingerprint": candidate.content_fingerprint,
-        "canonical_content": candidate.canonical_content,
-        "content_ref": candidate.content_ref,
-        "vision_artifact_id": candidate.vision_artifact_id,
-        "vision_fingerprint": candidate.vision_fingerprint,
-        "product_goal_artifact_id": candidate.product_goal_artifact_id,
-        "product_goal_fingerprint": candidate.product_goal_fingerprint,
-        "discovery_artifact_id": candidate.discovery_artifact_id,
-        "discovery_fingerprint": candidate.discovery_fingerprint,
-        "base_spec_version_id": candidate.base_spec_version_id,
-        "base_spec_hash": candidate.base_spec_hash,
+        "spec_version_id": spec.spec_version_id,
+        "spec_hash": spec.spec_hash,
+        "status": spec.status,
+        "approved_at": _iso(spec.approved_at),
+        "approved_by": spec.approved_by,
+        "source_specification_candidate_id": (
+            spec.source_specification_candidate_id
+        ),
+        "source_specification_candidate_fingerprint": (
+            spec.source_specification_candidate_fingerprint
+        ),
+        "source_vision_artifact_id": spec.source_vision_artifact_id,
+        "source_vision_fingerprint": spec.source_vision_fingerprint,
+        "source_product_goal_artifact_id": (
+            spec.source_product_goal_artifact_id
+        ),
+        "source_product_goal_fingerprint": (
+            spec.source_product_goal_fingerprint
+        ),
+        "supersedes_spec_version_id": spec.supersedes_spec_version_id,
+        "candidate": candidate,
     }
+
+
+def _accepted_registry_candidate_payloads(
+    *,
+    project_id: int,
+    specifications: list[SpecRegistry],
+    candidates: list[SpecificationCandidate],
+    decisions: list[SpecificationDecision],
+) -> dict[int, JsonObject]:
+    """Resolve every registry row to one exact accepted v2 candidate packet."""
+    payloads: dict[int, JsonObject] = {}
+    for spec in specifications:
+        spec_version_id = spec.spec_version_id
+        if spec_version_id is None:
+            message = "Stored Specification registry identity is unavailable."
+            raise ValueError(message)
+        matches = [
+            item
+            for item in candidates
+            if (
+                item.specification_candidate_id
+                == spec.source_specification_candidate_id
+                and item.candidate_fingerprint
+                == spec.source_specification_candidate_fingerprint
+                and item.payload_fingerprint == spec.spec_hash
+                and item.vision_artifact_id == spec.source_vision_artifact_id
+                and item.vision_fingerprint == spec.source_vision_fingerprint
+                and item.product_goal_artifact_id
+                == spec.source_product_goal_artifact_id
+                and item.product_goal_fingerprint
+                == spec.source_product_goal_fingerprint
+            )
+        ]
+        terminal_decisions = [
+            item
+            for item in decisions
+            if item.specification_candidate_id
+            == spec.source_specification_candidate_id
+            and item.candidate_fingerprint
+            == spec.source_specification_candidate_fingerprint
+        ]
+        if (
+            len(matches) != 1
+            or len(terminal_decisions) != 1
+            or terminal_decisions[0].decision != "accepted"
+        ):
+            message = (
+                "Stored Specification registry does not resolve one accepted "
+                f"candidate for project {project_id}, version {spec_version_id}."
+            )
+            raise ValueError(message)
+        payloads[spec_version_id] = _specification_candidate_data(
+            matches[0],
+            decision_state=terminal_decisions[0].decision,
+        )
+    return payloads
+
+
+def _authority_decisions_by_id(
+    decisions: list[SpecAuthorityAcceptance],
+) -> dict[int, SpecAuthorityAcceptance]:
+    """Index persisted Authority decisions that retain a pending identity."""
+    indexed: dict[int, SpecAuthorityAcceptance] = {}
+    for decision in decisions:
+        authority_id = decision.pending_authority_id
+        if authority_id is not None:
+            indexed[authority_id] = decision
+    return indexed
 
 
 @dataclass(frozen=True)
@@ -440,6 +642,21 @@ class _ProjectReadContext:
 @dataclass(frozen=True)
 class _ProjectReadFailure:
     """Typed missing-Project result shared by scoped projections."""
+
+    error: JsonObject
+
+
+@dataclass(frozen=True)
+class _SpecificationReadProjection:
+    """Exact candidate packet plus its selected accepted registry row, if any."""
+
+    candidate: JsonObject
+    registry: SpecRegistry | None
+
+
+@dataclass(frozen=True)
+class _SpecificationReadFailure:
+    """Typed unavailable-candidate result for Specification reads."""
 
     error: JsonObject
 
@@ -491,6 +708,24 @@ class DurableAuthorityReviewProjection:
                     .order_by(col(SpecRegistry.spec_version_id))
                 ).all()
             )
+            specification_candidates = list(
+                session.exec(
+                    select(SpecificationCandidate)
+                    .where(col(SpecificationCandidate.project_id) == project_id)
+                    .order_by(
+                        col(SpecificationCandidate.specification_candidate_id)
+                    )
+                ).all()
+            )
+            specification_decisions = list(
+                session.exec(
+                    select(SpecificationDecision)
+                    .where(col(SpecificationDecision.project_id) == project_id)
+                    .order_by(
+                        col(SpecificationDecision.specification_decision_id)
+                    )
+                ).all()
+            )
             authorities = list(
                 session.exec(
                     select(CompiledSpecAuthority)
@@ -519,11 +754,21 @@ class DurableAuthorityReviewProjection:
             for spec in specifications
             if spec.spec_version_id is not None
         }
-        decisions_by_authority: dict[int, SpecAuthorityAcceptance] = {}
-        for decision in decisions:
-            authority_id = decision.pending_authority_id
-            if authority_id is not None:
-                decisions_by_authority[authority_id] = decision
+        try:
+            candidate_payloads = _accepted_registry_candidate_payloads(
+                project_id=project_id,
+                specifications=specifications,
+                candidates=specification_candidates,
+                decisions=specification_decisions,
+            )
+        except (TypeError, ValueError) as error:
+            return _error(
+                "SPECIFICATION_CANDIDATE_UNAVAILABLE",
+                "Stored Specification candidate contract is unavailable.",
+                project_id=project_id,
+                reason=str(error),
+            )
+        decisions_by_authority = _authority_decisions_by_id(decisions)
 
         rendered: list[JsonValue] = []
         rendered_by_id: dict[int, JsonObject] = {}
@@ -543,9 +788,9 @@ class DurableAuthorityReviewProjection:
             payload_or_error = self._authority_payload(
                 authority=authority,
                 spec=spec,
+                candidate=candidate_payloads[authority.spec_version_id],
                 decision=decision,
                 status=status,
-                include_spec=include_spec,
             )
             if payload_or_error.get("ok") is False:
                 return payload_or_error
@@ -556,16 +801,8 @@ class DurableAuthorityReviewProjection:
             elif status == "pending_review":
                 pending_authority_id = authority_id
 
-        accepted = (
-            rendered_by_id.get(accepted_authority_id)
-            if accepted_authority_id is not None
-            else None
-        )
-        pending = (
-            rendered_by_id.get(pending_authority_id)
-            if pending_authority_id is not None
-            else None
-        )
+        accepted = rendered_by_id.get(accepted_authority_id or -1)
+        pending = rendered_by_id.get(pending_authority_id or -1)
         findings = pending.get("findings", []) if pending is not None else []
         return _success(
             {
@@ -575,8 +812,12 @@ class DurableAuthorityReviewProjection:
                     "name": project.name,
                 },
                 "specifications": [
-                    self._specification_payload(spec, include_spec=include_spec)
+                    _specification_registry_data(
+                        spec,
+                        candidate=candidate_payloads[spec.spec_version_id],
+                    )
                     for spec in specifications
+                    if spec.spec_version_id is not None
                 ],
                 "authorities": rendered,
                 "accepted_authority": accepted,
@@ -600,9 +841,9 @@ class DurableAuthorityReviewProjection:
         *,
         authority: CompiledSpecAuthority,
         spec: SpecRegistry,
+        candidate: JsonObject,
         decision: SpecAuthorityAcceptance | None,
         status: str,
-        include_spec: str,
     ) -> JsonObject:
         load_result = load_compiled_artifact(authority)
         artifact = load_result.artifact
@@ -651,9 +892,9 @@ class DurableAuthorityReviewProjection:
             "prompt_hash": authority.prompt_hash,
             "compiled_at": _iso(authority.compiled_at),
             "terminal_decision": terminal_decision,
-            "specification": self._specification_payload(
+            "specification": _specification_registry_data(
                 spec,
-                include_spec=include_spec,
+                candidate=candidate,
             ),
             "invariants": [
                 _validated(invariant.model_dump(mode="json"))
@@ -662,29 +903,6 @@ class DurableAuthorityReviewProjection:
             "findings": findings,
             "artifact": _validated(artifact.model_dump(mode="json")),
         }
-
-    @staticmethod
-    def _specification_payload(
-        spec: SpecRegistry,
-        *,
-        include_spec: str,
-    ) -> JsonObject:
-        size_bytes = len(spec.content.encode("utf-8"))
-        content_included = include_spec == "full" or (
-            include_spec == "auto" and size_bytes <= _AUTO_SPEC_CONTENT_LIMIT_BYTES
-        )
-        return {
-            "spec_version_id": spec.spec_version_id,
-            "spec_hash": spec.spec_hash,
-            "status": spec.status,
-            "content_ref": spec.content_ref,
-            "approved_at": _iso(spec.approved_at),
-            "approved_by": spec.approved_by,
-            "size_bytes": size_bytes,
-            "content_included": content_included,
-            "content": spec.content if content_included else None,
-        }
-
 
 class DurableReadProjectionService:
     """Read supported operator views without deriving workflow availability."""
@@ -992,33 +1210,8 @@ class DurableReadProjectionService:
         }
         return _success(data)
 
-    def discovery_status(self, *, project_id: int) -> JsonObject:
-        """Project the current durable discovery artifact and exact parents."""
-        snapshot = self._snapshot(project_id)
-        if isinstance(snapshot, dict):
-            return snapshot
-        selection = select_product_definition_state(snapshot)
-        discovery = selection.discovery
-        if discovery is None:
-            return _success(
-                {
-                    "current": None,
-                    "stale_reason": (
-                        "DISCOVERY_FACT_CONFLICT"
-                        if selection.discovery_conflict
-                        else "DISCOVERY_NOT_CURRENT"
-                    ),
-                }
-            )
-        return _success(
-            {
-                "current": _discovery_data(discovery),
-                "stale_reason": None,
-            }
-        )
-
     def specification_status(self, *, project_id: int) -> JsonObject:
-        """Project the current candidate, review, and graph-selected registry row."""
+        """Project one complete current v2 review packet and accepted row."""
         snapshot = self._snapshot(project_id)
         if isinstance(snapshot, dict):
             return snapshot
@@ -1028,6 +1221,7 @@ class DurableReadProjectionService:
         if candidate is None:
             return _success(
                 {
+                    "schema_version": _SPECIFICATION_REVIEW_SCHEMA_VERSION,
                     "current": None,
                     "candidate": None,
                     "review": None,
@@ -1048,22 +1242,29 @@ class DurableReadProjectionService:
             == candidate.specification_candidate_id
         ]
         review = _specification_review_data(decisions)
+        decision_state = (
+            "conflict" if review is None else str(review.get("state", "pending"))
+        )
+        projection = self._specification_projection(
+            project_id=project_id,
+            candidate=candidate,
+            spec=spec,
+            decision_state=decision_state,
+        )
+        if isinstance(projection, _SpecificationReadFailure):
+            return projection.error
         return _success(
             {
+                "schema_version": _SPECIFICATION_REVIEW_SCHEMA_VERSION,
                 "current": (
                     None
-                    if spec is None
-                    else {
-                        "spec_version_id": spec.spec_version_id,
-                        "spec_hash": spec.spec_hash,
-                        "status": spec.status,
-                        "source_specification_candidate_id": (
-                            spec.source_specification_candidate_id
-                        ),
-                        "canonical_content": candidate.canonical_content,
-                    }
+                    if projection.registry is None
+                    else _specification_registry_data(
+                        projection.registry,
+                        candidate=projection.candidate,
+                    )
                 ),
-                "candidate": _specification_candidate_data(candidate),
+                "candidate": projection.candidate,
                 "review": review,
                 "stale_reason": (
                     "SPECIFICATION_FACT_CONFLICT"
@@ -1074,7 +1275,7 @@ class DurableReadProjectionService:
         )
 
     def specification_review(self, *, project_id: int) -> JsonObject:
-        """Project the pending or terminal durable candidate review state."""
+        """Project pending or terminal state over the complete v2 review packet."""
         snapshot = self._snapshot(project_id)
         if isinstance(snapshot, dict):
             return snapshot
@@ -1083,6 +1284,7 @@ class DurableReadProjectionService:
         if candidate is None:
             return _success(
                 {
+                    "schema_version": _SPECIFICATION_REVIEW_SCHEMA_VERSION,
                     "candidate": None,
                     "review": None,
                     "stale_reason": (
@@ -1101,9 +1303,21 @@ class DurableReadProjectionService:
             )
         ]
         review = _specification_review_data(decisions)
+        decision_state = (
+            "conflict" if review is None else str(review.get("state", "pending"))
+        )
+        projection = self._specification_projection(
+            project_id=project_id,
+            candidate=candidate,
+            spec=selection.accepted_spec,
+            decision_state=decision_state,
+        )
+        if isinstance(projection, _SpecificationReadFailure):
+            return projection.error
         return _success(
             {
-                "candidate": _specification_candidate_data(candidate),
+                "schema_version": _SPECIFICATION_REVIEW_SCHEMA_VERSION,
+                "candidate": projection.candidate,
                 "review": review,
                 "stale_reason": (
                     "SPECIFICATION_REVIEW_CONFLICT"
@@ -1661,6 +1875,104 @@ class DurableReadProjectionService:
                 "authority": _result_data(authority),
                 "sprint": _result_data(sprint) if sprint.get("ok") is True else None,
             }
+        )
+
+    def _specification_projection(
+        self,
+        *,
+        project_id: int,
+        candidate: SpecificationCandidateFact,
+        spec: SpecVersionFact | None,
+        decision_state: str,
+    ) -> _SpecificationReadProjection | _SpecificationReadFailure:
+        """Resolve the selected fact to one candidate, via registry if accepted."""
+        with Session(self._engine) as session:
+            registry: SpecRegistry | None = None
+            if spec is not None:
+                registry = session.get(SpecRegistry, spec.spec_version_id)
+                registry_fact = None if registry is None else (
+                    registry.project_id,
+                    registry.spec_hash,
+                    registry.status,
+                    registry.source_specification_candidate_id,
+                    registry.source_specification_candidate_fingerprint,
+                    registry.source_vision_artifact_id,
+                    registry.source_vision_fingerprint,
+                    registry.source_product_goal_artifact_id,
+                    registry.source_product_goal_fingerprint,
+                )
+                selected_fact = (
+                    project_id,
+                    spec.spec_hash,
+                    spec.status,
+                    spec.source_specification_candidate_id,
+                    spec.source_specification_candidate_fingerprint,
+                    spec.source_vision_artifact_id,
+                    spec.source_vision_fingerprint,
+                    spec.source_product_goal_artifact_id,
+                    spec.source_product_goal_fingerprint,
+                )
+                if registry_fact != selected_fact:
+                    return _SpecificationReadFailure(
+                        _error(
+                            "SPECIFICATION_CANDIDATE_UNAVAILABLE",
+                            "Selected Specification registry row changed.",
+                            project_id=project_id,
+                            spec_version_id=spec.spec_version_id,
+                        )
+                    )
+            statement = select(SpecificationCandidate).where(
+                col(SpecificationCandidate.project_id) == project_id,
+                col(SpecificationCandidate.specification_candidate_id)
+                == candidate.specification_candidate_id,
+                col(SpecificationCandidate.candidate_fingerprint)
+                == candidate.candidate_fingerprint,
+            )
+            if registry is not None:
+                statement = statement.where(
+                    col(SpecificationCandidate.payload_fingerprint)
+                    == registry.spec_hash,
+                    col(SpecificationCandidate.vision_artifact_id)
+                    == registry.source_vision_artifact_id,
+                    col(SpecificationCandidate.vision_fingerprint)
+                    == registry.source_vision_fingerprint,
+                    col(SpecificationCandidate.product_goal_artifact_id)
+                    == registry.source_product_goal_artifact_id,
+                    col(SpecificationCandidate.product_goal_fingerprint)
+                    == registry.source_product_goal_fingerprint,
+                )
+            persisted = session.exec(statement).one_or_none()
+        if persisted is None:
+            return _SpecificationReadFailure(
+                _error(
+                    "SPECIFICATION_CANDIDATE_UNAVAILABLE",
+                    "Selected Specification does not resolve one persisted candidate.",
+                    project_id=project_id,
+                    specification_candidate_id=(
+                        candidate.specification_candidate_id
+                    ),
+                )
+            )
+        try:
+            candidate_data = _specification_candidate_data(
+                persisted,
+                decision_state=decision_state,
+            )
+        except (TypeError, ValueError) as error:
+            return _SpecificationReadFailure(
+                _error(
+                    "SPECIFICATION_CANDIDATE_UNAVAILABLE",
+                    "Stored Specification candidate contract is unavailable.",
+                    project_id=project_id,
+                    specification_candidate_id=(
+                        candidate.specification_candidate_id
+                    ),
+                    reason=str(error),
+                )
+            )
+        return _SpecificationReadProjection(
+            candidate=candidate_data,
+            registry=registry,
         )
 
     def _snapshot(self, project_id: int) -> WorkflowFactSnapshot | JsonObject:
