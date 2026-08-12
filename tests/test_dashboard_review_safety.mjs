@@ -202,16 +202,77 @@ test('lifecycle stages omit mandatory Discovery', () => {
     );
 });
 
-test('Specification authoring is host-owned and renders the exact v2 review packet', () => {
+test('Specification source registration exposes only normal path fields', () => {
     const { context } = loadFrontend();
 
-    const author = context.specificationPanelMarkup(
+    const registration = context.specificationPanelMarkup(
         { candidate: null, review: null },
-        [action('author_specification', 'specifications/author')],
+        [action('register_specification_source', 'specifications/source')],
     );
-    assert.match(author, /data-direct-action="author_specification"/);
-    assert.match(author, />Author Specification</);
-    assert.doesNotMatch(author, /textarea|type="file"|canonical_content/i);
+    assert.match(registration, /data-specification-source-form="true"/);
+    assert.match(registration, /name="source_path"/);
+    assert.match(registration, /name="adr_paths"/);
+    assert.match(registration, /name="preparation_capability"/);
+    assert.match(registration, /grill-with-docs/);
+    assert.match(registration, /attestation/);
+    assert.match(registration, /does not infer or prove/);
+    assert.match(registration, /CONTEXT\.md is captured automatically when present/);
+    assert.match(registration, /absence is recorded/);
+    assert.doesNotMatch(registration, /context_path|context_required/i);
+    assert.doesNotMatch(registration, /fingerprint|artifact_id|candidate_id|canonical_content/i);
+    assert.doesNotMatch(source, /author_specification|Author Specification/);
+
+    assert.equal(typeof context.specificationSourceSubmission, 'function');
+    const submission = context.specificationSourceSubmission(
+        [action('register_specification_source', 'specifications/source')],
+        ' specification.md ',
+        ' grill-with-docs ',
+        ' docs/adr/0002.md\n\n docs/adr/0001.md ',
+    );
+    assert.equal(submission.action.endpoint, 'specifications/source');
+    assert.deepEqual(JSON.parse(JSON.stringify(submission.fields)), {
+        source_path: 'specification.md',
+        preparation_capability: 'grill-with-docs',
+        adr_paths: ['docs/adr/0002.md', 'docs/adr/0001.md'],
+    });
+});
+
+test('accepted Specification remains visible while amendment source is prepared', () => {
+    const { context } = loadFrontend();
+    const rendered = context.specificationPanelMarkup(
+        {
+            current: {
+                spec_version_id: 8,
+                spec_hash: 'sha256:accepted-base',
+                candidate: {
+                    rendered_markdown: '# Accepted base Specification',
+                },
+            },
+            candidate: null,
+            review: null,
+        },
+        [
+            action('register_specification_source', 'specifications/source'),
+            action('structure_specification', 'specifications/structure'),
+        ],
+    );
+
+    assert.match(rendered, /Accepted Specification/);
+    assert.match(rendered, /# Accepted base Specification/);
+    assert.match(rendered, /data-specification-source-form="true"/);
+    assert.match(rendered, /data-direct-action="structure_specification"/);
+});
+
+test('Specification structuring is host-owned and preserves exact candidate review', () => {
+    const { context } = loadFrontend();
+
+    const structure = context.specificationPanelMarkup(
+        { candidate: null, review: null },
+        [action('structure_specification', 'specifications/structure')],
+    );
+    assert.match(structure, /data-direct-action="structure_specification"/);
+    assert.match(structure, />Structure Specification</);
+    assert.doesNotMatch(structure, /textarea|type="file"|fingerprint|canonical_content/i);
 
     const rendered = context.specificationPanelMarkup(
         {
@@ -241,6 +302,47 @@ test('Specification authoring is host-owned and renders the exact v2 review pack
         'accepted',
     );
     assert.equal(binding.expectedCandidate, 'sha256:spec-seen');
+});
+
+test('terminal Specification review keeps exact candidate and source re-entry', () => {
+    const { context } = loadFrontend();
+    const actions = [action('register_specification_source', 'specifications/source')];
+    const candidate = {
+        candidate_fingerprint: 'sha256:terminal-candidate',
+        rendered_markdown: '# Exact terminal candidate',
+    };
+
+    for (const state of ['rejected', 'feedback', 'accepted']) {
+        const rendered = context.specificationPanelMarkup(
+            { candidate, review: { state } },
+            actions,
+        );
+
+        assert.match(rendered, /# Exact terminal candidate/);
+        assert.match(rendered, /data-specification-source-form="true"/);
+        assert.match(rendered, /Register Specification source/);
+    }
+});
+
+test('pending Specification review never exposes source replacement', () => {
+    const { context } = loadFrontend();
+    const rendered = context.specificationPanelMarkup(
+        {
+            candidate: {
+                candidate_fingerprint: 'sha256:pending-candidate',
+                rendered_markdown: '# Exact pending candidate',
+            },
+            review: { state: 'pending' },
+        },
+        [
+            action('decide_specification', 'specifications/decision'),
+            action('register_specification_source', 'specifications/source'),
+        ],
+    );
+
+    assert.match(rendered, /# Exact pending candidate/);
+    assert.match(rendered, /data-review-scope="specification"/);
+    assert.doesNotMatch(rendered, /data-specification-source-form="true"/);
 });
 
 test('review binding keeps the exact action and candidate seen at dialog open', () => {

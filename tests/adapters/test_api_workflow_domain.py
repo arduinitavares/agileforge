@@ -50,8 +50,9 @@ from services.application import (
     ProductGoalResponseRequest,
     ProductGoalReviewRequest,
     RoadmapReviewRequest,
-    SpecificationAuthoringRequest,
     SpecificationReviewRequest,
+    SpecificationSourceRegistrationRequest,
+    SpecificationStructuringRequest,
     SprintPlanningInputService,
     SprintPlanningRequest,
     SprintPlanReviewRequest,
@@ -297,15 +298,17 @@ def test_create_project_api_rejects_unknown_or_internal_fields(
             "model_id",
         ),
         (
-            "/api/projects/41/specifications/author",
+            "/api/projects/41/specifications/source",
             {
+                "source_path": "SPECIFICATION.md",
+                "preparation_capability": "grill-with-docs",
                 "idempotency_key": "specification-41",
                 "actor": "operator",
             },
             "canonical_content",
         ),
         (
-            "/api/projects/41/specifications/author",
+            "/api/projects/41/specifications/structure",
             {
                 "idempotency_key": "specification-41",
                 "actor": "operator",
@@ -545,9 +548,15 @@ class _FakeApiApplication:
     ) -> TransitionResult:
         return self._record_delivery_request(request)
 
-    def author_specification(
+    def register_specification_source(
         self,
-        request: SpecificationAuthoringRequest,
+        request: SpecificationSourceRegistrationRequest,
+    ) -> TransitionResult:
+        return self._record_delivery_request(request)
+
+    def structure_specification(
+        self,
+        request: SpecificationStructuringRequest,
     ) -> TransitionResult:
         return self._record_delivery_request(request)
 
@@ -4488,6 +4497,54 @@ def test_position_advertises_only_executable_semantic_api_routes(
     assert all("decision_fingerprint" not in item for item in actions)
 
 
+def test_position_advertises_optional_specification_source_reentry_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Expose source re-entry without making all optional work immediate."""
+    source = NodeDecision(
+        node_id="specification.source.register",
+        child_graph_id="specification",
+        request_kind="register_specification_source",
+        category=NodeCategory.AVAILABLE,
+        recommendation_kind=RecommendationKind.OPTIONAL_REENTRY,
+        reason_code="SPECIFICATION_SOURCE_REPLACEMENT_AVAILABLE",
+        decision_fingerprint="source-reentry",
+    )
+    unrelated = NodeDecision(
+        node_id="vision.bootstrap",
+        child_graph_id="vision",
+        request_kind="generate_vision_bootstrap",
+        category=NodeCategory.AVAILABLE,
+        recommendation_kind=RecommendationKind.OPTIONAL_REENTRY,
+        reason_code="VISION_OPTIONAL_REENTRY",
+        decision_fingerprint="vision-reentry",
+    )
+    position = _all_request_kinds_position().model_copy(
+        update={
+            "available_nodes": (source.node_id, unrelated.node_id),
+            "decisions": (source, unrelated),
+        }
+    )
+    monkeypatch.setattr(
+        api_module,
+        "_application",
+        lambda: _FakeApiApplication(position=position),
+    )
+
+    response = TestClient(api_module.app).get("/api/projects/41/position")
+
+    assert response.status_code == HTTPStatus.OK
+    assert response.json()["actions"] == [
+        {
+            "node_id": "specification.source.register",
+            "instance_key": None,
+            "request_kind": "register_specification_source",
+            "endpoint": "specifications/source",
+            "transport": "semantic",
+        }
+    ]
+
+
 @pytest.mark.parametrize(
     "request_kind",
     [
@@ -4834,17 +4891,20 @@ def test_authority_endpoint_submits_exact_typed_request(
     assert request.expected_candidate_fingerprint == "sha256:authority-shown"
 
 
-def test_specification_author_endpoint_submits_only_transport_metadata(
+def test_specification_source_endpoint_submits_semantic_file_selection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Keep semantic payload, lineage, and fingerprints host-owned."""
+    """Submit paths while keeping captured bytes and lineage host-owned."""
     application = _FakeApiApplication()
     monkeypatch.setattr(api_module, "_application", lambda: application)
 
     response = TestClient(api_module.app).post(
-        "/api/projects/41/specifications/author",
+        "/api/projects/41/specifications/source",
         json={
-            "idempotency_key": "author-api-41",
+            "source_path": "SPECIFICATION.md",
+            "adr_paths": ["docs/adr/0002.md", "docs/adr/0001.md"],
+            "preparation_capability": "grill-with-docs",
+            "idempotency_key": "source-api-41",
             "actor": "dashboard-user",
             "correlation_id": "corr-api-41",
         },
@@ -4852,13 +4912,80 @@ def test_specification_author_endpoint_submits_only_transport_metadata(
 
     assert response.status_code == HTTPStatus.OK
     request = application.requests[0]
-    assert isinstance(request, SpecificationAuthoringRequest)
+    assert isinstance(request, SpecificationSourceRegistrationRequest)
     assert request.model_dump(mode="json") == {
         "project_id": PROJECT_ID,
-        "idempotency_key": "author-api-41",
+        "source_path": "SPECIFICATION.md",
+        "preparation_capability": "grill-with-docs",
+        "adr_paths": ["docs/adr/0001.md", "docs/adr/0002.md"],
+        "idempotency_key": "source-api-41",
         "actor": "dashboard-user",
         "correlation_id": "corr-api-41",
     }
+
+
+@pytest.mark.parametrize(
+    "capability",
+    [None, "caller-owned"],
+)
+def test_specification_source_endpoint_requires_exact_preparation_attestation(
+    capability: str | None,
+) -> None:
+    """Never infer external preparation or accept an unknown capability."""
+    payload = {
+        "source_path": "SPECIFICATION.md",
+        "idempotency_key": "source-api-41",
+        "actor": "dashboard-user",
+    }
+    if capability is not None:
+        payload["preparation_capability"] = capability
+
+    response = TestClient(api_module.app).post(
+        "/api/projects/41/specifications/source",
+        json=payload,
+    )
+
+    assert response.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+
+
+def test_specification_structure_endpoint_submits_only_transport_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep the registered source and structuring input host-selected."""
+    application = _FakeApiApplication()
+    monkeypatch.setattr(api_module, "_application", lambda: application)
+
+    response = TestClient(api_module.app).post(
+        "/api/projects/41/specifications/structure",
+        json={
+            "idempotency_key": "structure-api-41",
+            "actor": "dashboard-user",
+            "correlation_id": "corr-api-41",
+        },
+    )
+
+    assert response.status_code == HTTPStatus.OK
+    request = application.requests[0]
+    assert isinstance(request, SpecificationStructuringRequest)
+    assert request.model_dump(mode="json") == {
+        "project_id": PROJECT_ID,
+        "idempotency_key": "structure-api-41",
+        "actor": "dashboard-user",
+        "correlation_id": "corr-api-41",
+    }
+
+
+def test_retired_specification_author_endpoint_is_not_registered() -> None:
+    """Hard-break the retired combined authoring transport."""
+    response = TestClient(api_module.app).post(
+        "/api/projects/41/specifications/author",
+        json={
+            "idempotency_key": "author-api-41",
+            "actor": "dashboard-user",
+        },
+    )
+
+    assert response.status_code == HTTPStatus.NOT_FOUND
 
 
 @pytest.mark.parametrize(

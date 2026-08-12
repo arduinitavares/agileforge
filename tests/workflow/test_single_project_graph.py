@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, TypedDict
 from pydantic import TypeAdapter
 from sqlmodel import Session, select
 
+from adapters.git.repository_probe import GitPythonRepositoryProbe
 from models.core import Project, Task
 from repositories.workflow import WorkflowFactRepository
 from services.authority_review_projection import (
@@ -20,7 +21,12 @@ from services.contracts.specification import (
     SPEC_AUTHORITY_COMPILER_VERSION,
     compute_invariant_id_from_payload,
 )
-from services.specification_authoring_input import SpecificationAuthoringInputService
+from services.specification_authoring_input import SpecificationStructuringInputService
+from tests.workflow.test_product_discovery_transitions import (
+    _record_binding,
+    _register_source,
+    _repository,
+)
 from utils.agileforge_spec_profile_v2 import SpecificationPayload
 from utils.spec_schemas import (
     Invariant,
@@ -49,7 +55,7 @@ from workflow.requests import (
     CloseSprint,
     CloseStory,
     CompileAuthority,
-    CompleteSpecificationAuthoring,
+    CompleteSpecificationStructuring,
     CompleteTask,
     DecideAuthority,
     DecideBacklog,
@@ -73,6 +79,8 @@ from workflow.requests import (
 )
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from sqlalchemy.engine import Engine
 
 
@@ -267,9 +275,7 @@ def _authority_artifact() -> SpecAuthorityCompilationSuccess:
         source_map=[
             SourceMapEntry(
                 invariant_id=invariant_id,
-                excerpt=(
-                    "Every persisted lifecycle fact MUST include project_id."
-                ),
+                excerpt=("Every persisted lifecycle fact MUST include project_id."),
                 location="REQ.lifecycle.persist",
             )
         ],
@@ -397,6 +403,8 @@ def _new_journey(engine: Engine) -> _Journey:
             graph=project_graph(),
             clock=clock,
             adk_recipe_registry=_ProviderFreeRegistry(),
+            specification_source_check=lambda _project_id, _input: None,
+            specification_registration_check=lambda _prepared: None,
         ),
         clock=clock,
         project_id=project_id,
@@ -571,45 +579,72 @@ def _accept_initial_goal(journey: _Journey) -> None:
     assert accepted.ok is True
 
 
-def _accept_specification(journey: _Journey) -> tuple[int, str]:
+def _accept_specification(
+    journey: _Journey,
+    tmp_path: Path,
+) -> tuple[int, str]:
     domain = journey.domain
     project_id = journey.project_id
-    position, author = _assert_next(
-        domain, project_id, "specification.author", NodeCategory.AVAILABLE
+    probe = GitPythonRepositoryProbe()
+    repository = _repository(tmp_path, name="journey-specification-source")
+    _record_binding(
+        journey.engine,
+        project_id=project_id,
+        repository=repository,
+        probe=probe,
+        inspected_at=journey.clock.now_value - timedelta(seconds=1),
+    )
+    position, _ = _assert_next(
+        domain,
+        project_id,
+        "specification.source.register",
+        NodeCategory.AVAILABLE,
+    )
+    registered = _register_source(
+        journey.engine,
+        domain,
+        project_id=project_id,
+        repository_probe=probe,
+        key="journey-specification-source",
+    )
+    assert registered.ok is True
+    position, structurer = _assert_next(
+        domain, project_id, "specification.structure", NodeCategory.AVAILABLE
     )
     started = domain.transition(
         StartNodeAttempt(
             project_id=project_id,
             graph_version=position.graph_version,
             fact_fingerprint=position.fact_fingerprint,
-            decision_fingerprint=author.decision_fingerprint,
+            decision_fingerprint=structurer.decision_fingerprint,
             idempotency_key="journey-specification-start",
             actor="operator@example.com",
-            target_node_id="specification.author",
-            target_instance_key=author.instance_key,
-            normalized_input=SpecificationAuthoringInputService(
-                engine=journey.engine
+            target_node_id="specification.structure",
+            target_instance_key=structurer.instance_key,
+            normalized_input=SpecificationStructuringInputService(
+                engine=journey.engine,
+                repository_probe=probe,
             ).build(
                 project_id=project_id,
-                decision=author,
+                decision=structurer,
             ),
-            model_id="fake/specification-author",
+            model_id="fake/specification-structurer",
             execution_settings={"temperature": 0},
             lease_seconds=60,
         )
     )
     assert started.ok is True
-    authored = domain.transition(
-        CompleteSpecificationAuthoring(
-            **_guards(position, "specification.author"),
+    structured = domain.transition(
+        CompleteSpecificationStructuring(
+            **_guards(position, "specification.structure"),
             idempotency_key="journey-specification-complete",
             attempt_id=_output_int(started, "attempt_id"),
             attempt_fingerprint=str(started.output["attempt_fingerprint"]),
             payload=_specification_payload(),
         )
     )
-    assert authored.ok is True
-    specification_hash = str(authored.output["payload_fingerprint"])
+    assert structured.ok is True
+    specification_hash = str(structured.output["payload_fingerprint"])
     position, review = _assert_next(
         domain, project_id, "specification.review", NodeCategory.WAITING
     )
@@ -1027,7 +1062,8 @@ def _assert_next_cycle_and_fulfill_goal(journey: _Journey) -> None:
         "planning.sprint.plan",
         NodeCategory.AVAILABLE,
     )
-    assert "specification.author" in position.available_nodes
+    assert "specification.source.register" in position.available_nodes
+    assert "specification.structure" not in position.available_nodes
     assert "goal.fulfill" in position.available_nodes
     assert "goal.abandon" in position.available_nodes
     assert "vision.interview" not in position.available_nodes
@@ -1069,12 +1105,13 @@ def test_root_graph_has_exact_v2_lifecycle_order() -> None:
 
 def test_provider_free_persisted_v2_journey_reaches_triage_and_next_goal(
     engine: Engine,
+    tmp_path: Path,
 ) -> None:
     """Persist every semantic boundary from Vision through post-Sprint triage."""
     journey = _new_journey(engine)
     _accept_initial_vision(journey)
     _accept_initial_goal(journey)
-    spec_version_id, specification_hash = _accept_specification(journey)
+    spec_version_id, specification_hash = _accept_specification(journey, tmp_path)
     _accept_authority(journey, spec_version_id, specification_hash)
     requirements = (
         "Persist the primary lifecycle boundary",

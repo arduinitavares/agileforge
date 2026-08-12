@@ -45,12 +45,30 @@ _ISSUE_199_REQUIRED_COLUMNS: dict[str, frozenset[str]] = {
             "canonical_envelope_json",
             "payload_fingerprint",
             "candidate_fingerprint",
+            "specification_source_id",
+            "specification_source_fingerprint",
             "vision_artifact_id",
             "vision_fingerprint",
             "product_goal_artifact_id",
             "product_goal_fingerprint",
             "workflow_node_attempt_id",
             "attempt_fingerprint",
+        }
+    ),
+    "specification_sources": frozenset(
+        {
+            "source_bundle_json",
+            "source_fingerprint",
+            "repository_binding_id",
+            "repository_head_sha",
+            "repository_dirty",
+            "repository_status_fingerprint",
+            "vision_artifact_id",
+            "vision_fingerprint",
+            "product_goal_artifact_id",
+            "product_goal_fingerprint",
+            "supersedes_specification_source_id",
+            "supersedes_source_fingerprint",
         }
     ),
     "spec_registry": frozenset(
@@ -65,6 +83,7 @@ _ISSUE_199_REQUIRED_COLUMNS: dict[str, frozenset[str]] = {
     ),
 }
 _ISSUE_199_RETIRED_TABLE = "discovery_artifacts"
+_REGISTERED_SOURCE_REQUIRED_TABLE = "specification_sources"
 
 
 class UnsupportedBusinessSchemaError(RuntimeError):
@@ -78,6 +97,8 @@ def _assert_current_business_schema(target_engine: Engine) -> None:
     incompatible: list[str] = []
     if _ISSUE_199_RETIRED_TABLE in tables:
         incompatible.append(f"retired table {_ISSUE_199_RETIRED_TABLE}")
+    if "projects" in tables and _REGISTERED_SOURCE_REQUIRED_TABLE not in tables:
+        incompatible.append(f"missing table {_REGISTERED_SOURCE_REQUIRED_TABLE}")
     for table, required in _ISSUE_199_REQUIRED_COLUMNS.items():
         if table not in tables:
             continue

@@ -12,23 +12,28 @@ execution governed by reviewed specification authority.
 One durable Project owns one ordered lifecycle:
 
 ```text
-Vision -> Product Goal -> Specification Authoring -> Specification Review
+Vision -> Product Goal -> Source Registration -> Specification Structuring
+       -> Specification Review
        -> Typed Authority Compile -> Authority Review -> Backlog -> Roadmap
        -> Stories -> Sprint -> Execution -> Triage
 ```
 
-After a human accepts a Product Goal, AgileForge prepares the inputs for the
-`to-spec` producer and records one immutable `agileforge.spec.v2` candidate.
-The semantic payload and its host-owned lineage envelope are fingerprinted
-together. A human reviews that exact candidate before Authority compilation,
-then reviews the compiled Authority through a separate gate.
+After a human accepts a Product Goal, an external agent may run
+`grill-with-docs`, update the lazily created `CONTEXT.md`, record applicable
+ADRs, and run `to-spec`. It registers that exact human-readable source with
+AgileForge. AgileForge captures its bytes, the present-or-absent Context state,
+ADRs, accepted Vision and Goal fingerprints, and repository revision before an
+internal Specification Structuring Agent creates canonical
+`agileforge.spec.v2`. A human reviews that exact candidate before Authority
+compilation, then reviews the compiled Authority through a separate gate.
 
 Discovery is optional work such as interviews, `grill-with-docs`, research,
-repository evidence, ADRs, and prototypes. It may contribute source provenance
-to a Specification, but AgileForge does not persist a Discovery artifact or
+repository evidence, ADRs, and prototypes. `grill-with-docs` is preparation
+attestation, not proof of an external agent's internal reasoning. Discovery may
+contribute to a Specification, but AgileForge does not persist an artifact or
 expose a Discovery workflow gate, API, CLI command, or dashboard card. Markdown
-and files are review projections only; they are never accepted as Specification
-input or compiled into Authority.
+and registered source files are never compiled into Authority. Authority
+consumes only accepted typed `agileforge.spec.v2` clauses.
 
 `WorkflowDomain.position(project_id)` derives available, waiting, blocked,
 invalid, or terminal nodes from durable Project facts. Commands submit typed
@@ -36,7 +41,7 @@ requests through `WorkflowDomain.transition(request)`. ADK recipes execute
 eligible model work; they do not own routing state.
 
 The current model-backed nodes cover Vision and Product Goal interviews,
-Specification authoring, Authority compilation and repair, Backlog, Roadmap,
+Specification structuring, Authority compilation and repair, Backlog, Roadmap,
 Story, and Sprint generation. Human Specification and Authority review
 decisions remain separate explicit workflow transitions.
 
@@ -47,8 +52,9 @@ decisions remain separate explicit workflow transitions.
 - **Specification authority**: reviewed compiler output constrains downstream
   planning and execution.
 - **Canonical Specification**: a typed v2 payload contains semantics while an
-  immutable envelope binds direct Vision and Product Goal lineage, source and
-  producer evidence, attempt identity, amendment base and diff, and exact
+  immutable envelope binds direct Vision and Product Goal lineage, the exact
+  registered `to-spec` source, source preparation attestation, structurer and
+  attempt identity, amendment base and diff, and exact
   payload, review-view, and candidate fingerprints.
 - **Durable Project facts**: process restarts and execution-trace resets do not
   alter workflow position.
@@ -96,12 +102,15 @@ Current checkout UI: `./agileforge-dev ui --profile local --port auto`
 
 Provenance: `./agileforge-dev info --profile local --json`
 
-Execute the command template returned by `workflow next`. AgileForge derives and
-validates internal guards from the current durable position. Operators provide
-only task-specific semantic fields and transport metadata such as idempotency key
-and actor. Humans never enter raw workflow JSON, file paths, Markdown,
-fingerprints, or lineage identifiers for Specification authoring or review. Use
-a new idempotency key for each distinct request.
+Execute the command template returned by `workflow next`. After the external
+agent produces its source, the graph advertises `specification source register`;
+after immutable capture, it advertises `specification structure`. AgileForge
+derives and validates internal guards from the current durable position.
+Operators provide only task-specific semantic fields and transport metadata
+such as idempotency key and actor. Source registration takes
+repository-relative source and applicable ADR paths. Humans never enter raw
+workflow JSON, candidate IDs, fingerprints, or lineage identifiers for
+structuring or review. Use a new idempotency key for each distinct request.
 
 The Specification v2 cutover is a hard break. Initialize a fresh profile and
 business database when moving from a checkout that used the former Discovery or

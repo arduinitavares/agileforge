@@ -20,6 +20,11 @@ from services.agent_workbench.authority_projection import (
     AuthorityProjectionService,
     pending_authority_fingerprint,
 )
+from services.contracts.specification_source import (
+    SpecificationSourceBundle,
+    SpecificationSourceDocument,
+    source_bundle_fingerprint,
+)
 from services.packet_renderer import render_packet
 from services.packets.canonical import (
     CanonicalPacketError,
@@ -52,6 +57,7 @@ if TYPE_CHECKING:
         ProductGoalInterviewTurnFact,
         SpecificationCandidateFact,
         SpecificationDecisionFact,
+        SpecificationSourceFact,
         SpecVersionFact,
         SprintFact,
         VisionArtifactDecisionFact,
@@ -204,8 +210,7 @@ def _vision_components_data(
                 "source_kinds": [
                     item
                     for item in source_kinds
-                    if isinstance(item, str)
-                    and item in _VISION_BASIS_SOURCE_KINDS
+                    if isinstance(item, str) and item in _VISION_BASIS_SOURCE_KINDS
                 ]
                 if isinstance(source_kinds, list | tuple)
                 else [],
@@ -446,6 +451,11 @@ def _specification_candidate_data(
             ),
         ),
         (
+            "registered source fingerprint",
+            candidate.specification_source_fingerprint,
+            envelope.registered_source_fingerprint,
+        ),
+        (
             "source manifest fingerprint",
             candidate.source_manifest_fingerprint,
             envelope.source_manifest_fingerprint,
@@ -498,6 +508,10 @@ def _specification_candidate_data(
         "product_goal_fingerprint": envelope.accepted_product_goal_fingerprint,
         "base_spec_version_id": envelope.base_specification_id,
         "base_spec_hash": envelope.base_payload_fingerprint,
+        "specification_source_id": candidate.specification_source_id,
+        "registered_source_fingerprint": envelope.registered_source_fingerprint,
+        "source_producer_capability": envelope.source_producer_capability,
+        "source_preparation_capability": (envelope.source_preparation_capability),
         "source_manifest": [
             _validated(item.model_dump(mode="json"))
             for item in envelope.source_manifest
@@ -508,10 +522,9 @@ def _specification_candidate_data(
         "producer_capability": envelope.producer_capability,
         "producer_version": envelope.producer_version,
         "model_id": envelope.model_id,
-        "model_configuration_fingerprint": (
-            envelope.model_configuration_fingerprint
-        ),
+        "model_configuration_fingerprint": (envelope.model_configuration_fingerprint),
         "prompt_fingerprint": envelope.prompt_fingerprint,
+        "prompt_version": envelope.prompt_version,
         "workflow_node_attempt_id": envelope.workflow_node_attempt_id,
         "attempt_fingerprint": envelope.attempt_fingerprint,
         "correlation_id": envelope.correlation_id,
@@ -532,6 +545,82 @@ def _specification_candidate_data(
     }
 
 
+def _source_document_metadata(
+    document: SpecificationSourceDocument,
+) -> JsonObject:
+    """Project document identity without exposing captured source bytes."""
+    return {
+        "source_id": document.source_id,
+        "relative_path": document.relative_path,
+        "byte_length": document.byte_length,
+        "content_fingerprint": document.content_fingerprint,
+    }
+
+
+def _specification_source_data(source: SpecificationSourceFact) -> JsonObject:
+    """Project registered-source provenance as metadata and digests only."""
+    bundle = SpecificationSourceBundle.model_validate(source.bundle)
+    if source_bundle_fingerprint(bundle) != source.source_fingerprint:
+        message = "Registered Specification source fingerprint changed."
+        raise ValueError(message)
+    if (
+        source.repository_head_sha,
+        source.repository_dirty,
+        source.repository_status_fingerprint,
+        source.vision_fingerprint,
+        source.product_goal_fingerprint,
+    ) != (
+        bundle.repository_revision.head_sha,
+        bundle.repository_revision.dirty,
+        bundle.repository_revision.status_fingerprint,
+        bundle.accepted_vision_fingerprint,
+        bundle.accepted_product_goal_fingerprint,
+    ):
+        message = "Registered Specification source lineage changed."
+        raise ValueError(message)
+    context_document = bundle.context.document
+    return {
+        "schema_version": bundle.schema_version,
+        "specification_source_id": source.specification_source_id,
+        "source_fingerprint": source.source_fingerprint,
+        "producer_capability": bundle.producer_capability,
+        "preparation_capability": bundle.preparation_capability,
+        "source": _source_document_metadata(bundle.source),
+        "context": {
+            "state": bundle.context.state,
+            "document": (
+                None
+                if context_document is None
+                else _source_document_metadata(context_document)
+            ),
+        },
+        "adrs": [_source_document_metadata(document) for document in bundle.adrs],
+        "repository": {
+            "repository_binding_id": source.repository_binding_id,
+            "head_sha": bundle.repository_revision.head_sha,
+            "branch_name": bundle.repository_revision.branch_name,
+            "detached_head": bundle.repository_revision.detached_head,
+            "dirty": bundle.repository_revision.dirty,
+            "status_fingerprint": bundle.repository_revision.status_fingerprint,
+            "probe_version": bundle.repository_revision.probe_version,
+        },
+        "accepted_vision": {
+            "vision_artifact_id": source.vision_artifact_id,
+            "fingerprint": source.vision_fingerprint,
+        },
+        "active_product_goal": {
+            "product_goal_artifact_id": source.product_goal_artifact_id,
+            "fingerprint": source.product_goal_fingerprint,
+        },
+        "supersedes_specification_source_id": (
+            source.supersedes_specification_source_id
+        ),
+        "supersedes_source_fingerprint": source.supersedes_source_fingerprint,
+        "registered_by": source.registered_by,
+        "registered_at": _iso(source.registered_at),
+    }
+
+
 def _specification_registry_data(
     spec: SpecRegistry,
     *,
@@ -544,20 +633,14 @@ def _specification_registry_data(
         "status": spec.status,
         "approved_at": _iso(spec.approved_at),
         "approved_by": spec.approved_by,
-        "source_specification_candidate_id": (
-            spec.source_specification_candidate_id
-        ),
+        "source_specification_candidate_id": (spec.source_specification_candidate_id),
         "source_specification_candidate_fingerprint": (
             spec.source_specification_candidate_fingerprint
         ),
         "source_vision_artifact_id": spec.source_vision_artifact_id,
         "source_vision_fingerprint": spec.source_vision_fingerprint,
-        "source_product_goal_artifact_id": (
-            spec.source_product_goal_artifact_id
-        ),
-        "source_product_goal_fingerprint": (
-            spec.source_product_goal_fingerprint
-        ),
+        "source_product_goal_artifact_id": (spec.source_product_goal_artifact_id),
+        "source_product_goal_fingerprint": (spec.source_product_goal_fingerprint),
         "supersedes_spec_version_id": spec.supersedes_spec_version_id,
         "candidate": candidate,
     }
@@ -597,8 +680,7 @@ def _accepted_registry_candidate_payloads(
         terminal_decisions = [
             item
             for item in decisions
-            if item.specification_candidate_id
-            == spec.source_specification_candidate_id
+            if item.specification_candidate_id == spec.source_specification_candidate_id
             and item.candidate_fingerprint
             == spec.source_specification_candidate_fingerprint
         ]
@@ -712,18 +794,14 @@ class DurableAuthorityReviewProjection:
                 session.exec(
                     select(SpecificationCandidate)
                     .where(col(SpecificationCandidate.project_id) == project_id)
-                    .order_by(
-                        col(SpecificationCandidate.specification_candidate_id)
-                    )
+                    .order_by(col(SpecificationCandidate.specification_candidate_id))
                 ).all()
             )
             specification_decisions = list(
                 session.exec(
                     select(SpecificationDecision)
                     .where(col(SpecificationDecision.project_id) == project_id)
-                    .order_by(
-                        col(SpecificationDecision.specification_decision_id)
-                    )
+                    .order_by(col(SpecificationDecision.specification_decision_id))
                 ).all()
             )
             authorities = list(
@@ -904,6 +982,7 @@ class DurableAuthorityReviewProjection:
             "artifact": _validated(artifact.model_dump(mode="json")),
         }
 
+
 class DurableReadProjectionService:
     """Read supported operator views without deriving workflow availability."""
 
@@ -1078,9 +1157,7 @@ class DurableReadProjectionService:
             for item in selection.transcript
             if item.user_text is not None
         ]
-        latest_turn = (
-            selection.transcript[-1] if selection.transcript else None
-        )
+        latest_turn = selection.transcript[-1] if selection.transcript else None
         draft_data: JsonObject | None = (
             _vision_turn_draft_data(latest_turn)
             if latest_turn is not None and not latest_turn.is_complete
@@ -1093,19 +1170,14 @@ class DurableReadProjectionService:
             else None
         )
         current_data: JsonObject | None = (
-            None
-            if vision is None
-            else {"statement": vision.statement}
+            None if vision is None else {"statement": vision.statement}
         )
         candidate_data: JsonObject | None = (
             None if candidate is None else _vision_candidate_data(candidate)
         )
         data: JsonObject = {
             "bootstrap_available": not selection.transcript
-            and (
-                selection.artifact is None
-                or selection.open_revision is not None
-            ),
+            and (selection.artifact is None or selection.open_revision is not None),
             "current": current_data,
             "draft": draft_data,
             "transcript": transcript,
@@ -1216,13 +1288,56 @@ class DurableReadProjectionService:
         if isinstance(snapshot, dict):
             return snapshot
         selection = select_product_definition_state(snapshot)
+        source = (
+            None
+            if selection.specification_source is None
+            else _specification_source_data(selection.specification_source)
+        )
         candidate = selection.specification_candidate
         spec = selection.accepted_spec
         if candidate is None:
+            current: JsonObject | None = None
+            if spec is not None:
+                accepted_candidate = next(
+                    (
+                        item
+                        for item in snapshot.specification_candidates
+                        if (
+                            item.specification_candidate_id,
+                            item.candidate_fingerprint,
+                        )
+                        == (
+                            spec.source_specification_candidate_id,
+                            spec.source_specification_candidate_fingerprint,
+                        )
+                    ),
+                    None,
+                )
+                if accepted_candidate is None:
+                    return _error(
+                        "SPECIFICATION_CANDIDATE_UNAVAILABLE",
+                        "Accepted Specification candidate is unavailable.",
+                        project_id=project_id,
+                        spec_version_id=spec.spec_version_id,
+                    )
+                accepted_projection = self._specification_projection(
+                    project_id=project_id,
+                    candidate=accepted_candidate,
+                    spec=spec,
+                    decision_state="accepted",
+                )
+                if isinstance(accepted_projection, _SpecificationReadFailure):
+                    return accepted_projection.error
+                if accepted_projection.registry is not None:
+                    current = _specification_registry_data(
+                        accepted_projection.registry,
+                        candidate=accepted_projection.candidate,
+                    )
             return _success(
                 {
                     "schema_version": _SPECIFICATION_REVIEW_SCHEMA_VERSION,
-                    "current": None,
+                    "source": source,
+                    "current": current,
                     "candidate": None,
                     "review": None,
                     "stale_reason": (
@@ -1231,7 +1346,11 @@ class DurableReadProjectionService:
                             selection.specification_candidate_conflict
                             or selection.accepted_spec_conflict
                         )
-                        else "SPECIFICATION_NOT_CURRENT"
+                        else (
+                            "SPECIFICATION_SOURCE_NOT_REGISTERED"
+                            if source is None
+                            else "SPECIFICATION_NOT_STRUCTURED"
+                        )
                     ),
                 }
             )
@@ -1248,7 +1367,19 @@ class DurableReadProjectionService:
         projection = self._specification_projection(
             project_id=project_id,
             candidate=candidate,
-            spec=spec,
+            spec=(
+                spec
+                if spec is not None
+                and (
+                    spec.source_specification_candidate_id,
+                    spec.source_specification_candidate_fingerprint,
+                )
+                == (
+                    candidate.specification_candidate_id,
+                    candidate.candidate_fingerprint,
+                )
+                else None
+            ),
             decision_state=decision_state,
         )
         if isinstance(projection, _SpecificationReadFailure):
@@ -1256,6 +1387,7 @@ class DurableReadProjectionService:
         return _success(
             {
                 "schema_version": _SPECIFICATION_REVIEW_SCHEMA_VERSION,
+                "source": source,
                 "current": (
                     None
                     if projection.registry is None
@@ -1280,17 +1412,27 @@ class DurableReadProjectionService:
         if isinstance(snapshot, dict):
             return snapshot
         selection = select_product_definition_state(snapshot)
+        source = (
+            None
+            if selection.specification_source is None
+            else _specification_source_data(selection.specification_source)
+        )
         candidate = selection.specification_candidate
         if candidate is None:
             return _success(
                 {
                     "schema_version": _SPECIFICATION_REVIEW_SCHEMA_VERSION,
+                    "source": source,
                     "candidate": None,
                     "review": None,
                     "stale_reason": (
                         "SPECIFICATION_FACT_CONFLICT"
                         if selection.specification_candidate_conflict
-                        else "NO_CURRENT_CANDIDATE"
+                        else (
+                            "SPECIFICATION_SOURCE_NOT_REGISTERED"
+                            if source is None
+                            else "SPECIFICATION_NOT_STRUCTURED"
+                        )
                     ),
                 }
             )
@@ -1309,7 +1451,19 @@ class DurableReadProjectionService:
         projection = self._specification_projection(
             project_id=project_id,
             candidate=candidate,
-            spec=selection.accepted_spec,
+            spec=(
+                selection.accepted_spec
+                if selection.accepted_spec is not None
+                and (
+                    selection.accepted_spec.source_specification_candidate_id,
+                    selection.accepted_spec.source_specification_candidate_fingerprint,
+                )
+                == (
+                    candidate.specification_candidate_id,
+                    candidate.candidate_fingerprint,
+                )
+                else None
+            ),
             decision_state=decision_state,
         )
         if isinstance(projection, _SpecificationReadFailure):
@@ -1317,6 +1471,7 @@ class DurableReadProjectionService:
         return _success(
             {
                 "schema_version": _SPECIFICATION_REVIEW_SCHEMA_VERSION,
+                "source": source,
                 "candidate": projection.candidate,
                 "review": review,
                 "stale_reason": (
@@ -1890,16 +2045,20 @@ class DurableReadProjectionService:
             registry: SpecRegistry | None = None
             if spec is not None:
                 registry = session.get(SpecRegistry, spec.spec_version_id)
-                registry_fact = None if registry is None else (
-                    registry.project_id,
-                    registry.spec_hash,
-                    registry.status,
-                    registry.source_specification_candidate_id,
-                    registry.source_specification_candidate_fingerprint,
-                    registry.source_vision_artifact_id,
-                    registry.source_vision_fingerprint,
-                    registry.source_product_goal_artifact_id,
-                    registry.source_product_goal_fingerprint,
+                registry_fact = (
+                    None
+                    if registry is None
+                    else (
+                        registry.project_id,
+                        registry.spec_hash,
+                        registry.status,
+                        registry.source_specification_candidate_id,
+                        registry.source_specification_candidate_fingerprint,
+                        registry.source_vision_artifact_id,
+                        registry.source_vision_fingerprint,
+                        registry.source_product_goal_artifact_id,
+                        registry.source_product_goal_fingerprint,
+                    )
                 )
                 selected_fact = (
                     project_id,
@@ -1927,6 +2086,10 @@ class DurableReadProjectionService:
                 == candidate.specification_candidate_id,
                 col(SpecificationCandidate.candidate_fingerprint)
                 == candidate.candidate_fingerprint,
+                col(SpecificationCandidate.specification_source_id)
+                == candidate.specification_source_id,
+                col(SpecificationCandidate.specification_source_fingerprint)
+                == candidate.specification_source_fingerprint,
             )
             if registry is not None:
                 statement = statement.where(
@@ -1948,9 +2111,7 @@ class DurableReadProjectionService:
                     "SPECIFICATION_CANDIDATE_UNAVAILABLE",
                     "Selected Specification does not resolve one persisted candidate.",
                     project_id=project_id,
-                    specification_candidate_id=(
-                        candidate.specification_candidate_id
-                    ),
+                    specification_candidate_id=(candidate.specification_candidate_id),
                 )
             )
         try:
@@ -1964,9 +2125,7 @@ class DurableReadProjectionService:
                     "SPECIFICATION_CANDIDATE_UNAVAILABLE",
                     "Stored Specification candidate contract is unavailable.",
                     project_id=project_id,
-                    specification_candidate_id=(
-                        candidate.specification_candidate_id
-                    ),
+                    specification_candidate_id=(candidate.specification_candidate_id),
                     reason=str(error),
                 )
             )

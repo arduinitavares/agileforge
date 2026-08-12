@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 
@@ -171,11 +172,75 @@ def test_zero_one_and_multiple_remote_urls_are_sorted(git_repository: Path) -> N
 
     repo.create_remote("local", str(git_repository / "private-source"))
 
-    assert probe.inspect(git_repository).remotes == (
-        str(git_repository / "private-source"),
+    result = probe.inspect(git_repository)
+    assert result.remotes == (
         "ssh://example.test/alpha.git",
         "ssh://example.test/zulu.git",
     )
+    assert [warning.code for warning in result.warnings] == ["REMOTE_OMITTED"]
+
+
+@pytest.mark.parametrize(
+    ("remote_url", "expected_identity"),
+    [
+        (
+            "https://operator:CREDENTIAL_SENTINEL@example.test/team/repo.git"
+            "?access_token=QUERY_SENTINEL#configured",
+            "https://example.test/team/repo.git",
+        ),
+        (
+            "ssh://CREDENTIAL_SENTINEL@example.test/team/repo.git",
+            "ssh://example.test/team/repo.git",
+        ),
+        (
+            "CREDENTIAL_SENTINEL@example.test:team/repo.git",
+            "example.test:team/repo.git",
+        ),
+        (
+            "CREDENTIAL_SENTINEL@example.test:team/repo.git"
+            "?access_token=QUERY_SENTINEL#configured",
+            "example.test:team/repo.git",
+        ),
+    ],
+)
+def test_remote_identity_excludes_credentials_before_leaving_probe(
+    git_repository: Path,
+    remote_url: str,
+    expected_identity: str,
+) -> None:
+    """Expose scheme, host, and path without URL or SCP-style userinfo."""
+    Repo(git_repository).create_remote("origin", remote_url)
+
+    result = GitPythonRepositoryProbe().inspect(git_repository)
+
+    assert result.remotes == (expected_identity,)
+    assert "CREDENTIAL_SENTINEL" not in repr(result)
+    assert "QUERY_SENTINEL" not in repr(result)
+
+
+@pytest.mark.parametrize(
+    "remote_url",
+    [
+        "/private/host/repository.git",
+        "../relative/repository.git",
+        "file:///private/host/repository.git",
+        "file:/private/host/repository.git",
+        "C:/private/host/repository.git",
+        "https:///missing-host.git",
+        "not a remote URL",
+    ],
+)
+def test_probe_omits_local_and_malformed_remote_locations(
+    git_repository: Path,
+    remote_url: str,
+) -> None:
+    """Host-local or malformed locations cannot enter portable evidence."""
+    Repo(git_repository).create_remote("origin", remote_url)
+
+    result = GitPythonRepositoryProbe().inspect(git_repository)
+
+    assert result.remotes == ()
+    assert remote_url not in repr(result)
 
 
 def test_non_ascii_and_surrogateescaped_paths_have_stable_normalization(
@@ -229,15 +294,15 @@ def test_non_ascii_and_surrogateescaped_paths_have_stable_normalization(
     expected_fingerprint = canonical_hash(
         {
             "probe_version": "agileforge.repository-probe.v1",
-            "worktree_path": worktree_path,
-            "common_git_dir": common_git_dir,
             "head_sha": "a" * 40,
             "branch_name": "main",
             "detached_head": False,
+            "dirty": True,
             "status_entries": [
                 entry.model_dump(mode="json") for entry in expected_entries
             ],
             "remotes": (),
+            "remote_omitted": False,
         }
     )
 
@@ -301,6 +366,25 @@ def test_equivalent_probe_replays_the_same_status_fingerprint(
     second = probe.inspect(git_repository)
 
     assert first.status_fingerprint == second.status_fingerprint
+
+
+def test_status_fingerprint_is_portable_across_checkout_roots(
+    git_repository: Path,
+    tmp_path: Path,
+) -> None:
+    """Ignore checkout-local absolute paths while retaining Git semantics."""
+    relocated = tmp_path / "relocated-repository"
+    shutil.copytree(git_repository, relocated)
+    probe = GitPythonRepositoryProbe()
+
+    original = probe.inspect(git_repository)
+    copy = probe.inspect(relocated)
+
+    assert original.worktree_path != copy.worktree_path
+    assert original.common_git_dir != copy.common_git_dir
+    assert original.head_sha == copy.head_sha
+    assert original.status_entries == copy.status_entries
+    assert original.status_fingerprint == copy.status_fingerprint
 
 
 def test_status_fingerprint_changes_when_untracked_path_changes(

@@ -72,9 +72,10 @@ _ACTION_ENDPOINTS = {
     "record_authority_feedback": "authority/feedback",
     "record_backlog_draft": "backlog/generate",
     "record_product_goal_interview_turn": "goals/respond",
-    "author_specification": "specifications/author",
+    "register_specification_source": "specifications/source",
     "record_vision_interview_turn": "vision/respond",
     "repair_authority": "authority/repair",
+    "structure_specification": "specifications/structure",
 }
 
 _ACTION_CHILDREN = {
@@ -87,9 +88,10 @@ _ACTION_CHILDREN = {
     "record_authority_feedback": "authority",
     "record_backlog_draft": "backlog",
     "record_product_goal_interview_turn": "product_goal",
-    "author_specification": "specification",
+    "register_specification_source": "specification",
     "record_vision_interview_turn": "vision",
     "repair_authority": "authority",
+    "structure_specification": "specification",
 }
 
 
@@ -116,6 +118,7 @@ class FakeLifecycle:
     goal_transcript: list[JsonValue] = field(default_factory=list)
     goal_candidate: JsonObject | None = None
     goal_accepted: bool = False
+    specification_source: JsonObject | None = None
     specification: JsonObject | None = None
     specification_accepted: bool = False
     authority_pending: JsonObject | None = None
@@ -235,7 +238,8 @@ class FakeLifecycle:
             "/goals/review": self._review_goal,
             "/repository": self._attach_repository,
             "/repository/refresh": self._refresh_repository,
-            "/specifications/author": self._author_specification,
+            "/specifications/source": self._register_specification_source,
+            "/specifications/structure": self._structure_specification,
             "/specifications/review": self._review_specification,
             "/vision/bootstrap": self._bootstrap_vision,
             "/vision/respond": self._record_vision_turn,
@@ -383,8 +387,25 @@ class FakeLifecycle:
         assert isinstance(body["rationale"], str)
         self.goal_accepted = True
 
-    def _author_specification(self, body: JsonObject) -> None:
+    def _register_specification_source(self, body: JsonObject) -> None:
+        self._assert_fields(
+            body,
+            {"source_path", "preparation_capability", "adr_paths"},
+        )
+        assert body["source_path"] == "specs/product-specification.md"
+        assert body["preparation_capability"] == "grill-with-docs"
+        assert body["adr_paths"] == ["docs/adr/0004-registered-source.md"]
+        self.specification_source = {
+            "specification_source_id": 31,
+            "source_fingerprint": "sha256:hidden-registered-source",
+            "producer_capability": "to-spec",
+            "preparation_capability": "grill-with-docs",
+            "context": {"state": "absent", "document": None},
+        }
+
+    def _structure_specification(self, body: JsonObject) -> None:
         self._assert_fields(body, set())
+        assert self.specification_source is not None
         self.specification = {
             "title": "Human lifecycle review",
             "rendered_markdown": (
@@ -493,15 +514,11 @@ class FakeLifecycle:
 
     def _vision_projection(self) -> JsonObject:
         current: JsonObject | None = (
-            {"statement": self._vision_statement()}
-            if self.vision_accepted
-            else None
+            {"statement": self._vision_statement()} if self.vision_accepted else None
         )
         candidate = None if self.vision_accepted else self.vision_candidate
         review: JsonObject | None = (
-            {"state": "pending", "rationale": None}
-            if candidate is not None
-            else None
+            {"state": "pending", "rationale": None} if candidate is not None else None
         )
         return {
             "bootstrap_available": (
@@ -562,6 +579,7 @@ class FakeLifecycle:
         if candidate is not None:
             review = {"state": "accepted" if self.specification_accepted else "pending"}
         return {
+            "source": self.specification_source,
             "candidate": candidate,
             "review": review,
             "stale_reason": None,
@@ -593,7 +611,11 @@ class FakeLifecycle:
             (not self.vision_accepted, "decide_vision_review"),
             (self.goal_candidate is None, "record_product_goal_interview_turn"),
             (not self.goal_accepted, "decide_product_goal_review"),
-            (self.specification is None, "author_specification"),
+            (
+                self.specification_source is None,
+                "register_specification_source",
+            ),
+            (self.specification is None, "structure_specification"),
             (not self.specification_accepted, "decide_specification"),
             (
                 self.authority_pending is None and self.authority_accepted is None,
@@ -904,7 +926,16 @@ def _complete_vision_and_goal(
 
 
 def _record_and_review_definition(page: Page) -> None:
-    page.locator('[data-direct-action="author_specification"]').click()
+    page.locator("#specification-source-path").fill("specs/product-specification.md")
+    page.locator("#specification-preparation-capability").select_option(
+        "grill-with-docs"
+    )
+    page.locator("#specification-adr-paths").fill("docs/adr/0004-registered-source.md")
+    page.locator('form[data-specification-source-form="true"]').evaluate(
+        "form => form.requestSubmit()"
+    )
+    expect(page.get_by_role("button", name="Structure Specification")).to_be_visible()
+    page.locator('[data-direct-action="structure_specification"]').click()
     expect(page.get_by_text("Human lifecycle review")).to_be_visible()
     expect(
         page.get_by_text("Every candidate has a scoped human decision.")
@@ -960,6 +991,13 @@ def _authority_ready_fake() -> FakeLifecycle:
         "fingerprint": "sha256:recovery-goal",
     }
     fake.goal_accepted = True
+    fake.specification_source = {
+        "specification_source_id": 31,
+        "source_fingerprint": "sha256:recovery-source",
+        "producer_capability": "to-spec",
+        "preparation_capability": "grill-with-docs",
+        "context": {"state": "absent", "document": None},
+    }
     fake.specification = {
         "title": "Recoverable Authority feedback",
         "rendered_markdown": "# Recoverable Authority feedback",

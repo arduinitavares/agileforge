@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from copy import deepcopy
 
 import pytest
@@ -21,7 +22,11 @@ from services.specs.candidate_contract import (
     load_candidate_contract,
     render_candidate_review_markdown,
 )
-from utils.agileforge_spec_profile_v2 import SpecificationPayload, canonical_spec_hash
+from utils.agileforge_spec_profile_v2 import (
+    SpecificationPayload,
+    canonical_spec_hash,
+    canonical_spec_json,
+)
 
 
 def _payload() -> SpecificationPayload:
@@ -79,6 +84,9 @@ def _envelope(**overrides: object) -> SpecificationCandidateEnvelope:
         "accepted_vision_fingerprint": _fingerprint("vision"),
         "accepted_product_goal_id": 23,
         "accepted_product_goal_fingerprint": _fingerprint("goal"),
+        "registered_source_fingerprint": _fingerprint("registered-source"),
+        "source_producer_capability": "to-spec",
+        "source_preparation_capability": "grill-with-docs",
         "source_manifest": (
             CandidateSourceManifestEntry(
                 source_id="SRC.goal",
@@ -88,10 +96,11 @@ def _envelope(**overrides: object) -> SpecificationCandidateEnvelope:
         ),
         "accepted_fact_fingerprint": _fingerprint("facts"),
         "producer_input_fingerprint": _fingerprint("input"),
-        "producer_capability": "to-spec",
-        "producer_version": "2.0.0",
+        "producer_capability": "specification-structurer",
+        "producer_version": "1.0.0",
         "model_id": "model-x",
         "model_configuration_fingerprint": _fingerprint("model-config"),
+        "prompt_version": "agileforge.specification-structurer.prompt.v1",
         "prompt_fingerprint": _fingerprint("prompt"),
         "workflow_node_attempt_id": WORKFLOW_NODE_ATTEMPT_ID,
         "attempt_fingerprint": _fingerprint("attempt"),
@@ -107,12 +116,44 @@ def _envelope(**overrides: object) -> SpecificationCandidateEnvelope:
     )
 
 
+def test_v2_envelope_schema_requires_registered_source_and_structurer_provenance() -> (
+    None
+):
+    """Expose one closed hard-break provenance contract to every host caller."""
+    expected_fields = {
+        "registered_source_fingerprint",
+        "source_producer_capability",
+        "source_preparation_capability",
+        "prompt_version",
+    }
+
+    for schema in (
+        CandidateBuildInput.model_json_schema(),
+        SpecificationCandidateEnvelope.model_json_schema(),
+    ):
+        assert expected_fields <= set(schema["required"])
+        assert schema["properties"]["source_producer_capability"]["const"] == (
+            "to-spec"
+        )
+        assert schema["properties"]["source_preparation_capability"]["const"] == (
+            "grill-with-docs"
+        )
+        assert schema["properties"]["producer_capability"]["const"] == (
+            "specification-structurer"
+        )
+
+
 def test_initial_envelope_binds_immutable_payload_and_complete_review_view() -> None:
     """An initial candidate hashes exact semantic bytes and rendered review."""
     envelope = _envelope()
 
     assert envelope.candidate_kind is CandidateKind.INITIAL
-    assert envelope.envelope_version == "agileforge.spec-candidate-envelope.v1"
+    assert envelope.envelope_version == "agileforge.spec-candidate-envelope.v2"
+    assert envelope.registered_source_fingerprint == _fingerprint("registered-source")
+    assert envelope.source_producer_capability == "to-spec"
+    assert envelope.source_preparation_capability == "grill-with-docs"
+    assert envelope.producer_capability == "specification-structurer"
+    assert envelope.prompt_version == ("agileforge.specification-structurer.prompt.v1")
     assert envelope.payload_fingerprint == canonical_spec_hash(_payload())
     assert envelope.review_view_fingerprint.startswith("sha256:")
     assert envelope.candidate_fingerprint.startswith("sha256:")
@@ -122,7 +163,7 @@ def test_initial_envelope_binds_immutable_payload_and_complete_review_view() -> 
     assert envelope.base_specification_id is None
     assert envelope.amendment_diff is None
     with pytest.raises(ValidationError):
-        envelope.producer_capability = "other"
+        envelope.producer_capability = "other"  # ty: ignore[invalid-assignment]
 
 
 def test_candidate_canonical_json_round_trips_with_fingerprint_verification() -> None:
@@ -148,6 +189,19 @@ def test_candidate_canonical_json_round_trips_with_fingerprint_verification() ->
             f"{serialized}\n",
             expected_candidate_fingerprint=envelope.candidate_fingerprint,
         )
+    retired = json.loads(serialized)
+    retired["envelope"]["envelope_version"] = "agileforge.spec-candidate-envelope.v1"
+    retired_json = json.dumps(
+        retired,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    with pytest.raises(ValidationError):
+        load_candidate_contract(
+            retired_json,
+            expected_candidate_fingerprint=envelope.candidate_fingerprint,
+        )
 
 
 def test_candidate_fingerprint_excludes_host_execution_metadata() -> None:
@@ -170,9 +224,9 @@ def test_candidate_fingerprint_excludes_host_execution_metadata() -> None:
 
     assert baseline.candidate_fingerprint == changed_execution.candidate_fingerprint
     assert baseline.review_view_fingerprint != changed_execution.review_view_fingerprint
-    assert canonical_candidate_json(
-        _payload(), baseline
-    ) != canonical_candidate_json(_payload(), changed_execution)
+    assert canonical_candidate_json(_payload(), baseline) != canonical_candidate_json(
+        _payload(), changed_execution
+    )
     assert baseline.payload_fingerprint != changed_semantics.payload_fingerprint
     assert baseline.review_view_fingerprint != changed_semantics.review_view_fingerprint
     assert baseline.candidate_fingerprint != changed_semantics.candidate_fingerprint
@@ -203,6 +257,63 @@ def test_candidate_fingerprint_excludes_host_lineage_row_ids() -> None:
     assert amendment.candidate_fingerprint == recreated_amendment.candidate_fingerprint
 
 
+@pytest.mark.parametrize(
+    ("field", "changed_value"),
+    [
+        ("registered_source_fingerprint", _fingerprint("registered-source-v2")),
+        ("producer_version", "1.0.1"),
+        ("prompt_version", "agileforge.specification-structurer.prompt.v2"),
+        ("prompt_fingerprint", _fingerprint("prompt-v2")),
+        ("model_configuration_fingerprint", _fingerprint("model-config-v2")),
+    ],
+)
+def test_portable_candidate_identity_changes_with_producer_provenance(
+    field: str,
+    changed_value: str,
+) -> None:
+    """Every variable source/producer contract byte participates in identity."""
+    baseline = _envelope()
+    changed = _envelope(**{field: changed_value})
+
+    assert baseline.candidate_fingerprint != changed.candidate_fingerprint
+
+
+def test_candidate_identity_seed_contains_every_source_capability() -> None:
+    """Fixed capability literals are explicit portable identity bytes."""
+    payload = _payload()
+    envelope = _envelope()
+    identity = envelope.model_dump(mode="json")
+    for key in (
+        "accepted_vision_id",
+        "accepted_product_goal_id",
+        "base_specification_id",
+        "workflow_node_attempt_id",
+        "attempt_fingerprint",
+        "correlation_id",
+        "produced_at",
+        "review_view_fingerprint",
+        "candidate_fingerprint",
+    ):
+        identity.pop(key)
+    canonical_identity = json.dumps(
+        {
+            "payload": json.loads(canonical_spec_json(payload)),
+            "envelope": identity,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+
+    assert identity["registered_source_fingerprint"] == _fingerprint(
+        "registered-source"
+    )
+    assert identity["source_producer_capability"] == "to-spec"
+    assert identity["source_preparation_capability"] == "grill-with-docs"
+    assert identity["producer_capability"] == "specification-structurer"
+    assert envelope.candidate_fingerprint == _fingerprint(canonical_identity)
+
+
 def test_complete_review_view_includes_envelope_evidence_and_changes_with_it() -> None:
     """Reviewer Markdown commits to source, producer, attempt, and base evidence."""
     baseline = _envelope()
@@ -220,7 +331,12 @@ def test_complete_review_view_includes_envelope_evidence_and_changes_with_it() -
     markdown = render_candidate_review_markdown(_payload(), baseline)
 
     for expected in (
-        "Producer capability: to-spec",
+        "Envelope version: agileforge.spec-candidate-envelope.v2",
+        f"Registered source fingerprint: {_fingerprint('registered-source')}",
+        "Source producer capability: to-spec",
+        "Source preparation capability: grill-with-docs",
+        "Producer capability: specification-structurer",
+        "Prompt version: agileforge.specification-structurer.prompt.v1",
         f"Workflow node attempt id: {WORKFLOW_NODE_ATTEMPT_ID}",
         f"Attempt fingerprint: {_fingerprint('attempt')}",
         "SRC.goal",
@@ -261,17 +377,27 @@ def test_source_warning_is_nested_under_its_own_manifest_entry() -> None:
 
 def test_complete_review_escapes_untrusted_envelope_text() -> None:
     """Envelope metadata cannot create reviewer-visible Markdown controls."""
-    envelope = _envelope(producer_capability="# forged heading")
+    envelope = _envelope(producer_version="# forged heading")
 
     markdown = render_candidate_review_markdown(_payload(), envelope)
 
-    assert "Producer capability: \\# forged heading" in markdown
+    assert "Producer version: \\# forged heading" in markdown
 
 
 def test_source_and_attempt_metadata_are_closed_and_validated() -> None:
     """Envelope evidence cannot omit paired model configuration or stable source IDs."""
     with pytest.raises(ValidationError, match="model"):
         _envelope(model_configuration_fingerprint=None)
+    with pytest.raises(ValidationError, match="model"):
+        _envelope(model_id=None)
+    with pytest.raises(ValidationError):
+        _envelope(producer_capability="to-spec")
+    with pytest.raises(ValidationError):
+        _envelope(source_producer_capability="manual")
+    with pytest.raises(ValidationError):
+        _envelope(source_preparation_capability="research")
+    with pytest.raises(ValidationError):
+        _envelope(registered_source_fingerprint=None)
 
     with pytest.raises(ValidationError):
         CandidateSourceManifestEntry(
@@ -279,6 +405,27 @@ def test_source_and_attempt_metadata_are_closed_and_validated() -> None:
             kind=CandidateSourceKind.PRODUCT_GOAL,
             fingerprint="sha256:goal",
         )
+
+
+def test_source_manifest_permutation_keeps_the_full_envelope_stable() -> None:
+    """Set-like source rows have one review and portable candidate identity."""
+    manifest = (
+        CandidateSourceManifestEntry(
+            source_id="SRC.goal",
+            kind=CandidateSourceKind.PRODUCT_GOAL,
+            fingerprint=_fingerprint("goal"),
+        ),
+        CandidateSourceManifestEntry(
+            source_id="SRC.vision",
+            kind=CandidateSourceKind.VISION,
+            fingerprint=_fingerprint("vision"),
+        ),
+    )
+
+    forward = _envelope(source_manifest=manifest)
+    reverse = _envelope(source_manifest=tuple(reversed(manifest)))
+
+    assert forward == reverse
 
 
 def test_payload_source_notes_must_reference_the_host_manifest() -> None:

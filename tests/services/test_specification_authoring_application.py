@@ -1,4 +1,4 @@
-"""Semantic application boundary for direct Specification authoring."""
+"""Semantic application boundary for Specification structuring."""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ from typing import TYPE_CHECKING
 from services.application import (
     AgenticActionRequest,
     AgileForgeApplication,
-    SpecificationAuthoringRequest,
     SpecificationReviewRequest,
+    SpecificationStructuringRequest,
 )
 from workflow.contracts import (
     FactReference,
@@ -35,9 +35,9 @@ CANDIDATE_ID = 31
 
 def _decision() -> NodeDecision:
     return NodeDecision(
-        node_id="specification.author",
+        node_id="specification.structure",
         child_graph_id="specification",
-        request_kind="author_specification",
+        request_kind="structure_specification",
         category=NodeCategory.AVAILABLE,
         recommendation_kind=RecommendationKind.REQUIRED,
         reason_code="SPECIFICATION_INITIAL_REQUIRED",
@@ -47,6 +47,11 @@ def _decision() -> NodeDecision:
                 fact_type="product_goal",
                 fact_id="2",
                 fingerprint="goal",
+            ),
+            FactReference(
+                fact_type="specification_source",
+                fact_id="3",
+                fingerprint="source",
             ),
         ),
         decision_fingerprint="decision",
@@ -93,7 +98,7 @@ class _InputService:
         self.build_calls = 0
 
     def replay(self, query: NodeAttemptReplayQuery) -> TransitionResult | None:
-        assert query.node_id == "specification.author"
+        assert query.node_id == "specification.structure"
         return self.replay_result
 
     def build(self, *, project_id: int, decision: NodeDecision) -> JsonObject:
@@ -101,7 +106,7 @@ class _InputService:
         assert decision == _decision()
         self.build_calls += 1
         return {
-            "schema_version": "agileforge.spec-authoring-input.v2",
+            "schema_version": "agileforge.spec-structuring-input.v1",
             "project_id": PROJECT_ID,
         }
 
@@ -152,23 +157,23 @@ class _ReviewDomain(_Domain):
         return TransitionResult(ok=True, applied_node_id="specification.review")
 
 
-def _request() -> SpecificationAuthoringRequest:
-    return SpecificationAuthoringRequest(
+def _request() -> SpecificationStructuringRequest:
+    return SpecificationStructuringRequest(
         project_id=PROJECT_ID,
-        idempotency_key="author-specification-7",
+        idempotency_key="structure-specification-7",
         actor="operator",
         correlation_id="manual-test-7",
     )
 
 
-def test_authoring_uses_host_input_and_exact_graph_decision(
+def test_structuring_uses_host_input_and_exact_graph_decision(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Public callers supply no payload, IDs, hashes, or lineage metadata."""
     input_service = _InputService()
     application = AgileForgeApplication(
         workflow_domain=_Domain(),
-        specification_authoring_input=input_service,
+        specification_structuring_input=input_service,
     )
     captured: list[AgenticActionRequest] = []
 
@@ -181,32 +186,32 @@ def test_authoring_uses_host_input_and_exact_graph_decision(
 
     monkeypatch.setattr(AgileForgeApplication, "run_agentic_action", _capture)
 
-    result = application.author_specification(_request())
+    result = application.structure_specification(_request())
 
     assert result.ok
     assert input_service.build_calls == 1
     assert len(captured) == 1
     attempt = captured[0]
-    assert attempt.node_id == "specification.author"
+    assert attempt.node_id == "specification.structure"
     assert attempt.input_payload["schema_version"] == (
-        "agileforge.spec-authoring-input.v2"
+        "agileforge.spec-structuring-input.v1"
     )
     assert attempt.decision_fingerprint == "decision"
 
 
-def test_authoring_replays_before_reading_current_position(
+def test_structuring_replays_before_reading_current_position(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A repeated key returns its durable outcome without another provider call."""
     replay = TransitionResult(
         ok=True,
         replayed=True,
-        applied_node_id="specification.author",
+        applied_node_id="specification.structure",
     )
     service = _InputService(replay)
     application = AgileForgeApplication(
         workflow_domain=_Domain(),
-        specification_authoring_input=service,
+        specification_structuring_input=service,
     )
 
     def _unexpected(*_args: object, **_kwargs: object) -> TransitionResult:
@@ -215,7 +220,7 @@ def test_authoring_replays_before_reading_current_position(
 
     monkeypatch.setattr(AgileForgeApplication, "run_agentic_action", _unexpected)
 
-    assert application.author_specification(_request()) == replay
+    assert application.structure_specification(_request()) == replay
     assert service.build_calls == 0
 
 
@@ -225,7 +230,7 @@ def test_review_delegates_live_source_check_to_domain_transaction() -> None:
     domain = _ReviewDomain()
     application = AgileForgeApplication(
         workflow_domain=domain,
-        specification_authoring_input=service,
+        specification_structuring_input=service,
     )
 
     result = application.review_specification(
@@ -252,7 +257,7 @@ def test_feedback_delegates_without_application_source_probe() -> None:
     domain = _ReviewDomain()
     application = AgileForgeApplication(
         workflow_domain=domain,
-        specification_authoring_input=service,
+        specification_structuring_input=service,
     )
 
     result = application.review_specification(

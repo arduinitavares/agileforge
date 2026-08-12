@@ -1,7 +1,8 @@
 # Single Project Lifecycle Hard-Break Design
 
 **Date:** 2026-08-05
-**Status:** Approved; amended 2026-08-11 by issue #199
+**Status:** Superseded for Specification source/structuring details by
+[`2026-08-12-registered-to-spec-source-structuring-design.md`](2026-08-12-registered-to-spec-source-structuring-design.md)
 **Supersedes:** `2026-08-02-domain-workflow-graph-hard-break-design.md`
 **Scope:** Project creation, initial Vision and Product Goal, optional repository
 attachment, deterministic local repository inspection, canonical Specification
@@ -29,7 +30,8 @@ Create Project (Name)
 -> Product Goal Interview
 -> Human Review And Acceptance Of Product Goal
 -> Optional Grill Me With Docs, Research, Or Prototype Work
--> Host-Owned To-Spec Specification Authoring
+-> Register External To-Spec Source
+-> Host-Owned Specification Structuring
 -> Human Specification Review And Acceptance
 -> Typed Specification Authority Compile
 -> Human Authority Review And Acceptance
@@ -63,15 +65,14 @@ repository reconstruction machinery, compatibility routes, persistence models,
 tests, prompts, and active documentation are deleted rather than deprecated.
 No data migration or compatibility mode is provided.
 
-Issue #199 adds a second approved hard break. Discovery remains useful work:
-interviews, `grill-with-docs`, research, repository evidence, ADRs, and
-prototypes can supply provenance to Specification authoring. AgileForge stores
-no Discovery artifact and exposes no Discovery graph gate, API, CLI command, or
-UI state. The host prepares one typed `agileforge.spec.v2` payload and immutable
-candidate envelope for `to-spec`, renders Markdown for review, binds the human
-decision to the exact candidate fingerprint, and sends only the accepted typed
-payload to Authority compilation. Development and acceptance profiles must be
-recreated under the new schema.
+Issue #199 adds a second approved hard break. Discovery remains useful work
+performed through `grill-with-docs`; it is not a lifecycle artifact. An external
+agent runs `to-spec`, AgileForge registers the exact source plus optional Context
+and applicable ADRs, and the host-owned structurer produces one typed
+`agileforge.spec.v2` payload and immutable candidate envelope. AgileForge
+renders Markdown for review, binds the human decision to the exact candidate
+fingerprint, and sends only the accepted typed payload to Authority compilation.
+Development and acceptance profiles must be recreated under the new schema.
 
 ## Problem
 

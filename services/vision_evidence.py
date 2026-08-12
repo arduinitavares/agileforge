@@ -351,7 +351,9 @@ class VisionEvidenceCollector:
     ) -> _CandidateEvidence:
         """Prepare observed repository provenance without sensitive local detail."""
         remotes, remote_omitted = self._sanitized_remotes(probe.remotes)
-        if remote_omitted:
+        if remote_omitted or any(
+            warning.code == "REMOTE_OMITTED" for warning in probe.warnings
+        ):
             warnings.append(
                 self._warning(
                     code="REMOTE_OMITTED",
@@ -478,8 +480,7 @@ class VisionEvidenceCollector:
                     code="INVALID_SPECIFICATION",
                     source=relative_path,
                     message=(
-                        "Structured specification did not match the AgileForge "
-                        "profile."
+                        "Structured specification did not match the AgileForge profile."
                     ),
                 )
             )
@@ -739,8 +740,10 @@ class VisionEvidenceCollector:
             return None
         relative = Path(resolved_path)
         parts = relative.parts
-        if relative.is_absolute() or not parts or any(
-            part in {"", ".", ".."} for part in parts
+        if (
+            relative.is_absolute()
+            or not parts
+            or any(part in {"", ".", ".."} for part in parts)
         ):
             warnings.append(
                 self._warning(
@@ -790,11 +793,7 @@ class VisionEvidenceCollector:
     ) -> int | None:
         """Open one nonblocking leaf and retain only regular files."""
         nonblock = getattr(os, "O_NONBLOCK", None)
-        if (
-            not isinstance(nonblock, int)
-            or isinstance(nonblock, bool)
-            or nonblock <= 0
-        ):
+        if not isinstance(nonblock, int) or isinstance(nonblock, bool) or nonblock <= 0:
             warnings.append(
                 self._warning(
                     code="EVIDENCE_UNREADABLE",

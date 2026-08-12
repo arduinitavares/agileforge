@@ -1,4 +1,4 @@
-"""Provider-free transactional tests for direct Specification authoring."""
+"""Provider-free transactional tests for Specification structuring."""
 
 from __future__ import annotations
 
@@ -6,68 +6,71 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import pytest
+from git import Repo
 from pydantic import ValidationError
 from sqlmodel import Session, col, select
 
+from adapters.git.repository_probe import GitPythonRepositoryProbe
 from models.core import Project
 from models.product_definition import SpecificationCandidate, SpecificationDecision
+from models.repository import RepositoryBinding
 from models.specs import SpecRegistry
 from models.workflow import WorkflowNodeAttempt, WorkflowNodeAttemptOutcome
 from services.contracts.specification_authoring import (
-    SPECIFICATION_PRODUCT_GOAL_SOURCE_ID,
     SPECIFICATION_VISION_SOURCE_ID,
-    SpecificationAuthoringInput,
-    specification_authoring_fact_fingerprint,
-    specification_authoring_input_fingerprint,
+    SpecificationStructuringInput,
+    specification_structuring_fact_fingerprint,
+    specification_structuring_input_fingerprint,
 )
-from services.specification_authoring_input import SpecificationAuthoringInputService
+from services.specification_authoring_input import SpecificationStructuringInputService
+from services.specification_source_registration import (
+    SpecificationSourceRegistrationRequest,
+    SpecificationSourceRegistrationService,
+)
 from services.specs.candidate_contract import load_candidate_contract
-from tests.workflow.lifecycle_fixtures import (
-    _seed_accepted_vision_and_goal,
-    seed_accepted_specification,
-)
+from tests.workflow.lifecycle_fixtures import _seed_accepted_vision_and_goal
 from utils.agileforge_spec_profile_v2 import SpecificationPayload
 from workflow.clock import FixedClock
-from workflow.contracts import (
-    GRAPH_VERSION,
-    FactReference,
-    NodeCategory,
-    NodeDecision,
-    RecommendationKind,
-    TransitionResult,
-    WorkflowErrorCode,
-)
+from workflow.contracts import GRAPH_VERSION, TransitionResult, WorkflowErrorCode
 from workflow.definitions.product_discovery import SPECIFICATION_NODES
 from workflow.domain import WorkflowDomain
-from workflow.fingerprints import canonical_hash, canonical_json
+from workflow.fingerprints import canonical_json
 from workflow.graph import ChildGraphSpec, WorkflowGraph
-from workflow.handlers.product_discovery import (
-    execute_complete_specification_authoring,
-    execute_decide_specification,
-)
+from workflow.handlers.product_discovery import execute_decide_specification
 from workflow.requests import (
-    CompleteSpecificationAuthoring,
+    CompleteSpecificationStructuring,
     DecideSpecification,
+    RegisterSpecificationSource,
     StartNodeAttempt,
 )
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from sqlalchemy.engine import Engine
+
+    from services.repository_probe import RepositoryProbe, RepositoryProbeResult
 
 NOW = datetime(2026, 8, 11, 12, tzinfo=UTC)
 EXPECTED_REVISION_CANDIDATES = 2
 
 
 class _Registry:
-    """Expose the sole recipe needed by these domain tests."""
+    """Expose the sole recipe needed by these provider-free domain tests."""
 
     def require(self, node_id: str) -> object:
-        if node_id != "specification.author":
+        if node_id != "specification.structure":
             raise LookupError(node_id)
         return object()
 
 
-def _domain(engine: Engine, *, at: datetime = NOW) -> WorkflowDomain:
+def _domain(
+    engine: Engine,
+    *,
+    at: datetime = NOW,
+    repository_probe: RepositoryProbe | None = None,
+) -> WorkflowDomain:
+    del repository_probe
     return WorkflowDomain(
         engine=engine,
         graph=WorkflowGraph(
@@ -79,35 +82,194 @@ def _domain(engine: Engine, *, at: datetime = NOW) -> WorkflowDomain:
         ),
         clock=FixedClock(now_value=at),
         adk_recipe_registry=_Registry(),
+        specification_source_check=lambda _project_id, _input: None,
+        specification_registration_check=lambda _prepared: None,
     )
 
 
-def _seed_accepted_goal(engine: Engine, *, name: str) -> tuple[int, int, str, int, str]:
+def _repository(tmp_path: Path, *, name: str) -> Path:
+    repository = tmp_path / name
+    repository.mkdir()
+    (repository / "SPECIFICATION.md").write_bytes(
+        b"# Exact external Specification\r\n\r\nPreserve these bytes.\r\n"
+    )
+    with Repo.init(repository) as repo:
+        with repo.config_writer() as config:
+            config.set_value("user", "name", "Specification Test")
+            config.set_value("user", "email", "specification@example.test")
+        repo.index.add(["SPECIFICATION.md"])
+        repo.index.commit("register exact source")
+    return repository
+
+
+def _record_binding(
+    engine: Engine,
+    *,
+    project_id: int,
+    repository: Path,
+    probe: RepositoryProbe,
+    inspected_at: datetime = NOW - timedelta(hours=1),
+) -> None:
+    observed: RepositoryProbeResult = probe.inspect(repository)
+    with Session(engine) as session:
+        project = session.get(Project, project_id)
+        assert project is not None
+        prior_id = project.active_repository_binding_id
+        binding = RepositoryBinding(
+            project_id=project_id,
+            worktree_path=observed.worktree_path,
+            common_git_dir=observed.common_git_dir,
+            head_sha=observed.head_sha,
+            branch_name=observed.branch_name,
+            detached_head=observed.detached_head,
+            dirty=observed.dirty,
+            status_fingerprint=observed.status_fingerprint,
+            status_entries_json=canonical_json(
+                [item.model_dump(mode="json") for item in observed.status_entries]
+            ),
+            remotes_json=canonical_json(list(observed.remotes)),
+            warnings_json=canonical_json(
+                [item.model_dump(mode="json") for item in observed.warnings]
+            ),
+            probe_version=observed.probe_version,
+            inspected_at=inspected_at,
+            supersedes_repository_binding_id=prior_id,
+            recorded_by="operator",
+        )
+        session.add(binding)
+        session.flush()
+        assert binding.repository_binding_id is not None
+        project.active_repository_binding_id = binding.repository_binding_id
+        session.add(project)
+        session.commit()
+
+
+def _seed_accepted_goal(
+    engine: Engine,
+    *,
+    name: str,
+    repository: Path,
+    repository_probe: RepositoryProbe | None = None,
+) -> tuple[int, int, str, int, str]:
+    probe = repository_probe or GitPythonRepositoryProbe()
     with Session(engine) as session:
         project = Project(name=name)
         session.add(project)
         session.flush()
         assert project.project_id is not None
+        project_id = project.project_id
         vision, goal = _seed_accepted_vision_and_goal(
             session,
-            project_id=project.project_id,
+            project_id=project_id,
             recorded_at=NOW.replace(hour=10),
         )
         session.commit()
         assert vision.vision_artifact_id is not None
         assert goal.product_goal_artifact_id is not None
-        return (
-            project.project_id,
+        lineage = (
+            project_id,
             vision.vision_artifact_id,
             vision.content_fingerprint,
             goal.product_goal_artifact_id,
             goal.content_fingerprint,
         )
+    _record_binding(
+        engine,
+        project_id=project_id,
+        repository=repository,
+        probe=probe,
+    )
+    return lineage
+
+
+def _register_source(
+    engine: Engine,
+    domain: WorkflowDomain,
+    *,
+    project_id: int,
+    repository_probe: RepositoryProbe,
+    key: str,
+) -> TransitionResult:
+    semantic_request = SpecificationSourceRegistrationRequest(
+        project_id=project_id,
+        source_path="SPECIFICATION.md",
+        preparation_capability="grill-with-docs",
+        idempotency_key=f"{key}-prepare",
+        actor="operator",
+        correlation_id=f"{key}-correlation",
+    )
+    prepared = SpecificationSourceRegistrationService(
+        engine=engine,
+        repository_probe=repository_probe,
+    ).prepare(semantic_request)
+    position = domain.position(project_id)
+    decision = next(
+        item
+        for item in position.decisions
+        if item.node_id == "specification.source.register"
+    )
+    return domain.transition(
+        RegisterSpecificationSource(
+            project_id=project_id,
+            graph_version=position.graph_version,
+            fact_fingerprint=position.fact_fingerprint,
+            decision_fingerprint=decision.decision_fingerprint,
+            idempotency_key=f"{key}-register",
+            actor="operator",
+            correlation_id=f"{key}-correlation",
+            accepted_vision_artifact_id=prepared.accepted_vision_artifact_id,
+            accepted_product_goal_artifact_id=(
+                prepared.accepted_product_goal_artifact_id
+            ),
+            repository_binding_id=prepared.repository_binding_id,
+            repository_binding_fingerprint=(prepared.repository_binding_fingerprint),
+            capture_request_fingerprint=prepared.request_fingerprint,
+            source_fingerprint=prepared.source_fingerprint,
+            bundle=prepared.bundle,
+        )
+    )
+
+
+def _ready_project(
+    engine: Engine,
+    tmp_path: Path,
+    *,
+    name: str,
+) -> tuple[int, int, str, int, str, Path, RepositoryProbe]:
+    repository = _repository(tmp_path, name=name)
+    probe: RepositoryProbe = GitPythonRepositoryProbe()
+    project_id, vision_id, vision_fp, goal_id, goal_fp = _seed_accepted_goal(
+        engine,
+        name=name,
+        repository=repository,
+        repository_probe=probe,
+    )
+    registered = _register_source(
+        engine,
+        _domain(
+            engine,
+            at=NOW - timedelta(seconds=10),
+            repository_probe=probe,
+        ),
+        project_id=project_id,
+        repository_probe=probe,
+        key=f"{name}-source",
+    )
+    assert registered.ok
+    return (
+        project_id,
+        vision_id,
+        vision_fp,
+        goal_id,
+        goal_fp,
+        repository,
+        probe,
+    )
 
 
 def _payload(
     *,
-    artifact_id: str = "SPEC.direct-authoring",
+    artifact_id: str = "SPEC.source-structuring",
     item_id: str = "REQ.persist-candidate",
     source_id: str | None = None,
 ) -> SpecificationPayload:
@@ -124,9 +286,9 @@ def _payload(
         {
             "schema_version": "agileforge.spec.v2",
             "artifact_id": artifact_id,
-            "title": "Direct authoring",
+            "title": "Source structuring",
             "summary": "Persist one exact typed candidate.",
-            "problem_statement": "Discovery must not be a persisted gate.",
+            "problem_statement": "External prose must be structured before review.",
             "items": [
                 {
                     "id": item_id,
@@ -143,17 +305,19 @@ def _payload(
     )
 
 
-def _author(
+def _structure(  # noqa: PLR0913
     engine: Engine,
     domain: WorkflowDomain,
     *,
     project_id: int,
     payload: SpecificationPayload,
     key: str,
+    repository_probe: RepositoryProbe | None = None,
 ) -> TransitionResult:
+    probe = repository_probe or GitPythonRepositoryProbe()
     position = domain.position(project_id)
     decision = next(
-        item for item in position.decisions if item.node_id == "specification.author"
+        item for item in position.decisions if item.node_id == "specification.structure"
     )
     start = domain.transition(
         StartNodeAttempt(
@@ -164,13 +328,16 @@ def _author(
             idempotency_key=f"{key}-start",
             actor="worker",
             correlation_id=f"{key}-correlation",
-            target_node_id="specification.author",
+            target_node_id="specification.structure",
             target_instance_key=decision.instance_key,
-            normalized_input=SpecificationAuthoringInputService(engine=engine).build(
+            normalized_input=SpecificationStructuringInputService(
+                engine=engine,
+                repository_probe=probe,
+            ).build(
                 project_id=project_id,
                 decision=decision,
             ),
-            model_id="fake/specification-author",
+            model_id="fake/specification-structurer",
             execution_settings={"temperature": 0},
             lease_seconds=60,
         )
@@ -181,7 +348,7 @@ def _author(
     assert isinstance(attempt_id, int)
     assert isinstance(attempt_fingerprint, str)
     return domain.transition(
-        CompleteSpecificationAuthoring(
+        CompleteSpecificationStructuring(
             project_id=project_id,
             graph_version=position.graph_version,
             fact_fingerprint=position.fact_fingerprint,
@@ -224,12 +391,30 @@ def _accept_request(
     )
 
 
+def test_structuring_is_unavailable_until_source_registration(
+    engine: Engine,
+    tmp_path: Path,
+) -> None:
+    """An accepted Goal exposes registration but not structuring by itself."""
+    repository = _repository(tmp_path, name="source-required")
+    project_id, *_lineage = _seed_accepted_goal(
+        engine,
+        name="Source required",
+        repository=repository,
+    )
+
+    position = _domain(engine).position(project_id)
+
+    assert "specification.source.register" in position.available_nodes
+    assert "specification.structure" not in position.available_nodes
+
+
 def test_completion_contract_rejects_provider_owned_envelope_metadata() -> None:
     """The completion boundary accepts semantics, not host lifecycle metadata."""
     with pytest.raises(ValidationError):
-        CompleteSpecificationAuthoring.model_validate(
+        CompleteSpecificationStructuring.model_validate(
             {
-                "kind": "complete_specification_authoring",
+                "kind": "complete_specification_structuring",
                 "project_id": 1,
                 "graph_version": GRAPH_VERSION,
                 "fact_fingerprint": "facts",
@@ -244,22 +429,23 @@ def test_completion_contract_rejects_provider_owned_envelope_metadata() -> None:
         )
 
 
-def test_accepted_goal_authors_and_accepts_exact_candidate_without_rewrite(
+def test_registered_source_structures_and_accepts_exact_candidate_without_rewrite(
     engine: Engine,
+    tmp_path: Path,
 ) -> None:
-    """Attempt continuation binds host metadata and acceptance preserves bytes."""
-    project_id, vision_id, _vision_fp, goal_id, _goal_fp = _seed_accepted_goal(
-        engine,
-        name="Direct specification",
+    """Host metadata binds the exact model payload and review preserves it."""
+    project_id, vision_id, _vision_fp, goal_id, _goal_fp, _repo, probe = _ready_project(
+        engine, tmp_path, name="exact-candidate"
     )
-    domain = _domain(engine)
+    domain = _domain(engine, repository_probe=probe)
     source_id = SPECIFICATION_VISION_SOURCE_ID
-    result = _author(
+    result = _structure(
         engine,
         domain,
         project_id=project_id,
         payload=_payload(source_id=source_id),
         key="initial",
+        repository_probe=probe,
     )
 
     assert result.ok
@@ -278,31 +464,36 @@ def test_accepted_goal_authors_and_accepts_exact_candidate_without_rewrite(
         assert envelope.accepted_vision_id == vision_id
         assert envelope.accepted_product_goal_id == goal_id
         assert envelope.workflow_node_attempt_id == candidate.workflow_node_attempt_id
-        assert envelope.model_id == "fake/specification-author"
-        attempt = session.get(
-            WorkflowNodeAttempt,
-            candidate.workflow_node_attempt_id,
-        )
+        assert envelope.model_id == "fake/specification-structurer"
+        assert envelope.producer_capability == "specification-structurer"
+        attempt = session.get(WorkflowNodeAttempt, candidate.workflow_node_attempt_id)
         assert attempt is not None
-        contract = SpecificationAuthoringInput.model_validate_json(
+        contract = SpecificationStructuringInput.model_validate_json(
             attempt.normalized_input_json
         )
+        assert envelope.registered_source_fingerprint == (
+            contract.registered_source.source_fingerprint
+        )
         assert envelope.accepted_fact_fingerprint == (
-            specification_authoring_fact_fingerprint(contract)
+            specification_structuring_fact_fingerprint(contract)
         )
         assert envelope.producer_input_fingerprint == (
-            specification_authoring_input_fingerprint(contract)
+            specification_structuring_input_fingerprint(contract)
         )
 
-    review_domain = _domain(engine, at=NOW + timedelta(seconds=1))
+    review_domain = _domain(
+        engine,
+        at=NOW + timedelta(seconds=1),
+        repository_probe=probe,
+    )
     accept_request = _accept_request(
         review_domain,
         project_id=project_id,
         key="accept-initial",
     )
     accepted = review_domain.transition(accept_request)
-    assert accepted.ok
     replay = review_domain.transition(accept_request)
+    assert accepted.ok
     assert replay.ok
     assert replay.replayed
     with Session(engine) as session:
@@ -319,36 +510,30 @@ def test_accepted_goal_authors_and_accepts_exact_candidate_without_rewrite(
         assert registry.source_specification_candidate_fingerprint == (
             candidate.candidate_fingerprint
         )
-        review = session.exec(
-            select(SpecificationDecision).where(
-                col(SpecificationDecision.project_id) == project_id
-            )
-        ).one()
-        session.delete(registry)
-        session.commit()
-        session.delete(review)
-        session.commit()
-        session.delete(candidate)
-        session.commit()
 
 
-def test_payload_source_note_must_exist_in_host_manifest(engine: Engine) -> None:
-    """A model cannot cite a source absent from the persisted attempt input."""
-    project_id, *_lineage = _seed_accepted_goal(
+def test_payload_source_note_must_exist_in_registered_manifest(
+    engine: Engine,
+    tmp_path: Path,
+) -> None:
+    """The structurer cannot cite prose outside the exact captured bundle."""
+    project_id, *_lineage, probe = _ready_project(
         engine,
-        name="Unknown source note",
+        tmp_path,
+        name="unknown-source-note",
     )
-    result = _author(
+    result = _structure(
         engine,
-        _domain(engine),
+        _domain(engine, repository_probe=probe),
         project_id=project_id,
         payload=_payload(source_id="SRC.external.missing"),
         key="unknown-source",
+        repository_probe=probe,
     )
 
     assert not result.ok
     assert result.error is not None
-    assert result.error.code == "STALE_SPECIFICATION_INPUT"
+    assert result.error.code is WorkflowErrorCode.STALE_SPECIFICATION_INPUT
     with Session(engine) as session:
         assert not session.exec(select(SpecificationCandidate)).all()
         outcome = session.exec(
@@ -360,251 +545,84 @@ def test_payload_source_note_must_exist_in_host_manifest(engine: Engine) -> None
         assert outcome.failure_code == "STALE_SPECIFICATION_INPUT"
 
 
-def test_amendment_pins_base_and_requires_every_removal_justification(
+def test_rejected_revision_requires_successor_source_and_supersedes_candidate(
     engine: Engine,
+    tmp_path: Path,
 ) -> None:
-    """A full-result amendment cannot silently remove a stable item."""
-    with Session(engine) as session:
-        project = Project(name="Specification amendment")
-        session.add(project)
-        session.flush()
-        assert project.project_id is not None
-        project_id = project.project_id
-        lineage = seed_accepted_specification(
-            session,
-            project_id=project_id,
-            content='{"base":"accepted"}',
-            recorded_at=NOW.replace(hour=9),
-        )
-    decision = NodeDecision(
-        node_id="specification.author",
-        child_graph_id="specification",
-        request_kind="author_specification",
-        category=NodeCategory.AVAILABLE,
-        recommendation_kind=RecommendationKind.OPTIONAL_REENTRY,
-        reason_code="SPECIFICATION_AMENDMENT_REQUIRED",
-        fact_references=(
-            FactReference(
-                fact_type="vision",
-                fact_id=str(lineage.vision_artifact_id),
-                fingerprint=lineage.vision_fingerprint,
-            ),
-            FactReference(
-                fact_type="product_goal",
-                fact_id=str(lineage.product_goal_artifact_id),
-                fingerprint=lineage.product_goal_fingerprint,
-            ),
-            FactReference(
-                fact_type="specification",
-                fact_id=str(lineage.spec.spec_version_id),
-                fingerprint=lineage.spec.spec_hash,
-            ),
-        ),
-        decision_fingerprint=canonical_hash({"decision": "amend"}),
-    )
-    with Session(engine) as session:
-        base_candidate = session.get(
-            SpecificationCandidate,
-            lineage.specification_candidate_id,
-        )
-        assert base_candidate is not None
-        base_payload, _base_envelope = load_candidate_contract(
-            base_candidate.canonical_envelope_json,
-            expected_candidate_fingerprint=base_candidate.candidate_fingerprint,
-        )
-        normalized_input = {
-            "schema_version": "agileforge.spec-authoring-input.v2",
-            "project_id": project_id,
-            "project_name": "Specification amendment",
-            "operation": "amendment",
-            "accepted_vision": {
-                "artifact_id": lineage.vision_artifact_id,
-                "fingerprint": lineage.vision_fingerprint,
-                "statement": "Accepted fixture Vision.",
-                "components": {"purpose": "exercise amendments"},
-            },
-            "accepted_product_goal": {
-                "artifact_id": lineage.product_goal_artifact_id,
-                "fingerprint": lineage.product_goal_fingerprint,
-                "statement": "Accepted fixture Product Goal.",
-            },
-            "source_manifest": [
-                {
-                    "source_id": SPECIFICATION_VISION_SOURCE_ID,
-                    "kind": "vision",
-                    "fingerprint": lineage.vision_fingerprint,
-                },
-                {
-                    "source_id": SPECIFICATION_PRODUCT_GOAL_SOURCE_ID,
-                    "kind": "product_goal",
-                    "fingerprint": lineage.product_goal_fingerprint,
-                },
-            ],
-            "source_context": [
-                {
-                    "source_id": SPECIFICATION_VISION_SOURCE_ID,
-                    "kind": "vision",
-                    "fingerprint": lineage.vision_fingerprint,
-                    "content": {"statement": "Accepted fixture Vision."},
-                },
-                {
-                    "source_id": SPECIFICATION_PRODUCT_GOAL_SOURCE_ID,
-                    "kind": "product_goal",
-                    "fingerprint": lineage.product_goal_fingerprint,
-                    "content": {"statement": "Accepted fixture Product Goal."},
-                },
-            ],
-            "base_specification": {
-                "spec_version_id": lineage.spec.spec_version_id,
-                "payload_fingerprint": lineage.spec.spec_hash,
-                "payload": base_payload.model_dump(mode="json"),
-            },
-            "prior_candidate": None,
-        }
-        attempt = WorkflowNodeAttempt(
-            project_id=project_id,
-            node_id="specification.author",
-            instance_key=None,
-            graph_version=GRAPH_VERSION,
-            fact_fingerprint=canonical_hash({"facts": "amendment"}),
-            business_fact_fingerprint=canonical_hash({"business": "amendment"}),
-            decision_fingerprint=decision.decision_fingerprint,
-            normalized_input_json=canonical_json(normalized_input),
-            input_fingerprint=canonical_hash(normalized_input),
-            model_id="fake/specification-author",
-            execution_settings_json=canonical_json({"temperature": 0}),
-            idempotency_key="amendment-attempt",
-            actor="worker",
-            correlation_id="amendment-correlation",
-            started_at=NOW,
-            lease_expires_at=NOW + timedelta(minutes=1),
-            attempt_fingerprint=canonical_hash({"attempt": "amendment"}),
-        )
-        session.add(attempt)
-        session.commit()
-        assert attempt.workflow_node_attempt_id is not None
-        amended_payload = base_payload.model_copy(
-            update={
-                "summary": "Amend the accepted base with a normative requirement.",
-                "items": _payload().items,
-            }
-        )
-        request = CompleteSpecificationAuthoring(
-            project_id=project_id,
-            graph_version=GRAPH_VERSION,
-            fact_fingerprint=attempt.fact_fingerprint,
-            decision_fingerprint=decision.decision_fingerprint,
-            idempotency_key="amendment-without-justification",
-            actor="worker",
-            correlation_id="amendment-correlation",
-            attempt_id=attempt.workflow_node_attempt_id,
-            attempt_fingerprint=attempt.attempt_fingerprint,
-            payload=amended_payload,
-        )
-        missing = execute_complete_specification_authoring(
-            session,
-            request,
-            decision,
-            NOW + timedelta(seconds=1),
-        )
-        assert not missing.ok
-        assert missing.error is not None
-        assert missing.error.code == "SPECIFICATION_AMENDMENT_MISMATCH"
-        old_item_id = base_payload.items[0].id
-        accepted = execute_complete_specification_authoring(
-            session,
-            request.model_copy(
-                update={
-                    "idempotency_key": "amendment-with-justification",
-                    "removal_justifications": {
-                        old_item_id: "The normative replacement is more precise."
-                    },
-                }
-            ),
-            decision,
-            NOW + timedelta(seconds=2),
-        )
-        assert accepted.ok
-        candidate = session.exec(
-            select(SpecificationCandidate).where(
-                col(SpecificationCandidate.workflow_node_attempt_id)
-                == attempt.workflow_node_attempt_id
-            )
-        ).one()
-        _payload_result, envelope = load_candidate_contract(
-            candidate.canonical_envelope_json,
-            expected_candidate_fingerprint=candidate.candidate_fingerprint,
-        )
-        assert envelope.base_specification_id == lineage.spec.spec_version_id
-        assert envelope.base_payload_fingerprint == lineage.spec.spec_hash
-        assert envelope.amendment_diff is not None
-        assert envelope.amendment_diff.removed_item_ids == (old_item_id,)
-
-        session.delete(candidate)
-        session.commit()
-        base_registry = session.get(SpecRegistry, lineage.spec.spec_version_id)
-        assert base_registry is not None
-        session.delete(base_registry)
-        session.commit()
-        base_decision = session.exec(
-            select(SpecificationDecision).where(
-                col(SpecificationDecision.specification_candidate_id)
-                == lineage.specification_candidate_id
-            )
-        ).one()
-        session.delete(base_decision)
-        session.commit()
-        base_candidate = session.get(
-            SpecificationCandidate,
-            lineage.specification_candidate_id,
-        )
-        assert base_candidate is not None
-        session.delete(base_candidate)
-        session.commit()
-
-
-def test_rejected_revision_supersedes_exact_candidate(engine: Engine) -> None:
-    """Feedback revision preserves initial mode and pins exact candidate lineage."""
-    project_id, *_lineage = _seed_accepted_goal(
+    """Feedback requires external source revision before another model call."""
+    project_id, *_lineage, repository, probe = _ready_project(
         engine,
-        name="Specification revision",
+        tmp_path,
+        name="source-revision",
     )
-    domain = _domain(engine)
-    first = _author(
+    first_domain = _domain(engine, repository_probe=probe)
+    first = _structure(
         engine,
-        domain,
+        first_domain,
         project_id=project_id,
         payload=_payload(),
         key="first",
+        repository_probe=probe,
     )
     assert first.ok
-    review_domain = _domain(engine, at=NOW + timedelta(seconds=1))
-    position = review_domain.position(project_id)
-    review = next(
-        item for item in position.decisions if item.node_id == "specification.review"
-    )
-    reference = review.fact_references[0]
-    rejected = review_domain.transition(
-        DecideSpecification(
-            project_id=project_id,
-            graph_version=position.graph_version,
-            fact_fingerprint=position.fact_fingerprint,
-            decision_fingerprint=review.decision_fingerprint,
-            idempotency_key="reject-first",
-            actor="operator",
-            specification_candidate_id=int(reference.fact_id),
-            candidate_fingerprint=reference.fingerprint,
-            decision="rejected",
-            rationale="Clarify the normative title.",
-        )
-    )
-    assert rejected.ok
-    second = _author(
+    review_domain = _domain(
         engine,
-        _domain(engine, at=NOW + timedelta(seconds=2)),
+        at=NOW + timedelta(seconds=1),
+        repository_probe=probe,
+    )
+    rejected_request = _accept_request(
+        review_domain,
+        project_id=project_id,
+        key="reject-first",
+    ).model_copy(
+        update={
+            "decision": "rejected",
+            "rationale": "Clarify the normative title in the source.",
+        }
+    )
+    assert review_domain.transition(rejected_request).ok
+    rejected_position = review_domain.position(project_id)
+    assert "specification.source.register" in rejected_position.available_nodes
+    assert "specification.structure" not in rejected_position.available_nodes
+
+    (repository / "SPECIFICATION.md").write_text(
+        "# Revised exact external Specification\n",
+        encoding="utf-8",
+    )
+    with Repo(repository) as repo:
+        repo.index.add(["SPECIFICATION.md"])
+        repo.index.commit("revise exact source")
+    _record_binding(
+        engine,
+        project_id=project_id,
+        repository=repository,
+        probe=probe,
+    )
+    replacement_domain = _domain(
+        engine,
+        at=NOW + timedelta(seconds=2),
+        repository_probe=probe,
+    )
+    replacement = _register_source(
+        engine,
+        replacement_domain,
+        project_id=project_id,
+        repository_probe=probe,
+        key="replacement-source",
+    )
+    assert replacement.ok
+    structuring_domain = _domain(
+        engine,
+        at=NOW + timedelta(seconds=3),
+        repository_probe=probe,
+    )
+    second = _structure(
+        engine,
+        structuring_domain,
         project_id=project_id,
         payload=_payload(item_id="REQ.persist-revised-candidate"),
         key="second",
+        repository_probe=probe,
     )
     assert second.ok
 
@@ -622,52 +640,40 @@ def test_rejected_revision_supersedes_exact_candidate(engine: Engine) -> None:
         assert candidates[1].supersedes_candidate_fingerprint == (
             candidates[0].candidate_fingerprint
         )
-
-    revision_domain = _domain(engine, at=NOW + timedelta(seconds=3))
-    revision_position = revision_domain.position(project_id)
-    revision_review = next(
-        item
-        for item in revision_position.decisions
-        if item.node_id == "specification.review"
-    )
-    revision_reference = revision_review.fact_references[0]
-    accepted_revision = revision_domain.transition(
-        DecideSpecification(
-            project_id=project_id,
-            graph_version=revision_position.graph_version,
-            fact_fingerprint=revision_position.fact_fingerprint,
-            decision_fingerprint=revision_review.decision_fingerprint,
-            idempotency_key="accept-revision",
-            actor="operator",
-            specification_candidate_id=int(revision_reference.fact_id),
-            candidate_fingerprint=revision_reference.fingerprint,
-            decision="accepted",
-            rationale="The revised normative title is ready.",
+        assert candidates[1].specification_source_id != (
+            candidates[0].specification_source_id
         )
-    )
-    assert accepted_revision.ok
 
 
-def test_acceptance_rejects_tampered_candidate_bytes(engine: Engine) -> None:
-    """The review handler fails closed before registering a changed candidate."""
-    project_id, *_lineage = _seed_accepted_goal(
+def test_acceptance_rejects_tampered_candidate_bytes(
+    engine: Engine,
+    tmp_path: Path,
+) -> None:
+    """The review handler fails closed before registering changed bytes."""
+    project_id, *_lineage, probe = _ready_project(
         engine,
-        name="Tampered candidate",
+        tmp_path,
+        name="tampered-candidate",
     )
-    domain = _domain(engine)
-    authored = _author(
+    domain = _domain(engine, repository_probe=probe)
+    authored = _structure(
         engine,
         domain,
         project_id=project_id,
         payload=_payload(),
         key="tamper",
+        repository_probe=probe,
     )
     assert authored.ok
-    position = _domain(engine, at=NOW + timedelta(seconds=1)).position(project_id)
+    position = domain.position(project_id)
     review = next(
         item for item in position.decisions if item.node_id == "specification.review"
     )
-    reference = review.fact_references[0]
+    reference = next(
+        item
+        for item in review.fact_references
+        if item.fact_type == "specification_candidate"
+    )
     request = DecideSpecification(
         project_id=project_id,
         graph_version=position.graph_version,
@@ -703,31 +709,32 @@ def test_acceptance_rejects_tampered_candidate_bytes(engine: Engine) -> None:
         assert not session.exec(select(SpecificationDecision)).all()
 
 
-def test_acceptance_rejects_unverified_live_repository_source(engine: Engine) -> None:
-    """A review request cannot claim source evidence absent from the candidate."""
-    project_id, *_lineage = _seed_accepted_goal(
+def test_acceptance_rejects_caller_owned_source_fingerprint(
+    engine: Engine,
+    tmp_path: Path,
+) -> None:
+    """Only the host may derive acceptance-time source identity."""
+    project_id, *_lineage, probe = _ready_project(
         engine,
-        name="Stale review source",
+        tmp_path,
+        name="host-owned-source",
     )
-    domain = _domain(engine)
-    authored = _author(
+    domain = _domain(engine, repository_probe=probe)
+    assert _structure(
         engine,
         domain,
         project_id=project_id,
         payload=_payload(),
-        key="stale-review-source",
-    )
-    assert authored.ok
-    review_domain = _domain(engine, at=NOW + timedelta(seconds=1))
+        key="host-owned",
+        repository_probe=probe,
+    ).ok
     request = _accept_request(
-        review_domain,
+        domain,
         project_id=project_id,
-        key="accept-stale-review-source",
-    ).model_copy(
-        update={"repository_source_fingerprint": "sha256:" + ("f" * 64)}
-    )
+        key="accept-host-owned-source",
+    ).model_copy(update={"repository_source_fingerprint": "sha256:" + ("f" * 64)})
 
-    result = review_domain.transition(request)
+    result = domain.transition(request)
 
     assert not result.ok
     assert result.error is not None

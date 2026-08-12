@@ -11,6 +11,7 @@ from google.adk.agents import BaseAgent, InvocationContext
 from google.adk.events import Event
 from google.adk.workflow import START
 
+import adapters.adk.recipes as recipes_module
 from adapters.adk.prompts.specification import (
     SPEC_AUTHORITY_COMPILER_PROMPT_HASH,
     SPEC_AUTHORITY_COMPILER_VERSION,
@@ -31,7 +32,7 @@ from workflow.definitions.root import ROOT_GRAPH
 from workflow.fingerprints import canonical_hash
 from workflow.requests import (
     CompileAuthority,
-    CompleteSpecificationAuthoring,
+    CompleteSpecificationStructuring,
     RecordBacklogDraft,
     RecordRoadmapDraft,
     RecordSprintPlan,
@@ -80,14 +81,14 @@ REQUEST_CASES: tuple[
     ...,
 ] = (
     (
-        "specification.author",
-        CompleteSpecificationAuthoring,
+        "specification.structure",
+        CompleteSpecificationStructuring,
         {
             "payload": {
                 "schema_version": "agileforge.spec.v2",
                 "artifact_id": "SPEC.agentic-recipe",
                 "title": "Agentic recipe",
-                "summary": "Author one exact typed Specification.",
+                "summary": "Structure one exact typed Specification.",
                 "problem_statement": "The lifecycle needs one semantic boundary.",
                 "items": [],
             },
@@ -177,8 +178,8 @@ def _agentic_nodes() -> AgenticRecipeNodes:
         ),
         vision_repair=FakeLeafAgent(name="fake_vision_repair", response={}),
         product_goal=FakeLeafAgent(name="fake_product_goal", response={}),
-        specification_author=FakeLeafAgent(
-            name="fake_specification_author",
+        specification_structurer=FakeLeafAgent(
+            name="fake_specification_structurer",
             response={},
         ),
         backlog_generation=FakeLeafAgent(name="fake_backlog", response={}),
@@ -255,6 +256,15 @@ def test_recipe_registry_covers_each_stable_agentic_domain_node_once() -> None:
         assert recipe.workflow.retry_config.max_attempts == expected_attempts
         assert not hasattr(recipe, "prerequisites")
         assert not hasattr(recipe, "next_command")
+
+
+def test_structuring_recipe_has_no_authoring_compatibility_alias() -> None:
+    """Keep the renamed provider boundary hard instead of dual-wiring it."""
+    nodes = _agentic_nodes()
+
+    assert "specification.author" not in AGENTIC_NODE_IDS
+    assert not hasattr(nodes, "specification_author")
+    assert not hasattr(recipes_module, "build_specification_authoring_workflow")
 
 
 def test_recipe_registry_rejects_any_domain_catalog_gap() -> None:

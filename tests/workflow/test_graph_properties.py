@@ -31,6 +31,7 @@ from workflow.facts import (
     ReviewDecisionFact,
     SpecificationCandidateFact,
     SpecificationDecisionFact,
+    SpecificationSourceFact,
     SpecVersionFact,
     SprintClosureFact,
     SprintFact,
@@ -235,11 +236,35 @@ AUTHORITATIVE_SNAPSHOT_VARIANTS: tuple[tuple[str, object], ...] = (
         ),
     ),
     (
+        "specification_sources",
+        (
+            SpecificationSourceFact(
+                specification_source_id=90,
+                source_fingerprint="sha256:source",
+                bundle={"schema_version": "agileforge.specification-source.v1"},
+                repository_binding_id=7,
+                repository_head_sha="a" * 40,
+                repository_dirty=False,
+                repository_status_fingerprint="sha256:status",
+                vision_artifact_id=83,
+                vision_fingerprint="sha256:vision",
+                product_goal_artifact_id=88,
+                product_goal_fingerprint="sha256:goal",
+                supersedes_specification_source_id=None,
+                supersedes_source_fingerprint=None,
+                registered_by="operator",
+                registered_at=EVALUATED_AT,
+            ),
+        ),
+    ),
+    (
         "specification_candidates",
         (
             SpecificationCandidateFact(
                 specification_candidate_id=91,
                 candidate_kind="initial",
+                specification_source_id=90,
+                specification_source_fingerprint="sha256:source",
                 vision_artifact_id=83,
                 vision_fingerprint="sha256:vision",
                 product_goal_artifact_id=88,

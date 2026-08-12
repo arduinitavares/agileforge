@@ -1,12 +1,12 @@
-"""Failure boundaries for durable Specification authoring attempts."""
+"""Failure boundaries for durable Specification structuring attempts."""
 
 from __future__ import annotations
 
-import importlib
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import pytest
+from git import Repo
 from google.adk.agents import BaseAgent, InvocationContext
 from google.adk.events import Event
 from google.adk.sessions import InMemorySessionService
@@ -24,23 +24,31 @@ from adapters.adk.runner import (
     AdkWorkflowRunner,
     SpecificationSourceCheck,
 )
+from adapters.git.repository_probe import GitPythonRepositoryProbe
 from models.core import Project
 from models.product_definition import SpecificationCandidate
+from models.repository import RepositoryBinding
 from models.workflow import WorkflowNodeAttempt, WorkflowNodeAttemptOutcome
 from services.contracts.specification_authoring import (
-    SpecificationAuthoringInput,
-    SpecificationAuthoringOutput,
+    SpecificationStructuringInput,
+    SpecificationStructuringOutput,
 )
-from services.specification_authoring_input import SpecificationAuthoringInputService
+from services.specification_authoring_input import SpecificationStructuringInputService
+from services.specification_source_registration import (
+    SpecificationSourceRegistrationRequest,
+    SpecificationSourceRegistrationService,
+)
 from tests.workflow.lifecycle_fixtures import _seed_accepted_vision_and_goal
 from workflow.clock import FixedClock
 from workflow.contracts import TransitionResult, WorkflowError, WorkflowErrorCode
 from workflow.definitions.root import ROOT_GRAPH
 from workflow.domain import WorkflowDomain
-from workflow.requests import RevalidateNodeAttempt
+from workflow.fingerprints import canonical_json
+from workflow.requests import RegisterSpecificationSource, RevalidateNodeAttempt
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
+    from pathlib import Path
 
     from sqlalchemy.engine import Engine
 
@@ -165,16 +173,13 @@ def _valid_output() -> JsonObject:
 def _invalid_model_output(
     provider_output: JsonObject,
 ) -> object:
-    """Match the production leaf's permissive structured-output boundary."""
-    model_output = importlib.import_module(
-        "adapters.adk.agents.specification_author"
-    ).SpecificationAuthoringModelOutput
-
-    return model_output.model_validate(provider_output).model_dump()
+    """Bypass the production schema to exercise recipe failure classification."""
+    return provider_output
 
 
 def _system(
     engine: Engine,
+    tmp_path: Path,
     leaf: BaseAgent,
     *,
     source_check: SpecificationSourceCheck | None = None,
@@ -187,6 +192,20 @@ def _system(
     JsonObject,
     AdkRunGuards,
 ]:
+    repository = tmp_path / "registered-specification-source"
+    repository.mkdir()
+    (repository / "SPECIFICATION.md").write_text(
+        "# Exact external Specification\n",
+        encoding="utf-8",
+    )
+    with Repo.init(repository) as repo:
+        with repo.config_writer() as config:
+            config.set_value("user", "name", "Structuring Attempt Test")
+            config.set_value("user", "email", "structuring@example.test")
+        repo.index.add(["SPECIFICATION.md"])
+        repo.index.commit("registered source")
+    probe = GitPythonRepositoryProbe()
+    observed = probe.inspect(repository)
     with Session(engine) as session:
         project = Project(name="Specification attempt boundary")
         session.add(project)
@@ -198,6 +217,31 @@ def _system(
             project_id=project_id,
             recorded_at=NOW - timedelta(minutes=1),
         )
+        binding = RepositoryBinding(
+            project_id=project_id,
+            worktree_path=observed.worktree_path,
+            common_git_dir=observed.common_git_dir,
+            head_sha=observed.head_sha,
+            branch_name=observed.branch_name,
+            detached_head=observed.detached_head,
+            dirty=observed.dirty,
+            status_fingerprint=observed.status_fingerprint,
+            status_entries_json=canonical_json(
+                [item.model_dump(mode="json") for item in observed.status_entries]
+            ),
+            remotes_json=canonical_json(list(observed.remotes)),
+            warnings_json=canonical_json(
+                [item.model_dump(mode="json") for item in observed.warnings]
+            ),
+            probe_version=observed.probe_version,
+            inspected_at=NOW - timedelta(seconds=30),
+            recorded_by="operator@example.test",
+        )
+        session.add(binding)
+        session.flush()
+        assert binding.repository_binding_id is not None
+        project.active_repository_binding_id = binding.repository_binding_id
+        session.add(project)
         session.commit()
     registry = build_agentic_recipe_registry(
         nodes=AgenticRecipeNodes(
@@ -206,7 +250,7 @@ def _system(
             vision_interview=_unused_leaf("unused_vision_interview"),
             vision_repair=_unused_leaf("unused_vision_repair"),
             product_goal=_unused_leaf("unused_product_goal"),
-            specification_author=leaf,
+            specification_structurer=leaf,
             backlog_generation=_unused_leaf("unused_backlog"),
             roadmap_generation=_unused_leaf("unused_roadmap"),
             story_generation=_unused_leaf("unused_story"),
@@ -219,16 +263,63 @@ def _system(
         graph=ROOT_GRAPH,
         clock=FixedClock(now_value=NOW),
         adk_recipe_registry=registry,
+        specification_registration_check=lambda _prepared: None,
+    )
+    prepared = SpecificationSourceRegistrationService(
+        engine=engine,
+        repository_probe=probe,
+    ).prepare(
+        SpecificationSourceRegistrationRequest(
+            project_id=project_id,
+            source_path="SPECIFICATION.md",
+            preparation_capability="grill-with-docs",
+            idempotency_key="register-source-attempt-boundary",
+            actor="operator@example.test",
+        )
+    )
+    source_position = domain.position(project_id)
+    source_decision = next(
+        item
+        for item in source_position.decisions
+        if item.node_id == "specification.source.register"
+    )
+    registered = domain.transition(
+        RegisterSpecificationSource(
+            project_id=project_id,
+            graph_version=source_position.graph_version,
+            fact_fingerprint=source_position.fact_fingerprint,
+            decision_fingerprint=source_decision.decision_fingerprint,
+            idempotency_key="register-source-attempt-boundary",
+            actor="operator@example.test",
+            accepted_vision_artifact_id=prepared.accepted_vision_artifact_id,
+            accepted_product_goal_artifact_id=(
+                prepared.accepted_product_goal_artifact_id
+            ),
+            repository_binding_id=prepared.repository_binding_id,
+            repository_binding_fingerprint=(prepared.repository_binding_fingerprint),
+            capture_request_fingerprint=prepared.request_fingerprint,
+            source_fingerprint=prepared.source_fingerprint,
+            bundle=prepared.bundle,
+        )
+    )
+    assert registered.ok is True
+    structuring_input_service = SpecificationStructuringInputService(
+        engine=engine,
+        repository_probe=probe,
     )
     runner = AdkWorkflowRunner(
         domain=domain,
         registry=registry,
         session_service=InMemorySessionService(),
-        specification_source_check=source_check,
+        specification_source_check=(
+            structuring_input_service.revalidate_sources
+            if source_check is None
+            else source_check
+        ),
         config=AdkExecutionConfig(
             project_id=project_id,
-            model_id="fake/specification-author",
-                execution_settings=execution_settings,
+            model_id="fake/specification-structurer",
+            execution_settings=execution_settings,
             lease_seconds=60,
             actor="operator@example.com",
             correlation_id="issue-199-attempt-boundary",
@@ -236,15 +327,15 @@ def _system(
     )
     position = domain.position(project_id)
     decision = next(
-        item for item in position.decisions if item.node_id == "specification.author"
+        item for item in position.decisions if item.node_id == "specification.structure"
     )
-    normalized_input = SpecificationAuthoringInputService(engine=engine).build(
+    normalized_input = structuring_input_service.build(
         project_id=project_id,
         decision=decision,
     )
     guards = AdkRunGuards(
         position=position,
-        idempotency_key="author-specification-attempt-boundary",
+        idempotency_key="structure-specification-attempt-boundary",
         actor="operator@example.com",
         correlation_id="issue-199-attempt-boundary",
     )
@@ -260,7 +351,7 @@ def _latest_outcome(
         select(WorkflowNodeAttempt)
         .where(
             col(WorkflowNodeAttempt.project_id) == project_id,
-            col(WorkflowNodeAttempt.node_id) == "specification.author",
+            col(WorkflowNodeAttempt.node_id) == "specification.structure",
         )
         .order_by(col(WorkflowNodeAttempt.workflow_node_attempt_id).desc())
     ).one()
@@ -283,7 +374,7 @@ def _latest_attempt(
         select(WorkflowNodeAttempt)
         .where(
             col(WorkflowNodeAttempt.project_id) == project_id,
-            col(WorkflowNodeAttempt.node_id) == "specification.author",
+            col(WorkflowNodeAttempt.node_id) == "specification.structure",
         )
         .order_by(col(WorkflowNodeAttempt.workflow_node_attempt_id).desc())
     ).one()
@@ -291,16 +382,18 @@ def _latest_attempt(
 
 def test_fact_drift_after_start_obsoletes_attempt_before_provider(
     engine: Engine,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Revalidate current business facts immediately before provider work."""
     leaf = _CountingSpecificationLeaf(
-        name="counting_specification_author",
+        name="counting_specification_structurer",
         response=_valid_output(),
         calls=[],
     )
     runner, domain, project_id, decision, normalized_input, guards = _system(
         engine,
+        tmp_path,
         leaf,
     )
     transition = domain.transition
@@ -344,14 +437,16 @@ def test_fact_drift_after_start_obsoletes_attempt_before_provider(
 
 def test_provider_failure_uses_specification_producer_code_durably(
     engine: Engine,
+    tmp_path: Path,
 ) -> None:
     """Keep Specification producer failures distinct from generic ADK failures."""
     leaf = _FailingSpecificationLeaf(
-        name="failing_specification_author",
+        name="failing_specification_structurer",
         calls=[],
     )
     runner, _domain, project_id, decision, normalized_input, guards = _system(
         engine,
+        tmp_path,
         leaf,
     )
 
@@ -372,15 +467,17 @@ def test_provider_failure_uses_specification_producer_code_durably(
 
 def test_trace_setup_drift_is_revalidated_immediately_before_provider(
     engine: Engine,
+    tmp_path: Path,
 ) -> None:
     """Trace setup cannot open a stale-call window after the authority check."""
     leaf = _CountingSpecificationLeaf(
-        name="trace_drift_specification_author",
+        name="trace_drift_specification_structurer",
         response=_valid_output(),
         calls=[],
     )
     runner, _domain, project_id, decision, normalized_input, guards = _system(
         engine,
+        tmp_path,
         leaf,
     )
     runner._session_service = _DriftingSessionService(
@@ -402,25 +499,27 @@ def test_trace_setup_drift_is_revalidated_immediately_before_provider(
 
 def test_input_validation_drift_is_revalidated_at_leaf_boundary(
     engine: Engine,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Recheck after host validation and immediately before the leaf call."""
     leaf = _CountingSpecificationLeaf(
-        name="leaf_boundary_specification_author",
+        name="leaf_boundary_specification_structurer",
         response=_valid_output(),
         calls=[],
     )
     runner, _domain, project_id, decision, normalized_input, guards = _system(
         engine,
+        tmp_path,
         leaf,
     )
-    original_validate = SpecificationAuthoringInput.model_validate
+    original_validate = SpecificationStructuringInput.model_validate
     drifted = False
 
     def validate_then_drift(
-        cls: type[SpecificationAuthoringInput],
+        cls: type[SpecificationStructuringInput],
         value: object,
-    ) -> SpecificationAuthoringInput:
+    ) -> SpecificationStructuringInput:
         del cls
         nonlocal drifted
         validated = original_validate(value)
@@ -435,7 +534,7 @@ def test_input_validation_drift_is_revalidated_at_leaf_boundary(
         return validated
 
     monkeypatch.setattr(
-        SpecificationAuthoringInput,
+        SpecificationStructuringInput,
         "model_validate",
         classmethod(validate_then_drift),
     )
@@ -454,23 +553,25 @@ def test_input_validation_drift_is_revalidated_at_leaf_boundary(
 @pytest.mark.parametrize("provider_fails", [False, True])
 def test_late_revalidation_replays_terminal_attempt_without_overwrite(
     engine: Engine,
+    tmp_path: Path,
     provider_fails: bool,
 ) -> None:
     """A late check must preserve both successful and failed terminal truth."""
     leaf: BaseAgent
     if provider_fails:
         leaf = _FailingSpecificationLeaf(
-            name="terminal_failure_specification_author",
+            name="terminal_failure_specification_structurer",
             calls=[],
         )
     else:
         leaf = _CountingSpecificationLeaf(
-            name="terminal_success_specification_author",
+            name="terminal_success_specification_structurer",
             response=_valid_output(),
             calls=[],
         )
     runner, domain, project_id, decision, normalized_input, guards = _system(
         engine,
+        tmp_path,
         leaf,
     )
     terminal = runner.run(decision, normalized_input, guards=guards)
@@ -501,11 +602,12 @@ def test_late_revalidation_replays_terminal_attempt_without_overwrite(
 
 def test_terminal_revalidation_replay_never_reenters_provider(
     engine: Engine,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An already-terminal success result stops this worker at the leaf boundary."""
     leaf = _CountingSpecificationLeaf(
-        name="terminal_replay_specification_author",
+        name="terminal_replay_specification_structurer",
         response=_valid_output(),
         calls=[],
     )
@@ -520,6 +622,7 @@ def test_terminal_revalidation_replay_never_reenters_provider(
 
     runner, domain, project_id, decision, normalized_input, guards = _system(
         engine,
+        tmp_path,
         leaf,
         source_check=source_check,
     )
@@ -530,7 +633,7 @@ def test_terminal_revalidation_replay_never_reenters_provider(
             return TransitionResult(
                 ok=True,
                 replayed=True,
-                applied_node_id="specification.author",
+                applied_node_id="specification.structure",
                 output={"status": "success"},
                 position=domain.position(project_id),
             )
@@ -548,16 +651,18 @@ def test_terminal_revalidation_replay_never_reenters_provider(
 
 def test_revalidation_exception_records_replayable_generic_external_failure(
     engine: Engine,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An authority-store failure is not a Specification producer failure."""
     leaf = _CountingSpecificationLeaf(
-        name="revalidation_exception_specification_author",
+        name="revalidation_exception_specification_structurer",
         response=_valid_output(),
         calls=[],
     )
     runner, domain, project_id, decision, normalized_input, guards = _system(
         engine,
+        tmp_path,
         leaf,
     )
     transition = domain.transition
@@ -587,10 +692,11 @@ def test_revalidation_exception_records_replayable_generic_external_failure(
 
 def test_source_check_stale_error_obsoletes_attempt_before_provider(
     engine: Engine,
+    tmp_path: Path,
 ) -> None:
     """Close the exact attempt when the leaf-boundary repository re-probe is stale."""
     leaf = _CountingSpecificationLeaf(
-        name="stale_source_specification_author",
+        name="stale_source_specification_structurer",
         response=_valid_output(),
         calls=[],
     )
@@ -608,6 +714,7 @@ def test_source_check_stale_error_obsoletes_attempt_before_provider(
 
     runner, _domain, project_id, decision, normalized_input, guards = _system(
         engine,
+        tmp_path,
         leaf,
         source_check=stale_source,
     )
@@ -628,10 +735,11 @@ def test_source_check_stale_error_obsoletes_attempt_before_provider(
 
 def test_source_check_exception_records_generic_failure_without_provider(
     engine: Engine,
+    tmp_path: Path,
 ) -> None:
     """Do not misclassify a repository re-probe exception as producer failure."""
     leaf = _CountingSpecificationLeaf(
-        name="source_exception_specification_author",
+        name="source_exception_specification_structurer",
         response=_valid_output(),
         calls=[],
     )
@@ -646,6 +754,7 @@ def test_source_check_exception_records_generic_failure_without_provider(
 
     runner, _domain, project_id, decision, normalized_input, guards = _system(
         engine,
+        tmp_path,
         leaf,
         source_check=fail_source_check,
     )
@@ -666,10 +775,11 @@ def test_source_check_exception_records_generic_failure_without_provider(
 
 def test_post_provider_source_drift_obsoletes_before_candidate_completion(
     engine: Engine,
+    tmp_path: Path,
 ) -> None:
     """Re-probe sources after one provider call and before business completion."""
     leaf = _PostProviderDriftingSpecificationLeaf(
-        name="post_provider_drift_specification_author",
+        name="post_provider_drift_specification_structurer",
         response=_valid_output(),
         calls=[],
         source_state=[],
@@ -692,6 +802,7 @@ def test_post_provider_source_drift_obsoletes_before_candidate_completion(
 
     runner, _domain, project_id, decision, normalized_input, guards = _system(
         engine,
+        tmp_path,
         leaf,
         source_check=source_check,
     )
@@ -711,27 +822,29 @@ def test_post_provider_source_drift_obsoletes_before_candidate_completion(
 
 def test_provider_retry_revalidates_facts_before_second_leaf_call(
     engine: Engine,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A provider retry cannot reuse a successful earlier authority check."""
     leaf = _CountingSpecificationLeaf(
-        name="retry_drift_specification_author",
+        name="retry_drift_specification_structurer",
         response={"payload": {"schema_version": "agileforge.spec.v2"}},
         calls=[],
     )
     retry_settings: JsonObject = {"timeout_seconds": 5.0, "max_attempts": 2}
     runner, _domain, project_id, decision, normalized_input, guards = _system(
         engine,
+        tmp_path,
         leaf,
         execution_settings=retry_settings,
     )
-    original_validate = SpecificationAuthoringOutput.model_validate
+    original_validate = SpecificationStructuringOutput.model_validate
     drifted = False
 
     def validate_after_fact_drift(
-        cls: type[SpecificationAuthoringOutput],
+        cls: type[SpecificationStructuringOutput],
         value: object,
-    ) -> SpecificationAuthoringOutput:
+    ) -> SpecificationStructuringOutput:
         del cls
         nonlocal drifted
         if not drifted:
@@ -745,7 +858,7 @@ def test_provider_retry_revalidates_facts_before_second_leaf_call(
         return original_validate(value)
 
     monkeypatch.setattr(
-        SpecificationAuthoringOutput,
+        SpecificationStructuringOutput,
         "model_validate",
         classmethod(validate_after_fact_drift),
     )
@@ -765,30 +878,31 @@ def test_provider_retry_revalidates_facts_before_second_leaf_call(
 
 def test_persisted_input_tampering_obsoletes_before_provider(
     engine: Engine,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The stored input bytes must still match their start-time fingerprint."""
     leaf = _CountingSpecificationLeaf(
-        name="tampered_input_specification_author",
+        name="tampered_input_specification_structurer",
         response=_valid_output(),
         calls=[],
     )
     runner, domain, project_id, decision, normalized_input, guards = _system(
         engine,
+        tmp_path,
         leaf,
     )
     transition = domain.transition
 
     def tamper_before_preflight(request: TransitionRequest) -> TransitionResult:
         if request.kind == "revalidate_node_attempt":
-                with Session(engine) as session:
-                    attempt = session.exec(
-                        select(WorkflowNodeAttempt).where(
-                            col(WorkflowNodeAttempt.project_id) == project_id,
-                            col(WorkflowNodeAttempt.node_id)
-                            == "specification.author",
-                        )
-                    ).one()
+            with Session(engine) as session:
+                attempt = session.exec(
+                    select(WorkflowNodeAttempt).where(
+                        col(WorkflowNodeAttempt.project_id) == project_id,
+                        col(WorkflowNodeAttempt.node_id) == "specification.structure",
+                    )
+                ).one()
                 attempt.normalized_input_json = '{"tampered":true}'
                 session.add(attempt)
                 session.commit()
@@ -809,30 +923,31 @@ def test_persisted_input_tampering_obsoletes_before_provider(
 
 def test_newer_competing_attempt_obsoletes_old_attempt_before_provider(
     engine: Engine,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Only the latest exact node-instance attempt retains provider authority."""
     leaf = _CountingSpecificationLeaf(
-        name="competing_attempt_specification_author",
+        name="competing_attempt_specification_structurer",
         response=_valid_output(),
         calls=[],
     )
     runner, domain, project_id, decision, normalized_input, guards = _system(
         engine,
+        tmp_path,
         leaf,
     )
     transition = domain.transition
 
     def compete_before_preflight(request: TransitionRequest) -> TransitionResult:
         if request.kind == "revalidate_node_attempt":
-                with Session(engine) as session:
-                    original = session.exec(
-                        select(WorkflowNodeAttempt).where(
-                            col(WorkflowNodeAttempt.project_id) == project_id,
-                            col(WorkflowNodeAttempt.node_id)
-                            == "specification.author",
-                        )
-                    ).one()
+            with Session(engine) as session:
+                original = session.exec(
+                    select(WorkflowNodeAttempt).where(
+                        col(WorkflowNodeAttempt.project_id) == project_id,
+                        col(WorkflowNodeAttempt.node_id) == "specification.structure",
+                    )
+                ).one()
                 session.add(
                     WorkflowNodeAttempt(
                         project_id=original.project_id,
@@ -846,9 +961,9 @@ def test_newer_competing_attempt_obsoletes_old_attempt_before_provider(
                         input_fingerprint=original.input_fingerprint,
                         model_id=original.model_id,
                         execution_settings_json=original.execution_settings_json,
-                        idempotency_key="competing-authoring-attempt",
+                        idempotency_key="competing-structuring-attempt",
                         actor=original.actor,
-                        correlation_id="competing-authoring-attempt",
+                        correlation_id="competing-structuring-attempt",
                         started_at=original.started_at,
                         lease_expires_at=original.lease_expires_at,
                         attempt_fingerprint="sha256:" + ("f" * 64),
@@ -868,7 +983,7 @@ def test_newer_competing_attempt_obsoletes_old_attempt_before_provider(
     with Session(engine) as session:
         original = session.exec(
             select(WorkflowNodeAttempt)
-            .where(col(WorkflowNodeAttempt.node_id) == "specification.author")
+            .where(col(WorkflowNodeAttempt.node_id) == "specification.structure")
             .order_by(col(WorkflowNodeAttempt.workflow_node_attempt_id))
         ).first()
         assert original is not None
@@ -898,17 +1013,19 @@ def test_newer_competing_attempt_obsoletes_old_attempt_before_provider(
 )
 def test_provider_schema_and_payload_failures_keep_stable_codes(
     engine: Engine,
+    tmp_path: Path,
     provider_output: JsonObject,
     expected_code: str,
 ) -> None:
     """Persist exact schema-versus-payload diagnostics without a candidate."""
     leaf = _CountingSpecificationLeaf(
-        name="invalid_specification_author",
+        name="invalid_specification_structurer",
         response=_invalid_model_output(provider_output),
         calls=[],
     )
     runner, _domain, project_id, decision, normalized_input, guards = _system(
         engine,
+        tmp_path,
         leaf,
     )
 

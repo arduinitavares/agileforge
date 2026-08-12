@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import importlib.util
+import json
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
@@ -19,24 +22,41 @@ from models.product_definition import (
     ProductGoalOutcome,
     SpecificationCandidate,
     SpecificationDecision,
+    SpecificationSource,
     VisionArtifact,
     VisionArtifactDecision,
     VisionEvidenceSnapshot,
     VisionInterviewTurn,
     VisionRevisionIntent,
 )
+from models.repository import RepositoryBinding, repository_binding_fingerprint
 from models.specs import SpecRegistry
 from models.workflow import WorkflowNodeAttempt
 from repositories.workflow import WorkflowFactRepository
 from services.contracts.specification_authoring import (
     SPECIFICATION_PRODUCT_GOAL_SOURCE_ID,
+    SPECIFICATION_STRUCTURER_PROMPT_VERSION,
     SPECIFICATION_VISION_SOURCE_ID,
     AcceptedProductGoalContext,
     AcceptedVisionContext,
-    SpecificationAuthoringInput,
-    SpecificationSourceContext,
-    specification_authoring_fact_fingerprint,
-    specification_authoring_input_fingerprint,
+    BaseSpecificationContext,
+    RegisteredRepositoryEvidence,
+    RegisteredSpecificationSource,
+    SpecificationStructuringContextCapture,
+    SpecificationStructuringDocument,
+    SpecificationStructuringInput,
+    specification_structuring_fact_fingerprint,
+    specification_structuring_input_fingerprint,
+)
+from services.contracts.specification_source import (
+    SPECIFICATION_SOURCE_CONTEXT_ID,
+    SPECIFICATION_SOURCE_PRIMARY_ID,
+    SpecificationContextCapture,
+    SpecificationRepositoryRevision,
+    SpecificationSourceBundle,
+    SpecificationSourceDocument,
+    source_bundle_fingerprint,
+    specification_source_adr_id,
 )
 from services.read_projections import DurableReadProjectionService
 from services.specs.candidate_contract import (
@@ -154,6 +174,35 @@ def _add_vision_evidence_snapshot(
     session.flush()
     assert snapshot.vision_evidence_snapshot_id is not None
     return snapshot.vision_evidence_snapshot_id
+
+
+def _registered_document(
+    *,
+    source_id: str,
+    relative_path: str,
+    content: bytes,
+) -> SpecificationSourceDocument:
+    """Build one byte-exact registered document for projection tests."""
+    return SpecificationSourceDocument(
+        source_id=source_id,
+        relative_path=relative_path,
+        content_base64=base64.b64encode(content).decode("ascii"),
+        byte_length=len(content),
+        content_fingerprint="sha256:" + hashlib.sha256(content).hexdigest(),
+    )
+
+
+def _structuring_document(
+    document: SpecificationSourceDocument,
+) -> SpecificationStructuringDocument:
+    """Expose exact registered UTF-8 bytes to the structuring contract."""
+    return SpecificationStructuringDocument(
+        source_id=document.source_id,
+        relative_path=document.relative_path,
+        text=base64.b64decode(document.content_base64, validate=True).decode("utf-8"),
+        byte_length=document.byte_length,
+        content_fingerprint=document.content_fingerprint,
+    )
 
 
 def _seed_lineage(  # noqa: PLR0915
@@ -323,15 +372,91 @@ def _seed_lineage(  # noqa: PLR0915
             )
         )
 
+        repository_status_fingerprint = canonical_hash(
+            {"projection_repository": goal_number}
+        )
+        repository_binding = RepositoryBinding(
+            project_id=project.project_id,
+            worktree_path="/projection/repository",
+            common_git_dir="/projection/repository/.git",
+            head_sha="a" * 40,
+            branch_name="dev/projection",
+            detached_head=False,
+            dirty=False,
+            status_fingerprint=repository_status_fingerprint,
+            status_entries_json="[]",
+            remotes_json="[]",
+            warnings_json="[]",
+            probe_version="agileforge.repository-probe.v1",
+            inspected_at=NOW + timedelta(seconds=5),
+            supersedes_repository_binding_id=None,
+            recorded_by="operator",
+        )
+        session.add(repository_binding)
+        session.flush()
+        assert repository_binding.repository_binding_id is not None
+        project.active_repository_binding_id = repository_binding.repository_binding_id
+        session.add(project)
+        source_document = _registered_document(
+            source_id=SPECIFICATION_SOURCE_PRIMARY_ID,
+            relative_path="SPECIFICATION.md",
+            content=b"REGISTERED_TO_SPEC_SOURCE_MUST_NOT_LEAK\n",
+        )
+        context_document = _registered_document(
+            source_id=SPECIFICATION_SOURCE_CONTEXT_ID,
+            relative_path="CONTEXT.md",
+            content=b"REGISTERED_CONTEXT_MUST_NOT_LEAK\n",
+        )
+        adr_document = _registered_document(
+            source_id=specification_source_adr_id("docs/adr/0001-projection.md"),
+            relative_path="docs/adr/0001-projection.md",
+            content=b"REGISTERED_ADR_MUST_NOT_LEAK\n",
+        )
+        source_bundle = SpecificationSourceBundle(
+            source=source_document,
+            context=SpecificationContextCapture(
+                state="present",
+                document=context_document,
+            ),
+            adrs=(adr_document,),
+            repository_revision=SpecificationRepositoryRevision(
+                head_sha=repository_binding.head_sha,
+                branch_name=repository_binding.branch_name,
+                detached_head=repository_binding.detached_head,
+                dirty=repository_binding.dirty,
+                status_fingerprint=repository_binding.status_fingerprint,
+            ),
+            accepted_vision_fingerprint=vision.content_fingerprint,
+            accepted_product_goal_fingerprint=goal.content_fingerprint,
+        )
+        source = SpecificationSource(
+            project_id=project.project_id,
+            source_bundle_json=canonical_json(source_bundle.model_dump(mode="json")),
+            source_fingerprint=source_bundle_fingerprint(source_bundle),
+            repository_binding_id=repository_binding.repository_binding_id,
+            repository_head_sha=repository_binding.head_sha,
+            repository_dirty=repository_binding.dirty,
+            repository_status_fingerprint=repository_binding.status_fingerprint,
+            vision_artifact_id=vision.vision_artifact_id,
+            vision_fingerprint=vision.content_fingerprint,
+            product_goal_artifact_id=goal.product_goal_artifact_id,
+            product_goal_fingerprint=goal.content_fingerprint,
+            supersedes_specification_source_id=None,
+            supersedes_source_fingerprint=None,
+            registered_by="operator",
+            registered_at=NOW + timedelta(seconds=6),
+        )
+        session.add(source)
+        session.flush()
+        assert source.specification_source_id is not None
+
         specification_attempt = WorkflowNodeAttempt(
             project_id=project.project_id,
-            node_id="specification.author",
+            node_id="specification.structure",
             instance_key=None,
             graph_version=GRAPH_VERSION,
             fact_fingerprint=canonical_hash({"specification": "facts"}),
-            business_fact_fingerprint=canonical_hash(
-                {"specification": "business"}
-            ),
+            business_fact_fingerprint=canonical_hash({"specification": "business"}),
             decision_fingerprint=canonical_hash({"specification": "decision"}),
             normalized_input_json="{}",
             input_fingerprint=canonical_hash({"specification": "input"}),
@@ -411,8 +536,23 @@ def _seed_lineage(  # noqa: PLR0915
                 kind=CandidateSourceKind.PRODUCT_GOAL,
                 fingerprint=goal.content_fingerprint,
             ),
+            CandidateSourceManifestEntry(
+                source_id=source_document.source_id,
+                kind=CandidateSourceKind.EXTERNAL,
+                fingerprint=source_document.content_fingerprint,
+            ),
+            CandidateSourceManifestEntry(
+                source_id=context_document.source_id,
+                kind=CandidateSourceKind.REPOSITORY,
+                fingerprint=context_document.content_fingerprint,
+            ),
+            CandidateSourceManifestEntry(
+                source_id=adr_document.source_id,
+                kind=CandidateSourceKind.REPOSITORY,
+                fingerprint=adr_document.content_fingerprint,
+            ),
         )
-        authoring_input = SpecificationAuthoringInput(
+        structuring_input = SpecificationStructuringInput(
             project_id=project.project_id,
             project_name=project.name,
             operation="initial",
@@ -427,23 +567,39 @@ def _seed_lineage(  # noqa: PLR0915
                 fingerprint=goal.content_fingerprint,
                 statement=goal.statement,
             ),
-            source_manifest=source_manifest,
-            source_context=(
-                SpecificationSourceContext(
-                    source_id=SPECIFICATION_VISION_SOURCE_ID,
-                    kind=CandidateSourceKind.VISION,
-                    fingerprint=vision.content_fingerprint,
-                    content={"statement": vision.statement},
+            registered_source=RegisteredSpecificationSource(
+                specification_source_id=source.specification_source_id,
+                source_fingerprint=source.source_fingerprint,
+                producer_capability=source_bundle.producer_capability,
+                preparation_capability=source_bundle.preparation_capability,
+                source=_structuring_document(source_document),
+                context=SpecificationStructuringContextCapture(
+                    state="present",
+                    document=_structuring_document(context_document),
                 ),
-                SpecificationSourceContext(
-                    source_id=SPECIFICATION_PRODUCT_GOAL_SOURCE_ID,
-                    kind=CandidateSourceKind.PRODUCT_GOAL,
-                    fingerprint=goal.content_fingerprint,
-                    content={"statement": goal.statement},
+                adrs=(_structuring_document(adr_document),),
+                repository_revision=source_bundle.repository_revision,
+                repository_evidence=RegisteredRepositoryEvidence(
+                    repository_binding_id=repository_binding.repository_binding_id,
+                    binding_fingerprint=repository_binding_fingerprint(
+                        repository_binding
+                    ),
+                    head_sha=repository_binding.head_sha,
+                    branch_name=repository_binding.branch_name,
+                    detached_head=repository_binding.detached_head,
+                    dirty=repository_binding.dirty,
+                    status_fingerprint=repository_binding.status_fingerprint,
+                    status_entries=(),
+                    remotes=(),
+                    warnings=(),
+                    probe_version=repository_binding.probe_version,
                 ),
+                accepted_vision_fingerprint=vision.content_fingerprint,
+                accepted_product_goal_fingerprint=goal.content_fingerprint,
             ),
+            source_manifest=source_manifest,
         )
-        normalized_input = authoring_input.model_dump(mode="json")
+        normalized_input = structuring_input.model_dump(mode="json")
         specification_attempt.normalized_input_json = canonical_json(normalized_input)
         specification_attempt.input_fingerprint = canonical_hash(normalized_input)
         specification_attempt.attempt_fingerprint = workflow_node_attempt_fingerprint(
@@ -479,19 +635,23 @@ def _seed_lineage(  # noqa: PLR0915
                 accepted_vision_fingerprint=vision.content_fingerprint,
                 accepted_product_goal_id=goal.product_goal_artifact_id,
                 accepted_product_goal_fingerprint=goal.content_fingerprint,
+                registered_source_fingerprint=source.source_fingerprint,
+                source_producer_capability=source_bundle.producer_capability,
+                source_preparation_capability=(source_bundle.preparation_capability),
                 source_manifest=source_manifest,
-                accepted_fact_fingerprint=specification_authoring_fact_fingerprint(
-                    authoring_input
+                accepted_fact_fingerprint=specification_structuring_fact_fingerprint(
+                    structuring_input
                 ),
                 producer_input_fingerprint=(
-                    specification_authoring_input_fingerprint(authoring_input)
+                    specification_structuring_input_fingerprint(structuring_input)
                 ),
-                producer_capability="to-spec",
-                producer_version="2.0.0",
+                producer_capability="specification-structurer",
+                producer_version="1.0.0",
                 model_id=specification_attempt.model_id,
                 model_configuration_fingerprint=canonical_hash(
                     {"model": specification_attempt.model_id}
                 ),
+                prompt_version=SPECIFICATION_STRUCTURER_PROMPT_VERSION,
                 prompt_fingerprint=canonical_hash({"prompt": "specification-v2"}),
                 workflow_node_attempt_id=(
                     specification_attempt.workflow_node_attempt_id
@@ -504,6 +664,8 @@ def _seed_lineage(  # noqa: PLR0915
         candidate = SpecificationCandidate(
             project_id=project.project_id,
             candidate_kind="initial",
+            specification_source_id=source.specification_source_id,
+            specification_source_fingerprint=source.source_fingerprint,
             vision_artifact_id=vision.vision_artifact_id,
             vision_fingerprint=vision.content_fingerprint,
             product_goal_artifact_id=goal.product_goal_artifact_id,
@@ -535,6 +697,13 @@ def _seed_lineage(  # noqa: PLR0915
             "goal_id": goal.product_goal_artifact_id,
             "goal_fingerprint": goal.content_fingerprint,
             "goal_statement": goal.statement,
+            "source_id": source.specification_source_id,
+            "source_fingerprint": source.source_fingerprint,
+            "source_document_fingerprint": source_document.content_fingerprint,
+            "context_document_fingerprint": context_document.content_fingerprint,
+            "adr_document_fingerprint": adr_document.content_fingerprint,
+            "repository_binding_id": repository_binding.repository_binding_id,
+            "repository_status_fingerprint": (repository_binding.status_fingerprint),
             "candidate_id": candidate.specification_candidate_id,
             "candidate_fingerprint": candidate.candidate_fingerprint,
             "payload_fingerprint": candidate.payload_fingerprint,
@@ -606,6 +775,10 @@ def _assert_complete_candidate_projection(
         "product_goal_fingerprint",
         "base_spec_version_id",
         "base_spec_hash",
+        "specification_source_id",
+        "registered_source_fingerprint",
+        "source_producer_capability",
+        "source_preparation_capability",
         "source_manifest",
         "source_manifest_fingerprint",
         "accepted_fact_fingerprint",
@@ -615,6 +788,7 @@ def _assert_complete_candidate_projection(
         "model_id",
         "model_configuration_fingerprint",
         "prompt_fingerprint",
+        "prompt_version",
         "workflow_node_attempt_id",
         "attempt_fingerprint",
         "correlation_id",
@@ -635,27 +809,27 @@ def _assert_complete_candidate_projection(
     assert candidate["vision_fingerprint"] == seeded["vision_fingerprint"]
     assert candidate["product_goal_artifact_id"] == seeded["goal_id"]
     assert candidate["product_goal_fingerprint"] == seeded["goal_fingerprint"]
+    assert candidate["specification_source_id"] == seeded["source_id"]
+    assert candidate["registered_source_fingerprint"] == seeded["source_fingerprint"]
+    assert candidate["source_producer_capability"] == "to-spec"
+    assert candidate["source_preparation_capability"] == "grill-with-docs"
+    assert candidate["producer_capability"] == "specification-structurer"
+    assert candidate["prompt_version"] == SPECIFICATION_STRUCTURER_PROMPT_VERSION
     assert candidate["source_manifest"] == seeded["source_manifest"]
     assert (
         candidate["source_manifest_fingerprint"]
         == seeded["source_manifest_fingerprint"]
     )
-    assert candidate["accepted_fact_fingerprint"] == seeded[
-        "accepted_fact_fingerprint"
-    ]
-    assert candidate["producer_input_fingerprint"] == seeded[
-        "producer_input_fingerprint"
-    ]
-    assert candidate["workflow_node_attempt_id"] == seeded[
-        "specification_attempt_id"
-    ]
-    assert candidate["attempt_fingerprint"] == seeded[
-        "specification_attempt_fingerprint"
-    ]
+    assert candidate["accepted_fact_fingerprint"] == seeded["accepted_fact_fingerprint"]
+    assert (
+        candidate["producer_input_fingerprint"] == seeded["producer_input_fingerprint"]
+    )
+    assert candidate["workflow_node_attempt_id"] == seeded["specification_attempt_id"]
+    assert (
+        candidate["attempt_fingerprint"] == seeded["specification_attempt_fingerprint"]
+    )
     assert candidate["payload_fingerprint"] == seeded["payload_fingerprint"]
-    assert candidate["rendered_view_fingerprint"] == seeded[
-        "rendered_view_fingerprint"
-    ]
+    assert candidate["rendered_view_fingerprint"] == seeded["rendered_view_fingerprint"]
     assert candidate["candidate_fingerprint"] == seeded["candidate_fingerprint"]
     assert candidate["base_spec_version_id"] is None
     assert candidate["base_spec_hash"] is None
@@ -1966,7 +2140,7 @@ def _accept_next_goal(engine: Engine, seeded: dict[str, object]) -> None:
         session.commit()
 
 
-def test_durable_projections_expose_current_human_content_and_pending_review(
+def test_durable_projections_expose_current_human_content_and_pending_review(  # noqa: PLR0915
     engine: Engine,
 ) -> None:
     """Pending status and review expose one complete exact v2 candidate packet."""
@@ -2005,10 +2179,467 @@ def test_durable_projections_expose_current_human_content_and_pending_review(
     assert specification_data["schema_version"] == (
         "agileforge.specification_review.v2"
     )
+    source_data = _json_object(specification_data["source"])
+    assert source_data["specification_source_id"] == seeded["source_id"]
+    assert source_data["source_fingerprint"] == seeded["source_fingerprint"]
+    assert source_data["producer_capability"] == "to-spec"
+    assert source_data["preparation_capability"] == "grill-with-docs"
+    source_document = _json_object(source_data["source"])
+    assert source_document == {
+        "source_id": SPECIFICATION_SOURCE_PRIMARY_ID,
+        "relative_path": "SPECIFICATION.md",
+        "byte_length": len(b"REGISTERED_TO_SPEC_SOURCE_MUST_NOT_LEAK\n"),
+        "content_fingerprint": seeded["source_document_fingerprint"],
+    }
+    context = _json_object(source_data["context"])
+    assert context["state"] == "present"
+    context_document = _json_object(context["document"])
+    assert (
+        context_document["content_fingerprint"]
+        == seeded["context_document_fingerprint"]
+    )
+    adrs = source_data["adrs"]
+    assert isinstance(adrs, list)
+    assert (
+        _json_object(adrs[0])["content_fingerprint"]
+        == seeded["adr_document_fingerprint"]
+    )
+    repository = _json_object(source_data["repository"])
+    assert repository["repository_binding_id"] == seeded["repository_binding_id"]
+    assert repository["status_fingerprint"] == seeded["repository_status_fingerprint"]
+    serialized_source = json.dumps(source_data)
+    assert "content_base64" not in serialized_source
+    assert "REGISTERED_TO_SPEC_SOURCE_MUST_NOT_LEAK" not in serialized_source
+    assert "REGISTERED_CONTEXT_MUST_NOT_LEAK" not in serialized_source
+    assert "REGISTERED_ADR_MUST_NOT_LEAK" not in serialized_source
     assert specification_data["current"] is None
     assert review_data["review"] == {"state": "pending"}
     assert review_data["candidate"] == candidate_data
+    assert review_data["source"] == source_data
     assert review_data["schema_version"] == "agileforge.specification_review.v2"
+
+
+def test_registered_source_status_precedes_structured_candidate(
+    engine: Engine,
+) -> None:
+    """A registered source is visible as digest metadata before structuring."""
+    seeded = _seed_lineage(engine)
+    project_id = _seeded_int(seeded, "project_id")
+    candidate_id = _seeded_int(seeded, "candidate_id")
+    with Session(engine) as session:
+        candidate = session.get(SpecificationCandidate, candidate_id)
+        assert candidate is not None
+        session.delete(candidate)
+        session.commit()
+
+    status = _data(
+        DurableReadProjectionService(engine=engine).specification_status(
+            project_id=project_id
+        )
+    )
+
+    source = _json_object(status["source"])
+    assert source["source_fingerprint"] == seeded["source_fingerprint"]
+    assert status["candidate"] is None
+    assert status["review"] is None
+    assert status["stale_reason"] == "SPECIFICATION_NOT_STRUCTURED"
+    assert "content_base64" not in json.dumps(source)
+
+
+def test_successor_source_retains_current_accepted_spec_before_amendment(
+    engine: Engine,
+) -> None:
+    """Registering amendment bytes does not hide the still-current accepted base."""
+    seeded = _seed_lineage(engine)
+    project_id = _seeded_int(seeded, "project_id")
+    candidate_id = _seeded_int(seeded, "candidate_id")
+    source_id = _seeded_int(seeded, "source_id")
+    with Session(engine) as session:
+        candidate = session.get(SpecificationCandidate, candidate_id)
+        source = session.get(SpecificationSource, source_id)
+        assert candidate is not None
+        assert source is not None
+        payload_fingerprint = candidate.payload_fingerprint
+        session.add(
+            SpecificationDecision(
+                project_id=project_id,
+                specification_candidate_id=candidate_id,
+                candidate_fingerprint=candidate.candidate_fingerprint,
+                decision="accepted",
+                rationale="Approved base.",
+                reviewer="operator",
+                idempotency_key="accepted-base-before-successor-source",
+                decided_at=NOW + timedelta(seconds=8),
+            )
+        )
+        registry = SpecRegistry(
+            project_id=project_id,
+            spec_hash=candidate.payload_fingerprint,
+            status="approved",
+            approved_at=NOW + timedelta(seconds=8),
+            approved_by="operator",
+            source_specification_candidate_id=candidate_id,
+            source_specification_candidate_fingerprint=(
+                candidate.candidate_fingerprint
+            ),
+            source_vision_artifact_id=candidate.vision_artifact_id,
+            source_vision_fingerprint=candidate.vision_fingerprint,
+            source_product_goal_artifact_id=candidate.product_goal_artifact_id,
+            source_product_goal_fingerprint=candidate.product_goal_fingerprint,
+        )
+        session.add(registry)
+        successor = SpecificationSource(
+            project_id=project_id,
+            source_bundle_json=source.source_bundle_json,
+            source_fingerprint=source.source_fingerprint,
+            repository_binding_id=source.repository_binding_id,
+            repository_head_sha=source.repository_head_sha,
+            repository_dirty=source.repository_dirty,
+            repository_status_fingerprint=source.repository_status_fingerprint,
+            vision_artifact_id=source.vision_artifact_id,
+            vision_fingerprint=source.vision_fingerprint,
+            product_goal_artifact_id=source.product_goal_artifact_id,
+            product_goal_fingerprint=source.product_goal_fingerprint,
+            supersedes_specification_source_id=source_id,
+            supersedes_source_fingerprint=source.source_fingerprint,
+            registered_by="operator",
+            registered_at=NOW + timedelta(seconds=9),
+        )
+        session.add(successor)
+        session.commit()
+        session.refresh(registry)
+        session.refresh(successor)
+        registry_id = registry.spec_version_id
+        successor_id = successor.specification_source_id
+
+    status = _data(
+        DurableReadProjectionService(engine=engine).specification_status(
+            project_id=project_id
+        )
+    )
+
+    source_data = _json_object(status["source"])
+    current = _json_object(status["current"])
+    assert source_data["specification_source_id"] == successor_id
+    assert current["spec_version_id"] == registry_id
+    assert current["spec_hash"] == payload_fingerprint
+    accepted_candidate = _json_object(current["candidate"])
+    assert accepted_candidate["specification_candidate_id"] == candidate_id
+    assert status["candidate"] is None
+    assert status["review"] is None
+    assert status["stale_reason"] == "SPECIFICATION_NOT_STRUCTURED"
+
+
+def test_pending_amendment_review_projects_the_exact_amendment_candidate(  # noqa: PLR0915
+    engine: Engine,
+) -> None:
+    """An approved base cannot replace its pending amendment review packet."""
+    seeded = _seed_lineage(engine)
+    project_id = _seeded_int(seeded, "project_id")
+    initial_candidate_id = _seeded_int(seeded, "candidate_id")
+    source_id = _seeded_int(seeded, "source_id")
+    base_payload = SpecificationPayload.model_validate(seeded["specification_payload"])
+    amendment_payload = base_payload.model_copy(
+        update={"summary": "Project the exact pending amendment for review."}
+    )
+
+    with Session(engine) as session:
+        initial_candidate = session.get(
+            SpecificationCandidate,
+            initial_candidate_id,
+        )
+        original_source = session.get(SpecificationSource, source_id)
+        assert initial_candidate is not None
+        assert original_source is not None
+        session.add(
+            SpecificationDecision(
+                project_id=project_id,
+                specification_candidate_id=initial_candidate_id,
+                candidate_fingerprint=initial_candidate.candidate_fingerprint,
+                decision="accepted",
+                rationale="Approved base.",
+                reviewer="operator",
+                idempotency_key="approve-base-before-amendment",
+                decided_at=NOW + timedelta(seconds=8),
+            )
+        )
+        base_registry = SpecRegistry(
+            project_id=project_id,
+            spec_hash=initial_candidate.payload_fingerprint,
+            status="approved",
+            approved_at=NOW + timedelta(seconds=8),
+            approved_by="operator",
+            source_specification_candidate_id=initial_candidate_id,
+            source_specification_candidate_fingerprint=(
+                initial_candidate.candidate_fingerprint
+            ),
+            source_vision_artifact_id=initial_candidate.vision_artifact_id,
+            source_vision_fingerprint=initial_candidate.vision_fingerprint,
+            source_product_goal_artifact_id=(
+                initial_candidate.product_goal_artifact_id
+            ),
+            source_product_goal_fingerprint=(
+                initial_candidate.product_goal_fingerprint
+            ),
+        )
+        session.add(base_registry)
+        session.flush()
+        assert base_registry.spec_version_id is not None
+        base_spec_version_id = base_registry.spec_version_id
+        base_spec_hash = base_registry.spec_hash
+
+        original_bundle = SpecificationSourceBundle.model_validate_json(
+            original_source.source_bundle_json
+        )
+        amendment_document = _registered_document(
+            source_id=SPECIFICATION_SOURCE_PRIMARY_ID,
+            relative_path="SPECIFICATION.md",
+            content=b"EXACT_PENDING_AMENDMENT_SOURCE\n",
+        )
+        amendment_bundle = SpecificationSourceBundle(
+            source=amendment_document,
+            context=original_bundle.context,
+            adrs=original_bundle.adrs,
+            repository_revision=original_bundle.repository_revision,
+            accepted_vision_fingerprint=(original_bundle.accepted_vision_fingerprint),
+            accepted_product_goal_fingerprint=(
+                original_bundle.accepted_product_goal_fingerprint
+            ),
+        )
+        amendment_source = SpecificationSource(
+            project_id=project_id,
+            source_bundle_json=canonical_json(amendment_bundle.model_dump(mode="json")),
+            source_fingerprint=source_bundle_fingerprint(amendment_bundle),
+            repository_binding_id=original_source.repository_binding_id,
+            repository_head_sha=original_source.repository_head_sha,
+            repository_dirty=original_source.repository_dirty,
+            repository_status_fingerprint=(
+                original_source.repository_status_fingerprint
+            ),
+            vision_artifact_id=original_source.vision_artifact_id,
+            vision_fingerprint=original_source.vision_fingerprint,
+            product_goal_artifact_id=original_source.product_goal_artifact_id,
+            product_goal_fingerprint=original_source.product_goal_fingerprint,
+            supersedes_specification_source_id=source_id,
+            supersedes_source_fingerprint=original_source.source_fingerprint,
+            registered_by="operator",
+            registered_at=NOW + timedelta(seconds=9),
+        )
+        session.add(amendment_source)
+        session.flush()
+        assert amendment_source.specification_source_id is not None
+
+        initial_attempt = session.get(
+            WorkflowNodeAttempt,
+            initial_candidate.workflow_node_attempt_id,
+        )
+        assert initial_attempt is not None
+        initial_structuring_input = SpecificationStructuringInput.model_validate_json(
+            initial_attempt.normalized_input_json
+        )
+        stored_manifest = seeded["source_manifest"]
+        assert isinstance(stored_manifest, list)
+        original_manifest = tuple(
+            CandidateSourceManifestEntry.model_validate(item)
+            for item in stored_manifest
+        )
+        amendment_manifest = tuple(
+            CandidateSourceManifestEntry(
+                source_id=item.source_id,
+                kind=item.kind,
+                fingerprint=(
+                    amendment_document.content_fingerprint
+                    if item.source_id == SPECIFICATION_SOURCE_PRIMARY_ID
+                    else item.fingerprint
+                ),
+                warnings=item.warnings,
+            )
+            for item in original_manifest
+        )
+        amendment_structuring_input = SpecificationStructuringInput(
+            project_id=project_id,
+            project_name=initial_structuring_input.project_name,
+            operation="amendment",
+            accepted_vision=initial_structuring_input.accepted_vision,
+            accepted_product_goal=(initial_structuring_input.accepted_product_goal),
+            registered_source=RegisteredSpecificationSource(
+                specification_source_id=(amendment_source.specification_source_id),
+                source_fingerprint=amendment_source.source_fingerprint,
+                producer_capability=amendment_bundle.producer_capability,
+                preparation_capability=amendment_bundle.preparation_capability,
+                source=_structuring_document(amendment_document),
+                context=initial_structuring_input.registered_source.context,
+                adrs=initial_structuring_input.registered_source.adrs,
+                repository_revision=amendment_bundle.repository_revision,
+                repository_evidence=(
+                    initial_structuring_input.registered_source.repository_evidence
+                ),
+                accepted_vision_fingerprint=(
+                    amendment_bundle.accepted_vision_fingerprint
+                ),
+                accepted_product_goal_fingerprint=(
+                    amendment_bundle.accepted_product_goal_fingerprint
+                ),
+            ),
+            source_manifest=amendment_manifest,
+            base_specification=BaseSpecificationContext(
+                spec_version_id=base_registry.spec_version_id,
+                payload_fingerprint=base_registry.spec_hash,
+                payload=base_payload,
+            ),
+        )
+        normalized_input = amendment_structuring_input.model_dump(mode="json")
+        amendment_attempt = WorkflowNodeAttempt(
+            project_id=project_id,
+            node_id="specification.structure",
+            instance_key=str(base_registry.spec_version_id),
+            graph_version=GRAPH_VERSION,
+            fact_fingerprint=canonical_hash({"amendment": "facts"}),
+            business_fact_fingerprint=canonical_hash({"amendment": "business"}),
+            decision_fingerprint=canonical_hash({"amendment": "decision"}),
+            normalized_input_json=canonical_json(normalized_input),
+            input_fingerprint=canonical_hash(normalized_input),
+            model_id="fake/product-definition",
+            execution_settings_json="{}",
+            idempotency_key="pending-amendment-attempt",
+            actor="operator",
+            correlation_id="pending-amendment",
+            started_at=NOW + timedelta(seconds=10),
+            lease_expires_at=NOW + timedelta(minutes=1),
+            attempt_fingerprint=canonical_hash({"amendment": "pending"}),
+        )
+        session.add(amendment_attempt)
+        session.flush()
+        assert amendment_attempt.workflow_node_attempt_id is not None
+        amendment_attempt.attempt_fingerprint = workflow_node_attempt_fingerprint(
+            {
+                "attempt_id": amendment_attempt.workflow_node_attempt_id,
+                "project_id": amendment_attempt.project_id,
+                "node_id": amendment_attempt.node_id,
+                "instance_key": amendment_attempt.instance_key,
+                "graph_version": amendment_attempt.graph_version,
+                "fact_fingerprint": amendment_attempt.fact_fingerprint,
+                "business_fact_fingerprint": (
+                    amendment_attempt.business_fact_fingerprint
+                ),
+                "decision_fingerprint": amendment_attempt.decision_fingerprint,
+                "normalized_input": normalized_input,
+                "input_fingerprint": amendment_attempt.input_fingerprint,
+                "model_id": amendment_attempt.model_id,
+                "execution_settings": {},
+                "idempotency_key": amendment_attempt.idempotency_key,
+                "actor": amendment_attempt.actor,
+                "correlation_id": amendment_attempt.correlation_id,
+                "started_at": amendment_attempt.started_at,
+                "lease_expires_at": amendment_attempt.lease_expires_at,
+            }
+        )
+        session.add(amendment_attempt)
+        session.flush()
+        amendment_envelope = build_candidate_envelope(
+            payload=amendment_payload,
+            metadata=CandidateBuildInput(
+                candidate_kind=CandidateKind.AMENDMENT,
+                accepted_vision_id=initial_candidate.vision_artifact_id,
+                accepted_vision_fingerprint=initial_candidate.vision_fingerprint,
+                accepted_product_goal_id=(initial_candidate.product_goal_artifact_id),
+                accepted_product_goal_fingerprint=(
+                    initial_candidate.product_goal_fingerprint
+                ),
+                registered_source_fingerprint=(amendment_source.source_fingerprint),
+                source_producer_capability="to-spec",
+                source_preparation_capability="grill-with-docs",
+                source_manifest=amendment_manifest,
+                accepted_fact_fingerprint=(
+                    specification_structuring_fact_fingerprint(
+                        amendment_structuring_input
+                    )
+                ),
+                producer_input_fingerprint=(
+                    specification_structuring_input_fingerprint(
+                        amendment_structuring_input
+                    )
+                ),
+                producer_capability="specification-structurer",
+                producer_version="1.0.0",
+                model_id=amendment_attempt.model_id,
+                model_configuration_fingerprint=canonical_hash(
+                    {"model": amendment_attempt.model_id}
+                ),
+                prompt_version=SPECIFICATION_STRUCTURER_PROMPT_VERSION,
+                prompt_fingerprint=canonical_hash({"prompt": "specification-v2"}),
+                workflow_node_attempt_id=(amendment_attempt.workflow_node_attempt_id),
+                attempt_fingerprint=amendment_attempt.attempt_fingerprint,
+                correlation_id="pending-amendment",
+                produced_at=NOW + timedelta(seconds=11),
+                base_payload=base_payload,
+                base_specification_id=base_registry.spec_version_id,
+                base_payload_fingerprint=base_registry.spec_hash,
+            ),
+        )
+        amendment_candidate = SpecificationCandidate(
+            project_id=project_id,
+            candidate_kind="amendment",
+            specification_source_id=amendment_source.specification_source_id,
+            specification_source_fingerprint=amendment_source.source_fingerprint,
+            vision_artifact_id=initial_candidate.vision_artifact_id,
+            vision_fingerprint=initial_candidate.vision_fingerprint,
+            product_goal_artifact_id=initial_candidate.product_goal_artifact_id,
+            product_goal_fingerprint=initial_candidate.product_goal_fingerprint,
+            base_spec_version_id=base_registry.spec_version_id,
+            base_spec_hash=base_registry.spec_hash,
+            canonical_envelope_json=canonical_candidate_json(
+                amendment_payload,
+                amendment_envelope,
+            ),
+            payload_fingerprint=amendment_envelope.payload_fingerprint,
+            source_manifest_fingerprint=(
+                amendment_envelope.source_manifest_fingerprint
+            ),
+            producer_input_fingerprint=(amendment_envelope.producer_input_fingerprint),
+            rendered_view_fingerprint=(amendment_envelope.review_view_fingerprint),
+            candidate_fingerprint=amendment_envelope.candidate_fingerprint,
+            workflow_node_attempt_id=amendment_attempt.workflow_node_attempt_id,
+            attempt_fingerprint=amendment_attempt.attempt_fingerprint,
+            supersedes_specification_candidate_id=initial_candidate_id,
+            supersedes_candidate_fingerprint=(initial_candidate.candidate_fingerprint),
+            recorded_by="operator",
+            recorded_at=NOW + timedelta(seconds=11),
+        )
+        session.add(amendment_candidate)
+        session.flush()
+        assert amendment_candidate.specification_candidate_id is not None
+        amendment_candidate_id = amendment_candidate.specification_candidate_id
+        session.commit()
+
+    review = _data(
+        DurableReadProjectionService(engine=engine).specification_review(
+            project_id=project_id
+        )
+    )
+    status = _data(
+        DurableReadProjectionService(engine=engine).specification_status(
+            project_id=project_id
+        )
+    )
+
+    candidate = _json_object(review["candidate"])
+    assert status["candidate"] == review["candidate"]
+    assert status["review"] == {"state": "pending"}
+    assert status["current"] is None
+    assert review["review"] == {"state": "pending"}
+    assert candidate["specification_candidate_id"] == amendment_candidate_id
+    assert candidate["candidate_kind"] == "amendment"
+    assert candidate["canonical_payload"] == amendment_payload.model_dump(mode="json")
+    assert candidate["rendered_markdown"] == render_candidate_review_markdown(
+        amendment_payload,
+        amendment_envelope,
+    )
+    assert candidate["base_spec_version_id"] == base_spec_version_id
+    assert candidate["base_spec_hash"] == base_spec_hash
+    assert candidate["decision_state"] == "pending"
+    amendment_diff = _json_object(candidate["amendment_diff"])
+    assert amendment_diff["changed_fields"] == ["summary"]
 
 
 @pytest.mark.parametrize(
@@ -2119,7 +2750,7 @@ def test_obsolete_product_discovery_selection_service_is_removed() -> None:
 def test_resolved_goal_and_next_goal_leave_old_product_definition_non_current(
     engine: Engine,
 ) -> None:
-    """Goal outcome remains visible and a later Goal does not reuse old artifacts."""
+    """A later Goal keeps the old pending candidate as an exact review target."""
     seeded = _seed_lineage(engine)
     project_id = seeded["project_id"]
     goal_id = seeded["goal_id"]
@@ -2160,14 +2791,28 @@ def test_resolved_goal_and_next_goal_leave_old_product_definition_non_current(
     vision = _data(reads.vision_status(project_id=project_id))
     active = _data(reads.product_goal_status(project_id=project_id))
     specification = _data(reads.specification_status(project_id=project_id))
+    review = _data(reads.specification_review(project_id=project_id))
     assert vision["current"] is not None
-    assert active["active"] is not None
-    assert specification == {
+    active_goal = _json_object(active["active"])
+    assert active_goal["statement"] == "Goal 2: transparent decisions."
+    assert active_goal["product_goal_artifact_id"] != goal_id
+    assert specification["schema_version"] == "agileforge.specification_review.v2"
+    assert specification["source"] is None
+    assert specification["current"] is None
+    assert specification["review"] == {"state": "pending"}
+    assert specification["stale_reason"] == "SPECIFICATION_NOT_APPROVED"
+    candidate = _json_object(specification["candidate"])
+    _assert_complete_candidate_projection(
+        candidate,
+        seeded,
+        decision_state="pending",
+    )
+    assert review == {
         "schema_version": "agileforge.specification_review.v2",
-        "current": None,
-        "candidate": None,
-        "review": None,
-        "stale_reason": "SPECIFICATION_NOT_CURRENT",
+        "source": None,
+        "candidate": candidate,
+        "review": {"state": "pending"},
+        "stale_reason": None,
     }
 
 

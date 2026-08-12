@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 from typing import TYPE_CHECKING
 
 import pytest
+from pydantic import ValidationError
 from sqlalchemy import inspect
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.schema import CheckConstraint, UniqueConstraint
@@ -19,11 +22,20 @@ from models.product_definition import (
     ProductGoalOutcome,
     SpecificationCandidate,
     SpecificationDecision,
+    SpecificationSource,
     VisionArtifact,
     VisionEvidenceSnapshot,
     VisionInterviewTurn,
     VisionRevisionIntent,
 )
+from services.contracts.specification_source import (
+    SpecificationContextCapture,
+    SpecificationRepositoryRevision,
+    SpecificationSourceBundle,
+    SpecificationSourceDocument,
+    source_bundle_fingerprint,
+)
+from workflow.fingerprints import canonical_json
 
 if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
@@ -140,10 +152,30 @@ EXPECTED_COLUMNS: dict[type[SQLModel], set[str]] = {
         "idempotency_key",
         "decided_at",
     },
+    SpecificationSource: {
+        "specification_source_id",
+        "project_id",
+        "source_bundle_json",
+        "source_fingerprint",
+        "repository_binding_id",
+        "repository_head_sha",
+        "repository_dirty",
+        "repository_status_fingerprint",
+        "vision_artifact_id",
+        "vision_fingerprint",
+        "product_goal_artifact_id",
+        "product_goal_fingerprint",
+        "supersedes_specification_source_id",
+        "supersedes_source_fingerprint",
+        "registered_by",
+        "registered_at",
+    },
     SpecificationCandidate: {
         "specification_candidate_id",
         "project_id",
         "candidate_kind",
+        "specification_source_id",
+        "specification_source_fingerprint",
         "vision_artifact_id",
         "vision_fingerprint",
         "product_goal_artifact_id",
@@ -185,9 +217,135 @@ EXPECTED_TABLE_NAMES: dict[type[SQLModel], str] = {
     ProductGoalArtifact: "product_goal_artifacts",
     ProductGoalArtifactDecision: "product_goal_artifact_decisions",
     ProductGoalOutcome: "product_goal_outcomes",
+    SpecificationSource: "specification_sources",
     SpecificationCandidate: "specification_candidates",
     SpecificationDecision: "specification_decisions",
 }
+
+
+def _source_document(
+    *,
+    source_id: str,
+    relative_path: str,
+    content: bytes,
+) -> SpecificationSourceDocument:
+    """Build one byte-exact source document for contract tests."""
+    return SpecificationSourceDocument(
+        source_id=source_id,
+        relative_path=relative_path,
+        content_base64=base64.b64encode(content).decode("ascii"),
+        byte_length=len(content),
+        content_fingerprint=("sha256:" + hashlib.sha256(content).hexdigest()),
+    )
+
+
+def _source_bundle(
+    *,
+    context: SpecificationContextCapture | None = None,
+    adrs: tuple[SpecificationSourceDocument, ...] = (),
+) -> SpecificationSourceBundle:
+    """Build one valid portable registered-source bundle."""
+    return SpecificationSourceBundle(
+        source=_source_document(
+            source_id="SRC.specification-source.primary",
+            relative_path="SPECIFICATION.md",
+            content=b"# Exact source\r\n\xef\xbb\xbfbytes\n",
+        ),
+        context=(
+            SpecificationContextCapture(state="absent") if context is None else context
+        ),
+        adrs=adrs,
+        repository_revision=SpecificationRepositoryRevision(
+            head_sha="a" * 40,
+            dirty=True,
+            status_fingerprint="sha256:" + "b" * 64,
+        ),
+        accepted_vision_fingerprint="sha256:" + "c" * 64,
+        accepted_product_goal_fingerprint="sha256:" + "d" * 64,
+    )
+
+
+def test_source_bundle_is_closed_byte_exact_and_canonical() -> None:
+    """Canonical identity preserves bytes and ignores ADR input order."""
+    first = _source_document(
+        source_id=(
+            "SRC.specification-source.adr."
+            + hashlib.sha256(b"docs/adr/0001-a.md").hexdigest()
+        ),
+        relative_path="docs/adr/0001-a.md",
+        content=b"# A\r\n",
+    )
+    second = _source_document(
+        source_id=(
+            "SRC.specification-source.adr."
+            + hashlib.sha256(b"docs/adr/0002-b.md").hexdigest()
+        ),
+        relative_path="docs/adr/0002-b.md",
+        content=b"# B\n",
+    )
+    baseline = _source_bundle(adrs=(second, first))
+    permuted = _source_bundle(adrs=(first, second))
+
+    assert [item.relative_path for item in baseline.adrs] == [
+        "docs/adr/0001-a.md",
+        "docs/adr/0002-b.md",
+    ]
+    assert source_bundle_fingerprint(baseline) == source_bundle_fingerprint(permuted)
+    assert base64.b64decode(baseline.source.content_base64) == (
+        b"# Exact source\r\n\xef\xbb\xbfbytes\n"
+    )
+    assert canonical_json(baseline.model_dump(mode="json")) == canonical_json(
+        permuted.model_dump(mode="json")
+    )
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        SpecificationSourceBundle.model_validate(
+            {**baseline.model_dump(mode="json"), "lifecycle_status": "accepted"}
+        )
+
+
+def test_source_bundle_distinguishes_absent_and_present_context() -> None:
+    """An explicitly present empty Context is not equivalent to absence."""
+    present = SpecificationContextCapture(
+        state="present",
+        document=_source_document(
+            source_id="SRC.specification-source.context",
+            relative_path="CONTEXT.md",
+            content=b"",
+        ),
+    )
+
+    assert source_bundle_fingerprint(_source_bundle()) != source_bundle_fingerprint(
+        _source_bundle(context=present)
+    )
+    with pytest.raises(ValidationError, match="present context requires a document"):
+        SpecificationContextCapture(state="present")
+    with pytest.raises(
+        ValidationError,
+        match="absent context cannot include a document",
+    ):
+        SpecificationContextCapture(state="absent", document=present.document)
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "content"),
+    [
+        ("../SPECIFICATION.md", b"valid"),
+        ("/SPECIFICATION.md", b"valid"),
+        ("docs\\SPECIFICATION.md", b"valid"),
+        ("SPECIFICATION.md", b"\xff"),
+    ],
+)
+def test_source_document_rejects_unsafe_paths_and_invalid_utf8(
+    relative_path: str,
+    content: bytes,
+) -> None:
+    """Registered documents are safe repository-relative UTF-8 bytes."""
+    with pytest.raises(ValidationError):
+        _source_document(
+            source_id="SRC.specification-source.primary",
+            relative_path=relative_path,
+            content=content,
+        )
 
 
 def _foreign_keys(table_name: str) -> set[tuple[tuple[str, ...], tuple[str, ...]]]:
@@ -225,6 +383,7 @@ def test_fresh_schema_has_versioned_product_definition_tables(engine: Engine) ->
         "product_goal_artifacts",
         "product_goal_artifact_decisions",
         "product_goal_outcomes",
+        "specification_sources",
         "specification_candidates",
         "specification_decisions",
     } <= names
@@ -303,6 +462,49 @@ def test_product_definition_records_enforce_scoped_lineage_and_values() -> None:
         "specification_decisions"
     )
 
+    source_fingerprints = _foreign_keys("specification_sources")
+    assert (
+        ("project_id", "repository_binding_id"),
+        (
+            "repository_bindings.project_id",
+            "repository_bindings.repository_binding_id",
+        ),
+    ) in source_fingerprints
+    assert (
+        ("project_id", "vision_artifact_id", "vision_fingerprint"),
+        (
+            "vision_artifacts.project_id",
+            "vision_artifacts.vision_artifact_id",
+            "vision_artifacts.content_fingerprint",
+        ),
+    ) in source_fingerprints
+    assert (
+        ("project_id", "product_goal_artifact_id", "product_goal_fingerprint"),
+        (
+            "product_goal_artifacts.project_id",
+            "product_goal_artifacts.product_goal_artifact_id",
+            "product_goal_artifacts.content_fingerprint",
+        ),
+    ) in source_fingerprints
+    assert (
+        (
+            "project_id",
+            "supersedes_specification_source_id",
+            "supersedes_source_fingerprint",
+        ),
+        (
+            "specification_sources.project_id",
+            "specification_sources.specification_source_id",
+            "specification_sources.source_fingerprint",
+        ),
+    ) in source_fingerprints
+    assert (
+        "(supersedes_specification_source_id IS NULL "
+        "AND supersedes_source_fingerprint IS NULL) OR "
+        "(supersedes_specification_source_id IS NOT NULL "
+        "AND supersedes_source_fingerprint IS NOT NULL)"
+    ) in _checks("specification_sources")
+
     vision_constraints = {
         constraint.name: tuple(constraint.columns.keys())
         for constraint in SQLModel.metadata.tables["vision_interview_turns"].constraints
@@ -353,6 +555,18 @@ def test_product_definition_records_enforce_scoped_lineage_and_values() -> None:
     ) in goal_fingerprints
 
     candidate_fingerprints = _foreign_keys("specification_candidates")
+    assert (
+        (
+            "project_id",
+            "specification_source_id",
+            "specification_source_fingerprint",
+        ),
+        (
+            "specification_sources.project_id",
+            "specification_sources.specification_source_id",
+            "specification_sources.source_fingerprint",
+        ),
+    ) in candidate_fingerprints
     assert (
         ("project_id", "vision_artifact_id", "vision_fingerprint"),
         (
@@ -450,9 +664,7 @@ def test_product_definition_records_enforce_scoped_lineage_and_values() -> None:
 
     attempt_uniques = {
         tuple(constraint.columns.keys())
-        for constraint in SQLModel.metadata.tables[
-            "workflow_node_attempts"
-        ].constraints
+        for constraint in SQLModel.metadata.tables["workflow_node_attempts"].constraints
         if isinstance(constraint, UniqueConstraint)
     }
     assert (

@@ -3,7 +3,7 @@
 ## Project
 
 The single durable aggregate that owns one product's Vision, Product Goals,
-discovery, specification, authority, planning, and execution history.
+Specification, Authority, planning, and execution history.
 
 Avoid: workflow session, graph cursor, repository row.
 
@@ -22,18 +22,30 @@ or abandoned outcome.
 
 Avoid: Sprint Goal, Backlog item, automatic completion.
 
-## Discovery Artifact
+## Discovery
 
-Immutable evidence recorded for the active Vision and Product Goal before a
-Specification Candidate is reviewed.
+Optional investigation performed through `grill-with-docs`, repository work,
+research, interviews, or prototypes before an external agent runs `to-spec`.
+Discovery is an activity. It is not a persisted artifact, review gate, or
+lifecycle node.
 
-Avoid: chat transcript, transient model context.
+Avoid: Discovery Artifact, mandatory phase, accepted lifecycle record.
+
+## Specification Source
+
+An immutable host capture of one external `to-spec` document, the deterministic
+present-or-absent `CONTEXT.md` state, applicable ADRs, repository revision, and
+exact accepted Vision/Product Goal lineage. It gates Specification structuring
+but is not itself human-reviewed.
+
+Avoid: canonical Specification, Discovery Artifact, mutable file reference.
 
 ## Specification Candidate
 
-An immutable proposed specification bound to exact Vision, Product Goal, and
-Discovery facts. Human acceptance creates the reviewed specification lineage
-used for authority compilation.
+An immutable canonical `agileforge.spec.v2` proposal produced by the internal
+Specification Structuring Agent from one exact Specification Source. Human
+acceptance creates the reviewed Specification lineage used for Authority
+compilation.
 
 Avoid: accepted authority, direct Backlog input.
 

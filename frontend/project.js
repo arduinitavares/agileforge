@@ -33,7 +33,7 @@ const REQUEST_STAGE = {
     record_post_sprint_triage: 'Review',
     record_product_goal_interview_turn: 'Product Goal',
     record_roadmap_draft: 'Roadmap',
-    author_specification: 'Specification',
+    register_specification_source: 'Specification',
     record_sprint_plan: 'Sprint',
     record_story_draft: 'Stories',
     record_vision_interview_turn: 'Vision',
@@ -41,6 +41,7 @@ const REQUEST_STAGE = {
     repair_story_readiness: 'Stories',
     review_sprint: 'Review',
     start_sprint: 'Sprint',
+    structure_specification: 'Specification',
 };
 
 const CHILD_STAGE = {
@@ -530,23 +531,85 @@ function productGoalPanelMarkup(projection, actions = []) {
     return `${visionContext}${goalOutcomeMarkup(projection, actions) || '<p class="text-sm text-slate-600">Product Goal is waiting for the current lifecycle state.</p>'}`;
 }
 
+function specificationSourceSubmission(actions, sourcePath, preparationCapability, adrPathsText) {
+    return {
+        action: captureAction(findAction(actions, 'register_specification_source')),
+        fields: {
+            source_path: String(sourcePath ?? '').trim(),
+            preparation_capability: String(preparationCapability ?? '').trim(),
+            adr_paths: String(adrPathsText ?? '')
+                .split(/\r?\n/)
+                .map((path) => path.trim())
+                .filter(Boolean),
+        },
+    };
+}
+
+function specificationSourceRegistrationMarkup(actions) {
+    const action = findAction(actions, 'register_specification_source');
+    return action
+        ? `<form data-specification-source-form="true" class="max-w-3xl space-y-4">
+                <p class="text-sm leading-6 text-slate-600">Register the repository document that contains the external Specification source.</p>
+                <div>
+                    <label for="specification-source-path" class="text-sm font-semibold">Source path</label>
+                    <input id="specification-source-path" name="source_path" type="text" required autocomplete="off" placeholder="specification.md" class="mt-1.5 w-full rounded-lg border-slate-300 font-mono text-sm focus:border-accent focus:ring-accent" />
+                    <p class="mt-1 text-xs leading-5 text-slate-500">Use a repository-relative path.</p>
+                </div>
+                <div>
+                    <label for="specification-adr-paths" class="text-sm font-semibold">Applicable ADR paths <span class="font-normal text-slate-500">(optional)</span></label>
+                    <textarea id="specification-adr-paths" name="adr_paths" rows="3" placeholder="docs/adr/0001-decision.md" class="mt-1.5 w-full resize-y rounded-lg border-slate-300 font-mono text-sm focus:border-accent focus:ring-accent"></textarea>
+                    <p class="mt-1 text-xs leading-5 text-slate-500">Enter one repository-relative ADR path per line.</p>
+                </div>
+                <div>
+                    <label for="specification-preparation-capability" class="text-sm font-semibold">Preparation capability</label>
+                    <select id="specification-preparation-capability" name="preparation_capability" required class="mt-1.5 w-full rounded-lg border-slate-300 text-sm focus:border-accent focus:ring-accent">
+                        <option value="">Select the capability that prepared this source</option>
+                        <option value="grill-with-docs">grill-with-docs</option>
+                    </select>
+                    <p class="mt-1 text-xs leading-5 text-slate-500">External preparation attestation. AgileForge does not infer or prove the agent's reasoning.</p>
+                </div>
+                <div class="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm leading-6 text-slate-600">
+                    <p>Root CONTEXT.md is captured automatically when present; its absence is recorded.</p>
+                </div>
+                <button type="submit" class="${BUTTON_PRIMARY}"><span class="material-symbols-outlined" aria-hidden="true">inventory_2</span><span>Register Specification source</span></button>
+            </form>`
+        : '';
+}
+
+function acceptedSpecificationMarkup(current) {
+    if (!current) return '';
+    return `<div class="max-w-4xl space-y-3">
+        <p class="text-sm font-semibold text-slate-700">Accepted Specification</p>
+        <pre class="whitespace-pre-wrap break-words rounded-lg border border-slate-300 bg-white p-4 font-mono text-sm leading-6">${escapeWorkflowText(current.candidate?.rendered_markdown ?? '')}</pre>
+    </div>`;
+}
+
 function specificationPanelMarkup(projection, actions = []) {
     const candidate = projection?.candidate;
+    const registration = specificationSourceRegistrationMarkup(actions);
     if (!candidate) {
-        const authorAction = findAction(actions, 'author_specification');
-        if (authorAction) {
-            return `<p class="mb-4 text-sm leading-6 text-slate-600">Author a Specification from the accepted Vision, Product Goal, and host-prepared evidence.</p>
-                <button type="button" data-direct-action="author_specification" class="${BUTTON_PRIMARY}"><span class="material-symbols-outlined" aria-hidden="true">description</span><span>Author Specification</span></button>`;
-        }
-        return '<p class="text-sm text-slate-600">Specification authoring is waiting for the current lifecycle state.</p>';
+        const structureAction = findAction(actions, 'structure_specification');
+        const structure = structureAction
+            ? `<div class="max-w-3xl">
+                <p class="mb-4 text-sm leading-6 text-slate-600">Structure the registered source into an exact reviewable Specification candidate.</p>
+                <button type="button" data-direct-action="structure_specification" class="${BUTTON_PRIMARY}"><span class="material-symbols-outlined" aria-hidden="true">schema</span><span>Structure Specification</span></button>
+            </div>`
+            : '';
+        const current = acceptedSpecificationMarkup(projection?.current);
+        return [current, registration, structure].filter(Boolean).join('')
+            || '<p class="text-sm text-slate-600">Specification preparation is waiting for the current lifecycle state.</p>';
     }
     const review = projection?.review;
     const reviewAction = findAction(actions, 'decide_specification');
     const decisionCopy = review?.state && review.state !== 'pending'
         ? `<p class="mb-4 text-sm font-semibold text-slate-700">Review: ${escapeWorkflowText(humanizeKey(review.state))}</p>`
         : '<p class="mb-4 text-sm font-semibold text-slate-700">Exact Specification candidate</p>';
+    const controls = review?.state === 'pending'
+        ? reviewControlsMarkup('specification', reviewAction)
+        : '';
+    const reentry = review?.state === 'pending' ? '' : registration;
     return `<div class="max-w-4xl">${decisionCopy}<pre class="whitespace-pre-wrap break-words rounded-lg border border-slate-300 bg-white p-4 font-mono text-sm leading-6">${escapeWorkflowText(candidate.rendered_markdown ?? '')}</pre></div>
-        ${review?.state === 'pending' ? reviewControlsMarkup('specification', reviewAction) : ''}`;
+        ${controls}${reentry}`;
 }
 
 function findingMarkup(finding) {
@@ -1062,6 +1125,41 @@ function installInteractions() {
             } catch (error) {
                 setDialogError(error.message);
             } finally {
+                if (submit) submit.disabled = false;
+            }
+            return;
+        }
+        if (form?.dataset?.specificationSourceForm === 'true') {
+            event.preventDefault();
+            if (form.dataset.submitting === 'true') return;
+            const sourcePath = form.querySelector('[name="source_path"]')?.value ?? '';
+            const preparationCapability = form.querySelector('[name="preparation_capability"]')?.value ?? '';
+            const adrPaths = form.querySelector('[name="adr_paths"]')?.value ?? '';
+            const submission = specificationSourceSubmission(
+                lifecycleState.actions,
+                sourcePath,
+                preparationCapability,
+                adrPaths,
+            );
+            if (!submission.fields.source_path) {
+                setProjectError('Enter a repository-relative Specification source path.');
+                return;
+            }
+            if (!submission.fields.preparation_capability) {
+                setProjectError('Select the preparation capability that produced this source.');
+                return;
+            }
+            const submit = form.querySelector('button[type="submit"]');
+            form.dataset.submitting = 'true';
+            if (submit) submit.disabled = true;
+            setProjectError('');
+            try {
+                await postAction(submission.action, submission.fields);
+                await loadDashboard();
+            } catch (error) {
+                setProjectError(error.message);
+            } finally {
+                delete form.dataset.submitting;
                 if (submit) submit.disabled = false;
             }
             return;

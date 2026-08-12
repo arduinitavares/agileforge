@@ -1,4 +1,4 @@
-"""Transactional direct Specification authoring and review handlers."""
+"""Transactional Specification source, structuring, and review handlers."""
 
 from __future__ import annotations
 
@@ -8,28 +8,31 @@ from typing import TYPE_CHECKING, cast
 from pydantic import TypeAdapter, ValidationError
 from sqlmodel import Session, col, select
 
+from models.core import Project
 from models.product_definition import (
     ProductGoalArtifact,
     ProductGoalArtifactDecision,
     SpecificationCandidate,
     SpecificationDecision,
+    SpecificationSource,
     VisionArtifact,
     VisionArtifactDecision,
-    VisionEvidenceSnapshot,
 )
+from models.repository import RepositoryBinding, repository_binding_fingerprint
 from models.specs import SpecRegistry
 from models.workflow import WorkflowNodeAttempt, WorkflowNodeAttemptOutcome
+from repositories.workflow import WorkflowFactLoadError, WorkflowFactRepository
 from services.contracts.specification_authoring import (
-    SPECIFICATION_ACTIVE_REPOSITORY_SOURCE_ID,
-    SPECIFICATION_AUTHOR_PROMPT_HASH,
-    SPECIFICATION_AUTHOR_VERSION,
     SPECIFICATION_PRODUCT_GOAL_SOURCE_ID,
-    SPECIFICATION_REPOSITORY_EVIDENCE_SOURCE_ID,
+    SPECIFICATION_STRUCTURER_PROMPT_HASH,
+    SPECIFICATION_STRUCTURER_PROMPT_VERSION,
+    SPECIFICATION_STRUCTURER_VERSION,
     SPECIFICATION_VISION_SOURCE_ID,
-    SpecificationAuthoringInput,
-    specification_authoring_fact_fingerprint,
-    specification_authoring_input_fingerprint,
+    SpecificationStructuringInput,
+    specification_structuring_fact_fingerprint,
+    specification_structuring_input_fingerprint,
 )
+from services.contracts.specification_source import source_bundle_fingerprint
 from services.specs.candidate_contract import (
     CandidateBuildInput,
     CandidateKind,
@@ -48,6 +51,11 @@ from workflow.contracts import (
     WorkflowError,
     WorkflowErrorCode,
 )
+from workflow.definitions.product_discovery import current_specification_source
+from workflow.definitions.product_goal import (
+    accepted_current_goal,
+    accepted_current_vision,
+)
 from workflow.fingerprints import canonical_hash, canonical_json
 
 if TYPE_CHECKING:
@@ -55,12 +63,13 @@ if TYPE_CHECKING:
 
     from utils.agileforge_spec_profile_v2 import SpecificationPayload
     from workflow.requests.product_discovery import (
-        CompleteSpecificationAuthoring,
+        CompleteSpecificationStructuring,
         DecideSpecification,
+        RegisterSpecificationSource,
     )
 
 _JSON_OBJECT = TypeAdapter(JsonObject)
-_PRODUCER_CAPABILITY = "to-spec"
+_PRODUCER_CAPABILITY = "specification-structurer"
 
 
 class _GuardError(Exception):
@@ -82,6 +91,15 @@ class _CandidateLineage:
     base: SpecRegistry | None
     base_payload: SpecificationPayload | None
     supersedes: SpecificationCandidate | None
+    source: SpecificationSource
+
+
+@dataclass(frozen=True)
+class _SourceRegistrationState:
+    """Validated durable source leaf and canonical prepared bytes."""
+
+    current: SpecificationSource | None
+    bundle_json: str
 
 
 def _failure(code: WorkflowErrorCode, message: str) -> TransitionResult:
@@ -91,9 +109,308 @@ def _failure(code: WorkflowErrorCode, message: str) -> TransitionResult:
     )
 
 
+def _current_source_row(
+    session: Session,
+    *,
+    project_id: int,
+) -> SpecificationSource | None:
+    """Resolve the sole durable source leaf or fail on a branched history."""
+    rows = tuple(
+        session.exec(
+            select(SpecificationSource)
+            .where(col(SpecificationSource.project_id) == project_id)
+            .order_by(col(SpecificationSource.specification_source_id))
+        ).all()
+    )
+    superseded = {
+        row.supersedes_specification_source_id
+        for row in rows
+        if row.supersedes_specification_source_id is not None
+    }
+    leaves = tuple(row for row in rows if row.specification_source_id not in superseded)
+    if len(leaves) > 1:
+        raise _GuardError(
+            WorkflowErrorCode.WORKFLOW_FACT_CONFLICT,
+            "Specification source history has multiple current rows.",
+        )
+    return leaves[0] if leaves else None
+
+
+def _validate_registration_references(
+    session: Session,
+    *,
+    request: RegisterSpecificationSource,
+    decision: NodeDecision,
+) -> tuple[VisionArtifact, ProductGoalArtifact]:
+    """Bind every graph reference to current durable product-definition facts."""
+    allowed = {
+        "vision",
+        "product_goal",
+        "specification_source",
+        "specification_candidate",
+        "specification",
+    }
+    if any(item.fact_type not in allowed for item in decision.fact_references):
+        raise _GuardError(
+            WorkflowErrorCode.STALE_SPECIFICATION_INPUT,
+            "Specification source registration contains an unknown graph source.",
+        )
+    vision_ref = cast("FactReference", _reference(decision, "vision", required=True))
+    goal_ref = cast(
+        "FactReference", _reference(decision, "product_goal", required=True)
+    )
+    vision = _accepted_vision(
+        session,
+        project_id=request.project_id,
+        reference=vision_ref,
+    )
+    goal = _accepted_goal(
+        session,
+        project_id=request.project_id,
+        reference=goal_ref,
+        vision=vision,
+    )
+    try:
+        snapshot = WorkflowFactRepository(session).load(request.project_id)
+    except WorkflowFactLoadError as error:
+        raise _GuardError(
+            WorkflowErrorCode.WORKFLOW_FACT_CONFLICT,
+            "Current Specification source facts are invalid.",
+        ) from error
+    current_vision = accepted_current_vision(snapshot)
+    current_goal = accepted_current_goal(snapshot)
+    if (
+        current_vision is None
+        or current_goal is None
+        or (
+            vision.vision_artifact_id,
+            vision.content_fingerprint,
+            goal.product_goal_artifact_id,
+            goal.content_fingerprint,
+        )
+        != (
+            current_vision.vision_artifact_id,
+            current_vision.content_fingerprint,
+            current_goal.product_goal_artifact_id,
+            current_goal.content_fingerprint,
+        )
+    ):
+        raise _GuardError(
+            WorkflowErrorCode.STALE_SPECIFICATION_INPUT,
+            "Specification source registration does not use the current "
+            "Vision and Goal.",
+        )
+
+    current_source = current_specification_source(snapshot)
+    source_ref = _reference(decision, "specification_source", required=False)
+    expected_source = (
+        None
+        if current_source is None
+        else (
+            str(current_source.specification_source_id),
+            current_source.source_fingerprint,
+        )
+    )
+    actual_source = (
+        None if source_ref is None else (source_ref.fact_id, source_ref.fingerprint)
+    )
+    if actual_source != expected_source:
+        raise _GuardError(
+            WorkflowErrorCode.STALE_SPECIFICATION_INPUT,
+            "The referenced Specification source is no longer current.",
+        )
+
+    candidate_ref = _reference(
+        decision,
+        "specification_candidate",
+        required=False,
+    )
+    if candidate_ref is not None:
+        candidate = session.get(SpecificationCandidate, int(candidate_ref.fact_id))
+        if (
+            candidate is None
+            or candidate.project_id != request.project_id
+            or candidate.candidate_fingerprint != candidate_ref.fingerprint
+            or current_source is None
+            or (
+                candidate.specification_source_id,
+                candidate.specification_source_fingerprint,
+            )
+            != (
+                current_source.specification_source_id,
+                current_source.source_fingerprint,
+            )
+        ):
+            raise _GuardError(
+                WorkflowErrorCode.STALE_SPECIFICATION_INPUT,
+                "The referenced candidate does not belong to the current source.",
+            )
+    specification_ref = _reference(
+        decision,
+        "specification",
+        required=False,
+    )
+    if specification_ref is not None:
+        _spec_by_reference(
+            session,
+            project_id=request.project_id,
+            reference=specification_ref,
+        )
+    if candidate_ref is not None and specification_ref is not None:
+        raise _GuardError(
+            WorkflowErrorCode.STALE_SPECIFICATION_INPUT,
+            "Source registration cannot revise and amend simultaneously.",
+        )
+    return vision, goal
+
+
+def _registration_state(
+    session: Session,
+    *,
+    request: RegisterSpecificationSource,
+    decision: NodeDecision,
+) -> _SourceRegistrationState:
+    """Revalidate prepared source semantics against current transaction facts."""
+    vision, goal = _validate_registration_references(
+        session,
+        request=request,
+        decision=decision,
+    )
+    project = session.get(Project, request.project_id)
+    binding = session.get(RepositoryBinding, request.repository_binding_id)
+    revision = request.bundle.repository_revision
+    if (
+        project is None
+        or project.active_repository_binding_id != request.repository_binding_id
+        or binding is None
+        or binding.project_id != request.project_id
+        or repository_binding_fingerprint(binding)
+        != request.repository_binding_fingerprint
+        or (revision.head_sha, revision.dirty, revision.status_fingerprint)
+        != (binding.head_sha, binding.dirty, binding.status_fingerprint)
+    ):
+        raise _GuardError(
+            WorkflowErrorCode.STALE_SPECIFICATION_INPUT,
+            "The active repository binding changed before source registration.",
+        )
+    if (
+        request.accepted_vision_artifact_id,
+        request.bundle.accepted_vision_fingerprint,
+        request.accepted_product_goal_artifact_id,
+        request.bundle.accepted_product_goal_fingerprint,
+    ) != (
+        vision.vision_artifact_id,
+        vision.content_fingerprint,
+        goal.product_goal_artifact_id,
+        goal.content_fingerprint,
+    ):
+        raise _GuardError(
+            WorkflowErrorCode.STALE_SPECIFICATION_INPUT,
+            "The prepared source bundle has stale product-definition lineage.",
+        )
+    bundle_json = canonical_json(request.bundle.model_dump(mode="json"))
+    if source_bundle_fingerprint(request.bundle) != request.source_fingerprint:
+        raise _GuardError(
+            WorkflowErrorCode.STALE_SPECIFICATION_INPUT,
+            "The prepared source fingerprint does not match its exact bundle.",
+        )
+    current = _current_source_row(session, project_id=request.project_id)
+    if (
+        current is not None
+        and current.source_fingerprint == request.source_fingerprint
+        and current.repository_binding_id == request.repository_binding_id
+        and current.source_bundle_json != bundle_json
+    ):
+        raise _GuardError(
+            WorkflowErrorCode.WORKFLOW_FACT_CONFLICT,
+            "The current source fingerprint resolves to different bytes.",
+        )
+    return _SourceRegistrationState(current=current, bundle_json=bundle_json)
+
+
+def execute_register_specification_source(
+    session: Session,
+    request: RegisterSpecificationSource,
+    decision: NodeDecision,
+    evaluated_at: datetime,
+) -> TransitionResult:
+    """Revalidate and persist one immutable external source inside the transition."""
+    try:
+        state = _registration_state(
+            session,
+            request=request,
+            decision=decision,
+        )
+    except _GuardError as error:
+        return _failure(error.code, error.message)
+    current = state.current
+    bundle_json = state.bundle_json
+    revision = request.bundle.repository_revision
+    if (
+        current is not None
+        and current.source_fingerprint == request.source_fingerprint
+        and current.repository_binding_id == request.repository_binding_id
+        and current.vision_artifact_id == request.accepted_vision_artifact_id
+        and current.vision_fingerprint == request.bundle.accepted_vision_fingerprint
+        and current.product_goal_artifact_id
+        == request.accepted_product_goal_artifact_id
+        and current.product_goal_fingerprint
+        == request.bundle.accepted_product_goal_fingerprint
+    ):
+        return TransitionResult(
+            ok=True,
+            applied_node_id=decision.node_id,
+            output={
+                "specification_source_id": current.specification_source_id,
+                "source_fingerprint": current.source_fingerprint,
+                "repository_binding_id": current.repository_binding_id,
+                "created": False,
+            },
+        )
+
+    source = SpecificationSource(
+        project_id=request.project_id,
+        source_bundle_json=bundle_json,
+        source_fingerprint=request.source_fingerprint,
+        repository_binding_id=request.repository_binding_id,
+        repository_head_sha=revision.head_sha,
+        repository_dirty=revision.dirty,
+        repository_status_fingerprint=revision.status_fingerprint,
+        vision_artifact_id=request.accepted_vision_artifact_id,
+        vision_fingerprint=request.bundle.accepted_vision_fingerprint,
+        product_goal_artifact_id=request.accepted_product_goal_artifact_id,
+        product_goal_fingerprint=request.bundle.accepted_product_goal_fingerprint,
+        supersedes_specification_source_id=(
+            None if current is None else current.specification_source_id
+        ),
+        supersedes_source_fingerprint=(
+            None if current is None else current.source_fingerprint
+        ),
+        registered_by=request.actor,
+        registered_at=evaluated_at,
+    )
+    session.add(source)
+    session.flush()
+    if source.specification_source_id is None:
+        return _failure(
+            WorkflowErrorCode.WORKFLOW_FACT_CONFLICT,
+            "Specification source did not receive a durable identity.",
+        )
+    return TransitionResult(
+        ok=True,
+        applied_node_id=decision.node_id,
+        output={
+            "specification_source_id": source.specification_source_id,
+            "source_fingerprint": source.source_fingerprint,
+            "repository_binding_id": source.repository_binding_id,
+            "created": True,
+        },
+    )
+
+
 def _prompt_fingerprint() -> str:
-    """Load the prompt identity owned by the authoring adapter contract."""
-    return SPECIFICATION_AUTHOR_PROMPT_HASH
+    """Load the prompt identity owned by the structuring adapter contract."""
+    return SPECIFICATION_STRUCTURER_PROMPT_HASH
 
 
 def _reference(
@@ -106,7 +423,7 @@ def _reference(
     if len(matches) > 1 or (required and not matches):
         raise _GuardError(
             WorkflowErrorCode.STALE_SPECIFICATION_INPUT,
-            f"Specification authoring requires one exact {kind} reference.",
+            f"Specification structuring requires one exact {kind} reference.",
         )
     return None if not matches else matches[0]
 
@@ -325,16 +642,22 @@ def _validate_base_lineage(
         )
 
 
-def _lineage_for_completion(
+def _lineage_for_completion(  # noqa: C901
     session: Session,
-    request: CompleteSpecificationAuthoring,
+    request: CompleteSpecificationStructuring,
     decision: NodeDecision,
 ) -> _CandidateLineage:
-    allowed = {"vision", "product_goal", "specification", "specification_candidate"}
+    allowed = {
+        "vision",
+        "product_goal",
+        "specification_source",
+        "specification",
+        "specification_candidate",
+    }
     if any(item.fact_type not in allowed for item in decision.fact_references):
         raise _GuardError(
             WorkflowErrorCode.STALE_SPECIFICATION_INPUT,
-            "Specification authoring contains an unknown graph source.",
+            "Specification structuring contains an unknown graph source.",
         )
     vision_ref = cast("FactReference", _reference(decision, "vision", required=True))
     goal_ref = cast(
@@ -342,10 +665,14 @@ def _lineage_for_completion(
     )
     base_ref = _reference(decision, "specification", required=False)
     prior_ref = _reference(decision, "specification_candidate", required=False)
+    source_ref = cast(
+        "FactReference",
+        _reference(decision, "specification_source", required=True),
+    )
     if base_ref is not None and prior_ref is not None:
         raise _GuardError(
             WorkflowErrorCode.STALE_SPECIFICATION_INPUT,
-            "Specification authoring cannot revise and amend simultaneously.",
+            "Specification structuring cannot revise and amend simultaneously.",
         )
     vision = _accepted_vision(
         session,
@@ -358,6 +685,24 @@ def _lineage_for_completion(
         reference=goal_ref,
         vision=vision,
     )
+    source = session.get(SpecificationSource, int(source_ref.fact_id))
+    current_source = _current_source_row(session, project_id=request.project_id)
+    if (
+        source is None
+        or source.project_id != request.project_id
+        or source.source_fingerprint != source_ref.fingerprint
+        or current_source is None
+        or source.specification_source_id != current_source.specification_source_id
+        or source.source_fingerprint != current_source.source_fingerprint
+        or (source.vision_artifact_id, source.vision_fingerprint)
+        != (vision.vision_artifact_id, vision.content_fingerprint)
+        or (source.product_goal_artifact_id, source.product_goal_fingerprint)
+        != (goal.product_goal_artifact_id, goal.content_fingerprint)
+    ):
+        raise _GuardError(
+            WorkflowErrorCode.STALE_SPECIFICATION_INPUT,
+            "The registered Specification source is no longer current.",
+        )
     if prior_ref is not None:
         prior = _candidate_by_reference(
             session,
@@ -410,6 +755,7 @@ def _lineage_for_completion(
                 base=None,
                 base_payload=None,
                 supersedes=prior,
+                source=source,
             )
         if prior.base_spec_version_id is None or prior.base_spec_hash is None:
             raise _GuardError(
@@ -439,6 +785,7 @@ def _lineage_for_completion(
                 base=base,
             ),
             supersedes=prior,
+            source=source,
         )
     if base_ref is not None:
         base = _spec_by_reference(
@@ -458,19 +805,23 @@ def _lineage_for_completion(
                 base=base,
             ),
             supersedes=None,
+            source=source,
         )
 
     candidates = session.exec(
         select(SpecificationCandidate).where(
             col(SpecificationCandidate.project_id) == request.project_id,
-            col(SpecificationCandidate.vision_artifact_id)
-            == vision.vision_artifact_id,
+            col(SpecificationCandidate.vision_artifact_id) == vision.vision_artifact_id,
             col(SpecificationCandidate.vision_fingerprint)
             == vision.content_fingerprint,
             col(SpecificationCandidate.product_goal_artifact_id)
             == goal.product_goal_artifact_id,
             col(SpecificationCandidate.product_goal_fingerprint)
             == goal.content_fingerprint,
+            col(SpecificationCandidate.specification_source_id)
+            == source.specification_source_id,
+            col(SpecificationCandidate.specification_source_fingerprint)
+            == source.source_fingerprint,
         )
     ).all()
     superseded = {
@@ -481,7 +832,7 @@ def _lineage_for_completion(
     if any(item.specification_candidate_id not in superseded for item in candidates):
         raise _GuardError(
             WorkflowErrorCode.SPECIFICATION_CANDIDATE_CONFLICT,
-            "Initial authoring already has a current candidate.",
+            "Initial structuring already has a current candidate.",
         )
     return _CandidateLineage(
         vision=vision,
@@ -490,23 +841,24 @@ def _lineage_for_completion(
         base=None,
         base_payload=None,
         supersedes=None,
+        source=source,
     )
 
 
 def _attempt(
     session: Session,
-    request: CompleteSpecificationAuthoring,
+    request: CompleteSpecificationStructuring,
 ) -> WorkflowNodeAttempt:
     attempt = session.get(WorkflowNodeAttempt, request.attempt_id)
     if (
         attempt is None
         or attempt.project_id != request.project_id
-        or attempt.node_id != "specification.author"
+        or attempt.node_id != "specification.structure"
         or attempt.attempt_fingerprint != request.attempt_fingerprint
     ):
         raise _GuardError(
             WorkflowErrorCode.STALE_SPECIFICATION_INPUT,
-            "The durable Specification authoring attempt is stale.",
+            "The durable Specification structuring attempt is stale.",
         )
     return attempt
 
@@ -514,20 +866,18 @@ def _attempt(
 def _attempt_inputs(
     attempt: WorkflowNodeAttempt,
 ) -> tuple[
-    SpecificationAuthoringInput,
+    SpecificationStructuringInput,
     tuple[CandidateSourceManifestEntry, ...],
     JsonObject,
 ]:
     try:
         normalized_input = _JSON_OBJECT.validate_json(attempt.normalized_input_json)
-        execution_settings = _JSON_OBJECT.validate_json(
-            attempt.execution_settings_json
-        )
-        contract = SpecificationAuthoringInput.model_validate(normalized_input)
+        execution_settings = _JSON_OBJECT.validate_json(attempt.execution_settings_json)
+        contract = SpecificationStructuringInput.model_validate(normalized_input)
     except (ValidationError, TypeError, ValueError) as exc:
         raise _GuardError(
             WorkflowErrorCode.STALE_SPECIFICATION_INPUT,
-            "The persisted Specification authoring input is invalid.",
+            "The persisted Specification structuring input is invalid.",
         ) from exc
     if (
         canonical_json(normalized_input) != attempt.normalized_input_json
@@ -536,13 +886,13 @@ def _attempt_inputs(
     ):
         raise _GuardError(
             WorkflowErrorCode.STALE_SPECIFICATION_INPUT,
-            "The persisted Specification authoring input fingerprint changed.",
+            "The persisted Specification structuring input fingerprint changed.",
         )
     return contract, contract.source_manifest, execution_settings
 
 
 def _validate_attempt_contract(
-    contract: SpecificationAuthoringInput,
+    contract: SpecificationStructuringInput,
     lineage: _CandidateLineage,
 ) -> None:
     operation = (
@@ -573,9 +923,7 @@ def _validate_attempt_contract(
         else contract.prior_candidate.candidate_fingerprint
     )
     expected_prior_fingerprint = (
-        None
-        if lineage.supersedes is None
-        else lineage.supersedes.candidate_fingerprint
+        None if lineage.supersedes is None else lineage.supersedes.candidate_fingerprint
     )
     if (
         contract.project_id,
@@ -584,6 +932,8 @@ def _validate_attempt_contract(
         contract.accepted_vision.fingerprint,
         contract.accepted_product_goal.artifact_id,
         contract.accepted_product_goal.fingerprint,
+        contract.registered_source.specification_source_id,
+        contract.registered_source.source_fingerprint,
         base_identity,
         prior_fingerprint,
     ) != (
@@ -593,19 +943,19 @@ def _validate_attempt_contract(
         lineage.vision.content_fingerprint,
         lineage.goal.product_goal_artifact_id,
         lineage.goal.content_fingerprint,
+        lineage.source.specification_source_id,
+        lineage.source.source_fingerprint,
         expected_base_identity,
         expected_prior_fingerprint,
     ):
         raise _GuardError(
             WorkflowErrorCode.STALE_SPECIFICATION_INPUT,
-            "The persisted authoring context does not match the graph decision.",
+            "The persisted structuring context does not match the graph decision.",
         )
 
 
 def _validate_manifest(
-    session: Session,
     *,
-    project_id: int,
     lineage: _CandidateLineage,
     manifest: tuple[CandidateSourceManifestEntry, ...],
     payload: SpecificationPayload,
@@ -633,26 +983,6 @@ def _validate_manifest(
                 WorkflowErrorCode.STALE_SPECIFICATION_INPUT,
                 f"The host source manifest does not match {source_id}.",
             )
-    repository_evidence = by_id.get(SPECIFICATION_REPOSITORY_EVIDENCE_SOURCE_ID)
-    if repository_evidence is not None:
-        snapshot_id = lineage.vision.vision_evidence_snapshot_id
-        snapshot = session.get(VisionEvidenceSnapshot, snapshot_id)
-        if (
-            repository_evidence.kind
-            not in {
-                CandidateSourceKind.REPOSITORY,
-                CandidateSourceKind.RESEARCH,
-            }
-            or snapshot is None
-            or snapshot.project_id != project_id
-            or snapshot.vision_evidence_snapshot_id
-            != lineage.vision.vision_evidence_snapshot_id
-            or snapshot.evidence_fingerprint != repository_evidence.fingerprint
-        ):
-            raise _GuardError(
-                WorkflowErrorCode.STALE_SPECIFICATION_INPUT,
-                "The repository evidence source is stale.",
-            )
     referenced_sources = {
         note.source_id for item in payload.items for note in item.source_notes
     }
@@ -677,9 +1007,9 @@ def _model_configuration_fingerprint(
     )
 
 
-def execute_complete_specification_authoring(
+def execute_complete_specification_structuring(
     session: Session,
-    request: CompleteSpecificationAuthoring,
+    request: CompleteSpecificationStructuring,
     decision: NodeDecision,
     evaluated_at: datetime,
 ) -> TransitionResult:
@@ -687,11 +1017,9 @@ def execute_complete_specification_authoring(
     try:
         lineage = _lineage_for_completion(session, request, decision)
         attempt = _attempt(session, request)
-        authoring_input, manifest, execution_settings = _attempt_inputs(attempt)
-        _validate_attempt_contract(authoring_input, lineage)
+        structuring_input, manifest, execution_settings = _attempt_inputs(attempt)
+        _validate_attempt_contract(structuring_input, lineage)
         _validate_manifest(
-            session,
-            project_id=request.project_id,
             lineage=lineage,
             manifest=manifest,
             payload=request.payload,
@@ -700,33 +1028,38 @@ def execute_complete_specification_authoring(
             payload=request.payload,
             metadata=CandidateBuildInput(
                 candidate_kind=lineage.candidate_kind,
-                accepted_vision_id=cast(
-                    "int", lineage.vision.vision_artifact_id
-                ),
+                accepted_vision_id=cast("int", lineage.vision.vision_artifact_id),
                 accepted_vision_fingerprint=lineage.vision.content_fingerprint,
                 accepted_product_goal_id=cast(
                     "int", lineage.goal.product_goal_artifact_id
                 ),
                 accepted_product_goal_fingerprint=lineage.goal.content_fingerprint,
+                registered_source_fingerprint=lineage.source.source_fingerprint,
+                source_producer_capability=(
+                    structuring_input.registered_source.producer_capability
+                ),
+                source_preparation_capability=(
+                    structuring_input.registered_source.preparation_capability
+                ),
                 source_manifest=manifest,
                 accepted_fact_fingerprint=(
-                    specification_authoring_fact_fingerprint(authoring_input)
+                    specification_structuring_fact_fingerprint(structuring_input)
                 ),
                 producer_input_fingerprint=(
-                    specification_authoring_input_fingerprint(authoring_input)
+                    specification_structuring_input_fingerprint(structuring_input)
                 ),
                 producer_capability=_PRODUCER_CAPABILITY,
-                producer_version=SPECIFICATION_AUTHOR_VERSION,
+                producer_version=SPECIFICATION_STRUCTURER_VERSION,
                 model_id=attempt.model_id,
                 model_configuration_fingerprint=(
                     _model_configuration_fingerprint(attempt, execution_settings)
                 ),
+                prompt_version=SPECIFICATION_STRUCTURER_PROMPT_VERSION,
                 prompt_fingerprint=_prompt_fingerprint(),
                 workflow_node_attempt_id=request.attempt_id,
                 attempt_fingerprint=request.attempt_fingerprint,
                 correlation_id=(
-                    attempt.correlation_id
-                    or f"workflow-attempt:{request.attempt_id}"
+                    attempt.correlation_id or f"workflow-attempt:{request.attempt_id}"
                 ),
                 produced_at=evaluated_at,
                 base_payload=lineage.base_payload,
@@ -752,6 +1085,8 @@ def execute_complete_specification_authoring(
     candidate = SpecificationCandidate(
         project_id=request.project_id,
         candidate_kind=envelope.candidate_kind.value,
+        specification_source_id=cast("int", lineage.source.specification_source_id),
+        specification_source_fingerprint=lineage.source.source_fingerprint,
         vision_artifact_id=lineage.vision.vision_artifact_id,
         vision_fingerprint=lineage.vision.content_fingerprint,
         product_goal_artifact_id=lineage.goal.product_goal_artifact_id,
@@ -818,59 +1153,50 @@ def _validate_candidate_attempt(  # noqa: PLR0913
     if (
         attempt is None
         or attempt.project_id != candidate.project_id
-        or attempt.node_id != "specification.author"
+        or attempt.node_id != "specification.structure"
         or attempt.attempt_fingerprint != candidate.attempt_fingerprint
         or outcome is None
         or outcome.status != "success"
     ):
         raise _GuardError(
             WorkflowErrorCode.STALE_SPECIFICATION_INPUT,
-            "The candidate authoring attempt is not an exact successful attempt.",
+            "The candidate structuring attempt is not an exact successful attempt.",
         )
-    authoring_input, manifest, settings = _attempt_inputs(attempt)
-    active_repository_source = next(
-        (
-            entry
-            for entry in manifest
-            if entry.source_id == SPECIFICATION_ACTIVE_REPOSITORY_SOURCE_ID
-        ),
-        None,
-    )
-    expected_repository_fingerprint = (
-        None
-        if active_repository_source is None
-        else active_repository_source.fingerprint
-    )
+    structuring_input, manifest, settings = _attempt_inputs(attempt)
+    expected_repository_fingerprint = lineage.source.source_fingerprint
     if (
         require_current_repository_source
         and repository_source_fingerprint != expected_repository_fingerprint
     ):
         raise _GuardError(
             WorkflowErrorCode.STALE_SPECIFICATION_INPUT,
-            "The live repository source does not match the candidate source bundle.",
+            "The current registered source does not match the candidate source.",
         )
-    _validate_attempt_contract(authoring_input, lineage)
+    _validate_attempt_contract(structuring_input, lineage)
     _validate_manifest(
-        session,
-        project_id=candidate.project_id,
         lineage=lineage,
         manifest=manifest,
         payload=payload,
     )
     if (
-        envelope.source_manifest != tuple(
-            sorted(manifest, key=lambda item: item.source_id)
-        )
+        envelope.source_manifest
+        != tuple(sorted(manifest, key=lambda item: item.source_id))
         or envelope.accepted_fact_fingerprint
-        != specification_authoring_fact_fingerprint(authoring_input)
+        != specification_structuring_fact_fingerprint(structuring_input)
         or envelope.producer_input_fingerprint
-        != specification_authoring_input_fingerprint(authoring_input)
+        != specification_structuring_input_fingerprint(structuring_input)
+        or envelope.registered_source_fingerprint != lineage.source.source_fingerprint
+        or envelope.source_producer_capability
+        != structuring_input.registered_source.producer_capability
+        or envelope.source_preparation_capability
+        != structuring_input.registered_source.preparation_capability
         or envelope.model_id != attempt.model_id
         or envelope.model_configuration_fingerprint
         != _model_configuration_fingerprint(attempt, settings)
         or envelope.prompt_fingerprint != _prompt_fingerprint()
+        or envelope.prompt_version != SPECIFICATION_STRUCTURER_PROMPT_VERSION
         or envelope.producer_capability != _PRODUCER_CAPABILITY
-        or envelope.producer_version != SPECIFICATION_AUTHOR_VERSION
+        or envelope.producer_version != SPECIFICATION_STRUCTURER_VERSION
     ):
         raise _GuardError(
             WorkflowErrorCode.STALE_SPECIFICATION_INPUT,
@@ -910,6 +1236,16 @@ def _lineage_for_review(
         reference=goal_ref,
         vision=accepted_vision,
     )
+    source = session.get(SpecificationSource, candidate.specification_source_id)
+    if (
+        source is None
+        or source.project_id != candidate.project_id
+        or source.source_fingerprint != candidate.specification_source_fingerprint
+    ):
+        raise _GuardError(
+            WorkflowErrorCode.STALE_SPECIFICATION_INPUT,
+            "The candidate registered source is unavailable.",
+        )
     supersedes: SpecificationCandidate | None = None
     if candidate.supersedes_specification_candidate_id is not None:
         supersedes = _candidate_by_reference(
@@ -965,6 +1301,7 @@ def _lineage_for_review(
             base=None,
             base_payload=None,
             supersedes=supersedes,
+            source=source,
         )
     if candidate.base_spec_version_id is None or candidate.base_spec_hash is None:
         raise _GuardError(
@@ -994,6 +1331,7 @@ def _lineage_for_review(
             base=base,
         ),
         supersedes=supersedes,
+        source=source,
     )
 
 
@@ -1035,10 +1373,7 @@ def _validated_review_target(
         repository_source_fingerprint=request.repository_source_fingerprint,
         require_current_repository_source=request.decision == "accepted",
     )
-    if (
-        request.decision in {"rejected", "feedback"}
-        and not request.rationale.strip()
-    ):
+    if request.decision in {"rejected", "feedback"} and not request.rationale.strip():
         raise _GuardError(
             WorkflowErrorCode.SPECIFICATION_CANDIDATE_CONFLICT,
             "Rejected Specification feedback requires a rationale.",
@@ -1067,13 +1402,10 @@ def _validated_review_target(
             "Approved Specification lineage is ambiguous.",
         )
     prior_approved = None if not approved_specs else approved_specs[0]
-    if (
-        lineage.candidate_kind is CandidateKind.AMENDMENT
-        and (
-            prior_approved is None
-            or prior_approved.spec_version_id != candidate.base_spec_version_id
-            or prior_approved.spec_hash != candidate.base_spec_hash
-        )
+    if lineage.candidate_kind is CandidateKind.AMENDMENT and (
+        prior_approved is None
+        or prior_approved.spec_version_id != candidate.base_spec_version_id
+        or prior_approved.spec_hash != candidate.base_spec_hash
     ):
         raise _GuardError(
             WorkflowErrorCode.STALE_SPECIFICATION_BASE,
@@ -1130,9 +1462,7 @@ def execute_decide_specification(
                 source_product_goal_artifact_id=(candidate.product_goal_artifact_id),
                 source_product_goal_fingerprint=(candidate.product_goal_fingerprint),
                 supersedes_spec_version_id=(
-                    None
-                    if prior_approved is None
-                    else prior_approved.spec_version_id
+                    None if prior_approved is None else prior_approved.spec_version_id
                 ),
             )
         )
@@ -1150,6 +1480,7 @@ def execute_decide_specification(
 
 
 __all__ = [
-    "execute_complete_specification_authoring",
+    "execute_complete_specification_structuring",
     "execute_decide_specification",
+    "execute_register_specification_source",
 ]

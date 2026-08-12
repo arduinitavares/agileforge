@@ -107,9 +107,7 @@ def _seed_accepted_vision(engine: Engine, *, name: str = "Goal reload") -> int:
             "evidence_id": "project:metadata",
             "kind": "project_metadata",
             "relative_path": None,
-            "content_fingerprint": canonical_hash(
-                {"name": name, "description": None}
-            ),
+            "content_fingerprint": canonical_hash({"name": name, "description": None}),
             "trust": "operator_provided",
             "content": {"name": name, "description": None},
             "truncated": False,
@@ -649,9 +647,9 @@ def test_goal_feedback_revision_and_outcome_are_exact_and_durable(
         rationale="",
         key="revision-accepted",
     )
-    assert "specification.author" in (
-        acceptance_domain.position(project_id).available_nodes
-    )
+    available_nodes = acceptance_domain.position(project_id).available_nodes
+    assert "specification.source.register" not in available_nodes
+    assert "specification.structure" not in available_nodes
 
     outcome_domain = _domain(engine, at=NOW + timedelta(seconds=3))
     assert outcome_domain.transition(
@@ -700,7 +698,8 @@ def test_accepted_goal_outcome_replays_and_opposite_writes_nothing(
     }
     vision = next(item for item in review.fact_references if item.fact_type == "vision")
     activated = review_domain.position(project_id)
-    assert "specification.author" in activated.available_nodes
+    assert "specification.source.register" not in activated.available_nodes
+    assert "specification.structure" not in activated.available_nodes
     assert "goal.interview" not in activated.available_nodes
 
     outcome_domain = _domain(engine, at=NOW + timedelta(seconds=2))

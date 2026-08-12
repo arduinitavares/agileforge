@@ -30,7 +30,7 @@ from utils.agileforge_spec_profile_v2 import (
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
-ENVELOPE_VERSION: str = "agileforge.spec-candidate-envelope.v1"
+ENVELOPE_VERSION: str = "agileforge.spec-candidate-envelope.v2"
 Fingerprint = Annotated[str, Field(pattern=r"^sha256:[0-9a-f]{64}$")]
 _MARKDOWN_LEADING_RE: re.Pattern[str] = re.compile(
     r"^(\s*)((?:[#\-*+>])|(?:\d+\.)(?=\s|$))"
@@ -62,8 +62,8 @@ class _FrozenModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
-def _require_nonblank(value: str) -> str:
-    if not value.strip():
+def _require_nonblank(value: object) -> object:
+    if isinstance(value, str) and not value.strip():
         message = "value must not be blank"
         raise ValueError(message)
     return value
@@ -72,7 +72,7 @@ def _require_nonblank(value: str) -> str:
 def _optional_nonblank(value: object) -> object:
     if value is None:
         return None
-    return _require_nonblank(value) if isinstance(value, str) else value
+    return _require_nonblank(value)
 
 
 def _sha256(value: str) -> str:
@@ -83,6 +83,22 @@ def _canonical_json(value: object) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
+def _validate_model_provenance(
+    *,
+    producer_capability: str,
+    model_id: str | None,
+    model_configuration_fingerprint: str | None,
+) -> None:
+    has_model_id = model_id is not None
+    has_model_config = model_configuration_fingerprint is not None
+    if has_model_id != has_model_config:
+        message = "model and model configuration fingerprint must be paired"
+        raise ValueError(message)
+    if producer_capability == "specification-structurer" and not has_model_id:
+        message = "model-backed producer requires model identity and configuration"
+        raise ValueError(message)
+
+
 class CandidateSourceManifestEntry(_FrozenModel):
     """One durable source reference used by the to-spec attempt."""
 
@@ -91,9 +107,9 @@ class CandidateSourceManifestEntry(_FrozenModel):
     fingerprint: Fingerprint
     warnings: tuple[Annotated[str, Field(min_length=1)], ...] = ()
 
-    _validate_text = field_validator(
-        "source_id", "fingerprint", mode="before"
-    )(_require_nonblank)
+    _validate_text = field_validator("source_id", "fingerprint", mode="before")(
+        _require_nonblank
+    )
 
     @field_validator("warnings", mode="before")
     @classmethod
@@ -102,8 +118,7 @@ class CandidateSourceManifestEntry(_FrozenModel):
         if not isinstance(value, list | tuple):
             return value
         return tuple(
-            _require_nonblank(item) if isinstance(item, str) else item
-            for item in value
+            _require_nonblank(item) if isinstance(item, str) else item for item in value
         )
 
 
@@ -127,13 +142,17 @@ class CandidateBuildInput(_FrozenModel):
     accepted_vision_fingerprint: Fingerprint
     accepted_product_goal_id: Annotated[int, Field(gt=0)]
     accepted_product_goal_fingerprint: Fingerprint
+    registered_source_fingerprint: Fingerprint
+    source_producer_capability: Literal["to-spec"]
+    source_preparation_capability: Literal["grill-with-docs"]
     source_manifest: tuple[CandidateSourceManifestEntry, ...]
     accepted_fact_fingerprint: Fingerprint
     producer_input_fingerprint: Fingerprint
-    producer_capability: Annotated[str, Field(min_length=1)]
+    producer_capability: Literal["specification-structurer"]
     producer_version: Annotated[str, Field(min_length=1)]
     model_id: str | None = None
     model_configuration_fingerprint: Fingerprint | None = None
+    prompt_version: Annotated[str, Field(min_length=1)]
     prompt_fingerprint: Fingerprint
     workflow_node_attempt_id: Annotated[int, Field(gt=0)]
     attempt_fingerprint: Fingerprint
@@ -148,10 +167,11 @@ class CandidateBuildInput(_FrozenModel):
     _validate_text = field_validator(
         "accepted_vision_fingerprint",
         "accepted_product_goal_fingerprint",
+        "registered_source_fingerprint",
         "accepted_fact_fingerprint",
         "producer_input_fingerprint",
-        "producer_capability",
         "producer_version",
+        "prompt_version",
         "prompt_fingerprint",
         "attempt_fingerprint",
         "correlation_id",
@@ -163,6 +183,16 @@ class CandidateBuildInput(_FrozenModel):
         "model_configuration_fingerprint",
         mode="before",
     )(_optional_nonblank)
+
+    @model_validator(mode="after")
+    def validate_model_provenance(self) -> Self:
+        """Require complete model evidence for the internal structurer."""
+        _validate_model_provenance(
+            producer_capability=self.producer_capability,
+            model_id=self.model_id,
+            model_configuration_fingerprint=self.model_configuration_fingerprint,
+        )
+        return self
 
 
 class CollectionDiff(_FrozenModel):
@@ -176,9 +206,7 @@ class CollectionDiff(_FrozenModel):
 class AmendmentDiff(_FrozenModel):
     """Full deterministic delta against one pinned accepted specification."""
 
-    changed_fields: tuple[
-        Literal["title", "summary", "problem_statement"], ...
-    ] = ()
+    changed_fields: tuple[Literal["title", "summary", "problem_statement"], ...] = ()
     items: CollectionDiff = Field(default_factory=CollectionDiff)
     relations: CollectionDiff = Field(default_factory=CollectionDiff)
     controlled_terms: CollectionDiff = Field(default_factory=CollectionDiff)
@@ -205,7 +233,7 @@ class AmendmentDiff(_FrozenModel):
 class SpecificationCandidateEnvelope(_FrozenModel):
     """Immutable host metadata bound to exact semantic payload bytes."""
 
-    envelope_version: Literal["agileforge.spec-candidate-envelope.v1"] = (
+    envelope_version: Literal["agileforge.spec-candidate-envelope.v2"] = (
         ENVELOPE_VERSION
     )
     candidate_kind: CandidateKind
@@ -215,14 +243,18 @@ class SpecificationCandidateEnvelope(_FrozenModel):
     accepted_product_goal_fingerprint: Fingerprint
     base_specification_id: Annotated[int, Field(gt=0)] | None = None
     base_payload_fingerprint: Fingerprint | None = None
+    registered_source_fingerprint: Fingerprint
+    source_producer_capability: Literal["to-spec"]
+    source_preparation_capability: Literal["grill-with-docs"]
     source_manifest: tuple[CandidateSourceManifestEntry, ...]
     source_manifest_fingerprint: Fingerprint
     accepted_fact_fingerprint: Fingerprint
     producer_input_fingerprint: Fingerprint
-    producer_capability: Annotated[str, Field(min_length=1)]
+    producer_capability: Literal["specification-structurer"]
     producer_version: Annotated[str, Field(min_length=1)]
     model_id: str | None = None
     model_configuration_fingerprint: Fingerprint | None = None
+    prompt_version: Annotated[str, Field(min_length=1)]
     prompt_fingerprint: Fingerprint
     workflow_node_attempt_id: Annotated[int, Field(gt=0)]
     attempt_fingerprint: Fingerprint
@@ -238,11 +270,12 @@ class SpecificationCandidateEnvelope(_FrozenModel):
     _validate_text = field_validator(
         "accepted_vision_fingerprint",
         "accepted_product_goal_fingerprint",
+        "registered_source_fingerprint",
         "source_manifest_fingerprint",
         "accepted_fact_fingerprint",
         "producer_input_fingerprint",
-        "producer_capability",
         "producer_version",
+        "prompt_version",
         "prompt_fingerprint",
         "attempt_fingerprint",
         "correlation_id",
@@ -271,14 +304,11 @@ class SpecificationCandidateEnvelope(_FrozenModel):
         ):
             message = "source manifest fingerprint does not match source manifest"
             raise ValueError(message)
-        has_model_id = self.model_id is not None
-        has_model_config = self.model_configuration_fingerprint is not None
-        if has_model_id != has_model_config:
-            message = "model and model configuration fingerprint must be paired"
-            raise ValueError(message)
-        if self.producer_capability == "to-spec" and not has_model_id:
-            message = "model producer requires model identity and configuration"
-            raise ValueError(message)
+        _validate_model_provenance(
+            producer_capability=self.producer_capability,
+            model_id=self.model_id,
+            model_configuration_fingerprint=self.model_configuration_fingerprint,
+        )
         if self.candidate_kind is CandidateKind.INITIAL:
             if (
                 self.base_specification_id is not None
@@ -321,9 +351,7 @@ def _collection_diff(
         added=tuple(sorted(current.keys() - base.keys())),
         changed=tuple(
             sorted(
-                key
-                for key in base.keys() & current.keys()
-                if base[key] != current[key]
+                key for key in base.keys() & current.keys() if base[key] != current[key]
             )
         ),
         removed=tuple(sorted(base.keys() - current.keys())),
@@ -461,6 +489,9 @@ def _render_candidate_review(
         ("Accepted Product Goal fingerprint", "accepted_product_goal_fingerprint"),
         ("Base specification id", "base_specification_id"),
         ("Base payload fingerprint", "base_payload_fingerprint"),
+        ("Registered source fingerprint", "registered_source_fingerprint"),
+        ("Source producer capability", "source_producer_capability"),
+        ("Source preparation capability", "source_preparation_capability"),
         ("Source manifest fingerprint", "source_manifest_fingerprint"),
         ("Accepted fact fingerprint", "accepted_fact_fingerprint"),
         ("Producer input fingerprint", "producer_input_fingerprint"),
@@ -468,6 +499,7 @@ def _render_candidate_review(
         ("Producer version", "producer_version"),
         ("Model id", "model_id"),
         ("Model configuration fingerprint", "model_configuration_fingerprint"),
+        ("Prompt version", "prompt_version"),
         ("Prompt fingerprint", "prompt_fingerprint"),
         ("Workflow node attempt id", "workflow_node_attempt_id"),
         ("Attempt fingerprint", "attempt_fingerprint"),
@@ -477,10 +509,7 @@ def _render_candidate_review(
         ("Profile version", "profile_version"),
         ("Renderer version", "renderer_version"),
     )
-    lines.extend(
-        f"- {label}: {_escape_markdown(data[key])}"
-        for label, key in labels
-    )
+    lines.extend(f"- {label}: {_escape_markdown(data[key])}" for label, key in labels)
     lines.extend(["", "### Source Manifest", ""])
     for entry in data["source_manifest"]:
         lines.append(
@@ -489,8 +518,7 @@ def _render_candidate_review(
             f"{_escape_markdown(entry['fingerprint'])}"
         )
         lines.extend(
-            f"  - Warning: {_escape_markdown(warning)}"
-            for warning in entry["warnings"]
+            f"  - Warning: {_escape_markdown(warning)}" for warning in entry["warnings"]
         )
     lines.extend(["", "### Amendment Diff", ""])
     diff = data["amendment_diff"]
@@ -635,6 +663,9 @@ def build_candidate_envelope(
             ),
             "base_specification_id": base_specification_id,
             "base_payload_fingerprint": base_payload_fingerprint,
+            "registered_source_fingerprint": metadata.registered_source_fingerprint,
+            "source_producer_capability": metadata.source_producer_capability,
+            "source_preparation_capability": metadata.source_preparation_capability,
             "source_manifest": [item.model_dump(mode="json") for item in manifest],
             "source_manifest_fingerprint": _source_manifest_fingerprint(manifest),
             "accepted_fact_fingerprint": metadata.accepted_fact_fingerprint,
@@ -643,6 +674,7 @@ def build_candidate_envelope(
             "producer_version": metadata.producer_version,
             "model_id": metadata.model_id,
             "model_configuration_fingerprint": metadata.model_configuration_fingerprint,
+            "prompt_version": metadata.prompt_version,
             "prompt_fingerprint": metadata.prompt_fingerprint,
             "workflow_node_attempt_id": metadata.workflow_node_attempt_id,
             "attempt_fingerprint": metadata.attempt_fingerprint,

@@ -30,6 +30,7 @@ from models.product_definition import (
     ProductGoalOutcome,
     SpecificationCandidate,
     SpecificationDecision,
+    SpecificationSource,
     VisionArtifact,
     VisionArtifactDecision,
     VisionEvidenceSnapshot,
@@ -135,6 +136,12 @@ def _delete_project_spec_rows(session: Session, project_id: int) -> None:
     session.exec(
         delete(SpecificationCandidate).where(
             col(SpecificationCandidate.project_id) == project_id
+        )
+    )
+    session.flush()
+    session.exec(
+        delete(SpecificationSource).where(
+            col(SpecificationSource.project_id) == project_id
         )
     )
     session.flush()

@@ -1,15 +1,15 @@
 # adapters/adk/agents/specification_author.py
-"""Single-turn to-spec agent for canonical Specification v2 authoring."""
+"""Single-turn agent for canonical Specification v2 structuring."""
 
 from google.adk.agents import Agent
 from google.adk.models.lite_llm import LiteLlm
-from pydantic import BaseModel, ConfigDict
 
 from adapters.adk.prompts.specification_author import (
-    SPECIFICATION_AUTHOR_INSTRUCTIONS,
+    SPECIFICATION_STRUCTURER_INSTRUCTIONS,
 )
 from services.contracts.specification_authoring import (
-    SpecificationAuthoringInput,
+    SpecificationStructuringInput,
+    SpecificationStructuringOutput,
 )
 from utils.model_config import (
     get_model_id,
@@ -21,13 +21,7 @@ from utils.runtime_config import (
     get_vision_interviewer_max_tokens,
 )
 
-_model_id: str = get_model_id("specification_author")
-
-
-class SpecificationAuthoringModelOutput(BaseModel):
-    """Permissive structured object classified by the owning recipe wrapper."""
-
-    model_config = ConfigDict(extra="allow")
+_model_id: str = get_model_id("specification_structurer")
 
 
 model: LiteLlm = LiteLlm(
@@ -39,16 +33,16 @@ model: LiteLlm = LiteLlm(
 )
 
 root_agent: Agent = Agent(
-    name="specification_author",
-    description="Create one canonical typed Specification from host-owned sources.",
+    name="specification_structurer",
+    description="Structure host-owned sources into one canonical Specification.",
     model=model,
-    input_schema=SpecificationAuthoringInput,
-    output_schema=SpecificationAuthoringModelOutput,
-    instruction=SPECIFICATION_AUTHOR_INSTRUCTIONS,
+    input_schema=SpecificationStructuringInput,
+    output_schema=SpecificationStructuringOutput,
+    instruction=SPECIFICATION_STRUCTURER_INSTRUCTIONS,
     mode="single_turn",
     output_key="specification_candidate",
     disallow_transfer_to_parent=True,
     disallow_transfer_to_peers=True,
 )
 
-__all__ = ["SpecificationAuthoringModelOutput", "root_agent"]
+__all__ = ["root_agent"]

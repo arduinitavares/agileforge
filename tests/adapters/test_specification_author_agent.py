@@ -3,73 +3,105 @@
 from __future__ import annotations
 
 import importlib
-from typing import TYPE_CHECKING
+import os
+import subprocess  # nosec B404  # test-only clean-process import boundary
+import sys
+from pathlib import Path
 
-from pydantic import BaseModel, TypeAdapter
+import pytest
+from pydantic import TypeAdapter, ValidationError
 
+from services.contracts.specification_authoring import SpecificationStructuringOutput
 from workflow.contracts import JsonObject
 
-if TYPE_CHECKING:
-    import pytest
+
+def test_structurer_agent_imports_in_a_clean_process() -> None:
+    """Keep the ADK entrypoint free of package-initialization cycles."""
+    completed = subprocess.run(  # nosec B603
+        (
+            sys.executable,
+            "-c",
+            "import adapters.adk.agents.specification_author",
+        ),
+        cwd=Path(__file__).parents[2],
+        env={**os.environ, "OPENROUTER_API_KEY": "test-key"},
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr
 
 
-def test_agent_prompt_hash_binds_the_actual_packaged_instructions() -> None:
+def test_structurer_prompt_hash_binds_the_actual_packaged_instructions() -> None:
     """Fail collection when the loaded to-spec prompt drifts from provenance."""
-    prompt_module = importlib.import_module(
-        "adapters.adk.prompts.specification_author"
-    )
-    contract = importlib.import_module(
-        "services.contracts.specification_authoring"
-    )
+    prompt_module = importlib.import_module("adapters.adk.prompts.specification_author")
+    contract = importlib.import_module("services.contracts.specification_authoring")
     prompts = importlib.import_module("adapters.adk.prompts")
 
     instructions = prompts.load_prompt("specification_author.txt")
 
-    assert instructions == prompt_module.SPECIFICATION_AUTHOR_INSTRUCTIONS
-    assert prompt_module.SPECIFICATION_AUTHOR_PROMPT_HASH == (
-        contract.SPECIFICATION_AUTHOR_PROMPT_HASH
+    assert hasattr(prompt_module, "SPECIFICATION_STRUCTURER_INSTRUCTIONS")
+    assert hasattr(contract, "SPECIFICATION_STRUCTURER_PROMPT_HASH")
+    assert instructions == prompt_module.SPECIFICATION_STRUCTURER_INSTRUCTIONS
+    assert prompt_module.SPECIFICATION_STRUCTURER_PROMPT_HASH == (
+        contract.SPECIFICATION_STRUCTURER_PROMPT_HASH
     )
-    assert contract.compute_specification_author_prompt_hash(instructions) == (
-        contract.SPECIFICATION_AUTHOR_PROMPT_HASH
+    assert contract.compute_specification_structurer_prompt_hash(instructions) == (
+        contract.SPECIFICATION_STRUCTURER_PROMPT_HASH
     )
-    assert contract.SPECIFICATION_AUTHOR_PROMPT_HASH == (
-        "sha256:ab4ec877a7fa25a38100820269c5aad25a476fb55d29cd51296123bd01dfe678"
+    assert contract.SPECIFICATION_STRUCTURER_VERSION == "1.0.0"
+    assert contract.SPECIFICATION_STRUCTURER_PROMPT_VERSION == (
+        "agileforge.specification-structurer.prompt.v1"
+    )
+    assert contract.SPECIFICATION_STRUCTURER_PROMPT_HASH == (
+        "sha256:fec7c251132af921dd721e5e3cdea758eef95ce0437bfd85d2f24dad00c70e21"
     )
 
 
-def test_agent_requests_structured_json_without_owning_semantic_validation(
+def test_agent_advertises_the_exact_closed_structuring_contract(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Leave schema-versus-payload classification to the recipe wrapper."""
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     module = importlib.import_module("adapters.adk.agents.specification_author")
-    prompt_module = importlib.import_module(
-        "adapters.adk.prompts.specification_author"
-    )
+    prompt_module = importlib.import_module("adapters.adk.prompts.specification_author")
 
     output_schema = module.root_agent.output_schema
 
-    assert output_schema is module.SpecificationAuthoringModelOutput
+    contract = importlib.import_module("services.contracts.specification_authoring")
+
+    assert module.root_agent.name == "specification_structurer"
+    assert output_schema is contract.SpecificationStructuringOutput
     assert module.root_agent.instruction == (
-        prompt_module.SPECIFICATION_AUTHOR_INSTRUCTIONS
+        prompt_module.SPECIFICATION_STRUCTURER_INSTRUCTIONS
     )
-    assert issubclass(output_schema, BaseModel)
-    assert output_schema.model_config["extra"] == "allow"
+    assert output_schema.model_config["extra"] == "forbid"
+    assert output_schema.model_config["frozen"] is True
     adapter = TypeAdapter(output_schema)
-    assert adapter.validate_python(
-        {"payload": {"schema_version": "agileforge.spec.v1"}}
-    ).model_dump() == {"payload": {"schema_version": "agileforge.spec.v1"}}
-    assert adapter.validate_python(
-        {"payload": {"schema_version": "agileforge.spec.v2"}}
-    ).model_dump() == {"payload": {"schema_version": "agileforge.spec.v2"}}
+    with pytest.raises(ValidationError):
+        adapter.validate_python({"payload": {"schema_version": "agileforge.spec.v1"}})
 
 
 def test_model_output_contract_is_a_json_object() -> None:
-    """Reject scalar/list output before it reaches semantic classification."""
-    output_schema = importlib.import_module(
-        "adapters.adk.agents.specification_author"
-    ).SpecificationAuthoringModelOutput
+    """Retain JSON-object compatibility after closing the provider schema."""
+    output = SpecificationStructuringOutput.model_validate(
+        {
+            "payload": {
+                "schema_version": "agileforge.spec.v2",
+                "artifact_id": "SPEC.closed-provider",
+                "title": "Closed provider",
+                "summary": "Expose the exact typed structuring result.",
+                "problem_statement": "Permissive provider schemas hide drift.",
+                "items": [],
+            }
+        }
+    )
 
-    assert TypeAdapter(JsonObject).validate_python(
-        output_schema.model_validate({"payload": {}}).model_dump()
-    ) == {"payload": {}}
+    assert (
+        TypeAdapter(JsonObject).validate_python(output.model_dump(mode="json"))[
+            "payload"
+        ]["schema_version"]
+        == "agileforge.spec.v2"
+    )

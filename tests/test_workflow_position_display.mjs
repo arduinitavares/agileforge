@@ -127,7 +127,7 @@ test('semantic mutations contain transport metadata and human input only', () =>
     assert.doesNotMatch(source, /workflowInputControl|input_payload|model_id/);
 });
 
-test('Specification is authored and reviewed without JSON editing', () => {
+test('Specification is structured and reviewed without JSON editing', () => {
     const context = loadFrontend();
     assert.equal(typeof context.specificationPanelMarkup, 'function');
     const specification = context.specificationPanelMarkup(

@@ -1,6 +1,7 @@
 # Make to-spec the canonical Specification boundary
 
-**Status:** Accepted
+**Status:** Superseded by
+[ADR 0004](0004-register-to-spec-source-before-structuring.md)
 
 **Date:** 2026-08-11
 

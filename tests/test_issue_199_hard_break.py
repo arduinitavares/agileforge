@@ -136,12 +136,24 @@ def test_discovery_domain_model_and_request_are_absent_from_active_runtime() -> 
 
 
 def test_discovery_node_is_absent_from_active_workflow_graph() -> None:
-    """Accepted Product Goal must route directly to Specification authoring."""
+    """Accepted Product Goal routes through source capture, never Discovery."""
     node_ids = {node.node_id for node in SPECIFICATION_NODES}
     request_kinds = {node.request_kind for node in SPECIFICATION_NODES}
 
+    assert node_ids == {
+        "specification.source.register",
+        "specification.structure",
+        "specification.review",
+    }
+    assert request_kinds == {
+        "register_specification_source",
+        "structure_specification",
+        "decide_specification",
+    }
     assert "discovery.record" not in node_ids
     assert "record_discovery_artifact" not in request_kinds
+    assert "specification.author" not in node_ids
+    assert "author_specification" not in request_kinds
 
 
 def test_root_graph_exposes_specification_not_product_discovery() -> None:
@@ -164,6 +176,29 @@ def test_discovery_route_and_cli_command_are_absent() -> None:
     assert not any(route.endswith("/discovery") for route in route_paths)
     assert "record_discovery_artifact" not in api_request_kinds
     assert "record_discovery_artifact" not in cli_request_kinds
+    assert "author_specification" not in api_request_kinds
+    assert "author_specification" not in cli_request_kinds
+    assert {
+        "register_specification_source",
+        "structure_specification",
+    }.issubset(api_request_kinds)
+    assert {
+        "register_specification_source",
+        "structure_specification",
+    }.issubset(cli_request_kinds)
+
+
+def test_structurer_provider_contract_replaces_direct_authoring() -> None:
+    """The provider sees the closed structuring input and nested v2 payload."""
+    agent = _source("adapters/adk/agents/specification_author.py")
+    contract = _source("services/contracts/specification_authoring.py")
+
+    assert "SpecificationStructuringInput" in agent
+    assert "SpecificationStructuringOutput" in agent
+    assert 'name="specification_structurer"' in agent
+    assert "SpecificationAuthoringInput" not in contract
+    assert "class SpecificationStructuringOutput" in contract
+    assert "payload: SpecificationPayload" in contract
 
 
 def test_dashboard_has_no_mandatory_discovery_surface() -> None:
@@ -231,6 +266,9 @@ def test_issue_199_documentation_cutover_is_explicit() -> None:
         REPOSITORY_ROOT
         / "docs/superpowers/specs/2026-08-11-agileforge-spec-profile-v2.md"
     )
+    structuring_adr = (
+        REPOSITORY_ROOT / "docs/adr/0004-register-to-spec-source-before-structuring.md"
+    )
     former_plan = _source(
         "docs/superpowers/plans/2026-08-05-single-project-lifecycle-hard-break.md"
     )
@@ -238,5 +276,11 @@ def test_issue_199_documentation_cutover_is_explicit() -> None:
     assert not obsolete_example.exists()
     assert v2_profile.is_file()
     assert "agileforge.spec.v2" in v2_profile.read_text(encoding="utf-8")
+    assert structuring_adr.is_file()
+    assert "to-spec" in structuring_adr.read_text(encoding="utf-8")
+    active_docs = _source("README.md") + _source("docs/agent-cli-manual.md")
+    assert "specification source register" in active_docs
+    assert "specification structure" in active_docs
+    assert "`specification author`" not in active_docs
     assert "Status: Superseded" in former_plan
     assert "2026-08-11-to-spec-single-specification-boundary.md" in former_plan

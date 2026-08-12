@@ -18,6 +18,8 @@ if TYPE_CHECKING:
         AuthorityReviewRequest,
         PostSprintTriageRequest,
         SpecificationReviewRequest,
+        SpecificationSourceRegistrationRequest,
+        SpecificationStructuringRequest,
     )
 
 SPRINT_CAPACITY_POINTS = 8
@@ -139,8 +141,16 @@ _SEMANTIC_TEXT_COMMANDS = (
             " --idempotency-key refresh-myfinance-1 --actor acceptance-agent"
         ),
         (
-            "agileforge specification author --project-id 1"
+            "agileforge specification source register --project-id 1"
+            " --source-path specification.md"
+            " --preparation-capability grill-with-docs"
+            " --adr-path docs/adr/0001-record-format.md"
+            " --adr-path docs/adr/0002-reconciliation.md"
             " --idempotency-key spec-myfinance-1 --actor acceptance-agent"
+        ),
+        (
+            "agileforge specification structure --project-id 1"
+            " --idempotency-key structure-myfinance-1 --actor acceptance-agent"
         ),
         (
             "agileforge specification review --project-id 1 --decision accepted"
@@ -172,6 +182,194 @@ def test_semantic_lifecycle_commands_parse(command: str) -> None:
     assert not hasattr(parsed, "graph_version")
     assert not hasattr(parsed, "expected_fact_fingerprint")
     assert not hasattr(parsed, "changed_by")
+
+
+class _SpecificationPreparationApplication:
+    """Capture the two host-prepared Specification commands."""
+
+    def __init__(self) -> None:
+        self.registered: list[object] = []
+        self.structured: list[object] = []
+
+    def register_specification_source(self, request: object) -> object:
+        self.registered.append(request)
+        return cli_main.TransitionResult(ok=True)
+
+    def structure_specification(self, request: object) -> object:
+        self.structured.append(request)
+        return cli_main.TransitionResult(ok=True)
+
+
+def test_specification_source_register_cli_sends_only_human_paths_and_metadata(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Keep source bytes, Context state, lineage, and identity host-owned."""
+    application = _SpecificationPreparationApplication()
+
+    exit_code = cli_main.main(
+        [
+            "specification",
+            "source",
+            "register",
+            "--project-id",
+            "41",
+            "--source-path",
+            "specification.md",
+            "--preparation-capability",
+            "grill-with-docs",
+            "--adr-path",
+            "docs/adr/0002.md",
+            "--adr-path",
+            "docs/adr/0001.md",
+            "--idempotency-key",
+            "source-cli-41",
+            "--actor",
+            "operator",
+            "--correlation-id",
+            "correlation-41",
+        ],
+        application=application,
+    )
+
+    assert exit_code == 0
+    assert len(application.registered) == 1
+    request = cast("SpecificationSourceRegistrationRequest", application.registered[0])
+    assert request.project_id == PROJECT_ID
+    assert request.source_path == "specification.md"
+    assert request.adr_paths == ("docs/adr/0001.md", "docs/adr/0002.md")
+    assert request.preparation_capability == "grill-with-docs"
+    assert request.idempotency_key == "source-cli-41"
+    assert request.actor == "operator"
+    assert request.correlation_id == "correlation-41"
+    for hidden in (
+        "context_state",
+        "source_fingerprint",
+        "repository_binding_id",
+        "accepted_vision_artifact_id",
+        "accepted_product_goal_artifact_id",
+        "bundle",
+    ):
+        assert not hasattr(request, hidden)
+    assert '"ok": true' in capsys.readouterr().out
+
+
+def test_specification_structure_cli_sends_only_transport_metadata(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Let the host select the registered source and all producer evidence."""
+    application = _SpecificationPreparationApplication()
+
+    exit_code = cli_main.main(
+        [
+            "specification",
+            "structure",
+            "--project-id",
+            "41",
+            "--idempotency-key",
+            "structure-cli-41",
+            "--actor",
+            "operator",
+            "--correlation-id",
+            "correlation-41",
+        ],
+        application=application,
+    )
+
+    assert exit_code == 0
+    assert len(application.structured) == 1
+    request = cast("SpecificationStructuringRequest", application.structured[0])
+    assert request.model_dump(mode="json") == {
+        "project_id": PROJECT_ID,
+        "idempotency_key": "structure-cli-41",
+        "actor": "operator",
+        "correlation_id": "correlation-41",
+    }
+    assert '"ok": true' in capsys.readouterr().out
+
+
+def test_retired_specification_author_command_is_not_parseable() -> None:
+    """Make the Specification preparation split a CLI hard break."""
+    with pytest.raises(ValueError, match="invalid choice"):
+        cli_main.build_parser().parse_args(
+            [
+                "specification",
+                "author",
+                "--project-id",
+                "41",
+                "--idempotency-key",
+                "retired-author-41",
+                "--actor",
+                "operator",
+            ]
+        )
+
+
+@pytest.mark.parametrize(
+    ("flag", "value"),
+    [
+        ("--context-present", "true"),
+        ("--source-fingerprint", "sha256:caller-owned"),
+        ("--source-json", "source.json"),
+        ("--bundle-json", "bundle.json"),
+        ("--input-file", "source.json"),
+        ("--repository-binding-id", "7"),
+        ("--specification-source-id", "9"),
+        ("--accepted-vision-artifact-id", "11"),
+        ("--accepted-product-goal-artifact-id", "13"),
+    ],
+)
+def test_specification_source_register_rejects_host_owned_flags(
+    flag: str,
+    value: str,
+) -> None:
+    """Keep source capture state and derived identities out of CLI syntax."""
+    with pytest.raises(ValueError, match="unrecognized arguments"):
+        cli_main.build_parser().parse_args(
+            [
+                "specification",
+                "source",
+                "register",
+                "--project-id",
+                "41",
+                "--source-path",
+                "specification.md",
+                "--preparation-capability",
+                "grill-with-docs",
+                "--idempotency-key",
+                "source-41",
+                "--actor",
+                "operator",
+                flag,
+                value,
+            ]
+        )
+
+
+@pytest.mark.parametrize(
+    "capability_args",
+    [(), ("--preparation-capability", "caller-owned")],
+)
+def test_specification_source_register_requires_exact_preparation_attestation(
+    capability_args: tuple[str, ...],
+) -> None:
+    """The CLI never invents an external preparation attestation."""
+    with pytest.raises(ValueError, match="preparation-capability"):
+        cli_main.build_parser().parse_args(
+            [
+                "specification",
+                "source",
+                "register",
+                "--project-id",
+                "41",
+                "--source-path",
+                "specification.md",
+                "--idempotency-key",
+                "source-41",
+                "--actor",
+                "operator",
+                *capability_args,
+            ]
+        )
 
 
 class _AuthorityFeedbackApplication:
@@ -332,16 +530,10 @@ def test_semantic_text_cli_strips_before_application_call(
     assert getattr(application.requests[0], field) == "Canonical text."
     if field == "rationale" and command.startswith("specification review"):
         request = cast("SpecificationReviewRequest", application.requests[0])
-        assert (
-            request.expected_candidate_fingerprint
-            == "sha256:candidate-shown"
-        )
+        assert request.expected_candidate_fingerprint == "sha256:candidate-shown"
     if field == "rationale" and command.startswith("authority decide"):
         request = cast("AuthorityReviewRequest", application.requests[0])
-        assert (
-            request.expected_candidate_fingerprint
-            == "sha256:authority-shown"
-        )
+        assert request.expected_candidate_fingerprint == "sha256:authority-shown"
     assert '"ok": true' in capsys.readouterr().out
 
 

@@ -97,3 +97,24 @@ def test_pre_issue_199_schema_is_rejected_before_runtime_access() -> None:
         ensure_business_db_ready(legacy)
 
     assert "projects" not in inspect(legacy).get_table_names()
+
+
+def test_pre_source_registration_schema_is_rejected_before_create_all() -> None:
+    """Do not let create_all silently upgrade an existing issue-199 database."""
+    legacy = create_engine(
+        "sqlite:///:memory:",
+        poolclass=StaticPool,
+        connect_args={"check_same_thread": False},
+    )
+    with legacy.begin() as connection:
+        connection.exec_driver_sql(
+            "CREATE TABLE projects (project_id INTEGER PRIMARY KEY, name TEXT NOT NULL)"
+        )
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"UNSUPPORTED_BUSINESS_SCHEMA.*missing table specification_sources",
+    ):
+        ensure_business_db_ready(legacy)
+
+    assert "specification_sources" not in inspect(legacy).get_table_names()

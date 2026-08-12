@@ -78,6 +78,12 @@ from services.project_lifecycle import (
     RepositoryRefreshCommand,
 )
 from services.roadmap_runtime import build_roadmap_input_context
+from services.specification_source_registration import (
+    PreparedSpecificationSourceRegistration,
+    SpecificationSourceRegistrationError,
+    SpecificationSourceRegistrationErrorCode,
+    SpecificationSourceRegistrationRequest,
+)
 from services.specs.candidate_contract import load_candidate_contract
 from services.sprint_selection import (
     SprintSelectionError,
@@ -138,6 +144,7 @@ from workflow.requests import (
     FulfillProductGoal,
     RecordAuthorityFeedback,
     RecordPostSprintTriage,
+    RegisterSpecificationSource,
     RepairStoryReadiness,
     ReviewSprint,
     StartSprint,
@@ -230,8 +237,8 @@ class _ProductGoalInterviewInputPort(Protocol):
     ) -> JsonObject: ...
 
 
-class _SpecificationAuthoringInputPort(Protocol):
-    """Host preparation for one exact to-spec authoring attempt."""
+class _SpecificationStructuringInputPort(Protocol):
+    """Host preparation for one exact Specification structuring attempt."""
 
     def replay(self, query: NodeAttemptReplayQuery) -> TransitionResult | None: ...
 
@@ -248,6 +255,21 @@ class _SpecificationAuthoringInputPort(Protocol):
         persisted_input: JsonObject,
         /,
     ) -> WorkflowError | None: ...
+
+
+class _SpecificationSourceRegistrationPort(Protocol):
+    """Capture one byte-exact external source before its guarded transition."""
+
+    def prepare(
+        self,
+        request: SpecificationSourceRegistrationRequest,
+    ) -> PreparedSpecificationSourceRegistration: ...
+
+
+class _SpecificationSourceReplayPort(Protocol):
+    """Recover a completed source command before recapturing repository bytes."""
+
+    def replay(self, query: TransitionReplayQuery) -> TransitionResult | None: ...
 
 
 class _AuthorityCompilationInputPort(Protocol):
@@ -1115,7 +1137,9 @@ class _LifecycleServiceOptions(TypedDict, total=False):
 
     vision_input: _VisionInputPort | None
     product_goal_services: ProductGoalLifecycleServices | None
-    specification_authoring_input: _SpecificationAuthoringInputPort | None
+    specification_structuring_input: _SpecificationStructuringInputPort | None
+    specification_source_registration: _SpecificationSourceRegistrationPort | None
+    specification_source_replay: _SpecificationSourceReplayPort | None
     authority_compilation_input: _AuthorityCompilationInputPort | None
     authority_review_selection: _AuthorityReviewSelectionPort | None
     authority_repair_input: _AuthorityRepairInputPort | None
@@ -1577,8 +1601,8 @@ class ProductGoalOutcomeRequest(FrozenModel):
     correlation_id: str | None = None
 
 
-class SpecificationAuthoringRequest(FrozenModel):
-    """Transport metadata for one host-prepared to-spec attempt."""
+class SpecificationStructuringRequest(FrozenModel):
+    """Transport metadata for one host-prepared structuring attempt."""
 
     project_id: int
     idempotency_key: str = Field(min_length=1)
@@ -1681,6 +1705,19 @@ def _vision_evidence_workflow_error_code(
     assert_never(code)
 
 
+def _source_registration_workflow_error_code(
+    code: SpecificationSourceRegistrationErrorCode,
+) -> WorkflowErrorCode:
+    """Map closed capture failures onto the retained workflow error surface."""
+    if code is SpecificationSourceRegistrationErrorCode.PROJECT_NOT_FOUND:
+        return WorkflowErrorCode.PROJECT_NOT_FOUND
+    if code is SpecificationSourceRegistrationErrorCode.REPOSITORY_BINDING_REQUIRED:
+        return WorkflowErrorCode.REPOSITORY_BINDING_INVALID
+    if code is SpecificationSourceRegistrationErrorCode.REPOSITORY_PROVENANCE_STALE:
+        return WorkflowErrorCode.REPOSITORY_PROVENANCE_STALE
+    return WorkflowErrorCode.STALE_SPECIFICATION_INPUT
+
+
 class AgileForgeApplication:
     """Expose the narrow workflow application interface to transports."""
 
@@ -1698,8 +1735,14 @@ class AgileForgeApplication:
         self._read_projection = read_projection
         self._vision_input = lifecycle_services.get("vision_input")
         self._product_goal_services = lifecycle_services.get("product_goal_services")
-        self._specification_authoring_input = lifecycle_services.get(
-            "specification_authoring_input"
+        self._specification_structuring_input = lifecycle_services.get(
+            "specification_structuring_input"
+        )
+        self._specification_source_registration = lifecycle_services.get(
+            "specification_source_registration"
+        )
+        self._specification_source_replay = lifecycle_services.get(
+            "specification_source_replay"
         )
         self._authority_compilation_input = lifecycle_services.get(
             "authority_compilation_input"
@@ -1867,9 +1910,9 @@ class AgileForgeApplication:
                 correlation_id=request.correlation_id,
             ),
             specification_source_check=(
-                self._specification_authoring_input.revalidate_sources
-                if request.node_id == "specification.author"
-                and self._specification_authoring_input is not None
+                self._specification_structuring_input.revalidate_sources
+                if request.node_id == "specification.structure"
+                and self._specification_structuring_input is not None
                 else None
             ),
         )
@@ -3154,14 +3197,14 @@ class AgileForgeApplication:
             )
         )
 
-    def author_specification(
+    def structure_specification(
         self,
-        request: SpecificationAuthoringRequest,
+        request: SpecificationStructuringRequest,
     ) -> TransitionResult:
-        """Run one exact host-prepared to-spec attempt for the current Goal."""
-        input_service = self._specification_authoring_input
+        """Run one exact host-prepared structuring attempt for the current source."""
+        input_service = self._specification_structuring_input
         if input_service is None:
-            message = "Specification authoring requires an injected input builder."
+            message = "Specification structuring requires an injected input builder."
             raise RuntimeError(message)
         replay = input_service.replay(
             NodeAttemptReplayQuery(
@@ -3169,7 +3212,7 @@ class AgileForgeApplication:
                 graph_version=None,
                 fact_fingerprint=None,
                 decision_fingerprint=None,
-                node_id="specification.author",
+                node_id="specification.structure",
                 idempotency_key=request.idempotency_key,
                 actor=request.actor,
                 correlation_id=request.correlation_id,
@@ -3178,21 +3221,25 @@ class AgileForgeApplication:
         if replay is not None:
             return replay
         position = self.position(project_id=request.project_id)
-        decision = _unique_available_decision(position, "specification.author")
+        decision = _unique_available_decision(position, "specification.structure")
         if decision is None or decision.category is not NodeCategory.AVAILABLE:
-            return _transition_not_available(position, "specification.author")
-        model_id = get_model_id(AGENTIC_MODEL_ROLES["specification.author"])
+            return _transition_not_available(position, "specification.structure")
+        model_id = get_model_id(AGENTIC_MODEL_ROLES["specification.structure"])
         try:
             input_payload = input_service.build(
                 project_id=request.project_id,
                 decision=decision,
             )
-        except VisionEvidenceCollectionError as error:
+        except (ValueError, VisionEvidenceCollectionError) as error:
             return TransitionResult(
                 ok=False,
                 position=position,
                 error=WorkflowError(
-                    code=_vision_evidence_workflow_error_code(error.code),
+                    code=(
+                        _vision_evidence_workflow_error_code(error.code)
+                        if isinstance(error, VisionEvidenceCollectionError)
+                        else WorkflowErrorCode.STALE_SPECIFICATION_INPUT
+                    ),
                     message=str(error),
                 ),
             )
@@ -3202,13 +3249,91 @@ class AgileForgeApplication:
                 graph_version=position.graph_version,
                 fact_fingerprint=position.fact_fingerprint,
                 decision_fingerprint=decision.decision_fingerprint,
-                node_id="specification.author",
+                node_id="specification.structure",
                 instance_key=decision.instance_key,
                 input_payload=input_payload,
                 model_id=model_id,
                 idempotency_key=request.idempotency_key,
                 actor=request.actor,
                 correlation_id=request.correlation_id,
+            )
+        )
+
+    def register_specification_source(
+        self,
+        request: SpecificationSourceRegistrationRequest,
+    ) -> TransitionResult:
+        """Capture semantic file selection, then submit one host-only command."""
+        registration = self._specification_source_registration
+        if registration is None:
+            message = "Specification source registration requires an injected service."
+            raise RuntimeError(message)
+        replay_service = self._specification_source_replay
+        replay = (
+            None
+            if replay_service is None
+            else replay_service.replay(
+                TransitionReplayQuery(
+                    request_kind="register_specification_source",
+                    project_id=request.project_id,
+                    idempotency_key=request.idempotency_key,
+                    actor=request.actor,
+                    correlation_id=request.correlation_id,
+                    operator_input={
+                        "capture_request_fingerprint": request.semantic_fingerprint()
+                    },
+                )
+            )
+        )
+        if replay is not None:
+            return replay
+        position = self.position(project_id=request.project_id)
+        decision = _unique_available_decision(
+            position,
+            "specification.source.register",
+        )
+        if decision is None or decision.category is not NodeCategory.AVAILABLE:
+            return _transition_not_available(position, "specification.source.register")
+        try:
+            prepared = registration.prepare(request)
+        except SpecificationSourceRegistrationError as error:
+            return TransitionResult(
+                ok=False,
+                position=position,
+                error=WorkflowError(
+                    code=_source_registration_workflow_error_code(error.code),
+                    message=str(error),
+                ),
+            )
+        if prepared.project_id != request.project_id:
+            return TransitionResult(
+                ok=False,
+                position=position,
+                error=WorkflowError(
+                    code=WorkflowErrorCode.STALE_SPECIFICATION_INPUT,
+                    message="Prepared Specification source belongs to another Project.",
+                ),
+            )
+        return self.transition(
+            RegisterSpecificationSource(
+                project_id=request.project_id,
+                graph_version=position.graph_version,
+                fact_fingerprint=position.fact_fingerprint,
+                decision_fingerprint=decision.decision_fingerprint,
+                idempotency_key=request.idempotency_key,
+                actor=request.actor,
+                correlation_id=request.correlation_id,
+                accepted_vision_artifact_id=(prepared.accepted_vision_artifact_id),
+                accepted_product_goal_artifact_id=(
+                    prepared.accepted_product_goal_artifact_id
+                ),
+                repository_binding_id=prepared.repository_binding_id,
+                repository_binding_fingerprint=(
+                    prepared.repository_binding_fingerprint
+                ),
+                capture_request_fingerprint=prepared.request_fingerprint,
+                source_fingerprint=prepared.source_fingerprint,
+                bundle=prepared.bundle,
             )
         )
 
@@ -3624,10 +3749,8 @@ def _delivery_lineage(
         or envelope.payload_fingerprint != spec.spec_hash
         or candidate.vision_artifact_id != spec.source_vision_artifact_id
         or candidate.vision_fingerprint != spec.source_vision_fingerprint
-        or candidate.product_goal_artifact_id
-        != spec.source_product_goal_artifact_id
-        or candidate.product_goal_fingerprint
-        != spec.source_product_goal_fingerprint
+        or candidate.product_goal_artifact_id != spec.source_product_goal_artifact_id
+        or candidate.product_goal_fingerprint != spec.source_product_goal_fingerprint
     ):
         return None
     return _DeliveryLineage(
@@ -4510,7 +4633,7 @@ def production_application() -> AgileForgeApplication:
         build_spec_authority_compiler_agent,
     )
     from adapters.adk.agents.specification_author import (  # noqa: PLC0415
-        root_agent as specification_author_agent,
+        root_agent as specification_structurer_agent,
     )
     from adapters.adk.agents.sprint import root_agent as sprint_agent  # noqa: PLC0415
     from adapters.adk.agents.story import (  # noqa: PLC0415
@@ -4528,7 +4651,10 @@ def production_application() -> AgileForgeApplication:
         DurableReadProjectionService,
     )
     from services.specification_authoring_input import (  # noqa: PLC0415
-        SpecificationAuthoringInputService,
+        SpecificationStructuringInputService,
+    )
+    from services.specification_source_registration import (  # noqa: PLC0415
+        SpecificationSourceRegistrationService,
     )
     from workflow.clock import SystemClock  # noqa: PLC0415
     from workflow.definitions.root import project_graph  # noqa: PLC0415
@@ -4550,7 +4676,7 @@ def production_application() -> AgileForgeApplication:
             vision_interview=vision_interview_agent,
             vision_repair=vision_repair_agent,
             product_goal=product_goal_interview_agent,
-            specification_author=specification_author_agent,
+            specification_structurer=specification_structurer_agent,
             backlog_generation=backlog_agent,
             roadmap_generation=roadmap_agent,
             story_generation=create_user_story_writer_agent(),
@@ -4560,7 +4686,11 @@ def production_application() -> AgileForgeApplication:
     )
     engine = get_engine()
     ensure_business_db_ready(engine)
-    specification_authoring_input = SpecificationAuthoringInputService(
+    specification_structuring_input = SpecificationStructuringInputService(
+        engine=engine,
+        repository_probe=GitPythonRepositoryProbe(),
+    )
+    specification_source_registration = SpecificationSourceRegistrationService(
         engine=engine,
         repository_probe=GitPythonRepositoryProbe(),
     )
@@ -4569,8 +4699,9 @@ def production_application() -> AgileForgeApplication:
         graph=graph,
         clock=SystemClock(),
         adk_recipe_registry=registry,
-        specification_source_check=(
-            specification_authoring_input.revalidate_sources
+        specification_source_check=(specification_structuring_input.revalidate_sources),
+        specification_registration_check=(
+            specification_source_registration.verify_prepared
         ),
     )
 
@@ -4585,7 +4716,9 @@ def production_application() -> AgileForgeApplication:
         product_goal_services=ProductGoalLifecycleServices(
             interview_input=ProductGoalInterviewInputService(engine=engine),
         ),
-        specification_authoring_input=specification_authoring_input,
+        specification_structuring_input=specification_structuring_input,
+        specification_source_registration=specification_source_registration,
+        specification_source_replay=DurableTransitionReplayService(engine=engine),
         authority_compilation_input=AuthorityCompilationInputService(engine=engine),
         authority_review_selection=AuthorityReviewSelectionService(engine=engine),
         authority_repair_input=AuthorityRepairInputService(engine=engine),
@@ -4635,8 +4768,9 @@ __all__ = [
     "RepositoryRefreshRequest",
     "RoadmapReviewRequest",
     "SemanticTransitionReplayPort",
-    "SpecificationAuthoringRequest",
     "SpecificationReviewRequest",
+    "SpecificationSourceRegistrationRequest",
+    "SpecificationStructuringRequest",
     "SprintCloseRequest",
     "SprintPlanReviewRequest",
     "SprintPlanningInputService",

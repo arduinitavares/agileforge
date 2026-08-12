@@ -6,12 +6,16 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Literal, Protocol
 
-from pydantic import Field
-
-from workflow.contracts import FrozenModel
+from pydantic import BaseModel, ConfigDict, Field
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+class _FrozenProbeModel(BaseModel):
+    """Immutable probe DTO without importing the workflow package."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
 
 class RepositoryProbeErrorCode(StrEnum):
@@ -51,7 +55,7 @@ class RepositoryProbeError(RuntimeError):
         super().__init__(_ERROR_MESSAGES[code])
 
 
-class RepositoryStatusEntry(FrozenModel):
+class RepositoryStatusEntry(_FrozenProbeModel):
     """One normalized Git status observation."""
 
     area: Literal["index", "worktree", "untracked"]
@@ -60,14 +64,14 @@ class RepositoryStatusEntry(FrozenModel):
     previous_path: str | None = None
 
 
-class RepositoryProbeWarning(FrozenModel):
+class RepositoryProbeWarning(_FrozenProbeModel):
     """A non-fatal repository observation warning."""
 
-    code: Literal["DIRTY_WORKTREE"]
+    code: Literal["DIRTY_WORKTREE", "REMOTE_OMITTED"]
     message: str
 
 
-class RepositoryProbeResult(FrozenModel):
+class RepositoryProbeResult(_FrozenProbeModel):
     """Immutable repository identity and status captured by one probe."""
 
     worktree_path: str

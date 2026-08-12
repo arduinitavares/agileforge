@@ -132,35 +132,56 @@ the exact same request after an uncertain transport result.
 
 ## Specification And Authority Boundary
 
-An accepted Product Goal enables host-owned `specification author`. AgileForge
-captures the accepted Vision and Product Goal, source manifest, model and prompt
-configuration, workflow attempt, and any accepted amendment base before it
-invokes the configured `to-spec` producer. The producer returns a typed
-`agileforge.spec.v2` payload. AgileForge validates and persists that payload
-with an immutable envelope and renders the complete Markdown review view.
+An accepted Product Goal enables `specification source register`, not direct
+authoring. An external agent performs optional Discovery through
+`grill-with-docs`, updates `CONTEXT.md` when terminology is resolved, creates
+ADRs only when warranted, and runs `to-spec` to produce a human-readable source
+Specification. `grill-with-docs` is provenance attestation; AgileForge does not
+claim to prove the agent's internal reasoning.
 
-The operator does not supply raw JSON, a file path, Markdown, candidate IDs,
-hashes, fingerprints, or lineage fields. Execute the exact `specification
-author` template returned by `workflow next`.
+Register the exact source and applicable ADR paths using the command returned by
+`workflow next`:
+
+```sh
+./agileforge-dev cli --profile local -- specification source register \
+  --project-id 41 \
+  --source-path specs/product-specification.md \
+  --preparation-capability grill-with-docs \
+  --adr-path docs/adr/0004-register-to-spec-source-before-structuring.md \
+  --idempotency-key specification-source-41-1 \
+  --actor operator
+```
+
+AgileForge atomically captures exact bytes, the accepted Vision fingerprint,
+active Product Goal fingerprint, repository binding and revision, an explicit
+`CONTEXT.md` present/absent state, and applicable ADR fingerprints. Once the
+source is registered, execute the advertised `specification structure` command:
+
+```sh
+./agileforge-dev cli --profile local -- specification structure \
+  --project-id 41 \
+  --idempotency-key specification-structure-41-1 \
+  --actor operator
+```
+
+The internal Specification Structuring Agent receives the captured Vision,
+Goal, exact source, present Context, ADRs, repository evidence, pinned amendment
+base, and prior human feedback when applicable. It returns semantic content
+through the closed `agileforge.spec.v2` contract. AgileForge owns identities,
+canonical ordering, hashes, lineage, timestamps, persistence, and rendering.
 
 `specification review` resolves the graph-selected immutable candidate. The
 human supplies only the decision and rationale plus normal transport metadata.
 Acceptance does not rewrite payload or envelope bytes. Authority compilation
-then consumes the accepted typed payload, never the rendered Markdown. A
+then consumes only the accepted typed clauses, never source Markdown,
+`CONTEXT.md`, ADR or repository prose, or rendered Markdown. A
 separate `authority review` and `authority decide` gate remains required before
 Backlog work.
 
-Discovery work such as `grill-with-docs`, research, interviews, repository
-evidence, ADRs, or prototypes can contribute source provenance. There is no
-Discovery artifact, lifecycle node, API route, CLI command, or UI state.
-
-To use post-Goal source work, write the result to one approved repository file:
-`README.md`, `CONTEXT.md`, `pyproject.toml`, `specs/spec.json`, `specs/spec.md`,
-`docs/spec/spec.json`, or `docs/spec/spec.md`. Then run `repository refresh`
-before `specification author`. Authoring captures a bounded snapshot and
-rechecks it immediately before the provider call. A changed binding or file
-makes the attempt stale; the provider never receives old source bytes. Review
-source warnings under the manifest entry that produced them.
+There is no Discovery artifact, lifecycle node, API route, CLI command, or UI
+state. `CONTEXT.md` is optional because domain modeling creates it lazily.
+Source, Context, ADR, Vision, Goal, repository, or binding drift invalidates the
+attempt; read `workflow next` again and register a new immutable source.
 
 ## Command Catalog
 
@@ -170,7 +191,7 @@ The current fixed request kinds map to these prefixes:
 | --- | --- |
 | Vision | `vision bootstrap`, `vision respond`, `vision status`, `vision review`, `vision revision` |
 | Product Goal | `goal respond`, `goal review`, `goal complete`, `goal abandon` |
-| Specification | `specification author`, `specification status`, `specification review` |
+| Specification | `specification source register`, `specification structure`, `specification status`, `specification review` |
 | Authority | `authority compile`, `authority feedback`, `authority decide`, `authority repair` |
 | Backlog | `backlog generate`, `backlog decide` |
 | Roadmap | `roadmap generate`, `roadmap decide` |
@@ -204,7 +225,7 @@ The production recipe catalog contains:
 ```text
 authority.compile
 authority.repair
-specification.author
+specification.structure
 vision.bootstrap
 vision.interview
 goal.interview

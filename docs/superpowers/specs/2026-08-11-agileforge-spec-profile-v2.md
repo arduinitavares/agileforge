@@ -14,20 +14,29 @@ dual-read, or compatibility alias.
 ## Boundary
 
 An accepted Vision and active accepted Product Goal enable
-`specification.author`. The host prepares the complete authoring input from
-durable state and invokes the configured `to-spec` producer. Humans provide
-normal-language review decisions and feedback. They never author payload JSON,
-IDs, hashes, fingerprints, lineage, source manifests, or attempt metadata.
+`specification.source.register`. An external agent performs any useful
+Discovery through `grill-with-docs`, resolves terminology in `CONTEXT.md` when
+needed, creates warranted ADRs, runs `to-spec`, and writes one human-readable
+source Specification. AgileForge captures those exact bytes before exposing
+`specification.structure`.
 
-The producer returns only:
+The internal Specification Structuring Agent receives the registered source,
+optional captured Context, applicable ADRs, repository evidence/revision,
+accepted Vision and Goal, a pinned base for amendments, and prior human
+feedback for revisions. Humans provide normal-language review decisions and
+feedback. They never author payload JSON, IDs, hashes, fingerprints, lineage,
+source manifests, or attempt metadata.
+
+The structuring provider returns only:
 
 - one complete `SpecificationPayload`;
 - removal justifications for an amendment; and
 - explicit stable-ID replacements for an amendment.
 
-Discovery, research, repository inspection, interviews, ADRs, and prototypes
-remain optional activities and provenance sources. They are not persisted as a
-Discovery lifecycle artifact or review gate.
+Discovery remains an optional `grill-with-docs` activity. The registered
+Specification Source is immutable provenance, not a Discovery artifact or
+review gate. Preparation capability is an attestation; AgileForge does not
+claim to prove the external agent's internal reasoning.
 
 ## Canonical semantic payload
 
@@ -55,12 +64,15 @@ fingerprint is SHA-256 over those canonical semantic bytes.
 ## Host-owned candidate envelope
 
 Lifecycle and execution evidence never enters the semantic payload. The
-immutable `agileforge.spec-candidate-envelope.v1` envelope binds the exact
+immutable `agileforge.spec-candidate-envelope.v2` envelope binds the exact
 payload to:
 
 - accepted Vision and Product Goal identities and fingerprints;
+- exact registered source fingerprint plus `to-spec` producer and
+  `grill-with-docs` preparation capabilities;
 - the complete source manifest and accepted-fact fingerprint;
-- producer input, capability, version, model configuration, and prompt;
+- structurer input, capability, version, model configuration, prompt version,
+  and prompt fingerprint;
 - workflow attempt, correlation, and production time;
 - canonical payload and deterministic review-view fingerprints; and
 - the resulting candidate fingerprint.
@@ -74,8 +86,9 @@ identity across executions.
 
 Production source IDs are stable semantic roles rather than database-row IDs:
 `SRC.vision.accepted`, `SRC.product-goal.active`,
-`SRC.repository-evidence.accepted-vision`, and
-`SRC.repository-context.active`. Accepted-fact and producer-input fingerprints
+`SRC.specification-source.primary`, `SRC.specification-source.context`, and
+path-derived `SRC.specification-source.adr.*` IDs. Accepted-fact and
+structurer-input fingerprints
 use portable semantic projections that exclude project, artifact, attempt, and
 version row IDs while retaining the exact accepted content, source, base,
 producer, model, prompt, and amendment evidence.
@@ -86,13 +99,18 @@ relations, controlled terms, and external references. Every removal requires a
 justification. Replacing a stable item ID requires an explicit old-to-new
 mapping and justification.
 
-Optional post-Goal repository sources use only `README.md`, `CONTEXT.md`,
-`pyproject.toml`, `specs/spec.json`, `specs/spec.md`, `docs/spec/spec.json`, or
-`docs/spec/spec.md`. Operators refresh the repository binding after writing
-source material. The host captures a bounded source bundle and revalidates its
-fingerprint at the last boundary before provider invocation. Drift obsoletes
-the attempt without calling the provider. Each warning is rendered directly
-under the source-manifest entry that produced it.
+The source registration selects one canonical repository-relative `to-spec`
+path and zero or more applicable `docs/adr/*.md` paths. Root `CONTEXT.md` is
+captured automatically as exactly present or absent; it is never mandatory.
+The host preserves exact UTF-8 bytes, including BOM, newline spelling, trailing
+whitespace, and trailing newline. It rejects traversal, aliases, symlinks,
+non-regular files, invalid UTF-8, oversize bundles, and capture races instead of
+normalizing or truncating input.
+
+Vision, Goal, repository revision, source, Context, and ADR fingerprints are
+revalidated before and after each provider call, immediately before candidate
+persistence, and inside accepted-decision persistence. Drift obsoletes the
+attempt without creating or accepting a candidate.
 
 ## Review, acceptance, and Authority
 
@@ -112,4 +130,4 @@ separate mandatory gate before Backlog generation.
 The executable contract is defined by
 `utils/agileforge_spec_profile_v2.py` and
 `services/specs/candidate_contract.py`. Architecture rationale is recorded in
-[ADR 0003](../../adr/0003-make-to-spec-the-canonical-specification-boundary.md).
+[ADR 0004](../../adr/0004-register-to-spec-source-before-structuring.md).

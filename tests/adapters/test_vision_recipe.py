@@ -145,30 +145,34 @@ def _evidence(name: str = "Vision") -> JsonObject:
         "content": content,
         "truncated": False,
     }
-    return _JSON_OBJECT.validate_python({
-        "schema_version": "agileforge.vision-evidence.v1",
-        "items": [item],
-        "warnings": [],
-        "evidence_fingerprint": canonical_hash(
-            {
-                "schema_version": "agileforge.vision-evidence.v1",
-                "items": [item],
-                "warnings": [],
-            }
-        ),
-    })
+    return _JSON_OBJECT.validate_python(
+        {
+            "schema_version": "agileforge.vision-evidence.v1",
+            "items": [item],
+            "warnings": [],
+            "evidence_fingerprint": canonical_hash(
+                {
+                    "schema_version": "agileforge.vision-evidence.v1",
+                    "items": [item],
+                    "warnings": [],
+                }
+            ),
+        }
+    )
 
 
 def _components(*, complete: bool = True) -> JsonObject:
-    return _JSON_OBJECT.validate_python({
-        "project_name": "Vision",
-        "target_user": "Operators" if complete else None,
-        "problem": "State drift",
-        "product_category": "Tool",
-        "key_benefit": "Trust",
-        "competitors": "Spreadsheets",
-        "differentiator": "Facts",
-    })
+    return _JSON_OBJECT.validate_python(
+        {
+            "project_name": "Vision",
+            "target_user": "Operators" if complete else None,
+            "problem": "State drift",
+            "product_category": "Tool",
+            "key_benefit": "Trust",
+            "competitors": "Spreadsheets",
+            "differentiator": "Facts",
+        }
+    )
 
 
 def _draft(
@@ -194,48 +198,52 @@ def _draft(
                 else [],
             }
         )
-    return _JSON_OBJECT.validate_python({
-        "schema_version": "agileforge.vision-draft.v1",
-        "components": components,
-        "component_basis": basis,
-        "draft_statement": statement,
-        "assumptions": (
-            [
+    return _JSON_OBJECT.validate_python(
+        {
+            "schema_version": "agileforge.vision-draft.v1",
+            "components": components,
+            "component_basis": basis,
+            "draft_statement": statement,
+            "assumptions": (
+                [
+                    {
+                        "assumption_id": "assumption:one",
+                        "text": "Operators need durable workflow facts.",
+                        "affected_components": ["target_user"],
+                    }
+                ]
+                if source_kind == "inference"
+                else []
+            ),
+            "conflicts": [],
+            "clarifying_questions": []
+            if complete
+            else [
                 {
-                    "assumption_id": "assumption:one",
-                    "text": "Operators need durable workflow facts.",
+                    "question_id": "question:target",
+                    "text": "Who uses it?",
                     "affected_components": ["target_user"],
+                    "conflict_ids": [],
                 }
-            ]
-            if source_kind == "inference"
-            else []
-        ),
-        "conflicts": [],
-        "clarifying_questions": []
-        if complete
-        else [
-            {
-                "question_id": "question:target",
-                "text": "Who uses it?",
-                "affected_components": ["target_user"],
-                "conflict_ids": [],
-            }
-        ],
-        "is_complete": complete,
-    })
+            ],
+            "is_complete": complete,
+        }
+    )
 
 
 def _bootstrap_input(*, evidence: JsonObject | None = None) -> JsonObject:
-    return _JSON_OBJECT.validate_python({
-        "request": {
-            "schema_version": "agileforge.vision-input.v1",
-            "operation": "bootstrap",
-            "project_name": "Vision",
-            "project_description": None,
-            "evidence": _evidence() if evidence is None else evidence,
-        },
-        "preflight": None,
-    })
+    return _JSON_OBJECT.validate_python(
+        {
+            "request": {
+                "schema_version": "agileforge.vision-input.v1",
+                "operation": "bootstrap",
+                "project_name": "Vision",
+                "project_description": None,
+                "evidence": _evidence() if evidence is None else evidence,
+            },
+            "preflight": None,
+        }
+    )
 
 
 def _clarification_input(
@@ -246,35 +254,37 @@ def _clarification_input(
     """Build a clarification envelope with explicit stored and observed evidence."""
     evidence = _evidence() if stored_evidence is None else stored_evidence
     observed = evidence if observed_evidence is None else observed_evidence
-    return _JSON_OBJECT.validate_python({
-        "request": {
-            "schema_version": "agileforge.vision-input.v1",
-            "operation": "clarification",
-            "project_name": "Vision",
-            "project_description": None,
-            "vision_evidence_snapshot_id": TRUSTED_SNAPSHOT_ID,
-            "evidence": evidence,
-            "current_components": _components(complete=False),
-            "current_statement": "A draft.",
-            "current_component_basis": [],
-            "current_assumptions": [],
-            "current_conflicts": [],
-            "current_questions": [
-                {
-                    "question_id": "question:target",
-                    "text": "Who uses it?",
-                    "affected_components": ["target_user"],
-                    "conflict_ids": [],
-                }
-            ],
-            "human_response": "Operators use it.",
-            "addressed_question_ids": ["question:target"],
-        },
-        "preflight": {
-            "expected_evidence_fingerprint": evidence["evidence_fingerprint"],
-            "observed_evidence": observed,
+    return _JSON_OBJECT.validate_python(
+        {
+            "request": {
+                "schema_version": "agileforge.vision-input.v1",
+                "operation": "clarification",
+                "project_name": "Vision",
+                "project_description": None,
+                "vision_evidence_snapshot_id": TRUSTED_SNAPSHOT_ID,
+                "evidence": evidence,
+                "current_components": _components(complete=False),
+                "current_statement": "A draft.",
+                "current_component_basis": [],
+                "current_assumptions": [],
+                "current_conflicts": [],
+                "current_questions": [
+                    {
+                        "question_id": "question:target",
+                        "text": "Who uses it?",
+                        "affected_components": ["target_user"],
+                        "conflict_ids": [],
+                    }
+                ],
+                "human_response": "Operators use it.",
+                "addressed_question_ids": ["question:target"],
+            },
+            "preflight": {
+                "expected_evidence_fingerprint": evidence["evidence_fingerprint"],
+                "observed_evidence": observed,
+            },
         }
-    })
+    )
 
 
 async def _run_recipe_async(
@@ -345,7 +355,7 @@ def _registry(primary: BaseAgent, repair: SequenceLeaf) -> AdkRecipeRegistry:
             vision_interview=primary,
             vision_repair=repair,
             product_goal=unused,
-            specification_author=unused,
+            specification_structurer=unused,
             backlog_generation=unused,
             roadmap_generation=unused,
             story_generation=unused,
@@ -500,9 +510,7 @@ def test_registry_wires_the_dedicated_vision_repair_leaf() -> None:
     registry = _registry(primary, repair)
 
     workflow = registry.require("vision.bootstrap").workflow
-    result = asyncio.run(
-        _run_workflow_async(workflow, _bootstrap_input())
-    )
+    result = asyncio.run(_run_workflow_async(workflow, _bootstrap_input()))
 
     assert result.payload == _draft()
     assert len(primary.calls) == 1
@@ -1258,7 +1266,7 @@ def test_schema_failure_records_no_vision_facts(engine: Engine) -> None:
             vision_interview=failing,
             vision_repair=unused,
             product_goal=unused,
-            specification_author=unused,
+            specification_structurer=unused,
             backlog_generation=unused,
             roadmap_generation=unused,
             story_generation=unused,

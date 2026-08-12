@@ -41,7 +41,7 @@ class RevalidateNodeAttempt(FrozenModel):
     project_id: int
     attempt_id: int
     attempt_fingerprint: str = Field(min_length=1)
-    target_node_id: Literal["specification.author"] = "specification.author"
+    target_node_id: Literal["specification.structure"] = "specification.structure"
     idempotency_key: str = Field(min_length=1)
     actor: str = Field(min_length=1)
     correlation_id: str | None = None

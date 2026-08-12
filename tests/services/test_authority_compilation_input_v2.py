@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 from datetime import UTC, datetime
@@ -10,12 +11,23 @@ from typing import TYPE_CHECKING, Literal
 import pytest
 from sqlmodel import Session
 
-from models.product_definition import SpecificationCandidate
+from models.product_definition import SpecificationCandidate, SpecificationSource
 from models.specs import SpecRegistry
 from services.authority_compilation_input import (
     AuthorityCompilationInputError,
     AuthorityCompilationInputService,
 )
+from services.contracts.specification_source import (
+    SPECIFICATION_SOURCE_CONTEXT_ID,
+    SPECIFICATION_SOURCE_PRIMARY_ID,
+    SpecificationContextCapture,
+    SpecificationRepositoryRevision,
+    SpecificationSourceBundle,
+    SpecificationSourceDocument,
+    source_bundle_fingerprint,
+    specification_source_adr_id,
+)
+from services.repository_probe import RepositoryProbeWarning, RepositoryStatusEntry
 from services.specs.candidate_contract import (
     CandidateBuildInput,
     CandidateKind,
@@ -41,11 +53,33 @@ CANDIDATE_ID = 71
 SPEC_VERSION_ID = 91
 VISION_ID = 17
 GOAL_ID = 23
+SOURCE_ID = 37
 COMPILER_MODEL = "offline/authority-compiler"
+_SOURCE_MARKDOWN_SENTINEL = "SOURCE_MARKDOWN_MUST_NEVER_REACH_AUTHORITY"
+_CONTEXT_SENTINEL = "CONTEXT_PROSE_MUST_NEVER_REACH_AUTHORITY"
+_ADR_SENTINEL = "ADR_PROSE_MUST_NEVER_REACH_AUTHORITY"
+_REPOSITORY_SENTINEL = "REPOSITORY_PROSE_MUST_NEVER_REACH_AUTHORITY"
 
 
 def _fingerprint(label: str) -> str:
     return f"sha256:{hashlib.sha256(label.encode()).hexdigest()}"
+
+
+def _source_document(
+    *,
+    source_id: str,
+    relative_path: str,
+    text: str,
+) -> SpecificationSourceDocument:
+    """Build one byte-exact source carrying an Authority exclusion sentinel."""
+    raw = text.encode("utf-8")
+    return SpecificationSourceDocument(
+        source_id=source_id,
+        relative_path=relative_path,
+        content_base64=base64.b64encode(raw).decode("ascii"),
+        byte_length=len(raw),
+        content_fingerprint="sha256:" + hashlib.sha256(raw).hexdigest(),
+    )
 
 
 def _payload() -> SpecificationPayload:
@@ -67,7 +101,7 @@ def _payload() -> SpecificationPayload:
                     "acceptance": ["The exact accepted payload is compiled."],
                     "source_notes": [
                         {
-                            "source_id": "SRC.operator",
+                            "source_id": SPECIFICATION_SOURCE_PRIMARY_ID,
                             "kind": "external_summary",
                             "text": "SECRET PROVENANCE PROSE",
                             "external_ref_id": "EXT.operator-notes",
@@ -102,6 +136,51 @@ def _seed_approved_spec(engine: Engine) -> SpecRegistry:
     payload = _payload()
     vision_fingerprint = _fingerprint("vision")
     goal_fingerprint = _fingerprint("goal")
+    source_document = _source_document(
+        source_id=SPECIFICATION_SOURCE_PRIMARY_ID,
+        relative_path="SPECIFICATION.md",
+        text=_SOURCE_MARKDOWN_SENTINEL,
+    )
+    context_document = _source_document(
+        source_id=SPECIFICATION_SOURCE_CONTEXT_ID,
+        relative_path="CONTEXT.md",
+        text=_CONTEXT_SENTINEL,
+    )
+    adr_document = _source_document(
+        source_id=specification_source_adr_id("docs/adr/0001-authority-boundary.md"),
+        relative_path="docs/adr/0001-authority-boundary.md",
+        text=_ADR_SENTINEL,
+    )
+    source_bundle = SpecificationSourceBundle(
+        source=source_document,
+        context=SpecificationContextCapture(
+            state="present",
+            document=context_document,
+        ),
+        adrs=(adr_document,),
+        repository_revision=SpecificationRepositoryRevision(
+            head_sha="a" * 40,
+            branch_name="dev/authority-boundary",
+            dirty=True,
+            status_entries=(
+                RepositoryStatusEntry(
+                    area="worktree",
+                    change="modified",
+                    path=_REPOSITORY_SENTINEL,
+                ),
+            ),
+            status_fingerprint=_fingerprint("repository-status"),
+            warnings=(
+                RepositoryProbeWarning(
+                    code="DIRTY_WORKTREE",
+                    message=_REPOSITORY_SENTINEL,
+                ),
+            ),
+        ),
+        accepted_vision_fingerprint=vision_fingerprint,
+        accepted_product_goal_fingerprint=goal_fingerprint,
+    )
+    registered_source_fingerprint = source_bundle_fingerprint(source_bundle)
     envelope = build_candidate_envelope(
         payload=payload,
         metadata=CandidateBuildInput(
@@ -110,19 +189,23 @@ def _seed_approved_spec(engine: Engine) -> SpecRegistry:
             accepted_vision_fingerprint=vision_fingerprint,
             accepted_product_goal_id=GOAL_ID,
             accepted_product_goal_fingerprint=goal_fingerprint,
+            registered_source_fingerprint=registered_source_fingerprint,
+            source_producer_capability="to-spec",
+            source_preparation_capability="grill-with-docs",
             source_manifest=(
                 CandidateSourceManifestEntry(
-                    source_id="SRC.operator",
-                    kind=CandidateSourceKind.PRODUCT_GOAL,
-                    fingerprint=goal_fingerprint,
+                    source_id=source_document.source_id,
+                    kind=CandidateSourceKind.EXTERNAL,
+                    fingerprint=source_document.content_fingerprint,
                 ),
             ),
             accepted_fact_fingerprint=_fingerprint("facts"),
             producer_input_fingerprint=_fingerprint("producer-input"),
-            producer_capability="to-spec",
-            producer_version="2.0.0",
-            model_id="offline/to-spec",
+            producer_capability="specification-structurer",
+            producer_version="1.0.0",
+            model_id="offline/specification-structurer",
             model_configuration_fingerprint=_fingerprint("model-config"),
+            prompt_version="agileforge.specification-structurer.prompt.v1",
             prompt_fingerprint=_fingerprint("prompt"),
             workflow_node_attempt_id=61,
             attempt_fingerprint=_fingerprint("attempt"),
@@ -134,6 +217,8 @@ def _seed_approved_spec(engine: Engine) -> SpecRegistry:
         specification_candidate_id=CANDIDATE_ID,
         project_id=PROJECT_ID,
         candidate_kind="initial",
+        specification_source_id=SOURCE_ID,
+        specification_source_fingerprint=registered_source_fingerprint,
         vision_artifact_id=VISION_ID,
         vision_fingerprint=vision_fingerprint,
         product_goal_artifact_id=GOAL_ID,
@@ -147,6 +232,27 @@ def _seed_approved_spec(engine: Engine) -> SpecRegistry:
         workflow_node_attempt_id=envelope.workflow_node_attempt_id,
         attempt_fingerprint=envelope.attempt_fingerprint,
         recorded_by="operator",
+    )
+    source = SpecificationSource(
+        specification_source_id=SOURCE_ID,
+        project_id=PROJECT_ID,
+        source_bundle_json=json.dumps(
+            source_bundle.model_dump(mode="json"),
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        source_fingerprint=registered_source_fingerprint,
+        repository_binding_id=11,
+        repository_head_sha=source_bundle.repository_revision.head_sha,
+        repository_dirty=source_bundle.repository_revision.dirty,
+        repository_status_fingerprint=(
+            source_bundle.repository_revision.status_fingerprint
+        ),
+        vision_artifact_id=VISION_ID,
+        vision_fingerprint=vision_fingerprint,
+        product_goal_artifact_id=GOAL_ID,
+        product_goal_fingerprint=goal_fingerprint,
+        registered_by="operator",
     )
     spec = SpecRegistry(
         spec_version_id=SPEC_VERSION_ID,
@@ -165,6 +271,7 @@ def _seed_approved_spec(engine: Engine) -> SpecRegistry:
         connection.exec_driver_sql("PRAGMA foreign_keys=OFF")
         connection.commit()
     with Session(engine) as session:
+        session.add(source)
         session.add(candidate)
         session.add(spec)
         session.commit()
@@ -224,6 +331,10 @@ def test_builds_exact_typed_v2_input_without_provenance(engine: Engine) -> None:
     assert "external_references" not in serialized
     assert "This item is context, not an invariant source." not in serialized
     assert "REQ.authority.background" not in serialized
+    assert _SOURCE_MARKDOWN_SENTINEL not in serialized
+    assert _CONTEXT_SENTINEL not in serialized
+    assert _ADR_SENTINEL not in serialized
+    assert _REPOSITORY_SENTINEL not in serialized
 
 
 @pytest.mark.parametrize("failure", ["superseded", "decision-mismatch"])

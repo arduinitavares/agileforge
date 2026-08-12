@@ -16,6 +16,7 @@ from models.product_definition import (
     ProductGoalOutcome,
     SpecificationCandidate,
     SpecificationDecision,
+    SpecificationSource,
     VisionArtifact,
     VisionArtifactDecision,
     VisionEvidenceSnapshot,
@@ -485,7 +486,8 @@ def _assert_active_goal_blocks_revision_acceptance(
         lineage.revised_vision_artifact_id
     )
     available_nodes = domain.position(lineage.project_id).available_nodes
-    assert "specification.author" not in available_nodes
+    assert "specification.source.register" not in available_nodes
+    assert "specification.structure" not in available_nodes
     return resolved_lineage
 
 
@@ -707,9 +709,7 @@ def test_accepted_revision_creates_only_a_new_vision(engine: Engine) -> None:
     fingerprint = initial.output["vision_fingerprint"]
     assert isinstance(artifact_id, int)
     assert isinstance(fingerprint, str)
-    initial_attempt_id, initial_attempt_fingerprint = _attempt_identity(
-        initial_attempt
-    )
+    initial_attempt_id, initial_attempt_fingerprint = _attempt_identity(initial_attempt)
     accepted = _review_vision(
         domain,
         project_id,
@@ -815,6 +815,7 @@ def test_accepted_revision_creates_only_a_new_vision(engine: Engine) -> None:
             SpecificationDecision,
             SpecRegistry,
             SpecificationCandidate,
+            SpecificationSource,
             ProductGoalOutcome,
             ProductGoalArtifactDecision,
             ProductGoalArtifact,

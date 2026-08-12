@@ -33,8 +33,9 @@ from services.application import (
     RepositoryAttachRequest,
     RepositoryRefreshRequest,
     RoadmapReviewRequest,
-    SpecificationAuthoringRequest,
     SpecificationReviewRequest,
+    SpecificationSourceRegistrationRequest,
+    SpecificationStructuringRequest,
     SprintCloseRequest,
     SprintPlanningRequest,
     SprintPlanReviewRequest,
@@ -197,9 +198,14 @@ class _Application(Protocol):
         request: RepositoryRefreshRequest,
     ) -> TransitionResult: ...
 
-    def author_specification(
+    def register_specification_source(
         self,
-        request: SpecificationAuthoringRequest,
+        request: SpecificationSourceRegistrationRequest,
+    ) -> TransitionResult: ...
+
+    def structure_specification(
+        self,
+        request: SpecificationStructuringRequest,
     ) -> TransitionResult: ...
 
     def review_specification(
@@ -609,6 +615,39 @@ def _install_execution_action_mutations(
     triage.add_argument("--file", required=True)
 
 
+def _install_specification_mutations(
+    specification_sub: argparse._SubParsersAction,
+) -> None:
+    """Install source capture, structuring, and exact human review commands."""
+    specification_source = specification_sub.add_parser("source")
+    specification_source_sub = specification_source.add_subparsers(
+        dest="specification_source_action",
+        required=True,
+    )
+    source_register = _semantic_leaf(
+        specification_source_sub,
+        "register",
+        _specification_source_register,
+    )
+    source_register.add_argument("--source-path", required=True)
+    source_register.add_argument(
+        "--preparation-capability",
+        choices=("grill-with-docs",),
+        required=True,
+    )
+    source_register.add_argument("--adr-path", dest="adr_paths", action="append")
+    _semantic_leaf(specification_sub, "structure", _specification_structure)
+    specification_review = _semantic_leaf(
+        specification_sub,
+        "review",
+        _specification_review,
+    )
+    specification_review.add_argument(
+        "--decision", choices=("accepted", "rejected", "feedback"), required=True
+    )
+    specification_review.add_argument("--rationale", required=True)
+
+
 def _install_lifecycle_mutations(
     branches: dict[tuple[str, ...], argparse._SubParsersAction],
 ) -> None:
@@ -643,16 +682,7 @@ def _install_lifecycle_mutations(
     repository_attach.add_argument("--path", required=True)
     _semantic_leaf(branches[("repository",)], "refresh", _repository_refresh)
 
-    _semantic_leaf(
-        branches[("specification",)], "author", _specification_author
-    )
-    specification_review = _semantic_leaf(
-        branches[("specification",)], "review", _specification_review
-    )
-    specification_review.add_argument(
-        "--decision", choices=("accepted", "rejected", "feedback"), required=True
-    )
-    specification_review.add_argument("--rationale", required=True)
+    _install_specification_mutations(branches[("specification",)])
 
     _semantic_leaf(branches[("authority",)], "compile", _authority_compile)
     authority_decide = _semantic_leaf(
@@ -1096,13 +1126,32 @@ def _repository_refresh(args: argparse.Namespace, application: _Application) -> 
     )
 
 
-def _specification_author(
+def _specification_source_register(
     args: argparse.Namespace,
     application: _Application,
 ) -> int:
     return _emit_result(
-        application.author_specification(
-            SpecificationAuthoringRequest(
+        application.register_specification_source(
+            SpecificationSourceRegistrationRequest(
+                project_id=args.project_id,
+                source_path=args.source_path,
+                preparation_capability=args.preparation_capability,
+                adr_paths=tuple(args.adr_paths or ()),
+                idempotency_key=args.idempotency_key,
+                actor=args.actor,
+                correlation_id=args.correlation_id,
+            )
+        )
+    )
+
+
+def _specification_structure(
+    args: argparse.Namespace,
+    application: _Application,
+) -> int:
+    return _emit_result(
+        application.structure_specification(
+            SpecificationStructuringRequest(
                 project_id=args.project_id,
                 idempotency_key=args.idempotency_key,
                 actor=args.actor,
@@ -1121,9 +1170,7 @@ def _specification_review(
     data = packet.get("data")
     candidate = data.get("candidate") if isinstance(data, dict) else None
     expected_candidate_fingerprint = (
-        candidate.get("candidate_fingerprint")
-        if isinstance(candidate, dict)
-        else None
+        candidate.get("candidate_fingerprint") if isinstance(candidate, dict) else None
     )
     if not isinstance(expected_candidate_fingerprint, str) or not (
         expected_candidate_fingerprint.strip()

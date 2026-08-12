@@ -487,6 +487,92 @@ class ProductGoalOutcome(SQLModel, table=True):
     decided_at: datetime = Field(default_factory=utc_now, nullable=False)
 
 
+class SpecificationSource(SQLModel, table=True):
+    """Immutable registered external to-spec source and exact lineage."""
+
+    __tablename__ = "specification_sources"
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id",
+            "specification_source_id",
+            "source_fingerprint",
+            name="uq_specification_source_identity",
+        ),
+        UniqueConstraint(
+            "project_id",
+            "supersedes_specification_source_id",
+            name="uq_specification_source_successor",
+        ),
+        CheckConstraint(
+            "(supersedes_specification_source_id IS NULL "
+            "AND supersedes_source_fingerprint IS NULL) OR "
+            "(supersedes_specification_source_id IS NOT NULL "
+            "AND supersedes_source_fingerprint IS NOT NULL)",
+            name="ck_specification_source_supersedes",
+        ),
+        ForeignKeyConstraint(
+            ["project_id", "repository_binding_id"],
+            [
+                "repository_bindings.project_id",
+                "repository_bindings.repository_binding_id",
+            ],
+            name="fk_specification_source_repository_binding",
+        ),
+        ForeignKeyConstraint(
+            ["project_id", "vision_artifact_id", "vision_fingerprint"],
+            [
+                "vision_artifacts.project_id",
+                "vision_artifacts.vision_artifact_id",
+                "vision_artifacts.content_fingerprint",
+            ],
+            name="fk_specification_source_vision",
+        ),
+        ForeignKeyConstraint(
+            [
+                "project_id",
+                "product_goal_artifact_id",
+                "product_goal_fingerprint",
+            ],
+            [
+                "product_goal_artifacts.project_id",
+                "product_goal_artifacts.product_goal_artifact_id",
+                "product_goal_artifacts.content_fingerprint",
+            ],
+            name="fk_specification_source_goal",
+        ),
+        ForeignKeyConstraint(
+            [
+                "project_id",
+                "supersedes_specification_source_id",
+                "supersedes_source_fingerprint",
+            ],
+            [
+                "specification_sources.project_id",
+                "specification_sources.specification_source_id",
+                "specification_sources.source_fingerprint",
+            ],
+            name="fk_specification_source_supersedes",
+        ),
+    )
+
+    specification_source_id: int | None = Field(default=None, primary_key=True)
+    project_id: int = Field(foreign_key="projects.project_id", index=True)
+    source_bundle_json: str = Field(sa_type=Text)
+    source_fingerprint: str = Field(index=True)
+    repository_binding_id: int = Field(index=True)
+    repository_head_sha: str = Field(index=True, min_length=40, max_length=40)
+    repository_dirty: bool
+    repository_status_fingerprint: str = Field(index=True)
+    vision_artifact_id: int = Field(index=True)
+    vision_fingerprint: str = Field(index=True)
+    product_goal_artifact_id: int = Field(index=True)
+    product_goal_fingerprint: str = Field(index=True)
+    supersedes_specification_source_id: int | None = Field(default=None, index=True)
+    supersedes_source_fingerprint: str | None = Field(default=None, index=True)
+    registered_by: str = Field(index=True)
+    registered_at: datetime = Field(default_factory=utc_now, nullable=False)
+
+
 class SpecificationCandidate(SQLModel, table=True):
     """Immutable candidate specification with complete product lineage."""
 
@@ -531,6 +617,19 @@ class SpecificationCandidate(SQLModel, table=True):
             "(supersedes_specification_candidate_id IS NOT NULL "
             "AND supersedes_candidate_fingerprint IS NOT NULL)",
             name="ck_specification_candidate_supersedes",
+        ),
+        ForeignKeyConstraint(
+            [
+                "project_id",
+                "specification_source_id",
+                "specification_source_fingerprint",
+            ],
+            [
+                "specification_sources.project_id",
+                "specification_sources.specification_source_id",
+                "specification_sources.source_fingerprint",
+            ],
+            name="fk_specification_candidate_source",
         ),
         ForeignKeyConstraint(
             ["project_id", "vision_artifact_id", "vision_fingerprint"],
@@ -592,6 +691,8 @@ class SpecificationCandidate(SQLModel, table=True):
     specification_candidate_id: int | None = Field(default=None, primary_key=True)
     project_id: int = Field(foreign_key="projects.project_id", index=True)
     candidate_kind: str = Field(index=True)
+    specification_source_id: int = Field(index=True)
+    specification_source_fingerprint: str = Field(index=True)
     vision_artifact_id: int = Field(index=True)
     vision_fingerprint: str = Field(index=True)
     product_goal_artifact_id: int = Field(index=True)

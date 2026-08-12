@@ -19,12 +19,14 @@ from models.product_definition import (
     ProductGoalOutcome,
     SpecificationCandidate,
     SpecificationDecision,
+    SpecificationSource,
     VisionArtifact,
     VisionArtifactDecision,
     VisionEvidenceSnapshot,
     VisionInterviewTurn,
     VisionRevisionIntent,
 )
+from models.repository import RepositoryBinding, repository_binding_fingerprint
 from models.specs import SpecRegistry
 from models.workflow import WorkflowNodeAttempt
 from repositories.workflow import (
@@ -34,13 +36,24 @@ from repositories.workflow import (
 )
 from services.contracts.specification_authoring import (
     SPECIFICATION_PRODUCT_GOAL_SOURCE_ID,
+    SPECIFICATION_STRUCTURER_PROMPT_VERSION,
     SPECIFICATION_VISION_SOURCE_ID,
     AcceptedProductGoalContext,
     AcceptedVisionContext,
-    SpecificationAuthoringInput,
-    SpecificationSourceContext,
-    specification_authoring_fact_fingerprint,
-    specification_authoring_input_fingerprint,
+    RegisteredRepositoryEvidence,
+    RegisteredSpecificationSource,
+    SpecificationStructuringContextCapture,
+    SpecificationStructuringDocument,
+    SpecificationStructuringInput,
+    specification_structuring_fact_fingerprint,
+    specification_structuring_input_fingerprint,
+)
+from services.contracts.specification_source import (
+    SpecificationContextCapture,
+    SpecificationRepositoryRevision,
+    SpecificationSourceBundle,
+    SpecificationSourceDocument,
+    source_bundle_fingerprint,
 )
 from services.specs.candidate_contract import (
     CandidateBuildInput,
@@ -83,6 +96,7 @@ def _clear_product_definition_fixture_rows(engine: Engine) -> Iterator[None]:
         session.exec(delete(SpecificationDecision))
         session.exec(delete(SpecRegistry))
         session.exec(delete(SpecificationCandidate))
+        session.exec(delete(SpecificationSource))
         session.exec(delete(ProductGoalOutcome))
         session.exec(delete(ProductGoalArtifactDecision))
         for artifact in session.exec(
@@ -133,6 +147,8 @@ def _clear_product_definition_fixture_rows(engine: Engine) -> Iterator[None]:
             session.flush()
         session.exec(delete(VisionEvidenceSnapshot))
         session.exec(delete(WorkflowNodeAttempt))
+        session.exec(update(Project).values(active_repository_binding_id=None))
+        session.exec(delete(RepositoryBinding))
         session.exec(delete(Project))
         session.commit()
 
@@ -146,12 +162,12 @@ def _id(value: int | None) -> int:
 def test_specification_facts_expose_direct_v2_lineage_without_discovery() -> None:
     """Keep the immutable v2 candidate and accepted-row fact boundary explicit."""
     assert not hasattr(workflow_facts, "DiscoveryArtifactFact")
-    assert (
-        "discovery_artifacts" not in workflow_facts.WorkflowFactSnapshot.model_fields
-    )
+    assert "discovery_artifacts" not in workflow_facts.WorkflowFactSnapshot.model_fields
     assert set(workflow_facts.SpecificationCandidateFact.model_fields) == {
         "specification_candidate_id",
         "candidate_kind",
+        "specification_source_id",
+        "specification_source_fingerprint",
         "vision_artifact_id",
         "vision_fingerprint",
         "product_goal_artifact_id",
@@ -171,6 +187,24 @@ def test_specification_facts_expose_direct_v2_lineage_without_discovery() -> Non
         "recorded_by",
         "recorded_at",
     }
+    assert set(workflow_facts.SpecificationSourceFact.model_fields) == {
+        "specification_source_id",
+        "source_fingerprint",
+        "bundle",
+        "repository_binding_id",
+        "repository_head_sha",
+        "repository_dirty",
+        "repository_status_fingerprint",
+        "vision_artifact_id",
+        "vision_fingerprint",
+        "product_goal_artifact_id",
+        "product_goal_fingerprint",
+        "supersedes_specification_source_id",
+        "supersedes_source_fingerprint",
+        "registered_by",
+        "registered_at",
+    }
+    assert "specification_sources" in workflow_facts.WorkflowFactSnapshot.model_fields
     assert set(workflow_facts.SpecificationDecisionFact.model_fields) == {
         "specification_decision_id",
         "specification_candidate_id",
@@ -486,6 +520,85 @@ def _specification_payload(project_id: int) -> SpecificationPayload:
     )
 
 
+def _source_document(
+    *,
+    source_id: str,
+    relative_path: str,
+    content: bytes,
+) -> SpecificationSourceDocument:
+    """Build a byte-exact document for one registered source fixture."""
+    import base64  # noqa: PLC0415
+    import hashlib  # noqa: PLC0415
+
+    return SpecificationSourceDocument(
+        source_id=source_id,
+        relative_path=relative_path,
+        content_base64=base64.b64encode(content).decode("ascii"),
+        byte_length=len(content),
+        content_fingerprint="sha256:" + hashlib.sha256(content).hexdigest(),
+    )
+
+
+def _structuring_document(
+    document: SpecificationSourceDocument,
+) -> SpecificationStructuringDocument:
+    """Decode a registered document without changing any UTF-8 bytes."""
+    import base64  # noqa: PLC0415
+
+    return SpecificationStructuringDocument(
+        source_id=document.source_id,
+        relative_path=document.relative_path,
+        text=base64.b64decode(document.content_base64, validate=True).decode("utf-8"),
+        byte_length=document.byte_length,
+        content_fingerprint=document.content_fingerprint,
+    )
+
+
+def _specification_source(  # noqa: PLR0913
+    *,
+    project_id: int,
+    repository_binding_id: int,
+    vision_id: int,
+    vision_fingerprint: str,
+    goal_id: int,
+    goal_fingerprint: str,
+    registered_at: datetime,
+) -> SpecificationSource:
+    """Build one canonical immutable external source registration."""
+    bundle = SpecificationSourceBundle(
+        source=_source_document(
+            source_id="SRC.specification-source.primary",
+            relative_path="SPECIFICATION.md",
+            content=b"# Durable product definition\n",
+        ),
+        context=SpecificationContextCapture(state="absent"),
+        repository_revision=SpecificationRepositoryRevision(
+            head_sha="a" * 40,
+            dirty=False,
+            status_fingerprint=canonical_hash({"status": project_id}),
+        ),
+        accepted_vision_fingerprint=vision_fingerprint,
+        accepted_product_goal_fingerprint=goal_fingerprint,
+    )
+    return SpecificationSource(
+        project_id=project_id,
+        source_bundle_json=canonical_json(bundle.model_dump(mode="json")),
+        source_fingerprint=source_bundle_fingerprint(bundle),
+        repository_binding_id=repository_binding_id,
+        repository_head_sha=bundle.repository_revision.head_sha,
+        repository_dirty=bundle.repository_revision.dirty,
+        repository_status_fingerprint=(bundle.repository_revision.status_fingerprint),
+        vision_artifact_id=vision_id,
+        vision_fingerprint=vision_fingerprint,
+        product_goal_artifact_id=goal_id,
+        product_goal_fingerprint=goal_fingerprint,
+        supersedes_specification_source_id=None,
+        supersedes_source_fingerprint=None,
+        registered_by="operator",
+        registered_at=registered_at,
+    )
+
+
 def _seed_product_definition(  # noqa: PLR0915
     session: Session,
     name: str,
@@ -501,6 +614,27 @@ def _seed_product_definition(  # noqa: PLR0915
     session.add(project)
     session.flush()
     project_id = _id(project.project_id)
+    binding = RepositoryBinding(
+        project_id=project_id,
+        worktree_path="repository",
+        common_git_dir="repository/.git",
+        head_sha="a" * 40,
+        branch_name="main",
+        detached_head=False,
+        dirty=False,
+        status_fingerprint=canonical_hash({"status": project_id}),
+        status_entries_json="[]",
+        remotes_json="[]",
+        warnings_json="[]",
+        probe_version="agileforge.repository-probe.v1",
+        inspected_at=recorded_at,
+        recorded_by="operator",
+    )
+    session.add(binding)
+    session.flush()
+    repository_binding_id = _id(binding.repository_binding_id)
+    project.active_repository_binding_id = repository_binding_id
+    session.add(project)
     vision_id, vision_fingerprint, initial_turn_id = _vision_artifact(
         session,
         project_id,
@@ -637,21 +771,36 @@ def _seed_product_definition(  # noqa: PLR0915
             decided_at=outcome_at,
         )
         session.add(outcome)
+    source = _specification_source(
+        project_id=project_id,
+        repository_binding_id=repository_binding_id,
+        vision_id=vision_id,
+        vision_fingerprint=vision_fingerprint,
+        goal_id=goal_id,
+        goal_fingerprint=goal.content_fingerprint,
+        registered_at=accepted_at + timedelta(seconds=30),
+    )
+    session.add(source)
+    session.flush()
+    source_id = _id(source.specification_source_id)
     candidate_attempt_id = _attempt(
         session,
         project_id,
         candidate_recorded_at,
-        node_id="specification.author",
-        key="specification-author",
+        node_id="specification.structure",
+        key="specification-structure",
     )
     candidate_attempt_fingerprint = _attempt_fingerprint(
         project_id,
-        "specification-author",
+        "specification-structure",
     )
     candidate_attempt = _workflow_attempt(session, candidate_attempt_id)
     payload = _specification_payload(project_id)
     accepted_vision = session.get(VisionArtifact, vision_id)
     assert accepted_vision is not None
+    source_bundle = SpecificationSourceBundle.model_validate_json(
+        source.source_bundle_json
+    )
     source_manifest = (
         CandidateSourceManifestEntry(
             source_id=SPECIFICATION_VISION_SOURCE_ID,
@@ -663,8 +812,13 @@ def _seed_product_definition(  # noqa: PLR0915
             kind=CandidateSourceKind.PRODUCT_GOAL,
             fingerprint=goal.content_fingerprint,
         ),
+        CandidateSourceManifestEntry(
+            source_id=source_bundle.source.source_id,
+            kind=CandidateSourceKind.EXTERNAL,
+            fingerprint=source_bundle.source.content_fingerprint,
+        ),
     )
-    authoring_input = SpecificationAuthoringInput(
+    structuring_input = SpecificationStructuringInput(
         project_id=project_id,
         project_name=project.name,
         operation="initial",
@@ -675,29 +829,63 @@ def _seed_product_definition(  # noqa: PLR0915
             components=TypeAdapter(JsonObject).validate_json(
                 accepted_vision.components_json
             ),
+            component_basis=tuple(
+                TypeAdapter(list[JsonObject]).validate_json(
+                    accepted_vision.component_basis_json
+                )
+            ),
+            assumptions=tuple(
+                TypeAdapter(list[JsonObject]).validate_json(
+                    accepted_vision.assumptions_json
+                )
+            ),
+            conflicts=tuple(
+                TypeAdapter(list[JsonObject]).validate_json(
+                    accepted_vision.conflicts_json
+                )
+            ),
         ),
         accepted_product_goal=AcceptedProductGoalContext(
             artifact_id=goal_id,
             fingerprint=goal.content_fingerprint,
             statement=goal.statement,
         ),
-        source_manifest=source_manifest,
-        source_context=(
-            SpecificationSourceContext(
-                source_id=SPECIFICATION_VISION_SOURCE_ID,
-                kind=CandidateSourceKind.VISION,
-                fingerprint=vision_fingerprint,
-                content={"statement": accepted_vision.statement},
+        registered_source=RegisteredSpecificationSource(
+            specification_source_id=source_id,
+            source_fingerprint=source.source_fingerprint,
+            producer_capability=source_bundle.producer_capability,
+            preparation_capability=source_bundle.preparation_capability,
+            source=_structuring_document(source_bundle.source),
+            context=SpecificationStructuringContextCapture(state="absent"),
+            adrs=(),
+            repository_revision=source_bundle.repository_revision,
+            repository_evidence=RegisteredRepositoryEvidence(
+                repository_binding_id=repository_binding_id,
+                binding_fingerprint=repository_binding_fingerprint(binding),
+                head_sha=binding.head_sha,
+                branch_name=binding.branch_name,
+                detached_head=binding.detached_head,
+                dirty=binding.dirty,
+                status_fingerprint=binding.status_fingerprint,
+                status_entries=tuple(
+                    TypeAdapter(list[JsonObject]).validate_json(
+                        binding.status_entries_json
+                    )
+                ),
+                remotes=tuple(
+                    TypeAdapter(list[str]).validate_json(binding.remotes_json)
+                ),
+                warnings=tuple(
+                    TypeAdapter(list[JsonObject]).validate_json(binding.warnings_json)
+                ),
+                probe_version=binding.probe_version,
             ),
-            SpecificationSourceContext(
-                source_id=SPECIFICATION_PRODUCT_GOAL_SOURCE_ID,
-                kind=CandidateSourceKind.PRODUCT_GOAL,
-                fingerprint=goal.content_fingerprint,
-                content={"statement": goal.statement},
-            ),
+            accepted_vision_fingerprint=vision_fingerprint,
+            accepted_product_goal_fingerprint=goal.content_fingerprint,
         ),
+        source_manifest=source_manifest,
     )
-    normalized_input = authoring_input.model_dump(mode="json")
+    normalized_input = structuring_input.model_dump(mode="json")
     candidate_attempt.normalized_input_json = canonical_json(normalized_input)
     candidate_attempt.input_fingerprint = canonical_hash(normalized_input)
     candidate_attempt.attempt_fingerprint = workflow_node_attempt_fingerprint(
@@ -708,9 +896,7 @@ def _seed_product_definition(  # noqa: PLR0915
             "instance_key": candidate_attempt.instance_key,
             "graph_version": candidate_attempt.graph_version,
             "fact_fingerprint": candidate_attempt.fact_fingerprint,
-            "business_fact_fingerprint": (
-                candidate_attempt.business_fact_fingerprint
-            ),
+            "business_fact_fingerprint": (candidate_attempt.business_fact_fingerprint),
             "decision_fingerprint": candidate_attempt.decision_fingerprint,
             "normalized_input": normalized_input,
             "input_fingerprint": candidate_attempt.input_fingerprint,
@@ -734,20 +920,26 @@ def _seed_product_definition(  # noqa: PLR0915
             accepted_vision_fingerprint=vision_fingerprint,
             accepted_product_goal_id=goal_id,
             accepted_product_goal_fingerprint=goal.content_fingerprint,
+            registered_source_fingerprint=source.source_fingerprint,
+            source_producer_capability=source_bundle.producer_capability,
+            source_preparation_capability=source_bundle.preparation_capability,
             source_manifest=source_manifest,
-            accepted_fact_fingerprint=specification_authoring_fact_fingerprint(
-                authoring_input
+            accepted_fact_fingerprint=specification_structuring_fact_fingerprint(
+                structuring_input
             ),
-            producer_input_fingerprint=specification_authoring_input_fingerprint(
-                authoring_input
+            producer_input_fingerprint=specification_structuring_input_fingerprint(
+                structuring_input
             ),
-            producer_capability="to-spec",
+            producer_capability="specification-structurer",
             producer_version="2.0.0",
             model_id=candidate_attempt.model_id,
             model_configuration_fingerprint=canonical_hash(
                 {"model": "test-model", "temperature": 0}
             ),
-            prompt_fingerprint=canonical_hash({"prompt": "to-spec-v2"}),
+            prompt_version=SPECIFICATION_STRUCTURER_PROMPT_VERSION,
+            prompt_fingerprint=canonical_hash(
+                {"prompt": "specification-structurer-v1"}
+            ),
             workflow_node_attempt_id=candidate_attempt_id,
             attempt_fingerprint=candidate_attempt_fingerprint,
             correlation_id=f"specification-{project_id}",
@@ -757,6 +949,8 @@ def _seed_product_definition(  # noqa: PLR0915
     candidate = SpecificationCandidate(
         project_id=project_id,
         candidate_kind="initial",
+        specification_source_id=source_id,
+        specification_source_fingerprint=source.source_fingerprint,
         vision_artifact_id=vision_id,
         vision_fingerprint=vision_fingerprint,
         product_goal_artifact_id=goal_id,
@@ -816,6 +1010,8 @@ def _seed_product_definition(  # noqa: PLR0915
         "goal_id": goal_id,
         "goal_fingerprint": goal.content_fingerprint,
         "goal_decision_id": goal_decision_id,
+        "source_id": source_id,
+        "source_fingerprint": source.source_fingerprint,
         "outcome_id": 0 if outcome is None else _id(outcome.product_goal_outcome_id),
         "candidate_id": candidate_id,
         "candidate_fingerprint": candidate.candidate_fingerprint,
@@ -911,6 +1107,14 @@ def test_loader_retains_product_definition_identity_and_registered_spec_lineage(
         snapshot = WorkflowFactRepository(session).load(int(seed["project_id"]))
 
     assert "repository_bindings" not in WorkflowFactSnapshot.model_fields
+    assert (
+        snapshot.specification_sources[0].specification_source_id == seed["source_id"]
+    )
+    assert (
+        snapshot.specification_sources[0].source_fingerprint
+        == seed["source_fingerprint"]
+    )
+    assert snapshot.specification_sources[0].bundle["producer_capability"] == "to-spec"
     assert snapshot.spec_versions[0].spec_version_id == seed["registered_spec_id"]
     assert (
         snapshot.spec_versions[0].source_specification_candidate_id
@@ -942,8 +1146,15 @@ def test_loader_retains_product_definition_identity_and_registered_spec_lineage(
     )
     assert snapshot.product_goal_outcomes[0].product_goal_artifact_id == seed["goal_id"]
     assert (
-        snapshot.specification_candidates[0].product_goal_artifact_id
-        == seed["goal_id"]
+        snapshot.specification_candidates[0].product_goal_artifact_id == seed["goal_id"]
+    )
+    assert (
+        snapshot.specification_candidates[0].specification_source_id
+        == seed["source_id"]
+    )
+    assert (
+        snapshot.specification_candidates[0].specification_source_fingerprint
+        == seed["source_fingerprint"]
     )
     assert (
         snapshot.specification_candidates[0].product_goal_fingerprint
@@ -998,7 +1209,7 @@ def test_loader_rejects_candidate_attempt_contract_drift(
     statement: str,
     replacement: str,
 ) -> None:
-    """The candidate envelope must match its exact specification-author attempt."""
+    """The candidate envelope must match its exact structuring attempt."""
     with Session(engine) as session:
         seed = _seed_product_definition(
             session,
@@ -1213,9 +1424,7 @@ def test_loader_keeps_historical_candidate_after_later_goal_outcome_and_revision
 
     assert [
         item.specification_candidate_id for item in snapshot.specification_candidates
-    ] == [
-        seed["candidate_id"]
-    ]
+    ] == [seed["candidate_id"]]
 
 
 def test_loader_rejects_candidate_recorded_after_product_goal_outcome(

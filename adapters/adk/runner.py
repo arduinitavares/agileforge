@@ -91,6 +91,7 @@ class SpecificationSourceCheck(Protocol):
         """Return stale evidence detail, or None while sources remain current."""
         ...
 
+
 _TRANSITION_REQUEST = TypeAdapter(TransitionRequest)
 _ADK_EXECUTION_ERRORS: tuple[type[BaseException], ...] = (
     AlreadyExistsError,
@@ -315,8 +316,8 @@ class AdkWorkflowRunner:
         attempt_fingerprint: str,
         persisted_input: JsonObject,
     ) -> SpecificationAttemptRevalidator | None:
-        """Build the exact leaf-boundary checks only for Specification authoring."""
-        if request.node_id != "specification.author":
+        """Build exact leaf-boundary checks only for Specification structuring."""
+        if request.node_id != "specification.structure":
             return None
 
         def revalidate(
@@ -444,13 +445,13 @@ class AdkWorkflowRunner:
                 code=error.code,
                 message=error.message,
             )
-        if request.node_id == "specification.author":
+        if request.node_id == "specification.structure":
             return self._fail_specification_attempt(
                 request=request,
                 attempt_id=attempt_id,
                 attempt_fingerprint=attempt_fingerprint,
                 code=WorkflowErrorCode.SPECIFICATION_PRODUCER_FAILED,
-                message="Specification author provider execution failed.",
+                message="Specification structurer provider execution failed.",
             )
         return self._fail_attempt(
             request=request,
@@ -460,9 +461,7 @@ class AdkWorkflowRunner:
                 durable_code="ADK_EXECUTION_FAILED",
                 durable_message=str(error) or type(error).__name__,
                 transport_code=WorkflowErrorCode.EXTERNAL_EXECUTION_FAILED,
-                transport_message=(
-                    "ADK recipe execution or output validation failed."
-                ),
+                transport_message=("ADK recipe execution or output validation failed."),
             ),
         )
 
@@ -475,7 +474,7 @@ class AdkWorkflowRunner:
         code: WorkflowErrorCode,
         message: str,
     ) -> TransitionResult:
-        """Persist and return one stable Specification authoring failure."""
+        """Persist and return one stable Specification structuring failure."""
         return self._fail_attempt(
             request=request,
             attempt_id=attempt_id,

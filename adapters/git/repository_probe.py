@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
+from urllib.parse import urlsplit, urlunsplit
 
 from git import Repo
 from git.exc import BadName, InvalidGitRepositoryError, NoSuchPathError
@@ -27,6 +28,7 @@ if TYPE_CHECKING:
 
 _PROBE_VERSION = "agileforge.repository-probe.v1"
 _DIRTY_WORKTREE_MESSAGE = "Repository worktree contains changes."
+_REMOTE_OMITTED_MESSAGE = "Local or invalid repository remotes were omitted."
 type StatusChange = Literal[
     "added",
     "modified",
@@ -53,6 +55,7 @@ class _ProbeState:
     detached_head: bool
     entries: tuple[RepositoryStatusEntry, ...]
     remotes: tuple[str, ...]
+    remote_omitted: bool
 
 
 class GitPythonRepositoryProbe:
@@ -108,8 +111,14 @@ class GitPythonRepositoryProbe:
             None if detached_head else _normalize_text(repo.active_branch.name)
         )
         remote_urls: list[str] = []
+        remote_omitted = False
         for remote in repo.remotes:
-            remote_urls.extend(_normalize_text(url) for url in remote.urls)
+            for url in remote.urls:
+                identity = _remote_identity(url)
+                if identity is None:
+                    remote_omitted = True
+                else:
+                    remote_urls.append(identity)
         remotes: tuple[str, ...] = tuple(sorted(remote_urls))
         second_head_sha = self._read_head_sha(repo)
         if first_head_sha != second_head_sha:
@@ -126,6 +135,7 @@ class GitPythonRepositoryProbe:
                 detached_head=detached_head,
                 entries=entries,
                 remotes=remotes,
+                remote_omitted=remote_omitted,
             ),
         )
 
@@ -221,6 +231,55 @@ def _normalize_text(
     return os.fsdecode(os.fsencode(str(value)))
 
 
+def _remote_identity(
+    value: str | bytes | os.PathLike[str] | os.PathLike[bytes] | object,
+) -> str | None:
+    """Retain remote location identity without credentials or URL metadata."""
+    remote = _normalize_text(value)
+    if "://" in remote:
+        return _url_remote_identity(remote)
+    separator = remote.find(":")
+    if separator <= 0:
+        return None
+    prefix = remote[:separator]
+    path = remote[separator + 1 :]
+    path = path.split("?", maxsplit=1)[0].split("#", maxsplit=1)[0]
+    if prefix.casefold() == "file" or (
+        len(prefix) == 1
+        and prefix.isascii()
+        and prefix.isalpha()
+        and path.startswith("/")
+    ):
+        return None
+    host = prefix.rsplit("@", maxsplit=1)[-1]
+    if (
+        not host
+        or not path
+        or "@" in path
+        or any(character.isspace() for character in remote)
+        or any(character in "/\\?#" for character in host)
+        or "\\" in path
+    ):
+        return None
+    return f"{host}:{path}"
+
+
+def _url_remote_identity(remote: str) -> str | None:
+    """Return one sanitized network URL identity, excluding local URL forms."""
+    try:
+        parsed = urlsplit(remote)
+        host = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        return None
+    if parsed.scheme.casefold() == "file" or host is None:
+        return None
+    authority = f"[{host}]" if ":" in host else host
+    if port is not None:
+        authority = f"{authority}:{port}"
+    return urlunsplit((parsed.scheme.casefold(), authority, parsed.path, "", ""))
+
+
 def _entry_sort_key(entry: RepositoryStatusEntry) -> tuple[str, str, bytes, bytes]:
     """Sort status entries independently of locale or Unicode collation."""
     return (
@@ -236,25 +295,31 @@ def _result(repo: Repo, state: _ProbeState) -> RepositoryProbeResult:
     worktree_path = _normalize_text(repo.working_tree_dir or str(state.normalized_path))
     common_git_dir = _normalize_text(str(Path(repo.common_dir).resolve()))
     dirty = bool(state.entries)
-    warnings: tuple[RepositoryProbeWarning, ...] = (
-        (
+    warning_values: list[RepositoryProbeWarning] = []
+    if dirty:
+        warning_values.append(
             RepositoryProbeWarning(
                 code="DIRTY_WORKTREE",
                 message=_DIRTY_WORKTREE_MESSAGE,
-            ),
+            )
         )
-        if dirty
-        else ()
-    )
+    if state.remote_omitted:
+        warning_values.append(
+            RepositoryProbeWarning(
+                code="REMOTE_OMITTED",
+                message=_REMOTE_OMITTED_MESSAGE,
+            )
+        )
+    warnings = tuple(warning_values)
     fingerprint_payload = {
         "probe_version": _PROBE_VERSION,
-        "worktree_path": worktree_path,
-        "common_git_dir": common_git_dir,
         "head_sha": state.head_sha,
         "branch_name": state.branch_name,
         "detached_head": state.detached_head,
+        "dirty": dirty,
         "status_entries": [entry.model_dump(mode="json") for entry in state.entries],
         "remotes": state.remotes,
+        "remote_omitted": state.remote_omitted,
     }
     return RepositoryProbeResult(
         worktree_path=worktree_path,

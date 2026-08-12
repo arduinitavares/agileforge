@@ -19,9 +19,12 @@ from models.workflow import (
 )
 from repositories.workflow import WorkflowFactLoadError, WorkflowFactRepository
 from services.contracts.specification_authoring import (
-    SPECIFICATION_ACTIVE_REPOSITORY_SOURCE_ID,
-    SpecificationAuthoringInput,
-    specification_authoring_input_fingerprint,
+    SpecificationStructuringInput,
+    specification_structuring_input_fingerprint,
+)
+from services.specification_source_registration import (
+    PreparedSpecificationSourceRegistration,
+    SpecificationSourceRegistrationError,
 )
 from workflow.contracts import (
     JsonObject,
@@ -44,7 +47,7 @@ from workflow.handlers import (
     execute_abandon_product_goal,
     execute_begin_vision_revision,
     execute_compile_authority,
-    execute_complete_specification_authoring,
+    execute_complete_specification_structuring,
     execute_create_project,
     execute_decide_authority,
     execute_decide_backlog,
@@ -60,6 +63,7 @@ from workflow.handlers import (
     execute_record_product_goal_interview_turn,
     execute_record_repository_binding,
     execute_record_vision_interview_turn,
+    execute_register_specification_source,
     execute_repair_authority,
     execute_start_node_attempt,
     load_attempt,
@@ -78,7 +82,7 @@ from workflow.requests import (
     CloseSprint,
     CloseStory,
     CompileAuthority,
-    CompleteSpecificationAuthoring,
+    CompleteSpecificationStructuring,
     CompleteTask,
     CreateProject,
     DecideAuthority,
@@ -102,6 +106,7 @@ from workflow.requests import (
     RecordSprintPlan,
     RecordStoryDraft,
     RecordVisionInterviewTurn,
+    RegisterSpecificationSource,
     RepairAuthority,
     RepairStoryReadiness,
     RevalidateNodeAttempt,
@@ -144,6 +149,17 @@ class SpecificationSourceCheck(Protocol):
         """Return stale-source detail, or None while sources remain current."""
 
 
+class SpecificationRegistrationCheck(Protocol):
+    """Re-capture one prepared source immediately before its guarded write."""
+
+    def __call__(
+        self,
+        prepared: PreparedSpecificationSourceRegistration,
+        /,
+    ) -> SpecificationSourceRegistrationError | None:
+        """Return one capture failure, or None while exact bytes remain current."""
+
+
 _SQLITE_BUSY_TIMEOUT_MS = 1_000
 _SQLITE_LOCK_MESSAGES = ("database is locked", "database table is locked")
 
@@ -157,7 +173,7 @@ type _ProductGoalRequest = (
     | AbandonProductGoal
 )
 type _ProductDiscoveryRequest = (
-    CompleteSpecificationAuthoring | DecideSpecification
+    RegisterSpecificationSource | CompleteSpecificationStructuring | DecideSpecification
 )
 type _VisionRequest = (
     GenerateVisionBootstrap
@@ -216,7 +232,7 @@ def _set_sqlite_busy_timeout(
 class WorkflowDomain:
     """Expose the only workflow position read and transition mutation APIs."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         *,
         engine: Engine,
@@ -224,6 +240,7 @@ class WorkflowDomain:
         clock: Clock,
         adk_recipe_registry: AdkRecipeRegistryProtocol | None = None,
         specification_source_check: SpecificationSourceCheck | None = None,
+        specification_registration_check: SpecificationRegistrationCheck | None = None,
     ) -> None:
         """Retain explicit persistence, graph, and time dependencies."""
         self._engine = engine
@@ -231,6 +248,7 @@ class WorkflowDomain:
         self._clock = clock
         self._adk_recipe_registry = adk_recipe_registry
         self._specification_source_check = specification_source_check
+        self._specification_registration_check = specification_registration_check
         self._configure_busy_timeout()
 
     def position(self, project_id: int) -> WorkflowPosition:
@@ -645,7 +663,7 @@ class WorkflowDomain:
                 error=WorkflowError(
                     code=WorkflowErrorCode.STALE_SPECIFICATION_INPUT,
                     message=(
-                        "Specification authoring input changed before provider "
+                        "Specification structuring input changed before provider "
                         "invocation."
                     ),
                 ),
@@ -694,14 +712,14 @@ class WorkflowDomain:
             row is not None
             and outcome is not None
             and row.attempt_fingerprint == request.attempt_fingerprint
-            and row.node_id == "specification.author"
+            and row.node_id == "specification.structure"
         ):
             return self._replay_attempt_start_receipt(session, row)
         if (
             row is None
             or outcome is not None
             or row.attempt_fingerprint != request.attempt_fingerprint
-            or row.node_id != "specification.author"
+            or row.node_id != "specification.structure"
         ):
             return self._obsolete_attempt(
                 session,
@@ -844,7 +862,7 @@ class WorkflowDomain:
                 attempt_id=request.attempt_id,
                 evaluated_at=evaluated_at,
             )
-        if isinstance(request, CompleteSpecificationAuthoring):
+        if isinstance(request, CompleteSpecificationStructuring):
             source_failure = self._revalidate_specification_completion_sources(
                 session,
                 request=request,
@@ -867,10 +885,10 @@ class WorkflowDomain:
                 output=result.output,
                 evaluated_at=evaluated_at,
             )
-        elif isinstance(request, CompleteSpecificationAuthoring):
+        elif isinstance(request, CompleteSpecificationStructuring):
             error = result.error
             if error is None:
-                message = "Failed Specification authoring has no structured error."
+                message = "Failed Specification structuring has no structured error."
                 raise RuntimeError(message)
             session.add(
                 WorkflowNodeAttemptOutcome(
@@ -904,7 +922,7 @@ class WorkflowDomain:
         self,
         session: Session,
         *,
-        request: CompleteSpecificationAuthoring,
+        request: CompleteSpecificationStructuring,
         attempt: WorkflowNodeAttempt | None,
         evaluated_at: datetime,
     ) -> TransitionResult | None:
@@ -921,10 +939,8 @@ class WorkflowDomain:
                 ),
             )
         try:
-            persisted_input = _JSON_OBJECT.validate_json(
-                attempt.normalized_input_json
-            )
-            contract = SpecificationAuthoringInput.model_validate(persisted_input)
+            persisted_input = _JSON_OBJECT.validate_json(attempt.normalized_input_json)
+            contract = SpecificationStructuringInput.model_validate(persisted_input)
         except (TypeError, ValueError):
             return self._obsolete_attempt(
                 session,
@@ -951,23 +967,11 @@ class WorkflowDomain:
                     message="The pending Specification source input changed.",
                 ),
             )
-        active_repository_source = next(
-            (
-                entry
-                for entry in contract.source_manifest
-                if entry.source_id == SPECIFICATION_ACTIVE_REPOSITORY_SOURCE_ID
-            ),
-            None,
-        )
         source_check = self._specification_source_check
         if source_check is None:
-            source_error = (
-                None
-                if active_repository_source is None
-                else WorkflowError(
-                    code=WorkflowErrorCode.STALE_SPECIFICATION_INPUT,
-                    message="Live Specification source validation is unavailable.",
-                )
+            source_error = WorkflowError(
+                code=WorkflowErrorCode.STALE_SPECIFICATION_INPUT,
+                message="Live Specification source validation is unavailable.",
             )
         else:
             source_error = source_check(request.project_id, serialized_input)
@@ -1119,6 +1123,11 @@ class WorkflowDomain:
         if isinstance(decision_or_failure, TransitionResult):
             return decision_or_failure
 
+        if isinstance(request, RegisterSpecificationSource):
+            registration_failure = self._revalidate_specification_registration(request)
+            if registration_failure is not None:
+                return registration_failure
+
         result = self._dispatch_positioned(
             session,
             request,
@@ -1131,6 +1140,44 @@ class WorkflowDomain:
             evaluated_at,
         )
         return result.model_copy(update={"position": position})
+
+    def _revalidate_specification_registration(
+        self,
+        request: RegisterSpecificationSource,
+    ) -> TransitionResult | None:
+        """Reject changed capture bytes at the last boundary before persistence."""
+        checker = self._specification_registration_check
+        if checker is None:
+            return TransitionResult(
+                ok=False,
+                error=WorkflowError(
+                    code=WorkflowErrorCode.STALE_SPECIFICATION_INPUT,
+                    message="Live Specification source verification is unavailable.",
+                ),
+            )
+        failure = checker(
+            PreparedSpecificationSourceRegistration(
+                project_id=request.project_id,
+                accepted_vision_artifact_id=request.accepted_vision_artifact_id,
+                accepted_product_goal_artifact_id=(
+                    request.accepted_product_goal_artifact_id
+                ),
+                repository_binding_id=request.repository_binding_id,
+                repository_binding_fingerprint=(request.repository_binding_fingerprint),
+                request_fingerprint=request.capture_request_fingerprint,
+                source_fingerprint=request.source_fingerprint,
+                bundle=request.bundle,
+            )
+        )
+        if failure is None:
+            return None
+        return TransitionResult(
+            ok=False,
+            error=WorkflowError(
+                code=WorkflowErrorCode.STALE_SPECIFICATION_INPUT,
+                message=str(failure),
+            ),
+        )
 
     def _dispatch_positioned(
         self,
@@ -1161,7 +1208,9 @@ class WorkflowDomain:
             )
         elif isinstance(
             request,
-            CompleteSpecificationAuthoring | DecideSpecification,
+            RegisterSpecificationSource
+            | CompleteSpecificationStructuring
+            | DecideSpecification,
         ):
             result = self._dispatch_product_discovery(
                 session, request, decision, evaluated_at
@@ -1233,8 +1282,12 @@ class WorkflowDomain:
         decision: NodeDecision,
         evaluated_at: datetime,
     ) -> TransitionResult:
-        if isinstance(request, CompleteSpecificationAuthoring):
-            return execute_complete_specification_authoring(
+        if isinstance(request, RegisterSpecificationSource):
+            return execute_register_specification_source(
+                session, request, decision, evaluated_at
+            )
+        if isinstance(request, CompleteSpecificationStructuring):
+            return execute_complete_specification_structuring(
                 session, request, decision, evaluated_at
             )
         if isinstance(request, DecideSpecification):
@@ -1282,20 +1335,18 @@ class WorkflowDomain:
         if (
             attempt is None
             or attempt.project_id != request.project_id
-            or attempt.node_id != "specification.author"
+            or attempt.node_id != "specification.structure"
             or attempt.attempt_fingerprint != candidate.attempt_fingerprint
             or outcome is None
             or outcome.status != "success"
             or not self._attempt_input_matches(attempt)
         ):
             return self._stale_specification_source(
-                "The pending Specification authoring attempt is stale."
+                "The pending Specification structuring attempt is stale."
             )
         try:
-            persisted_input = _JSON_OBJECT.validate_json(
-                attempt.normalized_input_json
-            )
-            contract = SpecificationAuthoringInput.model_validate(persisted_input)
+            persisted_input = _JSON_OBJECT.validate_json(attempt.normalized_input_json)
+            contract = SpecificationStructuringInput.model_validate(persisted_input)
         except (TypeError, ValueError):
             return self._stale_specification_source(
                 "The pending Specification source input is invalid."
@@ -1304,39 +1355,27 @@ class WorkflowDomain:
         if (
             contract.project_id != request.project_id
             or canonical_json(serialized_input) != attempt.normalized_input_json
-            or specification_authoring_input_fingerprint(contract)
+            or specification_structuring_input_fingerprint(contract)
             != candidate.producer_input_fingerprint
         ):
             return self._stale_specification_source(
                 "The pending Specification source input changed."
             )
-        active_repository_source = next(
-            (
-                entry
-                for entry in contract.source_manifest
-                if entry.source_id == SPECIFICATION_ACTIVE_REPOSITORY_SOURCE_ID
-            ),
-            None,
-        )
         prepared = request.model_copy(
             update={
                 "repository_source_fingerprint": (
-                    None
-                    if active_repository_source is None
-                    else active_repository_source.fingerprint
+                    contract.registered_source.source_fingerprint
                 )
             }
         )
         source_check = self._specification_source_check
         if source_check is None:
-            if active_repository_source is not None:
-                return self._stale_specification_source(
-                    "Live Specification source validation is unavailable."
-                )
-        else:
-            source_error = source_check(request.project_id, serialized_input)
-            if source_error is not None:
-                return TransitionResult(ok=False, error=source_error)
+            return self._stale_specification_source(
+                "Live Specification source validation is unavailable."
+            )
+        source_error = source_check(request.project_id, serialized_input)
+        if source_error is not None:
+            return TransitionResult(ok=False, error=source_error)
         return prepared
 
     @staticmethod

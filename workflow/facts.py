@@ -179,11 +179,33 @@ class ProductGoalOutcomeFact(FrozenModel):
     decided_at: _DATETIME
 
 
+class SpecificationSourceFact(FrozenModel):
+    """Immutable registered external source with exact durable lineage."""
+
+    specification_source_id: int
+    source_fingerprint: str
+    bundle: JsonObject
+    repository_binding_id: int
+    repository_head_sha: str
+    repository_dirty: bool
+    repository_status_fingerprint: str
+    vision_artifact_id: int
+    vision_fingerprint: str
+    product_goal_artifact_id: int
+    product_goal_fingerprint: str
+    supersedes_specification_source_id: int | None
+    supersedes_source_fingerprint: str | None
+    registered_by: str
+    registered_at: _DATETIME
+
+
 class SpecificationCandidateFact(FrozenModel):
     """Immutable candidate specification with exact product-definition lineage."""
 
     specification_candidate_id: int
     candidate_kind: Literal["initial", "amendment"]
+    specification_source_id: int
+    specification_source_fingerprint: str
     vision_artifact_id: int
     vision_fingerprint: str
     product_goal_artifact_id: int
@@ -509,6 +531,7 @@ class WorkflowFactSnapshot(FrozenModel):
     product_goal_artifacts: tuple[ProductGoalArtifactFact, ...] = ()
     product_goal_artifact_decisions: tuple[ProductGoalArtifactDecisionFact, ...] = ()
     product_goal_outcomes: tuple[ProductGoalOutcomeFact, ...] = ()
+    specification_sources: tuple[SpecificationSourceFact, ...] = ()
     specification_candidates: tuple[SpecificationCandidateFact, ...] = ()
     specification_decisions: tuple[SpecificationDecisionFact, ...] = ()
     spec_versions: tuple[SpecVersionFact, ...] = ()

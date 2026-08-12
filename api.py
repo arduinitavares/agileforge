@@ -44,8 +44,9 @@ from services.application import (
     RepositoryAttachRequest,
     RepositoryRefreshRequest,
     RoadmapReviewRequest,
-    SpecificationAuthoringRequest,
     SpecificationReviewRequest,
+    SpecificationSourceRegistrationRequest,
+    SpecificationStructuringRequest,
     SprintCloseRequest,
     SprintPlanningRequest,
     SprintPlanReviewRequest,
@@ -118,6 +119,14 @@ class MutationApiRequest(BaseModel):
     idempotency_key: str = Field(min_length=1, max_length=200)
     actor: str = Field(min_length=1, max_length=200)
     correlation_id: str | None = Field(default=None, min_length=1)
+
+
+class SpecificationSourceApiRequest(MutationApiRequest):
+    """Semantic repository paths for one exact source registration."""
+
+    source_path: str = Field(min_length=1)
+    adr_paths: tuple[str, ...] = ()
+    preparation_capability: Literal["grill-with-docs"]
 
 
 class MutationMetadata(TypedDict):
@@ -360,7 +369,8 @@ SEMANTIC_API_PATHS: dict[str, str] = {
     "fulfill_product_goal": "goals/complete",
     "generate_vision_bootstrap": "vision/bootstrap",
     "record_product_goal_interview_turn": "goals/respond",
-    "author_specification": "specifications/author",
+    "register_specification_source": "specifications/source",
+    "structure_specification": "specifications/structure",
     "record_sprint_plan": "sprint/generate",
     "record_vision_interview_turn": "vision/respond",
     "repair_authority": "authority/repair",
@@ -470,8 +480,14 @@ def _workflow_actions(position: WorkflowPosition) -> list[JsonObject]:
                 and decision.request_kind in _ACTIONABLE_WAITING_REQUEST_KINDS
             )
         )
-        and decision.recommendation_kind
-        in {RecommendationKind.REQUIRED, RecommendationKind.RECOVERY}
+        and (
+            decision.recommendation_kind
+            in {RecommendationKind.REQUIRED, RecommendationKind.RECOVERY}
+            or (
+                decision.recommendation_kind is RecommendationKind.OPTIONAL_REENTRY
+                and decision.request_kind == "register_specification_source"
+            )
+        )
         and decision.request_kind in SEMANTIC_API_PATHS | DELIVERY_API_PATHS
         and planning_action_decision_is_transportable(position.project_id, decision)
         and execution_action_decision_is_transportable(decision)
@@ -796,15 +812,34 @@ def abandon_product_goal(
     return _product_goal_outcome(project_id, req, "abandoned")
 
 
-@app.post("/api/projects/{project_id}/specifications/author")
-def author_specification(
+@app.post("/api/projects/{project_id}/specifications/source")
+def register_specification_source(
+    project_id: int,
+    req: SpecificationSourceApiRequest,
+) -> dict[str, object]:
+    """Capture one exact external to-spec source from semantic paths."""
+    return _result_payload(
+        _application().register_specification_source(
+            SpecificationSourceRegistrationRequest(
+                project_id=project_id,
+                source_path=req.source_path,
+                adr_paths=req.adr_paths,
+                preparation_capability=req.preparation_capability,
+                **_metadata(req),
+            )
+        )
+    )
+
+
+@app.post("/api/projects/{project_id}/specifications/structure")
+def structure_specification(
     project_id: int,
     req: MutationApiRequest,
 ) -> dict[str, object]:
-    """Run one exact Specification-authoring action from host context."""
+    """Run one host-prepared structuring action over the registered source."""
     return _result_payload(
-        _application().author_specification(
-            SpecificationAuthoringRequest(
+        _application().structure_specification(
+            SpecificationStructuringRequest(
                 project_id=project_id,
                 **_metadata(req),
             )

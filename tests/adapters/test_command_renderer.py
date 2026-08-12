@@ -28,6 +28,7 @@ _PLACEHOLDERS = {
     "<feedback>": "Narrow the identity invariant.",
     "<rationale>": "reviewed",
     "<reason>": "changed",
+    "<source-path>": "specification.md",
     "<story-id>": "7",
     "<dependency>": "7:8:Story 7 requires Story 8.",
     "<repair>": "7:3:101",
@@ -70,6 +71,46 @@ def test_workflow_next_renders_required_and_recovery_only() -> None:
         assert tokens[tokens.index("--actor") + 1] == "<actor>"
     assert "decision_fingerprint" not in serialized
     assert "--expected-" + "state" not in serialized
+
+
+def test_workflow_next_renders_optional_specification_source_reentry_only() -> None:
+    """Surface source replacement/amendment without promoting other optional work."""
+    source = NodeDecision(
+        node_id="specification.source.register",
+        child_graph_id="specification",
+        request_kind="register_specification_source",
+        category=NodeCategory.AVAILABLE,
+        recommendation_kind=RecommendationKind.OPTIONAL_REENTRY,
+        reason_code="SPECIFICATION_SOURCE_REPLACEMENT_AVAILABLE",
+        decision_fingerprint="source-reentry",
+    )
+    unrelated = NodeDecision(
+        node_id="vision.bootstrap",
+        child_graph_id="vision",
+        request_kind="generate_vision_bootstrap",
+        category=NodeCategory.AVAILABLE,
+        recommendation_kind=RecommendationKind.OPTIONAL_REENTRY,
+        reason_code="VISION_OPTIONAL_REENTRY",
+        decision_fingerprint="vision-reentry",
+    )
+    position = position_fixture().model_copy(
+        update={
+            "decisions": (source, unrelated),
+            "available_nodes": (source.node_id, unrelated.node_id),
+            "waiting_nodes": (),
+            "blocked_nodes": (),
+            "invalid_nodes": (),
+        }
+    )
+
+    payload = render_workflow_next(position)
+
+    assert [item["request_kind"] for item in payload["commands"]] == [
+        "register_specification_source"
+    ]
+    assert payload["commands"][0]["command"].startswith(
+        "agileforge specification source register"
+    )
 
 
 def test_zero_command_position_explains_terminal_waiting_and_invalid() -> None:
@@ -206,7 +247,8 @@ def test_lifecycle_positions_render_semantic_commands() -> None:
         "generate_vision_bootstrap": "agileforge vision bootstrap",
         "record_vision_interview_turn": "agileforge vision respond",
         "record_product_goal_interview_turn": "agileforge goal respond",
-        "author_specification": "agileforge specification author",
+        "register_specification_source": "agileforge specification source register",
+        "structure_specification": "agileforge specification structure",
         "record_authority_feedback": "agileforge authority feedback",
         "compile_authority": "agileforge authority compile",
         "fulfill_product_goal": "agileforge goal complete",
@@ -237,6 +279,59 @@ def test_lifecycle_positions_render_semantic_commands() -> None:
 
         assert len(payload["commands"]) == 1
         assert payload["commands"][0]["command"].startswith(command_prefix)
+
+
+def test_specification_preparation_commands_expose_no_host_owned_identity() -> None:
+    """Render only source selection or ordinary transport metadata."""
+    decisions = tuple(
+        NodeDecision(
+            node_id=node_id,
+            child_graph_id="specification",
+            request_kind=request_kind,
+            category=NodeCategory.AVAILABLE,
+            recommendation_kind=RecommendationKind.REQUIRED,
+            reason_code="SPECIFICATION_PREPARATION_REQUIRED",
+            decision_fingerprint=f"decision-{request_kind}",
+        )
+        for node_id, request_kind in (
+            ("specification.source.register", "register_specification_source"),
+            ("specification.structure", "structure_specification"),
+        )
+    )
+    position = position_fixture().model_copy(
+        update={
+            "decisions": decisions,
+            "available_nodes": tuple(item.node_id for item in decisions),
+            "waiting_nodes": (),
+            "blocked_nodes": (),
+            "invalid_nodes": (),
+        }
+    )
+
+    commands = render_workflow_next(position)["commands"]
+
+    assert [item["command"] for item in commands] == [
+        (
+            "agileforge specification source register --project-id 41 "
+            "--source-path '<source-path>' "
+            "--preparation-capability grill-with-docs "
+            "--idempotency-key '<idempotency-key>' --actor '<actor>'"
+        ),
+        (
+            "agileforge specification structure --project-id 41 "
+            "--idempotency-key '<idempotency-key>' --actor '<actor>'"
+        ),
+    ]
+    rendered = " ".join(item["command"] for item in commands)
+    for forbidden in (
+        "context",
+        "fingerprint",
+        "artifact-id",
+        "candidate-id",
+        "source-json",
+        "model-id",
+    ):
+        assert forbidden not in rendered
 
 
 def test_vision_bootstrap_command_contains_only_transport_metadata() -> None:

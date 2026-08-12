@@ -8,7 +8,7 @@ import pytest
 import yaml
 from pydantic import TypeAdapter
 
-from adapters.adk.model_roles import RETAINED_MODEL_ROLES
+from adapters.adk.model_roles import AGENTIC_MODEL_ROLES, RETAINED_MODEL_ROLES
 from utils import model_config
 from utils.model_config import (
     get_model_id,
@@ -107,6 +107,14 @@ def test_model_configs_exactly_match_live_production_roles() -> None:
 
     assert _configured_model_roles(_PRODUCTION_MODEL_CONFIG_PATH) == expected
     assert _configured_model_roles(_TEST_MODEL_CONFIG_PATH) == expected
+
+
+def test_specification_structure_uses_the_structurer_model_role() -> None:
+    """Hard-break the provider role instead of retaining an author alias."""
+    assert AGENTIC_MODEL_ROLES["specification.structure"] == (
+        "specification_structurer"
+    )
+    assert "specification_author" not in RETAINED_MODEL_ROLES
 
 
 def test_relax_zdr_for_tests_toggles_privacy(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -59,18 +59,20 @@ def _evidence() -> JsonObject:
         "content": content,
         "truncated": False,
     }
-    return _JSON_OBJECT.validate_python({
-        "schema_version": "agileforge.vision-evidence.v1",
-        "items": [item],
-        "warnings": [],
-        "evidence_fingerprint": canonical_hash(
-            {
-                "schema_version": "agileforge.vision-evidence.v1",
-                "items": [item],
-                "warnings": [],
-            }
-        ),
-    })
+    return _JSON_OBJECT.validate_python(
+        {
+            "schema_version": "agileforge.vision-evidence.v1",
+            "items": [item],
+            "warnings": [],
+            "evidence_fingerprint": canonical_hash(
+                {
+                    "schema_version": "agileforge.vision-evidence.v1",
+                    "items": [item],
+                    "warnings": [],
+                }
+            ),
+        }
+    )
 
 
 def _draft_payload() -> JsonObject:
@@ -83,79 +85,85 @@ def _draft_payload() -> JsonObject:
         "competitors": "Spreadsheets",
         "differentiator": "Facts",
     }
-    return _JSON_OBJECT.validate_python({
-        "schema_version": "agileforge.vision-draft.v1",
-        "components": components,
-        "component_basis": [
-            {
-                "component": name,
-                "source_kinds": ["evidence"],
-                "evidence_ids": ["project:metadata"],
-                "assumption_ids": [],
-            }
-            for name in components
-        ],
-        "draft_statement": "A trusted workflow tool.",
-        "assumptions": [],
-        "conflicts": [],
-        "clarifying_questions": [],
-        "is_complete": True,
-    })
+    return _JSON_OBJECT.validate_python(
+        {
+            "schema_version": "agileforge.vision-draft.v1",
+            "components": components,
+            "component_basis": [
+                {
+                    "component": name,
+                    "source_kinds": ["evidence"],
+                    "evidence_ids": ["project:metadata"],
+                    "assumption_ids": [],
+                }
+                for name in components
+            ],
+            "draft_statement": "A trusted workflow tool.",
+            "assumptions": [],
+            "conflicts": [],
+            "clarifying_questions": [],
+            "is_complete": True,
+        }
+    )
 
 
 def _bootstrap_input() -> JsonObject:
-    return _JSON_OBJECT.validate_python({
-        "request": {
-            "schema_version": "agileforge.vision-input.v1",
-            "operation": "bootstrap",
-            "project_name": "Vision",
-            "project_description": None,
-            "evidence": _evidence(),
-        },
-        "preflight": None,
-    })
+    return _JSON_OBJECT.validate_python(
+        {
+            "request": {
+                "schema_version": "agileforge.vision-input.v1",
+                "operation": "bootstrap",
+                "project_name": "Vision",
+                "project_description": None,
+                "evidence": _evidence(),
+            },
+            "preflight": None,
+        }
+    )
 
 
 def _clarification_input() -> JsonObject:
     """Return a strict host-owned clarification envelope."""
     evidence = _evidence()
-    return _JSON_OBJECT.validate_python({
-        "request": {
-            "schema_version": "agileforge.vision-input.v1",
-            "operation": "clarification",
-            "project_name": "Vision",
-            "project_description": None,
-            "vision_evidence_snapshot_id": 10,
-            "evidence": evidence,
-            "current_components": {
+    return _JSON_OBJECT.validate_python(
+        {
+            "request": {
+                "schema_version": "agileforge.vision-input.v1",
+                "operation": "clarification",
                 "project_name": "Vision",
-                "target_user": None,
-                "problem": "State drift",
-                "product_category": "Tool",
-                "key_benefit": "Trust",
-                "competitors": "Spreadsheets",
-                "differentiator": "Facts",
+                "project_description": None,
+                "vision_evidence_snapshot_id": 10,
+                "evidence": evidence,
+                "current_components": {
+                    "project_name": "Vision",
+                    "target_user": None,
+                    "problem": "State drift",
+                    "product_category": "Tool",
+                    "key_benefit": "Trust",
+                    "competitors": "Spreadsheets",
+                    "differentiator": "Facts",
+                },
+                "current_statement": "A draft.",
+                "current_component_basis": [],
+                "current_assumptions": [],
+                "current_conflicts": [],
+                "current_questions": [
+                    {
+                        "question_id": "question:target",
+                        "text": "Who is the user?",
+                        "affected_components": ["target_user"],
+                        "conflict_ids": [],
+                    }
+                ],
+                "human_response": "Correct the target user.",
+                "addressed_question_ids": ["question:target"],
             },
-            "current_statement": "A draft.",
-            "current_component_basis": [],
-            "current_assumptions": [],
-            "current_conflicts": [],
-            "current_questions": [
-                {
-                    "question_id": "question:target",
-                    "text": "Who is the user?",
-                    "affected_components": ["target_user"],
-                    "conflict_ids": [],
-                }
-            ],
-            "human_response": "Correct the target user.",
-            "addressed_question_ids": ["question:target"],
-        },
-        "preflight": {
-            "expected_evidence_fingerprint": evidence["evidence_fingerprint"],
-            "observed_evidence": evidence,
-        },
-    })
+            "preflight": {
+                "expected_evidence_fingerprint": evidence["evidence_fingerprint"],
+                "observed_evidence": evidence,
+            },
+        }
+    )
 
 
 def test_recipe_catalog_excludes_legacy_vision_and_adapts_interview_output() -> None:
@@ -167,7 +175,7 @@ def test_recipe_catalog_excludes_legacy_vision_and_adapts_interview_output() -> 
             vision_interview=root_agent,
             vision_repair=repair_agent,
             product_goal=root_agent,
-            specification_author=root_agent,
+            specification_structurer=root_agent,
             backlog_generation=root_agent,
             roadmap_generation=root_agent,
             story_generation=root_agent,

@@ -1,5 +1,10 @@
 # To-Spec Single Specification Boundary Implementation Plan
 
+> **Superseded 2026-08-12:** The direct internal-authoring steps in this plan
+> are replaced by
+> [`2026-08-12-registered-to-spec-source-structuring.md`](2026-08-12-registered-to-spec-source-structuring.md).
+> Keep this file only as implementation history.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:test-driven-development` for every behavior change and `superpowers:verification-before-completion` before every completion claim or commit.
 
 **Goal:** Implement issue #199 by making `to-spec` the single typed Specification-authoring boundary, removing persisted Discovery as a lifecycle gate, and preserving exact human Specification and Authority review.

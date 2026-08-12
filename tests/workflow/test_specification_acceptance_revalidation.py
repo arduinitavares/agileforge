@@ -1,4 +1,4 @@
-"""Transaction-bound live-source checks for Specification acceptance."""
+"""Transaction-bound live-source checks for Specification review."""
 
 from __future__ import annotations
 
@@ -13,15 +13,15 @@ from adapters.git.repository_probe import GitPythonRepositoryProbe
 from models.product_definition import SpecificationCandidate, SpecificationDecision
 from models.specs import SpecRegistry
 from models.workflow import WorkflowNodeAttempt, WorkflowNodeAttemptOutcome
-from services.contracts.specification_authoring import SpecificationAuthoringInput
-from services.specification_authoring_input import SpecificationAuthoringInputService
+from services.contracts.specification_authoring import SpecificationStructuringInput
+from services.specification_authoring_input import SpecificationStructuringInputService
 from tests.workflow.test_product_discovery_transitions import (
     NOW,
     _accept_request,
-    _author,
     _domain,
     _payload,
-    _seed_accepted_goal,
+    _ready_project,
+    _structure,
 )
 from workflow.contracts import JsonObject, WorkflowError, WorkflowErrorCode
 from workflow.domain import SpecificationSourceCheck, WorkflowDomain
@@ -32,6 +32,7 @@ if TYPE_CHECKING:
 
     from sqlalchemy.engine import Engine
 
+    from services.repository_probe import RepositoryProbe
     from workflow.contracts import NodeDecision, TransitionResult
     from workflow.requests import DecideSpecification
 
@@ -40,9 +41,10 @@ def _review_domain(
     engine: Engine,
     *,
     source_check: SpecificationSourceCheck,
+    repository_probe: RepositoryProbe,
     at: datetime = NOW + timedelta(seconds=1),
 ) -> WorkflowDomain:
-    baseline = _domain(engine, at=at)
+    baseline = _domain(engine, at=at, repository_probe=repository_probe)
     return WorkflowDomain(
         engine=engine,
         graph=baseline._graph,
@@ -52,30 +54,45 @@ def _review_domain(
     )
 
 
-def _authored_candidate(engine: Engine, *, key: str) -> tuple[int, WorkflowDomain]:
-    project_id, *_lineage = _seed_accepted_goal(engine, name=key)
-    domain = _domain(engine)
-    authored = _author(
+def _structured_candidate(
+    engine: Engine,
+    tmp_path: Path,
+    *,
+    key: str,
+) -> tuple[int, RepositoryProbe]:
+    project_id, *_lineage, probe = _ready_project(
+        engine,
+        tmp_path,
+        name=key,
+    )
+    domain = _domain(engine, repository_probe=probe)
+    structured = _structure(
         engine,
         domain,
         project_id=project_id,
         payload=_payload(),
         key=key,
+        repository_probe=probe,
     )
-    assert authored.ok
-    return project_id, domain
+    assert structured.ok
+    return project_id, probe
 
 
 def test_completion_source_drift_obsoletes_attempt_without_candidate(
     engine: Engine,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A final stale source probe cannot enter candidate persistence."""
-    project_id, *_lineage = _seed_accepted_goal(engine, name="completion-stale")
+    project_id, *_lineage, probe = _ready_project(
+        engine,
+        tmp_path,
+        name="completion-stale",
+    )
     checked_inputs: list[JsonObject] = []
     source_error = WorkflowError(
         code=WorkflowErrorCode.STALE_SPECIFICATION_INPUT,
-        message="Repository source changed before candidate persistence.",
+        message="Registered source changed before candidate persistence.",
     )
 
     def stale_source(
@@ -92,17 +109,23 @@ def test_completion_source_drift_obsoletes_attempt_without_candidate(
         raise AssertionError(message)
 
     monkeypatch.setattr(
-        "workflow.domain.execute_complete_specification_authoring",
+        "workflow.domain.execute_complete_specification_structuring",
         unexpected_handler,
     )
-    domain = _review_domain(engine, source_check=stale_source, at=NOW)
+    domain = _review_domain(
+        engine,
+        source_check=stale_source,
+        repository_probe=probe,
+        at=NOW,
+    )
 
-    result = _author(
+    result = _structure(
         engine,
         domain,
         project_id=project_id,
         payload=_payload(),
         key="completion-stale",
+        repository_probe=probe,
     )
 
     assert not result.ok
@@ -112,10 +135,10 @@ def test_completion_source_drift_obsoletes_attempt_without_candidate(
         attempt = session.exec(
             select(WorkflowNodeAttempt).where(
                 col(WorkflowNodeAttempt.project_id) == project_id,
-                col(WorkflowNodeAttempt.node_id) == "specification.author",
+                col(WorkflowNodeAttempt.node_id) == "specification.structure",
             )
         ).one()
-        expected_input = SpecificationAuthoringInput.model_validate_json(
+        expected_input = SpecificationStructuringInput.model_validate_json(
             attempt.normalized_input_json
         ).model_dump(mode="json")
         assert checked_inputs == [expected_input]
@@ -133,7 +156,7 @@ def test_completion_source_drift_obsoletes_attempt_without_candidate(
             )
             .where(
                 col(WorkflowNodeAttemptOutcome.project_id) == project_id,
-                col(WorkflowNodeAttempt.node_id) == "specification.author",
+                col(WorkflowNodeAttempt.node_id) == "specification.structure",
             )
         ).one()
         assert outcome.status == "obsolete"
@@ -141,10 +164,15 @@ def test_completion_source_drift_obsoletes_attempt_without_candidate(
 
 def test_acceptance_checks_exact_attempt_input_immediately_before_handler(
     engine: Engine,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The transaction owns the final live-source check and handler ordering."""
-    project_id, _author_domain = _authored_candidate(engine, key="accept-current")
+    project_id, probe = _structured_candidate(
+        engine,
+        tmp_path,
+        key="accept-current",
+    )
     events: list[str] = []
     checked_inputs: list[JsonObject] = []
 
@@ -170,7 +198,11 @@ def test_acceptance_checks_exact_attempt_input_immediately_before_handler(
         return original(session, request, decision, evaluated_at)
 
     monkeypatch.setattr(domain_module, "execute_decide_specification", record_handler)
-    domain = _review_domain(engine, source_check=source_check)
+    domain = _review_domain(
+        engine,
+        source_check=source_check,
+        repository_probe=probe,
+    )
     result = domain.transition(
         _accept_request(domain, project_id=project_id, key="accept-current-review")
     )
@@ -183,12 +215,9 @@ def test_acceptance_checks_exact_attempt_input_immediately_before_handler(
                 col(SpecificationCandidate.project_id) == project_id
             )
         ).one()
-        attempt = session.get(
-            WorkflowNodeAttempt,
-            candidate.workflow_node_attempt_id,
-        )
+        attempt = session.get(WorkflowNodeAttempt, candidate.workflow_node_attempt_id)
         assert attempt is not None
-        expected = SpecificationAuthoringInput.model_validate_json(
+        expected = SpecificationStructuringInput.model_validate_json(
             attempt.normalized_input_json
         ).model_dump(mode="json")
     assert checked_inputs == [expected]
@@ -196,13 +225,18 @@ def test_acceptance_checks_exact_attempt_input_immediately_before_handler(
 
 def test_acceptance_source_drift_stops_handler_and_business_writes(
     engine: Engine,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A stale final probe cannot create a decision or accepted Specification."""
-    project_id, _author_domain = _authored_candidate(engine, key="accept-stale")
+    project_id, probe = _structured_candidate(
+        engine,
+        tmp_path,
+        key="accept-stale",
+    )
     source_error = WorkflowError(
         code=WorkflowErrorCode.STALE_SPECIFICATION_INPUT,
-        message="Repository source changed before acceptance.",
+        message="Registered source changed before acceptance.",
     )
 
     def source_check(
@@ -222,7 +256,11 @@ def test_acceptance_source_drift_stops_handler_and_business_writes(
         "workflow.domain.execute_decide_specification",
         unexpected_handler,
     )
-    domain = _review_domain(engine, source_check=source_check)
+    domain = _review_domain(
+        engine,
+        source_check=source_check,
+        repository_probe=probe,
+    )
     result = domain.transition(
         _accept_request(domain, project_id=project_id, key="accept-stale-review")
     )
@@ -243,21 +281,23 @@ def test_acceptance_source_drift_stops_handler_and_business_writes(
 def test_production_source_checker_runs_inside_file_backed_transaction(
     tmp_path: Path,
 ) -> None:
-    """The existing repository checker composes with the domain transaction."""
+    """The exact source checker composes with the domain transaction."""
     file_engine = create_engine(f"sqlite:///{tmp_path / 'acceptance.sqlite'}")
     SQLModel.metadata.create_all(file_engine)
     try:
-        project_id, _author_domain = _authored_candidate(
+        project_id, probe = _structured_candidate(
             file_engine,
+            tmp_path,
             key="accept-production-checker",
         )
-        input_service = SpecificationAuthoringInputService(
+        input_service = SpecificationStructuringInputService(
             engine=file_engine,
             repository_probe=GitPythonRepositoryProbe(),
         )
         domain = _review_domain(
             file_engine,
             source_check=input_service.revalidate_sources,
+            repository_probe=probe,
         )
 
         result = domain.transition(
@@ -270,11 +310,16 @@ def test_production_source_checker_runs_inside_file_backed_transaction(
 
         assert result.ok
         with Session(file_engine) as session:
-            assert session.exec(
-                select(SpecificationDecision).where(
-                    col(SpecificationDecision.project_id) == project_id
+            assert (
+                session.exec(
+                    select(SpecificationDecision).where(
+                        col(SpecificationDecision.project_id) == project_id
+                    )
                 )
-            ).one().decision == "accepted"
+                .one()
+                .decision
+                == "accepted"
+            )
     finally:
         file_engine.dispose()
 
@@ -282,11 +327,13 @@ def test_production_source_checker_runs_inside_file_backed_transaction(
 @pytest.mark.parametrize("review_decision", ["rejected", "feedback"])
 def test_non_acceptance_review_remains_available_when_sources_drift(
     engine: Engine,
+    tmp_path: Path,
     review_decision: str,
 ) -> None:
     """Repository drift cannot deadlock rejection or revision feedback."""
-    project_id, _author_domain = _authored_candidate(
+    project_id, probe = _structured_candidate(
         engine,
+        tmp_path,
         key=f"review-{review_decision}",
     )
     source_checks: list[str] = []
@@ -299,10 +346,14 @@ def test_non_acceptance_review_remains_available_when_sources_drift(
         source_checks.append("checked")
         return WorkflowError(
             code=WorkflowErrorCode.STALE_SPECIFICATION_INPUT,
-            message="Repository source changed before review.",
+            message="Registered source changed before review.",
         )
 
-    domain = _review_domain(engine, source_check=stale_source)
+    domain = _review_domain(
+        engine,
+        source_check=stale_source,
+        repository_probe=probe,
+    )
     request = _accept_request(
         domain,
         project_id=project_id,
@@ -310,7 +361,7 @@ def test_non_acceptance_review_remains_available_when_sources_drift(
     ).model_copy(
         update={
             "decision": review_decision,
-            "rationale": "Refresh repository-backed requirements.",
+            "rationale": "Refresh exact source-grounded requirements.",
         }
     )
 

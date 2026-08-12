@@ -18,8 +18,8 @@ from adapters.adk.errors import (
 from adapters.adk.preflight import revalidate_specification_attempt
 from services.contracts.product_goal import ProductGoalInterviewOutput
 from services.contracts.specification_authoring import (
-    SpecificationAuthoringInput,
-    SpecificationAuthoringOutput,
+    SpecificationStructuringInput,
+    SpecificationStructuringOutput,
 )
 from services.contracts.sprint import (
     SprintPlannerInput,
@@ -49,7 +49,7 @@ from workflow.contracts import JsonObject, WorkflowErrorCode
 from workflow.fingerprints import canonical_hash
 from workflow.requests import (
     CompileAuthority,
-    CompleteSpecificationAuthoring,
+    CompleteSpecificationStructuring,
     GenerateVisionBootstrap,
     RecordBacklogDraft,
     RecordProductGoalInterviewTurn,
@@ -71,7 +71,7 @@ AGENTIC_NODE_IDS = (
     "vision.bootstrap",
     "vision.interview",
     "goal.interview",
-    "specification.author",
+    "specification.structure",
     "backlog.generate",
     "planning.roadmap.generate",
     "planning.story.generate",
@@ -188,7 +188,7 @@ class AgenticRecipeNodes:
     vision_interview: BaseAgent | Workflow
     vision_repair: BaseAgent | Workflow
     product_goal: BaseAgent | Workflow
-    specification_author: BaseAgent | Workflow
+    specification_structurer: BaseAgent | Workflow
     backlog_generation: BaseAgent | Workflow
     roadmap_generation: BaseAgent | Workflow
     story_generation: BaseAgent | Workflow
@@ -600,42 +600,40 @@ def _build_sprint_workflow(
     )
 
 
-def build_specification_authoring_workflow(
+def build_specification_structuring_workflow(
     *,
     leaf_agent: BaseAgent | Workflow,
     execution_settings: JsonObject,
 ) -> Workflow:
-    """Validate exact host input and typed model output around one to-spec leaf."""
+    """Validate exact host input and typed output around one structuring leaf."""
     timeout_seconds, max_attempts = _execution_limits(execution_settings)
     retry_config = RetryConfig(max_attempts=max_attempts)
 
     @node(
-        name="execute_specification_author",
+        name="execute_specification_structurer",
         rerun_on_resume=True,
         retry_config=retry_config,
         timeout=timeout_seconds,
     )
-    async def execute_specification_author(
+    async def execute_specification_structurer(
         context: Context,
         node_input: RecipeInput,
     ) -> RecipeOutput:
-        author_input = SpecificationAuthoringInput.model_validate(node_input.payload)
+        structuring_input = SpecificationStructuringInput.model_validate(
+            node_input.payload
+        )
         revalidated = revalidate_specification_attempt("before_provider")
-        if revalidated is not None and (
-            not revalidated.ok or revalidated.replayed
-        ):
+        if revalidated is not None and (not revalidated.ok or revalidated.replayed):
             raise AttemptRevalidationError(revalidated)
         generated = await context.run_node(
             leaf_agent,
-            node_input=author_input.model_dump(mode="json"),
+            node_input=structuring_input.model_dump(mode="json"),
         )
         revalidated = revalidate_specification_attempt("after_provider")
-        if revalidated is not None and (
-            not revalidated.ok or revalidated.replayed
-        ):
+        if revalidated is not None and (not revalidated.ok or revalidated.replayed):
             raise AttemptRevalidationError(revalidated)
         try:
-            output = SpecificationAuthoringOutput.model_validate(generated)
+            output = SpecificationStructuringOutput.model_validate(generated)
         except ValidationError as error:
             payload = generated.get("payload") if isinstance(generated, dict) else None
             schema_version = (
@@ -643,10 +641,10 @@ def build_specification_authoring_workflow(
             )
             if schema_version is not None and schema_version != SCHEMA_VERSION:
                 code = WorkflowErrorCode.UNSUPPORTED_SPECIFICATION_SCHEMA
-                message = "Specification author returned an unsupported schema."
+                message = "Specification structurer returned an unsupported schema."
             else:
                 code = WorkflowErrorCode.INVALID_SPECIFICATION_PAYLOAD
-                message = "Specification author returned an invalid v2 payload."
+                message = "Specification structurer returned an invalid v2 payload."
             raise SpecificationAgenticExecutionError(
                 code=code,
                 message=message,
@@ -654,12 +652,12 @@ def build_specification_authoring_workflow(
         return RecipeOutput(payload=output.model_dump(mode="json"))
 
     return Workflow(
-        name="specification_authoring",
+        name="specification_structuring",
         retry_config=retry_config,
         timeout=timeout_seconds,
         input_schema=RecipeInput,
         output_schema=RecipeOutput,
-        edges=[(START, execute_specification_author)],
+        edges=[(START, execute_specification_structurer)],
     )
 
 
@@ -956,13 +954,13 @@ def build_agentic_recipe_registry(
                 output_adapter=_product_goal_interview_output_adapter,
             ),
             AdkRecipe(
-                node_id="specification.author",
-                workflow=build_specification_authoring_workflow(
-                    leaf_agent=nodes.specification_author,
+                node_id="specification.structure",
+                workflow=build_specification_structuring_workflow(
+                    leaf_agent=nodes.specification_structurer,
                     execution_settings=execution_settings,
                 ),
                 output_adapter=_request_output_adapter(
-                    CompleteSpecificationAuthoring
+                    CompleteSpecificationStructuring
                 ),
             ),
             AdkRecipe(
@@ -1018,7 +1016,7 @@ __all__ = [
     "UnknownAdkRecipeError",
     "build_agentic_recipe_registry",
     "build_backlog_generation_workflow",
-    "build_specification_authoring_workflow",
+    "build_specification_structuring_workflow",
     "build_vision_workflow",
     "validate_structured_output",
 ]

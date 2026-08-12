@@ -39,6 +39,12 @@ from utils.spec_schemas import (
 _SOURCE_ID = "REQ.adapter.typed"
 _SOURCE_STATEMENT = "The payload MUST include account_id."
 _NON_NORMATIVE_SENTINEL = "NON_NORMATIVE_SENTINEL_MUST_NEVER_REACH_AUTHORITY"
+_REGISTERED_SOURCE_SENTINELS: tuple[str, ...] = (
+    "TO_SPEC_SOURCE_MARKDOWN_MUST_NEVER_REACH_AUTHORITY_PROVIDER",
+    "CONTEXT_MD_MUST_NEVER_REACH_AUTHORITY_PROVIDER",
+    "ADR_PROSE_MUST_NEVER_REACH_AUTHORITY_PROVIDER",
+    "REPOSITORY_EVIDENCE_MUST_NEVER_REACH_AUTHORITY_PROVIDER",
+)
 
 
 def _authority_input() -> AuthorityInputV2:
@@ -177,8 +183,14 @@ def test_compiler_input_accepts_the_typed_authority_projection() -> None:
 
 
 def test_serialized_compiler_input_excludes_non_normative_specification_prose() -> None:
-    """Send only the typed Authority projection across the provider boundary."""
+    """Send only accepted typed clauses across the Authority provider boundary."""
     specification = _specification_with_non_normative_sentinel()
+    structuring_only_provenance = {
+        "registered_source": _REGISTERED_SOURCE_SENTINELS[0],
+        "context": _REGISTERED_SOURCE_SENTINELS[1],
+        "adrs": [_REGISTERED_SOURCE_SENTINELS[2]],
+        "repository_evidence": _REGISTERED_SOURCE_SENTINELS[3],
+    }
     authority_input = build_authority_input_v2(specification)
     provider_input = SpecAuthorityCompilerInput(
         authority_input=authority_input,
@@ -190,7 +202,16 @@ def test_serialized_compiler_input_excludes_non_normative_specification_prose() 
     serialized = provider_input.model_dump_json()
 
     assert _NON_NORMATIVE_SENTINEL in specification.model_dump_json()
+    assert all(
+        sentinel in json.dumps(structuring_only_provenance)
+        for sentinel in _REGISTERED_SOURCE_SENTINELS
+    )
     assert _NON_NORMATIVE_SENTINEL not in serialized
+    assert all(sentinel not in serialized for sentinel in _REGISTERED_SOURCE_SENTINELS)
+    assert all(
+        field not in serialized
+        for field in ("registered_source", "context", "adrs", "repository_evidence")
+    )
     assert "GOAL.compiler.context" not in serialized
     assert set(authority_input.model_dump(mode="json")) == {
         "schema_version",

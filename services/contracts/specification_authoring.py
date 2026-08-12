@@ -1,5 +1,5 @@
 # services/contracts/specification_authoring.py
-"""Closed host-to-model contract for direct Specification authoring."""
+"""Closed host-to-model contract for Specification structuring."""
 
 from __future__ import annotations
 
@@ -9,7 +9,13 @@ from typing import TYPE_CHECKING, Annotated, Literal, Self, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from services.contracts.vision_evidence import VisionEvidenceBundle
+from services.contracts.specification_source import (
+    SPECIFICATION_SOURCE_CONTEXT_ID,
+    SPECIFICATION_SOURCE_PRIMARY_ID,
+    SpecificationRepositoryRevision,
+    source_bundle_fingerprint,
+    specification_source_adr_id,
+)
 from services.specs.candidate_contract import (
     CandidateSourceKind,
     CandidateSourceManifestEntry,
@@ -30,21 +36,19 @@ type JsonScalar = str | int | float | bool | None
 type JsonValue = JsonScalar | list[JsonValue] | dict[str, JsonValue]
 type JsonObject = dict[str, JsonValue]
 
-SPECIFICATION_AUTHOR_VERSION: str = "2.0.0"
-SPECIFICATION_AUTHOR_PROMPT_VERSION: str = "agileforge.to-spec.prompt.v2"
-SPECIFICATION_AUTHOR_PROMPT_HASH: str = (
-    "sha256:ab4ec877a7fa25a38100820269c5aad25a476fb55d29cd51296123bd01dfe678"
+SPECIFICATION_STRUCTURER_VERSION: str = "1.0.0"
+SPECIFICATION_STRUCTURER_PROMPT_VERSION: str = (
+    "agileforge.specification-structurer.prompt.v1"
+)
+SPECIFICATION_STRUCTURER_PROMPT_HASH: str = (
+    "sha256:fec7c251132af921dd721e5e3cdea758eef95ce0437bfd85d2f24dad00c70e21"
 )
 SPECIFICATION_VISION_SOURCE_ID: str = "SRC.vision.accepted"
 SPECIFICATION_PRODUCT_GOAL_SOURCE_ID: str = "SRC.product-goal.active"
-SPECIFICATION_REPOSITORY_EVIDENCE_SOURCE_ID: str = (
-    "SRC.repository-evidence.accepted-vision"
-)
-SPECIFICATION_ACTIVE_REPOSITORY_SOURCE_ID: str = "SRC.repository-context.active"
 
 
-def compute_specification_author_prompt_hash(prompt_text: str) -> str:
-    """Hash normalized packaged to-spec instructions for durable provenance."""
+def compute_specification_structurer_prompt_hash(prompt_text: str) -> str:
+    """Hash normalized packaged structuring instructions for provenance."""
     normalized = " ".join(prompt_text.strip().lower().split())
     return "sha256:" + hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
@@ -56,45 +60,175 @@ class _FrozenClosedModel(BaseModel):
 
 
 class AcceptedVisionContext(_FrozenClosedModel):
-    """Exact accepted Vision supplied as read-only authoring context."""
+    """Exact accepted Vision supplied as read-only structuring context."""
 
     artifact_id: Annotated[int, Field(gt=0)]
     fingerprint: Fingerprint
     statement: Annotated[str, Field(min_length=1)]
     components: JsonObject
+    component_basis: tuple[JsonObject, ...] = ()
+    assumptions: tuple[JsonObject, ...] = ()
+    conflicts: tuple[JsonObject, ...] = ()
 
 
 class AcceptedProductGoalContext(_FrozenClosedModel):
-    """Exact active accepted Product Goal supplied to to-spec."""
+    """Exact active accepted Product Goal supplied to the structurer."""
 
     artifact_id: Annotated[int, Field(gt=0)]
     fingerprint: Fingerprint
     statement: Annotated[str, Field(min_length=1)]
 
 
-class SpecificationSourceContext(_FrozenClosedModel):
-    """One host-owned source manifest row plus its model-readable content."""
+class SpecificationStructuringDocument(_FrozenClosedModel):
+    """One registered document projected as exact provider-readable UTF-8 prose."""
 
-    source_id: Annotated[str, Field(pattern=r"^SRC\.[a-z0-9][a-z0-9.-]{1,96}$")]
-    kind: CandidateSourceKind
-    fingerprint: Fingerprint
-    content: JsonObject
+    source_id: Annotated[str, Field(pattern=r"^SRC\.[a-z0-9][a-z0-9.-]{1,126}$")]
+    relative_path: Annotated[str, Field(min_length=1)]
+    text: str
+    byte_length: Annotated[int, Field(ge=0)]
+    content_fingerprint: Fingerprint
 
-
-def _validate_current_repository_context(
-    contexts: tuple[SpecificationSourceContext, ...],
-) -> None:
-    """Bind freshly collected repository bytes to their host fingerprint."""
-    for context in contexts:
-        if context.source_id != SPECIFICATION_ACTIVE_REPOSITORY_SOURCE_ID:
-            continue
-        evidence = VisionEvidenceBundle.model_validate(context.content)
-        if (
-            context.kind is not CandidateSourceKind.REPOSITORY
-            or context.fingerprint != evidence.evidence_fingerprint
-        ):
-            message = "current repository source context fingerprint changed"
+    @model_validator(mode="after")
+    def validate_exact_text(self) -> Self:
+        """Bind model-visible prose to its exact registered UTF-8 bytes."""
+        raw = self.text.encode("utf-8")
+        expected = "sha256:" + hashlib.sha256(raw).hexdigest()
+        if len(raw) != self.byte_length or expected != self.content_fingerprint:
+            message = "structuring document text must match exact UTF-8 bytes"
             raise ValueError(message)
+        return self
+
+
+class SpecificationStructuringContextCapture(_FrozenClosedModel):
+    """Expose the registered root Context state without inventing empty prose."""
+
+    state: Literal["absent", "present"]
+    document: SpecificationStructuringDocument | None = None
+
+    @model_validator(mode="after")
+    def validate_state(self) -> Self:
+        """Keep absent and present Context states explicit and exact."""
+        if self.state == "absent" and self.document is not None:
+            message = "absent structuring context cannot contain a document"
+            raise ValueError(message)
+        if self.state == "present" and self.document is None:
+            message = "present structuring context requires a document"
+            raise ValueError(message)
+        if self.document is not None and (
+            self.document.source_id != SPECIFICATION_SOURCE_CONTEXT_ID
+            or self.document.relative_path != "CONTEXT.md"
+        ):
+            message = "structuring context must be the registered root CONTEXT.md"
+            raise ValueError(message)
+        return self
+
+
+class RegisteredRepositoryEvidence(_FrozenClosedModel):
+    """Exact durable binding evidence paired with the portable source revision."""
+
+    repository_binding_id: Annotated[int, Field(gt=0)]
+    binding_fingerprint: Fingerprint
+    head_sha: Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")]
+    branch_name: str | None
+    detached_head: bool
+    dirty: bool
+    status_fingerprint: Fingerprint
+    status_entries: tuple[JsonObject, ...]
+    remotes: tuple[str, ...]
+    warnings: tuple[JsonObject, ...]
+    probe_version: Annotated[str, Field(min_length=1)]
+
+
+class RegisteredSpecificationSource(_FrozenClosedModel):
+    """Exact registered bundle projected for model consumption and provenance."""
+
+    specification_source_id: Annotated[int, Field(gt=0)]
+    source_fingerprint: Fingerprint
+    producer_capability: Literal["to-spec"]
+    preparation_capability: Literal["grill-with-docs"]
+    source: SpecificationStructuringDocument
+    context: SpecificationStructuringContextCapture
+    adrs: tuple[SpecificationStructuringDocument, ...] = ()
+    repository_revision: SpecificationRepositoryRevision
+    repository_evidence: RegisteredRepositoryEvidence
+    accepted_vision_fingerprint: Fingerprint
+    accepted_product_goal_fingerprint: Fingerprint
+
+    @field_validator("adrs")
+    @classmethod
+    def canonicalize_adrs(
+        cls,
+        value: tuple[SpecificationStructuringDocument, ...],
+    ) -> tuple[SpecificationStructuringDocument, ...]:
+        """Treat ADR selection as a canonical path-keyed set."""
+        return tuple(sorted(value, key=lambda item: item.relative_path))
+
+    @model_validator(mode="after")
+    def validate_registered_bundle(self) -> Self:
+        """Rebuild and fingerprint the canonical exact-byte registration."""
+        from services.contracts.specification_source import (  # noqa: PLC0415
+            SpecificationContextCapture,
+            SpecificationSourceBundle,
+            SpecificationSourceDocument,
+        )
+
+        def source_document(
+            document: SpecificationStructuringDocument,
+        ) -> SpecificationSourceDocument:
+            import base64  # noqa: PLC0415
+
+            return SpecificationSourceDocument(
+                source_id=document.source_id,
+                relative_path=document.relative_path,
+                content_base64=base64.b64encode(document.text.encode("utf-8")).decode(
+                    "ascii"
+                ),
+                byte_length=document.byte_length,
+                content_fingerprint=document.content_fingerprint,
+            )
+
+        if self.source.source_id != SPECIFICATION_SOURCE_PRIMARY_ID:
+            message = "registered structuring source must use the stable primary ID"
+            raise ValueError(message)
+        if self.context.document is None:
+            context = SpecificationContextCapture(state="absent")
+        else:
+            context = SpecificationContextCapture(
+                state="present",
+                document=source_document(self.context.document),
+            )
+        bundle = SpecificationSourceBundle(
+            producer_capability=self.producer_capability,
+            preparation_capability=self.preparation_capability,
+            source=source_document(self.source),
+            context=context,
+            adrs=tuple(source_document(item) for item in self.adrs),
+            repository_revision=self.repository_revision,
+            accepted_vision_fingerprint=self.accepted_vision_fingerprint,
+            accepted_product_goal_fingerprint=(self.accepted_product_goal_fingerprint),
+        )
+        if source_bundle_fingerprint(bundle) != self.source_fingerprint:
+            message = "registered structuring source fingerprint changed"
+            raise ValueError(message)
+        if (
+            self.repository_evidence.head_sha,
+            self.repository_evidence.dirty,
+            self.repository_evidence.status_fingerprint,
+        ) != (
+            self.repository_revision.head_sha,
+            self.repository_revision.dirty,
+            self.repository_revision.status_fingerprint,
+        ):
+            message = "registered repository evidence must match source revision"
+            raise ValueError(message)
+        expected_adr_ids = {
+            specification_source_adr_id(document.relative_path)
+            for document in self.adrs
+        }
+        if {document.source_id for document in self.adrs} != expected_adr_ids:
+            message = "registered ADR source IDs changed"
+            raise ValueError(message)
+        return self
 
 
 class BaseSpecificationContext(_FrozenClosedModel):
@@ -126,19 +260,55 @@ class PriorCandidateContext(_FrozenClosedModel):
         return self
 
 
-class SpecificationAuthoringInput(_FrozenClosedModel):
-    """Complete host-built input for the sole semantic authoring call."""
+def _expected_source_manifest(
+    contract: SpecificationStructuringInput,
+) -> dict[str, tuple[CandidateSourceKind, str]]:
+    registered = contract.registered_source
+    expected: dict[str, tuple[CandidateSourceKind, str]] = {
+        SPECIFICATION_VISION_SOURCE_ID: (
+            CandidateSourceKind.VISION,
+            contract.accepted_vision.fingerprint,
+        ),
+        SPECIFICATION_PRODUCT_GOAL_SOURCE_ID: (
+            CandidateSourceKind.PRODUCT_GOAL,
+            contract.accepted_product_goal.fingerprint,
+        ),
+        registered.source.source_id: (
+            CandidateSourceKind.EXTERNAL,
+            registered.source.content_fingerprint,
+        ),
+    }
+    if registered.context.document is not None:
+        context = registered.context.document
+        expected[context.source_id] = (
+            CandidateSourceKind.REPOSITORY,
+            context.content_fingerprint,
+        )
+    expected.update(
+        {
+            adr.source_id: (
+                CandidateSourceKind.REPOSITORY,
+                adr.content_fingerprint,
+            )
+            for adr in registered.adrs
+        }
+    )
+    return expected
 
-    schema_version: Literal["agileforge.spec-authoring-input.v2"] = (
-        "agileforge.spec-authoring-input.v2"
+
+class SpecificationStructuringInput(_FrozenClosedModel):
+    """Complete host-built input for the sole semantic structuring call."""
+
+    schema_version: Literal["agileforge.spec-structuring-input.v1"] = (
+        "agileforge.spec-structuring-input.v1"
     )
     project_id: Annotated[int, Field(gt=0)]
     project_name: Annotated[str, Field(min_length=1)]
     operation: Literal["initial", "revision", "amendment"]
     accepted_vision: AcceptedVisionContext
     accepted_product_goal: AcceptedProductGoalContext
+    registered_source: RegisteredSpecificationSource
     source_manifest: tuple[CandidateSourceManifestEntry, ...]
-    source_context: tuple[SpecificationSourceContext, ...]
     base_specification: BaseSpecificationContext | None = None
     prior_candidate: PriorCandidateContext | None = None
 
@@ -151,30 +321,21 @@ class SpecificationAuthoringInput(_FrozenClosedModel):
         """Canonicalize the set-like source manifest by stable source ID."""
         return tuple(sorted(value, key=lambda item: item.source_id))
 
-    @field_validator("source_context")
-    @classmethod
-    def canonicalize_source_context(
-        cls,
-        value: tuple[SpecificationSourceContext, ...],
-    ) -> tuple[SpecificationSourceContext, ...]:
-        """Keep source content in the exact manifest order."""
-        return tuple(sorted(value, key=lambda item: item.source_id))
-
     @model_validator(mode="after")
     def validate_composition_and_sources(self) -> Self:
-        """Bind operation semantics and every source byte to one manifest row."""
+        """Bind composition and all provider prose to one registered source."""
         if self.operation == "initial" and (
             self.base_specification is not None or self.prior_candidate is not None
         ):
-            message = "initial authoring cannot include a base or prior candidate"
+            message = "initial structuring cannot include a base or prior candidate"
             raise ValueError(message)
         if self.operation == "amendment" and (
             self.base_specification is None or self.prior_candidate is not None
         ):
-            message = "amendment authoring requires only an accepted base"
+            message = "amendment structuring requires only an accepted base"
             raise ValueError(message)
         if self.operation == "revision" and self.prior_candidate is None:
-            message = "revision authoring requires one terminal prior candidate"
+            message = "revision structuring requires one terminal prior candidate"
             raise ValueError(message)
         if self.prior_candidate is not None:
             prior_base = (
@@ -192,52 +353,51 @@ class SpecificationAuthoringInput(_FrozenClosedModel):
             if prior_base != current_base:
                 message = "revision base does not match the prior candidate"
                 raise ValueError(message)
+        if (
+            self.registered_source.accepted_vision_fingerprint
+            != self.accepted_vision.fingerprint
+            or self.registered_source.accepted_product_goal_fingerprint
+            != self.accepted_product_goal.fingerprint
+        ):
+            message = "registered source does not match accepted lineage"
+            raise ValueError(message)
         manifest = {
             item.source_id: (item.kind, item.fingerprint)
             for item in self.source_manifest
         }
-        contexts = {
-            item.source_id: (item.kind, item.fingerprint)
-            for item in self.source_context
-        }
-        if len(manifest) != len(self.source_manifest) or manifest != contexts:
-            message = "source context must exactly match the unique source manifest"
-            raise ValueError(message)
-        expected = {
-            SPECIFICATION_VISION_SOURCE_ID: (
-                CandidateSourceKind.VISION,
-                self.accepted_vision.fingerprint,
-            ),
-            SPECIFICATION_PRODUCT_GOAL_SOURCE_ID: (
-                CandidateSourceKind.PRODUCT_GOAL,
-                self.accepted_product_goal.fingerprint,
-            ),
-        }
-        if any(
-            manifest.get(source_id) != identity
-            for source_id, identity in expected.items()
+        if len(manifest) != len(self.source_manifest) or manifest != (
+            _expected_source_manifest(self)
         ):
             message = (
-                "source manifest must include exact accepted Vision and Product Goal"
+                "source manifest must exactly match the registered source manifest"
             )
             raise ValueError(message)
-        _validate_current_repository_context(self.source_context)
         return self
 
 
-def specification_authoring_input_fingerprint(
-    contract: SpecificationAuthoringInput,
+def specification_structuring_input_fingerprint(
+    contract: SpecificationStructuringInput,
 ) -> str:
     """Hash model-visible semantic input without host database row identities."""
     data = contract.model_dump(mode="json")
     data.pop("project_id")
     accepted_vision = data["accepted_vision"]
     accepted_goal = data["accepted_product_goal"]
-    if not isinstance(accepted_vision, dict) or not isinstance(accepted_goal, dict):
-        message = "Specification authoring lineage must be objects."
+    registered = data["registered_source"]
+    if not all(
+        isinstance(item, dict) for item in (accepted_vision, accepted_goal, registered)
+    ):
+        message = "Specification structuring lineage must be objects."
         raise TypeError(message)
     accepted_vision.pop("artifact_id")
     accepted_goal.pop("artifact_id")
+    registered.pop("specification_source_id")
+    repository_evidence = registered["repository_evidence"]
+    if not isinstance(repository_evidence, dict):
+        message = "Specification structuring repository evidence must be an object."
+        raise TypeError(message)
+    repository_evidence.pop("repository_binding_id")
+    repository_evidence.pop("binding_fingerprint")
     base = data.get("base_specification")
     if isinstance(base, dict):
         base.pop("spec_version_id")
@@ -247,8 +407,8 @@ def specification_authoring_input_fingerprint(
     return canonical_hash(data)
 
 
-def specification_authoring_fact_fingerprint(
-    contract: SpecificationAuthoringInput,
+def specification_structuring_fact_fingerprint(
+    contract: SpecificationStructuringInput,
 ) -> str:
     """Hash portable accepted lineage facts that authorize one candidate."""
     base = contract.base_specification
@@ -260,6 +420,9 @@ def specification_authoring_fact_fingerprint(
             "accepted_product_goal_fingerprint": (
                 contract.accepted_product_goal.fingerprint
             ),
+            "registered_source_fingerprint": (
+                contract.registered_source.source_fingerprint
+            ),
             "base_payload_fingerprint": (
                 None if base is None else base.payload_fingerprint
             ),
@@ -270,7 +433,7 @@ def specification_authoring_fact_fingerprint(
     )
 
 
-class SpecificationAuthoringOutput(_FrozenClosedModel):
+class SpecificationStructuringOutput(_FrozenClosedModel):
     """Only semantic bytes and explicit amendment declarations are model-owned."""
 
     payload: SpecificationPayload
@@ -283,8 +446,8 @@ class SpecificationAuthoringOutput(_FrozenClosedModel):
 for _contract in (
     BaseSpecificationContext,
     PriorCandidateContext,
-    SpecificationAuthoringInput,
-    SpecificationAuthoringOutput,
+    SpecificationStructuringInput,
+    SpecificationStructuringOutput,
 ):
     _contract.model_rebuild(
         _types_namespace={"SpecificationPayload": _SPECIFICATION_PAYLOAD_MODEL}
@@ -292,21 +455,22 @@ for _contract in (
 
 
 __all__ = [
-    "SPECIFICATION_ACTIVE_REPOSITORY_SOURCE_ID",
-    "SPECIFICATION_AUTHOR_PROMPT_HASH",
-    "SPECIFICATION_AUTHOR_PROMPT_VERSION",
-    "SPECIFICATION_AUTHOR_VERSION",
     "SPECIFICATION_PRODUCT_GOAL_SOURCE_ID",
-    "SPECIFICATION_REPOSITORY_EVIDENCE_SOURCE_ID",
+    "SPECIFICATION_STRUCTURER_PROMPT_HASH",
+    "SPECIFICATION_STRUCTURER_PROMPT_VERSION",
+    "SPECIFICATION_STRUCTURER_VERSION",
     "SPECIFICATION_VISION_SOURCE_ID",
     "AcceptedProductGoalContext",
     "AcceptedVisionContext",
     "BaseSpecificationContext",
     "PriorCandidateContext",
-    "SpecificationAuthoringInput",
-    "SpecificationAuthoringOutput",
-    "SpecificationSourceContext",
-    "compute_specification_author_prompt_hash",
-    "specification_authoring_fact_fingerprint",
-    "specification_authoring_input_fingerprint",
+    "RegisteredRepositoryEvidence",
+    "RegisteredSpecificationSource",
+    "SpecificationStructuringContextCapture",
+    "SpecificationStructuringDocument",
+    "SpecificationStructuringInput",
+    "SpecificationStructuringOutput",
+    "compute_specification_structurer_prompt_hash",
+    "specification_structuring_fact_fingerprint",
+    "specification_structuring_input_fingerprint",
 ]

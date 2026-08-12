@@ -494,7 +494,8 @@ def test_production_api_registers_semantic_lifecycle_routes() -> None:
         ("POST", "/api/projects/{project_id}/goals/review"),
         ("POST", "/api/projects/{project_id}/goals/complete"),
         ("POST", "/api/projects/{project_id}/goals/abandon"),
-        ("POST", "/api/projects/{project_id}/specifications/author"),
+        ("POST", "/api/projects/{project_id}/specifications/source"),
+        ("POST", "/api/projects/{project_id}/specifications/structure"),
         ("GET", "/api/projects/{project_id}/specifications/review"),
         ("POST", "/api/projects/{project_id}/specifications/review"),
         ("POST", "/api/projects/{project_id}/repository"),
@@ -507,6 +508,7 @@ def test_production_api_registers_semantic_lifecycle_routes() -> None:
     }
 
     assert expected <= routes
+    assert ("POST", "/api/projects/{project_id}/specifications/author") not in routes
 
 
 def test_production_api_read_handlers_use_injected_non_routing_projection(

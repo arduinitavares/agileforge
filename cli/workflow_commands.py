@@ -111,7 +111,12 @@ COMMAND_PREFIXES: dict[str, tuple[str, ...]] = {
     "record_post_sprint_triage": ("agileforge", "sprint", "triage"),
     "record_product_goal_interview_turn": ("agileforge", "goal", "respond"),
     "record_roadmap_draft": ("agileforge", "roadmap", "generate"),
-    "author_specification": ("agileforge", "specification", "author"),
+    "register_specification_source": (
+        "agileforge",
+        "specification",
+        "source",
+        "register",
+    ),
     "record_sprint_plan": ("agileforge", "sprint", "generate"),
     "record_story_draft": ("agileforge", "story", "generate"),
     "record_vision_interview_turn": ("agileforge", "vision", "respond"),
@@ -119,6 +124,7 @@ COMMAND_PREFIXES: dict[str, tuple[str, ...]] = {
     "repair_story_readiness": ("agileforge", "story", "readiness", "repair"),
     "review_sprint": ("agileforge", "sprint", "review"),
     "start_sprint": ("agileforge", "sprint", "start"),
+    "structure_specification": ("agileforge", "specification", "structure"),
 }
 
 
@@ -213,7 +219,12 @@ _SEMANTIC_ARGUMENTS: dict[str, tuple[str, ...]] = {
     ),
     "record_product_goal_interview_turn": ("--text", "<text>"),
     "record_roadmap_draft": (),
-    "author_specification": (),
+    "register_specification_source": (
+        "--source-path",
+        "<source-path>",
+        "--preparation-capability",
+        "grill-with-docs",
+    ),
     "record_sprint_plan": (
         "--max-story-points",
         "<max-story-points>",
@@ -226,6 +237,7 @@ _SEMANTIC_ARGUMENTS: dict[str, tuple[str, ...]] = {
     "repair_story_readiness": ("--repair", "<repair>"),
     "review_sprint": (),
     "start_sprint": (),
+    "structure_specification": (),
 }
 
 _DELIVERY_REQUEST_KINDS = frozenset(
@@ -304,7 +316,7 @@ def _decision_payload(
 
 
 def render_workflow_next(position: WorkflowPosition) -> WorkflowNextPayload:
-    """Render only available required and recovery decisions."""
+    """Render immediate work plus optional Specification source re-entry."""
     candidates = tuple(
         decision
         for decision in position.decisions
@@ -327,8 +339,14 @@ def render_workflow_next(position: WorkflowPosition) -> WorkflowNextPayload:
                 }
             )
         )
-        and decision.recommendation_kind
-        in {RecommendationKind.REQUIRED, RecommendationKind.RECOVERY}
+        and (
+            decision.recommendation_kind
+            in {RecommendationKind.REQUIRED, RecommendationKind.RECOVERY}
+            or (
+                decision.recommendation_kind is RecommendationKind.OPTIONAL_REENTRY
+                and decision.request_kind == "register_specification_source"
+            )
+        )
         and planning_action_decision_is_transportable(position.project_id, decision)
         and execution_action_decision_is_transportable(decision)
     )
