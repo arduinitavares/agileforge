@@ -167,6 +167,7 @@ def test_recipe_catalog_excludes_legacy_vision_and_adapts_interview_output() -> 
             vision_interview=root_agent,
             vision_repair=repair_agent,
             product_goal=root_agent,
+            specification_author=root_agent,
             backlog_generation=root_agent,
             roadmap_generation=root_agent,
             story_generation=root_agent,

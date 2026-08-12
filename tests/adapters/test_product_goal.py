@@ -85,6 +85,7 @@ def test_product_goal_recipe_is_registered_without_provider_execution() -> None:
             vision_interview=root_agent,
             vision_repair=root_agent,
             product_goal=root_agent,
+            specification_author=root_agent,
             backlog_generation=root_agent,
             roadmap_generation=root_agent,
             story_generation=root_agent,

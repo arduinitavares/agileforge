@@ -31,6 +31,7 @@ from workflow.definitions.root import ROOT_GRAPH
 from workflow.fingerprints import canonical_hash
 from workflow.requests import (
     CompileAuthority,
+    CompleteSpecificationAuthoring,
     RecordBacklogDraft,
     RecordRoadmapDraft,
     RecordSprintPlan,
@@ -78,6 +79,22 @@ REQUEST_CASES: tuple[
     tuple[str, type[PositionedRequest], JsonObject],
     ...,
 ] = (
+    (
+        "specification.author",
+        CompleteSpecificationAuthoring,
+        {
+            "payload": {
+                "schema_version": "agileforge.spec.v2",
+                "artifact_id": "SPEC.agentic-recipe",
+                "title": "Agentic recipe",
+                "summary": "Author one exact typed Specification.",
+                "problem_statement": "The lifecycle needs one semantic boundary.",
+                "items": [],
+            },
+            "removal_justifications": {},
+            "stable_id_replacements": [],
+        },
+    ),
     (
         "authority.compile",
         CompileAuthority,
@@ -160,6 +177,10 @@ def _agentic_nodes() -> AgenticRecipeNodes:
         ),
         vision_repair=FakeLeafAgent(name="fake_vision_repair", response={}),
         product_goal=FakeLeafAgent(name="fake_product_goal", response={}),
+        specification_author=FakeLeafAgent(
+            name="fake_specification_author",
+            response={},
+        ),
         backlog_generation=FakeLeafAgent(name="fake_backlog", response={}),
         roadmap_generation=FakeLeafAgent(name="fake_roadmap", response={}),
         story_generation=FakeLeafAgent(name="fake_story", response={}),

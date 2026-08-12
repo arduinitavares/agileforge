@@ -22,6 +22,7 @@ from pydantic import TypeAdapter
 from sqlmodel import Session, col, select
 
 from adapters.adk.errors import VisionAgenticPreflightError
+from adapters.adk.prompts.specification import SPEC_AUTHORITY_COMPILER_PROMPT_HASH
 from adapters.adk.recipes import (
     AdkRecipe,
     AdkRecipeRegistry,
@@ -51,6 +52,7 @@ from models.workflow import (
     WorkflowNodeAttemptOutcome,
     WorkflowTransitionReceipt,
 )
+from services.authority_compilation_input import AuthorityCompilationInputService
 from services.contracts.product_goal import (
     ProductGoalInterviewInput,
     ProductGoalInterviewOutput,
@@ -403,9 +405,7 @@ def _authority_artifact() -> SpecAuthorityCompilationSuccess:
         assumptions=[],
         source_map=[],
         compiler_version=compiler_service.SPEC_AUTHORITY_COMPILER_VERSION,
-        prompt_hash=compiler_service.compute_prompt_hash(
-            compiler_service.SPEC_AUTHORITY_COMPILER_INSTRUCTIONS
-        ),
+        prompt_hash=SPEC_AUTHORITY_COMPILER_PROMPT_HASH,
     )
 
 
@@ -507,6 +507,7 @@ def _goal_registry(
             vision_interview=vision_leaf or _unused_leaf("unused_vision_interview"),
             vision_repair=_unused_leaf("unused_vision_repair"),
             product_goal=leaf,
+            specification_author=_unused_leaf("unused_specification_author"),
             backlog_generation=_unused_leaf("unused_backlog"),
             roadmap_generation=_unused_leaf("unused_roadmap"),
             story_generation=_unused_leaf("unused_story"),
@@ -916,6 +917,7 @@ def test_runner_loads_vision_input_from_persisted_attempt(
             vision_interview=_observing_vision_leaf(observations, vision_response),
             vision_repair=_unused_leaf("unused_vision_repair"),
             product_goal=_unused_leaf("unused_product_goal"),
+            specification_author=_unused_leaf("unused_specification_author"),
             backlog_generation=_unused_leaf("unused_backlog"),
             roadmap_generation=_unused_leaf("unused_roadmap"),
             story_generation=_unused_leaf("unused_story"),
@@ -1518,7 +1520,7 @@ def test_authority_runner_executes_provider_once_before_completion_transaction(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Persist precomputed authority after one provider-free external call."""
-    project_id, spec_version_id, spec_hash = _seed_authority_compile_target(engine)
+    project_id, spec_version_id, _spec_hash = _seed_authority_compile_target(engine)
     calls: list[tuple[str, ...]] = []
     observer = ReceiptObserver(engine=engine, calls=calls)
     compiler_leaf = TransactionObservingLeafAgent(
@@ -1535,6 +1537,7 @@ def test_authority_runner_executes_provider_once_before_completion_transaction(
             vision_interview=_unused_leaf("unused_vision_interview"),
             vision_repair=_unused_leaf("unused_vision_repair"),
             product_goal=_unused_leaf("unused_product_goal"),
+            specification_author=_unused_leaf("unused_specification_author"),
             backlog_generation=_unused_leaf("unused_backlog"),
             roadmap_generation=_unused_leaf("unused_roadmap"),
             story_generation=_unused_leaf("unused_story"),
@@ -1584,19 +1587,11 @@ def test_authority_runner_executes_provider_once_before_completion_transaction(
         for item in domain.position(project_id).decisions
         if item.node_id == "authority.compile"
     )
-    normalized_input: JsonObject = {
-        "spec_version_id": spec_version_id,
-        "expected_spec_hash": spec_hash,
-        "compiler_model": "fake/compiler",
-        "compiler_input": {
-            "spec_source": '{"scope":"runner compile"}',
-            "spec_content_ref": None,
-            "domain_hint": None,
-            "project_id": project_id,
-            "spec_version_id": spec_version_id,
-            "spec_source_format": "agileforge.spec.v1",
-        },
-    }
+    normalized_input = AuthorityCompilationInputService(engine=engine).build(
+        project_id=project_id,
+        decision=decision,
+        compiler_model="fake/compiler",
+    )
 
     result = runner.run(decision, normalized_input)
 

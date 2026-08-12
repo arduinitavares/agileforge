@@ -12,6 +12,10 @@ from pydantic import BaseModel, ConfigDict, TypeAdapter
 
 from adapters.adk.errors import VisionAgenticPreflightError
 from services.contracts.product_goal import ProductGoalInterviewOutput
+from services.contracts.specification_authoring import (
+    SpecificationAuthoringInput,
+    SpecificationAuthoringOutput,
+)
 from services.contracts.sprint import (
     SprintPlannerInput,
     SprintPlannerOutput,
@@ -39,6 +43,7 @@ from workflow.contracts import JsonObject, WorkflowErrorCode
 from workflow.fingerprints import canonical_hash
 from workflow.requests import (
     CompileAuthority,
+    CompleteSpecificationAuthoring,
     GenerateVisionBootstrap,
     RecordBacklogDraft,
     RecordProductGoalInterviewTurn,
@@ -60,6 +65,7 @@ AGENTIC_NODE_IDS = (
     "vision.bootstrap",
     "vision.interview",
     "goal.interview",
+    "specification.author",
     "backlog.generate",
     "planning.roadmap.generate",
     "planning.story.generate",
@@ -96,6 +102,7 @@ class _CompileAuthorityRecipePayload(BaseModel):
     """Normalized host guards and retained compiler input."""
 
     model_config = ConfigDict(extra="forbid")
+    project_id: int
     spec_version_id: int
     expected_spec_hash: str
     compiler_model: str = "openrouter/openai/gpt-5.6-luna"
@@ -175,6 +182,7 @@ class AgenticRecipeNodes:
     vision_interview: BaseAgent | Workflow
     vision_repair: BaseAgent | Workflow
     product_goal: BaseAgent | Workflow
+    specification_author: BaseAgent | Workflow
     backlog_generation: BaseAgent | Workflow
     roadmap_generation: BaseAgent | Workflow
     story_generation: BaseAgent | Workflow
@@ -586,6 +594,43 @@ def _build_sprint_workflow(
     )
 
 
+def build_specification_authoring_workflow(
+    *,
+    leaf_agent: BaseAgent | Workflow,
+    execution_settings: JsonObject,
+) -> Workflow:
+    """Validate exact host input and typed model output around one to-spec leaf."""
+    timeout_seconds, max_attempts = _execution_limits(execution_settings)
+    retry_config = RetryConfig(max_attempts=max_attempts)
+
+    @node(
+        name="execute_specification_author",
+        rerun_on_resume=True,
+        retry_config=retry_config,
+        timeout=timeout_seconds,
+    )
+    async def execute_specification_author(
+        context: Context,
+        node_input: RecipeInput,
+    ) -> RecipeOutput:
+        author_input = SpecificationAuthoringInput.model_validate(node_input.payload)
+        generated = await context.run_node(
+            leaf_agent,
+            node_input=author_input.model_dump(mode="json"),
+        )
+        output = SpecificationAuthoringOutput.model_validate(generated)
+        return RecipeOutput(payload=output.model_dump(mode="json"))
+
+    return Workflow(
+        name="specification_authoring",
+        retry_config=retry_config,
+        timeout=timeout_seconds,
+        input_schema=RecipeInput,
+        output_schema=RecipeOutput,
+        edges=[(START, execute_specification_author)],
+    )
+
+
 def build_vision_workflow(
     *,
     primary_leaf: BaseAgent | Workflow,
@@ -879,6 +924,16 @@ def build_agentic_recipe_registry(
                 output_adapter=_product_goal_interview_output_adapter,
             ),
             AdkRecipe(
+                node_id="specification.author",
+                workflow=build_specification_authoring_workflow(
+                    leaf_agent=nodes.specification_author,
+                    execution_settings=execution_settings,
+                ),
+                output_adapter=_request_output_adapter(
+                    CompleteSpecificationAuthoring
+                ),
+            ),
+            AdkRecipe(
                 node_id="backlog.generate",
                 workflow=build_backlog_generation_workflow(
                     leaf_agent=nodes.backlog_generation,
@@ -931,6 +986,7 @@ __all__ = [
     "UnknownAdkRecipeError",
     "build_agentic_recipe_registry",
     "build_backlog_generation_workflow",
+    "build_specification_authoring_workflow",
     "build_vision_workflow",
     "validate_structured_output",
 ]
