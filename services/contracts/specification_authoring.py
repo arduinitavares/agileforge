@@ -36,7 +36,7 @@ type JsonScalar = str | int | float | bool | None
 type JsonValue = JsonScalar | list[JsonValue] | dict[str, JsonValue]
 type JsonObject = dict[str, JsonValue]
 
-SPECIFICATION_STRUCTURER_VERSION: str = "1.0.0"
+SPECIFICATION_STRUCTURER_VERSION: str = "1.0.1"
 SPECIFICATION_STRUCTURER_PROMPT_VERSION: str = (
     "agileforge.specification-structurer.prompt.v1"
 )
@@ -433,19 +433,57 @@ def specification_structuring_fact_fingerprint(
     )
 
 
+class SpecificationRemovalJustification(_FrozenClosedModel):
+    """One model-declared reason for removing a stable semantic entry."""
+
+    item_id: Annotated[str, Field(min_length=1)]
+    justification: Annotated[str, Field(min_length=1)]
+
+
 class SpecificationStructuringOutput(_FrozenClosedModel):
     """Only semantic bytes and explicit amendment declarations are model-owned."""
 
     payload: SpecificationPayload
-    removal_justifications: dict[str, Annotated[str, Field(min_length=1)]] = Field(
-        default_factory=dict
-    )
+    removal_justifications: tuple[SpecificationRemovalJustification, ...] = ()
     stable_id_replacements: tuple[StableIdReplacement, ...] = ()
+
+    @model_validator(mode="after")
+    def validate_unique_removal_justification_ids(self) -> Self:
+        """Reject ambiguous repeated declarations before host projection."""
+        item_ids = [item.item_id for item in self.removal_justifications]
+        if len(item_ids) != len(set(item_ids)):
+            message = "removal justification IDs must be unique"
+            raise ValueError(message)
+        return self
+
+
+def specification_structuring_completion_payload(
+    output: SpecificationStructuringOutput,
+) -> JsonObject:
+    """Project provider-safe records into the existing guarded host request."""
+    removal_justifications = {
+        item.item_id: item.justification
+        for item in sorted(
+            output.removal_justifications,
+            key=lambda item: item.item_id,
+        )
+    }
+    return cast(
+        "JsonObject",
+        {
+            "payload": output.payload.model_dump(mode="json"),
+            "removal_justifications": removal_justifications,
+            "stable_id_replacements": [
+                item.model_dump(mode="json") for item in output.stable_id_replacements
+            ],
+        },
+    )
 
 
 for _contract in (
     BaseSpecificationContext,
     PriorCandidateContext,
+    SpecificationRemovalJustification,
     SpecificationStructuringInput,
     SpecificationStructuringOutput,
 ):
@@ -466,11 +504,13 @@ __all__ = [
     "PriorCandidateContext",
     "RegisteredRepositoryEvidence",
     "RegisteredSpecificationSource",
+    "SpecificationRemovalJustification",
     "SpecificationStructuringContextCapture",
     "SpecificationStructuringDocument",
     "SpecificationStructuringInput",
     "SpecificationStructuringOutput",
     "compute_specification_structurer_prompt_hash",
+    "specification_structuring_completion_payload",
     "specification_structuring_fact_fingerprint",
     "specification_structuring_input_fingerprint",
 ]

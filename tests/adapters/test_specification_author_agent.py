@@ -7,8 +7,13 @@ import os
 import subprocess  # nosec B404  # test-only clean-process import boundary
 import sys
 from pathlib import Path
+from typing import cast
 
 import pytest
+from google.adk.models.lite_llm import (
+    LiteLlm,
+    _to_litellm_response_format,
+)
 from pydantic import TypeAdapter, ValidationError
 
 from services.contracts.specification_authoring import SpecificationStructuringOutput
@@ -51,7 +56,7 @@ def test_structurer_prompt_hash_binds_the_actual_packaged_instructions() -> None
     assert contract.compute_specification_structurer_prompt_hash(instructions) == (
         contract.SPECIFICATION_STRUCTURER_PROMPT_HASH
     )
-    assert contract.SPECIFICATION_STRUCTURER_VERSION == "1.0.0"
+    assert contract.SPECIFICATION_STRUCTURER_VERSION == "1.0.1"
     assert contract.SPECIFICATION_STRUCTURER_PROMPT_VERSION == (
         "agileforge.specification-structurer.prompt.v1"
     )
@@ -82,6 +87,26 @@ def test_agent_advertises_the_exact_closed_structuring_contract(
     adapter = TypeAdapter(output_schema)
     with pytest.raises(ValidationError):
         adapter.validate_python({"payload": {"schema_version": "agileforge.spec.v1"}})
+
+
+def test_agent_response_schema_uses_closed_removal_records(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep strict provider output free of unsupported free-form objects."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    module = importlib.import_module("adapters.adk.agents.specification_author")
+    model = cast("LiteLlm", module.root_agent.model)
+
+    response_format = _to_litellm_response_format(
+        module.root_agent.output_schema,
+        model.model,
+    )
+    assert response_format is not None
+    schema = response_format["json_schema"]["schema"]
+    removal_schema = schema["properties"]["removal_justifications"]
+
+    assert removal_schema["type"] == "array"
+    assert "additionalProperties" not in removal_schema
 
 
 def test_model_output_contract_is_a_json_object() -> None:

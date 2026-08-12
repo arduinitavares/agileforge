@@ -20,6 +20,7 @@ from services.contracts.product_goal import ProductGoalInterviewOutput
 from services.contracts.specification_authoring import (
     SpecificationStructuringInput,
     SpecificationStructuringOutput,
+    specification_structuring_completion_payload,
 )
 from services.contracts.sprint import (
     SprintPlannerInput,
@@ -649,7 +650,9 @@ def build_specification_structuring_workflow(
                 code=code,
                 message=message,
             ) from error
-        return RecipeOutput(payload=output.model_dump(mode="json"))
+        return RecipeOutput(
+            payload=specification_structuring_completion_payload(output)
+        )
 
     return Workflow(
         name="specification_structuring",

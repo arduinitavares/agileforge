@@ -20,6 +20,7 @@ from services.contracts.specification_authoring import (
     SpecificationStructuringDocument,
     SpecificationStructuringInput,
     SpecificationStructuringOutput,
+    specification_structuring_completion_payload,
     specification_structuring_fact_fingerprint,
     specification_structuring_input_fingerprint,
 )
@@ -303,7 +304,7 @@ def test_structuring_output_contains_only_semantics_and_amendment_declarations()
                     }
                 ],
             },
-            "removal_justifications": {},
+            "removal_justifications": [],
             "stable_id_replacements": [],
         }
     )
@@ -332,6 +333,57 @@ def test_structuring_output_exposes_the_exact_nested_closed_v2_schema() -> None:
     assert payload_schema["properties"]["schema_version"]["const"] == (
         "agileforge.spec.v2"
     )
+
+
+def test_structuring_output_rejects_duplicate_removal_justification_ids() -> None:
+    """One removed semantic entry cannot carry conflicting model declarations."""
+    raw = {
+        "payload": {
+            "schema_version": "agileforge.spec.v2",
+            "artifact_id": "SPEC.duplicate-removal",
+            "title": "Duplicate removal",
+            "summary": "Reject ambiguous removal declarations.",
+            "problem_statement": "Repeated IDs cannot map deterministically.",
+            "items": [],
+        },
+        "removal_justifications": [
+            {"item_id": "REQ.old", "justification": "First reason."},
+            {"item_id": "REQ.old", "justification": "Second reason."},
+        ],
+        "stable_id_replacements": [],
+    }
+
+    with pytest.raises(
+        ValidationError,
+        match="removal justification IDs must be unique",
+    ):
+        SpecificationStructuringOutput.model_validate(raw)
+
+
+def test_structuring_output_projects_removal_records_to_internal_map() -> None:
+    """Keep the provider-safe record shape outside the persisted host contract."""
+    output = SpecificationStructuringOutput.model_validate(
+        {
+            "payload": {
+                "schema_version": "agileforge.spec.v2",
+                "artifact_id": "SPEC.removal-projection",
+                "title": "Removal projection",
+                "summary": "Project typed records into deterministic host metadata.",
+                "problem_statement": "Provider and host shapes have different needs.",
+                "items": [],
+            },
+            "removal_justifications": [
+                {"item_id": "REQ.z", "justification": "Remove Z."},
+                {"item_id": "REQ.a", "justification": "Remove A."},
+            ],
+            "stable_id_replacements": [],
+        }
+    )
+    projected = specification_structuring_completion_payload(output)
+    assert projected["removal_justifications"] == {
+        "REQ.a": "Remove A.",
+        "REQ.z": "Remove Z.",
+    }
 
 
 @pytest.mark.parametrize(
