@@ -676,7 +676,7 @@ def _json_object(raw_json: str | None) -> JsonDict:
 
 
 def _list_value(payload: Mapping[str, Any], field: str) -> list[Any]:
-    """Return a list-valued discovery payload field."""
+    """Return a list-valued compilation payload field."""
     value = payload.get(field)
     return list(value) if isinstance(value, list) else []
 
