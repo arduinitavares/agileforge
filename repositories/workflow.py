@@ -20,7 +20,6 @@ from models.core import (
 from models.enums import SprintStatus, StoryStatus, WorkflowEventType
 from models.events import WorkflowEvent
 from models.product_definition import (
-    DiscoveryArtifact,
     ProductGoalArtifact,
     ProductGoalArtifactDecision,
     ProductGoalInterviewTurn,
@@ -59,6 +58,15 @@ from services.contracts.sprint import (
 )
 from services.contracts.vision_evidence import VisionEvidenceBundle
 from services.specs.authority_selection import pending_authority_fingerprint
+from services.specs.candidate_contract import (
+    SpecificationCandidateEnvelope,
+    canonical_candidate_json,
+    load_candidate_contract,
+)
+from utils.agileforge_spec_profile_v2 import (
+    SpecificationPayload,
+    canonical_spec_hash,
+)
 from utils.spec_schemas import SpecAuthorityCompilationSuccess
 from utils.task_metadata import TaskMetadata, serialize_task_metadata
 from workflow.contracts import JsonValue
@@ -76,7 +84,6 @@ from workflow.facts import (
     AuthorityFact,
     AuthorityFeedbackFact,
     BacklogRequirementFact,
-    DiscoveryArtifactFact,
     NodeAttemptFact,
     PhaseArtifactFact,
     PlanningArtifactFact,
@@ -217,7 +224,6 @@ class _ProductDefinitionFactLoad:
     product_goals: tuple[ProductGoalArtifactFact, ...]
     goal_decisions: tuple[ProductGoalArtifactDecisionFact, ...]
     goal_outcomes: tuple[ProductGoalOutcomeFact, ...]
-    discoveries: tuple[DiscoveryArtifactFact, ...]
     specification_candidates: tuple[SpecificationCandidateFact, ...]
     specification_decisions: tuple[SpecificationDecisionFact, ...]
 
@@ -231,6 +237,18 @@ class _VisionFactLoad:
     interview_turns: tuple[VisionInterviewTurnFact, ...]
     visions: tuple[VisionArtifactFact, ...]
     vision_decisions: tuple[VisionArtifactDecisionFact, ...]
+
+
+@dataclass(frozen=True)
+class _SpecificationCandidateSources:
+    """Validated parent maps required to reload specification candidates."""
+
+    visions: dict[int, str]
+    goals: dict[int, ProductGoalArtifactFact]
+    decisions: dict[int, ProductGoalArtifactDecisionFact]
+    outcomes: dict[int, ProductGoalOutcomeFact]
+    spec_versions: dict[int, str]
+    attempts: dict[int, NodeAttemptFact]
 
 
 @dataclass(frozen=True)
@@ -451,7 +469,6 @@ class WorkflowFactRepository:
             product_goal_artifacts=product_definition.product_goals,
             product_goal_artifact_decisions=product_definition.goal_decisions,
             product_goal_outcomes=product_definition.goal_outcomes,
-            discovery_artifacts=product_definition.discoveries,
             specification_candidates=product_definition.specification_candidates,
             specification_decisions=product_definition.specification_decisions,
             spec_versions=spec_version_facts,
@@ -536,6 +553,9 @@ class WorkflowFactRepository:
                     source_specification_candidate_id=(
                         row.source_specification_candidate_id
                     ),
+                    source_specification_candidate_fingerprint=(
+                        row.source_specification_candidate_fingerprint
+                    ),
                     source_vision_artifact_id=row.source_vision_artifact_id,
                     source_vision_fingerprint=row.source_vision_fingerprint,
                     source_product_goal_artifact_id=(
@@ -544,8 +564,6 @@ class WorkflowFactRepository:
                     source_product_goal_fingerprint=(
                         row.source_product_goal_fingerprint
                     ),
-                    source_discovery_artifact_id=row.source_discovery_artifact_id,
-                    source_discovery_fingerprint=row.source_discovery_fingerprint,
                     supersedes_spec_version_id=row.supersedes_spec_version_id,
                 )
             )
@@ -560,12 +578,14 @@ class WorkflowFactRepository:
         """Load staged product-definition records without ADK session state."""
         vision_load = self._vision_definition(project_id, node_attempts)
         visions = {item.vision_artifact_id: item for item in vision_load.visions}
-        attempts = {item.attempt_id: item.attempt_fingerprint for item in node_attempts}
+        attempt_fingerprints = {
+            item.attempt_id: item.attempt_fingerprint for item in node_attempts
+        }
         vision_fingerprints = {
             item_id: item.content_fingerprint for item_id, item in visions.items()
         }
         goal_turns = self._product_goal_interview_turns(
-            project_id, vision_fingerprints, attempts
+            project_id, vision_fingerprints, attempt_fingerprints
         )
         goals = self._product_goals(project_id, vision_fingerprints, goal_turns)
         decisions = self._product_goal_decisions(project_id, goals)
@@ -579,15 +599,16 @@ class WorkflowFactRepository:
             decisions,
             outcomes,
         )
-        discoveries = self._discovery_artifacts(
-            project_id,
-            vision_fingerprints,
-            goals,
-            decisions,
-            outcomes,
-        )
         candidates = self._specification_candidates(
-            project_id, vision_fingerprints, goals, discoveries, spec_versions
+            project_id,
+            _SpecificationCandidateSources(
+                visions=vision_fingerprints,
+                goals=goals,
+                decisions=decisions,
+                outcomes=outcomes,
+                spec_versions=spec_versions,
+                attempts={item.attempt_id: item for item in node_attempts},
+            ),
         )
         specification_decisions = self._specification_decisions(project_id, candidates)
         return _ProductDefinitionFactLoad(
@@ -600,7 +621,6 @@ class WorkflowFactRepository:
             product_goals=tuple(goals.values()),
             goal_decisions=tuple(decisions.values()),
             goal_outcomes=tuple(outcomes.values()),
-            discoveries=tuple(discoveries.values()),
             specification_candidates=tuple(candidates.values()),
             specification_decisions=tuple(specification_decisions.values()),
         )
@@ -1223,97 +1243,10 @@ class WorkflowFactRepository:
             )
         return facts
 
-    def _discovery_artifacts(
-        self,
-        project_id: int,
-        visions: dict[int, str],
-        goals: dict[int, ProductGoalArtifactFact],
-        decisions: dict[int, ProductGoalArtifactDecisionFact],
-        outcomes: dict[int, ProductGoalOutcomeFact],
-    ) -> dict[int, DiscoveryArtifactFact]:
-        rows = self._session.exec(
-            select(DiscoveryArtifact)
-            .where(col(DiscoveryArtifact.project_id) == project_id)
-            .order_by(col(DiscoveryArtifact.discovery_artifact_id)),
-            execution_options=self._query_options(),
-        ).all()
-        facts: dict[int, DiscoveryArtifactFact] = {}
-        goal_fingerprints = {
-            identifier: item.content_fingerprint for identifier, item in goals.items()
-        }
-        accepted_decisions_by_goal = self._accepted_goal_decisions_by_goal(
-            decisions.values()
-        )
-        outcomes_by_goal = {
-            item.product_goal_artifact_id: item for item in outcomes.values()
-        }
-        for row in rows:
-            identifier = self._required_id(row.discovery_artifact_id, "discovery")
-            self._require_fingerprint_reference(
-                row.vision_artifact_id,
-                row.vision_fingerprint,
-                visions,
-                "discovery Vision",
-            )
-            self._require_fingerprint_reference(
-                row.product_goal_artifact_id,
-                row.product_goal_fingerprint,
-                goal_fingerprints,
-                "discovery Product Goal",
-            )
-            goal = goals.get(row.product_goal_artifact_id)
-            accepted_decisions = accepted_decisions_by_goal.get(
-                row.product_goal_artifact_id,
-                (),
-            )
-            self._require_product_condition(
-                any(item.decided_at <= row.recorded_at for item in accepted_decisions),
-                "Discovery Product Goal was not accepted when discovery was recorded.",
-            )
-            outcome = outcomes_by_goal.get(row.product_goal_artifact_id)
-            self._require_product_condition(
-                outcome is None or row.recorded_at < outcome.decided_at,
-                "Discovery was recorded after its Product Goal outcome.",
-            )
-            if goal is not None:
-                self._require_product_condition(
-                    (goal.vision_artifact_id, goal.vision_fingerprint)
-                    == (row.vision_artifact_id, row.vision_fingerprint),
-                    "Discovery Vision does not match its Product Goal Vision.",
-                )
-            canonical_content = self._canonical_object(
-                row.canonical_content_json,
-                row.content_fingerprint,
-                "discovery",
-            )
-            self._require_product_condition(
-                row.supersedes_discovery_artifact_id is None
-                or row.supersedes_discovery_artifact_id in facts,
-                "Discovery supersession is invalid.",
-            )
-            facts[identifier] = DiscoveryArtifactFact(
-                discovery_artifact_id=identifier,
-                vision_artifact_id=row.vision_artifact_id,
-                vision_fingerprint=row.vision_fingerprint,
-                product_goal_artifact_id=row.product_goal_artifact_id,
-                product_goal_fingerprint=row.product_goal_fingerprint,
-                canonical_content=canonical_content,
-                content_fingerprint=row.content_fingerprint,
-                content_ref=row.content_ref,
-                producer=row.producer,
-                supersedes_discovery_artifact_id=(row.supersedes_discovery_artifact_id),
-                recorded_by=row.recorded_by,
-                recorded_at=row.recorded_at,
-            )
-        return facts
-
     def _specification_candidates(
         self,
         project_id: int,
-        visions: dict[int, str],
-        goals: dict[int, ProductGoalArtifactFact],
-        discoveries: dict[int, DiscoveryArtifactFact],
-        spec_versions: dict[int, str],
+        sources: _SpecificationCandidateSources,
     ) -> dict[int, SpecificationCandidateFact]:
         rows = self._session.exec(
             select(SpecificationCandidate)
@@ -1323,11 +1256,14 @@ class WorkflowFactRepository:
         ).all()
         facts: dict[int, SpecificationCandidateFact] = {}
         goal_fingerprints = {
-            identifier: item.content_fingerprint for identifier, item in goals.items()
-        }
-        discovery_fingerprints = {
             identifier: item.content_fingerprint
-            for identifier, item in discoveries.items()
+            for identifier, item in sources.goals.items()
+        }
+        accepted_decisions_by_goal = self._accepted_goal_decisions_by_goal(
+            sources.decisions.values()
+        )
+        outcomes_by_goal = {
+            item.product_goal_artifact_id: item for item in sources.outcomes.values()
         }
         for row in rows:
             identifier = self._required_id(
@@ -1337,7 +1273,7 @@ class WorkflowFactRepository:
             self._require_fingerprint_reference(
                 row.vision_artifact_id,
                 row.vision_fingerprint,
-                visions,
+                sources.visions,
                 "specification candidate Vision",
             )
             self._require_fingerprint_reference(
@@ -1346,75 +1282,183 @@ class WorkflowFactRepository:
                 goal_fingerprints,
                 "specification candidate Product Goal",
             )
-            self._require_fingerprint_reference(
-                row.discovery_artifact_id,
-                row.discovery_fingerprint,
-                discovery_fingerprints,
-                "specification candidate discovery",
-            )
-            goal = goals.get(row.product_goal_artifact_id)
-            discovery = discoveries.get(row.discovery_artifact_id)
-            if goal is not None and discovery is not None:
-                self._require_product_condition(
-                    (goal.vision_artifact_id, goal.vision_fingerprint)
-                    == (row.vision_artifact_id, row.vision_fingerprint)
-                    == (
-                        discovery.vision_artifact_id,
-                        discovery.vision_fingerprint,
-                    ),
-                    "Specification candidate Vision does not match its chain.",
-                )
-                self._require_product_condition(
-                    (
-                        row.product_goal_artifact_id,
-                        row.product_goal_fingerprint,
-                    )
-                    == (
-                        discovery.product_goal_artifact_id,
-                        discovery.product_goal_fingerprint,
-                    ),
-                    "Specification candidate Product Goal does not match discovery.",
-                )
-            base_is_complete = (
-                row.base_spec_version_id is not None and row.base_spec_hash is not None
+            goal = sources.goals.get(row.product_goal_artifact_id)
+            accepted_decisions = accepted_decisions_by_goal.get(
+                row.product_goal_artifact_id,
+                (),
             )
             self._require_product_condition(
-                base_is_complete
-                or (row.base_spec_version_id is None and row.base_spec_hash is None),
+                any(item.decided_at <= row.recorded_at for item in accepted_decisions),
+                "Specification candidate Product Goal was not accepted when recorded.",
+            )
+            outcome = outcomes_by_goal.get(row.product_goal_artifact_id)
+            self._require_product_condition(
+                outcome is None or row.recorded_at < outcome.decided_at,
+                "Specification candidate was recorded after its Product Goal outcome.",
+            )
+            if goal is not None:
+                self._require_product_condition(
+                    (goal.vision_artifact_id, goal.vision_fingerprint)
+                    == (row.vision_artifact_id, row.vision_fingerprint),
+                    "Specification candidate Vision does not match its Product Goal.",
+                )
+            self._require_product_condition(
+                row.candidate_kind in {"initial", "amendment"},
+                "Specification candidate kind is invalid.",
+            )
+            base_is_complete = row.base_spec_version_id is not None and (
+                row.base_spec_hash is not None
+            )
+            self._require_product_condition(
+                (row.candidate_kind == "initial" and not base_is_complete)
+                or (row.candidate_kind == "amendment" and base_is_complete),
                 "Specification candidate base specification is invalid.",
             )
             if base_is_complete:
                 self._require_fingerprint_reference(
                     row.base_spec_version_id,
                     row.base_spec_hash,
-                    spec_versions,
+                    sources.spec_versions,
                     "specification candidate base specification",
                 )
-            canonical_content = self._canonical_object(
-                row.canonical_content_json,
-                row.content_fingerprint,
-                "specification candidate",
+            attempt = sources.attempts.get(row.workflow_node_attempt_id)
+            self._require_product_condition(
+                attempt is not None
+                and attempt.attempt_fingerprint == row.attempt_fingerprint,
+                "Specification candidate attempt changed.",
+            )
+            if attempt is None:
+                continue
+            canonical_envelope, payload, envelope = (
+                self._canonical_specification_envelope(
+                    row.canonical_envelope_json,
+                    expected_candidate_fingerprint=row.candidate_fingerprint,
+                )
             )
             self._require_product_condition(
-                row.supersedes_specification_candidate_id is None
-                or row.supersedes_specification_candidate_id in facts,
+                row.payload_fingerprint == canonical_spec_hash(payload)
+                == envelope.payload_fingerprint,
+                "Specification candidate payload fingerprint changed.",
+            )
+            self._require_product_condition(
+                row.source_manifest_fingerprint
+                == envelope.source_manifest_fingerprint,
+                "Specification candidate source manifest fingerprint changed.",
+            )
+            source_manifest_lineage = {
+                (item.kind.value, item.fingerprint)
+                for item in envelope.source_manifest
+            }
+            self._require_product_condition(
+                {
+                    ("vision", row.vision_fingerprint),
+                    ("product_goal", row.product_goal_fingerprint),
+                }
+                <= source_manifest_lineage,
+                "Specification candidate source manifest omits direct lineage.",
+            )
+            self._require_product_condition(
+                row.producer_input_fingerprint == envelope.producer_input_fingerprint,
+                "Specification candidate producer input fingerprint changed.",
+            )
+            self._require_product_condition(
+                row.rendered_view_fingerprint == envelope.review_view_fingerprint,
+                "Specification candidate rendered view fingerprint changed.",
+            )
+            self._require_product_condition(
+                row.candidate_fingerprint == envelope.candidate_fingerprint,
+                "Specification candidate fingerprint changed.",
+            )
+            self._require_product_condition(
+                row.candidate_kind == envelope.candidate_kind.value,
+                "Specification candidate kind changed.",
+            )
+            self._require_product_condition(
+                attempt.node_id == "specification.author",
+                "Specification candidate attempt uses the wrong workflow node.",
+            )
+            self._require_product_condition(
+                envelope.accepted_fact_fingerprint
+                == attempt.business_fact_fingerprint,
+                "Specification candidate accepted facts changed after its attempt.",
+            )
+            self._require_product_condition(
+                envelope.producer_input_fingerprint == attempt.input_fingerprint,
+                "Specification candidate producer input changed after its attempt.",
+            )
+            self._require_product_condition(
+                envelope.model_id == attempt.model_id,
+                "Specification candidate model changed after its attempt.",
+            )
+            self._require_product_condition(
+                (
+                    row.vision_artifact_id,
+                    row.vision_fingerprint,
+                    row.product_goal_artifact_id,
+                    row.product_goal_fingerprint,
+                    row.base_spec_version_id,
+                    row.base_spec_hash,
+                    row.workflow_node_attempt_id,
+                    row.attempt_fingerprint,
+                )
+                == (
+                    envelope.accepted_vision_id,
+                    envelope.accepted_vision_fingerprint,
+                    envelope.accepted_product_goal_id,
+                    envelope.accepted_product_goal_fingerprint,
+                    envelope.base_specification_id,
+                    envelope.base_payload_fingerprint,
+                    envelope.workflow_node_attempt_id,
+                    envelope.attempt_fingerprint,
+                ),
+                "Specification candidate envelope lineage changed.",
+            )
+            supersedes_is_complete = (
+                row.supersedes_specification_candidate_id is not None
+                and row.supersedes_candidate_fingerprint is not None
+            )
+            self._require_product_condition(
+                supersedes_is_complete
+                or (
+                    row.supersedes_specification_candidate_id is None
+                    and row.supersedes_candidate_fingerprint is None
+                ),
                 "Specification candidate supersession is invalid.",
             )
+            if supersedes_is_complete:
+                self._require_fingerprint_reference(
+                    row.supersedes_specification_candidate_id,
+                    row.supersedes_candidate_fingerprint,
+                    {
+                        item_id: item.candidate_fingerprint
+                        for item_id, item in facts.items()
+                    },
+                    "specification candidate supersession",
+                )
             facts[identifier] = SpecificationCandidateFact(
                 specification_candidate_id=identifier,
+                candidate_kind=(
+                    "initial" if row.candidate_kind == "initial" else "amendment"
+                ),
                 vision_artifact_id=row.vision_artifact_id,
                 vision_fingerprint=row.vision_fingerprint,
                 product_goal_artifact_id=row.product_goal_artifact_id,
                 product_goal_fingerprint=row.product_goal_fingerprint,
-                discovery_artifact_id=row.discovery_artifact_id,
-                discovery_fingerprint=row.discovery_fingerprint,
                 base_spec_version_id=row.base_spec_version_id,
                 base_spec_hash=row.base_spec_hash,
-                canonical_content=canonical_content,
-                content_fingerprint=row.content_fingerprint,
-                content_ref=row.content_ref,
+                canonical_envelope=canonical_envelope,
+                payload_fingerprint=row.payload_fingerprint,
+                source_manifest_fingerprint=row.source_manifest_fingerprint,
+                producer_input_fingerprint=row.producer_input_fingerprint,
+                rendered_view_fingerprint=row.rendered_view_fingerprint,
+                candidate_fingerprint=row.candidate_fingerprint,
+                workflow_node_attempt_id=row.workflow_node_attempt_id,
+                attempt_fingerprint=row.attempt_fingerprint,
                 supersedes_specification_candidate_id=(
                     row.supersedes_specification_candidate_id
+                ),
+                supersedes_candidate_fingerprint=(
+                    row.supersedes_candidate_fingerprint
                 ),
                 recorded_by=row.recorded_by,
                 recorded_at=row.recorded_at,
@@ -1579,7 +1623,7 @@ class WorkflowFactRepository:
         facts: dict[int, SpecificationDecisionFact] = {}
         decided_candidates: set[int] = set()
         candidate_fingerprints = {
-            item_id: item.content_fingerprint for item_id, item in candidates.items()
+            item_id: item.candidate_fingerprint for item_id, item in candidates.items()
         }
         for row in rows:
             identifier = self._required_id(
@@ -1592,7 +1636,7 @@ class WorkflowFactRepository:
             )
             self._require_fingerprint_reference(
                 row.specification_candidate_id,
-                row.artifact_fingerprint,
+                row.candidate_fingerprint,
                 candidate_fingerprints,
                 "Specification decision",
             )
@@ -1613,7 +1657,7 @@ class WorkflowFactRepository:
             facts[identifier] = SpecificationDecisionFact(
                 specification_decision_id=identifier,
                 specification_candidate_id=row.specification_candidate_id,
-                artifact_fingerprint=row.artifact_fingerprint,
+                candidate_fingerprint=row.candidate_fingerprint,
                 decision=self._product_goal_decision(row.decision),
                 rationale=row.rationale,
                 reviewer=row.reviewer,
@@ -1647,8 +1691,6 @@ class WorkflowFactRepository:
                 item.source_vision_fingerprint,
                 item.source_product_goal_artifact_id,
                 item.source_product_goal_fingerprint,
-                item.source_discovery_artifact_id,
-                item.source_discovery_fingerprint,
             )
             self._require_product_condition(
                 candidate is not None,
@@ -1661,8 +1703,6 @@ class WorkflowFactRepository:
                 candidate.vision_fingerprint,
                 candidate.product_goal_artifact_id,
                 candidate.product_goal_fingerprint,
-                candidate.discovery_artifact_id,
-                candidate.discovery_fingerprint,
             )
             self._require_product_condition(
                 source_values == expected,
@@ -1673,10 +1713,14 @@ class WorkflowFactRepository:
                 "Specification registry requires an accepted candidate decision.",
             )
             self._require_product_condition(
-                item.spec_hash == candidate.content_fingerprint,
+                item.source_specification_candidate_fingerprint
+                == candidate.candidate_fingerprint,
+                "Specification registry candidate fingerprint changed.",
+            )
+            self._require_product_condition(
+                item.spec_hash == candidate.payload_fingerprint,
                 "Specification registry hash does not match its accepted candidate.",
             )
-            candidate_fingerprint = candidate.content_fingerprint
             if (
                 item.supersedes_spec_version_id is not None
                 and item.supersedes_spec_version_id not in versions_by_id
@@ -1688,9 +1732,6 @@ class WorkflowFactRepository:
             enriched.append(
                 item.model_copy(
                     update={
-                        "source_specification_candidate_fingerprint": (
-                            candidate_fingerprint
-                        ),
                         "status": (
                             "superseded"
                             if self._specification_precedes_current_vision(
@@ -2014,6 +2055,31 @@ class WorkflowFactRepository:
                 ),
             )
         )
+
+    @staticmethod
+    def _canonical_specification_envelope(
+        canonical_envelope_json: str,
+        *,
+        expected_candidate_fingerprint: str,
+    ) -> tuple[
+        dict[str, JsonValue],
+        SpecificationPayload,
+        SpecificationCandidateEnvelope,
+    ]:
+        """Validate one canonical v2 payload/envelope wrapper and its identity."""
+        try:
+            payload, envelope = load_candidate_contract(
+                canonical_envelope_json,
+                expected_candidate_fingerprint=expected_candidate_fingerprint,
+            )
+            stored = _JSON_OBJECT.validate_json(canonical_envelope_json)
+        except (TypeError, ValueError, ValidationError) as exc:
+            message = "Stored canonical specification candidate envelope is invalid."
+            raise WorkflowFactRepository._error(message) from exc
+        if canonical_candidate_json(payload, envelope) != canonical_envelope_json:
+            message = "Stored canonical specification candidate envelope changed."
+            raise WorkflowFactRepository._error(message)
+        return stored, payload, envelope
 
     @staticmethod
     def _canonical_object(

@@ -12,7 +12,6 @@ from sqlmodel import Session, col, delete, select, update
 
 from models.core import Project
 from models.product_definition import (
-    DiscoveryArtifact,
     ProductGoalArtifact,
     ProductGoalArtifactDecision,
     ProductGoalInterviewTurn,
@@ -32,11 +31,21 @@ from repositories.workflow import (
     WorkflowFactLoadError,
     WorkflowFactRepository,
 )
+from services.specs.candidate_contract import (
+    CandidateBuildInput,
+    CandidateKind,
+    CandidateSourceKind,
+    CandidateSourceManifestEntry,
+    build_candidate_envelope,
+    canonical_candidate_json,
+)
+from utils.agileforge_spec_profile_v2 import SpecificationPayload
 from utils.runtime_config import (
     ADK_EXECUTION_TRACE_IDENTITY,
     clear_runtime_config_cache,
     get_adk_execution_trace_db_target,
 )
+from workflow import facts as workflow_facts
 from workflow.facts import WorkflowFactSnapshot
 from workflow.fingerprints import (
     canonical_hash,
@@ -61,7 +70,6 @@ def _clear_product_definition_fixture_rows(engine: Engine) -> Iterator[None]:
         session.exec(delete(SpecificationDecision))
         session.exec(delete(SpecRegistry))
         session.exec(delete(SpecificationCandidate))
-        session.exec(delete(DiscoveryArtifact))
         session.exec(delete(ProductGoalOutcome))
         session.exec(delete(ProductGoalArtifactDecision))
         for artifact in session.exec(
@@ -120,6 +128,59 @@ def _id(value: int | None) -> int:
     """Narrow a flushed SQLModel identity for test fixtures."""
     assert value is not None
     return value
+
+
+def test_specification_facts_expose_direct_v2_lineage_without_discovery() -> None:
+    """Keep the immutable v2 candidate and accepted-row fact boundary explicit."""
+    assert not hasattr(workflow_facts, "DiscoveryArtifactFact")
+    assert (
+        "discovery_artifacts" not in workflow_facts.WorkflowFactSnapshot.model_fields
+    )
+    assert set(workflow_facts.SpecificationCandidateFact.model_fields) == {
+        "specification_candidate_id",
+        "candidate_kind",
+        "vision_artifact_id",
+        "vision_fingerprint",
+        "product_goal_artifact_id",
+        "product_goal_fingerprint",
+        "base_spec_version_id",
+        "base_spec_hash",
+        "canonical_envelope",
+        "payload_fingerprint",
+        "source_manifest_fingerprint",
+        "producer_input_fingerprint",
+        "rendered_view_fingerprint",
+        "candidate_fingerprint",
+        "workflow_node_attempt_id",
+        "attempt_fingerprint",
+        "supersedes_specification_candidate_id",
+        "supersedes_candidate_fingerprint",
+        "recorded_by",
+        "recorded_at",
+    }
+    assert set(workflow_facts.SpecificationDecisionFact.model_fields) == {
+        "specification_decision_id",
+        "specification_candidate_id",
+        "candidate_fingerprint",
+        "decision",
+        "rationale",
+        "reviewer",
+        "idempotency_key",
+        "decided_at",
+    }
+    assert set(workflow_facts.SpecVersionFact.model_fields) == {
+        "spec_version_id",
+        "spec_hash",
+        "status",
+        "approved_at",
+        "source_specification_candidate_id",
+        "source_specification_candidate_fingerprint",
+        "source_vision_artifact_id",
+        "source_vision_fingerprint",
+        "source_product_goal_artifact_id",
+        "source_product_goal_fingerprint",
+        "supersedes_spec_version_id",
+    }
 
 
 def _force_sql(
@@ -211,11 +272,19 @@ def _attempt(
         node_id=node_id,
         instance_key=None,
         graph_version="agileforge.workflow.v2",
-        fact_fingerprint="sha256:facts",
-        business_fact_fingerprint="sha256:business",
-        decision_fingerprint="sha256:decision",
+        fact_fingerprint=canonical_hash(
+            {"project_id": project_id, "key": key, "kind": "facts"}
+        ),
+        business_fact_fingerprint=canonical_hash(
+            {"project_id": project_id, "key": key, "kind": "business"}
+        ),
+        decision_fingerprint=canonical_hash(
+            {"project_id": project_id, "key": key, "kind": "decision"}
+        ),
         normalized_input_json="{}",
-        input_fingerprint="sha256:input",
+        input_fingerprint=canonical_hash(
+            {"project_id": project_id, "key": key, "kind": "input"}
+        ),
         model_id="test-model",
         execution_settings_json="{}",
         idempotency_key=f"{key}-attempt-{project_id}",
@@ -223,11 +292,23 @@ def _attempt(
         correlation_id=None,
         started_at=recorded_at,
         lease_expires_at=recorded_at + timedelta(minutes=5),
-        attempt_fingerprint=f"sha256:attempt:{key}:{project_id}",
+        attempt_fingerprint=_attempt_fingerprint(project_id, key),
     )
     session.add(attempt)
     session.flush()
     return _id(attempt.workflow_node_attempt_id)
+
+
+def _attempt_fingerprint(project_id: int, key: str) -> str:
+    """Return the strict fingerprint used by one test workflow attempt."""
+    return canonical_hash({"project_id": project_id, "attempt": key})
+
+
+def _workflow_attempt(session: Session, attempt_id: int) -> WorkflowNodeAttempt:
+    """Return one required workflow attempt from a persistence fixture."""
+    attempt = session.get(WorkflowNodeAttempt, attempt_id)
+    assert attempt is not None
+    return attempt
 
 
 def _vision_artifact(
@@ -292,7 +373,10 @@ def _vision_artifact(
             clarifying_questions,
         ),
         workflow_node_attempt_id=attempt_id,
-        attempt_fingerprint=f"sha256:attempt:vision-initial-{version_number}:{project_id}",
+        attempt_fingerprint=_attempt_fingerprint(
+            project_id,
+            f"vision-initial-{version_number}",
+        ),
         recorded_at=recorded_at,
     )
     session.add(turn)
@@ -362,6 +446,33 @@ def _record_product_goal_decision(
     return _id(review.product_goal_artifact_decision_id)
 
 
+def _specification_payload(project_id: int) -> SpecificationPayload:
+    """Return one small canonical v2 payload for persistence fixtures."""
+    return SpecificationPayload.model_validate(
+        {
+            "schema_version": "agileforge.spec.v2",
+            "artifact_id": f"SPEC.project-{project_id}",
+            "title": "Durable product definition",
+            "summary": "Persist one typed specification candidate.",
+            "problem_statement": (
+                "The workflow needs exact accepted specification bytes."
+            ),
+            "items": [
+                {
+                    "id": "GOAL.workflow.persist-spec",
+                    "type": "GOAL",
+                    "title": "Persist specification",
+                    "statement": "Keep one immutable specification candidate.",
+                    "acceptance": ["The exact candidate can be reloaded."],
+                }
+            ],
+            "relations": [],
+            "controlled_terms": [],
+            "external_references": [],
+        }
+    )
+
+
 def _seed_product_definition(
     session: Session,
     name: str,
@@ -371,7 +482,7 @@ def _seed_product_definition(
     """Seed one complete, loader-valid product-definition lineage."""
     recorded_at = datetime(2026, 8, 5, 12, tzinfo=UTC)
     accepted_at = recorded_at + timedelta(minutes=1)
-    discovery_recorded_at = recorded_at + timedelta(minutes=2)
+    candidate_recorded_at = recorded_at + timedelta(minutes=2)
     outcome_at = recorded_at + timedelta(minutes=3)
     project = Project(name=name)
     session.add(project)
@@ -436,7 +547,7 @@ def _seed_product_definition(
             vision_questions,
         ),
         workflow_node_attempt_id=attempt_id,
-        attempt_fingerprint=f"sha256:attempt:vision-revision:{project_id}",
+        attempt_fingerprint=_attempt_fingerprint(project_id, "vision-revision"),
         recorded_at=recorded_at,
     )
     session.add(turn)
@@ -470,7 +581,7 @@ def _seed_product_definition(
             goal_questions,
         ),
         workflow_node_attempt_id=goal_attempt_id,
-        attempt_fingerprint=f"sha256:attempt:goal:{project_id}",
+        attempt_fingerprint=_attempt_fingerprint(project_id, "goal"),
         recorded_at=recorded_at,
     )
     session.add(goal_turn)
@@ -513,40 +624,75 @@ def _seed_product_definition(
             decided_at=outcome_at,
         )
         session.add(outcome)
-    discovery_content = {"discovery": "complete"}
-    discovery = DiscoveryArtifact(
-        project_id=project_id,
-        vision_artifact_id=vision_id,
-        vision_fingerprint=vision_fingerprint,
-        product_goal_artifact_id=goal_id,
-        product_goal_fingerprint=goal.content_fingerprint,
-        canonical_content_json=canonical_json(discovery_content),
-        content_fingerprint=canonical_hash(discovery_content),
-        content_ref="discovery.md",
-        producer="test",
-        supersedes_discovery_artifact_id=None,
-        recorded_by="operator",
-        recorded_at=discovery_recorded_at,
+    candidate_attempt_id = _attempt(
+        session,
+        project_id,
+        candidate_recorded_at,
+        node_id="specification.author",
+        key="specification-author",
     )
-    session.add(discovery)
-    session.flush()
-    candidate_content = {"specification": "candidate"}
+    candidate_attempt_fingerprint = _attempt_fingerprint(
+        project_id,
+        "specification-author",
+    )
+    candidate_attempt = _workflow_attempt(session, candidate_attempt_id)
+    payload = _specification_payload(project_id)
+    envelope = build_candidate_envelope(
+        payload=payload,
+        metadata=CandidateBuildInput(
+            candidate_kind=CandidateKind.INITIAL,
+            accepted_vision_id=vision_id,
+            accepted_vision_fingerprint=vision_fingerprint,
+            accepted_product_goal_id=goal_id,
+            accepted_product_goal_fingerprint=goal.content_fingerprint,
+            source_manifest=(
+                CandidateSourceManifestEntry(
+                    source_id=f"VISION.{vision_id}",
+                    kind=CandidateSourceKind.VISION,
+                    fingerprint=vision_fingerprint,
+                ),
+                CandidateSourceManifestEntry(
+                    source_id=f"GOAL.{goal_id}",
+                    kind=CandidateSourceKind.PRODUCT_GOAL,
+                    fingerprint=goal.content_fingerprint,
+                ),
+            ),
+            accepted_fact_fingerprint=candidate_attempt.business_fact_fingerprint,
+            producer_input_fingerprint=candidate_attempt.input_fingerprint,
+            producer_capability="to-spec",
+            producer_version="2.0.0",
+            model_id=candidate_attempt.model_id,
+            model_configuration_fingerprint=canonical_hash(
+                {"model": "test-model", "temperature": 0}
+            ),
+            prompt_fingerprint=canonical_hash({"prompt": "to-spec-v2"}),
+            workflow_node_attempt_id=candidate_attempt_id,
+            attempt_fingerprint=candidate_attempt_fingerprint,
+            correlation_id=f"specification-{project_id}",
+            produced_at=candidate_recorded_at,
+        ),
+    )
     candidate = SpecificationCandidate(
         project_id=project_id,
+        candidate_kind="initial",
         vision_artifact_id=vision_id,
         vision_fingerprint=vision_fingerprint,
         product_goal_artifact_id=goal_id,
         product_goal_fingerprint=goal.content_fingerprint,
-        discovery_artifact_id=_id(discovery.discovery_artifact_id),
-        discovery_fingerprint=discovery.content_fingerprint,
         base_spec_version_id=None,
         base_spec_hash=None,
-        canonical_content_json=canonical_json(candidate_content),
-        content_fingerprint=canonical_hash(candidate_content),
-        content_ref="spec.json",
+        canonical_envelope_json=canonical_candidate_json(payload, envelope),
+        payload_fingerprint=envelope.payload_fingerprint,
+        source_manifest_fingerprint=envelope.source_manifest_fingerprint,
+        producer_input_fingerprint=envelope.producer_input_fingerprint,
+        rendered_view_fingerprint=envelope.review_view_fingerprint,
+        candidate_fingerprint=envelope.candidate_fingerprint,
+        workflow_node_attempt_id=candidate_attempt_id,
+        attempt_fingerprint=candidate_attempt_fingerprint,
         supersedes_specification_candidate_id=None,
+        supersedes_candidate_fingerprint=None,
         recorded_by="operator",
-        recorded_at=discovery_recorded_at + timedelta(minutes=1),
+        recorded_at=candidate_recorded_at,
     )
     session.add(candidate)
     session.flush()
@@ -555,26 +701,24 @@ def _seed_product_definition(
         SpecificationDecision(
             project_id=project_id,
             specification_candidate_id=candidate_id,
-            artifact_fingerprint=candidate.content_fingerprint,
+            candidate_fingerprint=candidate.candidate_fingerprint,
             decision="accepted",
             rationale="Ready for registration.",
             reviewer="operator",
             idempotency_key=f"specification-review-{project_id}",
-            decided_at=discovery_recorded_at + timedelta(minutes=2),
+            decided_at=candidate_recorded_at + timedelta(seconds=30),
         )
     )
     registered_spec = SpecRegistry(
         project_id=project_id,
-        spec_hash=canonical_hash(candidate_content),
-        content=canonical_json(candidate_content),
+        spec_hash=candidate.payload_fingerprint,
         status="approved",
         source_specification_candidate_id=candidate_id,
+        source_specification_candidate_fingerprint=candidate.candidate_fingerprint,
         source_vision_artifact_id=vision_id,
         source_vision_fingerprint=vision_fingerprint,
         source_product_goal_artifact_id=goal_id,
         source_product_goal_fingerprint=goal.content_fingerprint,
-        source_discovery_artifact_id=_id(discovery.discovery_artifact_id),
-        source_discovery_fingerprint=discovery.content_fingerprint,
         supersedes_spec_version_id=None,
     )
     session.add(registered_spec)
@@ -591,10 +735,9 @@ def _seed_product_definition(
         "goal_fingerprint": goal.content_fingerprint,
         "goal_decision_id": goal_decision_id,
         "outcome_id": 0 if outcome is None else _id(outcome.product_goal_outcome_id),
-        "discovery_id": _id(discovery.discovery_artifact_id),
-        "discovery_fingerprint": discovery.content_fingerprint,
         "candidate_id": candidate_id,
-        "candidate_fingerprint": candidate.content_fingerprint,
+        "candidate_fingerprint": candidate.candidate_fingerprint,
+        "payload_fingerprint": candidate.payload_fingerprint,
         "registered_spec_id": _id(registered_spec.spec_version_id),
     }
 
@@ -638,7 +781,7 @@ def _add_accepted_product_goal(
             questions,
         ),
         workflow_node_attempt_id=attempt_id,
-        attempt_fingerprint=f"sha256:attempt:goal-{goal_number}:{project_id}",
+        attempt_fingerprint=_attempt_fingerprint(project_id, f"goal-{goal_number}"),
         recorded_at=recorded_at,
     )
     session.add(turn)
@@ -716,18 +859,21 @@ def test_loader_retains_product_definition_identity_and_registered_spec_lineage(
         snapshot.product_goal_outcomes[0].product_goal_outcome_id == seed["outcome_id"]
     )
     assert snapshot.product_goal_outcomes[0].product_goal_artifact_id == seed["goal_id"]
-    assert snapshot.discovery_artifacts[0].product_goal_artifact_id == seed["goal_id"]
     assert (
-        snapshot.discovery_artifacts[0].product_goal_fingerprint
+        snapshot.specification_candidates[0].product_goal_artifact_id
+        == seed["goal_id"]
+    )
+    assert (
+        snapshot.specification_candidates[0].product_goal_fingerprint
         == seed["goal_fingerprint"]
     )
     assert (
-        snapshot.specification_candidates[0].discovery_artifact_id
-        == seed["discovery_id"]
+        snapshot.specification_candidates[0].candidate_fingerprint
+        == seed["candidate_fingerprint"]
     )
     assert (
-        snapshot.specification_candidates[0].discovery_fingerprint
-        == seed["discovery_fingerprint"]
+        snapshot.specification_candidates[0].payload_fingerprint
+        == seed["payload_fingerprint"]
     )
     assert (
         snapshot.spec_versions[0].source_specification_candidate_id
@@ -737,6 +883,64 @@ def test_loader_retains_product_definition_identity_and_registered_spec_lineage(
         snapshot.spec_versions[0].source_specification_candidate_fingerprint
         == seed["candidate_fingerprint"]
     )
+
+
+@pytest.mark.parametrize(
+    ("statement", "replacement"),
+    [
+        (
+            "UPDATE workflow_node_attempts "
+            "SET business_fact_fingerprint = :replacement "
+            "WHERE workflow_node_attempt_id = :attempt_id",
+            canonical_hash({"tampered": "business"}),
+        ),
+        (
+            "UPDATE workflow_node_attempts SET input_fingerprint = :replacement "
+            "WHERE workflow_node_attempt_id = :attempt_id",
+            canonical_hash({"tampered": "input"}),
+        ),
+        (
+            "UPDATE workflow_node_attempts SET model_id = :replacement "
+            "WHERE workflow_node_attempt_id = :attempt_id",
+            "other-model",
+        ),
+        (
+            "UPDATE workflow_node_attempts SET node_id = :replacement "
+            "WHERE workflow_node_attempt_id = :attempt_id",
+            "goal.interview",
+        ),
+    ],
+)
+def test_loader_rejects_candidate_attempt_contract_drift(
+    engine: Engine,
+    statement: str,
+    replacement: str,
+) -> None:
+    """The candidate envelope must match its exact specification-author attempt."""
+    with Session(engine) as session:
+        seed = _seed_product_definition(
+            session,
+            f"Candidate attempt drift {replacement}",
+        )
+        candidate = session.get(
+            SpecificationCandidate,
+            int(seed["candidate_id"]),
+        )
+        assert candidate is not None
+        _force_sql(session, "PRAGMA foreign_keys = OFF")
+        _force_sql(
+            session,
+            statement,
+            {
+                "replacement": replacement,
+                "attempt_id": candidate.workflow_node_attempt_id,
+            },
+        )
+        session.commit()
+        _force_sql(session, "PRAGMA foreign_keys = ON")
+
+        with pytest.raises(WorkflowFactLoadError):
+            WorkflowFactRepository(session).load(int(seed["project_id"]))
 
 
 def test_loader_retains_product_goal_review_states_as_business_facts(
@@ -862,11 +1066,11 @@ def test_loader_rejects_product_goal_lineage_without_accepted_vision(
         "WHERE project_id = :project_id",
     ],
 )
-def test_loader_rejects_discovery_without_accepted_active_product_goal(
+def test_loader_rejects_candidate_without_accepted_active_product_goal(
     engine: Engine,
     statement: str,
 ) -> None:
-    """Discovery requires its exact Product Goal to have been accepted."""
+    """A specification candidate requires its exact Product Goal acceptance."""
     with Session(engine) as session:
         seed = _seed_product_definition(
             session,
@@ -880,15 +1084,15 @@ def test_loader_rejects_discovery_without_accepted_active_product_goal(
             WorkflowFactRepository(session).load(int(seed["project_id"]))
 
 
-def test_loader_keeps_historical_discovery_after_later_goal_outcome_and_revision(
+def test_loader_keeps_historical_candidate_after_later_goal_outcome_and_revision(
     engine: Engine,
 ) -> None:
-    """Later Goal facts do not invalidate discovery valid when recorded."""
+    """Later Goal facts do not invalidate a candidate valid when recorded."""
     recorded_at = datetime(2026, 8, 5, 13, tzinfo=UTC)
     with Session(engine) as session:
         seed = _seed_product_definition(
             session,
-            "Historical Product Goal discovery",
+            "Historical Product Goal candidate",
             create_goal_outcome=False,
         )
         project_id = int(seed["project_id"])
@@ -925,20 +1129,22 @@ def test_loader_keeps_historical_discovery_after_later_goal_outcome_and_revision
 
         snapshot = WorkflowFactRepository(session).load(project_id)
 
-    assert [item.discovery_artifact_id for item in snapshot.discovery_artifacts] == [
-        seed["discovery_id"]
+    assert [
+        item.specification_candidate_id for item in snapshot.specification_candidates
+    ] == [
+        seed["candidate_id"]
     ]
 
 
-def test_loader_rejects_discovery_recorded_after_product_goal_outcome(
+def test_loader_rejects_candidate_recorded_after_product_goal_outcome(
     engine: Engine,
 ) -> None:
-    """A terminal Goal outcome closes discovery eligibility at its decision time."""
-    recorded_at = datetime(2026, 8, 5, 13, tzinfo=UTC)
+    """A terminal Goal outcome closes candidate eligibility at its decision time."""
+    recorded_at = datetime(2026, 8, 5, 12, 1, 30, tzinfo=UTC)
     with Session(engine) as session:
         seed = _seed_product_definition(
             session,
-            "Post-outcome Product Goal discovery",
+            "Post-outcome Product Goal candidate",
             create_goal_outcome=False,
         )
         project_id = int(seed["project_id"])
@@ -952,23 +1158,6 @@ def test_loader_rejects_discovery_recorded_after_product_goal_outcome(
                 decided_by="operator",
                 idempotency_key=f"post-outcome-goal-{project_id}",
                 decided_at=recorded_at,
-            )
-        )
-        content = {"discovery": "after-outcome"}
-        session.add(
-            DiscoveryArtifact(
-                project_id=project_id,
-                vision_artifact_id=int(seed["vision_id"]),
-                vision_fingerprint=str(seed["vision_fingerprint"]),
-                product_goal_artifact_id=int(seed["goal_id"]),
-                product_goal_fingerprint=str(seed["goal_fingerprint"]),
-                canonical_content_json=canonical_json(content),
-                content_fingerprint=canonical_hash(content),
-                content_ref="after-outcome.md",
-                producer="test",
-                supersedes_discovery_artifact_id=None,
-                recorded_by="operator",
-                recorded_at=recorded_at,
             )
         )
         session.commit()
@@ -1013,10 +1202,6 @@ def test_loader_rejects_noncausal_product_goal_decision_ordering(
         "vision_artifact_id = :other_vision_id, "
         "vision_fingerprint = :other_vision_fingerprint "
         "WHERE product_goal_artifact_id = :goal_id",
-        "UPDATE discovery_artifacts SET "
-        "vision_artifact_id = :other_vision_id, "
-        "vision_fingerprint = :other_vision_fingerprint "
-        "WHERE discovery_artifact_id = :discovery_id",
         "UPDATE specification_candidates SET "
         "vision_artifact_id = :other_vision_id, "
         "vision_fingerprint = :other_vision_fingerprint "
@@ -1059,7 +1244,6 @@ def test_loader_rejects_same_project_product_definition_chain_swaps(
             statement,
             {
                 "goal_id": int(seed["goal_id"]),
-                "discovery_id": int(seed["discovery_id"]),
                 "candidate_id": int(seed["candidate_id"]),
                 "other_vision_id": other_vision_id,
                 "other_vision_fingerprint": other_vision_fingerprint,
@@ -1398,12 +1582,12 @@ def test_loader_rejects_two_accepted_product_goals_without_outcomes(
     ("statement", "params"),
     [
         (
-            "UPDATE discovery_artifacts SET canonical_content_json = :value "
+            "UPDATE specification_candidates SET canonical_envelope_json = :value "
             "WHERE project_id = :project_id",
-            {"value": canonical_json({"discovery": "tampered"})},
+            {"value": canonical_json({"payload": {}, "envelope": {}})},
         ),
         (
-            "UPDATE specification_candidates SET discovery_fingerprint = :value "
+            "UPDATE specification_candidates SET candidate_fingerprint = :value "
             "WHERE project_id = :project_id",
             {"value": "sha256:tampered"},
         ),
@@ -1436,16 +1620,10 @@ def test_loader_rejects_product_definition_content_or_parent_tampering(
             "goal_turn_id",
         ),
         (
-            "UPDATE discovery_artifacts "
+            "UPDATE specification_candidates "
             "SET product_goal_artifact_id = :foreign_id "
             "WHERE project_id = :target_project",
             "goal_id",
-        ),
-        (
-            "UPDATE specification_candidates "
-            "SET discovery_artifact_id = :foreign_id "
-            "WHERE project_id = :target_project",
-            "discovery_id",
         ),
     ],
 )
@@ -1454,7 +1632,7 @@ def test_loader_rejects_cross_project_product_definition_references(
     statement: str,
     foreign_key: str,
 ) -> None:
-    """Fail closed for corrupt Goal, discovery, or specification parents."""
+    """Fail closed for corrupt Goal or specification parents."""
     with Session(engine) as session:
         target = _seed_product_definition(session, "Target product facts")
         foreign = _seed_product_definition(session, "Foreign product facts")

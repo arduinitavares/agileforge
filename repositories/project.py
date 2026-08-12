@@ -24,7 +24,6 @@ from models.core import (
 from models.db import get_engine
 from models.events import StoryCompletionLog, TaskExecutionLog, WorkflowEvent
 from models.product_definition import (
-    DiscoveryArtifact,
     ProductGoalArtifact,
     ProductGoalArtifactDecision,
     ProductGoalInterviewTurn,
@@ -102,7 +101,7 @@ def _neutralize_surviving_spec_pins(session: Session, project_id: int) -> None:
 
 
 def _delete_project_spec_rows(session: Session, project_id: int) -> None:
-    """Delete spec history after repairing nullable survivor references."""
+    """Delete the cyclic candidate/registry pair in foreign-key-safe order."""
     _neutralize_surviving_spec_pins(session, project_id)
     spec_versions = session.exec(
         select(SpecRegistry).where(SpecRegistry.project_id == project_id)
@@ -118,6 +117,11 @@ def _delete_project_spec_rows(session: Session, project_id: int) -> None:
                 col(SpecAuthorityAcceptance.spec_version_id).in_(spec_version_ids)
             )
         )
+    session.exec(
+        delete(SpecificationDecision).where(
+            col(SpecificationDecision.project_id) == project_id
+        )
+    )
     for spec_version in spec_versions:
         for compiled in session.exec(
             select(CompiledSpecAuthority).where(
@@ -125,7 +129,14 @@ def _delete_project_spec_rows(session: Session, project_id: int) -> None:
             )
         ).all():
             session.delete(compiled)
-        session.delete(spec_version)
+    session.flush()
+    session.exec(delete(SpecRegistry).where(col(SpecRegistry.project_id) == project_id))
+    session.flush()
+    session.exec(
+        delete(SpecificationCandidate).where(
+            col(SpecificationCandidate.project_id) == project_id
+        )
+    )
     session.flush()
 
 
@@ -300,9 +311,6 @@ def _delete_project_lifecycle_rows(session: Session, project: Project) -> None:
         message = "Project deletion requires a durable Project identity."
         raise RuntimeError(message)
     for model in (
-        SpecificationDecision,
-        SpecificationCandidate,
-        DiscoveryArtifact,
         ProductGoalOutcome,
         ProductGoalArtifactDecision,
         ProductGoalArtifact,
@@ -441,6 +449,7 @@ class ProjectRepository:
                 return False
 
             _ensure_project_authority_deletable(session, project_id)
+            _delete_project_spec_rows(session, project_id)
             _delete_project_lifecycle_rows(session, project)
 
             sprints = session.exec(
@@ -491,7 +500,6 @@ class ProjectRepository:
             )
             session.flush()
 
-            _delete_project_spec_rows(session, project_id)
             _delete_project_roadmap(session, project_id)
             session.delete(project)
 

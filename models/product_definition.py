@@ -487,69 +487,6 @@ class ProductGoalOutcome(SQLModel, table=True):
     decided_at: datetime = Field(default_factory=utc_now, nullable=False)
 
 
-class DiscoveryArtifact(SQLModel, table=True):
-    """Immutable discovery output with durable Vision and goal lineage."""
-
-    __tablename__ = "discovery_artifacts"
-    __table_args__ = (
-        UniqueConstraint(
-            "project_id",
-            "discovery_artifact_id",
-            name="uq_discovery_artifact_project_id",
-        ),
-        UniqueConstraint(
-            "project_id",
-            "discovery_artifact_id",
-            "content_fingerprint",
-            name="uq_discovery_artifact_parent",
-        ),
-        ForeignKeyConstraint(
-            ["project_id", "vision_artifact_id", "vision_fingerprint"],
-            [
-                "vision_artifacts.project_id",
-                "vision_artifacts.vision_artifact_id",
-                "vision_artifacts.content_fingerprint",
-            ],
-            name="fk_discovery_artifact_vision",
-        ),
-        ForeignKeyConstraint(
-            [
-                "project_id",
-                "product_goal_artifact_id",
-                "product_goal_fingerprint",
-            ],
-            [
-                "product_goal_artifacts.project_id",
-                "product_goal_artifacts.product_goal_artifact_id",
-                "product_goal_artifacts.content_fingerprint",
-            ],
-            name="fk_discovery_artifact_goal",
-        ),
-        ForeignKeyConstraint(
-            ["project_id", "supersedes_discovery_artifact_id"],
-            [
-                "discovery_artifacts.project_id",
-                "discovery_artifacts.discovery_artifact_id",
-            ],
-            name="fk_discovery_artifact_supersedes",
-        ),
-    )
-
-    discovery_artifact_id: int | None = Field(default=None, primary_key=True)
-    project_id: int = Field(foreign_key="projects.project_id", index=True)
-    vision_artifact_id: int = Field(index=True)
-    vision_fingerprint: str = Field(index=True)
-    product_goal_artifact_id: int = Field(index=True)
-    product_goal_fingerprint: str = Field(index=True)
-    canonical_content_json: str = Field(sa_type=Text)
-    content_fingerprint: str = Field(index=True)
-    content_ref: str | None = Field(default=None, sa_type=Text)
-    producer: str = Field(index=True)
-    supersedes_discovery_artifact_id: int | None = Field(default=None, index=True)
-    recorded_by: str = Field(index=True)
-    recorded_at: datetime = Field(default_factory=utc_now, nullable=False)
-
-
 class SpecificationCandidate(SQLModel, table=True):
     """Immutable candidate specification with complete product lineage."""
 
@@ -558,18 +495,42 @@ class SpecificationCandidate(SQLModel, table=True):
         UniqueConstraint(
             "project_id",
             "specification_candidate_id",
-            name="uq_specification_candidate_project_id",
+            "candidate_fingerprint",
+            name="uq_specification_candidate_identity",
         ),
         UniqueConstraint(
             "project_id",
             "specification_candidate_id",
-            "content_fingerprint",
-            name="uq_specification_candidate_parent",
+            "candidate_fingerprint",
+            "payload_fingerprint",
+            name="uq_specification_candidate_payload_identity",
+        ),
+        UniqueConstraint(
+            "project_id",
+            "workflow_node_attempt_id",
+            name="uq_specification_candidate_attempt",
+        ),
+        UniqueConstraint(
+            "project_id",
+            "supersedes_specification_candidate_id",
+            name="uq_specification_candidate_successor",
         ),
         CheckConstraint(
-            "(base_spec_version_id IS NULL AND base_spec_hash IS NULL) OR "
-            "(base_spec_version_id IS NOT NULL AND base_spec_hash IS NOT NULL)",
+            "candidate_kind IN ('initial', 'amendment')",
+            name="ck_specification_candidate_kind",
+        ),
+        CheckConstraint(
+            "(candidate_kind = 'initial' AND base_spec_version_id IS NULL "
+            "AND base_spec_hash IS NULL) OR (candidate_kind = 'amendment' "
+            "AND base_spec_version_id IS NOT NULL AND base_spec_hash IS NOT NULL)",
             name="ck_specification_candidate_base_spec",
+        ),
+        CheckConstraint(
+            "(supersedes_specification_candidate_id IS NULL "
+            "AND supersedes_candidate_fingerprint IS NULL) OR "
+            "(supersedes_specification_candidate_id IS NOT NULL "
+            "AND supersedes_candidate_fingerprint IS NOT NULL)",
+            name="ck_specification_candidate_supersedes",
         ),
         ForeignKeyConstraint(
             ["project_id", "vision_artifact_id", "vision_fingerprint"],
@@ -594,15 +555,6 @@ class SpecificationCandidate(SQLModel, table=True):
             name="fk_specification_candidate_goal",
         ),
         ForeignKeyConstraint(
-            ["project_id", "discovery_artifact_id", "discovery_fingerprint"],
-            [
-                "discovery_artifacts.project_id",
-                "discovery_artifacts.discovery_artifact_id",
-                "discovery_artifacts.content_fingerprint",
-            ],
-            name="fk_specification_candidate_discovery",
-        ),
-        ForeignKeyConstraint(
             ["project_id", "base_spec_version_id", "base_spec_hash"],
             [
                 "spec_registry.project_id",
@@ -610,12 +562,28 @@ class SpecificationCandidate(SQLModel, table=True):
                 "spec_registry.spec_hash",
             ],
             name="fk_specification_candidate_base_spec",
+            deferrable=True,
+            initially="DEFERRED",
         ),
         ForeignKeyConstraint(
-            ["project_id", "supersedes_specification_candidate_id"],
+            ["project_id", "workflow_node_attempt_id", "attempt_fingerprint"],
+            [
+                "workflow_node_attempts.project_id",
+                "workflow_node_attempts.workflow_node_attempt_id",
+                "workflow_node_attempts.attempt_fingerprint",
+            ],
+            name="fk_specification_candidate_attempt",
+        ),
+        ForeignKeyConstraint(
+            [
+                "project_id",
+                "supersedes_specification_candidate_id",
+                "supersedes_candidate_fingerprint",
+            ],
             [
                 "specification_candidates.project_id",
                 "specification_candidates.specification_candidate_id",
+                "specification_candidates.candidate_fingerprint",
             ],
             name="fk_specification_candidate_supersedes",
         ),
@@ -623,18 +591,23 @@ class SpecificationCandidate(SQLModel, table=True):
 
     specification_candidate_id: int | None = Field(default=None, primary_key=True)
     project_id: int = Field(foreign_key="projects.project_id", index=True)
+    candidate_kind: str = Field(index=True)
     vision_artifact_id: int = Field(index=True)
     vision_fingerprint: str = Field(index=True)
     product_goal_artifact_id: int = Field(index=True)
     product_goal_fingerprint: str = Field(index=True)
-    discovery_artifact_id: int = Field(index=True)
-    discovery_fingerprint: str = Field(index=True)
     base_spec_version_id: int | None = Field(default=None, index=True)
     base_spec_hash: str | None = Field(default=None, index=True)
-    canonical_content_json: str = Field(sa_type=Text)
-    content_fingerprint: str = Field(index=True)
-    content_ref: str | None = Field(default=None, sa_type=Text)
+    canonical_envelope_json: str = Field(sa_type=Text)
+    payload_fingerprint: str = Field(index=True)
+    source_manifest_fingerprint: str = Field(index=True)
+    producer_input_fingerprint: str = Field(index=True)
+    rendered_view_fingerprint: str = Field(index=True)
+    candidate_fingerprint: str = Field(index=True)
+    workflow_node_attempt_id: int = Field(index=True)
+    attempt_fingerprint: str = Field(index=True)
     supersedes_specification_candidate_id: int | None = Field(default=None, index=True)
+    supersedes_candidate_fingerprint: str | None = Field(default=None, index=True)
     recorded_by: str = Field(index=True)
     recorded_at: datetime = Field(default_factory=utc_now, nullable=False)
 
@@ -653,12 +626,17 @@ class SpecificationDecision(SQLModel, table=True):
             "idempotency_key",
             name="uq_specification_decision_idempotency",
         ),
+        UniqueConstraint(
+            "project_id",
+            "specification_candidate_id",
+            name="uq_specification_decision_candidate",
+        ),
         ForeignKeyConstraint(
-            ["project_id", "specification_candidate_id", "artifact_fingerprint"],
+            ["project_id", "specification_candidate_id", "candidate_fingerprint"],
             [
                 "specification_candidates.project_id",
                 "specification_candidates.specification_candidate_id",
-                "specification_candidates.content_fingerprint",
+                "specification_candidates.candidate_fingerprint",
             ],
             name="fk_specification_decision_parent",
         ),
@@ -667,7 +645,7 @@ class SpecificationDecision(SQLModel, table=True):
     specification_decision_id: int | None = Field(default=None, primary_key=True)
     project_id: int = Field(foreign_key="projects.project_id", index=True)
     specification_candidate_id: int = Field(index=True)
-    artifact_fingerprint: str = Field(index=True)
+    candidate_fingerprint: str = Field(index=True)
     decision: str = Field(index=True)
     rationale: str = Field(sa_type=Text)
     reviewer: str = Field(index=True)

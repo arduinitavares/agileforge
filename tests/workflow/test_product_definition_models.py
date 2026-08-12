@@ -13,7 +13,6 @@ from sqlmodel import Session, SQLModel
 from models import product_definition
 from models.db import _CURRENT_MODEL_MODULES
 from models.product_definition import (
-    DiscoveryArtifact,
     ProductGoalArtifact,
     ProductGoalArtifactDecision,
     ProductGoalInterviewTurn,
@@ -141,36 +140,26 @@ EXPECTED_COLUMNS: dict[type[SQLModel], set[str]] = {
         "idempotency_key",
         "decided_at",
     },
-    DiscoveryArtifact: {
-        "discovery_artifact_id",
-        "project_id",
-        "vision_artifact_id",
-        "vision_fingerprint",
-        "product_goal_artifact_id",
-        "product_goal_fingerprint",
-        "canonical_content_json",
-        "content_fingerprint",
-        "content_ref",
-        "producer",
-        "supersedes_discovery_artifact_id",
-        "recorded_by",
-        "recorded_at",
-    },
     SpecificationCandidate: {
         "specification_candidate_id",
         "project_id",
+        "candidate_kind",
         "vision_artifact_id",
         "vision_fingerprint",
         "product_goal_artifact_id",
         "product_goal_fingerprint",
-        "discovery_artifact_id",
-        "discovery_fingerprint",
         "base_spec_version_id",
         "base_spec_hash",
-        "canonical_content_json",
-        "content_fingerprint",
-        "content_ref",
+        "canonical_envelope_json",
+        "payload_fingerprint",
+        "source_manifest_fingerprint",
+        "producer_input_fingerprint",
+        "rendered_view_fingerprint",
+        "candidate_fingerprint",
+        "workflow_node_attempt_id",
+        "attempt_fingerprint",
         "supersedes_specification_candidate_id",
+        "supersedes_candidate_fingerprint",
         "recorded_by",
         "recorded_at",
     },
@@ -178,7 +167,7 @@ EXPECTED_COLUMNS: dict[type[SQLModel], set[str]] = {
         "specification_decision_id",
         "project_id",
         "specification_candidate_id",
-        "artifact_fingerprint",
+        "candidate_fingerprint",
         "decision",
         "rationale",
         "reviewer",
@@ -196,7 +185,6 @@ EXPECTED_TABLE_NAMES: dict[type[SQLModel], str] = {
     ProductGoalArtifact: "product_goal_artifacts",
     ProductGoalArtifactDecision: "product_goal_artifact_decisions",
     ProductGoalOutcome: "product_goal_outcomes",
-    DiscoveryArtifact: "discovery_artifacts",
     SpecificationCandidate: "specification_candidates",
     SpecificationDecision: "specification_decisions",
 }
@@ -237,10 +225,10 @@ def test_fresh_schema_has_versioned_product_definition_tables(engine: Engine) ->
         "product_goal_artifacts",
         "product_goal_artifact_decisions",
         "product_goal_outcomes",
-        "discovery_artifacts",
         "specification_candidates",
         "specification_decisions",
     } <= names
+    assert "discovery_artifacts" not in names
     assert product_definition in _CURRENT_MODEL_MODULES
 
 
@@ -251,8 +239,7 @@ def test_product_definition_records_expose_exact_immutable_columns() -> None:
         assert set(table.columns.keys()) == expected_columns
 
     candidate = SQLModel.metadata.tables["specification_candidates"]
-    assert candidate.c.canonical_content_json.type.__class__.__name__ == "Text"
-    assert candidate.c.content_ref.nullable
+    assert candidate.c.canonical_envelope_json.type.__class__.__name__ == "Text"
 
 
 def test_product_definition_records_enforce_scoped_lineage_and_values() -> None:
@@ -367,11 +354,19 @@ def test_product_definition_records_enforce_scoped_lineage_and_values() -> None:
 
     candidate_fingerprints = _foreign_keys("specification_candidates")
     assert (
-        ("project_id", "discovery_artifact_id", "discovery_fingerprint"),
+        ("project_id", "vision_artifact_id", "vision_fingerprint"),
         (
-            "discovery_artifacts.project_id",
-            "discovery_artifacts.discovery_artifact_id",
-            "discovery_artifacts.content_fingerprint",
+            "vision_artifacts.project_id",
+            "vision_artifacts.vision_artifact_id",
+            "vision_artifacts.content_fingerprint",
+        ),
+    ) in candidate_fingerprints
+    assert (
+        ("project_id", "product_goal_artifact_id", "product_goal_fingerprint"),
+        (
+            "product_goal_artifacts.project_id",
+            "product_goal_artifacts.product_goal_artifact_id",
+            "product_goal_artifacts.content_fingerprint",
         ),
     ) in candidate_fingerprints
     assert (
@@ -382,6 +377,89 @@ def test_product_definition_records_enforce_scoped_lineage_and_values() -> None:
             "spec_registry.spec_hash",
         ),
     ) in candidate_fingerprints
+    assert (
+        ("project_id", "workflow_node_attempt_id", "attempt_fingerprint"),
+        (
+            "workflow_node_attempts.project_id",
+            "workflow_node_attempts.workflow_node_attempt_id",
+            "workflow_node_attempts.attempt_fingerprint",
+        ),
+    ) in candidate_fingerprints
+    assert (
+        (
+            "project_id",
+            "supersedes_specification_candidate_id",
+            "supersedes_candidate_fingerprint",
+        ),
+        (
+            "specification_candidates.project_id",
+            "specification_candidates.specification_candidate_id",
+            "specification_candidates.candidate_fingerprint",
+        ),
+    ) in candidate_fingerprints
+    assert (
+        "(candidate_kind = 'initial' AND base_spec_version_id IS NULL "
+        "AND base_spec_hash IS NULL) OR (candidate_kind = 'amendment' "
+        "AND base_spec_version_id IS NOT NULL AND base_spec_hash IS NOT NULL)"
+    ) in _checks("specification_candidates")
+    assert (
+        "(supersedes_specification_candidate_id IS NULL "
+        "AND supersedes_candidate_fingerprint IS NULL) OR "
+        "(supersedes_specification_candidate_id IS NOT NULL "
+        "AND supersedes_candidate_fingerprint IS NOT NULL)"
+    ) in _checks("specification_candidates")
+
+    candidate_uniques = {
+        tuple(constraint.columns.keys())
+        for constraint in SQLModel.metadata.tables[
+            "specification_candidates"
+        ].constraints
+        if isinstance(constraint, UniqueConstraint)
+    }
+    assert (
+        "project_id",
+        "specification_candidate_id",
+        "candidate_fingerprint",
+    ) in candidate_uniques
+    assert (
+        "project_id",
+        "specification_candidate_id",
+        "candidate_fingerprint",
+        "payload_fingerprint",
+    ) in candidate_uniques
+    assert ("project_id", "workflow_node_attempt_id") in candidate_uniques
+    assert ("project_id", "supersedes_specification_candidate_id") in candidate_uniques
+
+    decision_fingerprints = _foreign_keys("specification_decisions")
+    assert (
+        ("project_id", "specification_candidate_id", "candidate_fingerprint"),
+        (
+            "specification_candidates.project_id",
+            "specification_candidates.specification_candidate_id",
+            "specification_candidates.candidate_fingerprint",
+        ),
+    ) in decision_fingerprints
+    decision_uniques = {
+        tuple(constraint.columns.keys())
+        for constraint in SQLModel.metadata.tables[
+            "specification_decisions"
+        ].constraints
+        if isinstance(constraint, UniqueConstraint)
+    }
+    assert ("project_id", "specification_candidate_id") in decision_uniques
+
+    attempt_uniques = {
+        tuple(constraint.columns.keys())
+        for constraint in SQLModel.metadata.tables[
+            "workflow_node_attempts"
+        ].constraints
+        if isinstance(constraint, UniqueConstraint)
+    }
+    assert (
+        "project_id",
+        "workflow_node_attempt_id",
+        "attempt_fingerprint",
+    ) in attempt_uniques
 
 
 def test_spec_registry_requires_product_definition_lineage() -> None:
@@ -390,15 +468,21 @@ def test_spec_registry_requires_product_definition_lineage() -> None:
 
     expected_columns = {
         "source_specification_candidate_id",
+        "source_specification_candidate_fingerprint",
         "source_vision_artifact_id",
         "source_vision_fingerprint",
         "source_product_goal_artifact_id",
         "source_product_goal_fingerprint",
-        "source_discovery_artifact_id",
-        "source_discovery_fingerprint",
         "supersedes_spec_version_id",
     }
     assert expected_columns <= set(table.columns.keys())
+    retired_columns = {
+        "content",
+        "content_ref",
+        "source_discovery_artifact_id",
+        "source_discovery_fingerprint",
+    }
+    assert retired_columns.isdisjoint(table.columns.keys())
     required_columns = expected_columns - {"supersedes_spec_version_id"}
     assert all(not table.c[column].nullable for column in required_columns)
     assert table.c.supersedes_spec_version_id.nullable
@@ -408,7 +492,54 @@ def test_spec_registry_requires_product_definition_lineage() -> None:
         for constraint in table.constraints
         if isinstance(constraint, UniqueConstraint)
     }
-    assert ("source_specification_candidate_id",) in unique_columns
+    assert (
+        "project_id",
+        "source_specification_candidate_id",
+    ) in unique_columns
+    assert (
+        "project_id",
+        "source_specification_candidate_id",
+        "source_specification_candidate_fingerprint",
+        "spec_hash",
+    ) in unique_columns
+    assert (
+        (
+            "project_id",
+            "source_specification_candidate_id",
+            "source_specification_candidate_fingerprint",
+            "spec_hash",
+        ),
+        (
+            "specification_candidates.project_id",
+            "specification_candidates.specification_candidate_id",
+            "specification_candidates.candidate_fingerprint",
+            "specification_candidates.payload_fingerprint",
+        ),
+    ) in _foreign_keys("spec_registry")
+    assert (
+        (
+            "project_id",
+            "source_vision_artifact_id",
+            "source_vision_fingerprint",
+        ),
+        (
+            "vision_artifacts.project_id",
+            "vision_artifacts.vision_artifact_id",
+            "vision_artifacts.content_fingerprint",
+        ),
+    ) in _foreign_keys("spec_registry")
+    assert (
+        (
+            "project_id",
+            "source_product_goal_artifact_id",
+            "source_product_goal_fingerprint",
+        ),
+        (
+            "product_goal_artifacts.project_id",
+            "product_goal_artifacts.product_goal_artifact_id",
+            "product_goal_artifacts.content_fingerprint",
+        ),
+    ) in _foreign_keys("spec_registry")
 
 
 def _insert_vision_turn(

@@ -566,6 +566,12 @@ class WorkflowNodeAttempt(SQLModel, table=True):
             "workflow_node_attempt_id",
             name="uq_workflow_attempt_project_id",
         ),
+        UniqueConstraint(
+            "project_id",
+            "workflow_node_attempt_id",
+            "attempt_fingerprint",
+            name="uq_workflow_attempt_identity",
+        ),
         CheckConstraint(
             "lease_expires_at > started_at",
             name="ck_workflow_attempt_lease",

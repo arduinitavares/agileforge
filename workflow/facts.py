@@ -179,39 +179,27 @@ class ProductGoalOutcomeFact(FrozenModel):
     decided_at: _DATETIME
 
 
-class DiscoveryArtifactFact(FrozenModel):
-    """Immutable discovery result with exact Vision and goal parents."""
-
-    discovery_artifact_id: int
-    vision_artifact_id: int
-    vision_fingerprint: str
-    product_goal_artifact_id: int
-    product_goal_fingerprint: str
-    canonical_content: JsonObject = Field(default_factory=dict)
-    content_fingerprint: str
-    content_ref: str | None
-    producer: str
-    supersedes_discovery_artifact_id: int | None
-    recorded_by: str
-    recorded_at: _DATETIME
-
-
 class SpecificationCandidateFact(FrozenModel):
     """Immutable candidate specification with exact product-definition lineage."""
 
     specification_candidate_id: int
+    candidate_kind: Literal["initial", "amendment"]
     vision_artifact_id: int
     vision_fingerprint: str
     product_goal_artifact_id: int
     product_goal_fingerprint: str
-    discovery_artifact_id: int
-    discovery_fingerprint: str
     base_spec_version_id: int | None
     base_spec_hash: str | None
-    canonical_content: JsonObject = Field(default_factory=dict)
-    content_fingerprint: str
-    content_ref: str | None
+    canonical_envelope: JsonObject = Field(default_factory=dict)
+    payload_fingerprint: str
+    source_manifest_fingerprint: str
+    producer_input_fingerprint: str
+    rendered_view_fingerprint: str
+    candidate_fingerprint: str
+    workflow_node_attempt_id: int
+    attempt_fingerprint: str
     supersedes_specification_candidate_id: int | None
+    supersedes_candidate_fingerprint: str | None
     recorded_by: str
     recorded_at: _DATETIME
 
@@ -221,7 +209,7 @@ class SpecificationDecisionFact(FrozenModel):
 
     specification_decision_id: int
     specification_candidate_id: int
-    artifact_fingerprint: str
+    candidate_fingerprint: str
     decision: Literal["accepted", "rejected", "feedback"]
     rationale: str
     reviewer: str
@@ -237,13 +225,11 @@ class SpecVersionFact(FrozenModel):
     status: Literal["approved", "superseded"]
     approved_at: _DATETIME | None
     source_specification_candidate_id: int
-    source_specification_candidate_fingerprint: str | None = None
+    source_specification_candidate_fingerprint: str
     source_vision_artifact_id: int
     source_vision_fingerprint: str
     source_product_goal_artifact_id: int
     source_product_goal_fingerprint: str
-    source_discovery_artifact_id: int
-    source_discovery_fingerprint: str
     supersedes_spec_version_id: int | None = None
 
 
@@ -523,7 +509,6 @@ class WorkflowFactSnapshot(FrozenModel):
     product_goal_artifacts: tuple[ProductGoalArtifactFact, ...] = ()
     product_goal_artifact_decisions: tuple[ProductGoalArtifactDecisionFact, ...] = ()
     product_goal_outcomes: tuple[ProductGoalOutcomeFact, ...] = ()
-    discovery_artifacts: tuple[DiscoveryArtifactFact, ...] = ()
     specification_candidates: tuple[SpecificationCandidateFact, ...] = ()
     specification_decisions: tuple[SpecificationDecisionFact, ...] = ()
     spec_versions: tuple[SpecVersionFact, ...] = ()

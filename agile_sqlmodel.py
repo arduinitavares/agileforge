@@ -40,7 +40,6 @@ from models.events import (
     WorkflowEvent,
 )
 from models.product_definition import (
-    DiscoveryArtifact,
     ProductGoalArtifact,
     ProductGoalArtifactDecision,
     ProductGoalInterviewTurn,
@@ -62,7 +61,6 @@ __all__ = [
     "AuthorityCurationAttempt",
     "AuthorityFeedbackAttempt",
     "CompiledSpecAuthority",
-    "DiscoveryArtifact",
     "Epic",
     "Feature",
     "ProductGoalArtifact",

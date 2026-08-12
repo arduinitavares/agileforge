@@ -11,7 +11,6 @@ from sqlmodel import Session, select
 
 from models.core import Project
 from models.product_definition import (
-    DiscoveryArtifact,
     ProductGoalArtifact,
     ProductGoalArtifactDecision,
     ProductGoalInterviewTurn,
@@ -55,7 +54,6 @@ _PRODUCT_MODELS = (
     ProductGoalInterviewTurn,
     SpecificationDecision,
     SpecificationCandidate,
-    DiscoveryArtifact,
     SpecRegistry,
     RepositoryBinding,
     WorkflowNodeAttemptOutcome,
