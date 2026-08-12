@@ -10,7 +10,6 @@ from sqlmodel import Session, col, select
 
 from models.core import Project
 from models.product_definition import (
-    DiscoveryArtifact,
     ProductGoalArtifact,
     ProductGoalArtifactDecision,
     ProductGoalInterviewTurn,
@@ -29,6 +28,8 @@ from services.node_attempt_replay import (
     DurableNodeAttemptReplayService,
     NodeAttemptReplayQuery,
 )
+from tests.workflow.lifecycle_fixtures import seed_accepted_specification
+from utils.agileforge_spec_profile_v2 import SpecificationPayload
 from workflow.clock import FixedClock
 from workflow.contracts import WorkflowErrorCode
 from workflow.definitions.root import project_graph
@@ -220,84 +221,55 @@ def _seed_accepted_goal_specification_lineage(
     session: Session,
     lineage: _GoalLineage,
 ) -> _ResolvedGoalSpecificationLineage:
-    """Persist the durable Task 2 Goal through registered-specification lineage."""
+    """Persist the original Goal with one accepted typed v2 Specification."""
     goal_id, goal_fingerprint = _seed_accepted_goal(session, lineage)
-    discovery_content: JsonObject = {"discovery": "Original Goal discovery."}
-    discovery = DiscoveryArtifact(
+    session.flush()
+    payload = SpecificationPayload.model_validate(
+        {
+            "schema_version": "agileforge.spec.v2",
+            "artifact_id": "SPEC.vision-revision-lineage",
+            "title": "Vision revision lineage",
+            "summary": "Keep the original Goal lineage exact during Vision revision.",
+            "problem_statement": "A revision must not inherit stale delivery facts.",
+            "items": [
+                {
+                    "id": "REQ.vision.revision-lineage",
+                    "type": "REQ",
+                    "title": "Reset downstream lineage",
+                    "statement": "A revised Vision MUST start a new Goal lifecycle.",
+                    "level": "MUST",
+                    "verification": "system-test",
+                    "acceptance": ["Prior accepted specifications are not current."],
+                }
+            ],
+        }
+    )
+    accepted = seed_accepted_specification(
+        session,
         project_id=lineage.project_id,
-        vision_artifact_id=lineage.vision_artifact_id,
-        vision_fingerprint=lineage.vision_fingerprint,
-        product_goal_artifact_id=goal_id,
-        product_goal_fingerprint=goal_fingerprint,
-        canonical_content_json=canonical_json(discovery_content),
-        content_fingerprint=canonical_hash(discovery_content),
-        content_ref="discovery.md",
-        producer="test",
-        supersedes_discovery_artifact_id=None,
-        recorded_by="operator@example.com",
+        content=payload.model_dump_json(),
         recorded_at=NOW + timedelta(seconds=1, microseconds=1),
     )
-    session.add(discovery)
-    session.flush()
-    assert discovery.discovery_artifact_id is not None
-    candidate_content: JsonObject = {"specification": "Original Goal scope."}
-    candidate = SpecificationCandidate(
-        project_id=lineage.project_id,
-        vision_artifact_id=lineage.vision_artifact_id,
-        vision_fingerprint=lineage.vision_fingerprint,
-        product_goal_artifact_id=goal_id,
-        product_goal_fingerprint=goal_fingerprint,
-        discovery_artifact_id=discovery.discovery_artifact_id,
-        discovery_fingerprint=discovery.content_fingerprint,
-        base_spec_version_id=None,
-        base_spec_hash=None,
-        canonical_content_json=canonical_json(candidate_content),
-        content_fingerprint=canonical_hash(candidate_content),
-        content_ref="specification.json",
-        supersedes_specification_candidate_id=None,
-        recorded_by="operator@example.com",
-        recorded_at=NOW + timedelta(seconds=1, microseconds=2),
-    )
-    session.add(candidate)
-    session.flush()
-    assert candidate.specification_candidate_id is not None
-    session.add(
-        SpecificationDecision(
-            project_id=lineage.project_id,
-            specification_candidate_id=candidate.specification_candidate_id,
-            artifact_fingerprint=candidate.content_fingerprint,
-            decision="accepted",
-            rationale="Original Goal specification accepted.",
-            reviewer="operator@example.com",
-            idempotency_key="original-goal-specification-accepted",
-            decided_at=NOW + timedelta(seconds=1, microseconds=3),
-        )
-    )
-    spec_content = canonical_json(candidate_content)
-    registered_spec = SpecRegistry(
-        project_id=lineage.project_id,
-        spec_hash=canonical_hash(candidate_content),
-        content=spec_content,
-        status="approved",
-        approved_at=NOW + timedelta(seconds=1, microseconds=4),
-        approved_by="operator@example.com",
-        source_specification_candidate_id=candidate.specification_candidate_id,
-        source_vision_artifact_id=lineage.vision_artifact_id,
-        source_vision_fingerprint=lineage.vision_fingerprint,
-        source_product_goal_artifact_id=goal_id,
-        source_product_goal_fingerprint=goal_fingerprint,
-        source_discovery_artifact_id=discovery.discovery_artifact_id,
-        source_discovery_fingerprint=discovery.content_fingerprint,
-        supersedes_spec_version_id=None,
-    )
-    session.add(registered_spec)
-    session.flush()
-    assert registered_spec.spec_version_id is not None
+    assert accepted.product_goal_artifact_id == goal_id
+    assert accepted.product_goal_fingerprint == goal_fingerprint
+    assert accepted.spec.spec_version_id is not None
     return _ResolvedGoalSpecificationLineage(
         product_goal_artifact_id=goal_id,
         product_goal_fingerprint=goal_fingerprint,
-        spec_version_id=registered_spec.spec_version_id,
+        spec_version_id=accepted.spec.spec_version_id,
     )
+
+
+def _seed_original_goal_specification(
+    engine: Engine,
+    lineage: _GoalLineage,
+) -> _ResolvedGoalSpecificationLineage:
+    """Seed one typed Specification before the pending Vision revision exists."""
+    with Session(engine) as session:
+        return _seed_accepted_goal_specification_lineage(
+            session,
+            lineage,
+        )
 
 
 def _domain(engine: Engine) -> WorkflowDomain:
@@ -344,6 +316,15 @@ def _start(
     result = domain.transition(request)
     assert result.ok
     return request, result
+
+
+def _attempt_identity(result: TransitionResult) -> tuple[int, str]:
+    """Read one typed durable attempt identity from a successful transition."""
+    attempt_id = result.output["attempt_id"]
+    attempt_fingerprint = result.output["attempt_fingerprint"]
+    assert isinstance(attempt_id, int)
+    assert isinstance(attempt_fingerprint, str)
+    return attempt_id, attempt_fingerprint
 
 
 def _record(
@@ -453,11 +434,9 @@ def _assert_active_goal_blocks_revision_acceptance(
     engine: Engine,
     domain: WorkflowDomain,
     lineage: _GoalLineage,
+    resolved_lineage: _ResolvedGoalSpecificationLineage,
 ) -> _ResolvedGoalSpecificationLineage:
     """Keep a pending revision unaccepted until its prior Goal is resolved."""
-    with Session(engine) as session:
-        resolved_lineage = _seed_accepted_goal_specification_lineage(session, lineage)
-        session.commit()
     blocked = _review_vision(
         domain,
         lineage.project_id,
@@ -484,7 +463,7 @@ def _assert_active_goal_blocks_revision_acceptance(
                 rationale="Original Goal fulfilled.",
                 decided_by="operator@example.com",
                 idempotency_key="original-goal-fulfilled",
-                decided_at=NOW + timedelta(seconds=2),
+                decided_at=NOW + timedelta(minutes=1),
             )
         )
         session.commit()
@@ -506,7 +485,7 @@ def _assert_active_goal_blocks_revision_acceptance(
         lineage.revised_vision_artifact_id
     )
     available_nodes = domain.position(lineage.project_id).available_nodes
-    assert all("discovery" not in node_id for node_id in available_nodes)
+    assert "specification.author" not in available_nodes
     return resolved_lineage
 
 
@@ -728,6 +707,9 @@ def test_accepted_revision_creates_only_a_new_vision(engine: Engine) -> None:
     fingerprint = initial.output["vision_fingerprint"]
     assert isinstance(artifact_id, int)
     assert isinstance(fingerprint, str)
+    initial_attempt_id, initial_attempt_fingerprint = _attempt_identity(
+        initial_attempt
+    )
     accepted = _review_vision(
         domain,
         project_id,
@@ -756,6 +738,18 @@ def test_accepted_revision_creates_only_a_new_vision(engine: Engine) -> None:
         )
     )
     assert opened.ok
+    resolved_lineage = _seed_original_goal_specification(
+        engine,
+        _GoalLineage(
+            project_id=project_id,
+            vision_artifact_id=artifact_id,
+            vision_fingerprint=fingerprint,
+            attempt_id=initial_attempt_id,
+            attempt_fingerprint=initial_attempt_fingerprint,
+            revised_vision_artifact_id=artifact_id,
+            revised_vision_fingerprint=fingerprint,
+        ),
+    )
     decision = _decision(domain, project_id, "vision.bootstrap")
     assert decision.category.value == "available"
     revision_start, revision_attempt = _start(
@@ -782,10 +776,6 @@ def test_accepted_revision_creates_only_a_new_vision(engine: Engine) -> None:
     revised_fingerprint = revised.output["vision_fingerprint"]
     assert isinstance(revised_id, int)
     assert isinstance(revised_fingerprint, str)
-    initial_attempt_id = initial_attempt.output["attempt_id"]
-    initial_attempt_fingerprint = initial_attempt.output["attempt_fingerprint"]
-    assert isinstance(initial_attempt_id, int)
-    assert isinstance(initial_attempt_fingerprint, str)
     resolved_lineage = _assert_active_goal_blocks_revision_acceptance(
         engine,
         domain,
@@ -798,6 +788,7 @@ def test_accepted_revision_creates_only_a_new_vision(engine: Engine) -> None:
             revised_vision_artifact_id=revised_id,
             revised_vision_fingerprint=revised_fingerprint,
         ),
+        resolved_lineage,
     )
     with Session(engine) as session:
         snapshot = WorkflowFactRepository(session).load(project_id)
@@ -824,7 +815,6 @@ def test_accepted_revision_creates_only_a_new_vision(engine: Engine) -> None:
             SpecificationDecision,
             SpecRegistry,
             SpecificationCandidate,
-            DiscoveryArtifact,
             ProductGoalOutcome,
             ProductGoalArtifactDecision,
             ProductGoalArtifact,

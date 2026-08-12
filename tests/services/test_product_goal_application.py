@@ -7,13 +7,10 @@ from datetime import UTC, datetime
 from services.application import (
     AgenticActionRequest,
     AgileForgeApplication,
-    DiscoveryArtifactRequest,
     ProductGoalInterviewRequest,
     ProductGoalLifecycleServices,
     ProductGoalOutcomeRequest,
     ProductGoalReviewRequest,
-    SpecificationCandidateRequest,
-    SpecificationReviewRequest,
 )
 from services.node_attempt_replay import NodeAttemptReplayQuery, TransitionReplayQuery
 from workflow.contracts import (
@@ -27,18 +24,13 @@ from workflow.contracts import (
 )
 from workflow.requests import (
     DecideProductGoalReview,
-    DecideSpecification,
     FulfillProductGoal,
-    RecordDiscoveryArtifact,
-    RecordSpecificationCandidate,
 )
 
 NOW = datetime(2026, 8, 5, tzinfo=UTC)
 PROJECT_ID = 7
 PRODUCT_GOAL_ARTIFACT_ID = 11
-SUPERSEDED_CANDIDATE_ID = 19
-PENDING_CANDIDATE_ID = 23
-PRODUCT_GOAL_COMMAND_COUNT = 6
+PRODUCT_GOAL_COMMAND_COUNT = 3
 type _GoalInputCall = (
     NodeAttemptReplayQuery | TransitionReplayQuery | tuple[int, NodeDecision, str]
 )
@@ -140,18 +132,6 @@ class _GoalInput:
         }
 
 
-class _DiscoverySelection:
-    """Resolve replacement lineage internally for the public application API."""
-
-    def __init__(self, supersedes: int | None = None) -> None:
-        self.supersedes = supersedes
-        self.calls: list[int] = []
-
-    def resolve_specification_supersedes(self, project_id: int) -> int | None:
-        self.calls.append(project_id)
-        return self.supersedes
-
-
 class _Application(AgileForgeApplication):
     """Capture the provider-facing handoff without executing ADK."""
 
@@ -197,7 +177,6 @@ def test_public_goal_interview_replays_then_uses_host_prepared_input() -> None:
         workflow_domain=domain,
         product_goal_services=ProductGoalLifecycleServices(
             interview_input=prepared,
-            discovery_selection=_DiscoverySelection(),
         ),
     )
 
@@ -226,7 +205,6 @@ def test_product_goal_commands_replay_before_any_state_read() -> None:
         workflow_domain=domain,
         product_goal_services=ProductGoalLifecycleServices(
             interview_input=prepared,
-            discovery_selection=_DiscoverySelection(),
         ),
     )
 
@@ -250,37 +228,7 @@ def test_product_goal_commands_replay_before_any_state_read() -> None:
             actor="operator@example.com",
         )
     )
-    discovery = app.record_discovery(
-        DiscoveryArtifactRequest(
-            project_id=PROJECT_ID,
-            canonical_content={"research": "interviews"},
-            idempotency_key="discovery",
-            actor="operator@example.com",
-        )
-    )
-    candidate = app.record_specification_candidate(
-        SpecificationCandidateRequest(
-            project_id=PROJECT_ID,
-            canonical_content={"title": "Candidate"},
-            idempotency_key="candidate",
-            actor="operator@example.com",
-        )
-    )
-    specification = app.review_specification(
-        SpecificationReviewRequest(
-            project_id=PROJECT_ID,
-            decision="accepted",
-            rationale="Reviewed.",
-            expected_candidate_fingerprint="sha256:specification-replaced-after-review",
-            idempotency_key="specification-review",
-            actor="operator@example.com",
-        )
-    )
-
-    assert all(
-        item == replayed
-        for item in (result, review, outcome, discovery, candidate, specification)
-    )
+    assert all(item == replayed for item in (result, review, outcome))
     assert domain.calls == []
     assert len(prepared.calls) == PRODUCT_GOAL_COMMAND_COUNT
     assert isinstance(prepared.calls[0], NodeAttemptReplayQuery)
@@ -308,7 +256,6 @@ def test_public_goal_review_and_outcome_resolve_exact_identities() -> None:
         workflow_domain=review_domain,
         product_goal_services=ProductGoalLifecycleServices(
             interview_input=prepared,
-            discovery_selection=_DiscoverySelection(),
         ),
     )
 
@@ -342,7 +289,6 @@ def test_public_goal_review_and_outcome_resolve_exact_identities() -> None:
         workflow_domain=outcome_domain,
         product_goal_services=ProductGoalLifecycleServices(
             interview_input=_GoalInput(),
-            discovery_selection=_DiscoverySelection(),
         ),
     )
     outcome = outcome_app.resolve_product_goal(
@@ -360,61 +306,3 @@ def test_public_goal_review_and_outcome_resolve_exact_identities() -> None:
     assert isinstance(outcome_request, FulfillProductGoal)
     assert outcome_request.product_goal_artifact_id == PRODUCT_GOAL_ARTIFACT_ID
     assert outcome_request.product_goal_fingerprint == "g"
-
-
-def test_public_discovery_and_specification_methods_resolve_lineage() -> None:
-    """Discovery callers provide content while the host owns durable lineage IDs."""
-    discovery = _decision("discovery.record", category=NodeCategory.AVAILABLE)
-    candidate = _decision("specification.record", category=NodeCategory.AVAILABLE)
-    pending = FactReference(
-        fact_type="specification_candidate",
-        fact_id=str(PENDING_CANDIDATE_ID),
-        fingerprint="s",
-    )
-    review = _decision(
-        "specification.review", category=NodeCategory.WAITING, references=(pending,)
-    )
-    domain = _Domain(_position(discovery, candidate, review))
-    app = _Application(
-        workflow_domain=domain,
-        product_goal_services=ProductGoalLifecycleServices(
-            interview_input=_GoalInput(),
-            discovery_selection=_DiscoverySelection(supersedes=SUPERSEDED_CANDIDATE_ID),
-        ),
-    )
-
-    recorded = app.record_discovery(
-        DiscoveryArtifactRequest(
-            project_id=PROJECT_ID,
-            canonical_content={"research": "interviews"},
-            content_ref="research/notes.md",
-            idempotency_key="discovery",
-            actor="operator@example.com",
-        )
-    )
-    proposed = app.record_specification_candidate(
-        SpecificationCandidateRequest(
-            project_id=PROJECT_ID,
-            canonical_content={"title": "Initial specification"},
-            idempotency_key="candidate",
-            actor="operator@example.com",
-        )
-    )
-    reviewed = app.review_specification(
-        SpecificationReviewRequest(
-            project_id=PROJECT_ID,
-            decision="feedback",
-            rationale="Make the acceptance criteria observable.",
-            idempotency_key="spec-review",
-            actor="operator@example.com",
-        )
-    )
-
-    assert recorded.ok is proposed.ok is reviewed.ok is True
-    requests = [item for item in domain.calls if item != "position"]
-    assert isinstance(requests[0], RecordDiscoveryArtifact)
-    assert isinstance(requests[1], RecordSpecificationCandidate)
-    assert requests[1].supersedes_specification_candidate_id == SUPERSEDED_CANDIDATE_ID
-    assert isinstance(requests[2], DecideSpecification)
-    assert requests[2].specification_candidate_id == PENDING_CANDIDATE_ID
-    assert requests[2].specification_fingerprint == "s"

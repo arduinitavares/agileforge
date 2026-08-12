@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, TypedDict
@@ -16,11 +15,18 @@ from services.authority_review_projection import (
     AuthorityReviewSnapshot,
     build_authority_review_snapshot_in_session,
 )
-from services.specs import compiler_service
+from services.contracts.specification import (
+    SPEC_AUTHORITY_COMPILER_PROMPT_HASH,
+    SPEC_AUTHORITY_COMPILER_VERSION,
+    compute_invariant_id_from_payload,
+)
+from services.specification_authoring_input import SpecificationAuthoringInputService
+from utils.agileforge_spec_profile_v2 import SpecificationPayload
 from utils.spec_schemas import (
     Invariant,
     InvariantType,
     RequiredFieldParams,
+    SourceMapEntry,
     SpecAuthorityCompilationSuccess,
 )
 from workflow.contracts import (
@@ -43,6 +49,7 @@ from workflow.requests import (
     CloseSprint,
     CloseStory,
     CompileAuthority,
+    CompleteSpecificationAuthoring,
     CompleteTask,
     DecideAuthority,
     DecideBacklog,
@@ -55,11 +62,9 @@ from workflow.requests import (
     FulfillProductGoal,
     GenerateVisionBootstrap,
     RecordBacklogDraft,
-    RecordDiscoveryArtifact,
     RecordPostSprintTriage,
     RecordProductGoalInterviewTurn,
     RecordRoadmapDraft,
-    RecordSpecificationCandidate,
     RecordSprintPlan,
     RecordStoryDraft,
     ReviewSprint,
@@ -212,23 +217,18 @@ def _first_output_int(result: TransitionResult, key: str) -> int:
     return value
 
 
-def _specification_content() -> tuple[JsonObject, str]:
-    raw = json.dumps(
+def _specification_payload() -> SpecificationPayload:
+    return SpecificationPayload.model_validate(
         {
-            "schema_version": "agileforge.spec.v1",
+            "schema_version": "agileforge.spec.v2",
             "artifact_id": "SPEC.lifecycle-journey",
             "title": "Lifecycle journey",
-            "status": "draft",
-            "version": "0.1",
-            "created_at": "2026-08-09",
-            "updated_at": "2026-08-09",
             "summary": "Deliver one persisted lifecycle increment.",
             "problem_statement": "Every semantic boundary must survive reload.",
             "items": [
                 {
                     "id": "REQ.lifecycle.persist",
                     "type": "REQ",
-                    "status": "accepted",
                     "level": "MUST",
                     "title": "Persist lifecycle facts",
                     "statement": "The system MUST persist every lifecycle fact.",
@@ -236,37 +236,41 @@ def _specification_content() -> tuple[JsonObject, str]:
                     "acceptance": ["The journey reaches post-Sprint triage."],
                 }
             ],
-            "relations": [],
-            "controlled_terms": [],
-            "external_references": [],
-            "rendering": {
-                "markdown_profile": "agileforge.spec_markdown.v1",
-                "rendered_markdown_sha256": None,
-            },
         }
     )
-    normalized = compiler_service.normalize_spec_content_for_registry(raw)
-    return _JSON_OBJECT.validate_json(normalized.content), normalized.spec_hash
 
 
 def _authority_artifact() -> SpecAuthorityCompilationSuccess:
+    parameters = RequiredFieldParams(field_name="project_id")
+    invariant_id = compute_invariant_id_from_payload(
+        InvariantType.REQUIRED_FIELD,
+        parameters,
+        source_item_id="REQ.lifecycle.persist",
+        source_level="MUST",
+    )
     return SpecAuthorityCompilationSuccess(
         scope_themes=["Lifecycle"],
         invariants=[
             Invariant(
-                id="INV-0123456789abcdef",
+                id=invariant_id,
                 type=InvariantType.REQUIRED_FIELD,
-                parameters=RequiredFieldParams(field_name="project_id"),
+                source_item_id="REQ.lifecycle.persist",
+                source_level="MUST",
+                parameters=parameters,
             )
         ],
         eligible_feature_rules=[],
         gaps=[],
         assumptions=[],
-        source_map=[],
-        compiler_version=compiler_service.SPEC_AUTHORITY_COMPILER_VERSION,
-        prompt_hash=compiler_service.compute_prompt_hash(
-            compiler_service.SPEC_AUTHORITY_COMPILER_INSTRUCTIONS
-        ),
+        source_map=[
+            SourceMapEntry(
+                invariant_id=invariant_id,
+                excerpt="The system MUST persist every lifecycle fact.",
+                location="REQ.lifecycle.persist",
+            )
+        ],
+        compiler_version=SPEC_AUTHORITY_COMPILER_VERSION,
+        prompt_hash=SPEC_AUTHORITY_COMPILER_PROMPT_HASH,
     )
 
 
@@ -563,34 +567,45 @@ def _accept_initial_goal(journey: _Journey) -> None:
     assert accepted.ok is True
 
 
-def _accept_discovery_and_specification(journey: _Journey) -> tuple[int, str]:
+def _accept_specification(journey: _Journey) -> tuple[int, str]:
     domain = journey.domain
     project_id = journey.project_id
-    position, _ = _assert_next(
-        domain, project_id, "discovery.record", NodeCategory.AVAILABLE
+    position, author = _assert_next(
+        domain, project_id, "specification.author", NodeCategory.AVAILABLE
     )
-    discovery = domain.transition(
-        RecordDiscoveryArtifact(
-            **_guards(position, "discovery.record"),
-            idempotency_key="journey-discovery",
-            canonical_content={
-                "finding": "Persist every semantic boundary before advancing."
-            },
+    started = domain.transition(
+        StartNodeAttempt(
+            project_id=project_id,
+            graph_version=position.graph_version,
+            fact_fingerprint=position.fact_fingerprint,
+            decision_fingerprint=author.decision_fingerprint,
+            idempotency_key="journey-specification-start",
+            actor="operator@example.com",
+            target_node_id="specification.author",
+            target_instance_key=author.instance_key,
+            normalized_input=SpecificationAuthoringInputService(
+                engine=journey.engine
+            ).build(
+                project_id=project_id,
+                decision=author,
+            ),
+            model_id="fake/specification-author",
+            execution_settings={"temperature": 0},
+            lease_seconds=60,
         )
     )
-    assert discovery.ok is True
-    content, specification_hash = _specification_content()
-    position, _ = _assert_next(
-        domain, project_id, "specification.record", NodeCategory.AVAILABLE
-    )
-    recorded = domain.transition(
-        RecordSpecificationCandidate(
-            **_guards(position, "specification.record"),
-            idempotency_key="journey-specification",
-            canonical_content=content,
+    assert started.ok is True
+    authored = domain.transition(
+        CompleteSpecificationAuthoring(
+            **_guards(position, "specification.author"),
+            idempotency_key="journey-specification-complete",
+            attempt_id=_output_int(started, "attempt_id"),
+            attempt_fingerprint=str(started.output["attempt_fingerprint"]),
+            payload=_specification_payload(),
         )
     )
-    assert recorded.ok is True
+    assert authored.ok is True
+    specification_hash = str(authored.output["payload_fingerprint"])
     position, review = _assert_next(
         domain, project_id, "specification.review", NodeCategory.WAITING
     )
@@ -600,13 +615,12 @@ def _accept_discovery_and_specification(journey: _Journey) -> tuple[int, str]:
             **_guards(position, "specification.review"),
             idempotency_key="journey-specification-accept",
             specification_candidate_id=candidate_id,
-            specification_fingerprint=candidate_fingerprint,
+            candidate_fingerprint=candidate_fingerprint,
             decision="accepted",
             rationale="The specification covers the Goal increment.",
         )
     )
     assert accepted.ok is True
-    assert candidate_fingerprint == specification_hash
     position, compile_decision = _assert_next(
         domain, project_id, "authority.compile", NodeCategory.AVAILABLE
     )
@@ -1009,7 +1023,7 @@ def _assert_next_cycle_and_fulfill_goal(journey: _Journey) -> None:
         "planning.sprint.plan",
         NodeCategory.AVAILABLE,
     )
-    assert "discovery.record" in position.available_nodes
+    assert "specification.author" in position.available_nodes
     assert "goal.fulfill" in position.available_nodes
     assert "goal.abandon" in position.available_nodes
     assert "vision.interview" not in position.available_nodes
@@ -1056,7 +1070,7 @@ def test_provider_free_persisted_v2_journey_reaches_triage_and_next_goal(
     journey = _new_journey(engine)
     _accept_initial_vision(journey)
     _accept_initial_goal(journey)
-    spec_version_id, specification_hash = _accept_discovery_and_specification(journey)
+    spec_version_id, specification_hash = _accept_specification(journey)
     _accept_authority(journey, spec_version_id, specification_hash)
     requirements = (
         "Persist the primary lifecycle boundary",
