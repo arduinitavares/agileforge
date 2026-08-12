@@ -1,38 +1,37 @@
-"""Typed discovery and specification lifecycle transition requests."""
+"""Typed direct Specification authoring and review requests."""
 
 from typing import ClassVar, Literal
 
 from pydantic import Field
 
-from workflow.contracts import JsonObject
+from services.specs.candidate_contract import StableIdReplacement
+from utils.agileforge_spec_profile_v2 import SpecificationPayload
 from workflow.requests.base import PositionedRequest
 
 
-class RecordDiscoveryArtifact(PositionedRequest):
-    """Persist canonical discovery output for the active Product Goal."""
+class CompleteSpecificationAuthoring(PositionedRequest):
+    """Continue one exact authoring attempt with provider semantic output only."""
 
-    kind: Literal["record_discovery_artifact"] = "record_discovery_artifact"
-    node_id: ClassVar[str] = "discovery.record"
-    canonical_content: JsonObject
-    content_ref: str | None = None
-
-
-class RecordSpecificationCandidate(PositionedRequest):
-    """Persist a canonical specification candidate for current discovery."""
-
-    kind: Literal["record_specification_candidate"] = "record_specification_candidate"
-    node_id: ClassVar[str] = "specification.record"
-    canonical_content: JsonObject
-    content_ref: str | None = None
-    supersedes_specification_candidate_id: int | None = None
+    kind: Literal["complete_specification_authoring"] = (
+        "complete_specification_authoring"
+    )
+    node_id: ClassVar[str] = "specification.author"
+    attempt_id: int = Field(gt=0)
+    attempt_fingerprint: str = Field(min_length=1)
+    payload: SpecificationPayload
+    removal_justifications: dict[str, str] = Field(default_factory=dict)
+    stable_id_replacements: tuple[StableIdReplacement, ...] = ()
 
 
 class DecideSpecification(PositionedRequest):
-    """Record one exact specification candidate review decision."""
+    """Record one human decision for an exact immutable candidate."""
 
     kind: Literal["decide_specification"] = "decide_specification"
     node_id: ClassVar[str] = "specification.review"
-    specification_candidate_id: int
-    specification_fingerprint: str = Field(min_length=1)
+    specification_candidate_id: int = Field(gt=0)
+    candidate_fingerprint: str = Field(min_length=1)
     decision: Literal["accepted", "rejected", "feedback"]
     rationale: str = ""
+
+
+__all__ = ["CompleteSpecificationAuthoring", "DecideSpecification"]

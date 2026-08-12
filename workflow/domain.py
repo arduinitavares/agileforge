@@ -11,7 +11,11 @@ from sqlalchemy import event
 from sqlalchemy.exc import OperationalError
 from sqlmodel import Session, col, select
 
-from models.workflow import WorkflowNodeAttempt, WorkflowTransitionReceipt
+from models.workflow import (
+    WorkflowNodeAttempt,
+    WorkflowNodeAttemptOutcome,
+    WorkflowTransitionReceipt,
+)
 from repositories.workflow import WorkflowFactLoadError, WorkflowFactRepository
 from workflow.contracts import (
     JsonObject,
@@ -34,6 +38,7 @@ from workflow.handlers import (
     execute_abandon_product_goal,
     execute_begin_vision_revision,
     execute_compile_authority,
+    execute_complete_specification_authoring,
     execute_create_project,
     execute_decide_authority,
     execute_decide_backlog,
@@ -46,10 +51,8 @@ from workflow.handlers import (
     execute_planning_request,
     execute_record_authority_feedback,
     execute_record_backlog_draft,
-    execute_record_discovery_artifact,
     execute_record_product_goal_interview_turn,
     execute_record_repository_binding,
-    execute_record_specification_candidate,
     execute_record_vision_interview_turn,
     execute_repair_authority,
     execute_start_node_attempt,
@@ -69,6 +72,7 @@ from workflow.requests import (
     CloseSprint,
     CloseStory,
     CompileAuthority,
+    CompleteSpecificationAuthoring,
     CompleteTask,
     CreateProject,
     DecideAuthority,
@@ -84,12 +88,10 @@ from workflow.requests import (
     GenerateVisionBootstrap,
     RecordAuthorityFeedback,
     RecordBacklogDraft,
-    RecordDiscoveryArtifact,
     RecordPostSprintTriage,
     RecordProductGoalInterviewTurn,
     RecordRepositoryBinding,
     RecordRoadmapDraft,
-    RecordSpecificationCandidate,
     RecordSprintPlan,
     RecordStoryDraft,
     RecordVisionInterviewTurn,
@@ -135,7 +137,7 @@ type _ProductGoalRequest = (
     | AbandonProductGoal
 )
 type _ProductDiscoveryRequest = (
-    RecordDiscoveryArtifact | RecordSpecificationCandidate | DecideSpecification
+    CompleteSpecificationAuthoring | DecideSpecification
 )
 type _VisionRequest = (
     GenerateVisionBootstrap
@@ -688,6 +690,22 @@ class WorkflowDomain:
                 output=result.output,
                 evaluated_at=evaluated_at,
             )
+        elif isinstance(request, CompleteSpecificationAuthoring):
+            error = result.error
+            if error is None:
+                message = "Failed Specification authoring has no structured error."
+                raise RuntimeError(message)
+            session.add(
+                WorkflowNodeAttemptOutcome(
+                    project_id=request.project_id,
+                    workflow_node_attempt_id=request.attempt_id,
+                    status="failure",
+                    failure_code=error.code.value,
+                    failure_message=error.message,
+                    recorded_at=evaluated_at,
+                )
+            )
+            session.flush()
         terminal_result = result.model_copy(
             update={
                 "position": self._position_in_session(
@@ -868,9 +886,7 @@ class WorkflowDomain:
             )
         elif isinstance(
             request,
-            RecordDiscoveryArtifact
-            | RecordSpecificationCandidate
-            | DecideSpecification,
+            CompleteSpecificationAuthoring | DecideSpecification,
         ):
             result = self._dispatch_product_discovery(
                 session, request, decision, evaluated_at
@@ -942,12 +958,8 @@ class WorkflowDomain:
         decision: NodeDecision,
         evaluated_at: datetime,
     ) -> TransitionResult:
-        if isinstance(request, RecordDiscoveryArtifact):
-            return execute_record_discovery_artifact(
-                session, request, decision, evaluated_at
-            )
-        if isinstance(request, RecordSpecificationCandidate):
-            return execute_record_specification_candidate(
+        if isinstance(request, CompleteSpecificationAuthoring):
+            return execute_complete_specification_authoring(
                 session, request, decision, evaluated_at
             )
         if isinstance(request, DecideSpecification):

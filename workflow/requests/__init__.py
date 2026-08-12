@@ -27,9 +27,8 @@ from workflow.requests.planning import (
 )
 from workflow.requests.product_definition import DecideBacklog, RecordBacklogDraft
 from workflow.requests.product_discovery import (
+    CompleteSpecificationAuthoring,
     DecideSpecification,
-    RecordDiscoveryArtifact,
-    RecordSpecificationCandidate,
 )
 from workflow.requests.product_goal import (
     AbandonProductGoal,
@@ -64,8 +63,7 @@ type TransitionRequest = (
     | DecideProductGoalReview
     | FulfillProductGoal
     | AbandonProductGoal
-    | RecordDiscoveryArtifact
-    | RecordSpecificationCandidate
+    | CompleteSpecificationAuthoring
     | DecideSpecification
     | RecordBacklogDraft
     | DecideBacklog
@@ -94,6 +92,7 @@ __all__ = [
     "CloseSprint",
     "CloseStory",
     "CompileAuthority",
+    "CompleteSpecificationAuthoring",
     "CompleteTask",
     "CreateProject",
     "DecideAuthority",
@@ -109,12 +108,10 @@ __all__ = [
     "GenerateVisionBootstrap",
     "RecordAuthorityFeedback",
     "RecordBacklogDraft",
-    "RecordDiscoveryArtifact",
     "RecordPostSprintTriage",
     "RecordProductGoalInterviewTurn",
     "RecordRepositoryBinding",
     "RecordRoadmapDraft",
-    "RecordSpecificationCandidate",
     "RecordSprintPlan",
     "RecordStoryDraft",
     "RecordVisionInterviewTurn",

@@ -28,9 +28,8 @@ from workflow.handlers.product_definition import (
     validate_decide_backlog_review,
 )
 from workflow.handlers.product_discovery import (
+    execute_complete_specification_authoring,
     execute_decide_specification,
-    execute_record_discovery_artifact,
-    execute_record_specification_candidate,
 )
 from workflow.handlers.product_goal import (
     execute_abandon_product_goal,
@@ -55,6 +54,7 @@ __all__ = [
     "execute_abandon_product_goal",
     "execute_begin_vision_revision",
     "execute_compile_authority",
+    "execute_complete_specification_authoring",
     "execute_create_project",
     "execute_decide_authority",
     "execute_decide_backlog",
@@ -67,10 +67,8 @@ __all__ = [
     "execute_planning_request",
     "execute_record_authority_feedback",
     "execute_record_backlog_draft",
-    "execute_record_discovery_artifact",
     "execute_record_product_goal_interview_turn",
     "execute_record_repository_binding",
-    "execute_record_specification_candidate",
     "execute_record_vision_interview_turn",
     "execute_repair_authority",
     "execute_start_node_attempt",
