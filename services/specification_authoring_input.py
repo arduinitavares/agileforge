@@ -12,6 +12,10 @@ from models.product_definition import SpecificationCandidate, SpecificationDecis
 from models.specs import SpecRegistry
 from repositories.workflow import WorkflowFactLoadError, WorkflowFactRepository
 from services.contracts.specification_authoring import (
+    SPECIFICATION_ACTIVE_REPOSITORY_SOURCE_ID,
+    SPECIFICATION_PRODUCT_GOAL_SOURCE_ID,
+    SPECIFICATION_REPOSITORY_EVIDENCE_SOURCE_ID,
+    SPECIFICATION_VISION_SOURCE_ID,
     AcceptedProductGoalContext,
     AcceptedVisionContext,
     BaseSpecificationContext,
@@ -28,6 +32,8 @@ from services.specs.candidate_contract import (
     CandidateSourceManifestEntry,
     load_candidate_contract,
 )
+from services.vision_evidence import VisionEvidenceCollectionError
+from workflow.contracts import WorkflowError, WorkflowErrorCode
 from workflow.definitions.product_goal import (
     accepted_current_goal,
     accepted_current_vision,
@@ -36,6 +42,8 @@ from workflow.definitions.product_goal import (
 if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
 
+    from services.contracts.vision_evidence import VisionEvidenceBundle
+    from services.repository_probe import RepositoryProbe
     from utils.agileforge_spec_profile_v2 import SpecificationPayload
     from workflow.contracts import (
         FactReference,
@@ -67,6 +75,7 @@ class SpecificationAuthoringInputService:
     """Derive to-spec input solely from exact current durable facts."""
 
     engine: Engine
+    repository_probe: RepositoryProbe | None = None
 
     def replay(self, query: NodeAttemptReplayQuery) -> TransitionResult | None:
         """Replay an exact prior authoring attempt before rebuilding input."""
@@ -86,11 +95,6 @@ class SpecificationAuthoringInputService:
                     message = "Specification authoring requires accepted lineage."
                     raise ValueError(message)
                 _validate_lineage_references(decision, vision, goal)
-                source_manifest, source_context = _source_context(
-                    snapshot,
-                    vision,
-                    goal,
-                )
                 lineage = _LineageIdentity(
                     vision_id=vision.vision_artifact_id,
                     vision_fingerprint=vision.content_fingerprint,
@@ -103,30 +107,97 @@ class SpecificationAuthoringInputService:
                     decision=decision,
                     lineage=lineage,
                 )
-                contract = SpecificationAuthoringInput(
-                    project_id=project_id,
-                    project_name=snapshot.project.name,
-                    operation=operation,
-                    accepted_vision=AcceptedVisionContext(
-                        artifact_id=vision.vision_artifact_id,
-                        fingerprint=vision.content_fingerprint,
-                        statement=vision.statement,
-                        components=vision.components,
-                    ),
-                    accepted_product_goal=AcceptedProductGoalContext(
-                        artifact_id=goal.product_goal_artifact_id,
-                        fingerprint=goal.content_fingerprint,
-                        statement=goal.statement,
-                    ),
-                    source_manifest=source_manifest,
-                    source_context=source_context,
-                    base_specification=base,
-                    prior_candidate=prior,
-                )
         except WorkflowFactLoadError as error:
             raise ValueError(str(error)) from error
+        current_evidence = self._current_repository_evidence(project_id)
+        source_manifest, source_context = _source_context(
+            snapshot,
+            vision,
+            goal,
+            current_evidence=current_evidence,
+        )
+        contract = SpecificationAuthoringInput(
+            project_id=project_id,
+            project_name=snapshot.project.name,
+            operation=operation,
+            accepted_vision=AcceptedVisionContext(
+                artifact_id=vision.vision_artifact_id,
+                fingerprint=vision.content_fingerprint,
+                statement=vision.statement,
+                components=vision.components,
+            ),
+            accepted_product_goal=AcceptedProductGoalContext(
+                artifact_id=goal.product_goal_artifact_id,
+                fingerprint=goal.content_fingerprint,
+                statement=goal.statement,
+            ),
+            source_manifest=source_manifest,
+            source_context=source_context,
+            base_specification=base,
+            prior_candidate=prior,
+        )
         return contract.model_dump(mode="json")
 
+    def _current_repository_evidence(
+        self,
+        project_id: int,
+    ) -> VisionEvidenceBundle | None:
+        """Collect bounded current source material immediately before to-spec."""
+        if self.repository_probe is None:
+            return None
+        from services.vision_evidence import VisionEvidenceCollector  # noqa: PLC0415
+
+        bundle = VisionEvidenceCollector(
+            engine=self.engine,
+            repository_probe=self.repository_probe,
+        ).collect(project_id)
+        if all(item.kind == "project_metadata" for item in bundle.items):
+            return None
+        return bundle
+
+    def revalidate_sources(
+        self,
+        project_id: int,
+        persisted_input: JsonObject,
+        /,
+    ) -> WorkflowError | None:
+        """Re-probe the exact active repository bundle before provider use."""
+        try:
+            contract = SpecificationAuthoringInput.model_validate(persisted_input)
+            if contract.project_id != project_id:
+                return WorkflowError(
+                    code=WorkflowErrorCode.STALE_SPECIFICATION_INPUT,
+                    message=(
+                        "Specification source input belongs to another project."
+                    ),
+                )
+            expected = next(
+                (
+                    entry
+                    for entry in contract.source_manifest
+                    if entry.source_id == SPECIFICATION_ACTIVE_REPOSITORY_SOURCE_ID
+                ),
+                None,
+            )
+            current = self._current_repository_evidence(project_id)
+        except (ValueError, VisionEvidenceCollectionError) as error:
+            return WorkflowError(
+                code=WorkflowErrorCode.STALE_SPECIFICATION_INPUT,
+                message=f"Specification source evidence is stale: {error}",
+            )
+        current_fingerprint = (
+            None if current is None else current.evidence_fingerprint
+        )
+        expected_fingerprint = None if expected is None else expected.fingerprint
+        if current_fingerprint != expected_fingerprint:
+            return WorkflowError(
+                code=WorkflowErrorCode.STALE_SPECIFICATION_INPUT,
+                message=(
+                    "Specification source evidence changed after the authoring "
+                    "attempt started."
+                ),
+            )
+        return None
 
 def _single_reference(
     decision: NodeDecision,
@@ -166,22 +237,22 @@ def _source_context(
     snapshot: WorkflowFactSnapshot,
     vision: VisionArtifactFact,
     goal: ProductGoalArtifactFact,
+    *,
+    current_evidence: VisionEvidenceBundle | None = None,
 ) -> tuple[
     tuple[CandidateSourceManifestEntry, ...],
     tuple[SpecificationSourceContext, ...],
 ]:
-    vision_id = vision.vision_artifact_id
-    goal_id = goal.product_goal_artifact_id
     vision_fingerprint = vision.content_fingerprint
     goal_fingerprint = goal.content_fingerprint
     entries: list[CandidateSourceManifestEntry] = [
         CandidateSourceManifestEntry(
-            source_id=f"SRC.vision.{vision_id}",
+            source_id=SPECIFICATION_VISION_SOURCE_ID,
             kind=CandidateSourceKind.VISION,
             fingerprint=vision_fingerprint,
         ),
         CandidateSourceManifestEntry(
-            source_id=f"SRC.product-goal.{goal_id}",
+            source_id=SPECIFICATION_PRODUCT_GOAL_SOURCE_ID,
             kind=CandidateSourceKind.PRODUCT_GOAL,
             fingerprint=goal_fingerprint,
         ),
@@ -222,9 +293,14 @@ def _source_context(
             else CandidateSourceKind.RESEARCH
         )
         entry = CandidateSourceManifestEntry(
-            source_id=f"SRC.repository-evidence.{snapshot_id}",
+            source_id=SPECIFICATION_REPOSITORY_EVIDENCE_SOURCE_ID,
             kind=evidence_kind,
             fingerprint=evidence.evidence_fingerprint,
+            warnings=tuple(
+                f"{warning.get('code', 'SOURCE_WARNING')}: "
+                f"{warning.get('message', 'Source warning')}"
+                for warning in evidence.warnings
+            ),
         )
         entries.append(entry)
         contexts.append(
@@ -233,6 +309,25 @@ def _source_context(
                 kind=entry.kind,
                 fingerprint=entry.fingerprint,
                 content=evidence.evidence,
+            )
+        )
+    if current_evidence is not None:
+        entry = CandidateSourceManifestEntry(
+            source_id=SPECIFICATION_ACTIVE_REPOSITORY_SOURCE_ID,
+            kind=CandidateSourceKind.REPOSITORY,
+            fingerprint=current_evidence.evidence_fingerprint,
+            warnings=tuple(
+                f"{warning.code}: {warning.message}"
+                for warning in current_evidence.warnings
+            ),
+        )
+        entries.append(entry)
+        contexts.append(
+            SpecificationSourceContext(
+                source_id=entry.source_id,
+                kind=entry.kind,
+                fingerprint=entry.fingerprint,
+                content=current_evidence.model_dump(mode="json"),
             )
         )
     return tuple(entries), tuple(contexts)

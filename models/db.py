@@ -8,7 +8,7 @@ import sys
 from functools import cache
 from typing import TYPE_CHECKING
 
-from sqlalchemy import event
+from sqlalchemy import event, inspect
 from sqlalchemy.engine import Engine
 from sqlmodel import SQLModel, create_engine
 
@@ -38,6 +38,61 @@ _CURRENT_MODEL_MODULES: tuple[ModuleType, ...] = (
     workflow,
     authority_curation,
 )
+
+_ISSUE_199_REQUIRED_COLUMNS: dict[str, frozenset[str]] = {
+    "specification_candidates": frozenset(
+        {
+            "canonical_envelope_json",
+            "payload_fingerprint",
+            "candidate_fingerprint",
+            "vision_artifact_id",
+            "vision_fingerprint",
+            "product_goal_artifact_id",
+            "product_goal_fingerprint",
+            "workflow_node_attempt_id",
+            "attempt_fingerprint",
+        }
+    ),
+    "spec_registry": frozenset(
+        {
+            "source_specification_candidate_id",
+            "source_specification_candidate_fingerprint",
+            "source_vision_artifact_id",
+            "source_vision_fingerprint",
+            "source_product_goal_artifact_id",
+            "source_product_goal_fingerprint",
+        }
+    ),
+}
+_ISSUE_199_RETIRED_TABLE = "discovery_artifacts"
+
+
+class UnsupportedBusinessSchemaError(RuntimeError):
+    """Raised when a hard-break database predates the current model contract."""
+
+
+def _assert_current_business_schema(target_engine: Engine) -> None:
+    """Reject pre-issue-199 tables before create_all can mask incompatibility."""
+    inspector = inspect(target_engine)
+    tables = frozenset(inspector.get_table_names())
+    incompatible: list[str] = []
+    if _ISSUE_199_RETIRED_TABLE in tables:
+        incompatible.append(f"retired table {_ISSUE_199_RETIRED_TABLE}")
+    for table, required in _ISSUE_199_REQUIRED_COLUMNS.items():
+        if table not in tables:
+            continue
+        observed = {column["name"] for column in inspector.get_columns(table)}
+        missing = sorted(required - observed)
+        if missing:
+            incompatible.append(f"{table} missing {', '.join(missing)}")
+    if incompatible:
+        detail = "; ".join(incompatible)
+        message = (
+            "UNSUPPORTED_BUSINESS_SCHEMA: the database predates issue #199 "
+            f"({detail}). Create a fresh AgileForge profile/database; automatic "
+            "migration is intentionally unsupported."
+        )
+        raise UnsupportedBusinessSchemaError(message)
 
 
 def _is_pytest_running() -> bool:
@@ -108,4 +163,5 @@ def create_db_and_tables() -> None:
 def ensure_business_db_ready(engine_override: Engine | None = None) -> None:
     """Create all current business tables from SQLModel metadata."""
     target_engine = engine_override or engine
+    _assert_current_business_schema(target_engine)
     SQLModel.metadata.create_all(target_engine)

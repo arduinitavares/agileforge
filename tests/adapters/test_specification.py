@@ -13,7 +13,11 @@ from adapters.adk.prompts.specification import (
     SPEC_AUTHORITY_COMPILER_PROMPT_HASH,
     SPEC_AUTHORITY_COMPILER_VERSION,
 )
-from services.contracts.authority_input_v2 import AuthorityInputV2, AuthorityItemV2
+from services.contracts.authority_input_v2 import (
+    AuthorityInputV2,
+    AuthorityItemV2,
+    build_authority_input_v2,
+)
 from services.contracts.specification import (
     SPEC_AUTHORITY_COMPILER_PROMPT_HASH as CONTRACT_PROMPT_HASH,
 )
@@ -21,6 +25,7 @@ from services.contracts.specification import (
     compute_invariant_id_from_payload,
     compute_prompt_hash,
 )
+from utils.agileforge_spec_profile_v2 import SpecificationPayload
 from utils.spec_schemas import (
     InvariantType,
     RequiredFieldParams,
@@ -33,24 +38,21 @@ from utils.spec_schemas import (
 
 _SOURCE_ID = "REQ.adapter.typed"
 _SOURCE_STATEMENT = "The payload MUST include account_id."
+_NON_NORMATIVE_SENTINEL = "NON_NORMATIVE_SENTINEL_MUST_NEVER_REACH_AUTHORITY"
 
 
 def _authority_input() -> AuthorityInputV2:
     item = AuthorityItemV2(
         id=_SOURCE_ID,
         type="REQ",
-        title="Account identity",
         statement=_SOURCE_STATEMENT,
         level="MUST",
-        verification="system-test",
         acceptance=("Every accepted request has an account_id.",),
     )
     return AuthorityInputV2(
         artifact_id="SPEC.compiler-adapter",
         normative_items=(item,),
-        review_context=(),
         normative_relations=(),
-        controlled_terms=(),
         eligible_item_ids=(_SOURCE_ID,),
         authority_input_fingerprint="sha256:" + ("b" * 64),
     )
@@ -86,6 +88,37 @@ def _success_payload() -> dict[str, Any]:
     }
 
 
+def _specification_with_non_normative_sentinel() -> SpecificationPayload:
+    """Return full Specification prose containing one provider-exclusion marker."""
+    return SpecificationPayload.model_validate(
+        {
+            "schema_version": "agileforge.spec.v2",
+            "artifact_id": "SPEC.compiler-boundary",
+            "title": "Compiler boundary",
+            "summary": _NON_NORMATIVE_SENTINEL,
+            "problem_statement": _NON_NORMATIVE_SENTINEL,
+            "items": [
+                {
+                    "id": "GOAL.compiler.context",
+                    "type": "GOAL",
+                    "title": "Review context",
+                    "statement": _NON_NORMATIVE_SENTINEL,
+                    "rationale": _NON_NORMATIVE_SENTINEL,
+                },
+                {
+                    "id": _SOURCE_ID,
+                    "type": "REQ",
+                    "title": "Account identity",
+                    "statement": _SOURCE_STATEMENT,
+                    "level": "MUST",
+                    "verification": "integration-test",
+                    "acceptance": ["Every accepted request has an account_id."],
+                },
+            ],
+        }
+    )
+
+
 def test_prompt_and_service_contract_are_synchronized() -> None:
     """The adapter loads the exact host-hashed prompt and active version."""
     assert SPEC_AUTHORITY_COMPILER_VERSION == "4.0.0"
@@ -102,9 +135,8 @@ def test_prompt_documents_the_closed_typed_input_boundary() -> None:
     assert '"agileforge.authority-compiler-input.v2"' in instructions
     assert '"agileforge.authority_input.v2"' in instructions
     assert "Only normative_items may authorize invariants" in instructions
-    assert "review_context" in instructions
-    assert "MUST NOT authorize an invariant" in instructions
-    assert "controlled_terms are interpretation context only" in instructions
+    assert "review_context_ids" not in instructions
+    assert "No non-normative prose or non-normative item identity" in instructions
     assert "eligible_item_ids as exhaustive" in instructions
     assert "Every source_map.location MUST equal" in instructions
 
@@ -142,6 +174,42 @@ def test_compiler_input_accepts_the_typed_authority_projection() -> None:
     assert payload.schema_version == "agileforge.authority-compiler-input.v2"
     assert payload.authority_input.schema_version == "agileforge.authority_input.v2"
     assert payload.authority_input.eligible_item_ids == (_SOURCE_ID,)
+
+
+def test_serialized_compiler_input_excludes_non_normative_specification_prose() -> None:
+    """Send only the typed Authority projection across the provider boundary."""
+    specification = _specification_with_non_normative_sentinel()
+    authority_input = build_authority_input_v2(specification)
+    provider_input = SpecAuthorityCompilerInput(
+        authority_input=authority_input,
+        project_id=17,
+        spec_version_id=23,
+        specification_fingerprint="sha256:" + ("c" * 64),
+    )
+
+    serialized = provider_input.model_dump_json()
+
+    assert _NON_NORMATIVE_SENTINEL in specification.model_dump_json()
+    assert _NON_NORMATIVE_SENTINEL not in serialized
+    assert "GOAL.compiler.context" not in serialized
+    assert set(authority_input.model_dump(mode="json")) == {
+        "schema_version",
+        "artifact_id",
+        "normative_items",
+        "normative_relations",
+        "eligible_item_ids",
+        "authority_input_fingerprint",
+    }
+    assert "review_context_ids" not in serialized
+    assert authority_input.normative_items == (
+        AuthorityItemV2(
+            id=_SOURCE_ID,
+            type="REQ",
+            statement=_SOURCE_STATEMENT,
+            level="MUST",
+            acceptance=("Every accepted request has an account_id.",),
+        ),
+    )
 
 
 def test_compiler_input_is_closed_to_unknown_fields() -> None:

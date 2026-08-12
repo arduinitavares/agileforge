@@ -81,13 +81,13 @@ _ACTION_CHILDREN = {
     "compile_authority": "authority",
     "decide_authority": "authority",
     "decide_product_goal_review": "product_goal",
-    "decide_specification": "product_discovery",
+    "decide_specification": "specification",
     "decide_vision_review": "vision",
     "generate_vision_bootstrap": "vision",
     "record_authority_feedback": "authority",
     "record_backlog_draft": "backlog",
     "record_product_goal_interview_turn": "product_goal",
-    "author_specification": "product_discovery",
+    "author_specification": "specification",
     "record_vision_interview_turn": "vision",
     "repair_authority": "authority",
 }
@@ -825,12 +825,9 @@ def _assert_no_control_overlap(page: Page) -> None:
 def _assert_human_only_surface(page: Page) -> None:
     body_text = page.locator("body").inner_text()
     for forbidden in (
-        "INV-01",
         "INTERNAL_REASON_CODE",
         "agileforge.workflow.hidden",
         "authority.compile",
-        "compiler_version",
-        "sha256:",
     ):
         assert forbidden not in body_text
     assert (
@@ -918,8 +915,9 @@ def _record_and_review_definition(page: Page) -> None:
 def _compile_and_review_authority(page: Page) -> None:
     page.locator('[data-direct-action="compile_authority"]').click()
     expect(page.get_by_text("Exact Authority review packet")).to_be_visible()
-    expect(page.get_by_text("REQUIRED FIELD")).to_be_visible()
-    expect(page.get_by_text("project id")).to_be_visible()
+    expect(page.get_by_text("Complete compiled Authority artifact")).to_be_visible()
+    expect(page.get_by_text('"type": "REQUIRED_FIELD"')).to_be_visible()
+    expect(page.get_by_text('"field_name": "project_id"')).to_be_visible()
     expect(
         page.get_by_text("Confirm pilot team ownership before delivery begins.")
     ).to_be_visible()

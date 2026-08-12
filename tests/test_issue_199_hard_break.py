@@ -14,7 +14,8 @@ from services.specs.profile_content import (
     normalize_spec_content_for_registry,
 )
 from workflow.definitions.authority import AUTHORITY_NODES
-from workflow.definitions.product_discovery import PRODUCT_DISCOVERY_NODES
+from workflow.definitions.product_discovery import SPECIFICATION_NODES
+from workflow.definitions.root import ROOT_GRAPH
 from workflow.requests import product_discovery as product_discovery_requests
 
 REPOSITORY_ROOT: Path = Path(__file__).resolve().parents[1]
@@ -136,11 +137,19 @@ def test_discovery_domain_model_and_request_are_absent_from_active_runtime() -> 
 
 def test_discovery_node_is_absent_from_active_workflow_graph() -> None:
     """Accepted Product Goal must route directly to Specification authoring."""
-    node_ids = {node.node_id for node in PRODUCT_DISCOVERY_NODES}
-    request_kinds = {node.request_kind for node in PRODUCT_DISCOVERY_NODES}
+    node_ids = {node.node_id for node in SPECIFICATION_NODES}
+    request_kinds = {node.request_kind for node in SPECIFICATION_NODES}
 
     assert "discovery.record" not in node_ids
     assert "record_discovery_artifact" not in request_kinds
+
+
+def test_root_graph_exposes_specification_not_product_discovery() -> None:
+    """Public workflow position names the retained Specification workstream."""
+    child_graph_ids = {child.child_graph_id for child in ROOT_GRAPH.root.children}
+
+    assert "specification" in child_graph_ids
+    assert "product_discovery" not in child_graph_ids
 
 
 def test_discovery_route_and_cli_command_are_absent() -> None:
@@ -210,3 +219,24 @@ def test_separate_human_authority_review_model_and_node_remain() -> None:
     assert nodes["authority.compile"].request_kind == "compile_authority"
     assert nodes["authority.review"].request_kind == "decide_authority"
     assert nodes["authority.compile"] is not nodes["authority.review"]
+
+
+def test_issue_199_documentation_cutover_is_explicit() -> None:
+    """Active docs must publish v2 and retire the former discovery plan/example."""
+    obsolete_example = (
+        REPOSITORY_ROOT
+        / "docs/examples/scope-discovery/challenge-artifact.example.json"
+    )
+    v2_profile = (
+        REPOSITORY_ROOT
+        / "docs/superpowers/specs/2026-08-11-agileforge-spec-profile-v2.md"
+    )
+    former_plan = _source(
+        "docs/superpowers/plans/2026-08-05-single-project-lifecycle-hard-break.md"
+    )
+
+    assert not obsolete_example.exists()
+    assert v2_profile.is_file()
+    assert "agileforge.spec.v2" in v2_profile.read_text(encoding="utf-8")
+    assert "Status: Superseded" in former_plan
+    assert "2026-08-11-to-spec-single-specification-boundary.md" in former_plan

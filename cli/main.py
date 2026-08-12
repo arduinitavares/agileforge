@@ -800,6 +800,40 @@ def _specification_status(
     )
 
 
+def _confirm_specification_review(
+    packet: JsonObject,
+    *,
+    decision: str,
+) -> bool:
+    """Display the captured packet before obtaining the human confirmation."""
+    rendered = json.dumps(packet, indent=2, sort_keys=True, ensure_ascii=False)
+    sys.stderr.write(f"Exact Specification review packet:\n{rendered}\n")
+    sys.stderr.write(f"Confirm {decision} for this exact candidate? [y/N] ")
+    sys.stderr.flush()
+    try:
+        answer = sys.stdin.readline()
+    except OSError:
+        return False
+    return answer.strip().casefold() in {"y", "yes"}
+
+
+def _confirm_authority_review(
+    packet: JsonObject,
+    *,
+    decision: str,
+) -> bool:
+    """Display the captured Authority packet before human confirmation."""
+    rendered = json.dumps(packet, indent=2, sort_keys=True, ensure_ascii=False)
+    sys.stderr.write(f"Exact Authority review packet:\n{rendered}\n")
+    sys.stderr.write(f"Confirm {decision} for this exact candidate? [y/N] ")
+    sys.stderr.flush()
+    try:
+        answer = sys.stdin.readline()
+    except OSError:
+        return False
+    return answer.strip().casefold() in {"y", "yes"}
+
+
 def _authority_status(args: argparse.Namespace, application: _Application) -> int:
     return _emit_read(application.reads.authority_status(project_id=args.project_id))
 
@@ -1083,12 +1117,32 @@ def _specification_review(
     application: _Application,
 ) -> int:
     decision = cast("Literal['accepted', 'rejected', 'feedback']", args.decision)
+    packet = application.reads.specification_review(project_id=args.project_id)
+    data = packet.get("data")
+    candidate = data.get("candidate") if isinstance(data, dict) else None
+    expected_candidate_fingerprint = (
+        candidate.get("candidate_fingerprint")
+        if isinstance(candidate, dict)
+        else None
+    )
+    if not isinstance(expected_candidate_fingerprint, str) or not (
+        expected_candidate_fingerprint.strip()
+    ):
+        message = (
+            "Specification review requires the exact current review packet. "
+            "Run specification status and retry."
+        )
+        raise ValueError(message)
+    if not _confirm_specification_review(packet, decision=decision):
+        message = "Specification review cancelled before any decision was recorded."
+        raise ValueError(message)
     return _emit_result(
         application.review_specification(
             SpecificationReviewRequest(
                 project_id=args.project_id,
                 decision=decision,
                 rationale=args.rationale,
+                expected_candidate_fingerprint=expected_candidate_fingerprint,
                 idempotency_key=args.idempotency_key,
                 actor=args.actor,
                 correlation_id=args.correlation_id,
@@ -1112,12 +1166,34 @@ def _authority_compile(args: argparse.Namespace, application: _Application) -> i
 
 def _authority_decide(args: argparse.Namespace, application: _Application) -> int:
     decision = cast("Literal['accepted', 'rejected']", args.decision)
+    packet = application.reads.authority_review(project_id=args.project_id)
+    data = packet.get("data")
+    pending_authority = (
+        data.get("pending_authority") if isinstance(data, dict) else None
+    )
+    expected_candidate_fingerprint = (
+        pending_authority.get("authority_fingerprint")
+        if isinstance(pending_authority, dict)
+        else None
+    )
+    if not isinstance(expected_candidate_fingerprint, str) or not (
+        expected_candidate_fingerprint.strip()
+    ):
+        message = (
+            "Authority review requires the exact current review packet. "
+            "Run authority review and retry."
+        )
+        raise ValueError(message)
+    if not _confirm_authority_review(packet, decision=decision):
+        message = "Authority review cancelled before any decision was recorded."
+        raise ValueError(message)
     return _emit_result(
         application.decide_authority(
             AuthorityReviewRequest(
                 project_id=args.project_id,
                 decision=decision,
                 rationale=args.rationale,
+                expected_candidate_fingerprint=expected_candidate_fingerprint,
                 idempotency_key=args.idempotency_key,
                 actor=args.actor,
                 correlation_id=args.correlation_id,

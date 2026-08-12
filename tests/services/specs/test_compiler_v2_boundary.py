@@ -29,24 +29,12 @@ def _authority_input() -> AuthorityInputV2:
             AuthorityItemV2(
                 id="REQ.compiler.typed",
                 type="REQ",
-                title="Typed compilation",
-                statement="Authority MUST compile only this accepted requirement.",
+                statement="The Authority payload MUST include accepted_requirement.",
                 level="MUST",
-                verification="system-test",
                 acceptance=("The compiled invariant cites this requirement.",),
             ),
         ),
-        review_context=(
-            AuthorityItemV2(
-                id="NON_GOAL.compiler.prose",
-                type="NON_GOAL",
-                title="Review context",
-                statement="Never expose the hidden operator note.",
-                level=None,
-            ),
-        ),
         normative_relations=(),
-        controlled_terms=(),
         eligible_item_ids=("REQ.compiler.typed",),
         authority_input_fingerprint=_FINGERPRINT,
     )
@@ -98,7 +86,7 @@ def test_normalizer_accepts_only_eligible_typed_item_citations() -> None:
     normalized = normalize_compiler_output(
         _success(
             source_item_id="REQ.compiler.typed",
-            excerpt="Authority MUST compile only this accepted requirement.",
+            excerpt="The Authority payload MUST include accepted_requirement.",
         ),
         authority_input=_authority_input(),
     )
@@ -147,10 +135,8 @@ def test_normalizer_rejects_incomplete_normative_coverage() -> None:
                 AuthorityItemV2(
                     id="CONSTRAINT.compiler.complete",
                     type="CONSTRAINT",
-                    title="Complete coverage",
                     statement="Authority MUST account for every eligible item.",
                     level="MUST",
-                    verification="system-test",
                     acceptance=("Every eligible item is accounted for.",),
                 ),
             ),
@@ -164,13 +150,38 @@ def test_normalizer_rejects_incomplete_normative_coverage() -> None:
     normalized = normalize_compiler_output(
         _success(
             source_item_id="REQ.compiler.typed",
-            excerpt="Authority MUST compile only this accepted requirement.",
+            excerpt="The Authority payload MUST include accepted_requirement.",
         ),
         authority_input=authority_input,
     )
 
     assert isinstance(normalized.root, SpecAuthorityCompilationFailure)
     assert normalized.root.reason == "INCOMPLETE_NORMATIVE_COVERAGE"
+
+
+def test_normalizer_rejects_parameters_promoted_from_review_context() -> None:
+    """Non-normative context cannot hide behind an unrelated eligible citation."""
+    payload = json.loads(
+        _success(
+            source_item_id="REQ.compiler.typed",
+            excerpt="The Authority payload MUST include accepted_requirement.",
+        )
+    )
+    invariant = payload["invariants"][0]
+    invariant["type"] = "ROUTE_CONTRACT"
+    invariant["parameters"] = {
+        "route": "/admin",
+        "route_name": "Hidden administration",
+        "behavior": "Expose the hidden operator note.",
+    }
+
+    normalized = normalize_compiler_output(
+        json.dumps(payload),
+        authority_input=_authority_input(),
+    )
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationFailure)
+    assert normalized.root.reason == "INELIGIBLE_INVARIANT_SOURCE"
 
 
 def test_compiler_service_exposes_only_persisted_version_entrypoint() -> None:

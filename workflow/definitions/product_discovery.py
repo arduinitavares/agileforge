@@ -373,10 +373,10 @@ def _review_rule(
     )
 
 
-PRODUCT_DISCOVERY_NODES: tuple[NodeSpec, ...] = (
+SPECIFICATION_NODES: tuple[NodeSpec, ...] = (
     NodeSpec(
         node_id="specification.author",
-        child_graph_id="product_discovery",
+        child_graph_id="specification",
         request_kind="author_specification",
         recommendation_kind=RecommendationKind.REQUIRED,
         required_inputs=(
@@ -402,7 +402,7 @@ PRODUCT_DISCOVERY_NODES: tuple[NodeSpec, ...] = (
     ),
     NodeSpec(
         node_id="specification.review",
-        child_graph_id="product_discovery",
+        child_graph_id="specification",
         request_kind="decide_specification",
         recommendation_kind=RecommendationKind.REQUIRED,
         required_inputs=(

@@ -179,6 +179,58 @@ def test_gate_returns_exact_separately_accepted_spec_version(
     assert spec.source_specification_candidate_fingerprint is not None
 
 
+def test_gate_rejects_accepted_authority_for_superseded_specification(
+    session: Session,
+    sample_project: Project,
+) -> None:
+    """A new approved amendment requires its own independent Authority review."""
+    project_id = require_id(sample_project.project_id, "project_id")
+    _old_spec, _authority = _seed_compiled_authority(
+        session,
+        project_id=project_id,
+        accepted=True,
+    )
+    seed_accepted_specification(
+        session,
+        project_id=project_id,
+        content=json.dumps({"title": "Current amendment"}),
+    )
+    session.commit()
+
+    with pytest.raises(SpecAuthorityGateError, match="separate Authority review"):
+        spec_tools.ensure_accepted_spec_authority(project_id)
+
+
+def test_gate_rejects_when_latest_authority_for_current_spec_is_unreviewed(
+    session: Session,
+    sample_project: Project,
+) -> None:
+    """A forced recompile cannot inherit an older Authority acceptance."""
+    project_id = require_id(sample_project.project_id, "project_id")
+    spec, accepted_authority = _seed_compiled_authority(
+        session,
+        project_id=project_id,
+        accepted=True,
+    )
+    replacement = CompiledSpecAuthority(
+        spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
+        compiler_version=accepted_authority.compiler_version,
+        prompt_hash=accepted_authority.prompt_hash,
+        compiled_at=datetime.now(UTC),
+        compiled_artifact_json=_success_artifact_json(),
+        scope_themes=json.dumps(["Replacement scope"]),
+        invariants="[]",
+        eligible_feature_ids="[]",
+        rejected_features="[]",
+        spec_gaps="[]",
+    )
+    session.add(replacement)
+    session.commit()
+
+    with pytest.raises(SpecAuthorityGateError, match="separate Authority review"):
+        spec_tools.ensure_accepted_spec_authority(project_id)
+
+
 def test_compiled_but_unaccepted_authority_stays_at_human_review_gate(
     session: Session,
     sample_project: Project,

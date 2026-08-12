@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from typing import Literal
 
 from workflow.definitions.product_discovery import (
-    PRODUCT_DISCOVERY_NODES,
+    SPECIFICATION_NODES,
     _review_rule,
     _specification_rule,
     accepted_current_spec,
@@ -152,7 +152,7 @@ def test_accepted_goal_routes_directly_to_agentic_specification_author() -> None
     """A direct Vision/Goal chain exposes initial authoring without Discovery."""
     snapshot = _snapshot()
     author = _specification_rule(snapshot, NOW)[0]
-    nodes = {node.node_id: node for node in PRODUCT_DISCOVERY_NODES}
+    nodes = {node.node_id: node for node in SPECIFICATION_NODES}
 
     assert author.reason_code == "SPECIFICATION_INITIAL_REQUIRED"
     references = {

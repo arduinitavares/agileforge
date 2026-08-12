@@ -4,7 +4,7 @@ from typing import Literal
 
 from pydantic import Field
 
-from workflow.contracts import FrozenModel, JsonObject
+from workflow.contracts import FrozenModel, JsonObject, WorkflowErrorCode
 from workflow.requests.base import GuardedRequest
 
 
@@ -34,4 +34,38 @@ class FailNodeAttempt(FrozenModel):
     correlation_id: str | None = None
 
 
-__all__ = ["FailNodeAttempt", "StartNodeAttempt"]
+class RevalidateNodeAttempt(FrozenModel):
+    """Recheck one live Specification attempt before its provider call."""
+
+    kind: Literal["revalidate_node_attempt"] = "revalidate_node_attempt"
+    project_id: int
+    attempt_id: int
+    attempt_fingerprint: str = Field(min_length=1)
+    target_node_id: Literal["specification.author"] = "specification.author"
+    idempotency_key: str = Field(min_length=1)
+    actor: str = Field(min_length=1)
+    correlation_id: str | None = None
+
+
+class ObsoleteNodeAttempt(FrozenModel):
+    """Close one exact Specification attempt after a host source re-probe."""
+
+    kind: Literal["obsolete_node_attempt"] = "obsolete_node_attempt"
+    project_id: int
+    attempt_id: int
+    attempt_fingerprint: str = Field(min_length=1)
+    error_code: Literal[WorkflowErrorCode.STALE_SPECIFICATION_INPUT] = (
+        WorkflowErrorCode.STALE_SPECIFICATION_INPUT
+    )
+    error_message: str = Field(min_length=1)
+    idempotency_key: str = Field(min_length=1)
+    actor: str = Field(min_length=1)
+    correlation_id: str | None = None
+
+
+__all__ = [
+    "FailNodeAttempt",
+    "ObsoleteNodeAttempt",
+    "RevalidateNodeAttempt",
+    "StartNodeAttempt",
+]

@@ -11,12 +11,18 @@ from sqlalchemy import event
 from sqlalchemy.exc import OperationalError
 from sqlmodel import Session, col, select
 
+from models.product_definition import SpecificationCandidate
 from models.workflow import (
     WorkflowNodeAttempt,
     WorkflowNodeAttemptOutcome,
     WorkflowTransitionReceipt,
 )
 from repositories.workflow import WorkflowFactLoadError, WorkflowFactRepository
+from services.contracts.specification_authoring import (
+    SPECIFICATION_ACTIVE_REPOSITORY_SOURCE_ID,
+    SpecificationAuthoringInput,
+    specification_authoring_input_fingerprint,
+)
 from workflow.contracts import (
     JsonObject,
     NodeCategory,
@@ -86,6 +92,7 @@ from workflow.requests import (
     FailNodeAttempt,
     FulfillProductGoal,
     GenerateVisionBootstrap,
+    ObsoleteNodeAttempt,
     RecordAuthorityFeedback,
     RecordBacklogDraft,
     RecordPostSprintTriage,
@@ -97,6 +104,7 @@ from workflow.requests import (
     RecordVisionInterviewTurn,
     RepairAuthority,
     RepairStoryReadiness,
+    RevalidateNodeAttempt,
     ReviewSprint,
     StartNodeAttempt,
     StartSprint,
@@ -122,6 +130,18 @@ class AdkRecipeRegistryProtocol(Protocol):
 
     def require(self, node_id: str) -> object:
         """Return a recipe or raise LookupError when the node is unregistered."""
+
+
+class SpecificationSourceCheck(Protocol):
+    """Re-probe exact persisted Specification sources at a mutation boundary."""
+
+    def __call__(
+        self,
+        project_id: int,
+        persisted_input: JsonObject,
+        /,
+    ) -> WorkflowError | None:
+        """Return stale-source detail, or None while sources remain current."""
 
 
 _SQLITE_BUSY_TIMEOUT_MS = 1_000
@@ -203,12 +223,14 @@ class WorkflowDomain:
         graph: WorkflowGraph,
         clock: Clock,
         adk_recipe_registry: AdkRecipeRegistryProtocol | None = None,
+        specification_source_check: SpecificationSourceCheck | None = None,
     ) -> None:
         """Retain explicit persistence, graph, and time dependencies."""
         self._engine = engine
         self._graph = graph
         self._clock = clock
         self._adk_recipe_registry = adk_recipe_registry
+        self._specification_source_check = specification_source_check
         self._configure_busy_timeout()
 
     def position(self, project_id: int) -> WorkflowPosition:
@@ -455,6 +477,12 @@ class WorkflowDomain:
             return self._execute_project_request(session, request, evaluated_at)
         if isinstance(request, StartNodeAttempt):
             return self._execute_start_attempt(session, request, evaluated_at)
+        if isinstance(request, RevalidateNodeAttempt | ObsoleteNodeAttempt):
+            return (
+                self._execute_revalidate_attempt(session, request, evaluated_at)
+                if isinstance(request, RevalidateNodeAttempt)
+                else self._execute_obsolete_attempt(session, request, evaluated_at)
+            )
         if isinstance(request, FailNodeAttempt):
             return self._execute_failed_attempt(session, request, evaluated_at)
         if request.attempt_id is not None:
@@ -550,6 +578,146 @@ class WorkflowDomain:
                     evaluated_at,
                 )
             }
+        )
+
+    def _execute_revalidate_attempt(
+        self,
+        session: Session,
+        request: RevalidateNodeAttempt,
+        evaluated_at: datetime,
+    ) -> TransitionResult:
+        """Recheck Specification attempt authority before external execution."""
+        row = load_attempt(
+            session,
+            project_id=request.project_id,
+            attempt_id=request.attempt_id,
+        )
+        outcome = load_attempt_outcome(
+            session,
+            project_id=request.project_id,
+            attempt_id=request.attempt_id,
+        )
+        if (
+            row is not None
+            and outcome is not None
+            and row.attempt_fingerprint == request.attempt_fingerprint
+            and row.node_id == request.target_node_id
+        ):
+            return self._replay_attempt_start_receipt(session, row)
+        snapshot = WorkflowFactRepository(session).load(request.project_id)
+        position = self._graph.evaluate(snapshot, evaluated_at)
+        latest_attempt = max(
+            (
+                attempt
+                for attempt in snapshot.node_attempts
+                if row is not None
+                and attempt.node_id == row.node_id
+                and attempt.instance_key == row.instance_key
+            ),
+            key=lambda attempt: attempt.attempt_id,
+            default=None,
+        )
+        decision_is_current = row is not None and any(
+            decision.node_id == row.node_id
+            and decision.instance_key == row.instance_key
+            and decision.category is NodeCategory.WAITING
+            for decision in position.decisions
+        )
+        mismatch = (
+            row is None
+            or outcome is not None
+            or row.attempt_fingerprint != request.attempt_fingerprint
+            or row.node_id != request.target_node_id
+            or row.graph_version != self._graph.graph_version
+            or evaluated_at >= as_utc(row.lease_expires_at)
+            or row.business_fact_fingerprint != business_fact_fingerprint(snapshot)
+            or not self._attempt_input_matches(row)
+            or latest_attempt is None
+            or latest_attempt.attempt_id != row.workflow_node_attempt_id
+            or not decision_is_current
+        )
+        if mismatch:
+            return self._obsolete_attempt(
+                session,
+                project_id=request.project_id,
+                attempt_id=request.attempt_id,
+                evaluated_at=evaluated_at,
+                error=WorkflowError(
+                    code=WorkflowErrorCode.STALE_SPECIFICATION_INPUT,
+                    message=(
+                        "Specification authoring input changed before provider "
+                        "invocation."
+                    ),
+                ),
+            )
+        return TransitionResult(
+            ok=True,
+            applied_node_id=row.node_id,
+            output={"attempt_id": request.attempt_id, "status": "authoritative"},
+            position=position,
+        )
+
+    @staticmethod
+    def _attempt_input_matches(row: WorkflowNodeAttempt | None) -> bool:
+        """Validate the persisted normalized input against its captured hash."""
+        if row is None:
+            return False
+        try:
+            normalized = _JSON_OBJECT.validate_python(
+                json.loads(row.normalized_input_json)
+            )
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return False
+        return (
+            canonical_json(normalized) == row.normalized_input_json
+            and canonical_hash(normalized) == row.input_fingerprint
+        )
+
+    def _execute_obsolete_attempt(
+        self,
+        session: Session,
+        request: ObsoleteNodeAttempt,
+        evaluated_at: datetime,
+    ) -> TransitionResult:
+        """Close a live exact Specification attempt after stale host evidence."""
+        row = load_attempt(
+            session,
+            project_id=request.project_id,
+            attempt_id=request.attempt_id,
+        )
+        outcome = load_attempt_outcome(
+            session,
+            project_id=request.project_id,
+            attempt_id=request.attempt_id,
+        )
+        if (
+            row is not None
+            and outcome is not None
+            and row.attempt_fingerprint == request.attempt_fingerprint
+            and row.node_id == "specification.author"
+        ):
+            return self._replay_attempt_start_receipt(session, row)
+        if (
+            row is None
+            or outcome is not None
+            or row.attempt_fingerprint != request.attempt_fingerprint
+            or row.node_id != "specification.author"
+        ):
+            return self._obsolete_attempt(
+                session,
+                project_id=request.project_id,
+                attempt_id=request.attempt_id,
+                evaluated_at=evaluated_at,
+            )
+        return self._obsolete_attempt(
+            session,
+            project_id=request.project_id,
+            attempt_id=request.attempt_id,
+            evaluated_at=evaluated_at,
+            error=WorkflowError(
+                code=request.error_code,
+                message=request.error_message,
+            ),
         )
 
     @staticmethod
@@ -676,6 +844,15 @@ class WorkflowDomain:
                 attempt_id=request.attempt_id,
                 evaluated_at=evaluated_at,
             )
+        if isinstance(request, CompleteSpecificationAuthoring):
+            source_failure = self._revalidate_specification_completion_sources(
+                session,
+                request=request,
+                attempt=row,
+                evaluated_at=evaluated_at,
+            )
+            if source_failure is not None:
+                return source_failure
         result = self._dispatch_positioned(
             session,
             request,
@@ -723,6 +900,87 @@ class WorkflowDomain:
         )
         return terminal_result
 
+    def _revalidate_specification_completion_sources(
+        self,
+        session: Session,
+        *,
+        request: CompleteSpecificationAuthoring,
+        attempt: WorkflowNodeAttempt | None,
+        evaluated_at: datetime,
+    ) -> TransitionResult | None:
+        """Re-probe exact persisted sources immediately before candidate write."""
+        if attempt is None or not self._attempt_input_matches(attempt):
+            return self._obsolete_attempt(
+                session,
+                project_id=request.project_id,
+                attempt_id=request.attempt_id,
+                evaluated_at=evaluated_at,
+                error=WorkflowError(
+                    code=WorkflowErrorCode.STALE_SPECIFICATION_INPUT,
+                    message="The pending Specification source input is invalid.",
+                ),
+            )
+        try:
+            persisted_input = _JSON_OBJECT.validate_json(
+                attempt.normalized_input_json
+            )
+            contract = SpecificationAuthoringInput.model_validate(persisted_input)
+        except (TypeError, ValueError):
+            return self._obsolete_attempt(
+                session,
+                project_id=request.project_id,
+                attempt_id=request.attempt_id,
+                evaluated_at=evaluated_at,
+                error=WorkflowError(
+                    code=WorkflowErrorCode.STALE_SPECIFICATION_INPUT,
+                    message="The pending Specification source input is invalid.",
+                ),
+            )
+        serialized_input = contract.model_dump(mode="json")
+        if (
+            contract.project_id != request.project_id
+            or canonical_json(serialized_input) != attempt.normalized_input_json
+        ):
+            return self._obsolete_attempt(
+                session,
+                project_id=request.project_id,
+                attempt_id=request.attempt_id,
+                evaluated_at=evaluated_at,
+                error=WorkflowError(
+                    code=WorkflowErrorCode.STALE_SPECIFICATION_INPUT,
+                    message="The pending Specification source input changed.",
+                ),
+            )
+        active_repository_source = next(
+            (
+                entry
+                for entry in contract.source_manifest
+                if entry.source_id == SPECIFICATION_ACTIVE_REPOSITORY_SOURCE_ID
+            ),
+            None,
+        )
+        source_check = self._specification_source_check
+        if source_check is None:
+            source_error = (
+                None
+                if active_repository_source is None
+                else WorkflowError(
+                    code=WorkflowErrorCode.STALE_SPECIFICATION_INPUT,
+                    message="Live Specification source validation is unavailable.",
+                )
+            )
+        else:
+            source_error = source_check(request.project_id, serialized_input)
+        if source_error is None:
+            return None
+        return self._obsolete_attempt(
+            session,
+            project_id=request.project_id,
+            attempt_id=request.attempt_id,
+            evaluated_at=evaluated_at,
+            error=source_error,
+        )
+
     def _execute_failed_attempt(
         self,
         session: Session,
@@ -762,12 +1020,22 @@ class WorkflowDomain:
             request.project_id,
             evaluated_at,
         )
+        precise_failure_codes = {
+            WorkflowErrorCode.VISION_EVIDENCE_STALE,
+            WorkflowErrorCode.INVALID_SPECIFICATION_PAYLOAD,
+            WorkflowErrorCode.UNSUPPORTED_SPECIFICATION_SCHEMA,
+            WorkflowErrorCode.SPECIFICATION_PRODUCER_FAILED,
+        }
+        try:
+            requested_code = WorkflowErrorCode(request.failure_code)
+        except ValueError:
+            requested_code = WorkflowErrorCode.EXTERNAL_EXECUTION_FAILED
         error = (
             WorkflowError(
-                code=WorkflowErrorCode.VISION_EVIDENCE_STALE,
+                code=requested_code,
                 message=request.failure_message,
             )
-            if request.failure_code == WorkflowErrorCode.VISION_EVIDENCE_STALE.value
+            if requested_code in precise_failure_codes
             else WorkflowError(
                 code=WorkflowErrorCode.EXTERNAL_EXECUTION_FAILED,
                 message="ADK recipe execution or output validation failed.",
@@ -798,6 +1066,7 @@ class WorkflowDomain:
         project_id: int,
         attempt_id: int,
         evaluated_at: datetime,
+        error: WorkflowError | None = None,
     ) -> TransitionResult:
         """Record obsolescence when possible and deny business mutation."""
         row = load_attempt(
@@ -805,7 +1074,12 @@ class WorkflowDomain:
             project_id=project_id,
             attempt_id=attempt_id,
         )
-        if row is not None:
+        outcome = load_attempt_outcome(
+            session,
+            project_id=project_id,
+            attempt_id=attempt_id,
+        )
+        if row is not None and outcome is None:
             record_obsolete_outcome(
                 session,
                 project_id=project_id,
@@ -815,12 +1089,13 @@ class WorkflowDomain:
         result = TransitionResult(
             ok=False,
             position=self._position_in_session(session, project_id, evaluated_at),
-            error=WorkflowError(
+            error=error
+            or WorkflowError(
                 code=WorkflowErrorCode.ATTEMPT_OBSOLETE,
                 message="The node attempt is no longer authoritative.",
             ),
         )
-        if row is not None:
+        if row is not None and outcome is None:
             self._complete_attempt_start_receipt(
                 session,
                 row,
@@ -951,8 +1226,8 @@ class WorkflowDomain:
             )
         assert_never(request)
 
-    @staticmethod
     def _dispatch_product_discovery(
+        self,
         session: Session,
         request: _ProductDiscoveryRequest,
         decision: NodeDecision,
@@ -963,10 +1238,117 @@ class WorkflowDomain:
                 session, request, decision, evaluated_at
             )
         if isinstance(request, DecideSpecification):
+            prepared = self._revalidate_specification_acceptance(session, request)
+            if isinstance(prepared, TransitionResult):
+                return prepared
             return execute_decide_specification(
-                session, request, decision, evaluated_at
+                session, prepared, decision, evaluated_at
             )
         assert_never(request)
+
+    def _revalidate_specification_acceptance(  # noqa: PLR0911
+        self,
+        session: Session,
+        request: DecideSpecification,
+    ) -> DecideSpecification | TransitionResult:
+        """Re-probe the exact candidate attempt immediately before acceptance."""
+        if request.decision != "accepted":
+            return request
+        if request.repository_source_fingerprint is not None:
+            return self._stale_specification_source(
+                "Specification acceptance source identity is host-owned."
+            )
+        candidate = session.get(
+            SpecificationCandidate,
+            request.specification_candidate_id,
+        )
+        if (
+            candidate is None
+            or candidate.project_id != request.project_id
+            or candidate.candidate_fingerprint != request.candidate_fingerprint
+        ):
+            return self._stale_specification_source(
+                "The pending Specification candidate source is unavailable."
+            )
+        attempt = session.get(
+            WorkflowNodeAttempt,
+            candidate.workflow_node_attempt_id,
+        )
+        outcome = load_attempt_outcome(
+            session,
+            project_id=request.project_id,
+            attempt_id=candidate.workflow_node_attempt_id,
+        )
+        if (
+            attempt is None
+            or attempt.project_id != request.project_id
+            or attempt.node_id != "specification.author"
+            or attempt.attempt_fingerprint != candidate.attempt_fingerprint
+            or outcome is None
+            or outcome.status != "success"
+            or not self._attempt_input_matches(attempt)
+        ):
+            return self._stale_specification_source(
+                "The pending Specification authoring attempt is stale."
+            )
+        try:
+            persisted_input = _JSON_OBJECT.validate_json(
+                attempt.normalized_input_json
+            )
+            contract = SpecificationAuthoringInput.model_validate(persisted_input)
+        except (TypeError, ValueError):
+            return self._stale_specification_source(
+                "The pending Specification source input is invalid."
+            )
+        serialized_input = contract.model_dump(mode="json")
+        if (
+            contract.project_id != request.project_id
+            or canonical_json(serialized_input) != attempt.normalized_input_json
+            or specification_authoring_input_fingerprint(contract)
+            != candidate.producer_input_fingerprint
+        ):
+            return self._stale_specification_source(
+                "The pending Specification source input changed."
+            )
+        active_repository_source = next(
+            (
+                entry
+                for entry in contract.source_manifest
+                if entry.source_id == SPECIFICATION_ACTIVE_REPOSITORY_SOURCE_ID
+            ),
+            None,
+        )
+        prepared = request.model_copy(
+            update={
+                "repository_source_fingerprint": (
+                    None
+                    if active_repository_source is None
+                    else active_repository_source.fingerprint
+                )
+            }
+        )
+        source_check = self._specification_source_check
+        if source_check is None:
+            if active_repository_source is not None:
+                return self._stale_specification_source(
+                    "Live Specification source validation is unavailable."
+                )
+        else:
+            source_error = source_check(request.project_id, serialized_input)
+            if source_error is not None:
+                return TransitionResult(ok=False, error=source_error)
+        return prepared
+
+    @staticmethod
+    def _stale_specification_source(message: str) -> TransitionResult:
+        """Return one bounded rejection for an untrusted acceptance source."""
+        return TransitionResult(
+            ok=False,
+            error=WorkflowError(
+                code=WorkflowErrorCode.STALE_SPECIFICATION_INPUT,
+                message=message,
+            ),
+        )
 
     @staticmethod
     def _dispatch_authority(
@@ -1158,6 +1540,29 @@ class WorkflowDomain:
         receipt.completed_at = evaluated_at
         session.add(receipt)
         session.flush()
+
+    @staticmethod
+    def _replay_attempt_start_receipt(
+        session: Session,
+        attempt: WorkflowNodeAttempt,
+    ) -> TransitionResult:
+        """Return terminal attempt truth without rewriting its start receipt."""
+        receipt = session.exec(
+            select(WorkflowTransitionReceipt).where(
+                col(WorkflowTransitionReceipt.request_kind) == "start_node_attempt",
+                col(WorkflowTransitionReceipt.idempotency_key)
+                == attempt.idempotency_key,
+            )
+        ).one_or_none()
+        if (
+            receipt is None
+            or receipt.result_json is None
+            or receipt.completed_at is None
+        ):
+            msg = "A terminal node attempt has no completed start receipt."
+            raise RuntimeError(msg)
+        persisted = TransitionResult.model_validate_json(receipt.result_json)
+        return persisted.model_copy(update={"replayed": True})
 
     @staticmethod
     def _complete_attempt_start_receipt(

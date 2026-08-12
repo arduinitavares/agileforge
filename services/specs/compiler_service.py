@@ -889,10 +889,20 @@ def ensure_accepted_spec_authority(
     """Return an accepted Authority or stop at the independent review gate."""
     del recompile, tool_context
     with Session(_resolve_engine()) as session:
+        current_spec = session.exec(
+            select(SpecRegistry).where(
+                SpecRegistry.project_id == project_id,
+                SpecRegistry.status == "approved",
+            )
+        ).one_or_none()
+        if current_spec is None or current_spec.spec_version_id is None:
+            raise SpecAuthorityGateError.requires_review(project_id)
         acceptance = session.exec(
             select(SpecAuthorityAcceptance)
             .where(
                 SpecAuthorityAcceptance.project_id == project_id,
+                SpecAuthorityAcceptance.spec_version_id
+                == current_spec.spec_version_id,
                 SpecAuthorityAcceptance.status == "accepted",
             )
             .order_by(
@@ -906,7 +916,16 @@ def ensure_accepted_spec_authority(
                 project_id=project_id,
                 spec_version_id=acceptance.spec_version_id,
             )
-            if authority is not None and load_compiled_artifact(authority).ok:
+            latest_authority = latest_compiled_authority(
+                session,
+                spec_version_id=acceptance.spec_version_id,
+            )
+            if (
+                authority is not None
+                and latest_authority is not None
+                and authority.authority_id == latest_authority.authority_id
+                and load_compiled_artifact(authority).ok
+            ):
                 return acceptance.spec_version_id
     raise SpecAuthorityGateError.requires_review(project_id)
 

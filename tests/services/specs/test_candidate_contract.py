@@ -150,10 +150,15 @@ def test_candidate_canonical_json_round_trips_with_fingerprint_verification() ->
         )
 
 
-def test_candidate_fingerprint_changes_for_payload_and_attempt_metadata() -> None:
-    """A decision fingerprint commits to all immutable authority-affecting data."""
+def test_candidate_fingerprint_excludes_host_execution_metadata() -> None:
+    """Equivalent semantic candidates keep one identity across host executions."""
     baseline = _envelope()
-    changed_attempt = _envelope(attempt_fingerprint=_fingerprint("attempt-8"))
+    changed_execution = _envelope(
+        workflow_node_attempt_id=72,
+        attempt_fingerprint=_fingerprint("attempt-8"),
+        correlation_id="correlation-8",
+        produced_at="2026-08-11T12:00:01Z",
+    )
     changed_payload_dict = _payload().model_dump(mode="json")
     items = changed_payload_dict["items"]
     assert isinstance(items, list)
@@ -163,10 +168,39 @@ def test_candidate_fingerprint_changes_for_payload_and_attempt_metadata() -> Non
     changed_payload = SpecificationPayload.model_validate(changed_payload_dict)
     changed_semantics = _envelope(payload=changed_payload)
 
-    assert baseline.candidate_fingerprint != changed_attempt.candidate_fingerprint
+    assert baseline.candidate_fingerprint == changed_execution.candidate_fingerprint
+    assert baseline.review_view_fingerprint != changed_execution.review_view_fingerprint
+    assert canonical_candidate_json(
+        _payload(), baseline
+    ) != canonical_candidate_json(_payload(), changed_execution)
     assert baseline.payload_fingerprint != changed_semantics.payload_fingerprint
     assert baseline.review_view_fingerprint != changed_semantics.review_view_fingerprint
     assert baseline.candidate_fingerprint != changed_semantics.candidate_fingerprint
+
+
+def test_candidate_fingerprint_excludes_host_lineage_row_ids() -> None:
+    """Equivalent content lineage has one identity across recreated databases."""
+    baseline = _envelope()
+    recreated = _envelope(
+        accepted_vision_id=117,
+        accepted_product_goal_id=123,
+    )
+
+    assert baseline.candidate_fingerprint == recreated.candidate_fingerprint
+    assert baseline.review_view_fingerprint != recreated.review_view_fingerprint
+    amendment = _envelope(
+        candidate_kind=CandidateKind.AMENDMENT,
+        base_payload=_payload(),
+        base_specification_id=BASE_SPECIFICATION_ID,
+        base_payload_fingerprint=canonical_spec_hash(_payload()),
+    )
+    recreated_amendment = _envelope(
+        candidate_kind=CandidateKind.AMENDMENT,
+        base_payload=_payload(),
+        base_specification_id=BASE_SPECIFICATION_ID + 1,
+        base_payload_fingerprint=canonical_spec_hash(_payload()),
+    )
+    assert amendment.candidate_fingerprint == recreated_amendment.candidate_fingerprint
 
 
 def test_complete_review_view_includes_envelope_evidence_and_changes_with_it() -> None:
@@ -178,6 +212,7 @@ def test_complete_review_view_includes_envelope_evidence_and_changes_with_it() -
                 source_id="SRC.goal",
                 kind=CandidateSourceKind.PRODUCT_GOAL,
                 fingerprint=_fingerprint("changed-goal"),
+                warnings=("SOURCE_TRUNCATED: Review the bounded excerpt.",),
             ),
         )
     )
@@ -193,7 +228,35 @@ def test_complete_review_view_includes_envelope_evidence_and_changes_with_it() -
     ):
         assert expected in markdown
     assert baseline.review_view_fingerprint != changed_source.review_view_fingerprint
-    assert markdown != render_candidate_review_markdown(_payload(), changed_source)
+    changed_markdown = render_candidate_review_markdown(_payload(), changed_source)
+    assert "SOURCE_TRUNCATED: Review the bounded excerpt." in changed_markdown
+    assert markdown != changed_markdown
+
+
+def test_source_warning_is_nested_under_its_own_manifest_entry() -> None:
+    """A warning cannot be visually attributed to the following source."""
+    envelope = _envelope(
+        source_manifest=(
+            CandidateSourceManifestEntry(
+                source_id="SRC.repository",
+                kind=CandidateSourceKind.REPOSITORY,
+                fingerprint=_fingerprint("repository"),
+                warnings=("SOURCE_TRUNCATED: Review repository excerpt.",),
+            ),
+            CandidateSourceManifestEntry(
+                source_id="SRC.vision",
+                kind=CandidateSourceKind.VISION,
+                fingerprint=_fingerprint("vision"),
+            ),
+        )
+    )
+
+    markdown = render_candidate_review_markdown(_payload(), envelope)
+
+    repository_row = markdown.index("- SRC.repository")
+    warning_row = markdown.index("  - Warning: SOURCE_TRUNCATED")
+    vision_row = markdown.index("- SRC.vision")
+    assert repository_row < warning_row < vision_row
 
 
 def test_complete_review_escapes_untrusted_envelope_text() -> None:
@@ -318,6 +381,56 @@ def test_amendment_diff_tracks_relations_terms_and_external_references() -> None
     assert diff.external_references.added == ("EXT.budget-rules",)
 
 
+def test_amendment_diff_tracks_every_mutable_top_level_field() -> None:
+    """Reviewers see top-level semantic changes outside stable collections."""
+    base = _payload()
+    candidate_data = deepcopy(base.model_dump(mode="json"))
+    candidate_data.update(
+        {
+            "title": "Champion Squad Decision",
+            "summary": "Recommend a valid squad with explicit evidence.",
+            "problem_statement": "Operators need auditable squad recommendations.",
+        }
+    )
+    amendment = SpecificationPayload.model_validate(candidate_data)
+
+    diff = compute_amendment_diff(base, amendment)
+
+    assert diff.changed_fields == ("title", "summary", "problem_statement")
+
+
+def test_amendment_diff_uses_canonical_tag_set_order() -> None:
+    """Reordering set-like tags cannot create a semantic amendment delta."""
+    base_data = deepcopy(_payload().model_dump(mode="json"))
+    items = base_data["items"]
+    assert isinstance(items, list)
+    item = items[1]
+    assert isinstance(item, dict)
+    item["tags"] = ["budget", "weekly"]
+    base = SpecificationPayload.model_validate(base_data)
+    amendment_data = deepcopy(base_data)
+    amendment_items = amendment_data["items"]
+    assert isinstance(amendment_items, list)
+    amendment_item = amendment_items[1]
+    assert isinstance(amendment_item, dict)
+    amendment_item["tags"] = ["weekly", "budget"]
+    amendment = SpecificationPayload.model_validate(amendment_data)
+
+    assert canonical_spec_hash(base) == canonical_spec_hash(amendment)
+    assert compute_amendment_diff(base, amendment).changed_item_ids == ()
+
+
+def test_amendment_rejects_artifact_identity_change() -> None:
+    """An amendment cannot silently replace the stable Specification identity."""
+    base = _payload()
+    candidate_data = deepcopy(base.model_dump(mode="json"))
+    candidate_data["artifact_id"] = "SPEC.different"
+    amendment = SpecificationPayload.model_validate(candidate_data)
+
+    with pytest.raises(ValueError, match="artifact id"):
+        compute_amendment_diff(base, amendment)
+
+
 def test_amendment_rejects_stale_base_and_unexplained_removals() -> None:
     """A candidate cannot replace scope against stale or opaque base evidence."""
     base = _payload()
@@ -336,6 +449,58 @@ def test_amendment_rejects_stale_base_and_unexplained_removals() -> None:
             base_specification_id=BASE_SPECIFICATION_ID,
             base_payload_fingerprint=_fingerprint("stale"),
         )
+
+
+def test_amendment_requires_reasons_for_every_removed_semantic_entry() -> None:
+    """Relations, terms, and references cannot disappear without explanation."""
+    base_data = deepcopy(_payload().model_dump(mode="json"))
+    terms = base_data["controlled_terms"]
+    references = base_data["external_references"]
+    assert isinstance(terms, list)
+    assert isinstance(references, list)
+    terms.append(
+        {
+            "term": "Budget",
+            "definition": "The squad spending cap.",
+            "scope": "project",
+        }
+    )
+    references.append(
+        {
+            "id": "EXT.budget-rules",
+            "title": "Budget rules",
+            "summary": "Published budget constraints.",
+        }
+    )
+    base = SpecificationPayload.model_validate(base_data)
+    amendment_data = deepcopy(base_data)
+    amendment_data["relations"] = []
+    amendment_data["controlled_terms"] = []
+    amendment_data["external_references"] = []
+    amendment = SpecificationPayload.model_validate(amendment_data)
+    removed = {
+        "satisfies:REQ.cartola.budget->GOAL.cartola.weekly-decision": (
+            "The explicit link is obsolete."
+        ),
+        "budget:project": "The term is no longer needed.",
+        "EXT.budget-rules": "The external reference was retired.",
+    }
+
+    with pytest.raises(ValueError, match="every removed semantic entry"):
+        compute_amendment_diff(base, amendment)
+
+    diff = compute_amendment_diff(
+        base,
+        amendment,
+        removal_justifications=removed,
+    )
+
+    assert diff.relations.removed == (
+        "satisfies:REQ.cartola.budget->GOAL.cartola.weekly-decision",
+    )
+    assert diff.controlled_terms.removed == ("budget:project",)
+    assert diff.external_references.removed == ("EXT.budget-rules",)
+    assert dict(diff.removal_justifications) == removed
 
     with pytest.raises(ValueError, match="removal justification"):
         _envelope(
@@ -382,9 +547,85 @@ def test_stable_id_replacement_must_map_removed_to_added_item() -> None:
         base_specification_id=BASE_SPECIFICATION_ID,
         base_payload_fingerprint=canonical_spec_hash(base),
         removal_justifications={
-            "GOAL.cartola.weekly-decision": "The stable goal ID was corrected."
+            "GOAL.cartola.weekly-decision": "The stable goal ID was corrected.",
+            "satisfies:REQ.cartola.budget->GOAL.cartola.weekly-decision": (
+                "The relation now targets the replacement goal."
+            ),
         },
         stable_id_replacements=(replacement,),
     )
     assert envelope.amendment_diff is not None
     assert envelope.amendment_diff.replacements == (replacement,)
+
+
+def test_stable_id_replacements_are_canonical_under_permutation() -> None:
+    """Set-like replacement mappings have one diff and candidate identity."""
+    base = _payload()
+    candidate_data = deepcopy(base.model_dump(mode="json"))
+    candidate_data["items"] = [
+        {
+            "id": "GOAL.cartola.selection",
+            "type": "GOAL",
+            "title": "Selection",
+            "statement": "Help the operator select a weekly squad.",
+            "acceptance": ["A weekly selection is available."],
+        },
+        {
+            "id": "REQ.cartola.cap",
+            "type": "REQ",
+            "title": "Cap constraint",
+            "statement": "The selected squad MUST stay within budget.",
+            "level": "MUST",
+            "verification": "system-test",
+            "acceptance": ["A selected squad stays within budget."],
+        },
+    ]
+    candidate_data["relations"] = [
+        {
+            "from": "REQ.cartola.cap",
+            "type": "satisfies",
+            "to": "GOAL.cartola.selection",
+        }
+    ]
+    amendment = SpecificationPayload.model_validate(candidate_data)
+    replacements = (
+        StableIdReplacement(
+            old_item_id="REQ.cartola.budget",
+            new_item_id="REQ.cartola.cap",
+            justification="Use the domain term cap.",
+        ),
+        StableIdReplacement(
+            old_item_id="GOAL.cartola.weekly-decision",
+            new_item_id="GOAL.cartola.selection",
+            justification="Use the stable selection name.",
+        ),
+    )
+    reasons = {
+        "REQ.cartola.budget": "Replaced by the cap requirement.",
+        "GOAL.cartola.weekly-decision": "Replaced by the selection goal.",
+        "satisfies:REQ.cartola.budget->GOAL.cartola.weekly-decision": (
+            "Relation endpoints were replaced."
+        ),
+    }
+
+    first = _envelope(
+        payload=amendment,
+        candidate_kind=CandidateKind.AMENDMENT,
+        base_payload=base,
+        base_specification_id=BASE_SPECIFICATION_ID,
+        base_payload_fingerprint=canonical_spec_hash(base),
+        removal_justifications=reasons,
+        stable_id_replacements=replacements,
+    )
+    second = _envelope(
+        payload=amendment,
+        candidate_kind=CandidateKind.AMENDMENT,
+        base_payload=base,
+        base_specification_id=BASE_SPECIFICATION_ID,
+        base_payload_fingerprint=canonical_spec_hash(base),
+        removal_justifications=reasons,
+        stable_id_replacements=tuple(reversed(replacements)),
+    )
+
+    assert first.amendment_diff == second.amendment_diff
+    assert first.candidate_fingerprint == second.candidate_fingerprint

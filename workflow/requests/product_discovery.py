@@ -30,6 +30,7 @@ class DecideSpecification(PositionedRequest):
     node_id: ClassVar[str] = "specification.review"
     specification_candidate_id: int = Field(gt=0)
     candidate_fingerprint: str = Field(min_length=1)
+    repository_source_fingerprint: str | None = None
     decision: Literal["accepted", "rejected", "feedback"]
     rationale: str = ""
 

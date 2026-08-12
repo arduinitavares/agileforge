@@ -13,10 +13,16 @@ from tests.adapters.test_command_renderer import position_fixture
 from workflow.contracts import WorkflowPosition
 
 if TYPE_CHECKING:
-    from services.application import AuthorityFeedbackRequest, PostSprintTriageRequest
+    from services.application import (
+        AuthorityFeedbackRequest,
+        AuthorityReviewRequest,
+        PostSprintTriageRequest,
+        SpecificationReviewRequest,
+    )
 
 SPRINT_CAPACITY_POINTS = 8
 ARGUMENT_ERROR_EXIT_CODE = 2
+PROJECT_ID = 41
 _SEMANTIC_TEXT_COMMANDS = (
     (
         "vision respond --project-id 41 --text {value} "
@@ -256,6 +262,7 @@ class _SemanticTextApplication:
 
     def __init__(self) -> None:
         self.requests: list[object] = []
+        self.reads = _SpecificationReviewReads()
 
     def __getattr__(self, name: str) -> object:
         if name not in self._METHODS:
@@ -268,14 +275,53 @@ class _SemanticTextApplication:
         return capture
 
 
+class _SpecificationReviewReads:
+    """Return the exact packet identity captured by the CLI transport."""
+
+    def specification_review(self, *, project_id: int) -> dict[str, object]:
+        assert project_id == PROJECT_ID
+        return {
+            "ok": True,
+            "data": {
+                "candidate": {
+                    "candidate_fingerprint": "sha256:candidate-shown",
+                }
+            },
+        }
+
+    def authority_review(self, *, project_id: int) -> dict[str, object]:
+        assert project_id == PROJECT_ID
+        return {
+            "ok": True,
+            "data": {
+                "pending_authority": {
+                    "authority_fingerprint": "sha256:authority-shown",
+                }
+            },
+        }
+
+
 @pytest.mark.parametrize(("command", "field"), _SEMANTIC_TEXT_COMMANDS)
 def test_semantic_text_cli_strips_before_application_call(
     command: str,
     field: str,
     capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Persist canonical human text from every Task 7 CLI mutation."""
     application = _SemanticTextApplication()
+    if command.startswith("specification review"):
+        monkeypatch.setattr(
+            cli_main,
+            "_confirm_specification_review",
+            lambda _packet, *, decision: decision == "accepted",
+        )
+    if command.startswith("authority decide"):
+        monkeypatch.setattr(
+            cli_main,
+            "_confirm_authority_review",
+            lambda _packet, *, decision: decision == "accepted",
+        )
 
     exit_code = cli_main.main(
         shlex.split(command.format(value=shlex.quote("  Canonical text.  "))),
@@ -284,7 +330,67 @@ def test_semantic_text_cli_strips_before_application_call(
 
     assert exit_code == 0
     assert getattr(application.requests[0], field) == "Canonical text."
+    if field == "rationale" and command.startswith("specification review"):
+        request = cast("SpecificationReviewRequest", application.requests[0])
+        assert (
+            request.expected_candidate_fingerprint
+            == "sha256:candidate-shown"
+        )
+    if field == "rationale" and command.startswith("authority decide"):
+        request = cast("AuthorityReviewRequest", application.requests[0])
+        assert (
+            request.expected_candidate_fingerprint
+            == "sha256:authority-shown"
+        )
     assert '"ok": true' in capsys.readouterr().out
+
+
+def test_specification_review_displays_packet_before_human_confirmation(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A CLI decision cannot silently bind to a candidate the human never saw."""
+    application = _SemanticTextApplication()
+    monkeypatch.setattr("sys.stdin.readline", lambda: "no\n")
+
+    exit_code = cli_main.main(
+        shlex.split(
+            "specification review --project-id 41 --decision accepted "
+            "--rationale reviewed --idempotency-key review-41 --actor operator"
+        ),
+        application=application,
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == ARGUMENT_ERROR_EXIT_CODE
+    assert application.requests == []
+    assert "Exact Specification review packet" in captured.err
+    assert "sha256:candidate-shown" in captured.err
+    assert "cancelled" in captured.out
+
+
+def test_authority_review_displays_packet_before_human_confirmation(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A CLI decision cannot silently bind to an Authority the human never saw."""
+    application = _SemanticTextApplication()
+    monkeypatch.setattr("sys.stdin.readline", lambda: "no\n")
+
+    exit_code = cli_main.main(
+        shlex.split(
+            "authority decide --project-id 41 --decision accepted "
+            "--rationale reviewed --idempotency-key review-41 --actor operator"
+        ),
+        application=application,
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == ARGUMENT_ERROR_EXIT_CODE
+    assert application.requests == []
+    assert "Exact Authority review packet" in captured.err
+    assert "sha256:authority-shown" in captured.err
+    assert "cancelled" in captured.out
 
 
 @pytest.mark.parametrize(("command", "field"), _SEMANTIC_TEXT_COMMANDS)

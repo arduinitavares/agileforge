@@ -25,7 +25,7 @@ from repositories.workflow import WorkflowFactLoadError, WorkflowFactRepository
 from services.product_goal_interview_input import ProductGoalInterviewInputService
 from workflow.clock import FixedClock
 from workflow.contracts import GRAPH_VERSION, FactReference, WorkflowPosition
-from workflow.definitions.product_discovery import PRODUCT_DISCOVERY_NODES
+from workflow.definitions.product_discovery import SPECIFICATION_NODES
 from workflow.definitions.product_goal import PRODUCT_GOAL_NODES
 from workflow.domain import WorkflowDomain
 from workflow.fingerprints import (
@@ -66,7 +66,7 @@ def _domain(engine: Engine, *, at: datetime = NOW) -> WorkflowDomain:
             graph_version=GRAPH_VERSION,
             root=ChildGraphSpec(
                 child_graph_id="goal",
-                nodes=(*PRODUCT_GOAL_NODES, *PRODUCT_DISCOVERY_NODES),
+                nodes=(*PRODUCT_GOAL_NODES, *SPECIFICATION_NODES),
             ),
         ),
         clock=FixedClock(now_value=at),

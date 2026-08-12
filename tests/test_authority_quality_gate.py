@@ -15,6 +15,8 @@ from utils.spec_authority_assumptions import (
     StructuredSpecClaimProvenance,
 )
 from utils.spec_schemas import (
+    AuthorityQualityReport,
+    AuthorityQualitySummary,
     DataContractParams,
     Invariant,
     InvariantType,
@@ -97,6 +99,32 @@ def test_quality_gate_merges_exact_duplicate_invariants_and_preserves_sources() 
         gated.authority_quality.merged_items[0].source_evidence_count
         == EXPECTED_SOURCE_EVIDENCE_COUNT
     )
+
+
+def test_quality_gate_discards_provider_supplied_quality_metadata() -> None:
+    """Only the host may derive Authority quality summaries and groups."""
+    success = _success(invariants=[])
+    success.authority_quality = AuthorityQualityReport(
+        summary=AuthorityQualitySummary(
+            original_invariant_count=999,
+            final_invariant_count=999,
+            merged_invariant_count=999,
+            merged_assumption_count=999,
+            review_group_count=0,
+            near_duplicate_group_count=0,
+            over_split_group_count=0,
+            noisy_assumption_group_count=0,
+        ),
+        merged_items=[],
+        review_groups=[],
+    )
+
+    gated = apply_authority_quality_gate(success)
+
+    assert gated.authority_quality is not None
+    assert gated.authority_quality.summary.original_invariant_count == 0
+    assert gated.authority_quality.summary.final_invariant_count == 0
+    assert gated.authority_quality.summary.merged_invariant_count == 0
 
 
 def test_quality_gate_groups_same_shape_different_source_without_merging() -> None:

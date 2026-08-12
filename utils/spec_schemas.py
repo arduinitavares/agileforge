@@ -831,6 +831,12 @@ class SpecAuthorityCompilationSuccess(BaseModel):
                     mapping.authority_item_id,
                     mapping.authority_target_kind,
                 )
+            if actual_kind is not mapping.authority_target_kind:
+                raise _CompactIrMappingTargetKindError(
+                    mapping.authority_item_id,
+                    mapping.authority_target_kind,
+                    actual_kind,
+                )
         return self
 
     def _authority_item_kinds_by_id(self) -> dict[str, AuthorityTargetKind]:

@@ -3,11 +3,13 @@
 
 from google.adk.agents import Agent
 from google.adk.models.lite_llm import LiteLlm
+from pydantic import BaseModel, ConfigDict
 
-from adapters.adk.prompts import load_prompt
+from adapters.adk.prompts.specification_author import (
+    SPECIFICATION_AUTHOR_INSTRUCTIONS,
+)
 from services.contracts.specification_authoring import (
     SpecificationAuthoringInput,
-    SpecificationAuthoringOutput,
 )
 from utils.model_config import (
     get_model_id,
@@ -20,6 +22,14 @@ from utils.runtime_config import (
 )
 
 _model_id: str = get_model_id("specification_author")
+
+
+class SpecificationAuthoringModelOutput(BaseModel):
+    """Permissive structured object classified by the owning recipe wrapper."""
+
+    model_config = ConfigDict(extra="allow")
+
+
 model: LiteLlm = LiteLlm(
     model=_model_id,
     api_key=get_openrouter_api_key(),
@@ -33,12 +43,12 @@ root_agent: Agent = Agent(
     description="Create one canonical typed Specification from host-owned sources.",
     model=model,
     input_schema=SpecificationAuthoringInput,
-    output_schema=SpecificationAuthoringOutput,
-    instruction=load_prompt("specification_author.txt"),
+    output_schema=SpecificationAuthoringModelOutput,
+    instruction=SPECIFICATION_AUTHOR_INSTRUCTIONS,
     mode="single_turn",
     output_key="specification_candidate",
     disallow_transfer_to_parent=True,
     disallow_transfer_to_peers=True,
 )
 
-__all__ = ["root_agent"]
+__all__ = ["SpecificationAuthoringModelOutput", "root_agent"]

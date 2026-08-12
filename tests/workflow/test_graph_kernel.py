@@ -361,7 +361,7 @@ def test_root_definition_has_named_children_in_lifecycle_order() -> None:
     assert tuple(child.child_graph_id for child in ROOT_GRAPH.root.children) == (
         "vision",
         "product_goal",
-        "product_discovery",
+        "specification",
         "authority",
         "backlog",
         "planning",
@@ -370,7 +370,7 @@ def test_root_definition_has_named_children_in_lifecycle_order() -> None:
     (
         vision,
         product_goal,
-        product_discovery,
+        specification,
         authority,
         backlog,
         planning,
@@ -388,7 +388,7 @@ def test_root_definition_has_named_children_in_lifecycle_order() -> None:
         "goal.fulfill",
         "goal.abandon",
     )
-    assert tuple(node.node_id for node in product_discovery.nodes) == (
+    assert tuple(node.node_id for node in specification.nodes) == (
         "specification.author",
         "specification.review",
     )

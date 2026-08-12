@@ -107,18 +107,23 @@ def _payload() -> SpecificationPayload:
     return SpecificationPayload.model_validate(_payload_data())
 
 
-def test_builder_strips_provenance_prose_from_authority_input() -> None:
-    """Source notes and external-reference prose never cross the boundary."""
+def test_builder_strips_non_normative_prose_from_authority_input() -> None:
+    """Only eligible statement and acceptance semantics reach the compiler."""
     authority_input = build_authority_input_v2(_payload())
 
     serialized = authority_input.model_dump_json()
 
     assert "SECRET PROVENANCE PROSE MUST BE ABSENT" not in serialized
     assert "EXTERNAL REFERENCE PROSE MUST BE ABSENT" not in serialized
+    assert "Context could be promoted into an invariant." not in serialized
+    assert "A normative item allowed to source an invariant." not in serialized
+    assert "Typed compiler input" not in serialized
     assert "source_notes" not in serialized
     assert "external_references" not in serialized
-    assert authority_input.controlled_terms[0].term == "eligible item"
     assert "eligible item" not in authority_input.eligible_item_ids
+    assert "GOAL.authority.reviewable" not in serialized
+    assert "QUALITY.authority.explanatory" not in serialized
+    assert "RISK.authority.promotion" not in serialized
 
 
 def test_builder_classifies_only_supported_noninformative_items_as_normative() -> None:
@@ -133,11 +138,13 @@ def test_builder_classifies_only_supported_noninformative_items_as_normative() -
         "DATA.authority.source-id",
         "REQ.authority.typed-input",
     )
-    assert tuple(item.id for item in authority_input.review_context) == (
-        "GOAL.authority.reviewable",
-        "QUALITY.authority.explanatory",
-        "RISK.authority.promotion",
-    )
+    assert set(authority_input.model_fields_set) == {
+        "artifact_id",
+        "normative_items",
+        "normative_relations",
+        "eligible_item_ids",
+        "authority_input_fingerprint",
+    }
 
 
 def test_builder_keeps_only_relations_between_eligible_items() -> None:

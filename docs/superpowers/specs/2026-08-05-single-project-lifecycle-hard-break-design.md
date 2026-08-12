@@ -121,7 +121,9 @@ Project must use the same product-development flow.
 
 - No feature-level current-state or gap assessment in this slice.
 - No complete repository inventory.
-- No repository-content hashing or source-file ingestion.
+- No unrestricted repository-content inventory or source-file ingestion during
+  Project setup. Specification authoring may collect the bounded, allowlisted
+  source surface described below.
 - No model-backed repository interpretation.
 - No CodeGraph dependency during Project setup.
 - No GitHub API or GitHub CLI dependency during Project setup.
@@ -490,6 +492,16 @@ dirty-state, remote, artifact-fingerprint, workflow-guard, candidate identity,
 Specification fingerprint, or lineage data. `specification author` accepts no
 raw payload, file, or Markdown input. `specification review` resolves the exact
 graph-selected candidate.
+
+Optional post-Goal source work must be materialized in the active repository as
+one of `README.md`, `CONTEXT.md`, `pyproject.toml`, `specs/spec.json`,
+`specs/spec.md`, `docs/spec/spec.json`, or `docs/spec/spec.md`. After changing
+one of those files, refresh the repository binding before starting
+Specification authoring. The host collects one bounded snapshot, fingerprints
+it in the source manifest, and re-collects it at the final pre-provider
+boundary. Any provenance or content drift obsoletes the attempt with zero model
+calls. Source warnings remain attached to their exact manifest entry in the
+review packet.
 
 `goal complete` records the `fulfilled` outcome. Both Goal outcome commands
 require a human rationale and resolve the exact active Goal internally; the

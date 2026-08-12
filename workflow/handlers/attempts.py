@@ -10,7 +10,11 @@ from sqlmodel import Session, col, select
 
 from models.workflow import WorkflowNodeAttempt, WorkflowNodeAttemptOutcome
 from workflow.contracts import NodeDecision, TransitionResult
-from workflow.fingerprints import canonical_hash, canonical_json
+from workflow.fingerprints import (
+    canonical_hash,
+    canonical_json,
+    workflow_node_attempt_fingerprint,
+)
 
 if TYPE_CHECKING:
     from workflow.requests import FailNodeAttempt, StartNodeAttempt
@@ -103,26 +107,27 @@ def execute_start_node_attempt(
     if row.workflow_node_attempt_id is None:
         msg = "Workflow node attempt primary key was not assigned."
         raise RuntimeError(msg)
-    attempt_payload = {
-        "attempt_id": row.workflow_node_attempt_id,
-        "project_id": row.project_id,
-        "node_id": row.node_id,
-        "instance_key": row.instance_key,
-        "graph_version": row.graph_version,
-        "fact_fingerprint": row.fact_fingerprint,
-        "business_fact_fingerprint": row.business_fact_fingerprint,
-        "decision_fingerprint": row.decision_fingerprint,
-        "normalized_input": request.normalized_input,
-        "input_fingerprint": row.input_fingerprint,
-        "model_id": row.model_id,
-        "execution_settings": request.execution_settings,
-        "idempotency_key": row.idempotency_key,
-        "actor": row.actor,
-        "correlation_id": row.correlation_id,
-        "started_at": evaluated_at,
-        "lease_expires_at": lease_expires_at,
-    }
-    row.attempt_fingerprint = canonical_hash(attempt_payload)
+    row.attempt_fingerprint = workflow_node_attempt_fingerprint(
+        {
+            "attempt_id": row.workflow_node_attempt_id,
+            "project_id": row.project_id,
+            "node_id": row.node_id,
+            "instance_key": row.instance_key,
+            "graph_version": row.graph_version,
+            "fact_fingerprint": row.fact_fingerprint,
+            "business_fact_fingerprint": row.business_fact_fingerprint,
+            "decision_fingerprint": row.decision_fingerprint,
+            "normalized_input": request.normalized_input,
+            "input_fingerprint": row.input_fingerprint,
+            "model_id": row.model_id,
+            "execution_settings": request.execution_settings,
+            "idempotency_key": row.idempotency_key,
+            "actor": row.actor,
+            "correlation_id": row.correlation_id,
+            "started_at": evaluated_at,
+            "lease_expires_at": lease_expires_at,
+        }
+    )
     session.add(row)
     session.flush()
     return TransitionResult(

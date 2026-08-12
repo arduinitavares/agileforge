@@ -53,6 +53,11 @@ from models.workflow import (
     WorkflowNodeAttempt,
     WorkflowNodeAttemptOutcome,
 )
+from services.contracts.specification_authoring import (
+    SpecificationAuthoringInput,
+    specification_authoring_fact_fingerprint,
+    specification_authoring_input_fingerprint,
+)
 from services.contracts.sprint import (
     SprintPlannerOutput,
 )
@@ -121,6 +126,7 @@ from workflow.fingerprints import (
     product_goal_artifact_fingerprint,
     product_goal_interview_output_fingerprint,
     vision_interview_output_fingerprint,
+    workflow_node_attempt_fingerprint,
 )
 from workflow.planning_integrity import (
     dependency_edges_are_canonical,
@@ -1377,13 +1383,19 @@ class WorkflowFactRepository:
                 attempt.node_id == "specification.author",
                 "Specification candidate attempt uses the wrong workflow node.",
             )
+            authoring_input = self._specification_candidate_authoring_input(
+                project_id,
+                row,
+                attempt,
+            )
             self._require_product_condition(
                 envelope.accepted_fact_fingerprint
-                == attempt.business_fact_fingerprint,
+                == specification_authoring_fact_fingerprint(authoring_input),
                 "Specification candidate accepted facts changed after its attempt.",
             )
             self._require_product_condition(
-                envelope.producer_input_fingerprint == attempt.input_fingerprint,
+                envelope.producer_input_fingerprint
+                == specification_authoring_input_fingerprint(authoring_input),
                 "Specification candidate producer input changed after its attempt.",
             )
             self._require_product_condition(
@@ -1464,6 +1476,64 @@ class WorkflowFactRepository:
                 recorded_at=row.recorded_at,
             )
         return facts
+
+    def _specification_candidate_authoring_input(
+        self,
+        project_id: int,
+        candidate: SpecificationCandidate,
+        attempt: NodeAttemptFact,
+    ) -> SpecificationAuthoringInput:
+        """Reload and verify the exact DB-local attempt behind one candidate."""
+        attempt_row = self._session.get(
+            WorkflowNodeAttempt,
+            candidate.workflow_node_attempt_id,
+        )
+        if attempt_row is None:
+            message = "Specification candidate producer attempt is missing."
+            raise self._error(message)
+        try:
+            normalized_input = _JSON_OBJECT.validate_json(
+                attempt_row.normalized_input_json
+            )
+            execution_settings = _JSON_OBJECT.validate_json(
+                attempt_row.execution_settings_json
+            )
+            authoring_input = SpecificationAuthoringInput.model_validate_json(
+                attempt_row.normalized_input_json
+            )
+        except ValidationError as exc:
+            message = "Specification candidate producer input is invalid."
+            raise self._error(message) from exc
+        identity = {
+            "attempt_id": candidate.workflow_node_attempt_id,
+            "project_id": attempt_row.project_id,
+            "node_id": attempt_row.node_id,
+            "instance_key": attempt_row.instance_key,
+            "graph_version": attempt_row.graph_version,
+            "fact_fingerprint": attempt_row.fact_fingerprint,
+            "business_fact_fingerprint": attempt_row.business_fact_fingerprint,
+            "decision_fingerprint": attempt_row.decision_fingerprint,
+            "normalized_input": normalized_input,
+            "input_fingerprint": attempt_row.input_fingerprint,
+            "model_id": attempt_row.model_id,
+            "execution_settings": execution_settings,
+            "idempotency_key": attempt_row.idempotency_key,
+            "actor": attempt_row.actor,
+            "correlation_id": attempt_row.correlation_id,
+            "started_at": attempt_row.started_at,
+            "lease_expires_at": attempt_row.lease_expires_at,
+        }
+        self._require_product_condition(
+            attempt_row.project_id == project_id
+            and attempt_row.attempt_fingerprint
+            == workflow_node_attempt_fingerprint(identity)
+            and canonical_hash(normalized_input) == attempt.input_fingerprint
+            and attempt_row.input_fingerprint == attempt.input_fingerprint
+            and canonical_json(authoring_input.model_dump(mode="json"))
+            == attempt_row.normalized_input_json,
+            "Specification candidate producer input changed after its attempt.",
+        )
+        return authoring_input
 
     def _product_goal_decisions(
         self,

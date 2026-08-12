@@ -83,6 +83,33 @@ def test_load_compiled_artifact_fails_closed(
     assert result.observed_schema_version == observed_schema
 
 
+def test_load_compiled_artifact_rejects_mapping_target_kind_mismatch() -> None:
+    """Stored provider IR with contradictory target identity is never readable."""
+    payload = _success_payload()
+    payload.update(
+        {
+            "rejected_features": ["Deferred export"],
+            "ir_schema_version": "provider.ir.v1",
+            "ir_provenance": "model_emitted",
+            "authority_mappings": [
+                {
+                    "candidate_id": "CAND-provider",
+                    "authority_item_id": "REJ-1",
+                    "authority_target_kind": "gap",
+                    "mapping_status": "covered",
+                    "mapping_rationale": "The provider mislabels this exclusion.",
+                    "mapping_provenance": "model_quote",
+                }
+            ],
+        }
+    )
+
+    result = compiler_service.load_compiled_artifact(_stored(payload))
+
+    assert result.ok is False
+    assert result.status == "schema_invalid"
+
+
 def test_compiled_authority_read_failure_preserves_recovery_context() -> None:
     """Unsupported stored schemas return one stable graph-owned recovery error."""
     load_result = compiler_service.load_compiled_artifact(

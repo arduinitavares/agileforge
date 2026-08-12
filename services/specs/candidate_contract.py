@@ -89,10 +89,22 @@ class CandidateSourceManifestEntry(_FrozenModel):
     source_id: Annotated[str, Field(min_length=1)]
     kind: CandidateSourceKind
     fingerprint: Fingerprint
+    warnings: tuple[Annotated[str, Field(min_length=1)], ...] = ()
 
-    _validate_text = field_validator("source_id", "fingerprint", mode="before")(
-        _require_nonblank
-    )
+    _validate_text = field_validator(
+        "source_id", "fingerprint", mode="before"
+    )(_require_nonblank)
+
+    @field_validator("warnings", mode="before")
+    @classmethod
+    def validate_warnings(cls, value: object) -> object:
+        """Reject blank warning text without changing deterministic order."""
+        if not isinstance(value, list | tuple):
+            return value
+        return tuple(
+            _require_nonblank(item) if isinstance(item, str) else item
+            for item in value
+        )
 
 
 class StableIdReplacement(_FrozenModel):
@@ -164,6 +176,9 @@ class CollectionDiff(_FrozenModel):
 class AmendmentDiff(_FrozenModel):
     """Full deterministic delta against one pinned accepted specification."""
 
+    changed_fields: tuple[
+        Literal["title", "summary", "problem_statement"], ...
+    ] = ()
     items: CollectionDiff = Field(default_factory=CollectionDiff)
     relations: CollectionDiff = Field(default_factory=CollectionDiff)
     controlled_terms: CollectionDiff = Field(default_factory=CollectionDiff)
@@ -286,6 +301,18 @@ def _model_json(model: BaseModel) -> str:
     return _canonical_json(model.model_dump(mode="json", by_alias=True))
 
 
+def _item_json(item: BaseModel) -> str:
+    """Serialize one item using the v2 profile's set-like tag ordering."""
+    data = item.model_dump(mode="json", by_alias=True)
+    tags = data.get("tags")
+    if isinstance(tags, list):
+        data["tags"] = sorted(
+            tags,
+            key=lambda value: " ".join(str(value).strip().casefold().split()),
+        )
+    return _canonical_json(data)
+
+
 def _collection_diff(
     base: Mapping[str, str],
     current: Mapping[str, str],
@@ -322,8 +349,16 @@ def compute_amendment_diff(
     stable_id_replacements: Sequence[StableIdReplacement] = (),
 ) -> AmendmentDiff:
     """Compute all stable semantic collection deltas and validate removals."""
-    base_items = {item.id: _model_json(item) for item in base_payload.items}
-    current_items = {item.id: _model_json(item) for item in payload.items}
+    if base_payload.artifact_id != payload.artifact_id:
+        message = "stable Specification artifact id cannot change"
+        raise ValueError(message)
+    changed_fields = tuple(
+        field
+        for field in ("title", "summary", "problem_statement")
+        if getattr(base_payload, field) != getattr(payload, field)
+    )
+    base_items = {item.id: _item_json(item) for item in base_payload.items}
+    current_items = {item.id: _item_json(item) for item in payload.items}
     base_by_id = {item.id: item for item in base_payload.items}
     current_by_id = {item.id: item for item in payload.items}
     for item_id in base_by_id.keys() & current_by_id.keys():
@@ -331,20 +366,45 @@ def compute_amendment_diff(
             message = "stable item id cannot change type"
             raise ValueError(message)
     items = _collection_diff(base_items, current_items)
+    relations = _collection_diff(
+        {_relation_key(item): _model_json(item) for item in base_payload.relations},
+        {_relation_key(item): _model_json(item) for item in payload.relations},
+    )
+    controlled_terms = _collection_diff(
+        {_term_key(item): _model_json(item) for item in base_payload.controlled_terms},
+        {_term_key(item): _model_json(item) for item in payload.controlled_terms},
+    )
+    external_references = _collection_diff(
+        {item.id: _model_json(item) for item in base_payload.external_references},
+        {item.id: _model_json(item) for item in payload.external_references},
+    )
+    removed_keys = {
+        *items.removed,
+        *relations.removed,
+        *controlled_terms.removed,
+        *external_references.removed,
+    }
     justifications = dict(removal_justifications or {})
-    if set(justifications) - set(items.removed):
-        message = "removal justification references an item that was not removed"
+    if set(justifications) - removed_keys:
+        message = (
+            "removal justification references a semantic entry that was not removed"
+        )
         raise ValueError(message)
     missing = [
-        item_id
-        for item_id in items.removed
-        if not isinstance(justifications.get(item_id), str)
-        or not justifications[item_id].strip()
+        key
+        for key in sorted(removed_keys)
+        if not isinstance(justifications.get(key), str)
+        or not justifications[key].strip()
     ]
     if missing:
-        message = "removal justification is required for every removed item"
+        message = "removal justification is required for every removed semantic entry"
         raise ValueError(message)
-    replacements = tuple(stable_id_replacements)
+    replacements = tuple(
+        sorted(
+            stable_id_replacements,
+            key=lambda item: (item.old_item_id, item.new_item_id),
+        )
+    )
     old_ids = [replacement.old_item_id for replacement in replacements]
     new_ids = [replacement.new_item_id for replacement in replacements]
     if len(old_ids) != len(set(old_ids)) or len(new_ids) != len(set(new_ids)):
@@ -358,24 +418,13 @@ def compute_amendment_diff(
             message = "stable-ID replacement new item must be added"
             raise ValueError(message)
     return AmendmentDiff(
+        changed_fields=changed_fields,
         items=items,
-        relations=_collection_diff(
-            {_relation_key(item): _model_json(item) for item in base_payload.relations},
-            {_relation_key(item): _model_json(item) for item in payload.relations},
-        ),
-        controlled_terms=_collection_diff(
-            {
-                _term_key(item): _model_json(item)
-                for item in base_payload.controlled_terms
-            },
-            {_term_key(item): _model_json(item) for item in payload.controlled_terms},
-        ),
-        external_references=_collection_diff(
-            {item.id: _model_json(item) for item in base_payload.external_references},
-            {item.id: _model_json(item) for item in payload.external_references},
-        ),
+        relations=relations,
+        controlled_terms=controlled_terms,
+        external_references=external_references,
         removal_justifications=tuple(
-            (item_id, justifications[item_id]) for item_id in items.removed
+            (key, justifications[key]) for key in sorted(removed_keys)
         ),
         replacements=replacements,
     )
@@ -433,17 +482,25 @@ def _render_candidate_review(
         for label, key in labels
     )
     lines.extend(["", "### Source Manifest", ""])
-    lines.extend(
-        f"- {_escape_markdown(entry['source_id'])} "
-        f"({_escape_markdown(entry['kind'])}): "
-        f"{_escape_markdown(entry['fingerprint'])}"
-        for entry in data["source_manifest"]
-    )
+    for entry in data["source_manifest"]:
+        lines.append(
+            f"- {_escape_markdown(entry['source_id'])} "
+            f"({_escape_markdown(entry['kind'])}): "
+            f"{_escape_markdown(entry['fingerprint'])}"
+        )
+        lines.extend(
+            f"  - Warning: {_escape_markdown(warning)}"
+            for warning in entry["warnings"]
+        )
     lines.extend(["", "### Amendment Diff", ""])
     diff = data["amendment_diff"]
     if diff is None:
         lines.append("- None")
     else:
+        lines.append(
+            "- top-level fields: changed="
+            f"{_escape_markdown(','.join(diff['changed_fields']))}"
+        )
         for name in ("items", "relations", "controlled_terms", "external_references"):
             change = diff[name]
             lines.append(
@@ -485,11 +542,26 @@ def _candidate_fingerprint(
     payload: SpecificationPayload,
     envelope_data: Mapping[str, Any],
 ) -> str:
+    identity_envelope = {
+        key: value
+        for key, value in envelope_data.items()
+        if key
+        not in {
+            "accepted_vision_id",
+            "accepted_product_goal_id",
+            "base_specification_id",
+            "workflow_node_attempt_id",
+            "attempt_fingerprint",
+            "correlation_id",
+            "produced_at",
+            "review_view_fingerprint",
+        }
+    }
     return _sha256(
         _canonical_json(
             {
                 "payload": json.loads(canonical_spec_json(payload)),
-                "envelope": envelope_data,
+                "envelope": identity_envelope,
             }
         )
     )

@@ -410,9 +410,9 @@ def build_create_project_command(req: CreateProjectRequest) -> CreateProjectComm
 def build_authority_decision_request(
     project_id: int,
     req: AuthorityDecisionApiRequest,
-    expected_candidate_fingerprint: str | None = None,
+    expected_candidate_fingerprint: str,
 ) -> AuthorityReviewRequest:
-    """Translate one API choice plus an optional hidden browser expectation."""
+    """Translate one API choice plus its hidden browser expectation."""
     return AuthorityReviewRequest(
         project_id=project_id,
         idempotency_key=req.idempotency_key,
@@ -825,9 +825,9 @@ def review_specification(
     project_id: int,
     req: ReviewApiRequest,
     expected_candidate_fingerprint: Annotated[
-        str | None,
+        str,
         Header(alias="X-AgileForge-Expected-Candidate", include_in_schema=False),
-    ] = None,
+    ],
 ) -> dict[str, object]:
     """Record one semantic specification review decision."""
     return _result_payload(
@@ -1101,9 +1101,9 @@ def decide_project_authority(
     project_id: int,
     req: AuthorityDecisionApiRequest,
     expected_candidate_fingerprint: Annotated[
-        str | None,
+        str,
         Header(alias="X-AgileForge-Expected-Candidate", include_in_schema=False),
-    ] = None,
+    ],
 ) -> dict[str, object]:
     """Record one human choice with server-derived authority identity."""
     return _result_payload(

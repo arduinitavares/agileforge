@@ -64,16 +64,7 @@ def apply_authority_quality_gate(
 ) -> SpecAuthorityCompilationSuccess:
     """Return a copy with exact duplicates merged and quality report attached."""
     gated = success.model_copy(deep=True)
-    existing_quality = gated.authority_quality
-    existing_summary = (
-        existing_quality.summary if existing_quality is not None else None
-    )
-    existing_merged_items = (
-        list(existing_quality.merged_items) if existing_quality is not None else []
-    )
-    existing_review_groups = (
-        list(existing_quality.review_groups) if existing_quality is not None else []
-    )
+    gated.authority_quality = None
     original_assumption_count = len(gated.assumptions)
 
     merged_items: list[AuthorityQualityMergedItem] = []
@@ -85,21 +76,17 @@ def apply_authority_quality_gate(
     review_groups.extend(_near_duplicate_invariant_groups(gated.invariants))
     review_groups.extend(_over_split_groups(gated.invariants))
     review_groups.extend(_noisy_assumption_groups(gated.assumptions))
-    merged_items = _renumber_merged_items([*existing_merged_items, *merged_items])
-    review_groups = _dedupe_and_cap_groups([*existing_review_groups, *review_groups])
+    merged_items = _renumber_merged_items(merged_items)
+    review_groups = _dedupe_and_cap_groups(review_groups)
     merged_invariant_count = _removed_count_for_kind(merged_items, "invariant")
     merged_assumption_count = _removed_count_for_kind(merged_items, "assumption")
-    original_invariant_count = max(
-        existing_summary.original_invariant_count if existing_summary else 0,
-        len(gated.invariants) + merged_invariant_count,
-    )
+    original_invariant_count = len(gated.invariants) + merged_invariant_count
 
     summary = AuthorityQualitySummary(
         original_invariant_count=original_invariant_count,
         final_invariant_count=len(gated.invariants),
         merged_invariant_count=merged_invariant_count,
         merged_assumption_count=max(
-            existing_summary.merged_assumption_count if existing_summary else 0,
             original_assumption_count - len(gated.assumptions),
             merged_assumption_count,
         ),

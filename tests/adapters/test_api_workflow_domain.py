@@ -70,6 +70,7 @@ from services.node_attempt_replay import (
     NodeAttemptReplayQuery,
     TransitionReplayQuery,
 )
+from services.product_goal_interview_input import ProductGoalInterviewInputService
 from services.read_projections import DurableReadProjectionService
 from tests.adapters.test_command_renderer import position_fixture
 from tests.workflow.execution_fixtures import seed_started_execution
@@ -115,6 +116,7 @@ from workflow.requests import (
     DecideAuthority,
     DecideBacklog,
     DecideRoadmap,
+    DecideSpecification,
     DecideSprintPlan,
     DecideStory,
     RecordAuthorityFeedback,
@@ -2397,6 +2399,16 @@ def test_semantic_authority_review_replays_or_conflicts_before_advanced_position
             project_id=PROJECT_ID,
             decision="accepted",
             rationale="Authority is complete.",
+            expected_candidate_fingerprint="sha256:authority-17",
+            idempotency_key="authority-review-41",
+            actor="operator",
+        )
+    )
+    stale_candidate = application.decide_authority(
+        AuthorityReviewRequest(
+            project_id=PROJECT_ID,
+            decision="accepted",
+            rationale="Authority is complete.",
             expected_candidate_fingerprint="sha256:authority-replaced-after-review",
             idempotency_key="authority-review-41",
             actor="operator",
@@ -2407,12 +2419,15 @@ def test_semantic_authority_review_replays_or_conflicts_before_advanced_position
             project_id=PROJECT_ID,
             decision="rejected",
             rationale="Authority needs repair.",
+            expected_candidate_fingerprint="sha256:authority-17",
             idempotency_key="authority-review-41",
             actor="operator",
         )
     )
 
     assert replay == persisted.model_copy(update={"replayed": True})
+    assert stale_candidate.error is not None
+    assert stale_candidate.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
     assert conflict.error is not None
     assert conflict.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
     assert domain.position_calls == []
@@ -2507,7 +2522,7 @@ def test_semantic_specification_review_rejects_a_replaced_candidate() -> None:
     """A stale Specification review cannot select a newer candidate."""
     decision = NodeDecision(
         node_id="specification.review",
-        child_graph_id="product_discovery",
+        child_graph_id="specification",
         request_kind="decide_specification",
         category=NodeCategory.WAITING,
         recommendation_kind=RecommendationKind.REQUIRED,
@@ -2544,6 +2559,48 @@ def test_semantic_specification_review_rejects_a_replaced_candidate() -> None:
     assert result.error is not None
     assert result.error.code is WorkflowErrorCode.STALE_POSITION
     assert domain.requests == []
+
+
+def test_semantic_specification_review_replay_binds_exact_candidate(
+    engine: "Engine",
+) -> None:
+    """A prior decision cannot be replayed onto a replacement candidate."""
+    stored = DecideSpecification(
+        project_id=PROJECT_ID,
+        graph_version="agileforge.workflow.v2",
+        fact_fingerprint="facts-specification-review",
+        decision_fingerprint="decision-specification-review",
+        idempotency_key="specification-review-41",
+        actor="operator",
+        specification_candidate_id=31,
+        candidate_fingerprint="sha256:specification-a",
+        decision="accepted",
+        rationale="Specification is complete.",
+    )
+    persisted = TransitionResult(ok=True, applied_node_id="specification.review")
+    _store_completed_receipt(engine, stored, persisted)
+    domain = _BoundaryDomain(_vision_position())
+    application = AgileForgeApplication(
+        workflow_domain=domain,
+        product_goal_services=ProductGoalLifecycleServices(
+            interview_input=ProductGoalInterviewInputService(engine=engine),
+        ),
+    )
+
+    result = application.review_specification(
+        SpecificationReviewRequest(
+            project_id=PROJECT_ID,
+            decision="accepted",
+            rationale="Specification is complete.",
+            expected_candidate_fingerprint="sha256:specification-b",
+            idempotency_key="specification-review-41",
+            actor="operator",
+        )
+    )
+
+    assert result.error is not None
+    assert result.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
+    assert domain.position_calls == []
 
 
 def test_semantic_authority_review_rejects_a_replaced_candidate() -> None:
@@ -3617,7 +3674,11 @@ def test_api_authority_decision_accepts_semantic_choice_only() -> None:
         rationale="Reviewed",
     )
 
-    request = build_authority_decision_request(41, payload)
+    request = build_authority_decision_request(
+        41,
+        payload,
+        "sha256:authority-shown",
+    )
 
     assert isinstance(request, AuthorityReviewRequest)
     assert request.model_dump() == {
@@ -3628,6 +3689,7 @@ def test_api_authority_decision_accepts_semantic_choice_only() -> None:
         "actor": "dashboard-user",
         "correlation_id": "corr-api-41",
     }
+    assert request.expected_candidate_fingerprint == "sha256:authority-shown"
 
 
 def test_api_authority_feedback_accepts_trimmed_text_only() -> None:
@@ -4653,6 +4715,7 @@ def test_structured_conflict_advertises_actions_for_returned_position(
 
     response = client.post(
         "/api/projects/41/authority/decision",
+        headers={"X-AgileForge-Expected-Candidate": "sha256:authority-shown"},
         json={
             "idempotency_key": "stale-api-41",
             "actor": "dashboard-user",
@@ -4754,6 +4817,7 @@ def test_authority_endpoint_submits_exact_typed_request(
 
     response = client.post(
         "/api/projects/41/authority/decision",
+        headers={"X-AgileForge-Expected-Candidate": "sha256:authority-shown"},
         json={
             "idempotency_key": "accept-api-41",
             "actor": "dashboard-user",
@@ -4767,6 +4831,7 @@ def test_authority_endpoint_submits_exact_typed_request(
     request = cast("AuthorityReviewRequest", application.requests[0])
     assert isinstance(request, AuthorityReviewRequest)
     assert request.actor == "dashboard-user"
+    assert request.expected_candidate_fingerprint == "sha256:authority-shown"
 
 
 def test_specification_author_endpoint_submits_only_transport_metadata(
@@ -4837,6 +4902,28 @@ def test_browser_review_header_forwards_hidden_candidate_expectation(
         ),
     )
     assert request.expected_candidate_fingerprint == "sha256:candidate-shown"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/projects/41/specifications/review",
+        "/api/projects/41/authority/decision",
+    ],
+)
+def test_exact_review_requires_transport_captured_candidate(path: str) -> None:
+    """Reject a decision that is not bound to the packet the transport showed."""
+    response = TestClient(api_module.app).post(
+        path,
+        json={
+            "idempotency_key": "review-api-41",
+            "actor": "dashboard-ui",
+            "decision": "accepted",
+            "rationale": "Reviewed the candidate shown in the browser.",
+        },
+    )
+
+    assert response.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
 
 
 def test_browser_review_expectation_is_absent_from_public_api_schema() -> None:

@@ -108,6 +108,80 @@ test('Authority renders every advertised recovery step', () => {
     assert.doesNotMatch(repair, /Authority accepted/);
 });
 
+test('Authority review renders the complete deterministic artifact before controls', () => {
+    const { context } = loadFrontend();
+    const projection = {
+        pending_authority: {
+            authority_id: 91,
+            authority_fingerprint: 'sha256:exact-authority-binding',
+            spec_version_id: 23,
+            compiler_version: 'COMPILER-PROVENANCE-SENTINEL',
+            prompt_hash: 'PROMPT-PROVENANCE-SENTINEL',
+            compiled_at: '2026-08-11T12:00:00Z',
+            artifact: {
+                schema_version: 'agileforge.compiled_authority.v3',
+                scope_themes: ['SCOPE-THEME-SENTINEL'],
+                domain: 'DOMAIN-SENTINEL',
+                invariants: [{
+                    id: 'INVARIANT-ID-SENTINEL',
+                    type: 'REQUIRED_FIELD',
+                    source_item_id: 'SOURCE-ITEM-SENTINEL',
+                    source_level: 'MUST',
+                    parameters: { field_name: 'artifact_id' },
+                }],
+                eligible_feature_rules: [{ rule: 'ELIGIBLE-RULE-SENTINEL' }],
+                rejected_features: ['REJECTED-FEATURE-SENTINEL'],
+                gaps: ['GAP-SENTINEL'],
+                assumptions: [{ kind: 'ASSUMPTION-KIND-SENTINEL' }],
+                source_map: [{
+                    invariant_id: 'INVARIANT-ID-SENTINEL',
+                    excerpt: 'SOURCE-MAP-EXCERPT-SENTINEL',
+                    location: 'SOURCE-ITEM-SENTINEL',
+                }],
+                authority_quality: {
+                    review_groups: [{ reason: 'QUALITY-METADATA-SENTINEL' }],
+                },
+                compiler_version: 'ARTIFACT-COMPILER-SENTINEL',
+                prompt_hash: 'ARTIFACT-PROMPT-SENTINEL',
+                future_metadata: '<FUTURE-METADATA-SENTINEL>',
+            },
+            findings: [{ message: 'REVIEW-FINDING-SENTINEL' }],
+        },
+        findings: [{ message: 'REVIEW-FINDING-SENTINEL' }],
+    };
+
+    const rendered = context.authorityPanelMarkup(
+        projection,
+        [action('decide_authority', 'authority/decision')],
+    );
+    const controlsAt = rendered.indexOf('data-review-decision="accepted"');
+    assert.notEqual(controlsAt, -1);
+    for (const sentinel of [
+        'COMPILER-PROVENANCE-SENTINEL',
+        'PROMPT-PROVENANCE-SENTINEL',
+        'SCOPE-THEME-SENTINEL',
+        'DOMAIN-SENTINEL',
+        'INVARIANT-ID-SENTINEL',
+        'SOURCE-ITEM-SENTINEL',
+        'MUST',
+        'ELIGIBLE-RULE-SENTINEL',
+        'REJECTED-FEATURE-SENTINEL',
+        'ASSUMPTION-KIND-SENTINEL',
+        'SOURCE-MAP-EXCERPT-SENTINEL',
+        'QUALITY-METADATA-SENTINEL',
+        'ARTIFACT-COMPILER-SENTINEL',
+        'ARTIFACT-PROMPT-SENTINEL',
+        'FUTURE-METADATA-SENTINEL',
+        'REVIEW-FINDING-SENTINEL',
+    ]) {
+        const renderedAt = rendered.indexOf(sentinel);
+        assert.notEqual(renderedAt, -1, `${sentinel} must be rendered`);
+        assert.ok(renderedAt < controlsAt, `${sentinel} must precede controls`);
+    }
+    assert.match(rendered, /&lt;FUTURE-METADATA-SENTINEL&gt;/);
+    assert.doesNotMatch(rendered, /<FUTURE-METADATA-SENTINEL>/);
+});
+
 test('lifecycle stages omit mandatory Discovery', () => {
     const { context } = loadFrontend();
 

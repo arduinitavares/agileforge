@@ -231,7 +231,9 @@ def _specification_payload() -> SpecificationPayload:
                     "type": "REQ",
                     "level": "MUST",
                     "title": "Persist lifecycle facts",
-                    "statement": "The system MUST persist every lifecycle fact.",
+                    "statement": (
+                        "Every persisted lifecycle fact MUST include project_id."
+                    ),
                     "verification": "system-test",
                     "acceptance": ["The journey reaches post-Sprint triage."],
                 }
@@ -265,7 +267,9 @@ def _authority_artifact() -> SpecAuthorityCompilationSuccess:
         source_map=[
             SourceMapEntry(
                 invariant_id=invariant_id,
-                excerpt="The system MUST persist every lifecycle fact.",
+                excerpt=(
+                    "Every persisted lifecycle fact MUST include project_id."
+                ),
                 location="REQ.lifecycle.persist",
             )
         ],
@@ -1055,7 +1059,7 @@ def test_root_graph_has_exact_v2_lifecycle_order() -> None:
     assert tuple(child.child_graph_id for child in ROOT_GRAPH.root.children) == (
         "vision",
         "product_goal",
-        "product_discovery",
+        "specification",
         "authority",
         "backlog",
         "planning",

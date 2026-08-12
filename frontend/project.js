@@ -549,19 +549,6 @@ function specificationPanelMarkup(projection, actions = []) {
         ${review?.state === 'pending' ? reviewControlsMarkup('specification', reviewAction) : ''}`;
 }
 
-function invariantMarkup(invariant) {
-    const parameters = invariant?.parameters && typeof invariant.parameters === 'object'
-        ? Object.fromEntries(Object.entries(invariant.parameters).map(([key, value]) => [
-            key,
-            typeof value === 'string' ? value.replaceAll('_', ' ') : value,
-        ]))
-        : {};
-    return `<li class="min-w-0 border-l-2 border-slate-300 pl-3">
-        <p class="break-words text-sm font-semibold">${escapeWorkflowText(String(invariant?.type ?? 'Rule').replaceAll('_', ' '))}</p>
-        ${Object.keys(parameters).length > 0 ? `<div class="mt-2">${humanValueMarkup(parameters)}</div>` : ''}
-    </li>`;
-}
-
 function findingMarkup(finding) {
     const message = typeof finding === 'string' ? finding : finding?.message;
     if (!message) return '';
@@ -572,7 +559,17 @@ function findingMarkup(finding) {
 }
 
 function authorityPacketMarkup(authority, findings) {
-    const invariants = Array.isArray(authority?.invariants) ? authority.invariants : [];
+    const artifact = authority?.artifact && typeof authority.artifact === 'object'
+        ? authority.artifact
+        : { invariants: Array.isArray(authority?.invariants) ? authority.invariants : [] };
+    const provenance = {
+        authority_id: authority?.authority_id ?? null,
+        spec_version_id: authority?.spec_version_id ?? null,
+        status: authority?.status ?? null,
+        compiler_version: authority?.compiler_version ?? null,
+        prompt_hash: authority?.prompt_hash ?? null,
+        compiled_at: authority?.compiled_at ?? null,
+    };
     const allFindings = [...(Array.isArray(findings) ? findings : [])];
     (Array.isArray(authority?.findings) ? authority.findings : []).forEach((finding) => {
         const message = typeof finding === 'string' ? finding : finding?.message;
@@ -580,12 +577,14 @@ function authorityPacketMarkup(authority, findings) {
             allFindings.push(finding);
         }
     });
-    return `<div class="grid min-w-0 gap-6 lg:grid-cols-2">
+    return `<div class="grid min-w-0 gap-6">
         <div class="min-w-0">
-            <h3 class="text-sm font-semibold">Invariants</h3>
-            ${invariants.length > 0
-                ? `<ul class="mt-3 space-y-4">${invariants.map(invariantMarkup).join('')}</ul>`
-                : '<p class="mt-2 text-sm text-slate-500">No invariants were compiled.</p>'}
+            <h3 class="text-sm font-semibold">Compilation provenance</h3>
+            <pre class="mt-3 whitespace-pre-wrap break-anywhere rounded-lg border border-slate-300 bg-white p-4 font-mono text-xs leading-5">${escapeWorkflowText(JSON.stringify(provenance, null, 2))}</pre>
+        </div>
+        <div class="min-w-0">
+            <h3 class="text-sm font-semibold">Complete compiled Authority artifact</h3>
+            <pre data-authority-artifact="true" class="mt-3 whitespace-pre-wrap break-anywhere rounded-lg border border-slate-300 bg-white p-4 font-mono text-xs leading-5">${escapeWorkflowText(JSON.stringify(artifact, null, 2))}</pre>
         </div>
         <div class="min-w-0">
             <h3 class="text-sm font-semibold">Findings</h3>

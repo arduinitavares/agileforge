@@ -152,7 +152,7 @@ test('Specification is authored and reviewed without JSON editing', () => {
     assert.doesNotMatch(specification, /textarea|fingerprint/);
 });
 
-test('Authority and repository panels expose human controls and provenance only', () => {
+test('Authority and repository panels expose complete review data and human controls', () => {
     const context = loadFrontend();
     assert.equal(typeof context.authorityPanelMarkup, 'function');
     assert.equal(typeof context.repositoryPanelMarkup, 'function');
@@ -190,13 +190,17 @@ test('Authority and repository panels expose human controls and provenance only'
 
     assert.match(compile, />Compile</);
     assert.doesNotMatch(compile, /textarea|payload|model/i);
-    assert.match(review, /REQUIRED FIELD/);
-    assert.match(review, /project id/);
+    assert.match(review, /Complete compiled Authority artifact/);
+    assert.match(review, /REQUIRED_FIELD/);
+    assert.match(review, /project_id/);
+    assert.match(review, /INV-01/);
+    assert.match(review, /compiler_version/);
+    assert.match(review, /prompt_hash/);
     assert.match(review, /Confirm project ownership\./);
     assert.match(review, /data-review-decision="accepted"/);
     assert.match(review, /data-review-decision="feedback"/);
     assert.match(review, /data-review-decision="rejected"/);
-    assert.doesNotMatch(review, /INV-01|fingerprint|compiler_version/);
+    assert.doesNotMatch(review, /authority_fingerprint/);
     assert.match(repository, /\/tmp\/human-project/);
     assert.match(repository, /Detached at 01234567/);
     assert.match(repository, /Dirty/);

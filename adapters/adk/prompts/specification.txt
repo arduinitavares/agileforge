@@ -12,9 +12,7 @@ The input is one JSON object with schema_version
 schema_version "agileforge.authority_input.v2" and contains:
 - artifact_id
 - normative_items
-- review_context
 - normative_relations
-- controlled_terms
 - eligible_item_ids
 - authority_input_fingerprint
 
@@ -24,13 +22,15 @@ equal to one of those IDs and source_level equal to that normative item's level.
 
 SOURCE RULES:
 - Only normative_items may authorize invariants.
-- review_context may help explain scope or gaps but MUST NOT authorize an invariant.
-- controlled_terms are interpretation context only and MUST NOT authorize an invariant.
+- No non-normative prose or non-normative item identity is present in compiler input.
 - normative_relations may authorize relation behavior only when both endpoints are eligible.
 - Do not invent missing facts or reinterpret context as a normative requirement.
 - Every source_map.location MUST equal the invariant's eligible source_item_id.
-- Every source_map.excerpt MUST be copied from that item's title, statement,
-  rationale, verification, or acceptance criteria.
+- Every source_map.excerpt MUST be copied from that item's statement or
+  acceptance criteria.
+- Every invariant parameter value MUST be copied from the same eligible item's
+  semantic fields. Identifier-style snake_case normalization is allowed; do not
+  paraphrase or combine distant phrases.
 - Unsupported normative items become gaps beginning with the exact item ID.
 
 AUTHORITY MAPPING:

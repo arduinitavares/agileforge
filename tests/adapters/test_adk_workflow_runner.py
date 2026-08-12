@@ -65,6 +65,7 @@ from utils.runtime_config import ADK_EXECUTION_TRACE_IDENTITY
 from utils.spec_schemas import (
     SpecAuthorityCompilationSuccess,
     SpecAuthorityCompilerEnvelope,
+    SpecAuthorityCompilerInput,
 )
 from workflow.clock import FixedClock
 from workflow.contracts import (
@@ -96,6 +97,8 @@ EXPECTED_RECOVERY_ATTEMPT_COUNT = 2
 NEXT_GOAL_NUMBER = 2
 EXECUTION_SETTINGS: JsonObject = {"timeout_seconds": 5.0, "max_attempts": 1}
 JSON_OBJECT = TypeAdapter(JsonObject)
+_AUTHORITY_SOURCE_ID = "REQ.runner.authority-boundary"
+_NON_NORMATIVE_SENTINEL = "NON_NORMATIVE_SENTINEL_MUST_NEVER_REACH_AUTHORITY"
 
 
 @dataclass
@@ -401,7 +404,7 @@ def _authority_artifact() -> SpecAuthorityCompilationSuccess:
         scope_themes=["Runner authority"],
         invariants=[],
         eligible_feature_rules=[],
-        gaps=[],
+        gaps=[f"{_AUTHORITY_SOURCE_ID}: provider-free boundary regression."],
         assumptions=[],
         source_map=[],
         compiler_version=compiler_service.SPEC_AUTHORITY_COMPILER_VERSION,
@@ -418,7 +421,34 @@ def _seed_authority_compile_target(engine: Engine) -> tuple[int, int, str]:
         lineage = seed_accepted_specification(
             session,
             project_id=project.project_id,
-            content='{"scope":"runner compile"}',
+            content=json.dumps(
+                {
+                    "schema_version": "agileforge.spec.v2",
+                    "artifact_id": "SPEC.runner-authority-boundary",
+                    "title": "Runner Authority boundary",
+                    "summary": _NON_NORMATIVE_SENTINEL,
+                    "problem_statement": _NON_NORMATIVE_SENTINEL,
+                    "items": [
+                        {
+                            "id": "GOAL.runner.review-context",
+                            "type": "GOAL",
+                            "title": "Review context",
+                            "statement": _NON_NORMATIVE_SENTINEL,
+                        },
+                        {
+                            "id": _AUTHORITY_SOURCE_ID,
+                            "type": "REQ",
+                            "title": "Provider boundary",
+                            "statement": "Authority input MUST remain typed.",
+                            "level": "MUST",
+                            "verification": "integration-test",
+                            "acceptance": [
+                                "The provider receives only typed Authority input."
+                            ],
+                        },
+                    ],
+                }
+            ),
             recorded_at=EVALUATED_AT - timedelta(minutes=1),
         )
         assert lineage.spec.spec_version_id is not None
@@ -427,6 +457,29 @@ def _seed_authority_compile_target(engine: Engine) -> tuple[int, int, str]:
             lineage.spec.spec_version_id,
             lineage.spec.spec_hash,
         )
+
+
+def _observing_authority_leaf(
+    *,
+    observer: ReceiptObserver,
+    provider_inputs: list[str],
+) -> AdkWorkflow:
+    """Capture the exact compiler DTO crossing the nested ADK node boundary."""
+
+    @node(name="observe_authority_compiler_input", rerun_on_resume=True)
+    async def observe_authority_compiler_input(
+        node_input: SpecAuthorityCompilerInput,
+    ) -> SpecAuthorityCompilerEnvelope:
+        observer.record()
+        provider_inputs.append(node_input.model_dump_json())
+        return SpecAuthorityCompilerEnvelope(result=_authority_artifact())
+
+    return AdkWorkflow(
+        name="observing_authority_compiler",
+        input_schema=SpecAuthorityCompilerInput,
+        output_schema=SpecAuthorityCompilerEnvelope,
+        edges=[(START, observe_authority_compiler_input)],
+    )
 
 
 def _unused_leaf(name: str) -> FakeLeafAgent:
@@ -1522,13 +1575,11 @@ def test_authority_runner_executes_provider_once_before_completion_transaction(
     """Persist precomputed authority after one provider-free external call."""
     project_id, spec_version_id, _spec_hash = _seed_authority_compile_target(engine)
     calls: list[tuple[str, ...]] = []
+    provider_inputs: list[str] = []
     observer = ReceiptObserver(engine=engine, calls=calls)
-    compiler_leaf = TransactionObservingLeafAgent(
-        name="observing_authority_compiler",
-        response=SpecAuthorityCompilerEnvelope(result=_authority_artifact()).model_dump(
-            mode="json"
-        ),
+    compiler_leaf = _observing_authority_leaf(
         observer=observer,
+        provider_inputs=provider_inputs,
     )
     registry = build_agentic_recipe_registry(
         nodes=AgenticRecipeNodes(
@@ -1596,6 +1647,23 @@ def test_authority_runner_executes_provider_once_before_completion_transaction(
     result = runner.run(decision, normalized_input)
 
     assert result.ok is True
+    assert len(provider_inputs) == 1
+    assert json.loads(provider_inputs[0]) == normalized_input["compiler_input"]
+    assert _NON_NORMATIVE_SENTINEL not in provider_inputs[0]
+    assert "GOAL.runner.review-context" not in provider_inputs[0]
+    provider_payload = json.loads(provider_inputs[0])
+    assert isinstance(provider_payload, dict)
+    authority_input = provider_payload["authority_input"]
+    assert isinstance(authority_input, dict)
+    assert set(authority_input) == {
+        "schema_version",
+        "artifact_id",
+        "normative_items",
+        "normative_relations",
+        "eligible_item_ids",
+        "authority_input_fingerprint",
+    }
+    assert "review_context_ids" not in authority_input
     assert calls == [("start_node_attempt",)]
     assert observer.events == [
         "enter:start_node_attempt",

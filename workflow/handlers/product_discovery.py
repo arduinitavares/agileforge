@@ -20,9 +20,15 @@ from models.product_definition import (
 from models.specs import SpecRegistry
 from models.workflow import WorkflowNodeAttempt, WorkflowNodeAttemptOutcome
 from services.contracts.specification_authoring import (
+    SPECIFICATION_ACTIVE_REPOSITORY_SOURCE_ID,
     SPECIFICATION_AUTHOR_PROMPT_HASH,
     SPECIFICATION_AUTHOR_VERSION,
+    SPECIFICATION_PRODUCT_GOAL_SOURCE_ID,
+    SPECIFICATION_REPOSITORY_EVIDENCE_SOURCE_ID,
+    SPECIFICATION_VISION_SOURCE_ID,
     SpecificationAuthoringInput,
+    specification_authoring_fact_fingerprint,
+    specification_authoring_input_fingerprint,
 )
 from services.specs.candidate_contract import (
     CandidateBuildInput,
@@ -55,9 +61,6 @@ if TYPE_CHECKING:
 
 _JSON_OBJECT = TypeAdapter(JsonObject)
 _PRODUCER_CAPABILITY = "to-spec"
-_VISION_SOURCE_PREFIX = "SRC.vision."
-_GOAL_SOURCE_PREFIX = "SRC.product-goal."
-_REPOSITORY_EVIDENCE_SOURCE_PREFIX = "SRC.repository-evidence."
 
 
 class _GuardError(Exception):
@@ -614,11 +617,11 @@ def _validate_manifest(
             "The host source manifest contains duplicate identities.",
         )
     required = {
-        f"{_VISION_SOURCE_PREFIX}{lineage.vision.vision_artifact_id}": (
+        SPECIFICATION_VISION_SOURCE_ID: (
             CandidateSourceKind.VISION,
             lineage.vision.content_fingerprint,
         ),
-        f"{_GOAL_SOURCE_PREFIX}{lineage.goal.product_goal_artifact_id}": (
+        SPECIFICATION_PRODUCT_GOAL_SOURCE_ID: (
             CandidateSourceKind.PRODUCT_GOAL,
             lineage.goal.content_fingerprint,
         ),
@@ -630,21 +633,12 @@ def _validate_manifest(
                 WorkflowErrorCode.STALE_SPECIFICATION_INPUT,
                 f"The host source manifest does not match {source_id}.",
             )
-    for entry in manifest:
-        if not entry.source_id.startswith(_REPOSITORY_EVIDENCE_SOURCE_PREFIX):
-            continue
-        try:
-            snapshot_id = int(
-                entry.source_id.removeprefix(_REPOSITORY_EVIDENCE_SOURCE_PREFIX)
-            )
-        except ValueError as exc:
-            raise _GuardError(
-                WorkflowErrorCode.STALE_SPECIFICATION_INPUT,
-                "The repository evidence source identity is invalid.",
-            ) from exc
+    repository_evidence = by_id.get(SPECIFICATION_REPOSITORY_EVIDENCE_SOURCE_ID)
+    if repository_evidence is not None:
+        snapshot_id = lineage.vision.vision_evidence_snapshot_id
         snapshot = session.get(VisionEvidenceSnapshot, snapshot_id)
         if (
-            entry.kind
+            repository_evidence.kind
             not in {
                 CandidateSourceKind.REPOSITORY,
                 CandidateSourceKind.RESEARCH,
@@ -653,7 +647,7 @@ def _validate_manifest(
             or snapshot.project_id != project_id
             or snapshot.vision_evidence_snapshot_id
             != lineage.vision.vision_evidence_snapshot_id
-            or snapshot.evidence_fingerprint != entry.fingerprint
+            or snapshot.evidence_fingerprint != repository_evidence.fingerprint
         ):
             raise _GuardError(
                 WorkflowErrorCode.STALE_SPECIFICATION_INPUT,
@@ -715,8 +709,12 @@ def execute_complete_specification_authoring(
                 ),
                 accepted_product_goal_fingerprint=lineage.goal.content_fingerprint,
                 source_manifest=manifest,
-                accepted_fact_fingerprint=attempt.business_fact_fingerprint,
-                producer_input_fingerprint=attempt.input_fingerprint,
+                accepted_fact_fingerprint=(
+                    specification_authoring_fact_fingerprint(authoring_input)
+                ),
+                producer_input_fingerprint=(
+                    specification_authoring_input_fingerprint(authoring_input)
+                ),
                 producer_capability=_PRODUCER_CAPABILITY,
                 producer_version=SPECIFICATION_AUTHOR_VERSION,
                 model_id=attempt.model_id,
@@ -799,13 +797,15 @@ def execute_complete_specification_authoring(
     )
 
 
-def _validate_candidate_attempt(
+def _validate_candidate_attempt(  # noqa: PLR0913
     session: Session,
     *,
     candidate: SpecificationCandidate,
     envelope: SpecificationCandidateEnvelope,
     payload: SpecificationPayload,
     lineage: _CandidateLineage,
+    repository_source_fingerprint: str | None,
+    require_current_repository_source: bool,
 ) -> None:
     attempt = session.get(WorkflowNodeAttempt, candidate.workflow_node_attempt_id)
     outcome = session.exec(
@@ -828,6 +828,27 @@ def _validate_candidate_attempt(
             "The candidate authoring attempt is not an exact successful attempt.",
         )
     authoring_input, manifest, settings = _attempt_inputs(attempt)
+    active_repository_source = next(
+        (
+            entry
+            for entry in manifest
+            if entry.source_id == SPECIFICATION_ACTIVE_REPOSITORY_SOURCE_ID
+        ),
+        None,
+    )
+    expected_repository_fingerprint = (
+        None
+        if active_repository_source is None
+        else active_repository_source.fingerprint
+    )
+    if (
+        require_current_repository_source
+        and repository_source_fingerprint != expected_repository_fingerprint
+    ):
+        raise _GuardError(
+            WorkflowErrorCode.STALE_SPECIFICATION_INPUT,
+            "The live repository source does not match the candidate source bundle.",
+        )
     _validate_attempt_contract(authoring_input, lineage)
     _validate_manifest(
         session,
@@ -840,8 +861,10 @@ def _validate_candidate_attempt(
         envelope.source_manifest != tuple(
             sorted(manifest, key=lambda item: item.source_id)
         )
-        or envelope.accepted_fact_fingerprint != attempt.business_fact_fingerprint
-        or envelope.producer_input_fingerprint != attempt.input_fingerprint
+        or envelope.accepted_fact_fingerprint
+        != specification_authoring_fact_fingerprint(authoring_input)
+        or envelope.producer_input_fingerprint
+        != specification_authoring_input_fingerprint(authoring_input)
         or envelope.model_id != attempt.model_id
         or envelope.model_configuration_fingerprint
         != _model_configuration_fingerprint(attempt, settings)
@@ -887,6 +910,53 @@ def _lineage_for_review(
         reference=goal_ref,
         vision=accepted_vision,
     )
+    supersedes: SpecificationCandidate | None = None
+    if candidate.supersedes_specification_candidate_id is not None:
+        supersedes = _candidate_by_reference(
+            session,
+            project_id=candidate.project_id,
+            reference=FactReference(
+                fact_type="specification_candidate",
+                fact_id=str(candidate.supersedes_specification_candidate_id),
+                fingerprint=cast("str", candidate.supersedes_candidate_fingerprint),
+            ),
+        )
+        _load_candidate(supersedes)
+        terminal = session.exec(
+            select(SpecificationDecision).where(
+                col(SpecificationDecision.project_id) == candidate.project_id,
+                col(SpecificationDecision.specification_candidate_id)
+                == supersedes.specification_candidate_id,
+                col(SpecificationDecision.candidate_fingerprint)
+                == supersedes.candidate_fingerprint,
+            )
+        ).one_or_none()
+        if (
+            terminal is None
+            or terminal.decision not in {"rejected", "feedback"}
+            or (
+                supersedes.candidate_kind,
+                supersedes.vision_artifact_id,
+                supersedes.vision_fingerprint,
+                supersedes.product_goal_artifact_id,
+                supersedes.product_goal_fingerprint,
+                supersedes.base_spec_version_id,
+                supersedes.base_spec_hash,
+            )
+            != (
+                candidate.candidate_kind,
+                candidate.vision_artifact_id,
+                candidate.vision_fingerprint,
+                candidate.product_goal_artifact_id,
+                candidate.product_goal_fingerprint,
+                candidate.base_spec_version_id,
+                candidate.base_spec_hash,
+            )
+        ):
+            raise _GuardError(
+                WorkflowErrorCode.SPECIFICATION_CANDIDATE_CONFLICT,
+                "The Specification revision does not match exact rejected feedback.",
+            )
     if candidate.candidate_kind == CandidateKind.INITIAL.value:
         return _CandidateLineage(
             vision=accepted_vision,
@@ -894,7 +964,7 @@ def _lineage_for_review(
             candidate_kind=CandidateKind.INITIAL,
             base=None,
             base_payload=None,
-            supersedes=None,
+            supersedes=supersedes,
         )
     if candidate.base_spec_version_id is None or candidate.base_spec_hash is None:
         raise _GuardError(
@@ -923,7 +993,7 @@ def _lineage_for_review(
             project_id=candidate.project_id,
             base=base,
         ),
-        supersedes=None,
+        supersedes=supersedes,
     )
 
 
@@ -962,6 +1032,8 @@ def _validated_review_target(
         envelope=envelope,
         payload=payload,
         lineage=lineage,
+        repository_source_fingerprint=request.repository_source_fingerprint,
+        require_current_repository_source=request.decision == "accepted",
     )
     if (
         request.decision in {"rejected", "feedback"}

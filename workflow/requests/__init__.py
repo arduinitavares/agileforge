@@ -1,6 +1,11 @@
 """Guarded request contracts for workflow graph transitions."""
 
-from workflow.requests.attempts import FailNodeAttempt, StartNodeAttempt
+from workflow.requests.attempts import (
+    FailNodeAttempt,
+    ObsoleteNodeAttempt,
+    RevalidateNodeAttempt,
+    StartNodeAttempt,
+)
 from workflow.requests.authority import (
     CompileAuthority,
     DecideAuthority,
@@ -82,6 +87,8 @@ type TransitionRequest = (
     | CloseSprint
     | RecordPostSprintTriage
     | StartNodeAttempt
+    | RevalidateNodeAttempt
+    | ObsoleteNodeAttempt
     | FailNodeAttempt
 )
 
@@ -106,6 +113,7 @@ __all__ = [
     "FailNodeAttempt",
     "FulfillProductGoal",
     "GenerateVisionBootstrap",
+    "ObsoleteNodeAttempt",
     "RecordAuthorityFeedback",
     "RecordBacklogDraft",
     "RecordPostSprintTriage",
@@ -118,6 +126,7 @@ __all__ = [
     "RepairAuthority",
     "RepairStoryReadiness",
     "RepositoryBindingInput",
+    "RevalidateNodeAttempt",
     "ReviewSprint",
     "StartNodeAttempt",
     "StartSprint",

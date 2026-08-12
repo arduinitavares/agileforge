@@ -217,14 +217,13 @@ def test_builds_exact_typed_v2_input_without_provenance(engine: Engine) -> None:
     assert compiler_input.authority_input.eligible_item_ids == (
         "REQ.authority.exact-input",
     )
-    assert tuple(
-        item.id for item in compiler_input.authority_input.review_context
-    ) == ("REQ.authority.background",)
     serialized = json.dumps(result["compiler_input"])
     assert "SECRET PROVENANCE PROSE" not in serialized
     assert "SECRET EXTERNAL REFERENCE PROSE" not in serialized
     assert "source_notes" not in serialized
     assert "external_references" not in serialized
+    assert "This item is context, not an invariant source." not in serialized
+    assert "REQ.authority.background" not in serialized
 
 
 @pytest.mark.parametrize("failure", ["superseded", "decision-mismatch"])

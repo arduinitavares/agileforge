@@ -242,6 +242,13 @@ class _SpecificationAuthoringInputPort(Protocol):
         decision: NodeDecision,
     ) -> JsonObject: ...
 
+    def revalidate_sources(
+        self,
+        project_id: int,
+        persisted_input: JsonObject,
+        /,
+    ) -> WorkflowError | None: ...
+
 
 class _AuthorityCompilationInputPort(Protocol):
     """Host preparation for one authority compilation attempt."""
@@ -1585,8 +1592,7 @@ class SpecificationReviewRequest(FrozenModel):
     project_id: int
     decision: Literal["accepted", "rejected", "feedback"]
     rationale: SemanticText
-    expected_candidate_fingerprint: str | None = Field(
-        default=None,
+    expected_candidate_fingerprint: str = Field(
         min_length=1,
         exclude=True,
         repr=False,
@@ -1625,13 +1631,12 @@ class AuthorityCompileRequest(FrozenModel):
 
 
 class AuthorityReviewRequest(FrozenModel):
-    """Semantic authority decision with an optional browser review expectation."""
+    """Semantic authority decision bound to the exact reviewed candidate."""
 
     project_id: int
     decision: Literal["accepted", "rejected"]
     rationale: SemanticText
-    expected_candidate_fingerprint: str | None = Field(
-        default=None,
+    expected_candidate_fingerprint: str = Field(
         min_length=1,
         exclude=True,
         repr=False,
@@ -1860,6 +1865,12 @@ class AgileForgeApplication:
                 lease_seconds=_LEASE_SECONDS,
                 actor=request.actor,
                 correlation_id=request.correlation_id,
+            ),
+            specification_source_check=(
+                self._specification_authoring_input.revalidate_sources
+                if request.node_id == "specification.author"
+                and self._specification_authoring_input is not None
+                else None
             ),
         )
         return runner.run_request(
@@ -3057,6 +3068,7 @@ class AgileForgeApplication:
                 operator_input={
                     "decision": request.decision,
                     "rationale": request.rationale,
+                    "candidate_fingerprint": request.expected_candidate_fingerprint,
                 },
             )
         )
@@ -3170,6 +3182,20 @@ class AgileForgeApplication:
         if decision is None or decision.category is not NodeCategory.AVAILABLE:
             return _transition_not_available(position, "specification.author")
         model_id = get_model_id(AGENTIC_MODEL_ROLES["specification.author"])
+        try:
+            input_payload = input_service.build(
+                project_id=request.project_id,
+                decision=decision,
+            )
+        except VisionEvidenceCollectionError as error:
+            return TransitionResult(
+                ok=False,
+                position=position,
+                error=WorkflowError(
+                    code=_vision_evidence_workflow_error_code(error.code),
+                    message=str(error),
+                ),
+            )
         return self.run_agentic_action(
             AgenticActionRequest(
                 project_id=request.project_id,
@@ -3178,10 +3204,7 @@ class AgileForgeApplication:
                 decision_fingerprint=decision.decision_fingerprint,
                 node_id="specification.author",
                 instance_key=decision.instance_key,
-                input_payload=input_service.build(
-                    project_id=request.project_id,
-                    decision=decision,
-                ),
+                input_payload=input_payload,
                 model_id=model_id,
                 idempotency_key=request.idempotency_key,
                 actor=request.actor,
@@ -3204,6 +3227,7 @@ class AgileForgeApplication:
                 operator_input={
                     "decision": request.decision,
                     "rationale": request.rationale,
+                    "candidate_fingerprint": request.expected_candidate_fingerprint,
                 },
             )
         )
@@ -3304,6 +3328,9 @@ class AgileForgeApplication:
                     operator_input={
                         "decision": request.decision,
                         "rationale": request.rationale,
+                        "authority_fingerprint": (
+                            request.expected_candidate_fingerprint
+                        ),
                     },
                 )
             )
@@ -4533,11 +4560,18 @@ def production_application() -> AgileForgeApplication:
     )
     engine = get_engine()
     ensure_business_db_ready(engine)
+    specification_authoring_input = SpecificationAuthoringInputService(
+        engine=engine,
+        repository_probe=GitPythonRepositoryProbe(),
+    )
     domain = WorkflowDomain(
         engine=engine,
         graph=graph,
         clock=SystemClock(),
         adk_recipe_registry=registry,
+        specification_source_check=(
+            specification_authoring_input.revalidate_sources
+        ),
     )
 
     application = AgileForgeApplication(
@@ -4551,9 +4585,7 @@ def production_application() -> AgileForgeApplication:
         product_goal_services=ProductGoalLifecycleServices(
             interview_input=ProductGoalInterviewInputService(engine=engine),
         ),
-        specification_authoring_input=SpecificationAuthoringInputService(
-            engine=engine
-        ),
+        specification_authoring_input=specification_authoring_input,
         authority_compilation_input=AuthorityCompilationInputService(engine=engine),
         authority_review_selection=AuthorityReviewSelectionService(engine=engine),
         authority_repair_input=AuthorityRepairInputService(engine=engine),

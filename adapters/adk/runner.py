@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Literal, Protocol
 from uuid import uuid4
 
 from google.adk.apps import App, ResumabilityConfig
@@ -18,7 +18,16 @@ from openai import OpenAIError
 from pydantic import TypeAdapter
 from sqlalchemy.exc import SQLAlchemyError
 
-from adapters.adk.errors import VisionAgenticPreflightError
+from adapters.adk.errors import (
+    AttemptRevalidationError,
+    AttemptRevalidationInfrastructureError,
+    SpecificationAgenticExecutionError,
+    VisionAgenticPreflightError,
+)
+from adapters.adk.preflight import (
+    SpecificationAttemptRevalidator,
+    bind_specification_attempt_revalidator,
+)
 from adapters.adk.recipes import (
     AdkRecipe,
     AdkRecipeRegistry,
@@ -39,7 +48,13 @@ from workflow.contracts import (
     WorkflowErrorCode,
     WorkflowPosition,
 )
-from workflow.requests import FailNodeAttempt, StartNodeAttempt, TransitionRequest
+from workflow.requests import (
+    FailNodeAttempt,
+    ObsoleteNodeAttempt,
+    RevalidateNodeAttempt,
+    StartNodeAttempt,
+    TransitionRequest,
+)
 
 
 class WorkflowDomainRunnerPort(Protocol):
@@ -64,6 +79,18 @@ class WorkflowDomainRunnerPort(Protocol):
         ...
 
 
+class SpecificationSourceCheck(Protocol):
+    """Re-probe Specification source evidence at the external-call boundary."""
+
+    def __call__(
+        self,
+        project_id: int,
+        persisted_input: JsonObject,
+        /,
+    ) -> WorkflowError | None:
+        """Return stale evidence detail, or None while sources remain current."""
+        ...
+
 _TRANSITION_REQUEST = TypeAdapter(TransitionRequest)
 _ADK_EXECUTION_ERRORS: tuple[type[BaseException], ...] = (
     AlreadyExistsError,
@@ -76,6 +103,13 @@ _ADK_EXECUTION_ERRORS: tuple[type[BaseException], ...] = (
     SQLAlchemyError,
     TypeError,
     ValueError,
+)
+_AGENTIC_EXECUTION_ERRORS: tuple[type[BaseException], ...] = (
+    AttemptRevalidationError,
+    AttemptRevalidationInfrastructureError,
+    VisionAgenticPreflightError,
+    SpecificationAgenticExecutionError,
+    *_ADK_EXECUTION_ERRORS,
 )
 
 
@@ -117,6 +151,16 @@ class AdkRunRequest:
     correlation_id: str | None = None
 
 
+@dataclass(frozen=True)
+class _AttemptFailure:
+    """Durable and transport-facing views of one execution failure."""
+
+    durable_code: str
+    durable_message: str
+    transport_code: WorkflowErrorCode
+    transport_message: str
+
+
 class AdkWorkflowRunner:
     """Execute an available decision while durable facts remain authoritative.
 
@@ -133,12 +177,14 @@ class AdkWorkflowRunner:
         registry: AdkRecipeRegistry,
         config: AdkExecutionConfig,
         session_service: BaseSessionService | None = None,
+        specification_source_check: SpecificationSourceCheck | None = None,
     ) -> None:
         """Retain domain, recipe, execution, and trace-store dependencies."""
         self._domain = domain
         self._registry = registry
         self._config = config
         self._session_service = session_service
+        self._specification_source_check = specification_source_check
 
     def run(
         self,
@@ -235,66 +281,247 @@ class AdkWorkflowRunner:
             correlation_id=start_request.correlation_id,
             normalized_input=persisted_input,
         )
+        pre_provider_check = self._specification_attempt_revalidator(
+            request=request,
+            attempt_id=attempt_id,
+            attempt_fingerprint=attempt_fingerprint,
+            persisted_input=persisted_input,
+        )
         try:
             recipe = self._registry.require(request.node_id)
-            output = asyncio.run(
-                self._run_recipe(
-                    recipe,
-                    attempt_fingerprint=attempt_fingerprint,
-                    input_payload=persisted_input,
+            with bind_specification_attempt_revalidator(pre_provider_check):
+                output = asyncio.run(
+                    self._run_recipe(
+                        recipe,
+                        attempt_fingerprint=attempt_fingerprint,
+                        input_payload=persisted_input,
+                    )
                 )
-            )
             completion = recipe.output_adapter(output, context)
-        except VisionAgenticPreflightError as error:
-            failed = self._domain.transition(
-                FailNodeAttempt(
-                    project_id=self._config.project_id,
-                    attempt_id=attempt_id,
-                    attempt_fingerprint=attempt_fingerprint,
-                    failure_code=error.code.value,
-                    failure_message=error.message,
-                    idempotency_key=f"{request.idempotency_key}:failure",
-                    actor=request.actor,
-                    correlation_id=request.correlation_id,
-                )
-            )
-            if (
-                failed.error is not None
-                and failed.error.code is WorkflowErrorCode.ATTEMPT_OBSOLETE
-            ):
-                return failed
-            return TransitionResult(
-                ok=False,
-                position=failed.position,
-                error=WorkflowError(code=error.code, message=error.message),
-            )
-        except _ADK_EXECUTION_ERRORS as error:
-            failed = self._domain.transition(
-                FailNodeAttempt(
-                    project_id=self._config.project_id,
-                    attempt_id=attempt_id,
-                    attempt_fingerprint=attempt_fingerprint,
-                    failure_code="ADK_EXECUTION_FAILED",
-                    failure_message=str(error) or type(error).__name__,
-                    idempotency_key=f"{request.idempotency_key}:failure",
-                    actor=request.actor,
-                    correlation_id=request.correlation_id,
-                )
-            )
-            if (
-                failed.error is not None
-                and failed.error.code is WorkflowErrorCode.ATTEMPT_OBSOLETE
-            ):
-                return failed
-            return TransitionResult(
-                ok=False,
-                position=failed.position,
-                error=WorkflowError(
-                    code=WorkflowErrorCode.EXTERNAL_EXECUTION_FAILED,
-                    message="ADK recipe execution or output validation failed.",
-                ),
+        except _AGENTIC_EXECUTION_ERRORS as error:
+            return self._handle_execution_failure(
+                request=request,
+                attempt_id=attempt_id,
+                attempt_fingerprint=attempt_fingerprint,
+                error=error,
             )
         return self._domain.transition(_TRANSITION_REQUEST.validate_python(completion))
+
+    def _specification_attempt_revalidator(
+        self,
+        *,
+        request: AdkRunRequest,
+        attempt_id: int,
+        attempt_fingerprint: str,
+        persisted_input: JsonObject,
+    ) -> SpecificationAttemptRevalidator | None:
+        """Build the exact leaf-boundary checks only for Specification authoring."""
+        if request.node_id != "specification.author":
+            return None
+
+        def revalidate(
+            phase: Literal["before_provider", "after_provider"],
+        ) -> TransitionResult:
+            try:
+                return self._revalidate_specification_sources(
+                    request=request,
+                    attempt_id=attempt_id,
+                    attempt_fingerprint=attempt_fingerprint,
+                    persisted_input=persisted_input,
+                    check_id=f"{phase}:{uuid4()}",
+                )
+            except Exception as error:
+                raise AttemptRevalidationInfrastructureError from error
+
+        return revalidate
+
+    def _revalidate_specification_sources(
+        self,
+        *,
+        request: AdkRunRequest,
+        attempt_id: int,
+        attempt_fingerprint: str,
+        persisted_input: JsonObject,
+        check_id: str,
+    ) -> TransitionResult:
+        """Recheck durable facts, then re-probe host sources consecutively."""
+        revalidated = self._revalidate_specification_attempt(
+            request=request,
+            attempt_id=attempt_id,
+            attempt_fingerprint=attempt_fingerprint,
+            check_id=check_id,
+        )
+        source_check = self._specification_source_check
+        if not revalidated.ok or revalidated.replayed or source_check is None:
+            return revalidated
+        source_error = source_check(self._config.project_id, persisted_input)
+        if source_error is None:
+            return revalidated
+        self._require_stale_source_error(source_error)
+        return self._domain.transition(
+            ObsoleteNodeAttempt(
+                project_id=self._config.project_id,
+                attempt_id=attempt_id,
+                attempt_fingerprint=attempt_fingerprint,
+                error_message=source_error.message,
+                idempotency_key=(
+                    f"{request.idempotency_key}:source-obsolete:{check_id}"
+                ),
+                actor=request.actor,
+                correlation_id=request.correlation_id,
+            )
+        )
+
+    @staticmethod
+    def _require_stale_source_error(source_error: WorkflowError) -> None:
+        """Reject source-check results outside their closed stale-input contract."""
+        if source_error.code is not WorkflowErrorCode.STALE_SPECIFICATION_INPUT:
+            msg = "Specification source checks may only report stale input."
+            raise ValueError(msg)
+
+    def _revalidate_specification_attempt(
+        self,
+        *,
+        request: AdkRunRequest,
+        attempt_id: int,
+        attempt_fingerprint: str,
+        check_id: str,
+    ) -> TransitionResult:
+        """Recheck the durable Specification authority at the call boundary."""
+        return self._domain.transition(
+            RevalidateNodeAttempt(
+                project_id=self._config.project_id,
+                attempt_id=attempt_id,
+                attempt_fingerprint=attempt_fingerprint,
+                idempotency_key=f"{request.idempotency_key}:revalidation:{check_id}",
+                actor=request.actor,
+                correlation_id=request.correlation_id,
+            )
+        )
+
+    def _handle_execution_failure(
+        self,
+        *,
+        request: AdkRunRequest,
+        attempt_id: int,
+        attempt_fingerprint: str,
+        error: BaseException,
+    ) -> TransitionResult:
+        """Map one recipe failure without changing non-Specification semantics."""
+        if isinstance(error, AttemptRevalidationError):
+            return error.result
+        if isinstance(error, AttemptRevalidationInfrastructureError):
+            return self._fail_attempt(
+                request=request,
+                attempt_id=attempt_id,
+                attempt_fingerprint=attempt_fingerprint,
+                failure=_AttemptFailure(
+                    durable_code="ADK_EXECUTION_FAILED",
+                    durable_message=str(error),
+                    transport_code=WorkflowErrorCode.EXTERNAL_EXECUTION_FAILED,
+                    transport_message=(
+                        "ADK recipe execution or output validation failed."
+                    ),
+                ),
+            )
+        if isinstance(error, VisionAgenticPreflightError):
+            return self._fail_attempt(
+                request=request,
+                attempt_id=attempt_id,
+                attempt_fingerprint=attempt_fingerprint,
+                failure=_AttemptFailure(
+                    durable_code=error.code.value,
+                    durable_message=error.message,
+                    transport_code=error.code,
+                    transport_message=error.message,
+                ),
+            )
+        if isinstance(error, SpecificationAgenticExecutionError):
+            return self._fail_specification_attempt(
+                request=request,
+                attempt_id=attempt_id,
+                attempt_fingerprint=attempt_fingerprint,
+                code=error.code,
+                message=error.message,
+            )
+        if request.node_id == "specification.author":
+            return self._fail_specification_attempt(
+                request=request,
+                attempt_id=attempt_id,
+                attempt_fingerprint=attempt_fingerprint,
+                code=WorkflowErrorCode.SPECIFICATION_PRODUCER_FAILED,
+                message="Specification author provider execution failed.",
+            )
+        return self._fail_attempt(
+            request=request,
+            attempt_id=attempt_id,
+            attempt_fingerprint=attempt_fingerprint,
+            failure=_AttemptFailure(
+                durable_code="ADK_EXECUTION_FAILED",
+                durable_message=str(error) or type(error).__name__,
+                transport_code=WorkflowErrorCode.EXTERNAL_EXECUTION_FAILED,
+                transport_message=(
+                    "ADK recipe execution or output validation failed."
+                ),
+            ),
+        )
+
+    def _fail_specification_attempt(
+        self,
+        *,
+        request: AdkRunRequest,
+        attempt_id: int,
+        attempt_fingerprint: str,
+        code: WorkflowErrorCode,
+        message: str,
+    ) -> TransitionResult:
+        """Persist and return one stable Specification authoring failure."""
+        return self._fail_attempt(
+            request=request,
+            attempt_id=attempt_id,
+            attempt_fingerprint=attempt_fingerprint,
+            failure=_AttemptFailure(
+                durable_code=code.value,
+                durable_message=message,
+                transport_code=code,
+                transport_message=message,
+            ),
+        )
+
+    def _fail_attempt(
+        self,
+        *,
+        request: AdkRunRequest,
+        attempt_id: int,
+        attempt_fingerprint: str,
+        failure: _AttemptFailure,
+    ) -> TransitionResult:
+        """Close one exact attempt and retain its transport error contract."""
+        failed = self._domain.transition(
+            FailNodeAttempt(
+                project_id=self._config.project_id,
+                attempt_id=attempt_id,
+                attempt_fingerprint=attempt_fingerprint,
+                failure_code=failure.durable_code,
+                failure_message=failure.durable_message,
+                idempotency_key=f"{request.idempotency_key}:failure",
+                actor=request.actor,
+                correlation_id=request.correlation_id,
+            )
+        )
+        if (
+            failed.error is not None
+            and failed.error.code is WorkflowErrorCode.ATTEMPT_OBSOLETE
+        ):
+            return failed
+        return TransitionResult(
+            ok=False,
+            position=failed.position,
+            error=WorkflowError(
+                code=failure.transport_code,
+                message=failure.transport_message,
+            ),
+        )
 
     async def _run_recipe(
         self,
@@ -346,4 +573,5 @@ __all__ = [
     "AdkRunGuards",
     "AdkRunRequest",
     "AdkWorkflowRunner",
+    "SpecificationSourceCheck",
 ]

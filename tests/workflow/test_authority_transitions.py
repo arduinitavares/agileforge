@@ -29,6 +29,11 @@ from services.specs.compiler_service import (
     compile_spec_authority_for_version_in_session,
 )
 from tests.workflow.lifecycle_fixtures import seed_accepted_specification
+from utils.spec_authority_assumptions import (
+    AcceptedNormativeCountAssumptionClaim,
+    StructuredSpecClaimProvenance,
+)
+from utils.spec_authority_ir import IrProvenance
 from utils.spec_schemas import (
     Invariant,
     InvariantType,
@@ -62,6 +67,10 @@ EVALUATED_AT = datetime(2026, 8, 2, 12, tzinfo=UTC)
 DEFAULT_MODEL = "openrouter/openai/gpt-5.6-luna"
 EXPECTED_REPAIRED_AUTHORITY_COUNT = 2
 EXPECTED_COMPILE_AND_DECISION_RECEIPTS = 2
+AUTHORITY_REQUIREMENT_STATEMENT = (
+    "Every Project MUST review compiled authority. "
+    "The required project_id field MUST be included."
+)
 
 
 class _RequestGuards(TypedDict):
@@ -109,7 +118,12 @@ def _domain(engine: Engine) -> WorkflowDomain:
     )
 
 
-def _seed_current_spec(engine: Engine, spec_path: Path) -> tuple[int, int, str]:
+def _seed_current_spec(
+    engine: Engine,
+    spec_path: Path,
+    *,
+    statement: str = AUTHORITY_REQUIREMENT_STATEMENT,
+) -> tuple[int, int, str]:
     _ = spec_path
     content = json.dumps(
         {
@@ -124,7 +138,7 @@ def _seed_current_spec(engine: Engine, spec_path: Path) -> tuple[int, int, str]:
                     "type": "REQ",
                     "level": "MUST",
                     "title": "Review authority",
-                    "statement": "Every Project MUST review compiled authority.",
+                    "statement": statement,
                     "verification": "system-test",
                     "acceptance": ["A terminal review is stored."],
                 }
@@ -173,13 +187,14 @@ def _compile_request(
     spec_version_id: int,
     spec_hash: str,
     idempotency_key: str = "compile-authority",
+    compiled_authority: SpecAuthorityCompilationSuccess | None = None,
 ) -> CompileAuthority:
     return CompileAuthority(
         **_guards(position, "authority.compile"),
         idempotency_key=idempotency_key,
         spec_version_id=spec_version_id,
         expected_spec_hash=spec_hash,
-        compiled_authority=_success_artifact(),
+        compiled_authority=compiled_authority or _success_artifact(),
     )
 
 
@@ -247,7 +262,7 @@ def _approve_replacement_spec(
     assert old_spec is not None
     payload = {
         "schema_version": "agileforge.spec.v2",
-        "artifact_id": "SPEC.authority.replacement",
+        "artifact_id": "SPEC.authority",
         "title": "Replacement authority workflow",
         "summary": "Replacement authority workflow scope.",
         "problem_statement": "Authority must follow the replacement payload.",
@@ -296,9 +311,10 @@ def _tamper_review_input(
         authority.compiled_artifact_json = json.dumps(artifact)
         session.add(authority)
     elif target == "compiler_coverage":
-        authority.rejected_features = json.dumps(
-            [{"id": "REJ-tampered", "text": "Changed review classification."}]
-        )
+        assert authority.compiled_artifact_json is not None
+        artifact = json.loads(authority.compiled_artifact_json)
+        artifact["rejected_features"] = ["Changed review classification."]
+        authority.compiled_artifact_json = json.dumps(artifact)
         session.add(authority)
     elif target == "project_review_context":
         project = session.get(Project, project_id)
@@ -591,6 +607,78 @@ def test_decision_binds_exact_pending_authority_and_review_fingerprint(
         row = session.exec(select(SpecAuthorityAcceptance)).one()
         assert row.review_fingerprint == review.review_fingerprint
         assert row.authority_fingerprint == review.authority_fingerprint
+
+
+def test_review_projection_exposes_exact_complete_stored_authority_artifact(
+    engine: Engine,
+    tmp_path: Path,
+) -> None:
+    """Review exposes the validated stored artifact without host-side rewriting."""
+    source_statement = (
+        "Every Project MUST require the project_id field for compiled authority review."
+    )
+    project_id, spec_version_id, spec_hash = _seed_current_spec(
+        engine,
+        tmp_path / "exact-artifact.md",
+        statement=source_statement,
+    )
+    compiled_authority = SpecAuthorityCompilationSuccess.model_validate(
+        {
+            **_success_artifact().model_dump(mode="json"),
+            "assumptions": [
+                AcceptedNormativeCountAssumptionClaim(
+                    kind="accepted_normative_count",
+                    count=2,
+                    provenance=StructuredSpecClaimProvenance(
+                        source="structured_spec",
+                        artifact_id="SPEC.authority",
+                        source_item_ids=["REQ.authority.review"],
+                    ),
+                ).model_dump(mode="json")
+            ],
+            "ir_schema_version": "agileforge.authority_ir.test.v1",
+            "ir_provenance": IrProvenance.MODEL_EMITTED.value,
+            "source_map": [
+                {
+                    "invariant_id": "INV-0123456789abcdef",
+                    "excerpt": source_statement,
+                    "location": "REQ.authority.review",
+                }
+            ],
+        }
+    )
+    domain = _domain(engine)
+    result = domain.transition(
+        _compile_request(
+            domain.position(project_id),
+            spec_version_id=spec_version_id,
+            spec_hash=spec_hash,
+            compiled_authority=compiled_authority,
+        )
+    )
+    assert result.ok is True
+
+    with Session(engine) as session:
+        authority = session.exec(select(CompiledSpecAuthority)).one()
+        assert authority.compiled_artifact_json is not None
+        stored_artifact = json.loads(authority.compiled_artifact_json)
+        review = build_authority_review_snapshot_in_session(
+            session,
+            project_id=project_id,
+        )
+
+    assert isinstance(review, AuthorityReviewSnapshot)
+    assert review.artifact == stored_artifact
+    assert review.artifact["ir_schema_version"] == "agileforge.authority_ir.test.v1"
+    assert review.artifact["ir_provenance"] == IrProvenance.MODEL_EMITTED.value
+    assert review.artifact["invariants"][0]["parameters"] == {
+        "field_name": "project_id"
+    }
+    assert review.artifact["gaps"] == []
+    assert any(
+        finding["code"] == "COMPILER_ASSUMPTION_CLAIM_MISMATCH"
+        for finding in review.review_findings
+    )
 
 
 @pytest.mark.parametrize(

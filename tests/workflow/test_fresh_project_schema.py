@@ -6,7 +6,12 @@ import importlib
 import importlib.util
 from typing import TYPE_CHECKING
 
+import pytest
 from sqlalchemy import inspect
+from sqlalchemy.pool import StaticPool
+from sqlmodel import create_engine
+
+from models.db import ensure_business_db_ready
 
 if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
@@ -64,3 +69,31 @@ def test_old_aggregate_modules_and_symbols_are_absent() -> None:
 
     assert not hasattr(core, old_class_name)
     assert importlib.util.find_spec(old_repository_module) is None
+
+
+def test_pre_issue_199_schema_is_rejected_before_runtime_access() -> None:
+    """Fail clearly instead of allowing create_all over the retired schema."""
+    legacy = create_engine(
+        "sqlite:///:memory:",
+        poolclass=StaticPool,
+        connect_args={"check_same_thread": False},
+    )
+    with legacy.begin() as connection:
+        connection.exec_driver_sql(
+            "CREATE TABLE discovery_artifacts "
+            "(discovery_artifact_id INTEGER PRIMARY KEY, project_id INTEGER)"
+        )
+        connection.exec_driver_sql(
+            "CREATE TABLE specification_candidates "
+            "(specification_candidate_id INTEGER PRIMARY KEY, "
+            "discovery_artifact_id INTEGER NOT NULL, content TEXT NOT NULL)"
+        )
+        connection.exec_driver_sql(
+            "CREATE TABLE spec_registry "
+            "(spec_version_id INTEGER PRIMARY KEY, content_ref TEXT NOT NULL)"
+        )
+
+    with pytest.raises(RuntimeError, match="UNSUPPORTED_BUSINESS_SCHEMA"):
+        ensure_business_db_ready(legacy)
+
+    assert "projects" not in inspect(legacy).get_table_names()

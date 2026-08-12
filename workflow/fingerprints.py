@@ -160,3 +160,8 @@ def business_fact_fingerprint(snapshot: WorkflowFactSnapshot) -> str:
 def decision_fingerprint(payload: Mapping[str, object]) -> str:
     """Return a canonical fingerprint for an evaluated node decision payload."""
     return canonical_hash(payload)
+
+
+def workflow_node_attempt_fingerprint(payload: Mapping[str, object]) -> str:
+    """Fingerprint every immutable field of one durable provider attempt."""
+    return canonical_hash(payload)

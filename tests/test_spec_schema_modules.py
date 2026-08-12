@@ -141,6 +141,41 @@ def test_spec_authority_success_defaults_v3_and_rejects_strings() -> None:
         SpecAuthorityCompilationSuccess.model_validate(payload)
 
 
+def test_spec_authority_mapping_kind_must_match_resolved_target() -> None:
+    """Compact IR cannot declare a target kind that contradicts its exact ID."""
+    from utils.spec_schemas import (  # noqa: PLC0415
+        SpecAuthorityCompilationSuccess,
+    )
+
+    with pytest.raises(ValidationError, match="target kind gap is incompatible"):
+        SpecAuthorityCompilationSuccess.model_validate(
+            {
+                "scope_themes": ["Payments"],
+                "domain": None,
+                "invariants": [],
+                "eligible_feature_rules": [],
+                "rejected_features": ["Deferred export"],
+                "gaps": ["Missing documentation"],
+                "assumptions": [],
+                "source_map": [],
+                "compiler_version": "3.0.0",
+                "prompt_hash": "a" * 64,
+                "ir_schema_version": "provider.ir.v1",
+                "ir_provenance": "model_emitted",
+                "authority_mappings": [
+                    {
+                        "candidate_id": "CAND-provider",
+                        "authority_item_id": "REJ-1",
+                        "authority_target_kind": "gap",
+                        "mapping_status": "covered",
+                        "mapping_rationale": "The provider mislabels this exclusion.",
+                        "mapping_provenance": "model_quote",
+                    }
+                ],
+            }
+        )
+
+
 def test_behavioral_invariants_keep_provenance_top_level() -> None:
     """Behavioral params stay semantic-only while invariants carry provenance."""
     from utils.spec_schemas import (  # noqa: PLC0415

@@ -8,9 +8,14 @@ from typing import TYPE_CHECKING, Literal
 
 from google.adk import Context, Workflow
 from google.adk.workflow import START, JoinNode, RetryConfig, node
-from pydantic import BaseModel, ConfigDict, TypeAdapter
+from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 
-from adapters.adk.errors import VisionAgenticPreflightError
+from adapters.adk.errors import (
+    AttemptRevalidationError,
+    SpecificationAgenticExecutionError,
+    VisionAgenticPreflightError,
+)
+from adapters.adk.preflight import revalidate_specification_attempt
 from services.contracts.product_goal import ProductGoalInterviewOutput
 from services.contracts.specification_authoring import (
     SpecificationAuthoringInput,
@@ -33,6 +38,7 @@ from services.vision_output_validation import (
     VisionDraftValidationError,
     validate_vision_draft,
 )
+from utils.agileforge_spec_profile_v2 import SCHEMA_VERSION
 from utils.spec_schemas import (
     SpecAuthorityCompilationFailure,
     SpecAuthorityCompilationSuccess,
@@ -614,11 +620,37 @@ def build_specification_authoring_workflow(
         node_input: RecipeInput,
     ) -> RecipeOutput:
         author_input = SpecificationAuthoringInput.model_validate(node_input.payload)
+        revalidated = revalidate_specification_attempt("before_provider")
+        if revalidated is not None and (
+            not revalidated.ok or revalidated.replayed
+        ):
+            raise AttemptRevalidationError(revalidated)
         generated = await context.run_node(
             leaf_agent,
             node_input=author_input.model_dump(mode="json"),
         )
-        output = SpecificationAuthoringOutput.model_validate(generated)
+        revalidated = revalidate_specification_attempt("after_provider")
+        if revalidated is not None and (
+            not revalidated.ok or revalidated.replayed
+        ):
+            raise AttemptRevalidationError(revalidated)
+        try:
+            output = SpecificationAuthoringOutput.model_validate(generated)
+        except ValidationError as error:
+            payload = generated.get("payload") if isinstance(generated, dict) else None
+            schema_version = (
+                payload.get("schema_version") if isinstance(payload, dict) else None
+            )
+            if schema_version is not None and schema_version != SCHEMA_VERSION:
+                code = WorkflowErrorCode.UNSUPPORTED_SPECIFICATION_SCHEMA
+                message = "Specification author returned an unsupported schema."
+            else:
+                code = WorkflowErrorCode.INVALID_SPECIFICATION_PAYLOAD
+                message = "Specification author returned an invalid v2 payload."
+            raise SpecificationAgenticExecutionError(
+                code=code,
+                message=message,
+            ) from error
         return RecipeOutput(payload=output.model_dump(mode="json"))
 
     return Workflow(

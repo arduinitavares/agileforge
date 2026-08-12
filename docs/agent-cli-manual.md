@@ -154,6 +154,14 @@ Discovery work such as `grill-with-docs`, research, interviews, repository
 evidence, ADRs, or prototypes can contribute source provenance. There is no
 Discovery artifact, lifecycle node, API route, CLI command, or UI state.
 
+To use post-Goal source work, write the result to one approved repository file:
+`README.md`, `CONTEXT.md`, `pyproject.toml`, `specs/spec.json`, `specs/spec.md`,
+`docs/spec/spec.json`, or `docs/spec/spec.md`. Then run `repository refresh`
+before `specification author`. Authoring captures a bounded snapshot and
+rechecks it immediately before the provider call. A changed binding or file
+makes the attempt stale; the provider never receives old source bytes. Review
+source warnings under the manifest entry that produced them.
+
 ## Command Catalog
 
 The current fixed request kinds map to these prefixes:

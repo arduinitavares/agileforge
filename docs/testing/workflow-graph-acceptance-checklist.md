@@ -118,7 +118,11 @@ For each target, collect evidence in this order:
 3. Complete and accept one Product Goal.
 4. Perform any useful Discovery activities, such as `grill-with-docs`, research,
    repository inspection, ADR review, or a prototype. Record them only as source
-   provenance; they are not an artifact or lifecycle gate.
+   provenance; they are not an artifact or lifecycle gate. Materialize any
+   model-facing result in an approved source file (`README.md`, `CONTEXT.md`,
+   `pyproject.toml`, `specs/spec.json`, `specs/spec.md`, `docs/spec/spec.json`,
+   or `docs/spec/spec.md`) and refresh the repository binding after the final
+   write.
 5. Execute the host-owned `specification author` command advertised by
    `workflow next`.
 6. Verify the review packet contains the complete canonical
@@ -126,6 +130,7 @@ For each target, collect evidence in this order:
    Product Goal lineage, source and producer evidence, attempt identity,
    amendment base and diff when applicable, and exact payload, view, and
    candidate fingerprints.
+   Verify each source warning is nested under its own manifest entry.
 7. Have the human accept, reject, or provide feedback on that exact
    Specification candidate.
 8. Compile Authority from the accepted typed payload.

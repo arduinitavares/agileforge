@@ -9,12 +9,14 @@ from typing import TYPE_CHECKING, Annotated, Literal, Self, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from services.contracts.vision_evidence import VisionEvidenceBundle
 from services.specs.candidate_contract import (
     CandidateSourceKind,
     CandidateSourceManifestEntry,
     Fingerprint,
     StableIdReplacement,
 )
+from workflow.fingerprints import canonical_hash
 
 if TYPE_CHECKING:
     from utils.agileforge_spec_profile_v2 import SpecificationPayload
@@ -30,9 +32,21 @@ type JsonObject = dict[str, JsonValue]
 
 SPECIFICATION_AUTHOR_VERSION: str = "2.0.0"
 SPECIFICATION_AUTHOR_PROMPT_VERSION: str = "agileforge.to-spec.prompt.v2"
-SPECIFICATION_AUTHOR_PROMPT_HASH: str = "sha256:" + hashlib.sha256(
-    SPECIFICATION_AUTHOR_PROMPT_VERSION.encode("utf-8")
-).hexdigest()
+SPECIFICATION_AUTHOR_PROMPT_HASH: str = (
+    "sha256:ab4ec877a7fa25a38100820269c5aad25a476fb55d29cd51296123bd01dfe678"
+)
+SPECIFICATION_VISION_SOURCE_ID: str = "SRC.vision.accepted"
+SPECIFICATION_PRODUCT_GOAL_SOURCE_ID: str = "SRC.product-goal.active"
+SPECIFICATION_REPOSITORY_EVIDENCE_SOURCE_ID: str = (
+    "SRC.repository-evidence.accepted-vision"
+)
+SPECIFICATION_ACTIVE_REPOSITORY_SOURCE_ID: str = "SRC.repository-context.active"
+
+
+def compute_specification_author_prompt_hash(prompt_text: str) -> str:
+    """Hash normalized packaged to-spec instructions for durable provenance."""
+    normalized = " ".join(prompt_text.strip().lower().split())
+    return "sha256:" + hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 class _FrozenClosedModel(BaseModel):
@@ -65,6 +79,22 @@ class SpecificationSourceContext(_FrozenClosedModel):
     kind: CandidateSourceKind
     fingerprint: Fingerprint
     content: JsonObject
+
+
+def _validate_current_repository_context(
+    contexts: tuple[SpecificationSourceContext, ...],
+) -> None:
+    """Bind freshly collected repository bytes to their host fingerprint."""
+    for context in contexts:
+        if context.source_id != SPECIFICATION_ACTIVE_REPOSITORY_SOURCE_ID:
+            continue
+        evidence = VisionEvidenceBundle.model_validate(context.content)
+        if (
+            context.kind is not CandidateSourceKind.REPOSITORY
+            or context.fingerprint != evidence.evidence_fingerprint
+        ):
+            message = "current repository source context fingerprint changed"
+            raise ValueError(message)
 
 
 class BaseSpecificationContext(_FrozenClosedModel):
@@ -174,11 +204,11 @@ class SpecificationAuthoringInput(_FrozenClosedModel):
             message = "source context must exactly match the unique source manifest"
             raise ValueError(message)
         expected = {
-            f"SRC.vision.{self.accepted_vision.artifact_id}": (
+            SPECIFICATION_VISION_SOURCE_ID: (
                 CandidateSourceKind.VISION,
                 self.accepted_vision.fingerprint,
             ),
-            f"SRC.product-goal.{self.accepted_product_goal.artifact_id}": (
+            SPECIFICATION_PRODUCT_GOAL_SOURCE_ID: (
                 CandidateSourceKind.PRODUCT_GOAL,
                 self.accepted_product_goal.fingerprint,
             ),
@@ -191,7 +221,53 @@ class SpecificationAuthoringInput(_FrozenClosedModel):
                 "source manifest must include exact accepted Vision and Product Goal"
             )
             raise ValueError(message)
+        _validate_current_repository_context(self.source_context)
         return self
+
+
+def specification_authoring_input_fingerprint(
+    contract: SpecificationAuthoringInput,
+) -> str:
+    """Hash model-visible semantic input without host database row identities."""
+    data = contract.model_dump(mode="json")
+    data.pop("project_id")
+    accepted_vision = data["accepted_vision"]
+    accepted_goal = data["accepted_product_goal"]
+    if not isinstance(accepted_vision, dict) or not isinstance(accepted_goal, dict):
+        message = "Specification authoring lineage must be objects."
+        raise TypeError(message)
+    accepted_vision.pop("artifact_id")
+    accepted_goal.pop("artifact_id")
+    base = data.get("base_specification")
+    if isinstance(base, dict):
+        base.pop("spec_version_id")
+    prior = data.get("prior_candidate")
+    if isinstance(prior, dict):
+        prior.pop("base_specification_id")
+    return canonical_hash(data)
+
+
+def specification_authoring_fact_fingerprint(
+    contract: SpecificationAuthoringInput,
+) -> str:
+    """Hash portable accepted lineage facts that authorize one candidate."""
+    base = contract.base_specification
+    prior = contract.prior_candidate
+    return canonical_hash(
+        {
+            "operation": contract.operation,
+            "accepted_vision_fingerprint": contract.accepted_vision.fingerprint,
+            "accepted_product_goal_fingerprint": (
+                contract.accepted_product_goal.fingerprint
+            ),
+            "base_payload_fingerprint": (
+                None if base is None else base.payload_fingerprint
+            ),
+            "prior_candidate_fingerprint": (
+                None if prior is None else prior.candidate_fingerprint
+            ),
+        }
+    )
 
 
 class SpecificationAuthoringOutput(_FrozenClosedModel):
@@ -216,9 +292,13 @@ for _contract in (
 
 
 __all__ = [
+    "SPECIFICATION_ACTIVE_REPOSITORY_SOURCE_ID",
     "SPECIFICATION_AUTHOR_PROMPT_HASH",
     "SPECIFICATION_AUTHOR_PROMPT_VERSION",
     "SPECIFICATION_AUTHOR_VERSION",
+    "SPECIFICATION_PRODUCT_GOAL_SOURCE_ID",
+    "SPECIFICATION_REPOSITORY_EVIDENCE_SOURCE_ID",
+    "SPECIFICATION_VISION_SOURCE_ID",
     "AcceptedProductGoalContext",
     "AcceptedVisionContext",
     "BaseSpecificationContext",
@@ -226,4 +306,7 @@ __all__ = [
     "SpecificationAuthoringInput",
     "SpecificationAuthoringOutput",
     "SpecificationSourceContext",
+    "compute_specification_author_prompt_hash",
+    "specification_authoring_fact_fingerprint",
+    "specification_authoring_input_fingerprint",
 ]

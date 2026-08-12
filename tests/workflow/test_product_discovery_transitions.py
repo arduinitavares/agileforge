@@ -13,6 +13,13 @@ from models.core import Project
 from models.product_definition import SpecificationCandidate, SpecificationDecision
 from models.specs import SpecRegistry
 from models.workflow import WorkflowNodeAttempt, WorkflowNodeAttemptOutcome
+from services.contracts.specification_authoring import (
+    SPECIFICATION_PRODUCT_GOAL_SOURCE_ID,
+    SPECIFICATION_VISION_SOURCE_ID,
+    SpecificationAuthoringInput,
+    specification_authoring_fact_fingerprint,
+    specification_authoring_input_fingerprint,
+)
 from services.specification_authoring_input import SpecificationAuthoringInputService
 from services.specs.candidate_contract import load_candidate_contract
 from tests.workflow.lifecycle_fixtures import (
@@ -28,8 +35,9 @@ from workflow.contracts import (
     NodeDecision,
     RecommendationKind,
     TransitionResult,
+    WorkflowErrorCode,
 )
-from workflow.definitions.product_discovery import PRODUCT_DISCOVERY_NODES
+from workflow.definitions.product_discovery import SPECIFICATION_NODES
 from workflow.domain import WorkflowDomain
 from workflow.fingerprints import canonical_hash, canonical_json
 from workflow.graph import ChildGraphSpec, WorkflowGraph
@@ -66,7 +74,7 @@ def _domain(engine: Engine, *, at: datetime = NOW) -> WorkflowDomain:
             graph_version=GRAPH_VERSION,
             root=ChildGraphSpec(
                 child_graph_id="specification",
-                nodes=PRODUCT_DISCOVERY_NODES,
+                nodes=SPECIFICATION_NODES,
             ),
         ),
         clock=FixedClock(now_value=at),
@@ -245,7 +253,7 @@ def test_accepted_goal_authors_and_accepts_exact_candidate_without_rewrite(
         name="Direct specification",
     )
     domain = _domain(engine)
-    source_id = f"SRC.vision.{vision_id}"
+    source_id = SPECIFICATION_VISION_SOURCE_ID
     result = _author(
         engine,
         domain,
@@ -271,6 +279,20 @@ def test_accepted_goal_authors_and_accepts_exact_candidate_without_rewrite(
         assert envelope.accepted_product_goal_id == goal_id
         assert envelope.workflow_node_attempt_id == candidate.workflow_node_attempt_id
         assert envelope.model_id == "fake/specification-author"
+        attempt = session.get(
+            WorkflowNodeAttempt,
+            candidate.workflow_node_attempt_id,
+        )
+        assert attempt is not None
+        contract = SpecificationAuthoringInput.model_validate_json(
+            attempt.normalized_input_json
+        )
+        assert envelope.accepted_fact_fingerprint == (
+            specification_authoring_fact_fingerprint(contract)
+        )
+        assert envelope.producer_input_fingerprint == (
+            specification_authoring_input_fingerprint(contract)
+        )
 
     review_domain = _domain(engine, at=NOW + timedelta(seconds=1))
     accept_request = _accept_request(
@@ -356,7 +378,7 @@ def test_amendment_pins_base_and_requires_every_removal_justification(
         )
     decision = NodeDecision(
         node_id="specification.author",
-        child_graph_id="product_discovery",
+        child_graph_id="specification",
         request_kind="author_specification",
         category=NodeCategory.AVAILABLE,
         recommendation_kind=RecommendationKind.OPTIONAL_REENTRY,
@@ -408,31 +430,25 @@ def test_amendment_pins_base_and_requires_every_removal_justification(
             },
             "source_manifest": [
                 {
-                    "source_id": f"SRC.vision.{lineage.vision_artifact_id}",
+                    "source_id": SPECIFICATION_VISION_SOURCE_ID,
                     "kind": "vision",
                     "fingerprint": lineage.vision_fingerprint,
                 },
                 {
-                    "source_id": (
-                        "SRC.product-goal."
-                        f"{lineage.product_goal_artifact_id}"
-                    ),
+                    "source_id": SPECIFICATION_PRODUCT_GOAL_SOURCE_ID,
                     "kind": "product_goal",
                     "fingerprint": lineage.product_goal_fingerprint,
                 },
             ],
             "source_context": [
                 {
-                    "source_id": f"SRC.vision.{lineage.vision_artifact_id}",
+                    "source_id": SPECIFICATION_VISION_SOURCE_ID,
                     "kind": "vision",
                     "fingerprint": lineage.vision_fingerprint,
                     "content": {"statement": "Accepted fixture Vision."},
                 },
                 {
-                    "source_id": (
-                        "SRC.product-goal."
-                        f"{lineage.product_goal_artifact_id}"
-                    ),
+                    "source_id": SPECIFICATION_PRODUCT_GOAL_SOURCE_ID,
                     "kind": "product_goal",
                     "fingerprint": lineage.product_goal_fingerprint,
                     "content": {"statement": "Accepted fixture Product Goal."},
@@ -607,6 +623,30 @@ def test_rejected_revision_supersedes_exact_candidate(engine: Engine) -> None:
             candidates[0].candidate_fingerprint
         )
 
+    revision_domain = _domain(engine, at=NOW + timedelta(seconds=3))
+    revision_position = revision_domain.position(project_id)
+    revision_review = next(
+        item
+        for item in revision_position.decisions
+        if item.node_id == "specification.review"
+    )
+    revision_reference = revision_review.fact_references[0]
+    accepted_revision = revision_domain.transition(
+        DecideSpecification(
+            project_id=project_id,
+            graph_version=revision_position.graph_version,
+            fact_fingerprint=revision_position.fact_fingerprint,
+            decision_fingerprint=revision_review.decision_fingerprint,
+            idempotency_key="accept-revision",
+            actor="operator",
+            specification_candidate_id=int(revision_reference.fact_id),
+            candidate_fingerprint=revision_reference.fingerprint,
+            decision="accepted",
+            rationale="The revised normative title is ready.",
+        )
+    )
+    assert accepted_revision.ok
+
 
 def test_acceptance_rejects_tampered_candidate_bytes(engine: Engine) -> None:
     """The review handler fails closed before registering a changed candidate."""
@@ -661,3 +701,34 @@ def test_acceptance_rejects_tampered_candidate_bytes(engine: Engine) -> None:
     with Session(engine) as session:
         assert not session.exec(select(SpecRegistry)).all()
         assert not session.exec(select(SpecificationDecision)).all()
+
+
+def test_acceptance_rejects_unverified_live_repository_source(engine: Engine) -> None:
+    """A review request cannot claim source evidence absent from the candidate."""
+    project_id, *_lineage = _seed_accepted_goal(
+        engine,
+        name="Stale review source",
+    )
+    domain = _domain(engine)
+    authored = _author(
+        engine,
+        domain,
+        project_id=project_id,
+        payload=_payload(),
+        key="stale-review-source",
+    )
+    assert authored.ok
+    review_domain = _domain(engine, at=NOW + timedelta(seconds=1))
+    request = _accept_request(
+        review_domain,
+        project_id=project_id,
+        key="accept-stale-review-source",
+    ).model_copy(
+        update={"repository_source_fingerprint": "sha256:" + ("f" * 64)}
+    )
+
+    result = review_domain.transition(request)
+
+    assert not result.ok
+    assert result.error is not None
+    assert result.error.code is WorkflowErrorCode.STALE_SPECIFICATION_INPUT

@@ -9,6 +9,7 @@ from services.application import (
     AgenticActionRequest,
     AgileForgeApplication,
     SpecificationAuthoringRequest,
+    SpecificationReviewRequest,
 )
 from workflow.contracts import (
     FactReference,
@@ -16,8 +17,10 @@ from workflow.contracts import (
     NodeDecision,
     RecommendationKind,
     TransitionResult,
+    WorkflowError,
     WorkflowPosition,
 )
+from workflow.requests import DecideSpecification
 
 if TYPE_CHECKING:
     import pytest
@@ -27,12 +30,13 @@ if TYPE_CHECKING:
     from workflow.requests import TransitionRequest
 
 PROJECT_ID = 7
+CANDIDATE_ID = 31
 
 
 def _decision() -> NodeDecision:
     return NodeDecision(
         node_id="specification.author",
-        child_graph_id="product_discovery",
+        child_graph_id="specification",
         request_kind="author_specification",
         category=NodeCategory.AVAILABLE,
         recommendation_kind=RecommendationKind.REQUIRED,
@@ -101,6 +105,52 @@ class _InputService:
             "project_id": PROJECT_ID,
         }
 
+    def revalidate_sources(
+        self,
+        project_id: int,
+        persisted_input: JsonObject,
+        /,
+    ) -> WorkflowError | None:
+        del project_id, persisted_input
+        return None
+
+
+class _ReviewDomain(_Domain):
+    def __init__(self) -> None:
+        review = NodeDecision(
+            node_id="specification.review",
+            child_graph_id="specification",
+            request_kind="decide_specification",
+            category=NodeCategory.WAITING,
+            recommendation_kind=RecommendationKind.REQUIRED,
+            reason_code="SPECIFICATION_REVIEW_REQUIRED",
+            fact_references=(
+                FactReference(
+                    fact_type="specification_candidate",
+                    fact_id=str(CANDIDATE_ID),
+                    fingerprint="sha256:candidate",
+                ),
+            ),
+            decision_fingerprint="review-decision",
+        )
+        self.current = WorkflowPosition(
+            project_id=PROJECT_ID,
+            graph_version="agileforge.workflow.v2",
+            fact_fingerprint="review-facts",
+            evaluated_at=datetime(2026, 8, 11, 12, tzinfo=UTC),
+            available_nodes=(),
+            waiting_nodes=(review.node_id,),
+            blocked_nodes=(),
+            invalid_nodes=(),
+            terminal=False,
+            decisions=(review,),
+        )
+        self.requests: list[TransitionRequest] = []
+
+    def transition(self, request: TransitionRequest) -> TransitionResult:
+        self.requests.append(request)
+        return TransitionResult(ok=True, applied_node_id="specification.review")
+
 
 def _request() -> SpecificationAuthoringRequest:
     return SpecificationAuthoringRequest(
@@ -167,3 +217,58 @@ def test_authoring_replays_before_reading_current_position(
 
     assert application.author_specification(_request()) == replay
     assert service.build_calls == 0
+
+
+def test_review_delegates_live_source_check_to_domain_transaction() -> None:
+    """The application forwards acceptance without an earlier source probe."""
+    service = _InputService()
+    domain = _ReviewDomain()
+    application = AgileForgeApplication(
+        workflow_domain=domain,
+        specification_authoring_input=service,
+    )
+
+    result = application.review_specification(
+        SpecificationReviewRequest(
+            project_id=PROJECT_ID,
+            decision="accepted",
+            rationale="Reviewed exact candidate.",
+            expected_candidate_fingerprint="sha256:candidate",
+            idempotency_key="review-source-stale",
+            actor="operator",
+        )
+    )
+
+    assert result.ok
+    assert len(domain.requests) == 1
+    decision = domain.requests[0]
+    assert isinstance(decision, DecideSpecification)
+    assert decision.repository_source_fingerprint is None
+
+
+def test_feedback_delegates_without_application_source_probe() -> None:
+    """Feedback reaches the domain without any application source precheck."""
+    service = _InputService()
+    domain = _ReviewDomain()
+    application = AgileForgeApplication(
+        workflow_domain=domain,
+        specification_authoring_input=service,
+    )
+
+    result = application.review_specification(
+        SpecificationReviewRequest(
+            project_id=PROJECT_ID,
+            decision="feedback",
+            rationale="Refresh the repository-backed requirement.",
+            expected_candidate_fingerprint="sha256:candidate",
+            idempotency_key="review-source-feedback",
+            actor="operator",
+        )
+    )
+
+    assert result.ok
+    assert len(domain.requests) == 1
+    decision = domain.requests[0]
+    assert isinstance(decision, DecideSpecification)
+    assert decision.decision == "feedback"
+    assert decision.repository_source_fingerprint is None

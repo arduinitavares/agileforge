@@ -1,5 +1,9 @@
 # Single Project Lifecycle Hard Break Implementation Plan
 
+> **Status: Superseded (2026-08-11).** Do not execute this plan. Issue #199
+> replaces its Discovery-to-Specification instructions with
+> [`2026-08-11-to-spec-single-specification-boundary.md`](2026-08-11-to-spec-single-specification-boundary.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace the dual-origin setup architecture with one durable Project lifecycle that starts with a Vision interview, treats local repository attachment as optional Git provenance, and preserves the complete specification-to-delivery workflow.

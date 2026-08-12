@@ -583,6 +583,11 @@ def _build_authority_review_snapshot(
     artifact, _authority_evidence, _classification_evidence = (
         _authority_artifact_payload(authority)
     )
+    review_artifact = (
+        cast("JsonDict", compiled_artifact.model_dump(mode="json"))
+        if compiled_artifact is not None
+        else artifact
+    )
     artifact_shape_findings = _compiled_artifact_shape_findings(
         authority,
         project_id=project_id,
@@ -603,10 +608,6 @@ def _build_authority_review_snapshot(
         compiled_artifact=compiled_artifact,
         specification_payload=source.payload,
         artifact_shape_findings=artifact_shape_findings,
-    )
-    artifact = _artifact_with_review_findings(
-        artifact,
-        review_findings=ir_payload["review_findings"],
     )
     source_content_sha256 = (
         sha256_prefixed(source.text.encode("utf-8")) if content_included else None
@@ -660,7 +661,7 @@ def _build_authority_review_snapshot(
         ),
         pending_spec_version_id=authority.spec_version_id,
         compiled_at=_iso_z(authority.compiled_at),
-        artifact=artifact,
+        artifact=review_artifact,
     )
 
 
@@ -1129,49 +1130,6 @@ def _assumption_claimed_value(assumption: StructuredAuthorityAssumption) -> obje
         return list(assumption.item_ids)
     msg = f"unsupported structured assumption: {type(assumption).__name__}"
     raise TypeError(msg)
-
-
-def _artifact_with_review_findings(
-    artifact: JsonDict,
-    *,
-    review_findings: Sequence[Mapping[str, Any]],
-) -> JsonDict:
-    """Add host-derived blocking findings to rendered gaps."""
-    blocking = [
-        finding
-        for finding in review_findings
-        if finding.get("severity") == "blocking"
-        and finding.get("code") != "AUTHORITY_COVERAGE_INCOMPLETE"
-    ]
-    if not blocking:
-        return artifact
-    gaps = list(cast("Sequence[Mapping[str, Any]]", artifact.get("gaps") or []))
-    existing_texts = {str(gap.get("text", "")) for gap in gaps}
-    appended: list[JsonDict] = []
-    for index, finding in enumerate(blocking, start=1):
-        code = str(finding.get("code") or "")
-        if any(code in text for text in existing_texts):
-            continue
-        candidate_ids = [
-            str(candidate_id) for candidate_id in _as_list(finding.get("candidate_ids"))
-        ]
-        suffix = (
-            f" Affected candidates: {', '.join(candidate_ids)}."
-            if candidate_ids
-            else ""
-        )
-        appended.append(
-            {
-                "id": f"GAP-REVIEW-{index}",
-                "text": f"{code}: {finding.get('message')}.{suffix}",
-                "support": "inferred",
-                "source_refs": candidate_ids,
-                "source_excerpt": None,
-            }
-        )
-    if not appended:
-        return artifact
-    return {**artifact, "gaps": [*gaps, *appended]}
 
 
 def _rendered_assumption_items(value: object) -> list[JsonDict]:

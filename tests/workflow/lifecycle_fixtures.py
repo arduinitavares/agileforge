@@ -9,6 +9,7 @@ from typing import cast
 
 from sqlmodel import Session, col, select
 
+from models.core import Project
 from models.product_definition import (
     ProductGoalArtifact,
     ProductGoalArtifactDecision,
@@ -22,6 +23,17 @@ from models.product_definition import (
 )
 from models.specs import SpecRegistry
 from models.workflow import WorkflowNodeAttempt, WorkflowNodeAttemptOutcome
+from services.contracts.specification_authoring import (
+    SPECIFICATION_PRODUCT_GOAL_SOURCE_ID,
+    SPECIFICATION_VISION_SOURCE_ID,
+    AcceptedProductGoalContext,
+    AcceptedVisionContext,
+    BaseSpecificationContext,
+    SpecificationAuthoringInput,
+    SpecificationSourceContext,
+    specification_authoring_fact_fingerprint,
+    specification_authoring_input_fingerprint,
+)
 from services.specs.candidate_contract import (
     CandidateBuildInput,
     CandidateKind,
@@ -39,6 +51,7 @@ from workflow.fingerprints import (
     product_goal_artifact_fingerprint,
     product_goal_interview_output_fingerprint,
     vision_interview_output_fingerprint,
+    workflow_node_attempt_fingerprint,
 )
 
 
@@ -366,7 +379,7 @@ def _seed_accepted_vision_and_goal(
     return vision, goal
 
 
-def seed_accepted_specification(
+def seed_accepted_specification(  # noqa: PLR0915
     session: Session,
     *,
     project_id: int,
@@ -448,6 +461,93 @@ def seed_accepted_specification(
         candidate_attempt.workflow_node_attempt_id,
         "specification author attempt",
     )
+    project = session.get(Project, project_id)
+    if project is None:
+        message = "Specification fixture Project is missing."
+        raise AssertionError(message)
+    source_manifest = (
+        CandidateSourceManifestEntry(
+            source_id=SPECIFICATION_VISION_SOURCE_ID,
+            kind=CandidateSourceKind.VISION,
+            fingerprint=vision.content_fingerprint,
+        ),
+        CandidateSourceManifestEntry(
+            source_id=SPECIFICATION_PRODUCT_GOAL_SOURCE_ID,
+            kind=CandidateSourceKind.PRODUCT_GOAL,
+            fingerprint=goal.content_fingerprint,
+        ),
+    )
+    authoring_input = SpecificationAuthoringInput(
+        project_id=project_id,
+        project_name=project.name,
+        operation="initial" if current_spec is None else "amendment",
+        accepted_vision=AcceptedVisionContext(
+            artifact_id=vision_id,
+            fingerprint=vision.content_fingerprint,
+            statement=vision.statement,
+            components=cast("JsonObject", json.loads(vision.components_json)),
+        ),
+        accepted_product_goal=AcceptedProductGoalContext(
+            artifact_id=goal_id,
+            fingerprint=goal.content_fingerprint,
+            statement=goal.statement,
+        ),
+        source_manifest=source_manifest,
+        source_context=(
+            SpecificationSourceContext(
+                source_id=SPECIFICATION_VISION_SOURCE_ID,
+                kind=CandidateSourceKind.VISION,
+                fingerprint=vision.content_fingerprint,
+                content={"statement": vision.statement},
+            ),
+            SpecificationSourceContext(
+                source_id=SPECIFICATION_PRODUCT_GOAL_SOURCE_ID,
+                kind=CandidateSourceKind.PRODUCT_GOAL,
+                fingerprint=goal.content_fingerprint,
+                content={"statement": goal.statement},
+            ),
+        ),
+        base_specification=(
+            None
+            if current_spec is None or base_payload is None
+            else BaseSpecificationContext(
+                spec_version_id=_required(
+                    current_spec.spec_version_id,
+                    "base Specification",
+                ),
+                payload_fingerprint=current_spec.spec_hash,
+                payload=base_payload,
+            )
+        ),
+    )
+    normalized_input = authoring_input.model_dump(mode="json")
+    candidate_attempt.normalized_input_json = canonical_json(normalized_input)
+    candidate_attempt.input_fingerprint = canonical_hash(normalized_input)
+    candidate_attempt.attempt_fingerprint = workflow_node_attempt_fingerprint(
+        {
+            "attempt_id": candidate_attempt_id,
+            "project_id": project_id,
+            "node_id": candidate_attempt.node_id,
+            "instance_key": candidate_attempt.instance_key,
+            "graph_version": candidate_attempt.graph_version,
+            "fact_fingerprint": candidate_attempt.fact_fingerprint,
+            "business_fact_fingerprint": (
+                candidate_attempt.business_fact_fingerprint
+            ),
+            "decision_fingerprint": candidate_attempt.decision_fingerprint,
+            "normalized_input": normalized_input,
+            "input_fingerprint": candidate_attempt.input_fingerprint,
+            "model_id": candidate_attempt.model_id,
+            "execution_settings": {},
+            "idempotency_key": candidate_attempt.idempotency_key,
+            "actor": candidate_attempt.actor,
+            "correlation_id": candidate_attempt.correlation_id,
+            "started_at": candidate_attempt.started_at,
+            "lease_expires_at": candidate_attempt.lease_expires_at,
+        }
+    )
+    session.add(candidate_attempt)
+    session.flush()
     envelope = build_candidate_envelope(
         payload=payload,
         metadata=CandidateBuildInput(
@@ -460,20 +560,13 @@ def seed_accepted_specification(
             accepted_vision_fingerprint=vision.content_fingerprint,
             accepted_product_goal_id=goal_id,
             accepted_product_goal_fingerprint=goal.content_fingerprint,
-            source_manifest=(
-                CandidateSourceManifestEntry(
-                    source_id=f"SRC.vision.{vision_id}",
-                    kind=CandidateSourceKind.VISION,
-                    fingerprint=vision.content_fingerprint,
-                ),
-                CandidateSourceManifestEntry(
-                    source_id=f"SRC.product-goal.{goal_id}",
-                    kind=CandidateSourceKind.PRODUCT_GOAL,
-                    fingerprint=goal.content_fingerprint,
-                ),
+            source_manifest=source_manifest,
+            accepted_fact_fingerprint=specification_authoring_fact_fingerprint(
+                authoring_input
             ),
-            accepted_fact_fingerprint=candidate_attempt.business_fact_fingerprint,
-            producer_input_fingerprint=candidate_attempt.input_fingerprint,
+            producer_input_fingerprint=specification_authoring_input_fingerprint(
+                authoring_input
+            ),
             producer_capability="to-spec",
             producer_version="fixture-v2",
             model_id="fake/product-definition",
