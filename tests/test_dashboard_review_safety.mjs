@@ -108,18 +108,79 @@ test('Authority renders every advertised recovery step', () => {
     assert.doesNotMatch(repair, /Authority accepted/);
 });
 
+test('lifecycle stages omit mandatory Discovery', () => {
+    const { context } = loadFrontend();
+
+    assert.deepEqual(
+        JSON.parse(JSON.stringify(context.lifecycleStageLabels())),
+        [
+            'Vision',
+            'Product Goal',
+            'Specification',
+            'Authority',
+            'Backlog',
+            'Roadmap',
+            'Stories',
+            'Sprint',
+            'Execution',
+            'Review',
+        ],
+    );
+});
+
+test('Specification authoring is host-owned and renders the exact v2 review packet', () => {
+    const { context } = loadFrontend();
+
+    const author = context.specificationPanelMarkup(
+        { candidate: null, review: null },
+        [action('author_specification', 'specifications/author')],
+    );
+    assert.match(author, /data-direct-action="author_specification"/);
+    assert.match(author, />Author Specification</);
+    assert.doesNotMatch(author, /textarea|type="file"|canonical_content/i);
+
+    const rendered = context.specificationPanelMarkup(
+        {
+            candidate: {
+                candidate_fingerprint: 'sha256:spec-seen',
+                rendered_markdown: '# Exact Specification\n\n<unsafe>',
+            },
+            review: { state: 'pending' },
+        },
+        [action('decide_specification', 'specifications/decision')],
+    );
+    assert.match(rendered, /# Exact Specification/);
+    assert.match(rendered, /&lt;unsafe&gt;/);
+    assert.doesNotMatch(rendered, /<unsafe>/);
+
+    const binding = context.captureReviewBinding(
+        {
+            actions: [action('decide_specification', 'specifications/decision')],
+            specification: {
+                candidate: {
+                    candidate_fingerprint: 'sha256:spec-seen',
+                    fingerprint: 'sha256:obsolete-alias',
+                },
+            },
+        },
+        'specification',
+        'accepted',
+    );
+    assert.equal(binding.expectedCandidate, 'sha256:spec-seen');
+});
+
 test('review binding keeps the exact action and candidate seen at dialog open', () => {
     const { context } = loadFrontend();
     assert.equal(typeof context.captureReviewBinding, 'function');
     assert.equal(typeof context.reviewSubmission, 'function');
     const state = {
         actions: [action('decide_vision_review', 'vision/review')],
-        vision: { candidate: { fingerprint: 'sha256:vision-seen' } },
+        vision: { candidate: { review_fingerprint: 'sha256:vision-seen' } },
     };
 
     const binding = context.captureReviewBinding(state, 'vision', 'accepted');
     state.actions[0].endpoint = 'vision/replacement-review';
-    state.vision.candidate.fingerprint = 'sha256:vision-replacement';
+    state.vision.candidate.review_fingerprint = 'sha256:vision-replacement';
     const submission = context.reviewSubmission(binding, 'Reviewed as shown.');
 
     assert.equal(submission.action.endpoint, 'vision/review');
@@ -141,14 +202,16 @@ test('an older delayed dashboard load cannot replace the newest coherent snapsho
 
     const older = context.loadDashboard();
     const newest = context.loadDashboard();
-    assert.equal(calls.length, 16);
+    assert.equal(calls.length, 14);
 
-    calls.slice(8).forEach((call) => call.resolve(responseFor(call.url, 'Newest')));
+    calls.slice(7).forEach((call) => call.resolve(responseFor(call.url, 'Newest')));
     await newest;
-    calls.slice(0, 8).forEach((call) => call.resolve(responseFor(call.url, 'Older')));
+    calls.slice(0, 7).forEach((call) => call.resolve(responseFor(call.url, 'Older')));
     await older;
 
     assert.equal(calls[0].options.signal.aborted, true);
+    assert.equal(calls.some((call) => call.url.endsWith('/discovery')), false);
+    assert.equal(vm.runInContext("'discovery' in lifecycleState", context), false);
     assert.equal(vm.runInContext('lifecycleState.project.name', context), 'Newest');
     assert.equal(context.document.title, 'Newest | AgileForge');
 });

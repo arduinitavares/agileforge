@@ -1,7 +1,6 @@
 const STAGES = [
     'Vision',
     'Product Goal',
-    'Discovery',
     'Specification',
     'Authority',
     'Backlog',
@@ -31,11 +30,10 @@ const REQUEST_STAGE = {
     generate_vision_bootstrap: 'Vision',
     record_authority_feedback: 'Authority',
     record_backlog_draft: 'Backlog',
-    record_discovery_artifact: 'Discovery',
     record_post_sprint_triage: 'Review',
     record_product_goal_interview_turn: 'Product Goal',
     record_roadmap_draft: 'Roadmap',
-    record_specification_candidate: 'Specification',
+    author_specification: 'Specification',
     record_sprint_plan: 'Sprint',
     record_story_draft: 'Stories',
     record_vision_interview_turn: 'Vision',
@@ -49,7 +47,6 @@ const CHILD_STAGE = {
     authority: 'Authority',
     backlog: 'Backlog',
     execution: 'Execution',
-    product_discovery: 'Discovery',
     product_goal: 'Product Goal',
     vision: 'Vision',
 };
@@ -68,7 +65,6 @@ let lifecycleState = {
     actions: [],
     vision: {},
     goal: {},
-    discovery: {},
     specification: {},
     authority: {},
     repository: {},
@@ -534,28 +530,22 @@ function productGoalPanelMarkup(projection, actions = []) {
     return `${visionContext}${goalOutcomeMarkup(projection, actions) || '<p class="text-sm text-slate-600">Product Goal is waiting for the current lifecycle state.</p>'}`;
 }
 
-function discoveryPanelMarkup(projection) {
-    const current = projection?.current;
-    if (!current) {
-        return '<p class="text-sm text-slate-600">Discovery has not been recorded.</p>';
-    }
-    return `<div class="max-w-4xl">
-        <p class="mb-3 text-xs font-semibold uppercase text-accent">Current discovery</p>
-        ${humanValueMarkup(current.canonical_content ?? {})}
-    </div>`;
-}
-
 function specificationPanelMarkup(projection, actions = []) {
     const candidate = projection?.candidate;
     if (!candidate) {
-        return '<p class="text-sm text-slate-600">A Specification candidate has not been recorded.</p>';
+        const authorAction = findAction(actions, 'author_specification');
+        if (authorAction) {
+            return `<p class="mb-4 text-sm leading-6 text-slate-600">Author a Specification from the accepted Vision, Product Goal, and host-prepared evidence.</p>
+                <button type="button" data-direct-action="author_specification" class="${BUTTON_PRIMARY}"><span class="material-symbols-outlined" aria-hidden="true">description</span><span>Author Specification</span></button>`;
+        }
+        return '<p class="text-sm text-slate-600">Specification authoring is waiting for the current lifecycle state.</p>';
     }
     const review = projection?.review;
     const reviewAction = findAction(actions, 'decide_specification');
     const decisionCopy = review?.state && review.state !== 'pending'
         ? `<p class="mb-4 text-sm font-semibold text-slate-700">Review: ${escapeWorkflowText(humanizeKey(review.state))}</p>`
         : '<p class="mb-4 text-sm font-semibold text-slate-700">Exact Specification candidate</p>';
-    return `<div class="max-w-4xl">${decisionCopy}${humanValueMarkup(candidate.canonical_content ?? {})}</div>
+    return `<div class="max-w-4xl">${decisionCopy}<pre class="whitespace-pre-wrap break-words rounded-lg border border-slate-300 bg-white p-4 font-mono text-sm leading-6">${escapeWorkflowText(candidate.rendered_markdown ?? '')}</pre></div>
         ${review?.state === 'pending' ? reviewControlsMarkup('specification', reviewAction) : ''}`;
 }
 
@@ -753,7 +743,6 @@ function renderDashboard() {
         }),
     );
     setMarkup('goal-panel', productGoalPanelMarkup(lifecycleState.goal, lifecycleState.actions));
-    setMarkup('discovery-panel', discoveryPanelMarkup(lifecycleState.discovery));
     setMarkup(
         'specification-panel',
         specificationPanelMarkup(lifecycleState.specification, lifecycleState.actions),
@@ -818,12 +807,11 @@ async function loadDashboard() {
     const base = `/api/projects/${selectedProjectId}`;
     try {
         const options = { signal: controller.signal };
-        const [project, position, vision, goal, discovery, specification, authority, repository] = await Promise.all([
+        const [project, position, vision, goal, specification, authority, repository] = await Promise.all([
             requestJson(base, options),
             requestJson(`${base}/position`, options),
             requestJson(`${base}/vision/status`, options),
             requestJson(`${base}/goals/status`, options),
-            requestJson(`${base}/discovery`, options),
             requestJson(`${base}/specifications/review`, options),
             requestJson(`${base}/authority/review?include_spec=auto`, options),
             requestJson(`${base}/repository`, options),
@@ -835,7 +823,6 @@ async function loadDashboard() {
             actions: position.actions ?? [],
             vision: vision.data ?? {},
             goal: goal.data ?? {},
-            discovery: discovery.data ?? {},
             specification: specification.data ?? {},
             authority: authority.data ?? {},
             repository: repository.data ?? {},
@@ -888,7 +875,7 @@ function reviewCandidateFingerprint(state, scope) {
     return {
         authority: state?.authority?.pending_authority?.authority_fingerprint,
         goal: state?.goal?.candidate?.fingerprint,
-        specification: state?.specification?.candidate?.fingerprint,
+        specification: state?.specification?.candidate?.candidate_fingerprint,
         vision: state?.vision?.candidate?.review_fingerprint,
     }[scope] ?? null;
 }

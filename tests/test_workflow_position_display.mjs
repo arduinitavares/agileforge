@@ -58,7 +58,6 @@ test('human lifecycle labels cover every operator stage', () => {
     assert.deepEqual(Array.from(context.lifecycleStageLabels()), [
         'Vision',
         'Product Goal',
-        'Discovery',
         'Specification',
         'Authority',
         'Backlog',
@@ -128,34 +127,23 @@ test('semantic mutations contain transport metadata and human input only', () =>
     assert.doesNotMatch(source, /workflowInputControl|input_payload|model_id/);
 });
 
-test('discovery and specification are readable and reviewable without JSON editing', () => {
+test('Specification is authored and reviewed without JSON editing', () => {
     const context = loadFrontend();
-    assert.equal(typeof context.discoveryPanelMarkup, 'function');
     assert.equal(typeof context.specificationPanelMarkup, 'function');
-    const discovery = context.discoveryPanelMarkup({
-        current: {
-            canonical_content: {
-                summary: 'Operators need reliable reconciliation.',
-                constraints: ['Local-first', 'Auditable'],
-            },
-        },
-    });
     const specification = context.specificationPanelMarkup(
         {
             candidate: {
-                canonical_content: {
-                    title: 'Movement reconciliation',
-                    acceptance: ['Every imported row has durable provenance.'],
-                },
+                candidate_fingerprint: 'sha256:hidden',
+                rendered_markdown: (
+                    '# Movement reconciliation\n\n'
+                    + '- Every imported row has durable provenance.'
+                ),
             },
             review: { state: 'pending' },
         },
         [action('decide_specification', 'specifications/review')],
     );
 
-    assert.match(discovery, /Operators need reliable reconciliation\./);
-    assert.match(discovery, /Local-first/);
-    assert.doesNotMatch(discovery, /textarea|\{&quot;|canonical_content/);
     assert.match(specification, /Movement reconciliation/);
     assert.match(specification, /Every imported row has durable provenance\./);
     assert.match(specification, /data-review-decision="accepted"/);
@@ -223,7 +211,6 @@ test('project page owns only named human panels and dialogs', () => {
         'lifecycle-stage-strip',
         'vision-panel',
         'goal-panel',
-        'discovery-panel',
         'specification-panel',
         'authority-panel',
         'repository-panel',

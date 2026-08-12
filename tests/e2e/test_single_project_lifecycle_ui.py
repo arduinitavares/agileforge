@@ -71,9 +71,8 @@ _ACTION_ENDPOINTS = {
     "generate_vision_bootstrap": "vision/bootstrap",
     "record_authority_feedback": "authority/feedback",
     "record_backlog_draft": "backlog/generate",
-    "record_discovery_artifact": "discovery",
     "record_product_goal_interview_turn": "goals/respond",
-    "record_specification_candidate": "specifications",
+    "author_specification": "specifications/author",
     "record_vision_interview_turn": "vision/respond",
     "repair_authority": "authority/repair",
 }
@@ -87,9 +86,8 @@ _ACTION_CHILDREN = {
     "generate_vision_bootstrap": "vision",
     "record_authority_feedback": "authority",
     "record_backlog_draft": "backlog",
-    "record_discovery_artifact": "product_discovery",
     "record_product_goal_interview_turn": "product_goal",
-    "record_specification_candidate": "product_discovery",
+    "author_specification": "product_discovery",
     "record_vision_interview_turn": "vision",
     "repair_authority": "authority",
 }
@@ -118,7 +116,6 @@ class FakeLifecycle:
     goal_transcript: list[JsonValue] = field(default_factory=list)
     goal_candidate: JsonObject | None = None
     goal_accepted: bool = False
-    discovery: JsonObject | None = None
     specification: JsonObject | None = None
     specification_accepted: bool = False
     authority_pending: JsonObject | None = None
@@ -190,7 +187,6 @@ class FakeLifecycle:
         readers: dict[str, Callable[[], JsonObject]] = {
             "": self._project_projection,
             "/authority/review": self._authority_projection,
-            "/discovery": self._discovery_projection,
             "/goals/status": self._goal_projection,
             "/repository": self._repository_projection,
             "/specifications/review": self._specification_projection,
@@ -235,12 +231,11 @@ class FakeLifecycle:
             "/authority/decision": self._review_authority,
             "/authority/feedback": self._record_authority_feedback,
             "/authority/repair": self._repair_authority,
-            "/discovery": self._record_discovery,
             "/goals/respond": self._record_goal_turn,
             "/goals/review": self._review_goal,
             "/repository": self._attach_repository,
             "/repository/refresh": self._refresh_repository,
-            "/specifications": self._record_specification,
+            "/specifications/author": self._author_specification,
             "/specifications/review": self._review_specification,
             "/vision/bootstrap": self._bootstrap_vision,
             "/vision/respond": self._record_vision_turn,
@@ -388,19 +383,16 @@ class FakeLifecycle:
         assert isinstance(body["rationale"], str)
         self.goal_accepted = True
 
-    def _record_discovery(self, body: JsonObject) -> None:
-        self._assert_fields(body, {"canonical_content", "content_ref"})
-        content = body["canonical_content"]
-        assert isinstance(content, dict)
-        assert body["content_ref"] is None
-        self.discovery = content
-
-    def _record_specification(self, body: JsonObject) -> None:
-        self._assert_fields(body, {"canonical_content", "content_ref"})
-        content = body["canonical_content"]
-        assert isinstance(content, dict)
-        assert body["content_ref"] is None
-        self.specification = content
+    def _author_specification(self, body: JsonObject) -> None:
+        self._assert_fields(body, set())
+        self.specification = {
+            "title": "Human lifecycle review",
+            "rendered_markdown": (
+                "# Human lifecycle review\n\n"
+                "## Acceptance criteria\n\n"
+                "- Every candidate has a scoped human decision."
+            ),
+        }
 
     def _review_specification(self, body: JsonObject) -> None:
         self._assert_fields(body, {"decision", "rationale"})
@@ -556,26 +548,14 @@ class FakeLifecycle:
             "stale_reason": None if self.goal_accepted else "GOAL_NOT_ACTIVE",
         }
 
-    def _discovery_projection(self) -> JsonObject:
-        return {
-            "current": (
-                None
-                if self.discovery is None
-                else {
-                    "canonical_content": self.discovery,
-                    "fingerprint": "sha256:hidden",
-                }
-            ),
-            "stale_reason": None if self.discovery is not None else "NOT_CURRENT",
-        }
-
     def _specification_projection(self) -> JsonObject:
         candidate: JsonObject | None = (
             None
             if self.specification is None
             else {
-                "canonical_content": self.specification,
-                "fingerprint": "sha256:hidden-specification",
+                "candidate_fingerprint": "sha256:hidden-specification",
+                "payload_fingerprint": "sha256:hidden-specification-payload",
+                "rendered_markdown": self.specification["rendered_markdown"],
             }
         )
         review: JsonObject | None = None
@@ -613,8 +593,7 @@ class FakeLifecycle:
             (not self.vision_accepted, "decide_vision_review"),
             (self.goal_candidate is None, "record_product_goal_interview_turn"),
             (not self.goal_accepted, "decide_product_goal_review"),
-            (self.discovery is None, "record_discovery_artifact"),
-            (self.specification is None, "record_specification_candidate"),
+            (self.specification is None, "author_specification"),
             (not self.specification_accepted, "decide_specification"),
             (
                 self.authority_pending is None and self.authority_accepted is None,
@@ -797,27 +776,6 @@ def _accept_review(page: Page, scope: str) -> None:
     expect(page.locator("#human-action-dialog")).not_to_be_visible()
 
 
-def _record_test_artifact(page: Page, endpoint: str, content: JsonObject) -> None:
-    body: JsonObject = {
-        "idempotency_key": f"dashboard-test-{uuid4().hex}",
-        "actor": "dashboard-ui",
-        "canonical_content": content,
-        "content_ref": None,
-    }
-    result = page.evaluate(
-        """async ({endpoint, body}) => {
-            const response = await fetch(endpoint, {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify(body),
-            });
-            return response.ok;
-        }""",
-        {"endpoint": endpoint, "body": body},
-    )
-    assert result is True
-
-
 def _assert_no_horizontal_overflow(page: Page) -> None:
     fits = page.evaluate(
         "document.documentElement.scrollWidth === document.documentElement.clientWidth"
@@ -949,28 +907,11 @@ def _complete_vision_and_goal(
 
 
 def _record_and_review_definition(page: Page) -> None:
-    _record_test_artifact(
-        page,
-        f"/api/projects/{_PROJECT_ID}/discovery",
-        {
-            "summary": "Operators need lifecycle decisions they can review.",
-            "constraints": ["Local-first", "Durable evidence"],
-        },
-    )
-    page.locator("#refresh-project").click()
-    expect(
-        page.get_by_text("Operators need lifecycle decisions they can review.")
-    ).to_be_visible()
-    _record_test_artifact(
-        page,
-        f"/api/projects/{_PROJECT_ID}/specifications",
-        {
-            "title": "Human lifecycle review",
-            "acceptance": ["Every candidate has a scoped human decision."],
-        },
-    )
-    page.locator("#refresh-project").click()
+    page.locator('[data-direct-action="author_specification"]').click()
     expect(page.get_by_text("Human lifecycle review")).to_be_visible()
+    expect(
+        page.get_by_text("Every candidate has a scoped human decision.")
+    ).to_be_visible()
     _accept_review(page, "specification")
 
 
@@ -1021,8 +962,10 @@ def _authority_ready_fake() -> FakeLifecycle:
         "fingerprint": "sha256:recovery-goal",
     }
     fake.goal_accepted = True
-    fake.discovery = {"summary": "Feedback can be interrupted."}
-    fake.specification = {"title": "Recoverable Authority feedback"}
+    fake.specification = {
+        "title": "Recoverable Authority feedback",
+        "rendered_markdown": "# Recoverable Authority feedback",
+    }
     fake.specification_accepted = True
     fake._compile_authority(
         {
