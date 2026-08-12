@@ -234,12 +234,11 @@ def _snapshot(
                 status="approved",
                 approved_at=EVALUATED_AT,
                 source_specification_candidate_id=1,
+                source_specification_candidate_fingerprint="sha256:candidate-1",
                 source_vision_artifact_id=1,
                 source_vision_fingerprint="sha256:vision",
                 source_product_goal_artifact_id=1,
                 source_product_goal_fingerprint="sha256:goal",
-                source_discovery_artifact_id=1,
-                source_discovery_fingerprint="sha256:discovery",
             ),
         ),
         authorities=(

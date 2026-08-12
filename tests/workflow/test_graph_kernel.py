@@ -389,8 +389,7 @@ def test_root_definition_has_named_children_in_lifecycle_order() -> None:
         "goal.abandon",
     )
     assert tuple(node.node_id for node in product_discovery.nodes) == (
-        "discovery.record",
-        "specification.record",
+        "specification.author",
         "specification.review",
     )
     assert tuple(node.node_id for node in authority.nodes) == (

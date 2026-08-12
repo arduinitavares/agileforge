@@ -46,12 +46,11 @@ def _snapshot(
                 status="approved",
                 approved_at=EVALUATED_AT,
                 source_specification_candidate_id=1,
+                source_specification_candidate_fingerprint="sha256:candidate-1",
                 source_vision_artifact_id=1,
                 source_vision_fingerprint="sha256:vision",
                 source_product_goal_artifact_id=1,
                 source_product_goal_fingerprint="sha256:goal",
-                source_discovery_artifact_id=1,
-                source_discovery_fingerprint="sha256:discovery",
             ),
         )
         if specs is None
@@ -251,12 +250,11 @@ def test_new_current_spec_makes_historical_acceptance_stale_and_recompilable() -
         status="superseded",
         approved_at=EVALUATED_AT,
         source_specification_candidate_id=1,
+        source_specification_candidate_fingerprint="sha256:candidate-1",
         source_vision_artifact_id=1,
         source_vision_fingerprint="sha256:vision",
         source_product_goal_artifact_id=1,
         source_product_goal_fingerprint="sha256:goal",
-        source_discovery_artifact_id=1,
-        source_discovery_fingerprint="sha256:discovery",
     )
     new_spec = SpecVersionFact(
         spec_version_id=SPEC_ID + 1,
@@ -264,12 +262,11 @@ def test_new_current_spec_makes_historical_acceptance_stale_and_recompilable() -
         status="approved",
         approved_at=EVALUATED_AT + timedelta(minutes=1),
         source_specification_candidate_id=2,
+        source_specification_candidate_fingerprint="sha256:candidate-2",
         source_vision_artifact_id=1,
         source_vision_fingerprint="sha256:vision",
         source_product_goal_artifact_id=1,
         source_product_goal_fingerprint="sha256:goal",
-        source_discovery_artifact_id=1,
-        source_discovery_fingerprint="sha256:discovery",
     )
     position = authority_graph().evaluate(
         _snapshot(

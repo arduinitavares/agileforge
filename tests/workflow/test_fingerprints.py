@@ -179,8 +179,8 @@ def test_incomplete_product_goal_turn_changes_business_fact_fingerprint() -> Non
     assert business_fact_fingerprint(snapshot) != business_fact_fingerprint(completed)
 
 
-def test_goal_decision_changes_business_fingerprint_before_discovery() -> None:
-    """Goal review state is authoritative even before discovery is recorded."""
+def test_goal_decision_changes_business_fingerprint_before_specification() -> None:
+    """Goal review state is authoritative before Specification authoring."""
     created = datetime(2026, 8, 2, 12, tzinfo=UTC)
     pending = WorkflowFactSnapshot(
         project=ProjectFact(
@@ -213,7 +213,7 @@ def test_goal_decision_changes_business_fingerprint_before_discovery() -> None:
         business_fact_fingerprint(snapshot) for snapshot in (pending, *states.values())
     }
 
-    assert not pending.discovery_artifacts
+    assert not pending.specification_candidates
     assert business_fact_fingerprint(states["accepted"]) != business_fact_fingerprint(
         pending
     )
