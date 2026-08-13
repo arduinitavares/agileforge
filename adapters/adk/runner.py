@@ -551,41 +551,48 @@ class AdkWorkflowRunner:
         input_payload: JsonObject,
     ) -> RecipeOutput:
         session_service = self._session_service
+        owned_session_service: DatabaseSessionService | None = None
         if session_service is None:
-            session_service = DatabaseSessionService(
+            owned_session_service = DatabaseSessionService(
                 db_url=get_adk_execution_trace_db_target().async_sqlite_url
             )
-            self._session_service = session_service
-        session_id = attempt_fingerprint
-        await session_service.create_session(
-            app_name=self._config.identity.app_name,
-            user_id=self._config.identity.user_id,
-            session_id=session_id,
-        )
-        app = App(
-            name=self._config.identity.app_name,
-            root_agent=recipe.workflow,
-            resumability_config=ResumabilityConfig(is_resumable=True),
-        )
-        runner = Runner(app=app, session_service=session_service)
-        message = types.Content(
-            role="user",
-            parts=[
-                types.Part(text=RecipeInput(payload=input_payload).model_dump_json())
-            ],
-        )
-        output: object | None = None
-        async for event in runner.run_async(
-            user_id=self._config.identity.user_id,
-            session_id=session_id,
-            new_message=message,
-        ):
-            if event.output is not None:
-                output = event.output
-        if output is None:
-            msg = "ADK recipe completed without structured output."
-            raise ValueError(msg)
-        return RecipeOutput.model_validate(output)
+            session_service = owned_session_service
+        try:
+            session_id = attempt_fingerprint
+            await session_service.create_session(
+                app_name=self._config.identity.app_name,
+                user_id=self._config.identity.user_id,
+                session_id=session_id,
+            )
+            app = App(
+                name=self._config.identity.app_name,
+                root_agent=recipe.workflow,
+                resumability_config=ResumabilityConfig(is_resumable=True),
+            )
+            runner = Runner(app=app, session_service=session_service)
+            message = types.Content(
+                role="user",
+                parts=[
+                    types.Part(
+                        text=RecipeInput(payload=input_payload).model_dump_json()
+                    )
+                ],
+            )
+            output: object | None = None
+            async for event in runner.run_async(
+                user_id=self._config.identity.user_id,
+                session_id=session_id,
+                new_message=message,
+            ):
+                if event.output is not None:
+                    output = event.output
+            if output is None:
+                msg = "ADK recipe completed without structured output."
+                raise ValueError(msg)
+            return RecipeOutput.model_validate(output)
+        finally:
+            if owned_session_service is not None:
+                await owned_session_service.close()
 
 
 __all__ = [
