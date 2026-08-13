@@ -206,6 +206,8 @@ def test_cli_forwarding_installs_only_profile_environment(
     monkeypatch.setenv("AGILEFORGE_DB_URL", "parent-business")
     monkeypatch.setenv("AGILEFORGE_ADK_EXECUTION_TRACE_DB_URL", "parent-trace")
     monkeypatch.setenv("MODEL_CONFIG_PATH", "parent-models")
+    monkeypatch.setenv("SPECIFICATION_STRUCTURER_MAX_TOKENS", "24576")
+    monkeypatch.delenv("OPEN_ROUTER_API_KEY", raising=False)
     monkeypatch.setenv("DATABASE_URL", "parent-database")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "parent-secret")
     runner = _runner(checkout)
@@ -221,11 +223,13 @@ def test_cli_forwarding_installs_only_profile_environment(
     )
 
     child_environment = runner.calls[-1][2]
+    assert child_environment is not None
     profile = dev_main.load_profile(checkout, "local")
     assert child_environment == {
         **profile_environment(profile),
         "AGILEFORGE_LAUNCHER_CHILD": "1",
     }
+    assert child_environment["SPECIFICATION_STRUCTURER_MAX_TOKENS"] == "24576"
 
 
 def test_cli_secrets_file_allows_only_provider_key_and_parent_wins(

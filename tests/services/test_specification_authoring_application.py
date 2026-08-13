@@ -10,6 +10,7 @@ from services.application import (
     AgileForgeApplication,
     SpecificationReviewRequest,
     SpecificationStructuringRequest,
+    _agentic_execution_settings,
 )
 from workflow.contracts import (
     FactReference,
@@ -197,6 +198,40 @@ def test_structuring_uses_host_input_and_exact_graph_decision(
         "agileforge.spec-structuring-input.v1"
     )
     assert attempt.decision_fingerprint == "decision"
+
+
+def test_structuring_persists_its_effective_generation_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bind recovery identity to the same explicit budget used by the ADK agent."""
+    monkeypatch.setenv("SPECIFICATION_STRUCTURER_MAX_TOKENS", "24576")
+
+    assert _agentic_execution_settings("specification.structure") == {
+        "timeout_seconds": 120,
+        "max_attempts": 2,
+        "generation_config": {"max_output_tokens": 24_576},
+    }
+    assert _agentic_execution_settings("vision.interview") == {
+        "timeout_seconds": 120,
+        "max_attempts": 2,
+    }
+
+
+def test_structuring_uses_the_composed_agent_config_after_environment_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Persist the immutable composed request config, not a later environment read."""
+    composed_config: JsonObject = {"max_output_tokens": 11_111}
+    monkeypatch.setenv("SPECIFICATION_STRUCTURER_MAX_TOKENS", "22222")
+
+    assert _agentic_execution_settings(
+        "specification.structure",
+        specification_generation_config=composed_config,
+    ) == {
+        "timeout_seconds": 120,
+        "max_attempts": 2,
+        "generation_config": composed_config,
+    }
 
 
 def test_structuring_replays_before_reading_current_position(

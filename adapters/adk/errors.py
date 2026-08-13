@@ -40,7 +40,7 @@ class VisionAgenticPreflightError(RuntimeError):
 class SpecificationAgenticExecutionError(RuntimeError):
     """Typed failure for a malformed Specification producer result."""
 
-    code: WorkflowErrorCode
+    code: str
     message: str
 
     def __str__(self) -> str:

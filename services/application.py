@@ -101,6 +101,7 @@ from services.vision_evidence import (
 from services.vision_input import VisionInputService
 from utils.agileforge_spec_profile_v2 import canonical_spec_json
 from utils.model_config import get_model_id
+from utils.runtime_config import get_specification_structurer_generation_config
 from utils.spec_schemas import ValidationEvidence
 from workflow.contracts import (
     Blocker,
@@ -1148,6 +1149,7 @@ class _LifecycleServiceOptions(TypedDict, total=False):
     planning_action_selection: _PlanningActionSelectionPort | None
     execution_action_selection: _ExecutionActionSelectionPort | None
     sprint_planning_input: _SprintPlanningInputPort | None
+    specification_generation_config: JsonObject | None
 
 
 class _ReadProjectionPort(Protocol):
@@ -1272,6 +1274,23 @@ type SemanticText = Annotated[
     str,
     StringConstraints(strip_whitespace=True, min_length=1),
 ]
+
+
+def _agentic_execution_settings(
+    node_id: str,
+    *,
+    specification_generation_config: JsonObject | None = None,
+) -> JsonObject:
+    """Return effective non-secret settings included in attempt identity."""
+    settings: JsonObject = dict(_EXECUTION_SETTINGS)
+    if node_id == "specification.structure":
+        generation_config = _JSON_OBJECT.validate_python(
+            get_specification_structurer_generation_config()
+            if specification_generation_config is None
+            else specification_generation_config
+        )
+        settings = {**settings, "generation_config": generation_config}
+    return settings
 
 
 class AgenticActionRequest(FrozenModel):
@@ -1762,6 +1781,9 @@ class AgileForgeApplication:
             "execution_action_selection"
         )
         self._sprint_planning_input = lifecycle_services.get("sprint_planning_input")
+        self._specification_generation_config = lifecycle_services.get(
+            "specification_generation_config"
+        )
         self._project_lifecycle: ProjectLifecycleService | None = None
 
     @property
@@ -1904,7 +1926,12 @@ class AgileForgeApplication:
             config=AdkExecutionConfig(
                 project_id=request.project_id,
                 model_id=request.model_id,
-                execution_settings=_EXECUTION_SETTINGS,
+                execution_settings=_agentic_execution_settings(
+                    request.node_id,
+                    specification_generation_config=(
+                        self._specification_generation_config
+                    ),
+                ),
                 lease_seconds=_LEASE_SECONDS,
                 actor=request.actor,
                 correlation_id=request.correlation_id,
@@ -4668,6 +4695,17 @@ def production_application() -> AgileForgeApplication:
         "BaseAgent",
         vars(import_module("adapters.adk.agents.vision"))["repair_agent"],
     )
+    configured_generation = specification_structurer_agent.generate_content_config
+    if configured_generation is None:
+        message = "Specification structurer generation configuration is required."
+        raise RuntimeError(message)
+    specification_generation_config = cast(
+        "JsonObject",
+        configured_generation.model_dump(
+            mode="json",
+            exclude_none=True,
+        ),
+    )
     graph = project_graph()
     registry = build_agentic_recipe_registry(
         nodes=AgenticRecipeNodes(
@@ -4717,6 +4755,7 @@ def production_application() -> AgileForgeApplication:
             interview_input=ProductGoalInterviewInputService(engine=engine),
         ),
         specification_structuring_input=specification_structuring_input,
+        specification_generation_config=specification_generation_config,
         specification_source_registration=specification_source_registration,
         specification_source_replay=DurableTransitionReplayService(engine=engine),
         authority_compilation_input=AuthorityCompilationInputService(engine=engine),

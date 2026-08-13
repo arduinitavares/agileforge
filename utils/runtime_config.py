@@ -9,7 +9,11 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from utils.runtime_controls import LAUNCHER_CHILD_ENV, LAUNCHER_CHILD_VALUE
+from utils.runtime_controls import (
+    LAUNCHER_CHILD_ENV,
+    LAUNCHER_CHILD_VALUE,
+    SPECIFICATION_STRUCTURER_MAX_TOKENS_DEFAULT,
+)
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _CONFIG_ROOT_ENV = "AGILEFORGE_CONFIG_ROOT"
@@ -280,6 +284,18 @@ def get_spec_validator_max_tokens(default: int = 4096) -> int:
 def get_vision_interviewer_max_tokens(default: int = 4096) -> int:
     """Return the max token budget for the vision interviewer."""
     return get_int_env("VISION_INTERVIEWER_MAX_TOKENS", default)
+
+
+def get_specification_structurer_max_tokens(
+    default: int = SPECIFICATION_STRUCTURER_MAX_TOKENS_DEFAULT,
+) -> int:
+    """Return the dedicated max output budget for Specification structuring."""
+    return get_int_env("SPECIFICATION_STRUCTURER_MAX_TOKENS", default)
+
+
+def get_specification_structurer_generation_config() -> dict[str, int]:
+    """Return the effective non-secret Specification generation configuration."""
+    return {"max_output_tokens": get_specification_structurer_max_tokens()}
 
 
 def get_backlog_primer_max_tokens(default: int = 8192) -> int:

@@ -1028,6 +1028,7 @@ class WorkflowDomain:
             WorkflowErrorCode.VISION_EVIDENCE_STALE,
             WorkflowErrorCode.INVALID_SPECIFICATION_PAYLOAD,
             WorkflowErrorCode.UNSUPPORTED_SPECIFICATION_SCHEMA,
+            WorkflowErrorCode.SPECIFICATION_OUTPUT_INCOMPLETE,
             WorkflowErrorCode.SPECIFICATION_PRODUCER_FAILED,
         }
         try:

@@ -12,12 +12,17 @@ from utils.runtime_config import (
     clear_runtime_config_cache,
     get_business_db_target,
     get_database_echo,
+    get_specification_structurer_generation_config,
+    get_specification_structurer_max_tokens,
     is_spec_compiler_schema_disabled,
     resolve_database_target,
 )
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+DEFAULT_SPECIFICATION_STRUCTURER_TOKENS: int = 32_768
+OVERRIDDEN_SPECIFICATION_STRUCTURER_TOKENS: int = 24_576
 
 
 @pytest.fixture(autouse=True)
@@ -184,3 +189,26 @@ def test_spec_compiler_agent_schema_can_be_reenabled(
     monkeypatch.setenv("SPEC_COMPILER_DISABLE_SCHEMA", "false")
 
     assert is_spec_compiler_schema_disabled() is False
+
+
+def test_specification_structurer_has_a_dedicated_generation_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Do not inherit the smaller Vision interview response budget."""
+    monkeypatch.delenv("SPECIFICATION_STRUCTURER_MAX_TOKENS", raising=False)
+    monkeypatch.setenv("VISION_INTERVIEWER_MAX_TOKENS", "1024")
+
+    assert (
+        get_specification_structurer_max_tokens()
+        == DEFAULT_SPECIFICATION_STRUCTURER_TOKENS
+    )
+
+    monkeypatch.setenv("SPECIFICATION_STRUCTURER_MAX_TOKENS", "24576")
+
+    assert (
+        get_specification_structurer_max_tokens()
+        == OVERRIDDEN_SPECIFICATION_STRUCTURER_TOKENS
+    )
+    assert get_specification_structurer_generation_config() == {
+        "max_output_tokens": OVERRIDDEN_SPECIFICATION_STRUCTURER_TOKENS
+    }

@@ -603,6 +603,7 @@ def test_init_schema_bootstrap_receives_only_profile_environment(
         ),
         "AGILEFORGE_LAUNCHER_CHILD": "1",
         "MODEL_CONFIG_PATH": str(checkout / "config" / "models.yaml"),
+        "SPECIFICATION_STRUCTURER_MAX_TOKENS": "32768",
     }
     for secret_value in parent_values.values():
         assert secret_value not in schema_environment.values()
@@ -740,8 +741,10 @@ def test_init_is_idempotent_only_for_exact_existing_profile(
 def test_info_json_is_complete_redacted_and_validated(
     checkout: Path,
     capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Report complete non-secret provenance plus current validation state."""
+    monkeypatch.delenv("OPEN_ROUTER_API_KEY", raising=False)
     module = _module()
     init_runner = FakeRunner(checkout)
     assert (
@@ -778,11 +781,12 @@ def test_info_json_is_complete_redacted_and_validated(
         ),
         "AGILEFORGE_LAUNCHER_CHILD": "1",
         "MODEL_CONFIG_PATH": str(checkout / "config" / "models.yaml"),
+        "SPECIFICATION_STRUCTURER_MAX_TOKENS": 32_768,
     }
     serialized = json.dumps(payload).lower()
     assert serialized.count("open_router_api_key") == 1
-    for secret_key in ("password", "token"):
-        assert secret_key not in serialized
+    for secret_field in ('"password"', '"access_token"', '"api_token"'):
+        assert secret_field not in serialized
 
 
 def test_info_secrets_file_reports_presence_without_credential_value(

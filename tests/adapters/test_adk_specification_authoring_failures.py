@@ -2,18 +2,28 @@
 
 from __future__ import annotations
 
+import hashlib
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from pathlib import Path
+from typing import TYPE_CHECKING, cast
 
 import pytest
 from git import Repo
-from google.adk.agents import BaseAgent, InvocationContext
+from google.adk.agents import Agent, BaseAgent, InvocationContext
 from google.adk.events import Event
+from google.adk.models.base_llm import BaseLlm
+from google.adk.models.llm_response import LlmResponse
 from google.adk.sessions import InMemorySessionService
 from google.adk.sessions import Session as AdkSession
+from google.genai import types
 from openai import OpenAIError
+from pydantic import Field
 from sqlmodel import Session, col, select
 
+from adapters.adk.agents.specification_author import (
+    reject_incomplete_specification_output,
+)
+from adapters.adk.errors import SpecificationAgenticExecutionError
 from adapters.adk.recipes import (
     AgenticRecipeNodes,
     build_agentic_recipe_registry,
@@ -38,18 +48,19 @@ from services.specification_source_registration import (
     SpecificationSourceRegistrationRequest,
     SpecificationSourceRegistrationService,
 )
+from services.specs.candidate_contract import load_candidate_contract
 from tests.workflow.lifecycle_fixtures import _seed_accepted_vision_and_goal
-from workflow.clock import FixedClock
+from utils.agileforge_spec_profile_v2 import canonical_spec_json
 from workflow.contracts import TransitionResult, WorkflowError, WorkflowErrorCode
 from workflow.definitions.root import ROOT_GRAPH
 from workflow.domain import WorkflowDomain
-from workflow.fingerprints import canonical_json
+from workflow.fingerprints import canonical_hash, canonical_json
 from workflow.requests import RegisterSpecificationSource, RevalidateNodeAttempt
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
-    from pathlib import Path
 
+    from google.adk.models.llm_request import LlmRequest
     from sqlalchemy.engine import Engine
 
     from workflow.contracts import (
@@ -60,6 +71,29 @@ if TYPE_CHECKING:
 
 NOW = datetime(2026, 8, 11, 12, tzinfo=UTC)
 EXECUTION_SETTINGS: JsonObject = {"timeout_seconds": 5.0, "max_attempts": 1}
+ISSUE_200_SOURCE: Path = (
+    Path(__file__).parents[1] / "fixtures" / "issue_200" / "to-spec-source.md"
+)
+ISSUE_200_CONTEXT: Path = (
+    Path(__file__).parents[1] / "fixtures" / "issue_200" / "CONTEXT.md"
+)
+ISSUE_200_OUTPUT: Path = (
+    Path(__file__).parents[1]
+    / "fixtures"
+    / "issue_200"
+    / "complete-provider-output.json"
+)
+ISSUE_200_MAX_OUTPUT_TOKENS: int = 32_768
+ISSUE_200_EXECUTION_SETTINGS: JsonObject = {
+    "timeout_seconds": 5.0,
+    "max_attempts": 1,
+    "generation_config": {"max_output_tokens": ISSUE_200_MAX_OUTPUT_TOKENS},
+}
+ISSUE_200_OBSERVED_TRUNCATION_CHARS: int = 20_069
+ISSUE_200_SOURCE_BYTES: int = 8_726
+ISSUE_200_CONTEXT_BYTES: int = 1_297
+ISSUE_200_MIN_NORMALIZED_INPUT_CHARS: int = 13_000
+ISSUE_200_MIN_CANONICAL_OUTPUT_CHARS: int = 40_000
 
 
 class _CountingSpecificationLeaf(BaseAgent):
@@ -91,6 +125,56 @@ class _FailingSpecificationLeaf(BaseAgent):
         message = "provider routing failed"
         raise OpenAIError(message)
         yield
+
+
+class _TypedFailingSpecificationLeaf(BaseAgent):
+    """Raise one adapter-owned typed failure with a controlled open code."""
+
+    failure_code: str
+    calls: list[str]
+
+    async def _run_async_impl(
+        self,
+        ctx: InvocationContext,
+    ) -> AsyncGenerator[Event, None]:
+        del ctx
+        self.calls.append("provider")
+        raise SpecificationAgenticExecutionError(
+            code=self.failure_code,
+            message="Untrusted typed Specification failure.",
+        )
+        yield
+
+
+class _SpecificationResponseLlm(BaseLlm):
+    """Return one deterministic response while capturing the real ADK request."""
+
+    response_text: str
+    finish_reason: types.FinishReason
+    calls: list[str] = Field(default_factory=list)
+    requests: list[object] = Field(default_factory=list, exclude=True)
+
+    async def generate_content_async(
+        self,
+        llm_request: LlmRequest,
+        stream: bool = False,
+    ) -> AsyncGenerator[LlmResponse, None]:
+        """Yield a provider response after retaining its exact request contract."""
+        del stream
+        self.calls.append("provider")
+        self.requests.append(llm_request)
+        yield LlmResponse(
+            content=types.Content(
+                role="model",
+                parts=[types.Part.from_text(text=self.response_text)],
+            ),
+            finish_reason=self.finish_reason,
+            usage_metadata=types.GenerateContentResponseUsageMetadata(
+                prompt_token_count=4_200,
+                candidates_token_count=4_096,
+                total_token_count=8_296,
+            ),
+        )
 
 
 class _PostProviderDriftingSpecificationLeaf(BaseAgent):
@@ -141,6 +225,16 @@ class _DriftingSessionService(InMemorySessionService):
         return created
 
 
+class _TestClock:
+    """Allow source registration and candidate production at distinct instants."""
+
+    def __init__(self, now_value: datetime) -> None:
+        self.now_value = now_value
+
+    def now(self) -> datetime:
+        return self.now_value
+
+
 def _unused_leaf(name: str) -> _CountingSpecificationLeaf:
     return _CountingSpecificationLeaf(name=name, response={}, calls=[])
 
@@ -177,13 +271,16 @@ def _invalid_model_output(
     return provider_output
 
 
-def _system(
+def _system(  # noqa: PLR0913
     engine: Engine,
     tmp_path: Path,
     leaf: BaseAgent,
     *,
     source_check: SpecificationSourceCheck | None = None,
     execution_settings: JsonObject = EXECUTION_SETTINGS,
+    source_bytes: bytes = b"# Exact external Specification\n",
+    context_bytes: bytes | None = None,
+    structuring_time: datetime = NOW,
 ) -> tuple[
     AdkWorkflowRunner,
     WorkflowDomain,
@@ -194,15 +291,16 @@ def _system(
 ]:
     repository = tmp_path / "registered-specification-source"
     repository.mkdir()
-    (repository / "SPECIFICATION.md").write_text(
-        "# Exact external Specification\n",
-        encoding="utf-8",
-    )
+    (repository / "SPECIFICATION.md").write_bytes(source_bytes)
+    tracked_paths = ["SPECIFICATION.md"]
+    if context_bytes is not None:
+        (repository / "CONTEXT.md").write_bytes(context_bytes)
+        tracked_paths.append("CONTEXT.md")
     with Repo.init(repository) as repo:
         with repo.config_writer() as config:
             config.set_value("user", "name", "Structuring Attempt Test")
             config.set_value("user", "email", "structuring@example.test")
-        repo.index.add(["SPECIFICATION.md"])
+        repo.index.add(tracked_paths)
         repo.index.commit("registered source")
     probe = GitPythonRepositoryProbe()
     observed = probe.inspect(repository)
@@ -258,12 +356,23 @@ def _system(
         ),
         execution_settings=execution_settings,
     )
+    structuring_input_service = SpecificationStructuringInputService(
+        engine=engine,
+        repository_probe=probe,
+    )
+    runner_source_check = (
+        structuring_input_service.revalidate_sources
+        if source_check is None
+        else source_check
+    )
+    clock = _TestClock(NOW)
     domain = WorkflowDomain(
         engine=engine,
         graph=ROOT_GRAPH,
-        clock=FixedClock(now_value=NOW),
+        clock=clock,
         adk_recipe_registry=registry,
         specification_registration_check=lambda _prepared: None,
+        specification_source_check=source_check,
     )
     prepared = SpecificationSourceRegistrationService(
         engine=engine,
@@ -303,19 +412,12 @@ def _system(
         )
     )
     assert registered.ok is True
-    structuring_input_service = SpecificationStructuringInputService(
-        engine=engine,
-        repository_probe=probe,
-    )
+    clock.now_value = structuring_time
     runner = AdkWorkflowRunner(
         domain=domain,
         registry=registry,
         session_service=InMemorySessionService(),
-        specification_source_check=(
-            structuring_input_service.revalidate_sources
-            if source_check is None
-            else source_check
-        ),
+        specification_source_check=runner_source_check,
         config=AdkExecutionConfig(
             project_id=project_id,
             model_id="fake/specification-structurer",
@@ -463,6 +565,222 @@ def test_provider_failure_uses_specification_producer_code_durably(
         assert outcome.status == "failure"
         assert outcome.failure_code == "SPECIFICATION_PRODUCER_FAILED"
         assert not session.exec(select(SpecificationCandidate)).all()
+
+
+@pytest.mark.parametrize(
+    "failure_code",
+    ["UNKNOWN_SPECIFICATION_FAILURE", WorkflowErrorCode.PROJECT_NOT_FOUND.value],
+)
+def test_unapproved_typed_failure_code_fails_closed_and_replays_exactly(
+    engine: Engine,
+    tmp_path: Path,
+    failure_code: str,
+) -> None:
+    """Close attempts generically when an adapter emits an unapproved open code."""
+    leaf = _TypedFailingSpecificationLeaf(
+        name="typed_failing_specification_structurer",
+        failure_code=failure_code,
+        calls=[],
+    )
+    runner, _domain, project_id, decision, normalized_input, guards = _system(
+        engine,
+        tmp_path,
+        leaf,
+    )
+
+    result = runner.run(decision, normalized_input, guards=guards)
+    replay = runner.run(decision, normalized_input, guards=guards)
+
+    assert result.error is not None
+    assert result.error.code is WorkflowErrorCode.SPECIFICATION_PRODUCER_FAILED
+    assert result.error.message == "Specification structurer provider execution failed."
+    assert replay == result.model_copy(update={"replayed": True})
+    assert leaf.calls == ["provider"]
+    with Session(engine) as session:
+        outcome = _latest_outcome(session, project_id=project_id)
+        assert outcome.status == "failure"
+        assert outcome.failure_code == "SPECIFICATION_PRODUCER_FAILED"
+        assert outcome.failure_message == result.error.message
+        assert not session.exec(select(SpecificationCandidate)).all()
+
+
+@pytest.mark.parametrize(
+    ("truncate", "finish_reason"),
+    [
+        pytest.param(True, types.FinishReason.MAX_TOKENS, id="length-metadata"),
+        pytest.param(True, types.FinishReason.STOP, id="syntactic-incompleteness"),
+        pytest.param(False, types.FinishReason.MAX_TOKENS, id="valid-json-at-limit"),
+    ],
+)
+def test_incomplete_realistic_response_uses_actionable_durable_failure(
+    engine: Engine,
+    tmp_path: Path,
+    truncate: bool,
+    finish_reason: types.FinishReason,
+) -> None:
+    """Classify truncation before closed-schema validation can hide its evidence."""
+    complete_output = ISSUE_200_OUTPUT.read_text(encoding="utf-8")
+    response_text = (
+        complete_output[:ISSUE_200_OBSERVED_TRUNCATION_CHARS]
+        if truncate
+        else complete_output
+    )
+    if truncate:
+        assert len(response_text) == ISSUE_200_OBSERVED_TRUNCATION_CHARS
+    else:
+        SpecificationStructuringOutput.model_validate_json(response_text)
+    model = _SpecificationResponseLlm(
+        model="fake/length-limited",
+        response_text=response_text,
+        finish_reason=finish_reason,
+    )
+    leaf = Agent(
+        name="length_limited_specification_structurer",
+        model=model,
+        input_schema=SpecificationStructuringInput,
+        output_schema=SpecificationStructuringOutput,
+        instruction="Return one complete canonical Specification payload.",
+        generate_content_config=types.GenerateContentConfig(
+            max_output_tokens=ISSUE_200_MAX_OUTPUT_TOKENS
+        ),
+        mode="single_turn",
+        after_model_callback=reject_incomplete_specification_output,
+    )
+    source_bytes = ISSUE_200_SOURCE.read_bytes()
+    context_bytes = ISSUE_200_CONTEXT.read_bytes()
+    assert len(source_bytes) == ISSUE_200_SOURCE_BYTES
+    assert hashlib.sha256(source_bytes).hexdigest() == (
+        "7d1cb963d06f9e40c82204bc32093b505f6b10bc46027162104b05b4a0ba507a"
+    )
+    assert len(context_bytes) == ISSUE_200_CONTEXT_BYTES
+    assert hashlib.sha256(context_bytes).hexdigest() == (
+        "7f3d98698f2741a3a200a7558c98ee0415bbd670c8184c406cc854db44de64d7"
+    )
+    runner, _domain, project_id, decision, normalized_input, guards = _system(
+        engine,
+        tmp_path,
+        leaf,
+        execution_settings=ISSUE_200_EXECUTION_SETTINGS,
+        source_bytes=source_bytes,
+        context_bytes=context_bytes,
+        structuring_time=NOW + timedelta(seconds=1),
+    )
+    assert len(canonical_json(normalized_input)) >= ISSUE_200_MIN_NORMALIZED_INPUT_CHARS
+
+    result = runner.run(decision, normalized_input, guards=guards)
+
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.code.value == "SPECIFICATION_OUTPUT_INCOMPLETE"
+    assert result.error.message == (
+        "Specification structurer returned incomplete output. Increase "
+        "SPECIFICATION_STRUCTURER_MAX_TOKENS or select a provider that can return "
+        "the complete structured payload, then retry Structure Specification."
+    )
+    assert model.calls == ["provider"]
+
+    replayed = runner.run(decision, normalized_input, guards=guards)
+
+    assert replayed == result.model_copy(update={"replayed": True})
+    assert model.calls == ["provider"]
+    with Session(engine) as session:
+        outcome = _latest_outcome(session, project_id=project_id)
+        assert outcome.status == "failure"
+        assert outcome.failure_code == "SPECIFICATION_OUTPUT_INCOMPLETE"
+        assert outcome.failure_message == result.error.message
+        attempt = _latest_attempt(session, project_id=project_id)
+        assert attempt.execution_settings_json == canonical_json(
+            ISSUE_200_EXECUTION_SETTINGS
+        )
+        assert not session.exec(select(SpecificationCandidate)).all()
+
+
+def test_complete_realistic_response_persists_one_exact_canonical_candidate(
+    engine: Engine,
+    tmp_path: Path,
+) -> None:
+    """Structure the unshortened issue fixture through the actual ADK schema path."""
+    source_bytes = ISSUE_200_SOURCE.read_bytes()
+    context_bytes = ISSUE_200_CONTEXT.read_bytes()
+    output_bytes = ISSUE_200_OUTPUT.read_bytes()
+    expected = SpecificationStructuringOutput.model_validate_json(output_bytes)
+    assert len(output_bytes) > ISSUE_200_OBSERVED_TRUNCATION_CHARS
+    assert (
+        len(canonical_json(expected.model_dump(mode="json")))
+        > ISSUE_200_MIN_CANONICAL_OUTPUT_CHARS
+    )
+    model = _SpecificationResponseLlm(
+        model="fake/complete-specification",
+        response_text=output_bytes.decode("utf-8"),
+        finish_reason=types.FinishReason.STOP,
+    )
+    leaf = Agent(
+        name="complete_specification_structurer",
+        model=model,
+        input_schema=SpecificationStructuringInput,
+        output_schema=SpecificationStructuringOutput,
+        instruction="Return one complete canonical Specification payload.",
+        generate_content_config=types.GenerateContentConfig(
+            max_output_tokens=ISSUE_200_MAX_OUTPUT_TOKENS
+        ),
+        mode="single_turn",
+        after_model_callback=reject_incomplete_specification_output,
+    )
+
+    def unchanged_source(_project_id: int, _input: JsonObject) -> None:
+        """Avoid a nested SQLite-memory session after exact input construction."""
+
+    runner, _domain, project_id, decision, normalized_input, guards = _system(
+        engine,
+        tmp_path,
+        leaf,
+        source_check=unchanged_source,
+        execution_settings=ISSUE_200_EXECUTION_SETTINGS,
+        source_bytes=source_bytes,
+        context_bytes=context_bytes,
+        structuring_time=NOW + timedelta(seconds=1),
+    )
+    contract = SpecificationStructuringInput.model_validate(normalized_input)
+    assert contract.registered_source.source.text.encode("utf-8") == source_bytes
+    assert contract.registered_source.context.document is not None
+    assert (
+        contract.registered_source.context.document.text.encode("utf-8")
+        == context_bytes
+    )
+
+    result = runner.run(decision, normalized_input, guards=guards)
+
+    assert result.ok
+    assert model.calls == ["provider"]
+    assert len(model.requests) == 1
+    request = cast("LlmRequest", model.requests[0])
+    assert request.config.max_output_tokens == ISSUE_200_MAX_OUTPUT_TOKENS
+    assert request.config.response_mime_type == "application/json"
+    assert request.config.response_schema is SpecificationStructuringOutput
+    with Session(engine) as session:
+        candidates = session.exec(
+            select(SpecificationCandidate).where(
+                col(SpecificationCandidate.project_id) == project_id
+            )
+        ).all()
+        assert len(candidates) == 1
+        candidate = candidates[0]
+        payload, envelope = load_candidate_contract(
+            candidate.canonical_envelope_json,
+            expected_candidate_fingerprint=candidate.candidate_fingerprint,
+        )
+        assert canonical_spec_json(payload) == canonical_spec_json(expected.payload)
+        attempt = _latest_attempt(session, project_id=project_id)
+        assert attempt.execution_settings_json == canonical_json(
+            ISSUE_200_EXECUTION_SETTINGS
+        )
+        assert envelope.attempt_fingerprint == attempt.attempt_fingerprint
+        assert envelope.model_configuration_fingerprint == canonical_hash(
+            {
+                "model_id": attempt.model_id,
+                "execution_settings": ISSUE_200_EXECUTION_SETTINGS,
+            }
+        )
 
 
 def test_trace_setup_drift_is_revalidated_immediately_before_provider(

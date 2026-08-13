@@ -18,6 +18,7 @@ from typing import Literal, Self, cast
 from git import Git
 from pydantic import BaseModel, ConfigDict, model_validator
 
+from utils.runtime_controls import SPECIFICATION_STRUCTURER_MAX_TOKENS_DEFAULT
 from workflow.contracts import GRAPH_VERSION
 
 _PROFILE_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
@@ -612,6 +613,10 @@ def profile_environment(profile: RuntimeProfile) -> dict[str, str]:
             f"sqlite:///{profile.trace_database.as_posix()}"
         ),
         "MODEL_CONFIG_PATH": str(profile.model_config_path),
+        "SPECIFICATION_STRUCTURER_MAX_TOKENS": os.environ.get(
+            "SPECIFICATION_STRUCTURER_MAX_TOKENS",
+            str(SPECIFICATION_STRUCTURER_MAX_TOKENS_DEFAULT),
+        ),
     }
 
 

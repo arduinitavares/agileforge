@@ -545,7 +545,7 @@ def test_profile_paths_reject_symlinked_state_ancestor(
 
 
 def test_profile_environment_contains_only_runtime_controls(checkout: Path) -> None:
-    """Return exactly the three non-secret runtime controls."""
+    """Return only the required non-secret runtime controls."""
     profile = initialize_profile_record(checkout, "environment")
 
     assert profile_environment(profile) == {
@@ -554,6 +554,7 @@ def test_profile_environment_contains_only_runtime_controls(checkout: Path) -> N
             f"sqlite:///{profile.trace_database.as_posix()}"
         ),
         "MODEL_CONFIG_PATH": str(profile.model_config_path),
+        "SPECIFICATION_STRUCTURER_MAX_TOKENS": "32768",
     }
 
 

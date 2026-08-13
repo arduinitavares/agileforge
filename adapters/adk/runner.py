@@ -112,6 +112,17 @@ _AGENTIC_EXECUTION_ERRORS: tuple[type[BaseException], ...] = (
     SpecificationAgenticExecutionError,
     *_ADK_EXECUTION_ERRORS,
 )
+_SPECIFICATION_AGENT_FAILURE_CODES: frozenset[WorkflowErrorCode] = frozenset(
+    {
+        WorkflowErrorCode.INVALID_SPECIFICATION_PAYLOAD,
+        WorkflowErrorCode.UNSUPPORTED_SPECIFICATION_SCHEMA,
+        WorkflowErrorCode.SPECIFICATION_OUTPUT_INCOMPLETE,
+        WorkflowErrorCode.SPECIFICATION_PRODUCER_FAILED,
+    }
+)
+_SPECIFICATION_PRODUCER_FAILURE_MESSAGE: str = (
+    "Specification structurer provider execution failed."
+)
 
 
 @dataclass(frozen=True)
@@ -438,12 +449,22 @@ class AdkWorkflowRunner:
                 ),
             )
         if isinstance(error, SpecificationAgenticExecutionError):
+            try:
+                requested_code = WorkflowErrorCode(error.code)
+            except ValueError:
+                requested_code = None
+            if requested_code in _SPECIFICATION_AGENT_FAILURE_CODES:
+                code = requested_code
+                message = error.message
+            else:
+                code = WorkflowErrorCode.SPECIFICATION_PRODUCER_FAILED
+                message = _SPECIFICATION_PRODUCER_FAILURE_MESSAGE
             return self._fail_specification_attempt(
                 request=request,
                 attempt_id=attempt_id,
                 attempt_fingerprint=attempt_fingerprint,
-                code=error.code,
-                message=error.message,
+                code=code,
+                message=message,
             )
         if request.node_id == "specification.structure":
             return self._fail_specification_attempt(
@@ -451,7 +472,7 @@ class AdkWorkflowRunner:
                 attempt_id=attempt_id,
                 attempt_fingerprint=attempt_fingerprint,
                 code=WorkflowErrorCode.SPECIFICATION_PRODUCER_FAILED,
-                message="Specification structurer provider execution failed.",
+                message=_SPECIFICATION_PRODUCER_FAILURE_MESSAGE,
             )
         return self._fail_attempt(
             request=request,

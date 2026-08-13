@@ -229,6 +229,7 @@ class FakeRuntime:
                 ),
                 "AGILEFORGE_LAUNCHER_CHILD": "1",
                 "MODEL_CONFIG_PATH": "fixture-models.yaml",
+                "SPECIFICATION_STRUCTURER_MAX_TOKENS": 32_768,
             },
             "schema": {
                 "valid": True,

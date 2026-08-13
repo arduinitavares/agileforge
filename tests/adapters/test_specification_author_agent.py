@@ -3,21 +3,64 @@
 from __future__ import annotations
 
 import importlib
+import json
 import os
 import subprocess  # nosec B404  # test-only clean-process import boundary
 import sys
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import pytest
 from google.adk.models.lite_llm import (
     LiteLlm,
+    LiteLLMClient,
     _to_litellm_response_format,
 )
+from google.adk.models.llm_request import LlmRequest
+from google.adk.models.llm_response import LlmResponse
+from google.genai import types
+from litellm import ModelResponse
 from pydantic import TypeAdapter, ValidationError
 
 from services.contracts.specification_authoring import SpecificationStructuringOutput
 from workflow.contracts import JsonObject
+
+if TYPE_CHECKING:
+    from google.adk.agents.callback_context import CallbackContext
+
+DEDICATED_TOKEN_BUDGET: int = 24_576
+PRODUCTION_TOKEN_BUDGET: int = 32_768
+
+
+class _CapturingLiteLlmClient(LiteLLMClient):
+    """Capture the exact completion kwargs without making a provider call."""
+
+    def __init__(self) -> None:
+        self.kwargs: dict[str, object] = {}
+
+    async def acompletion(
+        self,
+        model: object,
+        messages: object,
+        tools: object,
+        **kwargs: object,
+    ) -> ModelResponse:
+        self.kwargs = {
+            "model": model,
+            "messages": messages,
+            "tools": tools,
+            **kwargs,
+        }
+        return ModelResponse(
+            model="fake/specification-structurer",
+            choices=[
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "{}"},
+                    "finish_reason": "stop",
+                }
+            ],
+        )
 
 
 def test_structurer_agent_imports_in_a_clean_process() -> None:
@@ -37,6 +80,63 @@ def test_structurer_agent_imports_in_a_clean_process() -> None:
     )
 
     assert completed.returncode == 0, completed.stderr
+
+
+def test_structurer_uses_explicit_dedicated_adk_generation_config() -> None:
+    """Expose the effective budget on the ADK request instead of LiteLLM internals."""
+    completed = subprocess.run(  # nosec B603
+        (
+            sys.executable,
+            "-c",
+            (
+                "import json; "
+                "from adapters.adk.agents.specification_author import root_agent; "
+                "print(json.dumps({"
+                "'max_output_tokens': "
+                "root_agent.generate_content_config.max_output_tokens,"
+                "'model_args': root_agent.model._additional_args"
+                "}))"
+            ),
+        ),
+        cwd=Path(__file__).parents[2],
+        env={
+            **os.environ,
+            "OPENROUTER_API_KEY": "test-key",
+            "SPECIFICATION_STRUCTURER_MAX_TOKENS": "24576",
+            "VISION_INTERVIEWER_MAX_TOKENS": "1024",
+        },
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    config = json.loads(completed.stdout)
+    assert config["max_output_tokens"] == DEDICATED_TOKEN_BUDGET
+    assert "max_tokens" not in config["model_args"]
+    assert "max_completion_tokens" not in config["model_args"]
+
+
+@pytest.mark.asyncio
+async def test_adk_generation_config_reaches_litellm_completion_contract() -> None:
+    """Map ADK max output tokens to the supported LiteLLM provider argument."""
+    client = _CapturingLiteLlmClient()
+    model = LiteLlm(
+        model="openrouter/openai/gpt-5.6-luna",
+        llm_client=client,
+        drop_params=True,
+    )
+    request = LlmRequest(
+        model=model.model,
+        contents=[types.Content(role="user", parts=[types.Part(text="input")])],
+        config=types.GenerateContentConfig(max_output_tokens=PRODUCTION_TOKEN_BUDGET),
+    )
+
+    _responses = [response async for response in model.generate_content_async(request)]
+
+    assert client.kwargs["max_completion_tokens"] == PRODUCTION_TOKEN_BUDGET
+    assert "max_tokens" not in client.kwargs
 
 
 def test_structurer_prompt_hash_binds_the_actual_packaged_instructions() -> None:
@@ -129,4 +229,54 @@ def test_model_output_contract_is_a_json_object() -> None:
             "payload"
         ]["schema_version"]
         == "agileforge.spec.v2"
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        None,
+        "",
+        "   ",
+        '{"payload": tru',
+        '{"payload": 1e',
+        '{"payload":"\\u12',
+        '{"payload": [1, 2,',
+    ],
+)
+def test_incomplete_json_classifier_covers_non_string_eof_positions(
+    text: str | None,
+) -> None:
+    """Recognize EOF truncation even when provider finish metadata is absent."""
+    module = importlib.import_module("adapters.adk.agents.specification_author")
+
+    assert module._contains_incomplete_json(text) is True
+
+
+@pytest.mark.parametrize(
+    "text",
+    ['{"payload":,}', '{"payload": 1.}', '{"payload": true garbage}'],
+)
+def test_incomplete_json_classifier_leaves_complete_malformed_json_to_schema(
+    text: str,
+) -> None:
+    """Keep non-EOF validation failures in the existing closed-schema path."""
+    module = importlib.import_module("adapters.adk.agents.specification_author")
+
+    assert module._contains_incomplete_json(text) is False
+
+
+@pytest.mark.parametrize(
+    "finish_reason",
+    [types.FinishReason.SAFETY, types.FinishReason.OTHER],
+)
+def test_empty_non_capacity_responses_keep_provider_failure_semantics(
+    finish_reason: types.FinishReason,
+) -> None:
+    """Do not prescribe token-budget recovery for explicit provider rejections."""
+    module = importlib.import_module("adapters.adk.agents.specification_author")
+
+    module.reject_incomplete_specification_output(
+        cast("CallbackContext", object()),
+        LlmResponse(finish_reason=finish_reason),
     )

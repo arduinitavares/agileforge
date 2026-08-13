@@ -208,6 +208,10 @@ class ChildRuntimeEnvironment(BaseModel):
     )
     launcher_child: Literal["1"] = Field(alias=LAUNCHER_CHILD_ENV)
     model_config_path: str = Field(alias="MODEL_CONFIG_PATH", min_length=1)
+    specification_structurer_max_tokens: int = Field(
+        alias="SPECIFICATION_STRUCTURER_MAX_TOKENS",
+        gt=0,
+    )
 
 
 class InfoResult(BaseModel):

@@ -120,10 +120,12 @@ def _commit_launcher_fixtures(source_root: Path, clone: Path) -> tuple[str, str]
         "api.py",
         "cli/dev_checks.py",
         "cli/dev_main.py",
+        "cli/dev_profiles.py",
         "cli/dev_server.py",
         "cli/main.py",
         "frontend/__init__.py",
         "pyproject.toml",
+        "utils/runtime_controls.py",
         "uv.lock",
     )
     for relative in copied_files:
