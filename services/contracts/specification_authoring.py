@@ -38,10 +38,10 @@ type JsonObject = dict[str, JsonValue]
 
 SPECIFICATION_STRUCTURER_VERSION: str = "1.0.1"
 SPECIFICATION_STRUCTURER_PROMPT_VERSION: str = (
-    "agileforge.specification-structurer.prompt.v1"
+    "agileforge.specification-structurer.prompt.v2"
 )
 SPECIFICATION_STRUCTURER_PROMPT_HASH: str = (
-    "sha256:fec7c251132af921dd721e5e3cdea758eef95ce0437bfd85d2f24dad00c70e21"
+    "sha256:88cad14ee56fde7c351b98063f375b5bd7747d4eb7f2c89191cd29b560f1d669"
 )
 SPECIFICATION_VISION_SOURCE_ID: str = "SRC.vision.accepted"
 SPECIFICATION_PRODUCT_GOAL_SOURCE_ID: str = "SRC.product-goal.active"

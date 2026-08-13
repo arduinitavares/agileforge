@@ -17,6 +17,9 @@ the right stage.
 - `todomvc`: small product behavior specification.
 - `petstore`: small OpenAPI/API-contract specification.
 - `gherkin`: scenario and acceptance-criteria specification.
+- `string-calculator-negative-diagnostic`: focused, provider-free source-to-spec
+  fidelity case with one human-labeled weakened candidate and one exact gold
+  candidate. It has no runtime or lifecycle effect.
 
 ## Artifact Rules
 

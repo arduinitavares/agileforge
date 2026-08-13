@@ -1,0 +1,21 @@
+{
+  "schema_version": "agileforge.specification-structuring-quality-evaluation.v1",
+  "case_id": "string-calculator-negative-diagnostic",
+  "evaluation_mode": "human-reviewed-fixture-oracle",
+  "source_path": "source/source.md",
+  "review_path": "agileforge/generated-spec/structured-spec-review.md",
+  "candidates": [
+    {
+      "candidate_id": "acceptable-exact",
+      "path": "agileforge/gold-spec/spec.json",
+      "expected_judgment": "semantically_acceptable"
+    },
+    {
+      "candidate_id": "weakened-begins-with",
+      "path": "agileforge/generated-spec/spec.json",
+      "expected_judgment": "semantically_unacceptable"
+    }
+  ],
+  "human_review_remains_final": true,
+  "runtime_effect": "none"
+}

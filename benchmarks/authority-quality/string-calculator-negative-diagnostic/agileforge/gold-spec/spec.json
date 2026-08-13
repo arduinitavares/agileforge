@@ -1,0 +1,69 @@
+{
+  "schema_version": "agileforge.spec.v2",
+  "artifact_id": "SPEC.string-calculator-negative-contract",
+  "title": "String Calculator Negative Diagnostic Contract",
+  "summary": "Preserves the exact Python and command-line negative-number diagnostic behavior.",
+  "problem_statement": "A structured Specification must retain the complete observable source contract without weakening equality, ordering, duplication, separators, streams, status, or newlines.",
+  "items": [
+    {
+      "id": "INTERFACE.python-negative-error",
+      "type": "INTERFACE",
+      "title": "Python rejection error type and text",
+      "statement": "The public add operation MUST raise ValueError whose complete message equals `negative numbers not allowed: ` followed by every canonical negative value in encounter order, separated by comma and space, with duplicate occurrences preserved.",
+      "level": "MUST",
+      "rationale": "Python callers need the complete source-defined rejection diagnostic.",
+      "verification": "unit-test",
+      "acceptance": [
+        "Input `-01,2,-003,-01` raises ValueError with complete message `negative numbers not allowed: -1, -3, -1`.",
+        "The message contains no additional prefix, suffix, or text."
+      ],
+      "tags": [
+        "python-api",
+        "error-contract"
+      ],
+      "source_notes": [
+        {
+          "source_id": "SRC.specification-source.primary",
+          "kind": "import",
+          "text": "The source requires the complete diagnostic, every canonical negative in encounter order, comma-space separators, and preserved duplicates."
+        }
+      ]
+    },
+    {
+      "id": "INTERFACE.installed-command",
+      "type": "INTERFACE",
+      "title": "Installed command with positional input",
+      "statement": "The project MUST install a string-calculator command that accepts one Number List as a positional argument for supported invocations.",
+      "level": "MUST",
+      "verification": "integration-test",
+      "acceptance": [
+        "The string-calculator executable is available after project installation.",
+        "A supported invocation supplies one Number List positional argument."
+      ]
+    },
+    {
+      "id": "INTERFACE.cli-success-channel",
+      "type": "INTERFACE",
+      "title": "CLI successful output contract",
+      "statement": "On successful calculation the installed command MUST write only the decimal sum and one trailing newline to standard output, write nothing to standard error, and exit zero.",
+      "level": "MUST",
+      "verification": "integration-test",
+      "acceptance": [
+        "A successful invocation for `1,2` writes exactly `3` followed by one newline to standard output.",
+        "The invocation writes nothing to standard error and exits zero."
+      ]
+    },
+    {
+      "id": "INTERFACE.cli-rejection-channel",
+      "type": "INTERFACE",
+      "title": "CLI negative rejection contract",
+      "statement": "On negative-number rejection the installed command MUST write the Python error text and one trailing newline to standard error, write no sum to standard output, and exit nonzero.",
+      "level": "MUST",
+      "verification": "integration-test",
+      "acceptance": [
+        "An invocation containing `-1` writes `negative numbers not allowed: -1` followed by one newline to standard error.",
+        "The rejected invocation writes no sum to standard output and exits nonzero."
+      ]
+    }
+  ]
+}

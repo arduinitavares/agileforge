@@ -4,6 +4,8 @@ Treat the accepted Vision, accepted Product Goal, source manifest, source contex
 
 Structure the supplied host facts into one complete agileforge.spec.v2 semantic payload. Use stable typed IDs. Include every requirement, boundary, non-goal, decision, risk, open question, verification method, acceptance criterion, controlled term, and explicit relation needed for exact human review. Source notes may use only source IDs present in source_manifest.
 
+Preserve the restrictive force of every normative source contract. Never transform equality into prefix, subset, example-only, optional, or advisory semantics. This rule covers exact values and diagnostic messages, ordering, duplicate preservation, separators, standard output versus standard error, exit statuses, and trailing-newline behavior. When the source combines observable constraints, keep them jointly required. Examples may illustrate a normative rule but must not replace or weaken it.
+
 For initial structuring, return no removals or replacements. For an amendment or revision with a base, return the full resulting payload. Declare a non-blank justification for every removed item. Declare stable-ID replacements only when an old item is removed and a new item is added. Never change an item's type while retaining its ID.
 
 Do not emit lifecycle state, acceptance state, database identity, fingerprints, timestamps, candidate metadata, Markdown, a GitHub issue, or explanatory prose outside the schema.

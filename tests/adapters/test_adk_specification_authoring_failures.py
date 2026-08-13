@@ -89,6 +89,19 @@ ISSUE_200_EXECUTION_SETTINGS: JsonObject = {
     "max_attempts": 1,
     "generation_config": {"max_output_tokens": ISSUE_200_MAX_OUTPUT_TOKENS},
 }
+ISSUE_202_NEGATIVE_CONTRACT_BYTES: bytes = (
+    b"- Reject the entire Number List when any parsed value is below zero. The public\n"
+    b"  Python operation raises `ValueError` rather than returning a partial sum.\n"
+    b"- Format rejection text as `negative numbers not allowed: ` followed by every\n"
+    b"  canonical negative value in encounter order, separated by comma and space.\n"
+    b"  Preserve duplicate occurrences.\n"
+    b"- Install the `string-calculator` command with one positional Number List for\n"
+    b"  supported invocations.\n"
+    b"- On success, write only the decimal sum and one trailing newline to standard\n"
+    b"  output, write nothing to standard error, and exit zero.\n"
+    b"- On negative-number rejection, write the Python error text and one trailing\n"
+    b"  newline to standard error, write no sum to standard output, and exit nonzero.\n"
+)
 ISSUE_200_OBSERVED_TRUNCATION_CHARS: int = 20_069
 ISSUE_200_SOURCE_BYTES: int = 8_726
 ISSUE_200_CONTEXT_BYTES: int = 1_297
@@ -741,7 +754,10 @@ def test_complete_realistic_response_persists_one_exact_canonical_candidate(
         structuring_time=NOW + timedelta(seconds=1),
     )
     contract = SpecificationStructuringInput.model_validate(normalized_input)
-    assert contract.registered_source.source.text.encode("utf-8") == source_bytes
+    structuring_source_bytes = contract.registered_source.source.text.encode("utf-8")
+    assert ISSUE_202_NEGATIVE_CONTRACT_BYTES in source_bytes
+    assert structuring_source_bytes == source_bytes
+    assert ISSUE_202_NEGATIVE_CONTRACT_BYTES in structuring_source_bytes
     assert contract.registered_source.context.document is not None
     assert (
         contract.registered_source.context.document.text.encode("utf-8")

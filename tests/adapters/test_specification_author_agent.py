@@ -30,6 +30,18 @@ if TYPE_CHECKING:
 
 DEDICATED_TOKEN_BUDGET: int = 24_576
 PRODUCTION_TOKEN_BUDGET: int = 32_768
+NORMATIVE_FIDELITY_REQUIREMENTS: tuple[str, ...] = (
+    "Preserve the restrictive force of every normative source contract.",
+    (
+        "Never transform equality into prefix, subset, example-only, optional, "
+        "or advisory semantics."
+    ),
+    (
+        "exact values and diagnostic messages, ordering, duplicate preservation, "
+        "separators, standard output versus standard error, exit statuses, and "
+        "trailing-newline behavior"
+    ),
+)
 
 
 class _CapturingLiteLlmClient(LiteLLMClient):
@@ -158,10 +170,10 @@ def test_structurer_prompt_hash_binds_the_actual_packaged_instructions() -> None
     )
     assert contract.SPECIFICATION_STRUCTURER_VERSION == "1.0.1"
     assert contract.SPECIFICATION_STRUCTURER_PROMPT_VERSION == (
-        "agileforge.specification-structurer.prompt.v1"
+        "agileforge.specification-structurer.prompt.v2"
     )
     assert contract.SPECIFICATION_STRUCTURER_PROMPT_HASH == (
-        "sha256:fec7c251132af921dd721e5e3cdea758eef95ce0437bfd85d2f24dad00c70e21"
+        "sha256:88cad14ee56fde7c351b98063f375b5bd7747d4eb7f2c89191cd29b560f1d669"
     )
 
 
@@ -187,6 +199,20 @@ def test_agent_advertises_the_exact_closed_structuring_contract(
     adapter = TypeAdapter(output_schema)
     with pytest.raises(ValidationError):
         adapter.validate_python({"payload": {"schema_version": "agileforge.spec.v1"}})
+
+
+def test_production_structurer_receives_normative_fidelity_instructions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Give the production model explicit protection against semantic weakening."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    module = importlib.import_module("adapters.adk.agents.specification_author")
+
+    instructions = module.root_agent.instruction
+
+    assert isinstance(instructions, str)
+    for requirement in NORMATIVE_FIDELITY_REQUIREMENTS:
+        assert requirement in instructions
 
 
 def test_agent_response_schema_uses_closed_removal_records(
