@@ -5,8 +5,9 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
-from typing import TYPE_CHECKING, TypeGuard
+from typing import TYPE_CHECKING, NoReturn, TypeGuard
 
 from pydantic import BaseModel, ValidationError
 
@@ -63,11 +64,29 @@ def _is_string_object_dict(value: object) -> TypeGuard[dict[str, object]]:
     return isinstance(value, dict) and all(isinstance(key, str) for key in value)
 
 
+def _reject_non_finite_json_constant(value: str) -> NoReturn:
+    """Reject Python's non-standard NaN and Infinity JSON extensions."""
+    message = f"non-finite numeric constant {value}"
+    raise ValueError(message)
+
+
+def _parse_finite_json_float(value: str) -> float:
+    """Reject JSON floats that overflow the host's finite representation."""
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        _reject_non_finite_json_constant(value)
+    return parsed
+
+
 def _decode(raw_json: str) -> object | SpecAuthorityCompilerOutput:
     """Decode untrusted provider JSON without accepting prose or Markdown fences."""
     try:
-        return json.loads(raw_json)
-    except (json.JSONDecodeError, TypeError) as error:
+        return json.loads(
+            raw_json,
+            parse_constant=_reject_non_finite_json_constant,
+            parse_float=_parse_finite_json_float,
+        )
+    except (json.JSONDecodeError, TypeError, ValueError) as error:
         return _failure(
             reason="INVALID_JSON",
             blocking_gaps=[f"Compiler output is not valid JSON: {error}"],

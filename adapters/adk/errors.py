@@ -25,6 +25,18 @@ class AttemptRevalidationInfrastructureError(RuntimeError):
 
 
 @dataclass
+class AuthorityAgenticExecutionError(RuntimeError):
+    """Typed failure for Authority compiler output rejected by the host."""
+
+    code: WorkflowErrorCode
+    message: str
+
+    def __str__(self) -> str:
+        """Render the bounded durable Authority failure message."""
+        return self.message
+
+
+@dataclass
 class VisionAgenticPreflightError(RuntimeError):
     """Raised before any Vision provider call when trusted preflight fails."""
 
@@ -51,6 +63,7 @@ class SpecificationAgenticExecutionError(RuntimeError):
 __all__ = [
     "AttemptRevalidationError",
     "AttemptRevalidationInfrastructureError",
+    "AuthorityAgenticExecutionError",
     "SpecificationAgenticExecutionError",
     "VisionAgenticPreflightError",
 ]

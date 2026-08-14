@@ -126,6 +126,21 @@ def test_normalizer_returns_closed_failure_for_invalid_json() -> None:
     assert normalized.root.reason == "INVALID_JSON"
 
 
+@pytest.mark.parametrize(
+    "numeric_literal",
+    ["NaN", "Infinity", "-Infinity", "1e999"],
+)
+def test_normalizer_rejects_non_finite_json_numbers(numeric_literal: str) -> None:
+    """Provider JSON stays RFC-compliant instead of accepting Python constants."""
+    normalized = normalize_compiler_output(
+        f'{{"result": {numeric_literal}}}',
+        authority_input=_authority_input(),
+    )
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationFailure)
+    assert normalized.root.reason == "INVALID_JSON"
+
+
 def test_normalizer_accepts_exact_item_id_gap_as_coverage() -> None:
     """Unsupported eligible semantics remain explicit instead of being inferred."""
     payload = _success_payload()

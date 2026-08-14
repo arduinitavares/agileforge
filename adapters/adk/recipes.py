@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
@@ -12,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 
 from adapters.adk.errors import (
     AttemptRevalidationError,
+    AuthorityAgenticExecutionError,
     SpecificationAgenticExecutionError,
     VisionAgenticPreflightError,
 )
@@ -22,6 +24,7 @@ from services.contracts.specification_authoring import (
     SpecificationStructuringOutput,
     specification_structuring_completion_payload,
 )
+from services.contracts.specification_normalizer import normalize_compiler_output
 from services.contracts.sprint import (
     SprintPlannerInput,
     SprintPlannerOutput,
@@ -43,7 +46,6 @@ from utils.agileforge_spec_profile_v2 import SCHEMA_VERSION
 from utils.spec_schemas import (
     SpecAuthorityCompilationFailure,
     SpecAuthorityCompilationSuccess,
-    SpecAuthorityCompilerEnvelope,
     SpecAuthorityCompilerInput,
 )
 from workflow.contracts import JsonObject, WorkflowErrorCode
@@ -202,10 +204,6 @@ class UnknownAdkRecipeError(LookupError):
     def __init__(self, node_id: str) -> None:
         """Retain the missing stable node ID in the error message."""
         super().__init__(f"No ADK recipe is registered for node {node_id!r}.")
-
-
-class _AuthorityCompilerFailureError(RuntimeError):
-    """Raised when a retained compiler returns its typed failure variant."""
 
 
 class AdkRecipeRegistry:
@@ -758,6 +756,28 @@ def _authority_completion_payload(
     }
 
 
+def _authority_compiler_json(generated: object) -> str:
+    """Serialize supported structured leaf output for the raw host boundary."""
+    if isinstance(generated, str):
+        return generated
+    try:
+        if isinstance(generated, BaseModel):
+            generated = generated.model_dump(mode="json")
+        return json.dumps(generated, allow_nan=False)
+    except (TypeError, ValueError):
+        return "unsupported structured Authority compiler output"
+
+
+def _authority_failure_message(failure: SpecAuthorityCompilationFailure) -> str:
+    """Render one bounded actionable failure without provider diagnostics."""
+    reason = failure.reason.strip()[:160] or "UNKNOWN_FAILURE"
+    details = [gap.strip()[:500] for gap in failure.blocking_gaps[:5] if gap.strip()]
+    message = f"Authority compiler output failed host normalization ({reason})"
+    if details:
+        message += ": " + "; ".join(details)
+    return message
+
+
 def _build_authority_workflow(
     *,
     workflow_name: str,
@@ -789,15 +809,17 @@ def _build_authority_workflow(
             leaf_agent,
             node_input=payload.compiler_input.model_dump(mode="json"),
         )
-        envelope = SpecAuthorityCompilerEnvelope.model_validate(generated)
-        if isinstance(envelope.result, SpecAuthorityCompilationFailure):
-            message = (
-                f"Authority compiler failed: {envelope.result.error}: "
-                f"{envelope.result.reason}"
+        normalized = normalize_compiler_output(
+            _authority_compiler_json(generated),
+            authority_input=payload.compiler_input.authority_input,
+        )
+        if isinstance(normalized.root, SpecAuthorityCompilationFailure):
+            raise AuthorityAgenticExecutionError(
+                code=WorkflowErrorCode.AUTHORITY_COMPILATION_FAILED,
+                message=_authority_failure_message(normalized.root),
             )
-            raise _AuthorityCompilerFailureError(message)
         return RecipeOutput(
-            payload=_authority_completion_payload(payload, envelope.result)
+            payload=_authority_completion_payload(payload, normalized.root)
         )
 
     return Workflow(
