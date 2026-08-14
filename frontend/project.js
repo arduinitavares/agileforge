@@ -609,18 +609,205 @@ function acceptedSpecificationMarkup(current) {
     </div>`;
 }
 
-function specificationPanelMarkup(projection, actions = []) {
+function singleDecisionReference(decision, factType) {
+    const matches = (Array.isArray(decision?.fact_references)
+        ? decision.fact_references
+        : []
+    ).filter((item) => item?.fact_type === factType);
+    return matches.length === 1 ? matches[0] : null;
+}
+
+function referenceMatches(reference, id, fingerprint) {
+    return reference?.fact_id === String(id)
+        && reference?.fingerprint === fingerprint;
+}
+
+function captureSpecificationStructuringBinding(state) {
+    const action = captureAction(findAction(state?.actions, 'structure_specification'));
+    const decisions = (Array.isArray(state?.position?.decisions)
+        ? state.position.decisions
+        : []
+    ).filter((decision) => decision?.node_id === 'specification.structure'
+        && decision?.request_kind === 'structure_specification'
+        && decision?.category === 'available');
+    if (!action || decisions.length !== 1) return null;
+    const decision = decisions[0];
+    if (typeof decision.decision_fingerprint !== 'string'
+        || !decision.decision_fingerprint) return null;
+    const projection = state?.specification ?? {};
+    const candidate = projection.candidate;
+    if (!candidate) {
+        const candidateReference = singleDecisionReference(
+            decision,
+            'specification_candidate',
+        );
+        const sourceReference = singleDecisionReference(
+            decision,
+            'specification_source',
+        );
+        if (!referenceMatches(
+            sourceReference,
+            projection.source?.specification_source_id,
+            projection.source?.source_fingerprint,
+        )) return null;
+        const revisedSource = decision.reason_code === 'SPECIFICATION_REVISION_REQUIRED'
+            && typeof candidateReference?.fact_id === 'string'
+            && Boolean(candidateReference.fact_id)
+            && typeof candidateReference?.fingerprint === 'string'
+            && Boolean(candidateReference.fingerprint);
+        if (candidateReference && !revisedSource) return null;
+        return {
+            action,
+            expectedDecision: decision.decision_fingerprint,
+            mode: revisedSource ? 'revised-source' : 'structure',
+        };
+    }
+    if (projection.review?.state !== 'feedback') return null;
+    const source = projection.source;
+    const candidateReference = singleDecisionReference(
+        decision,
+        'specification_candidate',
+    );
+    const sourceReference = singleDecisionReference(
+        decision,
+        'specification_source',
+    );
+    if (!source
+        || !referenceMatches(
+            candidateReference,
+            candidate.specification_candidate_id,
+            candidate.candidate_fingerprint,
+        )
+        || !referenceMatches(
+            sourceReference,
+            source.specification_source_id,
+            source.source_fingerprint,
+        )) return null;
+    const sameSource = candidate.specification_source_id
+            === source.specification_source_id
+        && candidate.registered_source_fingerprint === source.source_fingerprint;
+    let mode = null;
+    if (decision.reason_code === 'SPECIFICATION_FEEDBACK_RETRY_AVAILABLE'
+        && sameSource) {
+        mode = 'same-source-feedback';
+    } else if (decision.reason_code === 'SPECIFICATION_REVISION_REQUIRED'
+        && !sameSource) {
+        mode = 'revised-source';
+    }
+    return mode
+        ? { action, expectedDecision: decision.decision_fingerprint, mode }
+        : null;
+}
+
+function captureSpecificationSourceRegistrationBinding(state) {
+    const action = captureAction(
+        findAction(state?.actions, 'register_specification_source'),
+    );
+    const decisions = (Array.isArray(state?.position?.decisions)
+        ? state.position.decisions
+        : []
+    ).filter((decision) => decision?.node_id === 'specification.source.register'
+        && decision?.request_kind === 'register_specification_source'
+        && decision?.category === 'available');
+    if (!action || decisions.length !== 1) return null;
+    const decision = decisions[0];
+    if (typeof decision.decision_fingerprint !== 'string'
+        || !decision.decision_fingerprint) return null;
+    const projection = state?.specification ?? {};
+    const sourceReference = singleDecisionReference(
+        decision,
+        'specification_source',
+    );
+    const candidateReference = singleDecisionReference(
+        decision,
+        'specification_candidate',
+    );
+    if (sourceReference && !referenceMatches(
+        sourceReference,
+        projection.source?.specification_source_id,
+        projection.source?.source_fingerprint,
+    )) return null;
+    if (candidateReference && !referenceMatches(
+        candidateReference,
+        projection.candidate?.specification_candidate_id,
+        projection.candidate?.candidate_fingerprint,
+    )) return null;
+    if (projection.review?.state === 'feedback'
+        && (decision.reason_code
+                !== 'SPECIFICATION_FEEDBACK_SOURCE_REVISION_AVAILABLE'
+            || !sourceReference
+            || !candidateReference)) return null;
+    return {
+        action,
+        expectedDecision: decision.decision_fingerprint,
+    };
+}
+
+function specificationFeedbackContinuationMarkup(
+    projection,
+    actions,
+    registration,
+    position,
+) {
+    if (projection?.review?.state !== 'feedback') return registration;
+    const binding = captureSpecificationStructuringBinding({
+        actions,
+        position,
+        specification: projection,
+    });
+    if (!binding) return registration;
+    const rationale = projection.review.rationale
+        ? `<p class="mt-2 text-sm leading-6 text-amber-900"><strong>Feedback:</strong> ${escapeWorkflowText(projection.review.rationale)}</p>`
+        : '';
+    const revisedSource = registration
+        ? `<div class="mt-5 border-t border-amber-200 pt-5">
+            <p class="mb-3 text-sm font-semibold text-slate-800">Register a revised source</p>
+            <p class="mb-4 text-sm leading-6 text-slate-600">Choose this path only when the external Specification source itself changed.</p>
+            ${registration}
+        </div>`
+        : '';
+    const sameSource = binding.mode === 'same-source-feedback';
+    const instruction = sameSource
+        ? 'Retry with the unchanged registered source when the candidate transformation needs correction.'
+        : 'Structure the genuinely revised source that is now registered.';
+    const label = sameSource
+        ? 'Retry structuring from unchanged source'
+        : 'Structure revised source';
+    return `<section data-specification-feedback-continuation="true" class="mt-5 max-w-4xl rounded-lg border border-amber-300 bg-amber-50 p-5">
+        <p class="text-sm font-semibold text-amber-950">Choose how to address Specification Feedback</p>
+        ${rationale}
+        <p class="mt-4 text-sm leading-6 text-slate-700">${instruction}</p>
+        <button type="button" data-direct-action="structure_specification" class="${BUTTON_PRIMARY}"><span class="material-symbols-outlined" aria-hidden="true">refresh</span><span>${label}</span></button>
+        ${revisedSource}
+    </section>`;
+}
+
+function specificationPanelMarkup(projection, actions = [], position = {}) {
     const candidate = projection?.candidate;
     const registration = specificationSourceRegistrationMarkup(actions);
     if (!candidate) {
-        const structureAction = findAction(actions, 'structure_specification');
-        const structure = structureAction
+        const structureBinding = captureSpecificationStructuringBinding({
+            actions,
+            position,
+            specification: projection,
+        });
+        const revisedSource = structureBinding?.mode === 'revised-source';
+        const structure = structureBinding
             ? `<div class="max-w-3xl">
-                <p class="mb-4 text-sm leading-6 text-slate-600">Structure the registered source into an exact reviewable Specification candidate.</p>
-                <button type="button" data-direct-action="structure_specification" class="${BUTTON_PRIMARY}"><span class="material-symbols-outlined" aria-hidden="true">schema</span><span>Structure Specification</span></button>
+                <p class="mb-4 text-sm leading-6 text-slate-600">${revisedSource ? 'Structure the genuinely revised registered source with exact prior review lineage.' : 'Structure the registered source into an exact reviewable Specification candidate.'}</p>
+                <button type="button" data-direct-action="structure_specification" class="${BUTTON_PRIMARY}"><span class="material-symbols-outlined" aria-hidden="true">schema</span><span>${revisedSource ? 'Structure revised source' : 'Structure Specification'}</span></button>
             </div>`
             : '';
         const current = acceptedSpecificationMarkup(projection?.current);
+        if (revisedSource) {
+            return [
+                current,
+                `<section data-specification-feedback-continuation="true" class="max-w-4xl space-y-5 rounded-lg border border-amber-300 bg-amber-50 p-5">
+                    ${structure}
+                    ${registration ? `<div class="border-t border-amber-200 pt-5">${registration}</div>` : ''}
+                </section>`,
+            ].filter(Boolean).join('');
+        }
         return [current, registration, structure].filter(Boolean).join('')
             || '<p class="text-sm text-slate-600">Specification preparation is waiting for the current lifecycle state.</p>';
     }
@@ -632,7 +819,14 @@ function specificationPanelMarkup(projection, actions = []) {
     const controls = review?.state === 'pending'
         ? reviewControlsMarkup('specification', reviewAction)
         : '';
-    const reentry = review?.state === 'pending' ? '' : registration;
+    const reentry = review?.state === 'pending'
+        ? ''
+        : specificationFeedbackContinuationMarkup(
+            projection,
+            actions,
+            registration,
+            position,
+        );
     return `<div class="max-w-4xl">${decisionCopy}<pre class="whitespace-pre-wrap break-words rounded-lg border border-slate-300 bg-white p-4 font-mono text-sm leading-6">${escapeWorkflowText(candidate.rendered_markdown ?? '')}</pre></div>
         ${controls}${reentry}`;
 }
@@ -832,7 +1026,11 @@ function renderDashboard() {
     setMarkup('goal-panel', productGoalPanelMarkup(lifecycleState.goal, lifecycleState.actions));
     setMarkup(
         'specification-panel',
-        specificationPanelMarkup(lifecycleState.specification, lifecycleState.actions),
+        specificationPanelMarkup(
+            lifecycleState.specification,
+            lifecycleState.actions,
+            lifecycleState.position,
+        ),
     );
     setMarkup(
         'authority-panel',
@@ -932,6 +1130,9 @@ async function postAction(action, fields = {}, options = {}) {
     const headers = { 'Content-Type': 'application/json' };
     if (options.expectedCandidate) {
         headers['X-AgileForge-Expected-Candidate'] = options.expectedCandidate;
+    }
+    if (options.expectedDecision) {
+        headers['X-AgileForge-Expected-Decision'] = options.expectedDecision;
     }
     return requestJson(`/api/projects/${selectedProjectId}/${action.endpoint}`, {
         method: 'POST',
@@ -1123,19 +1324,45 @@ async function submitHumanAction() {
 
 async function runDirectAction(requestKind, button, fallbackEndpoint = null) {
     if (button.disabled) return false;
-    button.disabled = true;
+    setSpecificationContinuationBusy(button, true);
     setProjectError('');
     try {
-        const action = findAction(lifecycleState.actions, requestKind)
-            ?? (fallbackEndpoint ? { endpoint: fallbackEndpoint } : null);
-        await postAction(action);
+        if (requestKind === 'structure_specification') {
+            const binding = captureSpecificationStructuringBinding(lifecycleState);
+            if (!binding) {
+                throw new Error(
+                    'This Specification action changed. Refresh and choose from the current source state.',
+                );
+            }
+            await postAction(
+                binding.action,
+                {},
+                { expectedDecision: binding.expectedDecision },
+            );
+        } else {
+            const action = findAction(lifecycleState.actions, requestKind)
+                ?? (fallbackEndpoint ? { endpoint: fallbackEndpoint } : null);
+            await postAction(action);
+        }
         await loadDashboard();
     } catch (error) {
         setProjectError(error.message);
     } finally {
-        button.disabled = false;
+        setSpecificationContinuationBusy(button, false);
     }
     return true;
+}
+
+function setSpecificationContinuationBusy(control, busy) {
+    const continuation = control?.closest?.(
+        '[data-specification-feedback-continuation="true"]',
+    );
+    const controls = continuation?.querySelectorAll?.(
+        'button, input, textarea, select',
+    ) ?? [control];
+    Array.from(controls).forEach((item) => {
+        if (item) item.disabled = busy;
+    });
 }
 
 function installInteractions() {
@@ -1157,11 +1384,20 @@ function installInteractions() {
         if (form?.dataset?.specificationSourceForm === 'true') {
             event.preventDefault();
             if (form.dataset.submitting === 'true') return;
+            const binding = captureSpecificationSourceRegistrationBinding(
+                lifecycleState,
+            );
+            if (!binding) {
+                setProjectError(
+                    'This Specification source choice changed. Refresh and choose from the current state.',
+                );
+                return;
+            }
             const sourcePath = form.querySelector('[name="source_path"]')?.value ?? '';
             const preparationCapability = form.querySelector('[name="preparation_capability"]')?.value ?? '';
             const adrPaths = form.querySelector('[name="adr_paths"]')?.value ?? '';
             const submission = specificationSourceSubmission(
-                lifecycleState.actions,
+                [binding.action],
                 sourcePath,
                 preparationCapability,
                 adrPaths,
@@ -1176,15 +1412,20 @@ function installInteractions() {
             }
             const submit = form.querySelector('button[type="submit"]');
             form.dataset.submitting = 'true';
-            if (submit) submit.disabled = true;
+            setSpecificationContinuationBusy(form, true);
             setProjectError('');
             try {
-                await postAction(submission.action, submission.fields);
+                await postAction(
+                    submission.action,
+                    submission.fields,
+                    { expectedDecision: binding.expectedDecision },
+                );
                 await loadDashboard();
             } catch (error) {
                 setProjectError(error.message);
             } finally {
                 delete form.dataset.submitting;
+                setSpecificationContinuationBusy(form, false);
                 if (submit) submit.disabled = false;
             }
             return;

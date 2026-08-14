@@ -27,6 +27,7 @@ from workflow.contracts import (
     NodeDecision,
     RecommendationKind,
     TransitionResult,
+    WorkflowErrorCode,
     WorkflowPosition,
 )
 
@@ -192,6 +193,65 @@ def test_application_prepares_exact_bundle_then_submits_host_only_command() -> N
     assert replay.queries[0].operator_input == {
         "capture_request_fingerprint": semantic_request.semantic_fingerprint()
     }
+
+
+def test_application_rejects_stale_source_choice_before_capture() -> None:
+    """A changed rendered choice cannot capture or register against new state."""
+    bundle = _bundle()
+    prepared = PreparedSpecificationSourceRegistration(
+        project_id=PROJECT_ID,
+        accepted_vision_artifact_id=11,
+        accepted_product_goal_artifact_id=13,
+        repository_binding_id=REPOSITORY_BINDING_ID,
+        repository_binding_fingerprint="sha256:" + "e" * 64,
+        request_fingerprint="sha256:" + "f" * 64,
+        source_fingerprint=source_bundle_fingerprint(bundle),
+        bundle=bundle,
+    )
+    decision = NodeDecision(
+        node_id="specification.source.register",
+        child_graph_id="specification",
+        request_kind="register_specification_source",
+        category=NodeCategory.AVAILABLE,
+        recommendation_kind=RecommendationKind.OPTIONAL_REENTRY,
+        reason_code="SPECIFICATION_FEEDBACK_SOURCE_REVISION_AVAILABLE",
+        decision_fingerprint="sha256:current-source-choice",
+    )
+    position = WorkflowPosition(
+        project_id=PROJECT_ID,
+        graph_version="agileforge.workflow.v2",
+        fact_fingerprint="sha256:facts",
+        evaluated_at=NOW,
+        available_nodes=(decision.node_id,),
+        waiting_nodes=(),
+        blocked_nodes=(),
+        invalid_nodes=(),
+        terminal=False,
+        decisions=(decision,),
+    )
+    domain = _Domain(position)
+    registration = _RegistrationService(prepared)
+    application = AgileForgeApplication(
+        workflow_domain=domain,
+        specification_source_registration=registration,
+        specification_source_replay=_Replay(),
+    )
+    request = SpecificationSourceRegistrationRequest(
+        project_id=PROJECT_ID,
+        source_path="specification.md",
+        preparation_capability="grill-with-docs",
+        expected_decision_fingerprint="sha256:stale-source-choice",
+        idempotency_key="stale-source-choice",
+        actor="operator@example.test",
+    )
+
+    result = application.register_specification_source(request)
+
+    assert not result.ok
+    assert result.error is not None
+    assert result.error.code is WorkflowErrorCode.STALE_POSITION
+    assert registration.requests == []
+    assert domain.requests == []
 
 
 def test_application_replays_receipt_before_position_or_capture() -> None:

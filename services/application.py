@@ -1624,6 +1624,12 @@ class SpecificationStructuringRequest(FrozenModel):
     """Transport metadata for one host-prepared structuring attempt."""
 
     project_id: int
+    expected_decision_fingerprint: str | None = Field(
+        default=None,
+        min_length=1,
+        exclude=True,
+        repr=False,
+    )
     idempotency_key: str = Field(min_length=1)
     actor: str = Field(min_length=1)
     correlation_id: str | None = None
@@ -3251,6 +3257,11 @@ class AgileForgeApplication:
         decision = _unique_available_decision(position, "specification.structure")
         if decision is None or decision.category is not NodeCategory.AVAILABLE:
             return _transition_not_available(position, "specification.structure")
+        if (
+            request.expected_decision_fingerprint is not None
+            and request.expected_decision_fingerprint != decision.decision_fingerprint
+        ):
+            return _stale_specification_structuring_action(position)
         model_id = get_model_id(AGENTIC_MODEL_ROLES["specification.structure"])
         try:
             input_payload = input_service.build(
@@ -3321,6 +3332,11 @@ class AgileForgeApplication:
         )
         if decision is None or decision.category is not NodeCategory.AVAILABLE:
             return _transition_not_available(position, "specification.source.register")
+        if (
+            request.expected_decision_fingerprint is not None
+            and request.expected_decision_fingerprint != decision.decision_fingerprint
+        ):
+            return _stale_specification_source_registration_action(position)
         try:
             prepared = registration.prepare(request)
         except SpecificationSourceRegistrationError as error:
@@ -4611,6 +4627,40 @@ def _stale_review_candidate(
             message=(
                 f"The {subject} candidate changed after this review opened. "
                 "Reload and review the current candidate."
+            ),
+        ),
+    )
+
+
+def _stale_specification_structuring_action(
+    position: WorkflowPosition,
+) -> TransitionResult:
+    """Reject a browser structuring action whose exact position changed."""
+    return TransitionResult(
+        ok=False,
+        position=position,
+        error=WorkflowError(
+            code=WorkflowErrorCode.STALE_POSITION,
+            message=(
+                "The Specification structuring action changed after it was shown. "
+                "Reload and choose from the current source state."
+            ),
+        ),
+    )
+
+
+def _stale_specification_source_registration_action(
+    position: WorkflowPosition,
+) -> TransitionResult:
+    """Reject a browser source choice whose exact position changed."""
+    return TransitionResult(
+        ok=False,
+        position=position,
+        error=WorkflowError(
+            code=WorkflowErrorCode.STALE_POSITION,
+            message=(
+                "The Specification source choice changed after it was shown. "
+                "Reload and choose from the current source state."
             ),
         ),
     )

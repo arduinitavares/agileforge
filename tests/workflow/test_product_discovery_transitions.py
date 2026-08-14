@@ -12,11 +12,16 @@ from sqlmodel import Session, col, select
 
 from adapters.git.repository_probe import GitPythonRepositoryProbe
 from models.core import Project
-from models.product_definition import SpecificationCandidate, SpecificationDecision
+from models.product_definition import (
+    SpecificationCandidate,
+    SpecificationDecision,
+    SpecificationSource,
+)
 from models.repository import RepositoryBinding
 from models.specs import SpecRegistry
 from models.workflow import WorkflowNodeAttempt, WorkflowNodeAttemptOutcome
 from services.contracts.specification_authoring import (
+    SPECIFICATION_STRUCTURER_PROMPT_VERSION,
     SPECIFICATION_VISION_SOURCE_ID,
     SpecificationStructuringInput,
     specification_structuring_fact_fingerprint,
@@ -549,7 +554,7 @@ def test_rejected_revision_requires_successor_source_and_supersedes_candidate(
     engine: Engine,
     tmp_path: Path,
 ) -> None:
-    """Feedback requires external source revision before another model call."""
+    """Rejection requires external source revision before another model call."""
     project_id, *_lineage, repository, probe = _ready_project(
         engine,
         tmp_path,
@@ -584,6 +589,28 @@ def test_rejected_revision_requires_successor_source_and_supersedes_candidate(
     rejected_position = review_domain.position(project_id)
     assert "specification.source.register" in rejected_position.available_nodes
     assert "specification.structure" not in rejected_position.available_nodes
+    source_decision = next(
+        item
+        for item in rejected_position.decisions
+        if item.node_id == "specification.source.register"
+    )
+    forged_retry = source_decision.model_copy(
+        update={
+            "node_id": "specification.structure",
+            "reason_code": "SPECIFICATION_FEEDBACK_RETRY_AVAILABLE",
+        }
+    )
+    with pytest.raises(
+        ValueError,
+        match="prior candidate lineage or source is stale",
+    ):
+        SpecificationStructuringInputService(
+            engine=engine,
+            repository_probe=probe,
+        ).build(
+            project_id=project_id,
+            decision=forged_retry,
+        )
 
     (repository / "SPECIFICATION.md").write_text(
         "# Revised exact external Specification\n",
@@ -643,6 +670,192 @@ def test_rejected_revision_requires_successor_source_and_supersedes_candidate(
         assert candidates[1].specification_source_id != (
             candidates[0].specification_source_id
         )
+
+
+def test_feedback_retries_unchanged_source_with_exact_pending_lineage(
+    engine: Engine,
+    tmp_path: Path,
+) -> None:
+    """An explicit retry reuses exact source/feedback and appends one candidate."""
+    project_id, *_lineage, probe = _ready_project(
+        engine,
+        tmp_path,
+        name="same-source-feedback-retry",
+    )
+    first_domain = _domain(engine, repository_probe=probe)
+    first = _structure(
+        engine,
+        first_domain,
+        project_id=project_id,
+        payload=_payload(),
+        key="same-source-first",
+        repository_probe=probe,
+    )
+    assert first.ok
+    review_domain = _domain(
+        engine,
+        at=NOW + timedelta(seconds=1),
+        repository_probe=probe,
+    )
+    feedback_rationale = "Restore the exact negative-number diagnostic contract."
+    feedback_request = _accept_request(
+        review_domain,
+        project_id=project_id,
+        key="same-source-feedback",
+    ).model_copy(
+        update={
+            "decision": "feedback",
+            "rationale": feedback_rationale,
+        }
+    )
+    assert review_domain.transition(feedback_request).ok
+
+    retry_position = review_domain.position(project_id)
+    assert {
+        "specification.source.register",
+        "specification.structure",
+    }.issubset(retry_position.available_nodes)
+    retry_decision = next(
+        item
+        for item in retry_position.decisions
+        if item.node_id == "specification.structure"
+    )
+    assert retry_decision.reason_code == "SPECIFICATION_FEEDBACK_RETRY_AVAILABLE"
+    retry_input = SpecificationStructuringInput.model_validate(
+        SpecificationStructuringInputService(
+            engine=engine,
+            repository_probe=probe,
+        ).build(
+            project_id=project_id,
+            decision=retry_decision,
+        )
+    )
+    assert retry_input.operation == "revision"
+    assert retry_input.prior_candidate is not None
+    assert retry_input.prior_candidate.decision == "feedback"
+    assert retry_input.prior_candidate.rationale == feedback_rationale
+
+    with Session(engine) as session:
+        source_before = session.exec(
+            select(SpecificationSource).where(
+                col(SpecificationSource.project_id) == project_id
+            )
+        ).one()
+        candidate_before = session.exec(
+            select(SpecificationCandidate).where(
+                col(SpecificationCandidate.project_id) == project_id
+            )
+        ).one()
+        decision_before = session.exec(
+            select(SpecificationDecision).where(
+                col(SpecificationDecision.project_id) == project_id
+            )
+        ).one()
+        immutable_before = (
+            source_before.specification_source_id,
+            source_before.source_fingerprint,
+            candidate_before.candidate_fingerprint,
+            candidate_before.canonical_envelope_json,
+            decision_before.decision,
+            decision_before.rationale,
+        )
+
+    same_source = _register_source(
+        engine,
+        _domain(
+            engine,
+            at=NOW + timedelta(seconds=2),
+            repository_probe=probe,
+        ),
+        project_id=project_id,
+        repository_probe=probe,
+        key="same-source-noop",
+    )
+    assert same_source.ok
+    assert (
+        same_source.output["created"],
+        same_source.output["specification_source_id"],
+        same_source.output["source_fingerprint"],
+    ) == (False, immutable_before[0], immutable_before[1])
+
+    second = _structure(
+        engine,
+        _domain(
+            engine,
+            at=NOW + timedelta(seconds=3),
+            repository_probe=probe,
+        ),
+        project_id=project_id,
+        payload=_payload(
+            artifact_id="SPEC.same-source-retry",
+            item_id="REQ.persist-same-source-retry",
+        ),
+        key="same-source-second",
+        repository_probe=probe,
+    )
+    assert second.ok
+
+    with Session(engine) as session:
+        sources = session.exec(
+            select(SpecificationSource).where(
+                col(SpecificationSource.project_id) == project_id
+            )
+        ).all()
+        candidates = session.exec(
+            select(SpecificationCandidate)
+            .where(col(SpecificationCandidate.project_id) == project_id)
+            .order_by(col(SpecificationCandidate.specification_candidate_id))
+        ).all()
+        decisions = session.exec(
+            select(SpecificationDecision).where(
+                col(SpecificationDecision.project_id) == project_id
+            )
+        ).all()
+        registries = session.exec(
+            select(SpecRegistry).where(col(SpecRegistry.project_id) == project_id)
+        ).all()
+
+    assert len(sources) == 1
+    assert len(candidates) == EXPECTED_REVISION_CANDIDATES
+    assert len(decisions) == 1
+    assert registries == []
+    assert (
+        sources[0].specification_source_id,
+        sources[0].source_fingerprint,
+        candidates[0].candidate_fingerprint,
+        candidates[0].canonical_envelope_json,
+        decisions[0].decision,
+        decisions[0].rationale,
+    ) == immutable_before
+    assert (
+        candidates[1].specification_source_id == candidates[0].specification_source_id
+    )
+    assert candidates[1].specification_source_fingerprint == (
+        candidates[0].specification_source_fingerprint
+    )
+    assert candidates[1].supersedes_specification_candidate_id == (
+        candidates[0].specification_candidate_id
+    )
+    assert candidates[1].supersedes_candidate_fingerprint == (
+        candidates[0].candidate_fingerprint
+    )
+    assert candidates[1].workflow_node_attempt_id != (
+        candidates[0].workflow_node_attempt_id
+    )
+    _payload_after, envelope_after = load_candidate_contract(
+        candidates[1].canonical_envelope_json,
+        expected_candidate_fingerprint=candidates[1].candidate_fingerprint,
+    )
+    assert envelope_after.prompt_version == SPECIFICATION_STRUCTURER_PROMPT_VERSION
+    assert envelope_after.model_id == "fake/specification-structurer"
+    assert envelope_after.model_configuration_fingerprint
+    pending = _domain(
+        engine,
+        at=NOW + timedelta(seconds=4),
+        repository_probe=probe,
+    ).position(project_id)
+    assert "specification.review" in pending.waiting_nodes
+    assert "specification.structure" not in pending.available_nodes
 
 
 def test_acceptance_rejects_tampered_candidate_bytes(

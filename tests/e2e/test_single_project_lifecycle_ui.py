@@ -638,13 +638,30 @@ class FakeLifecycle:
         request_kind = self._phase_action()
         child = _ACTION_CHILDREN[request_kind]
         endpoint = _ACTION_ENDPOINTS[request_kind]
+        node_id = {
+            "register_specification_source": "specification.source.register",
+            "structure_specification": "specification.structure",
+        }.get(request_kind, f"internal.{request_kind}")
+        fact_references: list[JsonValue] = []
+        if request_kind == "structure_specification":
+            assert self.specification_source is not None
+            fact_references.append(
+                {
+                    "fact_type": "specification_source",
+                    "fact_id": str(
+                        self.specification_source["specification_source_id"]
+                    ),
+                    "fingerprint": self.specification_source["source_fingerprint"],
+                }
+            )
         decision: JsonObject = {
-            "node_id": f"internal.{request_kind}",
+            "node_id": node_id,
             "child_graph_id": child,
             "request_kind": request_kind,
             "category": "available",
             "reason_code": "INTERNAL_REASON_CODE",
             "decision_fingerprint": "sha256:hidden-decision",
+            "fact_references": fact_references,
         }
         blocker: JsonObject = {
             "node_id": "internal.next_stage",

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 from workflow.contracts import RecommendationKind
@@ -16,6 +16,7 @@ from workflow.definitions.product_discovery import (
     current_specification_source,
 )
 from workflow.facts import (
+    NodeAttemptFact,
     PostSprintTriageFact,
     ProductGoalArtifactDecisionFact,
     ProductGoalArtifactFact,
@@ -330,7 +331,7 @@ def test_pending_candidate_waits_for_review_by_exact_candidate_fingerprint() -> 
 
 
 def test_rejected_candidate_requires_a_replacement_registered_source() -> None:
-    """Feedback reopens external source preparation before another structuring call."""
+    """Rejection reopens external source preparation before another structuring call."""
     snapshot = _snapshot(candidate_decision="rejected")
     source = _source_registration_rule(snapshot, NOW)[0]
     structure = _specification_rule(snapshot, NOW)[0]
@@ -345,6 +346,59 @@ def test_rejected_candidate_requires_a_replacement_registered_source() -> None:
         ("specification_source", "source"),
         ("specification_candidate", "candidate"),
     }
+
+
+def test_feedback_exposes_same_source_retry_and_optional_source_revision() -> None:
+    """Feedback offers an exact retry or a genuinely revised external source."""
+    snapshot = _snapshot(candidate_decision="feedback")
+
+    source = _source_registration_rule(snapshot, NOW)[0]
+    structure = _specification_rule(snapshot, NOW)[0]
+
+    assert source.reason_code == "SPECIFICATION_FEEDBACK_SOURCE_REVISION_AVAILABLE"
+    assert source.category.value == "available"
+    assert source.recommendation_kind is RecommendationKind.OPTIONAL_REENTRY
+    assert structure.reason_code == "SPECIFICATION_FEEDBACK_RETRY_AVAILABLE"
+    assert structure.category.value == "available"
+    assert {
+        (item.fact_type, item.fact_id, item.fingerprint)
+        for item in structure.fact_references
+    } == {
+        ("vision", "1", "vision"),
+        ("product_goal", "3", "goal"),
+        ("specification_source", "5", "source"),
+        ("specification_candidate", "6", "candidate"),
+    }
+
+
+def test_active_feedback_retry_closes_revised_source_choice() -> None:
+    """One live structuring lease prevents choosing source replacement concurrently."""
+    snapshot = _snapshot(candidate_decision="feedback").model_copy(
+        update={
+            "node_attempts": (
+                NodeAttemptFact(
+                    attempt_id=9,
+                    node_id="specification.structure",
+                    instance_key=None,
+                    graph_version="agileforge.workflow.v2",
+                    input_fingerprint="input",
+                    fact_fingerprint="facts",
+                    business_fact_fingerprint="business",
+                    decision_fingerprint="decision",
+                    attempt_fingerprint="attempt",
+                    model_id="fake/model",
+                    lease_expires_at=NOW + timedelta(minutes=5),
+                    outcome=None,
+                ),
+            )
+        }
+    )
+
+    source = _source_registration_rule(snapshot, NOW)[0]
+
+    assert source.category.value == "waiting"
+    assert source.reason_code == "SPECIFICATION_STRUCTURER_ACTIVE"
+    assert source.valid_until == NOW + timedelta(minutes=5)
 
 
 def test_replacement_source_enables_revision_with_prior_feedback_reference() -> None:
@@ -464,6 +518,123 @@ def test_ambiguous_ancestor_feedback_fails_structuring_closed() -> None:
     )
 
     structure = _specification_rule(conflicted, NOW)[0]
+
+    assert structure.reason_code == "WORKFLOW_FACT_CONFLICT"
+    assert structure.category.value == "invalid"
+
+
+def test_replacement_source_uses_latest_same_source_feedback_retry() -> None:
+    """A linear retry chain selects its exact terminal leaf on source replacement."""
+    snapshot = _snapshot(candidate_decision="feedback")
+    original = snapshot.specification_sources[0]
+    replacement = original.model_copy(
+        update={
+            "specification_source_id": 18,
+            "source_fingerprint": "replacement-source",
+            "supersedes_specification_source_id": 5,
+            "supersedes_source_fingerprint": "source",
+        }
+    )
+    first_candidate = snapshot.specification_candidates[0]
+    second_candidate = first_candidate.model_copy(
+        update={
+            "specification_candidate_id": 16,
+            "candidate_fingerprint": "second-candidate",
+            "supersedes_specification_candidate_id": (
+                first_candidate.specification_candidate_id
+            ),
+            "supersedes_candidate_fingerprint": (first_candidate.candidate_fingerprint),
+        }
+    )
+    second_decision = snapshot.specification_decisions[0].model_copy(
+        update={
+            "specification_decision_id": 17,
+            "specification_candidate_id": 16,
+            "candidate_fingerprint": "second-candidate",
+        }
+    )
+    retried = snapshot.model_copy(
+        update={
+            "specification_sources": (original, replacement),
+            "specification_candidates": (first_candidate, second_candidate),
+            "specification_decisions": (
+                snapshot.specification_decisions[0],
+                second_decision,
+            ),
+        }
+    )
+
+    structure = _specification_rule(retried, NOW)[0]
+
+    assert structure.reason_code == "SPECIFICATION_REVISION_REQUIRED"
+    assert structure.category.value == "available"
+    assert (
+        "specification_candidate",
+        "16",
+        "second-candidate",
+    ) in {
+        (item.fact_type, item.fact_id, item.fingerprint)
+        for item in structure.fact_references
+    }
+
+
+def test_candidate_tail_into_cycle_fails_ancestor_selection_closed() -> None:
+    """One apparent leaf cannot legitimize a cyclic same-source predecessor chain."""
+    snapshot = _snapshot(candidate_decision="feedback")
+    original = snapshot.specification_sources[0]
+    replacement = original.model_copy(
+        update={
+            "specification_source_id": 19,
+            "source_fingerprint": "replacement-source",
+            "supersedes_specification_source_id": 5,
+            "supersedes_source_fingerprint": "source",
+        }
+    )
+    template = snapshot.specification_candidates[0]
+    candidate_a = template.model_copy(
+        update={
+            "specification_candidate_id": 16,
+            "candidate_fingerprint": "candidate-a",
+            "supersedes_specification_candidate_id": 17,
+            "supersedes_candidate_fingerprint": "candidate-b",
+        }
+    )
+    candidate_b = template.model_copy(
+        update={
+            "specification_candidate_id": 17,
+            "candidate_fingerprint": "candidate-b",
+            "supersedes_specification_candidate_id": 16,
+            "supersedes_candidate_fingerprint": "candidate-a",
+        }
+    )
+    candidate_c = template.model_copy(
+        update={
+            "specification_candidate_id": 18,
+            "candidate_fingerprint": "candidate-c",
+            "supersedes_specification_candidate_id": 16,
+            "supersedes_candidate_fingerprint": "candidate-a",
+        }
+    )
+    decision_template = snapshot.specification_decisions[0]
+    decisions = tuple(
+        decision_template.model_copy(
+            update={
+                "specification_decision_id": 20 + offset,
+                "specification_candidate_id": candidate.specification_candidate_id,
+                "candidate_fingerprint": candidate.candidate_fingerprint,
+            }
+        )
+        for offset, candidate in enumerate((candidate_a, candidate_b, candidate_c))
+    )
+    malformed = snapshot.model_copy(
+        update={
+            "specification_sources": (original, replacement),
+            "specification_candidates": (candidate_a, candidate_b, candidate_c),
+            "specification_decisions": decisions,
+        }
+    )
+
+    structure = _specification_rule(malformed, NOW)[0]
 
     assert structure.reason_code == "WORKFLOW_FACT_CONFLICT"
     assert structure.category.value == "invalid"

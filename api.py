@@ -816,12 +816,17 @@ def abandon_product_goal(
 def register_specification_source(
     project_id: int,
     req: SpecificationSourceApiRequest,
+    expected_decision_fingerprint: Annotated[
+        str,
+        Header(alias="X-AgileForge-Expected-Decision", include_in_schema=False),
+    ],
 ) -> dict[str, object]:
     """Capture one exact external to-spec source from semantic paths."""
     return _result_payload(
         _application().register_specification_source(
             SpecificationSourceRegistrationRequest(
                 project_id=project_id,
+                expected_decision_fingerprint=expected_decision_fingerprint,
                 source_path=req.source_path,
                 adr_paths=req.adr_paths,
                 preparation_capability=req.preparation_capability,
@@ -835,12 +840,17 @@ def register_specification_source(
 def structure_specification(
     project_id: int,
     req: MutationApiRequest,
+    expected_decision_fingerprint: Annotated[
+        str,
+        Header(alias="X-AgileForge-Expected-Decision", include_in_schema=False),
+    ],
 ) -> dict[str, object]:
-    """Run one host-prepared structuring action over the registered source."""
+    """Run one guarded host-prepared action over the registered source."""
     return _result_payload(
         _application().structure_specification(
             SpecificationStructuringRequest(
                 project_id=project_id,
+                expected_decision_fingerprint=expected_decision_fingerprint,
                 **_metadata(req),
             )
         )

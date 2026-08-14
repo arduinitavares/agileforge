@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from workflow.contracts import FactReference, InputField, RecommendationKind
@@ -115,6 +115,92 @@ def _source_by_id(
     }
 
 
+def _candidate_chain_index(
+    snapshot: WorkflowFactSnapshot,
+    choices: list[SpecificationCandidateFact],
+    *,
+    source_lineage: tuple[int, str, int, str],
+) -> (
+    tuple[
+        dict[int, SpecificationCandidateFact],
+        set[int],
+        dict[int, str],
+    ]
+    | None
+):
+    """Validate exact identities and decisions in one candidate chain."""
+    by_id = {candidate.specification_candidate_id: candidate for candidate in choices}
+    if len(by_id) != len(choices):
+        return None
+    superseded: set[int] = set()
+    decisions: dict[int, str] = {}
+    for candidate in choices:
+        lineage = (
+            candidate.vision_artifact_id,
+            candidate.vision_fingerprint,
+            candidate.product_goal_artifact_id,
+            candidate.product_goal_fingerprint,
+        )
+        parent_id = candidate.supersedes_specification_candidate_id
+        parent_fingerprint = candidate.supersedes_candidate_fingerprint
+        if lineage != source_lineage or (parent_id is None) != (
+            parent_fingerprint is None
+        ):
+            return None
+        parent = None if parent_id is None else by_id.get(parent_id)
+        if parent_id is not None and parent is not None:
+            if (
+                parent_id == candidate.specification_candidate_id
+                or parent.candidate_fingerprint != parent_fingerprint
+            ):
+                return None
+            superseded.add(parent_id)
+        decision, conflict = _candidate_decision(snapshot, candidate)
+        if conflict or decision is None:
+            return None
+        decisions[candidate.specification_candidate_id] = decision
+    return by_id, superseded, decisions
+
+
+def _candidate_chain_leaf(
+    snapshot: WorkflowFactSnapshot,
+    choices: list[SpecificationCandidateFact],
+    *,
+    source_lineage: tuple[int, str, int, str],
+) -> tuple[SpecificationCandidateFact, str] | None:
+    """Return the sole connected terminal leaf in an exact supersession chain."""
+    indexed = _candidate_chain_index(
+        snapshot,
+        choices,
+        source_lineage=source_lineage,
+    )
+    if indexed is None:
+        return None
+    by_id, superseded, decisions = indexed
+    leaves = [
+        candidate
+        for candidate in choices
+        if candidate.specification_candidate_id not in superseded
+    ]
+    if len(leaves) != 1:
+        return None
+    leaf = leaves[0]
+    connected: set[int] = set()
+    current = leaf
+    while True:
+        current_id = current.specification_candidate_id
+        if current_id in connected:
+            return None
+        connected.add(current_id)
+        parent_id = current.supersedes_specification_candidate_id
+        if parent_id not in by_id:
+            break
+        current = by_id[parent_id]
+    if len(connected) != len(choices):
+        return None
+    return leaf, decisions[leaf.specification_candidate_id]
+
+
 def _revision_candidate_on_ancestor(
     snapshot: WorkflowFactSnapshot,
     source: SpecificationSourceFact,
@@ -136,21 +222,18 @@ def _revision_candidate_on_ancestor(
         )
         == (source.specification_source_id, source.source_fingerprint)
     ]
-    if malformed or len(choices) > 1:
+    if malformed:
         return None, True, True
     if not choices:
         return None, False, False
-    candidate = choices[0]
-    if (
-        candidate.vision_artifact_id,
-        candidate.vision_fingerprint,
-        candidate.product_goal_artifact_id,
-        candidate.product_goal_fingerprint,
-    ) != source_lineage:
+    selected = _candidate_chain_leaf(
+        snapshot,
+        choices,
+        source_lineage=source_lineage,
+    )
+    if selected is None:
         return None, True, True
-    decision, conflict = _candidate_decision(snapshot, candidate)
-    if conflict or decision is None:
-        return None, True, True
+    candidate, decision = selected
     return (
         candidate if decision in {"rejected", "feedback"} else None,
         False,
@@ -532,9 +615,29 @@ def _source_reference(source: SpecificationSourceFact) -> FactReference:
     )
 
 
+def _active_specification_structuring_lease(
+    snapshot: WorkflowFactSnapshot,
+    evaluated_at: datetime,
+) -> datetime | None:
+    """Return the live lease that makes source alternatives mutually exclusive."""
+    attempts = tuple(
+        attempt
+        for attempt in snapshot.node_attempts
+        if attempt.node_id == "specification.structure" and attempt.instance_key is None
+    )
+    if not attempts:
+        return None
+    latest = max(attempts, key=lambda item: item.attempt_id)
+    return (
+        latest.lease_expires_at
+        if latest.outcome is None and evaluated_at < latest.lease_expires_at
+        else None
+    )
+
+
 def _source_registration_rule(
     snapshot: WorkflowFactSnapshot,
-    _at: datetime,
+    evaluated_at: datetime,
 ) -> tuple[RuleEvaluation, ...]:
     """Require immutable external source preparation before each structure call."""
     selection = select_product_definition_state(snapshot)
@@ -582,10 +685,25 @@ def _source_registration_rule(
         source_ref = _source_reference(source)
         decision = candidate_decision
         spec = selection.accepted_spec
-        if decision in {"rejected", "feedback"}:
+        if decision == "feedback":
             evaluation = RuleEvaluation(
                 RuleCategory.AVAILABLE,
-                f"SPECIFICATION_{decision.upper()}_SOURCE_REVISION_REQUIRED",
+                "SPECIFICATION_FEEDBACK_SOURCE_REVISION_AVAILABLE",
+                recommendation_kind=RecommendationKind.OPTIONAL_REENTRY,
+                fact_references=(
+                    *lineage,
+                    source_ref,
+                    _reference(
+                        "specification_candidate",
+                        candidate.specification_candidate_id,
+                        candidate.candidate_fingerprint,
+                    ),
+                ),
+            )
+        elif decision == "rejected":
+            evaluation = RuleEvaluation(
+                RuleCategory.AVAILABLE,
+                "SPECIFICATION_REJECTED_SOURCE_REVISION_REQUIRED",
                 fact_references=(
                     *lineage,
                     source_ref,
@@ -616,6 +734,15 @@ def _source_registration_rule(
                 RuleCategory.SATISFIED,
                 "SPECIFICATION_SOURCE_REGISTERED",
             )
+    active_lease = _active_specification_structuring_lease(snapshot, evaluated_at)
+    if evaluation.category is RuleCategory.AVAILABLE and active_lease is not None:
+        evaluation = replace(
+            evaluation,
+            category=RuleCategory.WAITING,
+            reason_code="SPECIFICATION_STRUCTURER_ACTIVE",
+            valid_until=active_lease,
+            recommendation_kind=None,
+        )
     return (evaluation,)
 
 
@@ -625,6 +752,7 @@ def _available_structuring_evaluation(
     vision: VisionArtifactFact,
     goal: ProductGoalArtifactFact,
     source: SpecificationSourceFact,
+    feedback_retry: SpecificationCandidateFact | None = None,
 ) -> RuleEvaluation:
     """Build one initial, revision, or amendment structuring decision."""
     references: tuple[FactReference, ...] = (
@@ -632,9 +760,11 @@ def _available_structuring_evaluation(
         _source_reference(source),
     )
     spec = accepted_current_spec(snapshot)
-    prior, ancestor_conflict = _revision_candidate_for_source(snapshot, source)
-    if ancestor_conflict:
-        return RuleEvaluation(RuleCategory.INVALID, "WORKFLOW_FACT_CONFLICT")
+    prior = feedback_retry
+    if prior is None:
+        prior, ancestor_conflict = _revision_candidate_for_source(snapshot, source)
+        if ancestor_conflict:
+            return RuleEvaluation(RuleCategory.INVALID, "WORKFLOW_FACT_CONFLICT")
     if prior is not None:
         references = (
             *references,
@@ -644,7 +774,11 @@ def _available_structuring_evaluation(
                 prior.candidate_fingerprint,
             ),
         )
-        reason = "SPECIFICATION_REVISION_REQUIRED"
+        reason = (
+            "SPECIFICATION_FEEDBACK_RETRY_AVAILABLE"
+            if feedback_retry is not None
+            else "SPECIFICATION_REVISION_REQUIRED"
+        )
     elif spec is not None:
         references = (
             *references,
@@ -685,7 +819,15 @@ def _specification_rule(
         )
     elif candidate is not None:
         decision, _decision_conflict = _candidate_decision(snapshot, candidate)
-        if decision in {"rejected", "feedback"}:
+        if decision == "feedback":
+            evaluation = _available_structuring_evaluation(
+                snapshot,
+                vision=vision,
+                goal=goal,
+                source=source,
+                feedback_retry=candidate,
+            )
+        elif decision == "rejected":
             evaluation = RuleEvaluation(
                 RuleCategory.SATISFIED,
                 "SPECIFICATION_SOURCE_REVISION_REQUIRED",

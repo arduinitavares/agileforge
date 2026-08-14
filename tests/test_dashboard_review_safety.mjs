@@ -66,6 +66,78 @@ function action(requestKind, endpoint) {
     };
 }
 
+function specificationStructurePosition({
+    reasonCode = 'SPECIFICATION_INITIAL_REQUIRED',
+    sourceId = '5',
+    sourceFingerprint = 'sha256:source-a',
+    candidateId = null,
+    candidateFingerprint = null,
+    decisionFingerprint = 'sha256:structure-position',
+} = {}) {
+    const factReferences = [
+        { fact_type: 'vision', fact_id: '1', fingerprint: 'sha256:vision' },
+        { fact_type: 'product_goal', fact_id: '2', fingerprint: 'sha256:goal' },
+        {
+            fact_type: 'specification_source',
+            fact_id: sourceId,
+            fingerprint: sourceFingerprint,
+        },
+    ];
+    if (candidateId && candidateFingerprint) {
+        factReferences.push({
+            fact_type: 'specification_candidate',
+            fact_id: candidateId,
+            fingerprint: candidateFingerprint,
+        });
+    }
+    return {
+        decisions: [{
+            node_id: 'specification.structure',
+            request_kind: 'structure_specification',
+            category: 'available',
+            reason_code: reasonCode,
+            fact_references: factReferences,
+            decision_fingerprint: decisionFingerprint,
+        }],
+    };
+}
+
+function specificationSourcePosition({
+    reasonCode = 'SPECIFICATION_SOURCE_REQUIRED',
+    sourceId = null,
+    sourceFingerprint = null,
+    candidateId = null,
+    candidateFingerprint = null,
+    decisionFingerprint = 'sha256:source-position',
+} = {}) {
+    const factReferences = [
+        { fact_type: 'vision', fact_id: '1', fingerprint: 'sha256:vision' },
+        { fact_type: 'product_goal', fact_id: '2', fingerprint: 'sha256:goal' },
+    ];
+    if (sourceId && sourceFingerprint) {
+        factReferences.push({
+            fact_type: 'specification_source',
+            fact_id: sourceId,
+            fingerprint: sourceFingerprint,
+        });
+    }
+    if (candidateId && candidateFingerprint) {
+        factReferences.push({
+            fact_type: 'specification_candidate',
+            fact_id: candidateId,
+            fingerprint: candidateFingerprint,
+        });
+    }
+    return {
+        node_id: 'specification.source.register',
+        request_kind: 'register_specification_source',
+        category: 'available',
+        reason_code: reasonCode,
+        fact_references: factReferences,
+        decision_fingerprint: decisionFingerprint,
+    };
+}
+
 function deferred() {
     let resolve;
     const promise = new Promise((done) => { resolve = done; });
@@ -241,6 +313,10 @@ test('accepted Specification remains visible while amendment source is prepared'
     const { context } = loadFrontend();
     const rendered = context.specificationPanelMarkup(
         {
+            source: {
+                specification_source_id: 5,
+                source_fingerprint: 'sha256:source-a',
+            },
             current: {
                 spec_version_id: 8,
                 spec_hash: 'sha256:accepted-base',
@@ -255,6 +331,7 @@ test('accepted Specification remains visible while amendment source is prepared'
             action('register_specification_source', 'specifications/source'),
             action('structure_specification', 'specifications/structure'),
         ],
+        specificationStructurePosition(),
     );
 
     assert.match(rendered, /Accepted Specification/);
@@ -267,8 +344,16 @@ test('Specification structuring is host-owned and preserves exact candidate revi
     const { context } = loadFrontend();
 
     const structure = context.specificationPanelMarkup(
-        { candidate: null, review: null },
+        {
+            source: {
+                specification_source_id: 5,
+                source_fingerprint: 'sha256:source-a',
+            },
+            candidate: null,
+            review: null,
+        },
         [action('structure_specification', 'specifications/structure')],
+        specificationStructurePosition(),
     );
     assert.match(structure, /data-direct-action="structure_specification"/);
     assert.match(structure, />Structure Specification</);
@@ -304,7 +389,217 @@ test('Specification structuring is host-owned and preserves exact candidate revi
     assert.equal(binding.expectedCandidate, 'sha256:spec-seen');
 });
 
-test('terminal Specification review keeps exact candidate and source re-entry', () => {
+test('Specification Feedback offers exact retry and genuine source revision', () => {
+    const { context } = loadFrontend();
+    const actions = [
+        action('register_specification_source', 'specifications/source'),
+        action('structure_specification', 'specifications/structure'),
+    ];
+    const candidate = {
+        specification_candidate_id: 9,
+        candidate_fingerprint: 'sha256:terminal-candidate',
+        specification_source_id: 5,
+        registered_source_fingerprint: 'sha256:source-a',
+        rendered_markdown: '# Exact terminal candidate',
+    };
+    const projection = {
+        source: {
+            specification_source_id: 5,
+            source_fingerprint: 'sha256:source-a',
+        },
+        candidate,
+        review: {
+            state: 'feedback',
+            rationale: 'Restore exact diagnostic text.',
+        },
+    };
+    const rendered = context.specificationPanelMarkup(
+        projection,
+        actions,
+        specificationStructurePosition({
+            reasonCode: 'SPECIFICATION_FEEDBACK_RETRY_AVAILABLE',
+            candidateId: '9',
+            candidateFingerprint: 'sha256:terminal-candidate',
+        }),
+    );
+
+    assert.match(rendered, /# Exact terminal candidate/);
+    assert.match(rendered, /Restore exact diagnostic text\./);
+    assert.match(rendered, /Retry structuring from unchanged source/);
+    assert.match(rendered, /data-direct-action="structure_specification"/);
+    assert.match(rendered, /Register a revised source/);
+    assert.match(rendered, /data-specification-source-form="true"/);
+
+    const binding = context.captureSpecificationStructuringBinding({
+        actions,
+        position: specificationStructurePosition({
+            reasonCode: 'SPECIFICATION_FEEDBACK_RETRY_AVAILABLE',
+            candidateId: '9',
+            candidateFingerprint: 'sha256:terminal-candidate',
+        }),
+        specification: projection,
+    });
+    assert.equal(binding.mode, 'same-source-feedback');
+    assert.equal(binding.expectedDecision, 'sha256:structure-position');
+
+    const sourceBinding = context.captureSpecificationSourceRegistrationBinding({
+        actions,
+        position: {
+            decisions: [specificationSourcePosition({
+                reasonCode: 'SPECIFICATION_FEEDBACK_SOURCE_REVISION_AVAILABLE',
+                sourceId: '5',
+                sourceFingerprint: 'sha256:source-a',
+                candidateId: '9',
+                candidateFingerprint: 'sha256:terminal-candidate',
+            })],
+        },
+        specification: projection,
+    });
+    assert.equal(sourceBinding.expectedDecision, 'sha256:source-position');
+});
+
+test('Specification Feedback never labels a revised or stale source as unchanged', () => {
+    const { context } = loadFrontend();
+    const actions = [
+        action('register_specification_source', 'specifications/source'),
+        action('structure_specification', 'specifications/structure'),
+    ];
+    const projection = {
+        source: {
+            specification_source_id: 8,
+            source_fingerprint: 'sha256:source-b',
+        },
+        candidate: {
+            specification_candidate_id: 9,
+            candidate_fingerprint: 'sha256:terminal-candidate',
+            specification_source_id: 5,
+            registered_source_fingerprint: 'sha256:source-a',
+            rendered_markdown: '# Exact terminal candidate',
+        },
+        review: {
+            state: 'feedback',
+            rationale: 'Restore exact diagnostic text.',
+        },
+    };
+    const revisedPosition = specificationStructurePosition({
+        reasonCode: 'SPECIFICATION_REVISION_REQUIRED',
+        sourceId: '8',
+        sourceFingerprint: 'sha256:source-b',
+        candidateId: '9',
+        candidateFingerprint: 'sha256:terminal-candidate',
+    });
+
+    const revisedProjection = {
+        source: {
+            specification_source_id: 8,
+            source_fingerprint: 'sha256:source-b',
+        },
+        candidate: null,
+        review: null,
+    };
+    const revised = context.specificationPanelMarkup(
+        revisedProjection,
+        actions,
+        revisedPosition,
+    );
+    assert.match(revised, /Structure revised source/);
+    assert.match(revised, /exact prior review lineage/);
+    assert.doesNotMatch(revised, /exact prior Feedback lineage/);
+    assert.doesNotMatch(revised, /Retry structuring from unchanged source/);
+    assert.match(revised, /data-specification-feedback-continuation="true"/);
+    const revisedBinding = context.captureSpecificationStructuringBinding({
+        actions,
+        position: revisedPosition,
+        specification: revisedProjection,
+    });
+    assert.equal(revisedBinding.mode, 'revised-source');
+    assert.equal(revisedBinding.expectedDecision, 'sha256:structure-position');
+
+    const stale = context.specificationPanelMarkup(
+        projection,
+        actions,
+        specificationStructurePosition({
+            reasonCode: 'SPECIFICATION_FEEDBACK_RETRY_AVAILABLE',
+            sourceId: '5',
+            sourceFingerprint: 'sha256:source-a',
+            candidateId: '9',
+            candidateFingerprint: 'sha256:terminal-candidate',
+        }),
+    );
+    assert.doesNotMatch(stale, /data-direct-action="structure_specification"/);
+    assert.match(stale, /data-specification-source-form="true"/);
+    assert.equal(context.captureSpecificationSourceRegistrationBinding({
+        actions,
+        position: {
+            decisions: [specificationSourcePosition({
+                reasonCode: 'SPECIFICATION_FEEDBACK_SOURCE_REVISION_AVAILABLE',
+                sourceId: '5',
+                sourceFingerprint: 'sha256:source-a',
+                candidateId: '9',
+                candidateFingerprint: 'sha256:terminal-candidate',
+            })],
+        },
+        specification: projection,
+    }), null);
+});
+
+test('candidate-less Specification projection rejects a candidate-bound action', () => {
+    const { context } = loadFrontend();
+    const rendered = context.specificationPanelMarkup(
+        {
+            source: {
+                specification_source_id: 5,
+                source_fingerprint: 'sha256:source-a',
+            },
+            candidate: null,
+            review: null,
+        },
+        [action('structure_specification', 'specifications/structure')],
+        specificationStructurePosition({
+            reasonCode: 'SPECIFICATION_FEEDBACK_RETRY_AVAILABLE',
+            candidateId: '9',
+            candidateFingerprint: 'sha256:terminal-candidate',
+        }),
+    );
+
+    assert.doesNotMatch(rendered, /data-direct-action="structure_specification"/);
+});
+
+test('Specification structuring sends its rendered decision guard', async () => {
+    const calls = [];
+    const { context } = loadFrontend(async (url, options) => {
+        calls.push({ url, options });
+        return { ok: true, text: async () => '{"status":"success"}' };
+    });
+
+    await context.postAction(
+        action('structure_specification', 'specifications/structure'),
+        {},
+        { expectedDecision: 'sha256:structure-position' },
+    );
+
+    assert.equal(
+        calls[0].options.headers['X-AgileForge-Expected-Decision'],
+        'sha256:structure-position',
+    );
+});
+
+test('Specification continuation disables both choices during either mutation', () => {
+    const { context } = loadFrontend();
+    const controls = [{ disabled: false }, { disabled: false }, { disabled: false }];
+    const control = {
+        closest() {
+            return { querySelectorAll: () => controls };
+        },
+    };
+
+    context.setSpecificationContinuationBusy(control, true);
+    assert.equal(controls.every((item) => item.disabled), true);
+    context.setSpecificationContinuationBusy(control, false);
+    assert.equal(controls.every((item) => !item.disabled), true);
+});
+
+test('rejected and accepted Specification reviews keep source re-entry only', () => {
     const { context } = loadFrontend();
     const actions = [action('register_specification_source', 'specifications/source')];
     const candidate = {
@@ -312,7 +607,7 @@ test('terminal Specification review keeps exact candidate and source re-entry', 
         rendered_markdown: '# Exact terminal candidate',
     };
 
-    for (const state of ['rejected', 'feedback', 'accepted']) {
+    for (const state of ['rejected', 'accepted']) {
         const rendered = context.specificationPanelMarkup(
             { candidate, review: { state } },
             actions,
@@ -321,6 +616,7 @@ test('terminal Specification review keeps exact candidate and source re-entry', 
         assert.match(rendered, /# Exact terminal candidate/);
         assert.match(rendered, /data-specification-source-form="true"/);
         assert.match(rendered, /Register Specification source/);
+        assert.doesNotMatch(rendered, /data-direct-action="structure_specification"/);
     }
 });
 

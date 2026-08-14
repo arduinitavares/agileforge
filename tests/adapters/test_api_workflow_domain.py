@@ -333,8 +333,18 @@ def test_semantic_api_models_reject_internal_fields(
     internal_field: str,
 ) -> None:
     """Reject every caller-owned guard, repository fact, or compiler payload."""
+    headers = (
+        {"X-AgileForge-Expected-Decision": "sha256:position"}
+        if path
+        in {
+            "/api/projects/41/specifications/source",
+            "/api/projects/41/specifications/structure",
+        }
+        else {}
+    )
     response = TestClient(api_module.app).post(
         path,
+        headers=headers,
         json={**payload, internal_field: {"caller": "owned"}},
     )
 
@@ -4545,6 +4555,61 @@ def test_position_advertises_optional_specification_source_reentry_only(
     ]
 
 
+def test_position_advertises_both_specification_feedback_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Project Feedback as two semantic human actions with no durable IDs."""
+    source = NodeDecision(
+        node_id="specification.source.register",
+        child_graph_id="specification",
+        request_kind="register_specification_source",
+        category=NodeCategory.AVAILABLE,
+        recommendation_kind=RecommendationKind.OPTIONAL_REENTRY,
+        reason_code="SPECIFICATION_FEEDBACK_SOURCE_REVISION_AVAILABLE",
+        decision_fingerprint="feedback-source-revision",
+    )
+    retry = NodeDecision(
+        node_id="specification.structure",
+        child_graph_id="specification",
+        request_kind="structure_specification",
+        category=NodeCategory.AVAILABLE,
+        recommendation_kind=RecommendationKind.REQUIRED,
+        reason_code="SPECIFICATION_FEEDBACK_RETRY_AVAILABLE",
+        decision_fingerprint="feedback-same-source-retry",
+    )
+    position = _all_request_kinds_position().model_copy(
+        update={
+            "available_nodes": (source.node_id, retry.node_id),
+            "decisions": (source, retry),
+        }
+    )
+    monkeypatch.setattr(
+        api_module,
+        "_application",
+        lambda: _FakeApiApplication(position=position),
+    )
+
+    response = TestClient(api_module.app).get("/api/projects/41/position")
+
+    assert response.status_code == HTTPStatus.OK
+    assert response.json()["actions"] == [
+        {
+            "node_id": "specification.source.register",
+            "instance_key": None,
+            "request_kind": "register_specification_source",
+            "endpoint": "specifications/source",
+            "transport": "semantic",
+        },
+        {
+            "node_id": "specification.structure",
+            "instance_key": None,
+            "request_kind": "structure_specification",
+            "endpoint": "specifications/structure",
+            "transport": "semantic",
+        },
+    ]
+
+
 @pytest.mark.parametrize(
     "request_kind",
     [
@@ -4891,15 +4956,16 @@ def test_authority_endpoint_submits_exact_typed_request(
     assert request.expected_candidate_fingerprint == "sha256:authority-shown"
 
 
-def test_specification_source_endpoint_submits_semantic_file_selection(
+def test_specification_source_endpoint_binds_semantic_file_selection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Submit paths while keeping captured bytes and lineage host-owned."""
+    """Submit paths with the shown position while capture remains host-owned."""
     application = _FakeApiApplication()
     monkeypatch.setattr(api_module, "_application", lambda: application)
 
     response = TestClient(api_module.app).post(
         "/api/projects/41/specifications/source",
+        headers={"X-AgileForge-Expected-Decision": "sha256:source-position"},
         json={
             "source_path": "SPECIFICATION.md",
             "adr_paths": ["docs/adr/0002.md", "docs/adr/0001.md"],
@@ -4913,6 +4979,7 @@ def test_specification_source_endpoint_submits_semantic_file_selection(
     assert response.status_code == HTTPStatus.OK
     request = application.requests[0]
     assert isinstance(request, SpecificationSourceRegistrationRequest)
+    assert request.expected_decision_fingerprint == "sha256:source-position"
     assert request.model_dump(mode="json") == {
         "project_id": PROJECT_ID,
         "source_path": "SPECIFICATION.md",
@@ -4922,6 +4989,17 @@ def test_specification_source_endpoint_submits_semantic_file_selection(
         "actor": "dashboard-user",
         "correlation_id": "corr-api-41",
     }
+
+    missing_guard = TestClient(api_module.app).post(
+        "/api/projects/41/specifications/source",
+        json={
+            "source_path": "SPECIFICATION.md",
+            "preparation_capability": "grill-with-docs",
+            "idempotency_key": "source-api-unguarded-41",
+            "actor": "dashboard-user",
+        },
+    )
+    assert missing_guard.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
 
 
 @pytest.mark.parametrize(
@@ -4942,21 +5020,25 @@ def test_specification_source_endpoint_requires_exact_preparation_attestation(
 
     response = TestClient(api_module.app).post(
         "/api/projects/41/specifications/source",
+        headers={"X-AgileForge-Expected-Decision": "sha256:source-position"},
         json=payload,
     )
 
     assert response.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
 
 
-def test_specification_structure_endpoint_submits_only_transport_metadata(
+def test_specification_structure_endpoint_binds_the_rendered_position(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Keep the registered source and structuring input host-selected."""
+    """Keep host-selected input while guarding the position shown by the UI."""
     application = _FakeApiApplication()
     monkeypatch.setattr(api_module, "_application", lambda: application)
 
     response = TestClient(api_module.app).post(
         "/api/projects/41/specifications/structure",
+        headers={
+            "X-AgileForge-Expected-Decision": "sha256:structure-position",
+        },
         json={
             "idempotency_key": "structure-api-41",
             "actor": "dashboard-user",
@@ -4967,12 +5049,22 @@ def test_specification_structure_endpoint_submits_only_transport_metadata(
     assert response.status_code == HTTPStatus.OK
     request = application.requests[0]
     assert isinstance(request, SpecificationStructuringRequest)
+    assert request.expected_decision_fingerprint == "sha256:structure-position"
     assert request.model_dump(mode="json") == {
         "project_id": PROJECT_ID,
         "idempotency_key": "structure-api-41",
         "actor": "dashboard-user",
         "correlation_id": "corr-api-41",
     }
+
+    missing_guard = TestClient(api_module.app).post(
+        "/api/projects/41/specifications/structure",
+        json={
+            "idempotency_key": "structure-api-unguarded-41",
+            "actor": "dashboard-user",
+        },
+    )
+    assert missing_guard.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
 
 
 def test_retired_specification_author_endpoint_is_not_registered() -> None:

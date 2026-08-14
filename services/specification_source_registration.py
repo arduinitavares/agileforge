@@ -102,6 +102,12 @@ class SpecificationSourceRegistrationRequest(FrozenModel):
     source_path: str = Field(min_length=1)
     preparation_capability: Literal["grill-with-docs"]
     adr_paths: tuple[str, ...] = ()
+    expected_decision_fingerprint: str | None = Field(
+        default=None,
+        min_length=1,
+        exclude=True,
+        repr=False,
+    )
     idempotency_key: str = Field(min_length=1, max_length=200)
     actor: str = Field(min_length=1, max_length=200)
     correlation_id: str | None = Field(default=None, min_length=1)

@@ -598,11 +598,6 @@ def _composition_context(
             project_id=project_id,
             reference=prior_reference,
             lineage=lineage,
-            source=source,
-        )
-        prior_payload, prior_envelope = load_candidate_contract(
-            prior_row.canonical_envelope_json,
-            expected_candidate_fingerprint=prior_row.candidate_fingerprint,
         )
         terminal = session.exec(
             select(SpecificationDecision).where(
@@ -616,6 +611,28 @@ def _composition_context(
         if terminal is None or terminal.decision not in {"rejected", "feedback"}:
             message = "Specification revision requires exact rejected feedback."
             raise ValueError(message)
+        same_source = (
+            prior_row.specification_source_id,
+            prior_row.specification_source_fingerprint,
+        ) == (source.source_id, source.source_fingerprint)
+        source_is_valid = (
+            terminal.decision == "feedback"
+            if same_source
+            else _source_descends_from_candidate(
+                session,
+                project_id=project_id,
+                source=source,
+                candidate=prior_row,
+                lineage=lineage,
+            )
+        )
+        if not source_is_valid:
+            message = "Specification prior candidate lineage or source is stale."
+            raise ValueError(message)
+        prior_payload, prior_envelope = load_candidate_contract(
+            prior_row.canonical_envelope_json,
+            expected_candidate_fingerprint=prior_row.candidate_fingerprint,
+        )
         base = _base_context(
             session,
             project_id=project_id,
@@ -658,7 +675,6 @@ def _exact_candidate(
     project_id: int,
     reference: FactReference,
     lineage: _LineageIdentity,
-    source: _SourceIdentity,
 ) -> SpecificationCandidate:
     try:
         candidate_id = int(reference.fact_id)
@@ -682,15 +698,6 @@ def _exact_candidate(
         lineage.vision_fingerprint,
         lineage.goal_id,
         lineage.goal_fingerprint,
-    ):
-        message = "Specification prior candidate lineage or source is stale."
-        raise ValueError(message)
-    if not _source_descends_from_candidate(
-        session,
-        project_id=project_id,
-        source=source,
-        candidate=candidate,
-        lineage=lineage,
     ):
         message = "Specification prior candidate lineage or source is stale."
         raise ValueError(message)

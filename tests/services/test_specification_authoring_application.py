@@ -19,6 +19,7 @@ from workflow.contracts import (
     RecommendationKind,
     TransitionResult,
     WorkflowError,
+    WorkflowErrorCode,
     WorkflowPosition,
 )
 from workflow.requests import DecideSpecification
@@ -256,6 +257,34 @@ def test_structuring_replays_before_reading_current_position(
     monkeypatch.setattr(AgileForgeApplication, "run_agentic_action", _unexpected)
 
     assert application.structure_specification(_request()) == replay
+    assert service.build_calls == 0
+
+
+def test_structuring_rejects_a_stale_rendered_position_before_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A changed UI action cannot build input or cross the provider boundary."""
+    service = _InputService()
+    application = AgileForgeApplication(
+        workflow_domain=_Domain(),
+        specification_structuring_input=service,
+    )
+
+    def _unexpected(*_args: object, **_kwargs: object) -> TransitionResult:
+        message = "provider execution must not start for a stale UI action"
+        raise AssertionError(message)
+
+    monkeypatch.setattr(AgileForgeApplication, "run_agentic_action", _unexpected)
+
+    result = application.structure_specification(
+        _request().model_copy(
+            update={"expected_decision_fingerprint": "stale-decision"}
+        )
+    )
+
+    assert not result.ok
+    assert result.error is not None
+    assert result.error.code is WorkflowErrorCode.STALE_POSITION
     assert service.build_calls == 0
 
 
