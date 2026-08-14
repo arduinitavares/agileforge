@@ -429,6 +429,9 @@ test('Specification Feedback offers exact retry and genuine source revision', ()
     assert.match(rendered, /data-direct-action="structure_specification"/);
     assert.match(rendered, /Register a revised source/);
     assert.match(rendered, /data-specification-source-form="true"/);
+    assert.match(rendered, /data-specification-structuring-status="true"/);
+    assert.match(rendered, /role="status"/);
+    assert.match(rendered, /aria-live="polite"/);
 
     const binding = context.captureSpecificationStructuringBinding({
         actions,
@@ -456,6 +459,26 @@ test('Specification Feedback offers exact retry and genuine source revision', ()
         specification: projection,
     });
     assert.equal(sourceBinding.expectedDecision, 'sha256:source-position');
+    const failedPosition = specificationStructurePosition({
+        reasonCode: 'SPECIFICATION_STRUCTURER_FAILED',
+        candidateId: '9',
+        candidateFingerprint: 'sha256:terminal-candidate',
+    });
+    const failedBinding = context.captureSpecificationStructuringBinding({
+        actions,
+        position: failedPosition,
+        specification: projection,
+    });
+    const failedRendered = context.specificationPanelMarkup(
+        projection,
+        actions,
+        failedPosition,
+    );
+
+    assert.equal(failedBinding.mode, 'same-source-feedback');
+    assert.equal(failedBinding.expectedDecision, 'sha256:structure-position');
+    assert.match(failedRendered, /Retry structuring from unchanged source/);
+    assert.match(failedRendered, /data-direct-action="structure_specification"/);
 });
 
 test('Specification Feedback never labels a revised or stale source as unchanged', () => {
@@ -597,6 +620,180 @@ test('Specification continuation disables both choices during either mutation', 
     assert.equal(controls.every((item) => item.disabled), true);
     context.setSpecificationContinuationBusy(control, false);
     assert.equal(controls.every((item) => !item.disabled), true);
+});
+
+test('Specification structuring exposes local busy and durable failure state', async () => {
+    const firstPending = deferred();
+    const retryPending = deferred();
+    const calls = [];
+    const failedPosition = specificationStructurePosition({
+        reasonCode: 'SPECIFICATION_STRUCTURER_FAILED',
+        candidateId: '9',
+        candidateFingerprint: 'sha256:terminal-candidate',
+        decisionFingerprint: 'sha256:failed-position',
+    });
+    const specification = {
+        source: {
+            specification_source_id: 5,
+            source_fingerprint: 'sha256:source-a',
+        },
+        candidate: {
+            specification_candidate_id: 9,
+            candidate_fingerprint: 'sha256:terminal-candidate',
+            specification_source_id: 5,
+            registered_source_fingerprint: 'sha256:source-a',
+            rendered_markdown: '# Exact terminal candidate',
+        },
+        review: {
+            state: 'feedback',
+            rationale: 'Restore exact diagnostic text.',
+        },
+    };
+    const pendingPosts = [firstPending, retryPending];
+    const { context, controls } = loadFrontend((url, options = {}) => {
+        calls.push({ url, options });
+        if (options.method === 'POST') return pendingPosts.shift().promise;
+        const payload = url.endsWith('/position')
+            ? {
+                data: failedPosition,
+                actions: [action(
+                    'structure_specification',
+                    'specifications/structure',
+                )],
+            }
+            : {
+                data: url.endsWith('/specifications/review')
+                    ? specification
+                    : {},
+            };
+        return Promise.resolve({
+            ok: true,
+            status: 200,
+            text: async () => JSON.stringify(payload),
+        });
+    });
+    vm.runInContext(`
+        selectedProjectId = 41;
+        lifecycleState = ${JSON.stringify({
+            actions: [action('structure_specification', 'specifications/structure')],
+            position: specificationStructurePosition({
+                reasonCode: 'SPECIFICATION_FEEDBACK_RETRY_AVAILABLE',
+                candidateId: '9',
+                candidateFingerprint: 'sha256:terminal-candidate',
+            }),
+            specification,
+        })};
+    `, context);
+
+    const attributes = new Map();
+    const label = {
+        dataset: {},
+        textContent: 'Retry structuring from unchanged source',
+    };
+    const status = { hidden: true, textContent: '' };
+    const sibling = { disabled: false };
+    let button;
+    const actionRegion = {
+        querySelector(selector) {
+            return selector === '[data-specification-structuring-status="true"]'
+                ? status
+                : null;
+        },
+    };
+    const continuation = {
+        querySelectorAll() { return [button, sibling]; },
+    };
+    button = {
+        disabled: false,
+        dataset: {},
+        closest(selector) {
+            if (selector === '[data-specification-feedback-continuation="true"]') {
+                return continuation;
+            }
+            if (selector === '[data-specification-structuring-action="true"]') {
+                return actionRegion;
+            }
+            return null;
+        },
+        querySelector(selector) {
+            return selector === '[data-specification-structuring-label="true"]'
+                ? label
+                : null;
+        },
+        setAttribute(name, value) { attributes.set(name, value); },
+        removeAttribute(name) { attributes.delete(name); },
+    };
+
+    const first = context.runDirectAction('structure_specification', button);
+    const duplicate = await context.runDirectAction('structure_specification', button);
+
+    assert.equal(calls.length, 1);
+    assert.equal(duplicate, false);
+    assert.equal(button.disabled, true);
+    assert.equal(sibling.disabled, true);
+    assert.equal(attributes.get('aria-busy'), 'true');
+    assert.equal(label.textContent, 'Structuring Specification...');
+    assert.equal(status.hidden, false);
+    assert.equal(status.textContent, 'Structuring Specification...');
+    assert.equal(
+        calls[0].options.headers['X-AgileForge-Expected-Decision'],
+        'sha256:structure-position',
+    );
+
+    firstPending.resolve({
+        ok: false,
+        status: 409,
+        text: async () => JSON.stringify({
+            detail: {
+                error: {
+                    code: 'SPECIFICATION_PRODUCER_FAILED',
+                    message: 'Specification structurer provider execution failed.',
+                },
+            },
+        }),
+    });
+    await first;
+
+    assert.equal(button.disabled, false);
+    assert.equal(sibling.disabled, false);
+    assert.equal(attributes.has('aria-busy'), false);
+    assert.equal(label.textContent, 'Retry structuring from unchanged source');
+    assert.equal(status.hidden, false);
+    assert.equal(
+        status.textContent,
+        'Specification structuring failed. '
+            + 'Specification structurer provider execution failed. '
+            + 'No new candidate was produced. '
+            + 'The prior candidate and Feedback remain current.',
+    );
+    assert.equal(
+        controls.get('project-error').textContent,
+        'Specification structurer provider execution failed.',
+    );
+
+    const retry = context.runDirectAction('structure_specification', button);
+    const postCalls = calls.filter(({ options }) => options.method === 'POST');
+    assert.equal(
+        postCalls.at(-1).options.headers['X-AgileForge-Expected-Decision'],
+        'sha256:failed-position',
+    );
+    retryPending.resolve({
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ status: 'success' }),
+    });
+    await retry;
+
+    assert.equal(
+        context.specificationStructuringFailureMessage(
+            null,
+            new Error('The network connection was lost.'),
+            false,
+        ),
+        'Specification structuring outcome is uncertain. '
+            + 'The network connection was lost. '
+            + 'Refresh the dashboard and verify the current candidate before retrying.',
+    );
 });
 
 test('rejected and accepted Specification reviews keep source re-entry only', () => {

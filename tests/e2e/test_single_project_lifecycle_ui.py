@@ -120,6 +120,9 @@ class FakeLifecycle:
     goal_accepted: bool = False
     specification_source: JsonObject | None = None
     specification: JsonObject | None = None
+    specification_feedback: str | None = None
+    specification_structure_reason: str | None = None
+    specification_structure_decision_fingerprint: str = "sha256:hidden-decision"
     specification_accepted: bool = False
     authority_pending: JsonObject | None = None
     authority_accepted: JsonObject | None = None
@@ -566,18 +569,30 @@ class FakeLifecycle:
         }
 
     def _specification_projection(self) -> JsonObject:
-        candidate: JsonObject | None = (
-            None
-            if self.specification is None
-            else {
+        candidate: JsonObject | None = None
+        if self.specification is not None:
+            assert self.specification_source is not None
+            candidate = {
+                "specification_candidate_id": 32,
+                "specification_source_id": self.specification_source[
+                    "specification_source_id"
+                ],
+                "registered_source_fingerprint": self.specification_source[
+                    "source_fingerprint"
+                ],
                 "candidate_fingerprint": "sha256:hidden-specification",
                 "payload_fingerprint": "sha256:hidden-specification-payload",
                 "rendered_markdown": self.specification["rendered_markdown"],
             }
-        )
         review: JsonObject | None = None
         if candidate is not None:
-            review = {"state": "accepted" if self.specification_accepted else "pending"}
+            if self.specification_accepted:
+                state = "accepted"
+            elif self.specification_feedback is not None:
+                state = "feedback"
+            else:
+                state = "pending"
+            review = {"state": state, "rationale": self.specification_feedback}
         return {
             "source": self.specification_source,
             "candidate": candidate,
@@ -615,7 +630,11 @@ class FakeLifecycle:
                 self.specification_source is None,
                 "register_specification_source",
             ),
-            (self.specification is None, "structure_specification"),
+            (
+                self.specification_feedback is not None
+                or self.specification is None,
+                "structure_specification",
+            ),
             (not self.specification_accepted, "decide_specification"),
             (
                 self.authority_pending is None and self.authority_accepted is None,
@@ -654,13 +673,32 @@ class FakeLifecycle:
                     "fingerprint": self.specification_source["source_fingerprint"],
                 }
             )
+            if self.specification_feedback is not None:
+                fact_references.append(
+                    {
+                        "fact_type": "specification_candidate",
+                        "fact_id": "32",
+                        "fingerprint": "sha256:hidden-specification",
+                    }
+                )
+            if self.specification_structure_reason == "SPECIFICATION_STRUCTURER_FAILED":
+                fact_references.append(
+                    {
+                        "fact_type": "node_attempt",
+                        "fact_id": "23",
+                        "fingerprint": "sha256:hidden-failed-attempt",
+                    }
+                )
+        specification_reason = self.specification_structure_reason
+        if specification_reason is None and self.specification_feedback is not None:
+            specification_reason = "SPECIFICATION_FEEDBACK_RETRY_AVAILABLE"
         decision: JsonObject = {
             "node_id": node_id,
             "child_graph_id": child,
             "request_kind": request_kind,
             "category": "available",
-            "reason_code": "INTERNAL_REASON_CODE",
-            "decision_fingerprint": "sha256:hidden-decision",
+            "reason_code": specification_reason or "INTERNAL_REASON_CODE",
+            "decision_fingerprint": self.specification_structure_decision_fingerprint,
             "fact_references": fact_references,
         }
         blocker: JsonObject = {
@@ -1067,6 +1105,146 @@ def _attach_and_refresh_repository(
     page.wait_for_timeout(_UI_SETTLE_MS)
     assert fake.refresh_count == 1
     assert page.locator("#lifecycle-stage-strip").inner_text() == stage_before_refresh
+
+
+def test_issue_204_structuring_reports_local_state_and_reloads_successor(
+    dashboard_harness: DashboardHarness,
+) -> None:
+    """Keep deferred, failed, and successful structuring visible in place."""
+    fake = FakeLifecycle(
+        repositories={},
+        project={
+            "project_id": _PROJECT_ID,
+            "name": "Issue 204 lifecycle",
+            "description": "Provider-free Specification structuring coverage.",
+        },
+        vision_candidate={"statement": "Accepted Vision"},
+        vision_accepted=True,
+        goal_candidate={"statement": "Accepted Product Goal"},
+        goal_accepted=True,
+        specification_source={
+            "specification_source_id": 31,
+            "source_fingerprint": "sha256:issue-204-source",
+            "producer_capability": "to-spec",
+            "preparation_capability": "grill-with-docs",
+            "context": {"state": "absent", "document": None},
+        },
+        specification={"rendered_markdown": "# Prior Feedback candidate"},
+        specification_feedback="Restore the exact observable contract.",
+    )
+    context = dashboard_harness.browser.new_context(viewport=_DESKTOP_VIEWPORT)
+    context.route("**/api/**", fake.handle)
+    page = context.new_page()
+    page.goto(
+        f"{dashboard_harness.url}/project.html?id={_PROJECT_ID}",
+        wait_until="networkidle",
+    )
+    page.evaluate(
+        """() => {
+            const originalFetch = window.fetch.bind(window);
+            window.issue204Requests = [];
+            window.resolveIssue204Structure = null;
+            window.fetch = (input, init = {}) => {
+                const url = String(input);
+                if (url.endsWith('/specifications/structure')
+                        && init.method === 'POST') {
+                    window.issue204Requests.push({
+                        headers: Object.fromEntries(new Headers(init.headers)),
+                    });
+                    return new Promise((resolve) => {
+                        window.resolveIssue204Structure = (response) => {
+                            window.resolveIssue204Structure = null;
+                            resolve(new Response(JSON.stringify(response.body), {
+                                status: response.status,
+                                headers: { 'Content-Type': 'application/json' },
+                            }));
+                        };
+                    });
+                }
+                return originalFetch(input, init);
+            };
+        }"""
+    )
+
+    button = page.locator('[data-direct-action="structure_specification"]')
+    expect(button).to_be_visible()
+    expect(button).to_contain_text("Retry structuring from unchanged source")
+    button.click()
+    page.wait_for_function("window.resolveIssue204Structure !== null")
+
+    status = page.locator('[data-specification-structuring-status="true"]')
+    expect(button).to_be_disabled()
+    expect(button).to_have_attribute("aria-busy", "true")
+    expect(button).to_contain_text("Structuring Specification...")
+    expect(status).to_be_visible()
+    expect(status).to_have_text("Structuring Specification...")
+    assert page.evaluate("window.issue204Requests.length") == 1
+    assert page.evaluate(
+        "window.issue204Requests[0].headers['x-agileforge-expected-decision']"
+    ) == "sha256:hidden-decision"
+
+    fake.specification_structure_reason = "SPECIFICATION_STRUCTURER_FAILED"
+    fake.specification_structure_decision_fingerprint = "sha256:failed-decision"
+    page.evaluate(
+        """window.resolveIssue204Structure({
+            status: 409,
+            body: {
+                detail: {
+                    error: {
+                        code: 'SPECIFICATION_PRODUCER_FAILED',
+                        message: 'Specification structurer provider execution failed.',
+                    },
+                },
+            },
+        })"""
+    )
+    expect(button).to_be_enabled()
+    expect(button).not_to_have_attribute("aria-busy", "true")
+    expect(status).to_contain_text(
+        "Specification structurer provider execution failed."
+    )
+    expect(status).to_contain_text("No new candidate was produced.")
+    expect(status).to_contain_text(
+        "The prior candidate and Feedback remain current."
+    )
+    expect(
+        page.get_by_text("Prior Feedback candidate", exact=False)
+    ).to_be_visible()
+    expect(button).to_be_visible()
+    assert page.evaluate("window.issue204Requests.length") == 1
+
+    button.click()
+    page.wait_for_function("window.resolveIssue204Structure !== null")
+    expect(button).to_be_disabled()
+    assert [
+        request["headers"]["x-agileforge-expected-decision"]
+        for request in page.evaluate("window.issue204Requests")
+    ] == ["sha256:hidden-decision", "sha256:failed-decision"]
+    fake.specification = {"rendered_markdown": "# Successor pending candidate"}
+    fake.specification_feedback = None
+    page.evaluate(
+        """window.resolveIssue204Structure({
+            status: 200,
+            body: { status: 'success', data: { output: { recorded: true } } },
+        })"""
+    )
+
+    expect(
+        page.get_by_text("Successor pending candidate", exact=False)
+    ).to_be_visible()
+    expect(
+        page.locator(
+            '[data-review-scope="specification"][data-review-decision="accepted"]'
+        )
+    ).to_be_visible()
+    expect(
+        page.get_by_role(
+            "button",
+            name="Retry structuring from unchanged source",
+        )
+    ).not_to_be_visible()
+    assert fake.api_errors == []
+    context.close()
 
 
 def test_desktop_human_single_lifecycle(

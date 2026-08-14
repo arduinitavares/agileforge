@@ -687,7 +687,8 @@ function captureSpecificationStructuringBinding(state) {
             === source.specification_source_id
         && candidate.registered_source_fingerprint === source.source_fingerprint;
     let mode = null;
-    if (decision.reason_code === 'SPECIFICATION_FEEDBACK_RETRY_AVAILABLE'
+    if ((decision.reason_code === 'SPECIFICATION_FEEDBACK_RETRY_AVAILABLE'
+            || decision.reason_code === 'SPECIFICATION_STRUCTURER_FAILED')
         && sameSource) {
         mode = 'same-source-feedback';
     } else if (decision.reason_code === 'SPECIFICATION_REVISION_REQUIRED'
@@ -777,9 +778,20 @@ function specificationFeedbackContinuationMarkup(
         <p class="text-sm font-semibold text-amber-950">Choose how to address Specification Feedback</p>
         ${rationale}
         <p class="mt-4 text-sm leading-6 text-slate-700">${instruction}</p>
-        <button type="button" data-direct-action="structure_specification" class="${BUTTON_PRIMARY}"><span class="material-symbols-outlined" aria-hidden="true">refresh</span><span>${label}</span></button>
+        ${specificationStructuringActionMarkup(label, 'refresh')}
         ${revisedSource}
     </section>`;
+}
+
+function specificationStructuringActionMarkup(label, icon) {
+    return `<div data-specification-structuring-action="true" class="mt-4">
+        <button type="button" data-direct-action="structure_specification" class="${BUTTON_PRIMARY}">
+            <span class="material-symbols-outlined" aria-hidden="true">${icon}</span>
+            <span data-specification-structuring-label="true">${label}</span>
+        </button>
+        <p data-specification-structuring-status="true" hidden role="status" aria-live="polite" aria-atomic="true"
+            class="mt-3 text-sm leading-6 text-slate-700"></p>
+    </div>`;
 }
 
 function specificationPanelMarkup(projection, actions = [], position = {}) {
@@ -795,7 +807,10 @@ function specificationPanelMarkup(projection, actions = [], position = {}) {
         const structure = structureBinding
             ? `<div class="max-w-3xl">
                 <p class="mb-4 text-sm leading-6 text-slate-600">${revisedSource ? 'Structure the genuinely revised registered source with exact prior review lineage.' : 'Structure the registered source into an exact reviewable Specification candidate.'}</p>
-                <button type="button" data-direct-action="structure_specification" class="${BUTTON_PRIMARY}"><span class="material-symbols-outlined" aria-hidden="true">schema</span><span>${revisedSource ? 'Structure revised source' : 'Structure Specification'}</span></button>
+                ${specificationStructuringActionMarkup(
+                    revisedSource ? 'Structure revised source' : 'Structure Specification',
+                    'schema',
+                )}
             </div>`
             : '';
         const current = acceptedSpecificationMarkup(projection?.current);
@@ -1079,7 +1094,12 @@ async function requestJson(path, options = {}) {
         }
     }
     if (!response.ok) {
-        throw new Error(responseErrorMessage(payload, 'The requested action failed.'));
+        const error = new Error(
+            responseErrorMessage(payload, 'The requested action failed.'),
+        );
+        error.status = response.status;
+        error.code = payload?.detail?.error?.code ?? payload?.code ?? null;
+        throw error;
     }
     return payload;
 }
@@ -1324,21 +1344,29 @@ async function submitHumanAction() {
 
 async function runDirectAction(requestKind, button, fallbackEndpoint = null) {
     if (button.disabled) return false;
-    setSpecificationContinuationBusy(button, true);
+    const isSpecificationStructuring = requestKind === 'structure_specification';
+    const setBusy = isSpecificationStructuring
+        ? setSpecificationStructuringBusy
+        : setSpecificationContinuationBusy;
+    let specificationBinding = null;
+    let mutationCompleted = false;
+    setBusy(button, true);
     setProjectError('');
     try {
-        if (requestKind === 'structure_specification') {
+        if (isSpecificationStructuring) {
             const binding = captureSpecificationStructuringBinding(lifecycleState);
             if (!binding) {
                 throw new Error(
                     'This Specification action changed. Refresh and choose from the current source state.',
                 );
             }
+            specificationBinding = binding;
             await postAction(
                 binding.action,
                 {},
                 { expectedDecision: binding.expectedDecision },
             );
+            mutationCompleted = true;
         } else {
             const action = findAction(lifecycleState.actions, requestKind)
                 ?? (fallbackEndpoint ? { endpoint: fallbackEndpoint } : null);
@@ -1346,11 +1374,83 @@ async function runDirectAction(requestKind, button, fallbackEndpoint = null) {
         }
         await loadDashboard();
     } catch (error) {
+        if (!isSpecificationStructuring) {
+            setProjectError(error.message);
+            return true;
+        }
+        let refreshed = false;
+        if (!mutationCompleted) {
+            try {
+                refreshed = await loadDashboard();
+            } catch (_loadError) {
+                // Keep the captured action visible when reconciliation also fails.
+            }
+        }
+        const currentButton = document.querySelector?.(
+            '[data-direct-action="structure_specification"]',
+        ) ?? button;
+        const localMessage = mutationCompleted
+            ? `Specification structuring completed, but the dashboard could not reload. ${error.message}`
+            : specificationStructuringFailureMessage(
+                specificationBinding,
+                error,
+                refreshed,
+            );
         setProjectError(error.message);
+        setSpecificationStructuringStatus(currentButton, localMessage);
     } finally {
-        setSpecificationContinuationBusy(button, false);
+        setBusy(button, false);
     }
     return true;
+}
+
+function specificationStructuringFailureMessage(binding, error, refreshed) {
+    if (error?.status !== 409 || error?.code !== 'SPECIFICATION_PRODUCER_FAILED') {
+        const nextStep = refreshed
+            ? 'The dashboard was refreshed. Verify the current candidate before retrying.'
+            : 'Refresh the dashboard and verify the current candidate before retrying.';
+        return `Specification structuring outcome is uncertain. ${error.message} ${nextStep}`;
+    }
+    const currentState = binding?.mode === 'same-source-feedback'
+        ? 'The prior candidate and Feedback remain current.'
+        : 'The registered source remains current.';
+    return `Specification structuring failed. ${error.message} No new candidate was produced. ${currentState}`;
+}
+
+function setSpecificationStructuringStatus(control, message) {
+    const action = control?.closest?.(
+        '[data-specification-structuring-action="true"]',
+    );
+    const status = action?.querySelector?.(
+        '[data-specification-structuring-status="true"]',
+    );
+    if (!status) return;
+    status.textContent = message;
+    status.hidden = !message;
+}
+
+function setSpecificationStructuringBusy(control, busy) {
+    setSpecificationContinuationBusy(control, busy);
+    const label = control?.querySelector?.(
+        '[data-specification-structuring-label="true"]',
+    );
+    if (busy) {
+        control?.setAttribute?.('aria-busy', 'true');
+        if (label) {
+            label.dataset.idleLabel = label.textContent;
+            label.textContent = 'Structuring Specification...';
+        }
+        setSpecificationStructuringStatus(
+            control,
+            'Structuring Specification...',
+        );
+        return;
+    }
+    control?.removeAttribute?.('aria-busy');
+    if (label?.dataset?.idleLabel) {
+        label.textContent = label.dataset.idleLabel;
+        delete label.dataset.idleLabel;
+    }
 }
 
 function setSpecificationContinuationBusy(control, busy) {
