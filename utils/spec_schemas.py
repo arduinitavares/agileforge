@@ -401,7 +401,12 @@ class Invariant(BaseModel):
         str,
         Field(
             pattern=r"^INV-[0-9a-f]{16}$",
-            description="Deterministic invariant identifier (INV- + 16 hex chars).",
+            description=(
+                "Reference identity for this invariant (INV- + 16 hex chars). "
+                "Provider output must use a distinct temporary identity for each "
+                "semantically distinct invariant; host normalization rewrites it "
+                "to the final deterministic identity."
+            ),
         ),
     ]
     type: Annotated[InvariantType, Field(description="Invariant type enum.")]
@@ -450,7 +455,13 @@ class SourceMapEntry(BaseModel):
 
     invariant_id: Annotated[
         str,
-        Field(description="Invariant ID referenced in this mapping."),
+        Field(
+            description=(
+                "The exact identity of the invariant referenced by this source "
+                "mapping: its temporary provider identity before host normalization "
+                "and final host identity afterward."
+            )
+        ),
     ]
     excerpt: Annotated[
         str,
@@ -635,7 +646,18 @@ class SpecAuthorityMapping(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     candidate_id: Annotated[str, Field(min_length=1)]
-    authority_item_id: Annotated[str, Field(min_length=1)]
+    authority_item_id: Annotated[
+        str,
+        Field(
+            min_length=1,
+            description=(
+                "For invariant targets, the exact identity of the referenced "
+                "invariant: its temporary provider identity before host normalization "
+                "and final host identity afterward. For other target kinds, the "
+                "emitted authority item ID."
+            ),
+        ),
+    ]
     authority_target_kind: AuthorityTargetKind
     mapping_status: CoverageStatus
     mapping_rationale: Annotated[str, Field(min_length=1)]

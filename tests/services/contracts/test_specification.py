@@ -207,6 +207,79 @@ def test_duplicate_placeholder_ids_with_unique_semantics_rewrite() -> None:
     assert [entry.invariant_id for entry in normalized.root.source_map] == invariant_ids
 
 
+def test_distinct_temporary_ids_keep_multi_invariant_references_aligned() -> None:
+    """Host ID rewriting preserves every explicit provider reference."""
+    payload = _success_payload()
+    payload["invariants"].append(
+        {
+            "id": "INV-0000000000000001",
+            "type": "REQUIRED_FIELD",
+            "source_item_id": _SOURCE_ID,
+            "source_level": "MUST",
+            "parameters": {"field_name": "eligible_typed_item"},
+        }
+    )
+    payload["source_map"].append(
+        {
+            "invariant_id": "INV-0000000000000001",
+            "excerpt": "Authority MUST include eligible_typed_item.",
+            "location": _SOURCE_ID,
+        }
+    )
+    payload.update(
+        {
+            "ir_schema_version": "provider.ir.v1",
+            "ir_provenance": "model_emitted",
+            "authority_mappings": [
+                {
+                    "candidate_id": "CAND-typed-citation",
+                    "authority_item_id": "INV-0000000000000000",
+                    "authority_target_kind": "invariant",
+                    "mapping_status": "covered",
+                    "mapping_rationale": "Maps the typed citation requirement.",
+                    "mapping_provenance": "model_quote",
+                },
+                {
+                    "candidate_id": "CAND-eligible-item",
+                    "authority_item_id": "INV-0000000000000001",
+                    "authority_target_kind": "invariant",
+                    "mapping_status": "covered",
+                    "mapping_rationale": "Maps the eligible item requirement.",
+                    "mapping_provenance": "model_quote",
+                },
+            ],
+        }
+    )
+
+    normalized = normalize_compiler_output(
+        json.dumps(payload),
+        authority_input=_authority_input(),
+    )
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    invariant_ids_by_field = {
+        item.parameters.model_dump(mode="json")["field_name"]: item.id
+        for item in normalized.root.invariants
+    }
+    expected_invariant_count = 2
+    assert len(invariant_ids_by_field) == expected_invariant_count
+    assert {
+        entry.excerpt: entry.invariant_id for entry in normalized.root.source_map
+    } == {
+        _SOURCE_STATEMENT: invariant_ids_by_field["typed_citation"],
+        "Authority MUST include eligible_typed_item.": invariant_ids_by_field[
+            "eligible_typed_item"
+        ],
+    }
+    assert {
+        mapping.candidate_id: mapping.authority_item_id
+        for mapping in normalized.root.authority_mappings
+    } == {
+        "CAND-typed-citation": invariant_ids_by_field["typed_citation"],
+        "CAND-eligible-item": invariant_ids_by_field["eligible_typed_item"],
+    }
+
+
 def test_ambiguous_duplicate_invariant_ids_fail_stably_under_permutation() -> None:
     """Unordered collections cannot positionally resolve one repeated provider ID."""
     forward = _success_payload()
@@ -242,8 +315,9 @@ def test_ambiguous_duplicate_invariant_ids_fail_stably_under_permutation() -> No
     assert isinstance(normalized_reverse.root, SpecAuthorityCompilationFailure)
     assert normalized_forward == normalized_reverse
     assert normalized_forward.root.reason == "JSON_VALIDATION_FAILED"
-    assert "ambiguous repeated invariant identity" in (
-        normalized_forward.root.blocking_gaps[0]
+    assert (
+        "ambiguous repeated invariant identity"
+        in (normalized_forward.root.blocking_gaps[0])
     )
 
 
@@ -524,6 +598,7 @@ def test_normalizer_rejects_mapping_target_kind_mismatch() -> None:
 
     assert isinstance(normalized.root, SpecAuthorityCompilationFailure)
     assert normalized.root.reason == "JSON_VALIDATION_FAILED"
-    assert "target kind gap is incompatible with REJ-1" in (
-        normalized.root.blocking_gaps[0]
+    assert (
+        "target kind gap is incompatible with REJ-1"
+        in (normalized.root.blocking_gaps[0])
     )

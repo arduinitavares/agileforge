@@ -15,9 +15,9 @@ from utils.spec_schemas import (
     RequiredFieldParams,
 )
 
-SPEC_AUTHORITY_COMPILER_VERSION = "4.0.0"
+SPEC_AUTHORITY_COMPILER_VERSION = "4.0.1"
 SPEC_AUTHORITY_COMPILER_PROMPT_HASH = (
-    "f5d694254ad628f8e96597326513a0b3d69d8e091473a325f5a4ea8e2daf3c05"
+    "df71d1e115c33e2b1dc118f21160ed34da9764fb8545bdfcd09c15a3226380fb"
 )
 
 
@@ -33,9 +33,7 @@ def render_invariant_summary(invariant: Invariant) -> str:
         return f"FORBIDDEN_CAPABILITY:{value}"
     if invariant.type == InvariantType.REQUIRED_FIELD:
         value = (
-            parameters.field_name
-            if isinstance(parameters, RequiredFieldParams)
-            else ""
+            parameters.field_name if isinstance(parameters, RequiredFieldParams) else ""
         )
         return f"REQUIRED_FIELD:{value}"
     if invariant.type == InvariantType.MAX_VALUE:

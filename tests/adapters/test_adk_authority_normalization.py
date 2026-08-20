@@ -47,6 +47,7 @@ from utils.spec_schemas import (
     SpecAuthorityCompilationSuccess,
     SpecAuthorityCompilerEnvelope,
     SpecAuthorityCompilerInput,
+    SpecAuthorityCompilerOutput,
 )
 from workflow.clock import FixedClock
 from workflow.definitions.authority import authority_graph
@@ -115,6 +116,8 @@ def _authority_input() -> AuthorityInputV2:
         level="MUST",
         acceptance=(
             "Host normalization remains authoritative.",
+            "Authority output MUST include first_field.",
+            "Authority output MUST include second_field.",
             NON_FINITE_SOURCE,
         ),
     )
@@ -184,6 +187,95 @@ def _ambiguous_payload() -> dict[str, Any]:
         },
     ]
     return payload
+
+
+def _distinct_multi_invariant_payload(
+    *,
+    label: str = "distinct-references",
+) -> dict[str, Any]:
+    payload = _success_payload(label=label)
+    payload["gaps"] = []
+    payload["invariants"] = [
+        {
+            "id": "INV-0000000000000000",
+            "type": "REQUIRED_FIELD",
+            "source_item_id": SOURCE_ID,
+            "source_level": "MUST",
+            "parameters": {"field_name": "first_field"},
+        },
+        {
+            "id": "INV-0000000000000001",
+            "type": "REQUIRED_FIELD",
+            "source_item_id": SOURCE_ID,
+            "source_level": "MUST",
+            "parameters": {"field_name": "second_field"},
+        },
+    ]
+    payload["source_map"] = [
+        {
+            "invariant_id": "INV-0000000000000000",
+            "excerpt": "Authority output MUST include first_field.",
+            "location": SOURCE_ID,
+        },
+        {
+            "invariant_id": "INV-0000000000000001",
+            "excerpt": "Authority output MUST include second_field.",
+            "location": SOURCE_ID,
+        },
+    ]
+    payload.update(
+        {
+            "ir_schema_version": "provider.ir.v1",
+            "ir_provenance": "model_emitted",
+            "authority_mappings": [
+                {
+                    "candidate_id": "CAND-first-field",
+                    "authority_item_id": "INV-0000000000000000",
+                    "authority_target_kind": "invariant",
+                    "mapping_status": "covered",
+                    "mapping_rationale": "Maps the first field requirement.",
+                    "mapping_provenance": "model_quote",
+                },
+                {
+                    "candidate_id": "CAND-second-field",
+                    "authority_item_id": "INV-0000000000000001",
+                    "authority_target_kind": "invariant",
+                    "mapping_status": "covered",
+                    "mapping_rationale": "Maps the second field requirement.",
+                    "mapping_provenance": "model_quote",
+                },
+            ],
+        }
+    )
+    return payload
+
+
+def _assert_distinct_multi_invariant_lineage(
+    compiled: SpecAuthorityCompilationSuccess,
+) -> None:
+    invariant_ids_by_field = {
+        item.parameters.model_dump(mode="json")["field_name"]: item.id
+        for item in compiled.invariants
+    }
+    expected_invariant_count = 2
+    assert len(invariant_ids_by_field) == expected_invariant_count
+    assert "INV-0000000000000000" not in invariant_ids_by_field.values()
+    assert "INV-0000000000000001" not in invariant_ids_by_field.values()
+    assert {entry.excerpt: entry.invariant_id for entry in compiled.source_map} == {
+        "Authority output MUST include first_field.": invariant_ids_by_field[
+            "first_field"
+        ],
+        "Authority output MUST include second_field.": invariant_ids_by_field[
+            "second_field"
+        ],
+    }
+    assert {
+        mapping.candidate_id: mapping.authority_item_id
+        for mapping in compiled.authority_mappings
+    } == {
+        "CAND-first-field": invariant_ids_by_field["first_field"],
+        "CAND-second-field": invariant_ids_by_field["second_field"],
+    }
 
 
 def _typed_source_violation_payload() -> dict[str, Any]:
@@ -380,6 +472,26 @@ def test_authority_recipes_normalize_supported_compiler_output_shapes(
 
 
 @pytest.mark.parametrize("node_id", ["authority.compile", "authority.repair"])
+def test_authority_recipes_preserve_distinct_multi_invariant_references(
+    node_id: str,
+) -> None:
+    """Compile and repair rewrite only exact temporary provider identities."""
+    calls: list[str] = []
+
+    output = _run_recipe(
+        node_id,
+        response=json.dumps(_distinct_multi_invariant_payload()),
+        calls=calls,
+    )
+
+    compiled = SpecAuthorityCompilationSuccess.model_validate(
+        output.payload["compiled_authority"]
+    )
+    _assert_distinct_multi_invariant_lineage(compiled)
+    assert calls == [node_id.replace(".", "_")]
+
+
+@pytest.mark.parametrize("node_id", ["authority.compile", "authority.repair"])
 @pytest.mark.parametrize(
     ("response", "reason", "detail"),
     [
@@ -462,7 +574,11 @@ def _seed_compile_target(engine: Engine) -> tuple[int, int, str]:
                     "statement": SOURCE_STATEMENT,
                     "level": "MUST",
                     "verification": "integration-test",
-                    "acceptance": ["Host normalization remains authoritative."],
+                    "acceptance": [
+                        "Host normalization remains authoritative.",
+                        "Authority output MUST include first_field.",
+                        "Authority output MUST include second_field.",
+                    ],
                 }
             ],
             "relations": [],
@@ -662,8 +778,8 @@ def test_raw_json_compile_and_repair_persist_one_pending_authority_and_replay(
     runner, domain = _build_runner(
         engine,
         project_id=project_id,
-        compile_response=json.dumps(_success_payload(label="compile")),
-        repair_response=json.dumps(_success_payload(label="repair")),
+        compile_response=json.dumps(_distinct_multi_invariant_payload(label="compile")),
+        repair_response=json.dumps(_distinct_multi_invariant_payload(label="repair")),
         calls=calls,
     )
 
@@ -717,6 +833,13 @@ def test_raw_json_compile_and_repair_persist_one_pending_authority_and_replay(
         assert len(authorities) == EXPECTED_REPAIRED_AUTHORITY_COUNT
         assert len(decisions) == 1
         assert decisions[0].status == "rejected"
+        for authority in authorities:
+            assert authority.compiled_artifact_json is not None
+            compiled = SpecAuthorityCompilerOutput.model_validate_json(
+                authority.compiled_artifact_json
+            ).root
+            assert isinstance(compiled, SpecAuthorityCompilationSuccess)
+            _assert_distinct_multi_invariant_lineage(compiled)
         assert isinstance(review, AuthorityReviewSnapshot)
         assert review.pending_authority_id == authorities[-1].authority_id
 

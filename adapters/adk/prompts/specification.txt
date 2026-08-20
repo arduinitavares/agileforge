@@ -91,6 +91,13 @@ Return one success object:
       "source_item_id": "an exact eligible item ID",
       "source_level": "MUST" | "SHOULD" | "MAY" | "MUST_NOT",
       "parameters": {}
+    },
+    {
+      "id": "INV-0000000000000001",
+      "type": "FORBIDDEN_CAPABILITY" | "REQUIRED_FIELD" | "MAX_VALUE" | "RELATION_CONSTRAINT" | "USER_INTERACTION" | "STATE_TRANSITION" | "DATA_CONTRACT" | "ROUTE_CONTRACT" | "VISIBILITY_RULE",
+      "source_item_id": "another exact eligible item ID",
+      "source_level": "MUST" | "SHOULD" | "MAY" | "MUST_NOT",
+      "parameters": {}
     }
   ],
   "eligible_feature_rules": [],
@@ -102,9 +109,14 @@ Return one success object:
       "invariant_id": "INV-0000000000000000",
       "excerpt": "exact eligible semantic excerpt",
       "location": "the same eligible item ID"
+    },
+    {
+      "invariant_id": "INV-0000000000000001",
+      "excerpt": "another exact eligible semantic excerpt",
+      "location": "the same eligible item ID as the second invariant"
     }
   ],
-  "compiler_version": "4.0.0",
+  "compiler_version": "4.0.1",
   "prompt_hash": "0000000000000000000000000000000000000000000000000000000000000000"
 }
 
@@ -129,8 +141,11 @@ INVARIANT PARAMETERS:
 
 ID AND HASH RULES:
 - The host deterministically rewrites invariant IDs and prompt_hash.
-- Use a schema-valid placeholder when you cannot calculate either value.
-- Keep source_map entries aligned with their invariants.
+- Provider invariant IDs are temporary reference identities, not final host IDs.
+- Every semantically distinct invariant MUST use a distinct temporary ID.
+- Use a schema-valid temporary ID for every invariant; do not calculate final host IDs.
+- Never reuse a temporary ID when type, source_item_id, source_level, or parameters differ.
+- Every source_map.invariant_id and invariant-target authority_mappings.authority_item_id MUST use the exact temporary ID of the invariant it references.
 - Never put provenance fields inside invariant parameters.
 
 STRICTNESS:

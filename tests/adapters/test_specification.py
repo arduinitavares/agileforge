@@ -27,13 +27,16 @@ from services.contracts.specification import (
 )
 from utils.agileforge_spec_profile_v2 import SpecificationPayload
 from utils.spec_schemas import (
+    Invariant,
     InvariantType,
     RequiredFieldParams,
+    SourceMapEntry,
     SpecAuthorityCompilationFailure,
     SpecAuthorityCompilationSuccess,
     SpecAuthorityCompilerEnvelope,
     SpecAuthorityCompilerInput,
     SpecAuthorityCompilerOutput,
+    SpecAuthorityMapping,
 )
 
 _SOURCE_ID = "REQ.adapter.typed"
@@ -127,7 +130,7 @@ def _specification_with_non_normative_sentinel() -> SpecificationPayload:
 
 def test_prompt_and_service_contract_are_synchronized() -> None:
     """The adapter loads the exact host-hashed prompt and active version."""
-    assert SPEC_AUTHORITY_COMPILER_VERSION == "4.0.0"
+    assert SPEC_AUTHORITY_COMPILER_VERSION == "4.0.1"
     assert SPEC_AUTHORITY_COMPILER_PROMPT_HASH == CONTRACT_PROMPT_HASH
     assert compute_prompt_hash(SPEC_AUTHORITY_COMPILER_INSTRUCTIONS) == (
         CONTRACT_PROMPT_HASH
@@ -145,6 +148,36 @@ def test_prompt_documents_the_closed_typed_input_boundary() -> None:
     assert "No non-normative prose or non-normative item identity" in instructions
     assert "eligible_item_ids as exhaustive" in instructions
     assert "Every source_map.location MUST equal" in instructions
+
+
+def test_provider_contract_requires_distinct_temporary_invariant_references() -> None:
+    """Provider-visible contracts prevent ambiguous multi-invariant references."""
+    instructions = SPEC_AUTHORITY_COMPILER_INSTRUCTIONS
+    invariant_id = Invariant.model_json_schema()["properties"]["id"]["description"]
+    source_map_id = SourceMapEntry.model_json_schema()["properties"]["invariant_id"][
+        "description"
+    ]
+    mapping_id = SpecAuthorityMapping.model_json_schema()["properties"][
+        "authority_item_id"
+    ].get("description", "")
+
+    assert (
+        "Every semantically distinct invariant MUST use a distinct temporary ID."
+        in instructions
+    )
+    assert (
+        "Every source_map.invariant_id and invariant-target "
+        "authority_mappings.authority_item_id MUST use the exact temporary ID"
+        in instructions
+    )
+    assert instructions.count('"id": "INV-0000000000000001"') == 1
+    assert instructions.count('"invariant_id": "INV-0000000000000001"') == 1
+    assert "Provider output must use a distinct temporary identity" in invariant_id
+    assert "final deterministic identity" in invariant_id
+    assert "temporary provider identity before host normalization" in source_map_id
+    assert "final host identity afterward" in source_map_id
+    assert "temporary provider identity before host normalization" in mapping_id
+    assert "final host identity afterward" in mapping_id
 
 
 @pytest.mark.parametrize(
