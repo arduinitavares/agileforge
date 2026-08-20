@@ -129,6 +129,7 @@ class FakeLifecycle:
     authority_rejected: bool = False
     authority_feedback: str | None = None
     authority_generation: int = 0
+    authority_compile_failed: bool = False
     fail_next_authority_feedback: bool = False
     refresh_count: int = 0
     api_errors: list[str] = field(default_factory=list)
@@ -697,7 +698,15 @@ class FakeLifecycle:
             "child_graph_id": child,
             "request_kind": request_kind,
             "category": "available",
-            "reason_code": specification_reason or "INTERNAL_REASON_CODE",
+            "reason_code": (
+                specification_reason
+                or (
+                    "AUTHORITY_COMPILE_FAILED"
+                    if self.authority_compile_failed
+                    and request_kind == "compile_authority"
+                    else "INTERNAL_REASON_CODE"
+                )
+            ),
             "decision_fingerprint": self.specification_structure_decision_fingerprint,
             "fact_references": fact_references,
         }
@@ -712,10 +721,29 @@ class FakeLifecycle:
             ],
             "decision_fingerprint": "sha256:hidden-blocker",
         }
+        decisions: list[JsonValue] = [decision, blocker]
+        if self.authority_compile_failed and request_kind == "compile_authority":
+            decisions = [
+                {
+                    "node_id": "goal.fulfill",
+                    "child_graph_id": "product_goal",
+                    "request_kind": "fulfill_product_goal",
+                    "category": "available",
+                    "reason_code": "PRODUCT_GOAL_FULFILLED_AVAILABLE",
+                },
+                {
+                    "node_id": "goal.abandon",
+                    "child_graph_id": "product_goal",
+                    "request_kind": "abandon_product_goal",
+                    "category": "available",
+                    "reason_code": "PRODUCT_GOAL_ABANDONED_AVAILABLE",
+                },
+                *decisions,
+            ]
         return {
             "graph_version": "agileforge.workflow.hidden",
             "fact_fingerprint": "sha256:hidden-facts",
-            "decisions": [decision, blocker],
+            "decisions": decisions,
             "terminal": False,
             "actions": [],
         } | {
@@ -1243,6 +1271,77 @@ def test_issue_204_structuring_reports_local_state_and_reloads_successor(
             name="Retry structuring from unchanged source",
         )
     ).not_to_be_visible()
+    assert fake.api_errors == []
+    context.close()
+
+
+def test_issue_206_cards_match_accepted_definition_and_failed_authority_retry(
+    dashboard_harness: DashboardHarness,
+) -> None:
+    """Keep lifecycle cards aligned with durable panels after compile failure."""
+    fake = FakeLifecycle(
+        repositories={},
+        project={
+            "project_id": _PROJECT_ID,
+            "name": "Issue 206 lifecycle",
+            "description": "Provider-free lifecycle-card contradiction coverage.",
+        },
+        vision_candidate={"statement": "Accepted Vision"},
+        vision_accepted=True,
+        goal_candidate={"statement": "Accepted Product Goal"},
+        goal_accepted=True,
+        specification_source={
+            "specification_source_id": 31,
+            "source_fingerprint": "sha256:issue-206-source",
+        },
+        specification={"rendered_markdown": "# Accepted Specification"},
+        specification_accepted=True,
+        authority_compile_failed=True,
+    )
+    context = dashboard_harness.browser.new_context(viewport=_DESKTOP_VIEWPORT)
+    context.route("**/api/**", fake.handle)
+    page = context.new_page()
+    page.goto(
+        f"{dashboard_harness.url}/project.html?id={_PROJECT_ID}",
+        wait_until="networkidle",
+    )
+
+    cards = page.locator("#lifecycle-stage-strip li")
+
+    def card_lines(stage: str) -> list[str]:
+        return [
+            line.strip()
+            for line in cards.filter(has_text=stage).inner_text().splitlines()
+            if line.strip()
+        ]
+
+    assert card_lines("Vision") == [
+        "Vision",
+        "Complete",
+    ]
+    assert card_lines("Product Goal") == [
+        "Product Goal",
+        "Active",
+    ]
+    assert card_lines("Specification") == [
+        "Specification",
+        "Complete",
+    ]
+    assert card_lines("Authority") == [
+        "Authority",
+        "Failed",
+        "Retry available.",
+    ]
+    assert card_lines("Backlog") == [
+        "Backlog",
+        "Waiting",
+        "Finish the current human review before continuing.",
+    ]
+    expect(page.locator("#goal-panel")).to_contain_text("Active Product Goal")
+    expect(page.locator("#specification-panel")).to_contain_text("Review: Accepted")
+    expect(
+        page.locator("#authority-panel").get_by_role("button", name="Compile")
+    ).to_be_visible()
     assert fake.api_errors == []
     context.close()
 

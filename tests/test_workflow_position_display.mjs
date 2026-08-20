@@ -52,6 +52,14 @@ function action(requestKind, endpoint) {
     };
 }
 
+function stageCard(markup, stage) {
+    const card = markup
+        .split('</li>')
+        .find((item) => item.includes(`>${stage}</p>`));
+    assert.ok(card, `Missing ${stage} lifecycle card.`);
+    return `${card}</li>`;
+}
+
 test('human lifecycle labels cover every operator stage', () => {
     const context = loadFrontend();
     assert.equal(typeof context.lifecycleStageLabels, 'function');
@@ -145,6 +153,205 @@ test('workflow position distinguishes prerequisite waiting from human review', (
     assert.doesNotMatch(prerequisiteMarkup, /In progress|A human decision is pending/);
     assert.match(reviewMarkup, /In progress/);
     assert.match(reviewMarkup, /A human decision is pending\./);
+});
+
+test('accepted definition and failed Authority retry override graph-only cards', () => {
+    const context = loadFrontend();
+    const position = {
+        decisions: [
+            {
+                node_id: 'goal.fulfill',
+                child_graph_id: 'product_goal',
+                request_kind: 'fulfill_product_goal',
+                category: 'available',
+                reason_code: 'PRODUCT_GOAL_FULFILLED_AVAILABLE',
+            },
+            {
+                node_id: 'goal.abandon',
+                child_graph_id: 'product_goal',
+                request_kind: 'abandon_product_goal',
+                category: 'available',
+                reason_code: 'PRODUCT_GOAL_ABANDONED_AVAILABLE',
+            },
+            {
+                node_id: 'authority.compile',
+                child_graph_id: 'authority',
+                request_kind: 'compile_authority',
+                category: 'available',
+                reason_code: 'AUTHORITY_COMPILE_FAILED',
+            },
+            {
+                node_id: 'backlog.generate',
+                child_graph_id: 'backlog',
+                request_kind: 'record_backlog_draft',
+                category: 'blocked',
+                reason_code: 'ACCEPTED_AUTHORITY_REQUIRED',
+                blockers: [{
+                    message: 'Backlog generation requires accepted current authority.',
+                }],
+            },
+        ],
+    };
+    const actions = [action('compile_authority', 'authority/compile')];
+    const projections = {
+        vision: { current: { statement: 'Accepted Vision' } },
+        goal: {
+            accepted_vision: { statement: 'Accepted Vision' },
+            active: { statement: 'Accepted Product Goal' },
+        },
+        specification: {
+            candidate: { rendered_markdown: '# Accepted Specification' },
+            review: { state: 'accepted' },
+        },
+        authority: {
+            pending_authority: null,
+            accepted_authority: null,
+        },
+    };
+
+    const markup = context.workflowPositionMarkup(position, actions, projections);
+
+    assert.match(stageCard(markup, 'Vision'), />Complete</);
+    assert.match(stageCard(markup, 'Product Goal'), />Active</);
+    assert.doesNotMatch(stageCard(markup, 'Product Goal'), /Ready/);
+    assert.match(stageCard(markup, 'Specification'), />Complete</);
+    assert.match(stageCard(markup, 'Authority'), />Failed</);
+    assert.match(stageCard(markup, 'Authority'), /Retry available\./);
+    assert.doesNotMatch(stageCard(markup, 'Authority'), /Ready for your input/);
+    assert.match(
+        stageCard(markup, 'Backlog'),
+        /Backlog generation requires accepted current authority\./,
+    );
+
+    assert.match(
+        context.productGoalPanelMarkup(projections.goal, actions),
+        /Active Product Goal/,
+    );
+    assert.match(
+        context.specificationPanelMarkup(projections.specification, actions, position),
+        /Review: Accepted/,
+    );
+    assert.match(context.authorityPanelMarkup(projections.authority, actions), />Compile</);
+});
+
+test('Ready for your input requires a control rendered by this dashboard', () => {
+    const context = loadFrontend();
+    const compilePosition = {
+        decisions: [{
+            child_graph_id: 'authority',
+            request_kind: 'compile_authority',
+            category: 'available',
+            reason_code: 'AUTHORITY_COMPILE_REQUIRED',
+        }],
+    };
+    const deliveryPosition = {
+        decisions: [{
+            child_graph_id: 'backlog',
+            request_kind: 'record_backlog_draft',
+            category: 'available',
+            reason_code: 'BACKLOG_GENERATION_AVAILABLE',
+        }],
+    };
+
+    const ready = context.workflowPositionMarkup(
+        compilePosition,
+        [action('compile_authority', 'authority/compile')],
+        {},
+    );
+    const noControl = context.workflowPositionMarkup(
+        deliveryPosition,
+        [action('record_backlog_draft', 'backlog/generate')],
+        {},
+    );
+
+    assert.match(stageCard(ready, 'Authority'), />Ready</);
+    assert.match(stageCard(ready, 'Authority'), /Ready for your input\./);
+    assert.match(stageCard(noControl, 'Backlog'), />Waiting</);
+    assert.doesNotMatch(stageCard(noControl, 'Backlog'), /Ready for your input/);
+});
+
+test('Specification card waits when lineage guards suppress structuring control', () => {
+    const context = loadFrontend();
+    const position = {
+        decisions: [{
+            node_id: 'specification.structure',
+            child_graph_id: 'specification',
+            request_kind: 'structure_specification',
+            category: 'available',
+            reason_code: 'SPECIFICATION_FEEDBACK_RETRY_AVAILABLE',
+            decision_fingerprint: 'sha256:structure-position',
+            fact_references: [
+                {
+                    fact_type: 'specification_source',
+                    fact_id: '5',
+                    fingerprint: 'sha256:source-a',
+                },
+                {
+                    fact_type: 'specification_candidate',
+                    fact_id: '9',
+                    fingerprint: 'sha256:stale-candidate',
+                },
+            ],
+        }],
+    };
+    const actions = [action('structure_specification', 'specifications/structure')];
+    const projections = {
+        specification: {
+            source: {
+                specification_source_id: 5,
+                source_fingerprint: 'sha256:source-a',
+            },
+            candidate: null,
+            review: null,
+        },
+    };
+
+    const markup = context.workflowPositionMarkup(position, actions, projections);
+    const panel = context.specificationPanelMarkup(
+        projections.specification,
+        actions,
+        position,
+    );
+
+    assert.doesNotMatch(panel, /data-direct-action="structure_specification"/);
+    assert.match(stageCard(markup, 'Specification'), />Waiting</);
+    assert.doesNotMatch(
+        stageCard(markup, 'Specification'),
+        /Ready for your input/,
+    );
+});
+
+test('pending and accepted Authority artifacts remain distinct lifecycle states', () => {
+    const context = loadFrontend();
+    const pending = context.workflowPositionMarkup(
+        {
+            decisions: [{
+                child_graph_id: 'authority',
+                request_kind: 'decide_authority',
+                category: 'waiting',
+                reason_code: 'AUTHORITY_REVIEW_REQUIRED',
+            }],
+        },
+        [action('decide_authority', 'authority/decision')],
+        { authority: { pending_authority: { authority_id: 17 } } },
+    );
+    const accepted = context.workflowPositionMarkup(
+        {
+            decisions: [{
+                child_graph_id: 'product_goal',
+                request_kind: 'fulfill_product_goal',
+                category: 'available',
+                reason_code: 'PRODUCT_GOAL_FULFILLED_AVAILABLE',
+            }],
+        },
+        [],
+        { authority: { accepted_authority: { authority_id: 17 } } },
+    );
+
+    assert.match(stageCard(pending, 'Authority'), />In progress</);
+    assert.match(stageCard(pending, 'Authority'), /A human decision is pending\./);
+    assert.match(stageCard(accepted, 'Authority'), />Complete</);
+    assert.doesNotMatch(stageCard(accepted, 'Authority'), /Failed|Retry available/);
 });
 
 test('semantic mutations contain transport metadata and human input only', () => {

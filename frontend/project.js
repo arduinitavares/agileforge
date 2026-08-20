@@ -52,6 +52,47 @@ const CHILD_STAGE = {
     vision: 'Vision',
 };
 
+const DASHBOARD_CONTROL_REQUEST_KINDS = new Set([
+    'abandon_product_goal',
+    'begin_vision_revision',
+    'compile_authority',
+    'decide_authority',
+    'decide_product_goal_review',
+    'decide_specification',
+    'decide_vision_review',
+    'fulfill_product_goal',
+    'generate_vision_bootstrap',
+    'record_authority_feedback',
+    'record_product_goal_interview_turn',
+    'record_vision_interview_turn',
+    'register_specification_source',
+    'repair_authority',
+    'structure_specification',
+]);
+
+const LIFECYCLE_CARD_STATES = {
+    active: {
+        status: 'Active',
+        reason: null,
+        tone: 'border-sky-300 bg-sky-50 text-sky-900',
+    },
+    complete: {
+        status: 'Complete',
+        reason: null,
+        tone: 'border-emerald-200 bg-white text-slate-700',
+    },
+    failed_retry: {
+        status: 'Failed',
+        reason: 'Retry available.',
+        tone: 'border-red-300 bg-red-50 text-red-800',
+    },
+    pending_human: {
+        status: 'In progress',
+        reason: 'A human decision is pending.',
+        tone: 'border-sky-300 bg-sky-50 text-sky-900',
+    },
+};
+
 const BUTTON_PRIMARY = 'inline-flex min-h-10 items-center justify-center gap-2 rounded-lg bg-accent px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-800 disabled:cursor-wait disabled:opacity-60';
 const BUTTON_SECONDARY = 'inline-flex min-h-10 items-center justify-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-800 hover:bg-slate-100 disabled:cursor-wait disabled:opacity-60';
 const BUTTON_DANGER = 'inline-flex min-h-10 items-center justify-center gap-2 rounded-lg border border-red-300 bg-white px-4 py-2 text-sm font-semibold text-red-700 hover:bg-red-50 disabled:cursor-wait disabled:opacity-60';
@@ -150,16 +191,30 @@ function decisionRank(category) {
 }
 
 function isActionableDecision(decision, actions) {
-    return findAction(actions, decision?.request_kind) !== null;
+    return DASHBOARD_CONTROL_REQUEST_KINDS.has(decision?.request_kind)
+        && findAction(actions, decision?.request_kind) !== null;
+}
+
+function lifecycleCardActions(position, actions, projections) {
+    return (Array.isArray(actions) ? actions : []).filter((action) => {
+        if (action?.request_kind !== 'structure_specification') return true;
+        return captureSpecificationStructuringBinding({
+            actions,
+            position,
+            specification: projections?.specification,
+        }) !== null;
+    });
 }
 
 function stageStatus(decision, actions) {
     const category = decision?.category;
+    if (category === 'available') {
+        return isActionableDecision(decision, actions) ? 'Ready' : 'Waiting';
+    }
     if (category === 'waiting') {
         return isActionableDecision(decision, actions) ? 'In progress' : 'Waiting';
     }
     return {
-        available: 'Ready',
         blocked: 'Waiting',
         invalid: 'Needs attention',
     }[category] ?? 'Upcoming';
@@ -167,7 +222,10 @@ function stageStatus(decision, actions) {
 
 function stageTone(decision, actions) {
     const category = decision?.category;
-    if (category === 'waiting' && !isActionableDecision(decision, actions)) {
+    if (
+        ['available', 'waiting'].includes(category)
+        && !isActionableDecision(decision, actions)
+    ) {
         return 'border-slate-300 bg-white text-slate-700';
     }
     return {
@@ -198,14 +256,19 @@ function stageReason(decision, actions) {
             ? 'A human decision is pending.'
             : waitingReason(decision);
     }
+    if (decision?.category === 'available') {
+        return isActionableDecision(decision, actions)
+            ? 'Ready for your input.'
+            : waitingReason(decision);
+    }
     return {
-        available: 'Ready for your input.',
         blocked: 'Finish the previous stage first.',
         invalid: 'Resolve the current lifecycle conflict.',
     }[decision?.category] ?? 'This stage follows the current work.';
 }
 
-function workflowPositionMarkup(position, actions = []) {
+function lifecycleCardProjection(position, actions = [], projections = {}) {
+    const cardActions = lifecycleCardActions(position, actions, projections);
     const decisions = Array.isArray(position?.decisions) ? position.decisions : [];
     const byStage = new Map();
     decisions.forEach((decision) => {
@@ -216,7 +279,7 @@ function workflowPositionMarkup(position, actions = []) {
             byStage.set(stage, decision);
         }
     });
-    (Array.isArray(actions) ? actions : []).forEach((action) => {
+    cardActions.forEach((action) => {
         const stage = REQUEST_STAGE[action.request_kind];
         if (stage && !byStage.has(stage)) {
             byStage.set(stage, { category: 'available', request_kind: action.request_kind });
@@ -228,18 +291,72 @@ function workflowPositionMarkup(position, actions = []) {
         .filter((index) => index !== null);
     const firstActive = activeIndexes.length > 0 ? Math.min(...activeIndexes) : -1;
 
-    return `<ol class="grid min-w-0 grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-6">${STAGES.map((stage, index) => {
+    const cards = STAGES.map((stage, index) => {
         const decision = byStage.get(stage);
         if (!decision && firstActive >= 0 && index < firstActive) {
-            return `<li class="min-w-0 rounded-lg border border-emerald-200 bg-white px-3 py-2">
-                <p class="break-words text-xs font-semibold">${escapeWorkflowText(stage)}</p>
-                <p class="mt-1 text-xs text-emerald-700">Complete</p>
-            </li>`;
+            return {
+                stage,
+                ...LIFECYCLE_CARD_STATES.complete,
+            };
         }
-        return `<li class="min-w-0 rounded-lg border px-3 py-2 ${stageTone(decision, actions)}">
-            <p class="break-words text-xs font-semibold">${escapeWorkflowText(stage)}</p>
-            <p class="mt-1 text-xs font-medium">${stageStatus(decision, actions)}</p>
-            ${decision ? `<p class="mt-1 break-words text-xs leading-4 opacity-80">${escapeWorkflowText(stageReason(decision, actions))}</p>` : ''}
+        return {
+            stage,
+            status: stageStatus(decision, cardActions),
+            reason: decision ? stageReason(decision, cardActions) : null,
+            tone: stageTone(decision, cardActions),
+        };
+    });
+    const cardByStage = new Map(cards.map((card) => [card.stage, card]));
+    const setCard = (stage, state) => {
+        Object.assign(cardByStage.get(stage), LIFECYCLE_CARD_STATES[state]);
+    };
+
+    const vision = projections?.vision ?? {};
+    if (vision?.candidate && vision?.review?.state === 'pending') {
+        setCard('Vision', 'pending_human');
+    } else if (vision?.current) {
+        setCard('Vision', 'complete');
+    }
+
+    const goal = projections?.goal ?? {};
+    if (goal?.candidate && goal?.review?.state === 'pending') {
+        setCard('Product Goal', 'pending_human');
+    } else if (goal?.active) {
+        setCard('Product Goal', 'active');
+    }
+
+    const specification = projections?.specification ?? {};
+    if (specification?.candidate && specification?.review?.state === 'pending') {
+        setCard('Specification', 'pending_human');
+    } else if (specification?.current || specification?.review?.state === 'accepted') {
+        setCard('Specification', 'complete');
+    }
+
+    const authority = projections?.authority ?? {};
+    const authorityDecision = byStage.get('Authority');
+    if (authority?.pending_authority) {
+        setCard('Authority', 'pending_human');
+    } else if (authority?.accepted_authority) {
+        setCard('Authority', 'complete');
+    } else if (
+        authorityDecision?.request_kind === 'compile_authority'
+        && authorityDecision?.reason_code === 'AUTHORITY_COMPILE_FAILED'
+        && isActionableDecision(authorityDecision, cardActions)
+    ) {
+        setCard('Authority', 'failed_retry');
+    }
+
+    return cards;
+}
+
+function workflowPositionMarkup(position, actions = [], projections = {}) {
+    const cards = lifecycleCardProjection(position, actions, projections);
+
+    return `<ol class="grid min-w-0 grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-6">${cards.map((card) => {
+        return `<li class="min-w-0 rounded-lg border px-3 py-2 ${card.tone}">
+            <p class="break-words text-xs font-semibold">${escapeWorkflowText(card.stage)}</p>
+            <p class="mt-1 text-xs font-medium">${escapeWorkflowText(card.status)}</p>
+            ${card.reason ? `<p class="mt-1 break-words text-xs leading-4 opacity-80">${escapeWorkflowText(card.reason)}</p>` : ''}
         </li>`;
     }).join('')}</ol>`;
 }
@@ -1029,7 +1146,11 @@ function renderDashboard() {
     );
     setMarkup(
         'lifecycle-stage-strip',
-        workflowPositionMarkup(lifecycleState.position, lifecycleState.actions),
+        workflowPositionMarkup(
+            lifecycleState.position,
+            lifecycleState.actions,
+            lifecycleState,
+        ),
     );
     setMarkup(
         'vision-panel',
