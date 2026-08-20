@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -75,6 +76,12 @@ EXPECTED_REPAIRED_AUTHORITY_COUNT = 2
 SOURCE_ID = "REQ.issue-205.authority-boundary"
 SOURCE_STATEMENT = "Authority output MUST preserve typed requirements."
 NON_FINITE_SOURCE = "The score MUST be at most NaN."
+ISSUE_208_FIXTURE_ROOT = (
+    Path(__file__).resolve().parents[2]
+    / "benchmarks"
+    / "authority-quality"
+    / "string-calculator-tooling-constraint"
+)
 
 
 class CountingAuthorityLeaf(BaseAgent):
@@ -137,6 +144,37 @@ def _compiler_input() -> SpecAuthorityCompilerInput:
         spec_version_id=2,
         specification_fingerprint="sha256:" + ("b" * 64),
     )
+
+
+def _issue_208_authority_input() -> AuthorityInputV2:
+    return AuthorityInputV2.model_validate_json(
+        (ISSUE_208_FIXTURE_ROOT / "source/authority-input.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+
+def _issue_208_compiler_input() -> SpecAuthorityCompilerInput:
+    return SpecAuthorityCompilerInput(
+        authority_input=_issue_208_authority_input(),
+        project_id=1,
+        spec_version_id=2,
+        specification_fingerprint="sha256:" + ("2" * 64),
+    )
+
+
+def _issue_208_response(*, gold: bool) -> str:
+    candidate_dir = "gold-authority" if gold else "generated-authority"
+    return (
+        ISSUE_208_FIXTURE_ROOT
+        / f"agileforge/{candidate_dir}/compiled-authority.json"
+    ).read_text(encoding="utf-8")
+
+
+def _issue_208_response_with_field_name(field_name: str) -> str:
+    payload = json.loads(_issue_208_response(gold=True))
+    payload["invariants"][0]["parameters"]["field_name"] = field_name
+    return json.dumps(payload)
 
 
 def _success_payload(*, label: str = "compile") -> dict[str, Any]:
@@ -328,20 +366,26 @@ def _non_finite_payload() -> dict[str, Any]:
     return payload
 
 
-def _recipe_payload(node_id: str) -> JsonObject:
-    compiler_input = _compiler_input().model_dump(mode="json")
+def _recipe_payload(
+    node_id: str,
+    *,
+    compiler_input: SpecAuthorityCompilerInput | None = None,
+) -> JsonObject:
+    serialized_compiler_input = (compiler_input or _compiler_input()).model_dump(
+        mode="json"
+    )
     if node_id == "authority.compile":
         return {
             "project_id": 1,
             "spec_version_id": 2,
             "expected_spec_hash": "sha256:" + ("b" * 64),
             "compiler_model": "fake/compiler",
-            "compiler_input": compiler_input,
+            "compiler_input": serialized_compiler_input,
         }
     return {
         "source_authority_id": 7,
         "source_authority_fingerprint": "sha256:" + ("c" * 64),
-        "compiler_input": compiler_input,
+        "compiler_input": serialized_compiler_input,
     }
 
 
@@ -372,6 +416,7 @@ async def _run_recipe_async(
     *,
     response: object,
     calls: list[str],
+    compiler_input: SpecAuthorityCompilerInput | None = None,
 ) -> RecipeOutput:
     target_leaf = _counting_leaf(
         name=node_id.replace(".", "_"),
@@ -404,7 +449,12 @@ async def _run_recipe_async(
         role="user",
         parts=[
             types.Part(
-                text=RecipeInput(payload=_recipe_payload(node_id)).model_dump_json()
+                text=RecipeInput(
+                    payload=_recipe_payload(
+                        node_id,
+                        compiler_input=compiler_input,
+                    )
+                ).model_dump_json()
             )
         ],
     )
@@ -427,8 +477,16 @@ def _run_recipe(
     *,
     response: object,
     calls: list[str],
+    compiler_input: SpecAuthorityCompilerInput | None = None,
 ) -> RecipeOutput:
-    return asyncio.run(_run_recipe_async(node_id, response=response, calls=calls))
+    return asyncio.run(
+        _run_recipe_async(
+            node_id,
+            response=response,
+            calls=calls,
+            compiler_input=compiler_input,
+        )
+    )
 
 
 def _success_response(kind: str) -> object:
@@ -488,6 +546,111 @@ def test_authority_recipes_preserve_distinct_multi_invariant_references(
         output.payload["compiled_authority"]
     )
     _assert_distinct_multi_invariant_lineage(compiled)
+    assert calls == [node_id.replace(".", "_")]
+
+
+@pytest.mark.parametrize("node_id", ["authority.compile", "authority.repair"])
+def test_attempt_28_tooling_constraint_fails_closed_in_compile_and_repair(
+    node_id: str,
+) -> None:
+    """The captured paraphrase/misclassification never crosses the host boundary."""
+    calls: list[str] = []
+
+    with pytest.raises(RuntimeError) as captured:
+        _run_recipe(
+            node_id,
+            response=_issue_208_response(gold=False),
+            calls=calls,
+            compiler_input=_issue_208_compiler_input(),
+        )
+
+    error = captured.value
+    code = getattr(error, "code", None)
+    code_value = getattr(code, "value", code)
+    assert type(error).__name__ == "AuthorityAgenticExecutionError"
+    assert code_value == "AUTHORITY_COMPILATION_FAILED"
+    assert "INELIGIBLE_INVARIANT_SOURCE" in str(error)
+    assert "CONSTRAINT.001 semantics" in str(error)
+    assert calls == [node_id.replace(".", "_")]
+
+
+@pytest.mark.parametrize("node_id", ["authority.compile", "authority.repair"])
+@pytest.mark.parametrize("field_name", ["request-limit", "request_lim"])
+def test_paraphrased_parameter_fails_closed_in_compile_and_repair(
+    node_id: str,
+    field_name: str,
+) -> None:
+    """Supported invariant parameters still must be copied verbatim."""
+    calls: list[str] = []
+
+    with pytest.raises(RuntimeError) as captured:
+        _run_recipe(
+            node_id,
+            response=_issue_208_response_with_field_name(field_name),
+            calls=calls,
+            compiler_input=_issue_208_compiler_input(),
+        )
+
+    error = captured.value
+    code = getattr(error, "code", None)
+    code_value = getattr(code, "value", code)
+    assert type(error).__name__ == "AuthorityAgenticExecutionError"
+    assert code_value == "AUTHORITY_COMPILATION_FAILED"
+    assert "INELIGIBLE_INVARIANT_SOURCE" in str(error)
+    assert "CONSTRAINT.002 semantics" in str(error)
+    assert calls == [node_id.replace(".", "_")]
+
+
+@pytest.mark.parametrize("node_id", ["authority.compile", "authority.repair"])
+def test_identifier_normalization_remains_supported_in_compile_and_repair(
+    node_id: str,
+) -> None:
+    """The sole documented snake_case normalization remains valid."""
+    calls: list[str] = []
+
+    output = _run_recipe(
+        node_id,
+        response=_issue_208_response_with_field_name("request_limit"),
+        calls=calls,
+        compiler_input=_issue_208_compiler_input(),
+    )
+
+    compiled = SpecAuthorityCompilationSuccess.model_validate(
+        output.payload["compiled_authority"]
+    )
+    assert compiled.invariants[0].parameters.model_dump(mode="json")[
+        "field_name"
+    ] == "request_limit"
+    assert calls == [node_id.replace(".", "_")]
+
+
+@pytest.mark.parametrize("node_id", ["authority.compile", "authority.repair"])
+def test_tooling_gap_and_measurable_constraint_normalize_in_compile_and_repair(
+    node_id: str,
+) -> None:
+    """Both compiler paths accept the exact gap and supported MAX_VALUE mapping."""
+    calls: list[str] = []
+
+    output = _run_recipe(
+        node_id,
+        response=_issue_208_response(gold=True),
+        calls=calls,
+        compiler_input=_issue_208_compiler_input(),
+    )
+
+    compiled = SpecAuthorityCompilationSuccess.model_validate(
+        output.payload["compiled_authority"]
+    )
+    assert compiled.gaps == [
+        "CONSTRAINT.001: unsupported tooling requirement; enforce outside "
+        "compiled Authority."
+    ]
+    assert len(compiled.invariants) == 1
+    assert compiled.invariants[0].source_item_id == "CONSTRAINT.002"
+    assert compiled.invariants[0].parameters.model_dump(mode="json") == {
+        "field_name": "request limit",
+        "max_value": 100,
+    }
     assert calls == [node_id.replace(".", "_")]
 
 
@@ -588,6 +751,49 @@ def _seed_compile_target(engine: Engine) -> tuple[int, int, str]:
     )
     with Session(engine) as session:
         project = Project(name="Issue 205 Authority boundary")
+        session.add(project)
+        session.flush()
+        assert project.project_id is not None
+        lineage = seed_accepted_specification(
+            session,
+            project_id=project.project_id,
+            content=content,
+            recorded_at=EVALUATED_AT - timedelta(minutes=1),
+        )
+        assert lineage.spec.spec_version_id is not None
+        return (
+            project.project_id,
+            lineage.spec.spec_version_id,
+            lineage.spec.spec_hash,
+        )
+
+
+def _seed_issue_208_compile_target(engine: Engine) -> tuple[int, int, str]:
+    authority_input = _issue_208_authority_input()
+    content = json.dumps(
+        {
+            "schema_version": "agileforge.spec.v2",
+            "artifact_id": authority_input.artifact_id,
+            "title": "Issue 208 tooling constraint classification",
+            "summary": "Classify only faithfully representable Authority invariants.",
+            "problem_statement": (
+                "Tooling requirements must remain outside unsupported invariants."
+            ),
+            "items": [
+                {
+                    **item.model_dump(mode="json"),
+                    "title": f"Authority source {item.id}",
+                    "verification": "manual-review",
+                }
+                for item in authority_input.normative_items
+            ],
+            "relations": [],
+            "controlled_terms": [],
+            "external_references": [],
+        }
+    )
+    with Session(engine) as session:
+        project = Project(name="Issue 208 Authority classification")
         session.add(project)
         session.flush()
         assert project.project_id is not None
@@ -840,6 +1046,136 @@ def test_raw_json_compile_and_repair_persist_one_pending_authority_and_replay(
             ).root
             assert isinstance(compiled, SpecAuthorityCompilationSuccess)
             _assert_distinct_multi_invariant_lineage(compiled)
+        assert isinstance(review, AuthorityReviewSnapshot)
+        assert review.pending_authority_id == authorities[-1].authority_id
+
+
+def test_attempt_28_failure_persists_no_partial_authority_and_replays(
+    engine: Engine,
+) -> None:
+    """Captured tooling misclassification records one durable closed failure."""
+    project_id, _spec_version_id, _spec_hash = _seed_issue_208_compile_target(engine)
+    calls: list[str] = []
+    runner, domain = _build_runner(
+        engine,
+        project_id=project_id,
+        compile_response=_issue_208_response(gold=False),
+        repair_response=_issue_208_response(gold=True),
+        calls=calls,
+    )
+
+    result, decision, compiler_input, guards = _run_compile(
+        engine,
+        runner=runner,
+        domain=domain,
+        project_id=project_id,
+        idempotency_key="issue-208-invalid-compile",
+    )
+    replay = runner.run(decision, compiler_input, guards=guards)
+
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.code.value == "AUTHORITY_COMPILATION_FAILED"
+    assert "INELIGIBLE_INVARIANT_SOURCE" in result.error.message
+    assert "CONSTRAINT.001 semantics" in result.error.message
+    assert replay == result.model_copy(update={"replayed": True})
+    assert calls == ["compile_provider"]
+    with Session(engine) as session:
+        assert session.exec(select(CompiledSpecAuthority)).all() == []
+        assert session.exec(select(SpecAuthorityAcceptance)).all() == []
+        attempts = session.exec(
+            select(WorkflowNodeAttempt).where(
+                WorkflowNodeAttempt.node_id == "authority.compile"
+            )
+        ).all()
+        attempt_ids = {
+            attempt.workflow_node_attempt_id
+            for attempt in attempts
+            if attempt.workflow_node_attempt_id is not None
+        }
+        outcomes = [
+            outcome
+            for outcome in session.exec(select(WorkflowNodeAttemptOutcome)).all()
+            if outcome.workflow_node_attempt_id in attempt_ids
+        ]
+        assert len(attempts) == 1
+        assert len(outcomes) == 1
+        assert outcomes[0].failure_code == "AUTHORITY_COMPILATION_FAILED"
+        assert "CONSTRAINT.001 semantics" in (outcomes[0].failure_message or "")
+
+
+def test_tooling_gap_compile_and_repair_persist_once_and_replay(
+    engine: Engine,
+) -> None:
+    """Gold classification yields one pending Authority per lifecycle step."""
+    project_id, _spec_version_id, _spec_hash = _seed_issue_208_compile_target(engine)
+    calls: list[str] = []
+    runner, domain = _build_runner(
+        engine,
+        project_id=project_id,
+        compile_response=_issue_208_response(gold=True),
+        repair_response=_issue_208_response(gold=True),
+        calls=calls,
+    )
+
+    compile_result, compile_decision, compile_input, compile_guards = _run_compile(
+        engine,
+        runner=runner,
+        domain=domain,
+        project_id=project_id,
+        idempotency_key="issue-208-valid-compile",
+    )
+    compile_replay = runner.run(
+        compile_decision,
+        compile_input,
+        guards=compile_guards,
+    )
+    assert compile_result.ok is True
+    assert compile_replay == compile_result.model_copy(update={"replayed": True})
+
+    repair_decision = _reject_and_record_feedback(
+        engine,
+        domain=domain,
+        project_id=project_id,
+    )
+    repair_result, repair_input, repair_guards = _run_repair(
+        engine,
+        runner=runner,
+        domain=domain,
+        project_id=project_id,
+        decision=repair_decision,
+    )
+    repair_replay = runner.run(
+        repair_decision,
+        repair_input,
+        guards=repair_guards,
+    )
+
+    assert repair_result.ok is True
+    assert repair_replay == repair_result.model_copy(update={"replayed": True})
+    assert calls == ["compile_provider", "repair_provider"]
+    with Session(engine) as session:
+        authorities = session.exec(select(CompiledSpecAuthority)).all()
+        decisions = session.exec(select(SpecAuthorityAcceptance)).all()
+        review = build_authority_review_snapshot_in_session(
+            session,
+            project_id=project_id,
+        )
+        assert len(authorities) == EXPECTED_REPAIRED_AUTHORITY_COUNT
+        assert len(decisions) == 1
+        assert decisions[0].status == "rejected"
+        for authority in authorities:
+            assert authority.compiled_artifact_json is not None
+            compiled = SpecAuthorityCompilerOutput.model_validate_json(
+                authority.compiled_artifact_json
+            ).root
+            assert isinstance(compiled, SpecAuthorityCompilationSuccess)
+            assert compiled.gaps == [
+                "CONSTRAINT.001: unsupported tooling requirement; enforce outside "
+                "compiled Authority."
+            ]
+            assert len(compiled.invariants) == 1
+            assert compiled.invariants[0].source_item_id == "CONSTRAINT.002"
         assert isinstance(review, AuthorityReviewSnapshot)
         assert review.pending_authority_id == authorities[-1].authority_id
 

@@ -30,11 +30,40 @@ class _FrozenClosedModel(BaseModel):
 class AuthorityItemV2(_FrozenClosedModel):
     """One eligible item containing only invariant-source semantics."""
 
-    id: Annotated[str, Field(min_length=1)]
-    type: Annotated[str, Field(min_length=1)]
-    statement: Annotated[str, Field(min_length=1)]
-    level: str | None = None
-    acceptance: tuple[Annotated[str, Field(min_length=1)], ...] = ()
+    id: Annotated[
+        str,
+        Field(min_length=1, description="Exact eligible source item identity."),
+    ]
+    type: Annotated[
+        str,
+        Field(
+            min_length=1,
+            description=(
+                "Source item category; it does not itself authorize an invariant "
+                "type. Use only a faithfully matching supported invariant shape."
+            ),
+        ),
+    ]
+    statement: Annotated[
+        str,
+        Field(
+            min_length=1,
+            description="Exact normative statement available for copied parameters.",
+        ),
+    ]
+    level: Annotated[
+        str | None,
+        Field(description="Exact normative level that invariants must preserve."),
+    ] = None
+    acceptance: Annotated[
+        tuple[Annotated[str, Field(min_length=1)], ...],
+        Field(
+            description=(
+                "Exact acceptance criteria available for copied parameters and "
+                "source-map excerpts."
+            )
+        ),
+    ] = ()
 
 
 class AuthorityRelationV2(_FrozenClosedModel):

@@ -31,6 +31,8 @@ SOURCE RULES:
 - Every invariant parameter value MUST be copied from the same eligible item's
   semantic fields. Identifier-style snake_case normalization is allowed; do not
   paraphrase or combine distant phrases.
+- An item's source type is context, not permission to force a similarly named
+  invariant. First require a faithful supported invariant shape; otherwise gap it.
 - Unsupported normative items become gaps beginning with the exact item ID.
 
 AUTHORITY MAPPING:
@@ -51,11 +53,13 @@ COVERAGE RULES:
 - Every eligible MUST or MUST_NOT item must produce one or more invariants, or a
   gap beginning with its exact item ID when no supported invariant can represent it.
 - Gaps are a last resort, not a substitute for supported runtime behavior.
-- Do not omit documentation, dependency, counter, keyboard, mouse, route,
-  persistence, reset, reload, restoration, or visibility requirements.
-- Use DATA_CONTRACT for explicit dependency, record, payload, storage, and naming
-  contracts. Use an item-ID gap for documentation or tooling requirements that
-  cannot be represented faithfully.
+- Do not omit counter, keyboard, mouse, route, persistence, reset, reload,
+  restoration, or visibility behavior. Documentation and tooling requirements
+  still require exact item-ID gaps when unsupported.
+- Use DATA_CONTRACT only for an explicit persisted or exchanged data shape,
+  dependency-manifest entry, record, payload, storage key, or naming contract.
+  Do not use it for a tool choice, language-version target, setup operation,
+  dependency operation, quality process, or other implementation workflow.
 - For API schemas, use DATA_CONTRACT with the schema or operation as subject. Do
   not emit context-free REQUIRED_FIELD invariants for request or response fields.
 - For path and query parameters, preserve the operation and route context.
@@ -77,6 +81,24 @@ COVERAGE RULES:
 - Use FORBIDDEN_CAPABILITY only for an explicit prohibition.
 - Before returning, verify each eligible item ID appears in at least one invariant
   citation or at the beginning of a gap.
+
+EXACT CLASSIFICATION EXAMPLES:
+- Tooling-only CONSTRAINT example (must become a gap):
+  source item ID: CONSTRAINT.001
+  source statement: The implementation MUST target Python 3.13 or newer and
+  manage the project exclusively with uv.
+  Required output: emit no invariant or source_map entry for CONSTRAINT.001 and
+  add this gap:
+  "CONSTRAINT.001: unsupported tooling requirement; enforce outside compiled Authority."
+  Do not emit DATA_CONTRACT. "project configuration and dependency management"
+  is a paraphrase and the item defines tooling, not a persisted/exchanged shape.
+- Measurable CONSTRAINT example (may become MAX_VALUE):
+  source statement: The request limit MUST be at most 100.
+  valid parameters: {"field_name": "request limit", "max_value": 100}
+  The source_map excerpt is the exact source statement and its location is the
+  exact source item ID.
+- Every parameter string in the invariant is copied verbatim from its source item,
+  except for the allowed identifier-style snake_case normalization.
 
 OUTPUT:
 Return one success object:
@@ -116,7 +138,7 @@ Return one success object:
       "location": "the same eligible item ID as the second invariant"
     }
   ],
-  "compiler_version": "4.0.1",
+  "compiler_version": "4.0.2",
   "prompt_hash": "0000000000000000000000000000000000000000000000000000000000000000"
 }
 

@@ -40,7 +40,12 @@ def _authority_input() -> AuthorityInputV2:
     )
 
 
-def _success(*, source_item_id: str, excerpt: str) -> str:
+def _success(
+    *,
+    source_item_id: str,
+    excerpt: str,
+    field_name: str = "accepted_requirement",
+) -> str:
     return json.dumps(
         {
             "schema_version": "agileforge.compiled_authority.v3",
@@ -52,7 +57,7 @@ def _success(*, source_item_id: str, excerpt: str) -> str:
                     "type": "REQUIRED_FIELD",
                     "source_item_id": source_item_id,
                     "source_level": "MUST",
-                    "parameters": {"field_name": "accepted_requirement"},
+                    "parameters": {"field_name": field_name},
                 }
             ],
             "eligible_feature_rules": [],
@@ -97,6 +102,41 @@ def test_normalizer_accepts_only_eligible_typed_item_citations() -> None:
     assert (
         normalized.root.source_map[0].invariant_id == normalized.root.invariants[0].id
     )
+
+
+def test_normalizer_accepts_single_token_identifier_normalization() -> None:
+    """One source token may use the documented identifier-style normalization."""
+    source_item_id = "REQ.compiler.email"
+    statement = "The Authority payload MUST include Email."
+    authority_input = AuthorityInputV2(
+        artifact_id="SPEC.compiler-email",
+        normative_items=(
+            AuthorityItemV2(
+                id=source_item_id,
+                type="REQ",
+                statement=statement,
+                level="MUST",
+                acceptance=("The compiled invariant cites this requirement.",),
+            ),
+        ),
+        normative_relations=(),
+        eligible_item_ids=(source_item_id,),
+        authority_input_fingerprint=_FINGERPRINT,
+    )
+
+    normalized = normalize_compiler_output(
+        _success(
+            source_item_id=source_item_id,
+            excerpt=statement,
+            field_name="email",
+        ),
+        authority_input=authority_input,
+    )
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    assert normalized.root.invariants[0].parameters.model_dump(mode="json") == {
+        "field_name": "email"
+    }
 
 
 @pytest.mark.parametrize(

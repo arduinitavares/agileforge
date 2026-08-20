@@ -1,0 +1,31 @@
+{
+  "schema_version": "agileforge.authority_input.v2",
+  "artifact_id": "SPEC.string-calculator-tooling-constraint",
+  "normative_items": [
+    {
+      "id": "CONSTRAINT.001",
+      "type": "CONSTRAINT",
+      "statement": "The implementation MUST target Python 3.13 or newer and manage the project exclusively with uv.",
+      "level": "MUST",
+      "acceptance": [
+        "Project configuration declares Python 3.13 or newer.",
+        "Project setup and dependency operations use uv."
+      ]
+    },
+    {
+      "id": "CONSTRAINT.002",
+      "type": "CONSTRAINT",
+      "statement": "The request limit MUST be at most 100.",
+      "level": "MUST",
+      "acceptance": [
+        "The request limit is no more than 100."
+      ]
+    }
+  ],
+  "normative_relations": [],
+  "eligible_item_ids": [
+    "CONSTRAINT.001",
+    "CONSTRAINT.002"
+  ],
+  "authority_input_fingerprint": "sha256:d2782c1ce73e8936313d155969e9a64f933ab7bde0c6bec55bf2a88369dc61e2"
+}

@@ -20,6 +20,10 @@ the right stage.
 - `string-calculator-negative-diagnostic`: focused, provider-free source-to-spec
   fidelity case with one human-labeled weakened candidate and one exact gold
   candidate. It has no runtime or lifecycle effect.
+- `string-calculator-tooling-constraint`: focused, provider-free
+  Authority-compiler classification case with the attempt-28 invalid candidate,
+  one exact-gap gold candidate, and a measurable supported comparison. It has no
+  runtime or lifecycle effect.
 
 ## Artifact Rules
 

@@ -32,7 +32,9 @@ if TYPE_CHECKING:
     from services.contracts.authority_input_v2 import AuthorityInputV2, AuthorityItemV2
 
 logger: logging.Logger = logging.getLogger(name=__name__)
-_MIN_PLURAL_TOKEN_LENGTH = 3
+_IDENTIFIER_NORMALIZATION_PATTERN: re.Pattern[str] = re.compile(
+    r"^[a-z0-9]+(?:_[a-z0-9]+)*$"
+)
 _ORDINAL_MAPPING_PREFIXES: dict[AuthorityTargetKind, tuple[str, ...]] = {
     AuthorityTargetKind.ELIGIBLE_FEATURE_RULE: ("ELIG", "EFR"),
     AuthorityTargetKind.REJECTED_FEATURE: ("REJ", "RF"),
@@ -163,23 +165,8 @@ def _excerpt_is_semantic(excerpt: str, item: AuthorityItemV2) -> bool:
     )
 
 
-def _semantic_token(value: str) -> str:
-    """Normalize a semantic token while tolerating simple plural inflection."""
-    normalized = value.casefold()
-    if len(normalized) > _MIN_PLURAL_TOKEN_LENGTH and normalized.endswith("s"):
-        return normalized[:-1]
-    return normalized
-
-
-def _semantic_tokens(value: str) -> tuple[str, ...]:
-    return tuple(
-        _semantic_token(token)
-        for token in re.findall(r"[a-z0-9]+", value.casefold())
-    )
-
-
 def _parameter_values(value: object) -> tuple[str, ...]:
-    """Flatten provider-controlled parameter scalars for source substantiation."""
+    """Flatten provider-controlled parameter scalars for exact source checks."""
     if isinstance(value, dict):
         return tuple(
             scalar
@@ -193,6 +180,21 @@ def _parameter_values(value: object) -> tuple[str, ...]:
     if isinstance(value, str | int | float) and not isinstance(value, bool):
         return (str(value),)
     return ()
+
+
+def _value_is_copied_from_source(value: str, source_text: str) -> bool:
+    """Allow exact copies plus the prompt's sole snake_case identifier exception."""
+    if value in source_text:
+        return True
+    if _IDENTIFIER_NORMALIZATION_PATTERN.fullmatch(value) is None:
+        return False
+    source_tokens = re.findall(r"[a-z0-9]+", source_text.casefold())
+    identifier_tokens = value.split("_")
+    token_count = len(identifier_tokens)
+    return any(
+        source_tokens[index : index + token_count] == identifier_tokens
+        for index in range(len(source_tokens) - token_count + 1)
+    )
 
 
 _INVARIANT_TYPE_CUES: dict[str, tuple[str, ...]] = {
@@ -216,20 +218,15 @@ _INVARIANT_TYPE_CUES: dict[str, tuple[str, ...]] = {
 
 
 def _parameters_are_semantic(invariant: Invariant, item: AuthorityItemV2) -> bool:
-    """Require all parameter values to occur in one eligible source field."""
+    """Require all parameter values verbatim in one eligible source field."""
     source_texts = _semantic_source_texts(item)
     values = _parameter_values(invariant.parameters.model_dump(mode="json"))
-    if not values:
-        return False
-    value_phrases = tuple(" ".join(_semantic_tokens(value)) for value in values)
-    if any(not phrase for phrase in value_phrases):
+    if not values or any(not value for value in values):
         return False
     supporting_texts = tuple(
         text
         for text in source_texts
-        if all(
-            phrase in " ".join(_semantic_tokens(text)) for phrase in value_phrases
-        )
+        if all(_value_is_copied_from_source(value, text) for value in values)
     )
     if not supporting_texts:
         return False

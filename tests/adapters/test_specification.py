@@ -27,8 +27,10 @@ from services.contracts.specification import (
 )
 from utils.agileforge_spec_profile_v2 import SpecificationPayload
 from utils.spec_schemas import (
+    DataContractParams,
     Invariant,
     InvariantType,
+    MaxValueParams,
     RequiredFieldParams,
     SourceMapEntry,
     SpecAuthorityCompilationFailure,
@@ -130,7 +132,7 @@ def _specification_with_non_normative_sentinel() -> SpecificationPayload:
 
 def test_prompt_and_service_contract_are_synchronized() -> None:
     """The adapter loads the exact host-hashed prompt and active version."""
-    assert SPEC_AUTHORITY_COMPILER_VERSION == "4.0.1"
+    assert SPEC_AUTHORITY_COMPILER_VERSION == "4.0.2"
     assert SPEC_AUTHORITY_COMPILER_PROMPT_HASH == CONTRACT_PROMPT_HASH
     assert compute_prompt_hash(SPEC_AUTHORITY_COMPILER_INSTRUCTIONS) == (
         CONTRACT_PROMPT_HASH
@@ -148,6 +150,51 @@ def test_prompt_documents_the_closed_typed_input_boundary() -> None:
     assert "No non-normative prose or non-normative item identity" in instructions
     assert "eligible_item_ids as exhaustive" in instructions
     assert "Every source_map.location MUST equal" in instructions
+
+
+def test_provider_contract_has_executable_tooling_constraint_guidance() -> None:
+    """Prompt and schema make the unsupported tooling boundary unambiguous."""
+    instructions = SPEC_AUTHORITY_COMPILER_INSTRUCTIONS
+    normalized_instructions = " ".join(instructions.split())
+    authority_item_schema = AuthorityItemV2.model_json_schema()["properties"]
+    data_contract_schema = DataContractParams.model_json_schema()
+    max_value_schema = MaxValueParams.model_json_schema()
+    success_schema = SpecAuthorityCompilationSuccess.model_json_schema()[
+        "properties"
+    ]
+
+    assert (
+        "Tooling-only CONSTRAINT example (must become a gap)"
+        in normalized_instructions
+    )
+    assert (
+        "The implementation MUST target Python 3.13 or newer and manage the "
+        "project exclusively with uv." in normalized_instructions
+    )
+    assert (
+        '"CONSTRAINT.001: unsupported tooling requirement; enforce outside '
+        'compiled Authority."' in normalized_instructions
+    )
+    assert (
+        "Measurable CONSTRAINT example (may become MAX_VALUE)"
+        in normalized_instructions
+    )
+    assert "The request limit MUST be at most 100." in normalized_instructions
+    assert (
+        "Every parameter string in the invariant is copied verbatim from its "
+        "source item, except for the allowed identifier-style snake_case "
+        "normalization." in normalized_instructions
+    )
+    assert "does not itself authorize an invariant type" in authority_item_schema[
+        "type"
+    ]["description"]
+    assert "Do not use DATA_CONTRACT for tooling" in data_contract_schema[
+        "description"
+    ]
+    assert "literal numeric maximum" in max_value_schema["description"]
+    assert "begin with the exact eligible item ID" in success_schema["gaps"][
+        "description"
+    ]
 
 
 def test_provider_contract_requires_distinct_temporary_invariant_references() -> None:

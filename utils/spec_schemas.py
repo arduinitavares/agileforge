@@ -251,13 +251,19 @@ class RequiredFieldParams(BaseModel):
 
 
 class MaxValueParams(BaseModel):
-    """Parameters for MAX_VALUE invariants."""
+    """Parameters for a source-stated literal numeric maximum."""
 
     model_config = ConfigDict(extra="forbid")
 
     field_name: Annotated[
         str,
-        Field(min_length=1, description="Field constrained by a maximum value."),
+        Field(
+            min_length=1,
+            description=(
+                "Exact source-grounded field name constrained by a literal "
+                "numeric maximum."
+            ),
+        ),
     ]
     max_value: Annotated[
         int | float,
@@ -323,21 +329,41 @@ class StateTransitionParams(BaseModel):
 
 
 class DataContractParams(BaseModel):
-    """Parameters for persisted or exchanged data contracts."""
+    """Parameters for explicit persisted or exchanged data shapes.
+
+    Do not use DATA_CONTRACT for tooling, setup, language-version, or
+    quality-process requirements.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     subject: Annotated[
         str,
-        Field(min_length=1, description="Data object, record, key, or payload."),
+        Field(
+            min_length=1,
+            description=(
+                "Exact source-grounded data object, record, storage key, manifest, "
+                "or payload; never a paraphrased process or tooling subject."
+            ),
+        ),
     ]
     fields: Annotated[
         list[str],
-        Field(default_factory=list, description="Required or recommended fields."),
+        Field(
+            default_factory=list,
+            description=(
+                "Exact source-grounded field, key, or manifest-member names."
+            ),
+        ),
     ]
     rule: Annotated[
         str,
-        Field(min_length=1, description="Data shape, naming, or persistence rule."),
+        Field(
+            min_length=1,
+            description=(
+                "Exact source-grounded data shape, naming, or persistence rule."
+            ),
+        ),
     ]
 
 
@@ -761,7 +787,12 @@ class SpecAuthorityCompilationSuccess(BaseModel):
     )
     gaps: Annotated[
         list[str],
-        Field(description="Missing or ambiguous spec items."),
+        Field(
+            description=(
+                "Unsupported, missing, or ambiguous items; coverage gaps must begin "
+                "with the exact eligible item ID followed by a colon."
+            )
+        ),
     ]
     assumptions: Annotated[
         list[AuthorityAssumption],
