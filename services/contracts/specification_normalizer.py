@@ -29,12 +29,15 @@ from utils.spec_schemas import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from services.contracts.authority_input_v2 import AuthorityInputV2, AuthorityItemV2
 
 logger: logging.Logger = logging.getLogger(name=__name__)
 _IDENTIFIER_NORMALIZATION_PATTERN: re.Pattern[str] = re.compile(
     r"^[a-z0-9]+(?:_[a-z0-9]+)*$"
 )
+_PERSISTED_INVARIANT_ID_PATTERN: re.Pattern[str] = re.compile(r"^INV-[0-9a-f]{16}$")
 _ORDINAL_MAPPING_PREFIXES: dict[AuthorityTargetKind, tuple[str, ...]] = {
     AuthorityTargetKind.ELIGIBLE_FEATURE_RULE: ("ELIG", "EFR"),
     AuthorityTargetKind.REJECTED_FEATURE: ("REJ", "RF"),
@@ -95,6 +98,156 @@ def _decode(raw_json: str) -> object | SpecAuthorityCompilerOutput:
         )
 
 
+def _success_payload(payload: object) -> dict[str, object] | None:
+    """Return the direct success payload from a direct or enveloped response."""
+    if not _is_string_object_dict(payload):
+        return None
+    result = payload.get("result")
+    if result is not None:
+        return result if _is_string_object_dict(result) else None
+    return payload
+
+
+def _temporary_invariant_references(payload: dict[str, object]) -> set[str]:
+    """Collect provider reference strings so generated surrogates cannot collide."""
+    references: set[str] = set()
+    for field, reference_key in (
+        ("source_map", "invariant_id"),
+        ("authority_mappings", "authority_item_id"),
+    ):
+        entries = payload.get(field)
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not _is_string_object_dict(entry):
+                continue
+            reference = entry.get(reference_key)
+            if isinstance(reference, str):
+                references.add(reference)
+    return references
+
+
+def _next_surrogate_invariant_id(
+    *,
+    ordinal: int,
+    reserved: set[str],
+) -> tuple[str, int]:
+    """Return one unused schema-valid local identity and the next ordinal."""
+    while True:
+        candidate = f"INV-{ordinal:016x}"
+        ordinal += 1
+        if candidate not in reserved:
+            return candidate, ordinal
+
+
+def _provider_invariant_ids(invariants: Sequence[object]) -> list[str]:
+    """Return non-empty provider identities in original occurrence order."""
+    provider_ids: list[str] = []
+    for invariant in invariants:
+        if not _is_string_object_dict(invariant):
+            continue
+        provider_id = invariant.get("id")
+        if isinstance(provider_id, str) and provider_id:
+            provider_ids.append(provider_id)
+    return provider_ids
+
+
+def _surrogate_invariant_ids(
+    provider_ids: list[str],
+    *,
+    reserved: set[str],
+) -> dict[str, str]:
+    """Assign one collision-free surrogate to each exact provider identity."""
+    old_to_surrogate: dict[str, str] = {}
+    ordinal = 0
+    for provider_id in provider_ids:
+        if provider_id in old_to_surrogate:
+            continue
+        surrogate, ordinal = _next_surrogate_invariant_id(
+            ordinal=ordinal,
+            reserved=reserved | set(old_to_surrogate.values()),
+        )
+        old_to_surrogate[provider_id] = surrogate
+    return old_to_surrogate
+
+
+def _rebind_reference_field(
+    entries: object,
+    *,
+    field: str,
+    old_to_surrogate: dict[str, str],
+) -> None:
+    """Replace exact known references in one provider-controlled collection."""
+    if not isinstance(entries, list):
+        return
+    for entry in entries:
+        if not _is_string_object_dict(entry):
+            continue
+        provider_id = entry.get(field)
+        if isinstance(provider_id, str) and provider_id in old_to_surrogate:
+            entry[field] = old_to_surrogate[provider_id]
+
+
+def _rebind_invariant_authority_mappings(
+    mappings: object,
+    *,
+    old_to_surrogate: dict[str, str],
+) -> None:
+    """Replace only compact-IR references whose target kind is invariant."""
+    if not isinstance(mappings, list):
+        return
+    for mapping in mappings:
+        if not _is_string_object_dict(mapping):
+            continue
+        if mapping.get("authority_target_kind") != "invariant":
+            continue
+        provider_id = mapping.get("authority_item_id")
+        if isinstance(provider_id, str) and provider_id in old_to_surrogate:
+            mapping["authority_item_id"] = old_to_surrogate[provider_id]
+
+
+def _bind_temporary_invariant_references(payload: object) -> object:
+    """Bind opaque provider references before persisted-model validation.
+
+    This changes only local reference representation. Unknown or malformed
+    references remain untouched so the strict schema and lineage checks reject
+    them normally.
+    """
+    success = _success_payload(payload)
+    if success is None:
+        return payload
+    invariants = success.get("invariants")
+    if not isinstance(invariants, list):
+        return payload
+
+    provider_ids = _provider_invariant_ids(invariants)
+    if not provider_ids or all(
+        _PERSISTED_INVARIANT_ID_PATTERN.fullmatch(provider_id)
+        for provider_id in provider_ids
+    ):
+        return payload
+
+    old_to_surrogate = _surrogate_invariant_ids(
+        provider_ids,
+        reserved=set(provider_ids) | _temporary_invariant_references(success),
+    )
+    _rebind_reference_field(
+        invariants,
+        field="id",
+        old_to_surrogate=old_to_surrogate,
+    )
+    _rebind_reference_field(
+        success.get("source_map"),
+        field="invariant_id",
+        old_to_surrogate=old_to_surrogate,
+    )
+    _rebind_invariant_authority_mappings(
+        success.get("authority_mappings"),
+        old_to_surrogate=old_to_surrogate,
+    )
+    return payload
+
+
 def _parse(payload: object) -> SpecAuthorityCompilerOutput:
     """Validate a direct output or the ADK result envelope."""
     try:
@@ -147,11 +300,7 @@ def _optional_text_sort_key(value: str | None) -> tuple[bool, str, str]:
 
 def _semantic_source_texts(item: AuthorityItemV2) -> tuple[str, ...]:
     """Return only semantic item fields that may support an invariant citation."""
-    return tuple(
-        text
-        for text in (item.statement, *item.acceptance)
-        if text.strip()
-    )
+    return tuple(text for text in (item.statement, *item.acceptance) if text.strip())
 
 
 def _excerpt_is_semantic(excerpt: str, item: AuthorityItemV2) -> bool:
@@ -169,14 +318,10 @@ def _parameter_values(value: object) -> tuple[str, ...]:
     """Flatten provider-controlled parameter scalars for exact source checks."""
     if isinstance(value, dict):
         return tuple(
-            scalar
-            for nested in value.values()
-            for scalar in _parameter_values(nested)
+            scalar for nested in value.values() for scalar in _parameter_values(nested)
         )
     if isinstance(value, list | tuple):
-        return tuple(
-            scalar for nested in value for scalar in _parameter_values(nested)
-        )
+        return tuple(scalar for nested in value for scalar in _parameter_values(nested))
     if isinstance(value, str | int | float) and not isinstance(value, bool):
         return (str(value),)
     return ()
@@ -237,9 +382,7 @@ def _parameters_are_semantic(invariant: Invariant, item: AuthorityItemV2) -> boo
             route.casefold() in text.casefold() for text in supporting_texts
         ):
             return False
-    return any(
-        cue in text.casefold() for text in supporting_texts for cue in cues
-    )
+    return any(cue in text.casefold() for text in supporting_texts for cue in cues)
 
 
 def _source_failure(
@@ -557,6 +700,7 @@ def normalize_compiler_output(
     payload = _decode(raw_json)
     if isinstance(payload, SpecAuthorityCompilerOutput):
         return payload
+    payload = _bind_temporary_invariant_references(payload)
     parsed = _parse(payload)
     if isinstance(parsed.root, SpecAuthorityCompilationFailure):
         return parsed

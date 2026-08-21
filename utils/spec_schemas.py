@@ -351,9 +351,7 @@ class DataContractParams(BaseModel):
         list[str],
         Field(
             default_factory=list,
-            description=(
-                "Exact source-grounded field, key, or manifest-member names."
-            ),
+            description=("Exact source-grounded field, key, or manifest-member names."),
         ),
     ]
     rule: Annotated[
@@ -1026,6 +1024,26 @@ class SpecAuthorityCompilationFailure(BaseModel):
             description="Structured source metadata validation issues.",
         ),
     ] = None
+
+
+class SpecAuthorityValidationRepairInput(BaseModel):
+    """Bounded host findings for one pre-candidate compiler repair pass."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["agileforge.authority-validation-repair-input.v1"] = (
+        "agileforge.authority-validation-repair-input.v1"
+    )
+    compiler_input: SpecAuthorityCompilerInput
+    validation_failure: SpecAuthorityCompilationFailure
+    invalid_output_excerpt: Annotated[str, Field(max_length=131_072)]
+    invalid_output_fingerprint: Annotated[
+        str,
+        Field(pattern=r"^sha256:[0-9a-f]{64}$"),
+    ]
+    invalid_output_length: Annotated[int, Field(ge=0)]
+    invalid_output_truncated: bool
+    repair_ordinal: Literal[1] = 1
 
 
 class SpecAuthorityCompilerOutput(

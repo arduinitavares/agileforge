@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -47,6 +48,7 @@ from utils.spec_schemas import (
     SpecAuthorityCompilationFailure,
     SpecAuthorityCompilationSuccess,
     SpecAuthorityCompilerInput,
+    SpecAuthorityValidationRepairInput,
 )
 from workflow.contracts import JsonObject, WorkflowErrorCode
 from workflow.fingerprints import canonical_hash
@@ -188,6 +190,8 @@ class AgenticRecipeNodes:
 
     authority_compile: BaseAgent | Workflow
     authority_repair: BaseAgent | Workflow
+    authority_compile_validation_repair: BaseAgent | Workflow
+    authority_repair_validation_repair: BaseAgent | Workflow
     vision_interview: BaseAgent | Workflow
     vision_repair: BaseAgent | Workflow
     product_goal: BaseAgent | Workflow
@@ -778,17 +782,83 @@ def _authority_failure_message(failure: SpecAuthorityCompilationFailure) -> str:
     return message
 
 
+_AUTHORITY_REPAIRABLE_FAILURE_REASONS = frozenset(
+    {
+        "INVALID_JSON",
+        "JSON_VALIDATION_FAILED",
+        "INELIGIBLE_INVARIANT_SOURCE",
+        "INCOMPLETE_NORMATIVE_COVERAGE",
+    }
+)
+_AUTHORITY_INVALID_OUTPUT_LIMIT = 131_072
+_AUTHORITY_INVALID_OUTPUT_TRUNCATION_MARKER = (
+    "\n...<authority-compiler-output-truncated>...\n"
+)
+
+
+def _bounded_authority_invalid_output(raw_output: str) -> tuple[str, bool]:
+    """Return bounded untrusted output evidence with stable prefix and suffix."""
+    if len(raw_output) <= _AUTHORITY_INVALID_OUTPUT_LIMIT:
+        return raw_output, False
+    available = _AUTHORITY_INVALID_OUTPUT_LIMIT - len(
+        _AUTHORITY_INVALID_OUTPUT_TRUNCATION_MARKER
+    )
+    prefix_length = available // 2
+    suffix_length = available - prefix_length
+    return (
+        raw_output[:prefix_length]
+        + _AUTHORITY_INVALID_OUTPUT_TRUNCATION_MARKER
+        + raw_output[-suffix_length:],
+        True,
+    )
+
+
+def _authority_validation_repair_input(
+    *,
+    compiler_input: SpecAuthorityCompilerInput,
+    failure: SpecAuthorityCompilationFailure,
+    raw_output: str,
+) -> SpecAuthorityValidationRepairInput:
+    """Build one immutable, bounded correction request from host findings."""
+    excerpt, truncated = _bounded_authority_invalid_output(raw_output)
+    fingerprint = hashlib.sha256(raw_output.encode("utf-8")).hexdigest()
+    return SpecAuthorityValidationRepairInput(
+        compiler_input=compiler_input,
+        validation_failure=failure,
+        invalid_output_excerpt=excerpt,
+        invalid_output_fingerprint=f"sha256:{fingerprint}",
+        invalid_output_length=len(raw_output),
+        invalid_output_truncated=truncated,
+        repair_ordinal=1,
+    )
+
+
+def _authority_validation_repair_failure_message(
+    initial: SpecAuthorityCompilationFailure,
+    final: SpecAuthorityCompilationFailure,
+) -> str:
+    """Render both bounded host findings after the sole repair pass fails."""
+    return (
+        "Bounded Authority validation repair failed. Initial: "
+        f"{_authority_failure_message(initial)} Final: "
+        f"{_authority_failure_message(final)}"
+    )
+
+
 def _build_authority_workflow(
     *,
     workflow_name: str,
-    execution_node_name: str,
     leaf_agent: BaseAgent | Workflow,
+    validation_repair_leaf: BaseAgent | Workflow,
     execution_settings: JsonObject,
     repair: bool,
 ) -> Workflow:
     """Invoke one retained compiler and emit strict precomputed authority."""
-    timeout_seconds, max_attempts = _execution_limits(execution_settings)
-    retry_config = RetryConfig(max_attempts=max_attempts)
+    timeout_seconds, _max_attempts = _execution_limits(execution_settings)
+    retry_config = RetryConfig(max_attempts=1)
+    execution_node_name = (
+        "execute_authority_repair" if repair else "execute_authority_compiler"
+    )
 
     @node(
         name=execution_node_name,
@@ -809,15 +879,39 @@ def _build_authority_workflow(
             leaf_agent,
             node_input=payload.compiler_input.model_dump(mode="json"),
         )
+        raw_output = _authority_compiler_json(generated)
         normalized = normalize_compiler_output(
-            _authority_compiler_json(generated),
+            raw_output,
             authority_input=payload.compiler_input.authority_input,
         )
         if isinstance(normalized.root, SpecAuthorityCompilationFailure):
-            raise AuthorityAgenticExecutionError(
-                code=WorkflowErrorCode.AUTHORITY_COMPILATION_FAILED,
-                message=_authority_failure_message(normalized.root),
+            initial_failure = normalized.root
+            if initial_failure.reason not in _AUTHORITY_REPAIRABLE_FAILURE_REASONS:
+                raise AuthorityAgenticExecutionError(
+                    code=WorkflowErrorCode.AUTHORITY_COMPILATION_FAILED,
+                    message=_authority_failure_message(initial_failure),
+                )
+            repair_input = _authority_validation_repair_input(
+                compiler_input=payload.compiler_input,
+                failure=initial_failure,
+                raw_output=raw_output,
             )
+            repaired = await context.run_node(
+                validation_repair_leaf,
+                node_input=repair_input.model_dump(mode="json"),
+            )
+            normalized = normalize_compiler_output(
+                _authority_compiler_json(repaired),
+                authority_input=payload.compiler_input.authority_input,
+            )
+            if isinstance(normalized.root, SpecAuthorityCompilationFailure):
+                raise AuthorityAgenticExecutionError(
+                    code=WorkflowErrorCode.AUTHORITY_COMPILATION_FAILED,
+                    message=_authority_validation_repair_failure_message(
+                        initial_failure,
+                        normalized.root,
+                    ),
+                )
         return RecipeOutput(
             payload=_authority_completion_payload(payload, normalized.root)
         )
@@ -932,8 +1026,8 @@ def build_agentic_recipe_registry(
                 node_id="authority.compile",
                 workflow=_build_authority_workflow(
                     workflow_name="authority_compilation",
-                    execution_node_name="execute_authority_compiler",
                     leaf_agent=nodes.authority_compile,
+                    validation_repair_leaf=(nodes.authority_compile_validation_repair),
                     execution_settings=execution_settings,
                     repair=False,
                 ),
@@ -943,8 +1037,8 @@ def build_agentic_recipe_registry(
                 node_id="authority.repair",
                 workflow=_build_authority_workflow(
                     workflow_name="authority_repair",
-                    execution_node_name="execute_authority_repair",
                     leaf_agent=nodes.authority_repair,
+                    validation_repair_leaf=(nodes.authority_repair_validation_repair),
                     execution_settings=execution_settings,
                     repair=True,
                 ),

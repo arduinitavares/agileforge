@@ -39,6 +39,7 @@ from utils.spec_schemas import (
     SpecAuthorityCompilerInput,
     SpecAuthorityCompilerOutput,
     SpecAuthorityMapping,
+    SpecAuthorityValidationRepairInput,
 )
 
 _SOURCE_ID = "REQ.adapter.typed"
@@ -132,11 +133,44 @@ def _specification_with_non_normative_sentinel() -> SpecificationPayload:
 
 def test_prompt_and_service_contract_are_synchronized() -> None:
     """The adapter loads the exact host-hashed prompt and active version."""
-    assert SPEC_AUTHORITY_COMPILER_VERSION == "4.0.2"
+    assert SPEC_AUTHORITY_COMPILER_VERSION == "4.1.0"
     assert SPEC_AUTHORITY_COMPILER_PROMPT_HASH == CONTRACT_PROMPT_HASH
     assert compute_prompt_hash(SPEC_AUTHORITY_COMPILER_INSTRUCTIONS) == (
         CONTRACT_PROMPT_HASH
     )
+
+
+def test_validation_repair_input_is_typed_bounded_and_frozen() -> None:
+    """Validation repair carries exact host findings as immutable typed data."""
+    compiler_input = SpecAuthorityCompilerInput(
+        authority_input=_authority_input(),
+        project_id=1,
+        spec_version_id=2,
+        specification_fingerprint="sha256:" + ("a" * 64),
+    )
+    failure = SpecAuthorityCompilationFailure(
+        error="SPEC_COMPILATION_FAILED",
+        reason="JSON_VALIDATION_FAILED",
+        blocking_gaps=["Invariant identity has the wrong representation."],
+    )
+    repair_input = SpecAuthorityValidationRepairInput(
+        compiler_input=compiler_input,
+        validation_failure=failure,
+        invalid_output_excerpt='{"invariants": []}',
+        invalid_output_fingerprint="sha256:" + ("b" * 64),
+        invalid_output_length=18,
+        invalid_output_truncated=False,
+        repair_ordinal=1,
+    )
+
+    assert repair_input.schema_version == (
+        "agileforge.authority-validation-repair-input.v1"
+    )
+    assert repair_input.compiler_input == compiler_input
+    assert repair_input.validation_failure == failure
+    frozen_field = "repair_ordinal"
+    with pytest.raises(ValidationError, match="frozen_instance"):
+        setattr(repair_input, frozen_field, 2)
 
 
 def test_prompt_documents_the_closed_typed_input_boundary() -> None:
@@ -144,7 +178,11 @@ def test_prompt_documents_the_closed_typed_input_boundary() -> None:
     instructions = SPEC_AUTHORITY_COMPILER_INSTRUCTIONS
 
     assert '"agileforge.authority-compiler-input.v2"' in instructions
+    assert '"agileforge.authority-validation-repair-input.v1"' in instructions
     assert '"agileforge.authority_input.v2"' in instructions
+    assert "sole normative source" in instructions
+    assert "bounded untrusted diagnostic data" in instructions
+    assert "Return a complete replacement" in instructions
     assert "Only normative_items may authorize invariants" in instructions
     assert "review_context_ids" not in instructions
     assert "No non-normative prose or non-normative item identity" in instructions
@@ -159,13 +197,10 @@ def test_provider_contract_has_executable_tooling_constraint_guidance() -> None:
     authority_item_schema = AuthorityItemV2.model_json_schema()["properties"]
     data_contract_schema = DataContractParams.model_json_schema()
     max_value_schema = MaxValueParams.model_json_schema()
-    success_schema = SpecAuthorityCompilationSuccess.model_json_schema()[
-        "properties"
-    ]
+    success_schema = SpecAuthorityCompilationSuccess.model_json_schema()["properties"]
 
     assert (
-        "Tooling-only CONSTRAINT example (must become a gap)"
-        in normalized_instructions
+        "Tooling-only CONSTRAINT example (must become a gap)" in normalized_instructions
     )
     assert (
         "The implementation MUST target Python 3.13 or newer and manage the "
@@ -185,16 +220,15 @@ def test_provider_contract_has_executable_tooling_constraint_guidance() -> None:
         "source item, except for the allowed identifier-style snake_case "
         "normalization." in normalized_instructions
     )
-    assert "does not itself authorize an invariant type" in authority_item_schema[
-        "type"
-    ]["description"]
-    assert "Do not use DATA_CONTRACT for tooling" in data_contract_schema[
-        "description"
-    ]
+    assert (
+        "does not itself authorize an invariant type"
+        in authority_item_schema["type"]["description"]
+    )
+    assert "Do not use DATA_CONTRACT for tooling" in data_contract_schema["description"]
     assert "literal numeric maximum" in max_value_schema["description"]
-    assert "begin with the exact eligible item ID" in success_schema["gaps"][
-        "description"
-    ]
+    assert (
+        "begin with the exact eligible item ID" in success_schema["gaps"]["description"]
+    )
 
 
 def test_provider_contract_requires_distinct_temporary_invariant_references() -> None:

@@ -4,9 +4,9 @@ Policy:
 - The agent and host-side normalizer MUST use the exact same instruction string.
 - prompt_hash MUST be computed from this exact string.
 
-Note on retries:
-- The ADK runtime may retry internally to satisfy JSON schema constraints.
-- Host-side normalization is the final authority for determinism (IDs/prompt_hash).
+Note on repair:
+- The recipe may request one bounded correction after host normalization fails.
+- Host-side normalization remains final authority for determinism and acceptance.
 """
 
 from __future__ import annotations

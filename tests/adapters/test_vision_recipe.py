@@ -352,6 +352,8 @@ def _registry(primary: BaseAgent, repair: SequenceLeaf) -> AdkRecipeRegistry:
         nodes=AgenticRecipeNodes(
             authority_compile=unused,
             authority_repair=unused,
+            authority_compile_validation_repair=unused,
+            authority_repair_validation_repair=unused,
             vision_interview=primary,
             vision_repair=repair,
             product_goal=unused,
@@ -1263,6 +1265,8 @@ def test_schema_failure_records_no_vision_facts(engine: Engine) -> None:
         nodes=AgenticRecipeNodes(
             authority_compile=unused,
             authority_repair=unused,
+            authority_compile_validation_repair=unused,
+            authority_repair_validation_repair=unused,
             vision_interview=failing,
             vision_repair=unused,
             product_goal=unused,

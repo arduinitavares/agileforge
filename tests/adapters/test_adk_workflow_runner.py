@@ -557,6 +557,12 @@ def _goal_registry(
         nodes=AgenticRecipeNodes(
             authority_compile=_unused_leaf("unused_authority_compile"),
             authority_repair=_unused_leaf("unused_authority_repair"),
+            authority_compile_validation_repair=_unused_leaf(
+                "unused_authority_compile_validation_repair"
+            ),
+            authority_repair_validation_repair=_unused_leaf(
+                "unused_authority_repair_validation_repair"
+            ),
             vision_interview=vision_leaf or _unused_leaf("unused_vision_interview"),
             vision_repair=_unused_leaf("unused_vision_repair"),
             product_goal=leaf,
@@ -967,6 +973,12 @@ def test_runner_loads_vision_input_from_persisted_attempt(
         nodes=AgenticRecipeNodes(
             authority_compile=_unused_leaf("unused_authority_compile"),
             authority_repair=_unused_leaf("unused_authority_repair"),
+            authority_compile_validation_repair=_unused_leaf(
+                "unused_authority_compile_validation_repair"
+            ),
+            authority_repair_validation_repair=_unused_leaf(
+                "unused_authority_repair_validation_repair"
+            ),
             vision_interview=_observing_vision_leaf(observations, vision_response),
             vision_repair=_unused_leaf("unused_vision_repair"),
             product_goal=_unused_leaf("unused_product_goal"),
@@ -1585,6 +1597,12 @@ def test_authority_runner_executes_provider_once_before_completion_transaction(
         nodes=AgenticRecipeNodes(
             authority_compile=compiler_leaf,
             authority_repair=_unused_leaf("unused_authority_repair"),
+            authority_compile_validation_repair=_unused_leaf(
+                "unused_authority_compile_validation_repair"
+            ),
+            authority_repair_validation_repair=_unused_leaf(
+                "unused_authority_repair_validation_repair"
+            ),
             vision_interview=_unused_leaf("unused_vision_interview"),
             vision_repair=_unused_leaf("unused_vision_repair"),
             product_goal=_unused_leaf("unused_product_goal"),

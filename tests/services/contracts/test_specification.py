@@ -280,6 +280,135 @@ def test_distinct_temporary_ids_keep_multi_invariant_references_aligned() -> Non
     }
 
 
+def test_noncanonical_temporary_ids_keep_exact_references_aligned() -> None:
+    """Opaque provider references need not use the persisted invariant format."""
+    payload = _success_payload()
+    payload["invariants"].append(
+        {
+            "id": "INV-0000000000011",
+            "type": "REQUIRED_FIELD",
+            "source_item_id": _SOURCE_ID,
+            "source_level": "MUST",
+            "parameters": {"field_name": "eligible_typed_item"},
+        }
+    )
+    payload["invariants"][0]["id"] = "INV-0000000000010"
+    payload["source_map"] = [
+        {
+            "invariant_id": "INV-0000000000010",
+            "excerpt": _SOURCE_STATEMENT,
+            "location": _SOURCE_ID,
+        },
+        {
+            "invariant_id": "INV-0000000000011",
+            "excerpt": "Authority MUST include eligible_typed_item.",
+            "location": _SOURCE_ID,
+        },
+    ]
+    payload.update(
+        {
+            "ir_schema_version": "provider.ir.v1",
+            "ir_provenance": "model_emitted",
+            "authority_mappings": [
+                {
+                    "candidate_id": "CAND-typed-citation",
+                    "authority_item_id": "INV-0000000000010",
+                    "authority_target_kind": "invariant",
+                    "mapping_status": "covered",
+                    "mapping_rationale": "Maps the typed citation requirement.",
+                    "mapping_provenance": "model_quote",
+                },
+                {
+                    "candidate_id": "CAND-eligible-item",
+                    "authority_item_id": "INV-0000000000011",
+                    "authority_target_kind": "invariant",
+                    "mapping_status": "covered",
+                    "mapping_rationale": "Maps the eligible item requirement.",
+                    "mapping_provenance": "model_quote",
+                },
+            ],
+        }
+    )
+
+    normalized = normalize_compiler_output(
+        json.dumps(payload),
+        authority_input=_authority_input(),
+    )
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    invariant_ids_by_field = {
+        item.parameters.model_dump(mode="json")["field_name"]: item.id
+        for item in normalized.root.invariants
+    }
+    assert {
+        entry.excerpt: entry.invariant_id for entry in normalized.root.source_map
+    } == {
+        _SOURCE_STATEMENT: invariant_ids_by_field["typed_citation"],
+        "Authority MUST include eligible_typed_item.": invariant_ids_by_field[
+            "eligible_typed_item"
+        ],
+    }
+    assert {
+        mapping.candidate_id: mapping.authority_item_id
+        for mapping in normalized.root.authority_mappings
+    } == {
+        "CAND-typed-citation": invariant_ids_by_field["typed_citation"],
+        "CAND-eligible-item": invariant_ids_by_field["eligible_typed_item"],
+    }
+
+
+def test_noncanonical_reused_id_still_fails_when_semantics_differ() -> None:
+    """Mechanical reference binding cannot hide ambiguous identity reuse."""
+    payload = _success_payload()
+    payload["invariants"][0]["id"] = "temporary-invariant"
+    payload["invariants"].append(
+        {
+            "id": "temporary-invariant",
+            "type": "REQUIRED_FIELD",
+            "source_item_id": _SOURCE_ID,
+            "source_level": "MUST",
+            "parameters": {"field_name": "eligible_typed_item"},
+        }
+    )
+    payload["source_map"] = [
+        {
+            "invariant_id": "temporary-invariant",
+            "excerpt": _SOURCE_STATEMENT,
+            "location": _SOURCE_ID,
+        },
+        {
+            "invariant_id": "temporary-invariant",
+            "excerpt": "Authority MUST include eligible_typed_item.",
+            "location": _SOURCE_ID,
+        },
+    ]
+
+    normalized = normalize_compiler_output(
+        json.dumps(payload),
+        authority_input=_authority_input(),
+    )
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationFailure)
+    assert normalized.root.reason == "JSON_VALIDATION_FAILED"
+    assert "ambiguous repeated invariant identity" in (normalized.root.blocking_gaps[0])
+
+
+def test_unknown_noncanonical_reference_remains_invalid() -> None:
+    """Only exact references to emitted invariants receive local surrogates."""
+    payload = _success_payload()
+    payload["invariants"][0]["id"] = "known-temporary-invariant"
+    payload["source_map"][0]["invariant_id"] = "unknown-temporary-invariant"
+
+    normalized = normalize_compiler_output(
+        json.dumps(payload),
+        authority_input=_authority_input(),
+    )
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationFailure)
+    assert normalized.root.reason == "INELIGIBLE_INVARIANT_SOURCE"
+    assert "source-map identities do not match" in normalized.root.blocking_gaps[0]
+
+
 def test_ambiguous_duplicate_invariant_ids_fail_stably_under_permutation() -> None:
     """Unordered collections cannot positionally resolve one repeated provider ID."""
     forward = _success_payload()

@@ -172,6 +172,14 @@ def _agentic_nodes() -> AgenticRecipeNodes:
     return AgenticRecipeNodes(
         authority_compile=FakeLeafAgent(name="fake_authority_compile", response={}),
         authority_repair=FakeLeafAgent(name="fake_authority_repair", response={}),
+        authority_compile_validation_repair=FakeLeafAgent(
+            name="fake_authority_compile_validation_repair",
+            response={},
+        ),
+        authority_repair_validation_repair=FakeLeafAgent(
+            name="fake_authority_repair_validation_repair",
+            response={},
+        ),
         vision_interview=FakeLeafAgent(
             name="fake_vision_interview",
             response={},
@@ -250,7 +258,13 @@ def test_recipe_registry_covers_each_stable_agentic_domain_node_once() -> None:
         assert recipe.workflow.retry_config is not None
         expected_attempts = (
             1
-            if node_id in {"vision.bootstrap", "vision.interview"}
+            if node_id
+            in {
+                "authority.compile",
+                "authority.repair",
+                "vision.bootstrap",
+                "vision.interview",
+            }
             else RECIPE_MAX_ATTEMPTS
         )
         assert recipe.workflow.retry_config.max_attempts == expected_attempts

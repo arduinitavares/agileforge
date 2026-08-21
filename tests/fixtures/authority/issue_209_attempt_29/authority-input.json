@@ -1,0 +1,320 @@
+{
+  "artifact_id": "SPEC.string-calculator-lab.v1",
+  "authority_input_fingerprint": "sha256:edd8223da117a5dbf2735b8b35c882eeb453850251e1a574bf341b79518a710e",
+  "eligible_item_ids": [
+    "CONSTRAINT.001",
+    "CONSTRAINT.002",
+    "DATA.001",
+    "DATA.002",
+    "INTERFACE.001",
+    "INTERFACE.002",
+    "QUALITY.001",
+    "REQ.001",
+    "REQ.002",
+    "REQ.003",
+    "REQ.004",
+    "REQ.005",
+    "REQ.006",
+    "REQ.007",
+    "REQ.008",
+    "REQ.009",
+    "REQ.010",
+    "REQ.011",
+    "REQ.012",
+    "REQ.013",
+    "REQ.014",
+    "REQ.015"
+  ],
+  "normative_items": [
+    {
+      "acceptance": [
+        "Project configuration declares Python 3.13 or newer.",
+        "Project setup and dependency operations use uv."
+      ],
+      "id": "CONSTRAINT.001",
+      "level": "MUST",
+      "statement": "The implementation MUST target Python 3.13 or newer and manage the project exclusively with uv.",
+      "type": "CONSTRAINT"
+    },
+    {
+      "acceptance": [
+        "Any runtime dependency has a documented concrete justification.",
+        "Unjustified runtime dependencies are not added."
+      ],
+      "id": "CONSTRAINT.002",
+      "level": "SHOULD",
+      "statement": "The implementation SHOULD prefer the Python standard library and MAY add a runtime dependency only when a concrete requirement cannot reasonably be met without it.",
+      "type": "CONSTRAINT"
+    },
+    {
+      "acceptance": [
+        "Empty input is valid.",
+        "Supported separators are comma and actual line feed.",
+        "The definition does not include custom Delimiters."
+      ],
+      "id": "DATA.001",
+      "level": "MUST",
+      "statement": "A Number List is either empty or one or more Integer Tokens separated by exactly one comma or actual line-feed Delimiter; comma and line-feed Delimiters may coexist.",
+      "type": "DATA"
+    },
+    {
+      "acceptance": [
+        "ASCII decimal digits are supported.",
+        "An optional leading minus sign is supported.",
+        "Whitespace and a leading plus sign are not part of the promised contract."
+      ],
+      "id": "DATA.002",
+      "level": "MUST",
+      "statement": "An Integer Token is ASCII decimal digits with an optional leading minus sign, with no whitespace and no leading plus sign.",
+      "type": "DATA"
+    },
+    {
+      "acceptance": [
+        "The symbol and signature are usable by a Python consumer."
+      ],
+      "id": "INTERFACE.001",
+      "level": "MUST",
+      "statement": "The Python interface is the importable operation add(numbers: str) -> int exposed from the string_calculator package.",
+      "type": "INTERFACE"
+    },
+    {
+      "acceptance": [
+        "The command is installed and invocable.",
+        "Supported success and rejection I/O contracts hold."
+      ],
+      "id": "INTERFACE.002",
+      "level": "MUST",
+      "statement": "The command-line interface is the installed string-calculator command with one positional Number List argument and conventional stdout, stderr, and exit-status behavior defined by this specification.",
+      "type": "INTERFACE"
+    },
+    {
+      "acceptance": [
+        "Public behavior is tested at public seams.",
+        "CLI output and status are deterministic for supported inputs."
+      ],
+      "id": "QUALITY.001",
+      "level": "SHOULD",
+      "statement": "The public Python and command-line contracts SHOULD remain small, predictable, externally verifiable, and suitable for automation.",
+      "type": "QUALITY"
+    },
+    {
+      "acceptance": [
+        "Importing add from string_calculator succeeds.",
+        "add accepts one string argument and returns an integer for supported input.",
+        "The public contract does not require consumers to import internal modules."
+      ],
+      "id": "REQ.001",
+      "level": "MUST",
+      "statement": "The product MUST export a public Python operation add(numbers: str) -> int directly from the string_calculator package interface.",
+      "type": "REQ"
+    },
+    {
+      "acceptance": [
+        "add(\"\") returns 0."
+      ],
+      "id": "REQ.002",
+      "level": "MUST",
+      "statement": "The Python operation MUST return zero for an empty Number List.",
+      "type": "REQ"
+    },
+    {
+      "acceptance": [
+        "One non-negative Integer Token returns its numeric value.",
+        "Comma-separated tokens return their arithmetic sum.",
+        "Line-feed-separated tokens return their arithmetic sum.",
+        "Comma and line-feed Delimiters may coexist.",
+        "There is no arbitrary product-level maximum number of Integer Tokens."
+      ],
+      "id": "REQ.003",
+      "level": "MUST",
+      "statement": "The Python operation MUST sum one or more supported non-negative Integer Tokens separated by supported Delimiters.",
+      "type": "REQ"
+    },
+    {
+      "acceptance": [
+        "A token such as 007 contributes 7.",
+        "A token such as -0 is accepted as zero.",
+        "Zero and leading-zero spellings produce their numeric meanings."
+      ],
+      "id": "REQ.004",
+      "level": "MUST",
+      "statement": "The product MUST interpret leading-zero spellings by numeric value and MUST treat negative zero as zero.",
+      "type": "REQ"
+    },
+    {
+      "acceptance": [
+        "Any negative value causes ValueError.",
+        "No partial sum is returned when rejection occurs.",
+        "Negative zero does not cause rejection."
+      ],
+      "id": "REQ.005",
+      "level": "MUST",
+      "statement": "The Python operation MUST reject the entire Number List when any parsed value is below zero by raising ValueError rather than returning a partial sum.",
+      "type": "REQ"
+    },
+    {
+      "acceptance": [
+        "The complete ValueError message equals `negative numbers not allowed: ` followed by the canonical negative values and nothing else.",
+        "Negative values appear in encounter order.",
+        "Repeated negative values remain repeated in the diagnostic.",
+        "Equivalent negative spellings are rendered as canonical decimal values without leading zeros.",
+        "Canonical negative values are separated by exactly comma and space."
+      ],
+      "id": "REQ.006",
+      "level": "MUST",
+      "statement": "For a Number List containing one or more negative values, the Python operation MUST raise ValueError whose complete message equals `negative numbers not allowed: ` followed only by every canonical negative value in encounter order, with duplicate occurrences preserved and values separated by comma and space.",
+      "type": "REQ"
+    },
+    {
+      "acceptance": [
+        "The installed command is named string-calculator.",
+        "A supported Number List can be supplied as one positional argument.",
+        "Actual shell-quoted line feeds are accepted as Delimiters."
+      ],
+      "id": "REQ.007",
+      "level": "MUST",
+      "statement": "The product MUST install a string-calculator command accepting one supported Number List as a positional argument.",
+      "type": "REQ"
+    },
+    {
+      "acceptance": [
+        "Standard output contains only the decimal sum followed by one newline.",
+        "Standard error is empty.",
+        "The process exits with status zero."
+      ],
+      "id": "REQ.008",
+      "level": "MUST",
+      "statement": "For a successful supported invocation, the command MUST write only the decimal sum and one trailing newline to standard output, write nothing to standard error, and exit zero.",
+      "type": "REQ"
+    },
+    {
+      "acceptance": [
+        "Standard output contains no sum.",
+        "Standard error equals the Python ValueError message followed by exactly one trailing newline.",
+        "The process exits with a nonzero status."
+      ],
+      "id": "REQ.009",
+      "level": "MUST",
+      "statement": "For negative-number rejection, the command MUST write the exact Python error text and one trailing newline to standard error, write no sum to standard output, and exit nonzero.",
+      "type": "REQ"
+    },
+    {
+      "acceptance": [
+        "CLI calculations are performed through add.",
+        "Public Python and CLI behavior remains governed by the same calculation implementation."
+      ],
+      "id": "REQ.010",
+      "level": "MUST",
+      "statement": "The command-line adapter MUST delegate to the public add operation and MUST NOT implement an independent parser or calculation path.",
+      "type": "REQ"
+    },
+    {
+      "acceptance": [
+        "The primary test seam is public add.",
+        "The secondary seam is the installed command through subprocess tests.",
+        "Tests do not require internal helper or module structure."
+      ],
+      "id": "REQ.011",
+      "level": "MUST",
+      "statement": "Tests MUST exercise externally visible behavior through the public Python add operation and the installed command rather than parser structure, helper calls, or module organization.",
+      "type": "REQ"
+    },
+    {
+      "acceptance": [
+        "Each listed supported partition has public-contract coverage.",
+        "Negative rejection order and duplicate preservation are tested.",
+        "CLI tests cover successful output and status, actual line-feed handling, and negative standard-error and nonzero behavior without duplicating every Python case."
+      ],
+      "id": "REQ.012",
+      "level": "MUST",
+      "statement": "The test suite MUST explicitly cover the supported behavior partitions, including empty input, one and many values, comma and line-feed Delimiters, mixed Delimiters, zero, leading zeros, negative zero, and negative rejection order and duplication.",
+      "type": "REQ"
+    },
+    {
+      "acceptance": [
+        "The four commands are present in the local quality gate.",
+        "The same four commands run in GitHub Actions.",
+        "The gate uses no typing suppressions."
+      ],
+      "id": "REQ.013",
+      "level": "MUST",
+      "statement": "Local verification and GitHub Actions MUST run the same quality gate: uv lock --check, uv run --frozen ruff check ., uv run --frozen ty check, and uv run --frozen pytest.",
+      "type": "REQ"
+    },
+    {
+      "acceptance": [
+        "Evidence identifies one exact commit SHA.",
+        "Evidence records successful results for every quality-gate command.",
+        "The evidence is available for human review."
+      ],
+      "id": "REQ.014",
+      "level": "MUST",
+      "statement": "Completion evidence MUST identify the exact verified commit and the successful quality-gate results.",
+      "type": "REQ"
+    },
+    {
+      "acceptance": [
+        "Captured evidence includes public-contract test failure before the corresponding behavior is implemented.",
+        "Captured evidence includes the subsequent passing result.",
+        "Evidence does not require a prescribed number or pattern of commits."
+      ],
+      "id": "REQ.015",
+      "level": "MUST",
+      "statement": "The release evidence MUST show visible failing and passing progression at public seams without requiring a particular commit cadence.",
+      "type": "REQ"
+    }
+  ],
+  "normative_relations": [
+    {
+      "from_": "DATA.001",
+      "to": "DATA.002",
+      "type": "depends_on"
+    },
+    {
+      "from_": "REQ.001",
+      "to": "INTERFACE.001",
+      "type": "implements"
+    },
+    {
+      "from_": "REQ.003",
+      "to": "DATA.001",
+      "type": "constrains"
+    },
+    {
+      "from_": "REQ.005",
+      "to": "REQ.006",
+      "type": "constrains"
+    },
+    {
+      "from_": "REQ.007",
+      "to": "REQ.010",
+      "type": "depends_on"
+    },
+    {
+      "from_": "REQ.007",
+      "to": "INTERFACE.002",
+      "type": "implements"
+    },
+    {
+      "from_": "REQ.008",
+      "to": "INTERFACE.002",
+      "type": "verifies"
+    },
+    {
+      "from_": "REQ.009",
+      "to": "INTERFACE.002",
+      "type": "verifies"
+    },
+    {
+      "from_": "REQ.011",
+      "to": "INTERFACE.001",
+      "type": "verifies"
+    },
+    {
+      "from_": "REQ.011",
+      "to": "INTERFACE.002",
+      "type": "verifies"
+    }
+  ],
+  "schema_version": "agileforge.authority_input.v2"
+}

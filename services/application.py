@@ -4761,6 +4761,12 @@ def production_application() -> AgileForgeApplication:
         nodes=AgenticRecipeNodes(
             authority_compile=build_spec_authority_compiler_agent(),
             authority_repair=build_spec_authority_compiler_agent(),
+            authority_compile_validation_repair=(
+                build_spec_authority_compiler_agent(validation_repair=True)
+            ),
+            authority_repair_validation_repair=(
+                build_spec_authority_compiler_agent(validation_repair=True)
+            ),
             vision_interview=vision_interview_agent,
             vision_repair=vision_repair_agent,
             product_goal=product_goal_interview_agent,

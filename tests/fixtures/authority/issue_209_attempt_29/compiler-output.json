@@ -1,0 +1,278 @@
+{
+  "assumptions": [],
+  "compiler_version": "4.0.2",
+  "eligible_feature_rules": [],
+  "gaps": [
+    "CONSTRAINT.001: unsupported tooling requirement; enforce outside compiled Authority.",
+    "CONSTRAINT.002: unsupported dependency-preference guidance; enforce outside compiled Authority.",
+    "QUALITY.001: unsupported quality-process requirement; enforce outside compiled Authority.",
+    "REQ.011: unsupported testing-process requirement; enforce outside compiled Authority.",
+    "REQ.012: unsupported test-coverage requirement; enforce outside compiled Authority.",
+    "REQ.013: unsupported quality-gate workflow requirement; enforce outside compiled Authority.",
+    "REQ.014: unsupported completion-evidence requirement; enforce outside compiled Authority.",
+    "REQ.015: unsupported release-evidence requirement; enforce outside compiled Authority."
+  ],
+  "invariants": [
+    {
+      "id": "INV-0000000000000000",
+      "parameters": {
+        "fields": [
+          "Integer Tokens",
+          "comma",
+          "actual line-feed Delimiter"
+        ],
+        "rule": "A Number List is either empty or one or more Integer Tokens separated by exactly one comma or actual line-feed Delimiter; comma and line-feed Delimiters may coexist.",
+        "subject": "Number List"
+      },
+      "source_item_id": "DATA.001",
+      "source_level": "MUST",
+      "type": "DATA_CONTRACT"
+    },
+    {
+      "id": "INV-0000000000000001",
+      "parameters": {
+        "fields": [
+          "ASCII decimal digits",
+          "optional leading minus sign",
+          "whitespace",
+          "leading plus sign"
+        ],
+        "rule": "An Integer Token is ASCII decimal digits with an optional leading minus sign, with no whitespace and no leading plus sign.",
+        "subject": "Integer Token"
+      },
+      "source_item_id": "DATA.002",
+      "source_level": "MUST",
+      "type": "DATA_CONTRACT"
+    },
+    {
+      "id": "INV-0000000000000002",
+      "parameters": {
+        "fields": [
+          "numbers: str",
+          "int"
+        ],
+        "rule": "The Python interface is the importable operation add(numbers: str) -> int exposed from the string_calculator package.",
+        "subject": "add(numbers: str) -> int"
+      },
+      "source_item_id": "INTERFACE.001",
+      "source_level": "MUST",
+      "type": "DATA_CONTRACT"
+    },
+    {
+      "id": "INV-0000000000000003",
+      "parameters": {
+        "behavior": "The command-line interface is the installed string-calculator command with one positional Number List argument and conventional stdout, stderr, and exit-status behavior defined by this specification.",
+        "route": "string-calculator",
+        "route_name": "command-line interface"
+      },
+      "source_item_id": "INTERFACE.002",
+      "source_level": "MUST",
+      "type": "ROUTE_CONTRACT"
+    },
+    {
+      "id": "INV-0000000000000004",
+      "parameters": {
+        "fields": [
+          "add",
+          "one string argument",
+          "an integer"
+        ],
+        "rule": "The product MUST export a public Python operation add(numbers: str) -> int directly from the string_calculator package interface.",
+        "subject": "public Python operation add(numbers: str) -> int"
+      },
+      "source_item_id": "REQ.001",
+      "source_level": "MUST",
+      "type": "DATA_CONTRACT"
+    },
+    {
+      "id": "INV-0000000000000005",
+      "parameters": {
+        "outcome": "returns 0",
+        "state": "empty Number List",
+        "trigger": "add(\"\")"
+      },
+      "source_item_id": "REQ.002",
+      "source_level": "MUST",
+      "type": "STATE_TRANSITION"
+    },
+    {
+      "id": "INV-0000000000000006",
+      "parameters": {
+        "fields": [
+          "supported non-negative Integer Tokens",
+          "supported Delimiters",
+          "arithmetic sum"
+        ],
+        "rule": "The Python operation MUST sum one or more supported non-negative Integer Tokens separated by supported Delimiters.",
+        "subject": "Python operation"
+      },
+      "source_item_id": "REQ.003",
+      "source_level": "MUST",
+      "type": "DATA_CONTRACT"
+    },
+    {
+      "id": "INV-0000000000000007",
+      "parameters": {
+        "fields": [
+          "numeric value",
+          "negative zero",
+          "zero"
+        ],
+        "rule": "The product MUST interpret leading-zero spellings by numeric value and MUST treat negative zero as zero.",
+        "subject": "leading-zero spellings"
+      },
+      "source_item_id": "REQ.004",
+      "source_level": "MUST",
+      "type": "DATA_CONTRACT"
+    },
+    {
+      "id": "INV-0000000000000008",
+      "parameters": {
+        "outcome": "raising ValueError rather than returning a partial sum",
+        "state": "Number List containing one or more negative values",
+        "trigger": "any parsed value is below zero"
+      },
+      "source_item_id": "REQ.005",
+      "source_level": "MUST",
+      "type": "STATE_TRANSITION"
+    },
+    {
+      "id": "INV-0000000000000009",
+      "parameters": {
+        "fields": [
+          "negative numbers not allowed: ",
+          "canonical negative value",
+          "encounter order",
+          "comma and space"
+        ],
+        "rule": "For a Number List containing one or more negative values, the Python operation MUST raise ValueError whose complete message equals `negative numbers not allowed: ` followed only by every canonical negative value in encounter order, with duplicate occurrences preserved and values separated by comma and space.",
+        "subject": "complete message"
+      },
+      "source_item_id": "REQ.006",
+      "source_level": "MUST",
+      "type": "DATA_CONTRACT"
+    },
+    {
+      "id": "INV-0000000000010",
+      "parameters": {
+        "behavior": "The product MUST install a string-calculator command accepting one supported Number List as a positional argument.",
+        "route": "string-calculator",
+        "route_name": "installed command"
+      },
+      "source_item_id": "REQ.007",
+      "source_level": "MUST",
+      "type": "ROUTE_CONTRACT"
+    },
+    {
+      "id": "INV-0000000000011",
+      "parameters": {
+        "behavior": "For a successful supported invocation, the command MUST write only the decimal sum and one trailing newline to standard output, write nothing to standard error, and exit zero.",
+        "route": "string-calculator",
+        "route_name": "successful supported invocation"
+      },
+      "source_item_id": "REQ.008",
+      "source_level": "MUST",
+      "type": "ROUTE_CONTRACT"
+    },
+    {
+      "id": "INV-0000000000012",
+      "parameters": {
+        "behavior": "For negative-number rejection, the command MUST write the exact Python error text and one trailing newline to standard error, write no sum to standard output, and exit nonzero.",
+        "route": "string-calculator",
+        "route_name": "negative-number rejection"
+      },
+      "source_item_id": "REQ.009",
+      "source_level": "MUST",
+      "type": "ROUTE_CONTRACT"
+    },
+    {
+      "id": "INV-0000000000013",
+      "parameters": {
+        "expression": "The command-line adapter MUST delegate to the public add operation and MUST NOT implement an independent parser or calculation path."
+      },
+      "source_item_id": "REQ.010",
+      "source_level": "MUST",
+      "type": "RELATION_CONSTRAINT"
+    }
+  ],
+  "prompt_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+  "rejected_features": [],
+  "schema_version": "agileforge.compiled_authority.v3",
+  "scope_themes": [
+    "Number List",
+    "public Python operation",
+    "command-line interface"
+  ],
+  "source_map": [
+    {
+      "excerpt": "A Number List is either empty or one or more Integer Tokens separated by exactly one comma or actual line-feed Delimiter; comma and line-feed Delimiters may coexist.",
+      "invariant_id": "INV-0000000000000000",
+      "location": "DATA.001"
+    },
+    {
+      "excerpt": "An Integer Token is ASCII decimal digits with an optional leading minus sign, with no whitespace and no leading plus sign.",
+      "invariant_id": "INV-0000000000000001",
+      "location": "DATA.002"
+    },
+    {
+      "excerpt": "The Python interface is the importable operation add(numbers: str) -> int exposed from the string_calculator package.",
+      "invariant_id": "INV-0000000000000002",
+      "location": "INTERFACE.001"
+    },
+    {
+      "excerpt": "The command-line interface is the installed string-calculator command with one positional Number List argument and conventional stdout, stderr, and exit-status behavior defined by this specification.",
+      "invariant_id": "INV-0000000000000003",
+      "location": "INTERFACE.002"
+    },
+    {
+      "excerpt": "The product MUST export a public Python operation add(numbers: str) -> int directly from the string_calculator package interface.",
+      "invariant_id": "INV-0000000000000004",
+      "location": "REQ.001"
+    },
+    {
+      "excerpt": "add(\"\") returns 0.",
+      "invariant_id": "INV-0000000000000005",
+      "location": "REQ.002"
+    },
+    {
+      "excerpt": "The Python operation MUST sum one or more supported non-negative Integer Tokens separated by supported Delimiters.",
+      "invariant_id": "INV-0000000000000006",
+      "location": "REQ.003"
+    },
+    {
+      "excerpt": "The product MUST interpret leading-zero spellings by numeric value and MUST treat negative zero as zero.",
+      "invariant_id": "INV-0000000000000007",
+      "location": "REQ.004"
+    },
+    {
+      "excerpt": "The Python operation MUST reject the entire Number List when any parsed value is below zero by raising ValueError rather than returning a partial sum.",
+      "invariant_id": "INV-0000000000000008",
+      "location": "REQ.005"
+    },
+    {
+      "excerpt": "For a Number List containing one or more negative values, the Python operation MUST raise ValueError whose complete message equals `negative numbers not allowed: ` followed only by every canonical negative value in encounter order, with duplicate occurrences preserved and values separated by comma and space.",
+      "invariant_id": "INV-0000000000000009",
+      "location": "REQ.006"
+    },
+    {
+      "excerpt": "The product MUST install a string-calculator command accepting one supported Number List as a positional argument.",
+      "invariant_id": "INV-0000000000010",
+      "location": "REQ.007"
+    },
+    {
+      "excerpt": "For a successful supported invocation, the command MUST write only the decimal sum and one trailing newline to standard output, write nothing to standard error, and exit zero.",
+      "invariant_id": "INV-0000000000011",
+      "location": "REQ.008"
+    },
+    {
+      "excerpt": "For negative-number rejection, the command MUST write the exact Python error text and one trailing newline to standard error, write no sum to standard output, and exit nonzero.",
+      "invariant_id": "INV-0000000000012",
+      "location": "REQ.009"
+    },
+    {
+      "excerpt": "The command-line adapter MUST delegate to the public add operation and MUST NOT implement an independent parser or calculation path.",
+      "invariant_id": "INV-0000000000013",
+      "location": "REQ.010"
+    }
+  ]
+}

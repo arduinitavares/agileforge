@@ -172,6 +172,8 @@ def test_recipe_catalog_excludes_legacy_vision_and_adapts_interview_output() -> 
         nodes=AgenticRecipeNodes(
             authority_compile=root_agent,
             authority_repair=root_agent,
+            authority_compile_validation_repair=root_agent,
+            authority_repair_validation_repair=root_agent,
             vision_interview=root_agent,
             vision_repair=repair_agent,
             product_goal=root_agent,

@@ -4,17 +4,21 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
+from google.adk import Workflow
 from google.adk.agents import BaseAgent, InvocationContext
 from google.adk.apps import App, ResumabilityConfig
 from google.adk.events import Event
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
+from google.adk.workflow import START, node
 from google.genai import types
 from sqlmodel import Session, select
 
@@ -43,12 +47,15 @@ from services.authority_review_projection import (
     build_authority_review_snapshot_in_session,
 )
 from services.contracts.authority_input_v2 import AuthorityInputV2, AuthorityItemV2
+from services.contracts.specification_normalizer import normalize_compiler_output
 from tests.workflow.lifecycle_fixtures import seed_accepted_specification
 from utils.spec_schemas import (
+    SpecAuthorityCompilationFailure,
     SpecAuthorityCompilationSuccess,
     SpecAuthorityCompilerEnvelope,
     SpecAuthorityCompilerInput,
     SpecAuthorityCompilerOutput,
+    SpecAuthorityValidationRepairInput,
 )
 from workflow.clock import FixedClock
 from workflow.definitions.authority import authority_graph
@@ -73,6 +80,7 @@ EVALUATED_AT = datetime(2026, 8, 14, 12, tzinfo=UTC)
 EXECUTION_SETTINGS: JsonObject = {"timeout_seconds": 5.0, "max_attempts": 2}
 LEASE_SECONDS = 60
 EXPECTED_REPAIRED_AUTHORITY_COUNT = 2
+INVALID_OUTPUT_EVIDENCE_LIMIT = 131_072
 SOURCE_ID = "REQ.issue-205.authority-boundary"
 SOURCE_STATEMENT = "Authority output MUST preserve typed requirements."
 NON_FINITE_SOURCE = "The score MUST be at most NaN."
@@ -82,6 +90,34 @@ ISSUE_208_FIXTURE_ROOT = (
     / "authority-quality"
     / "string-calculator-tooling-constraint"
 )
+ISSUE_209_FIXTURE_ROOT = (
+    Path(__file__).resolve().parents[1]
+    / "fixtures"
+    / "authority"
+    / "issue_209_attempt_29"
+)
+
+
+@dataclass(frozen=True)
+class _RecipeRunFixture:
+    """Optional provider-free inputs for one direct recipe execution."""
+
+    compiler_input: SpecAuthorityCompilerInput | None = None
+    validation_repair_response: object | None = None
+    validation_repair_observations: list[SpecAuthorityValidationRepairInput] | None = (
+        None
+    )
+    initial_leaf: BaseAgent | Workflow | None = None
+
+
+@dataclass(frozen=True)
+class _AuthorityRunnerResponses:
+    """Provider-free initial and validation-repair responses for both paths."""
+
+    compile: object
+    repair: object
+    compile_validation_repair: object | None = None
+    repair_validation_repair: object | None = None
 
 
 class CountingAuthorityLeaf(BaseAgent):
@@ -113,6 +149,48 @@ def _counting_leaf(
     leaf = CountingAuthorityLeaf(name=name, response=response, calls=calls)
     leaf.calls = calls
     return leaf
+
+
+def _validation_repair_leaf(
+    *,
+    response: object,
+    calls: list[str],
+    observations: list[SpecAuthorityValidationRepairInput],
+) -> Workflow:
+    """Return one typed provider-free repair leaf and capture its exact input."""
+
+    @node(name="record_authority_validation_repair", rerun_on_resume=True)
+    async def record_authority_validation_repair(
+        node_input: SpecAuthorityValidationRepairInput,
+    ) -> object:
+        calls.append("authority_validation_repair")
+        observations.append(node_input)
+        return response
+
+    return Workflow(
+        name="authority_validation_repair_provider",
+        input_schema=SpecAuthorityValidationRepairInput,
+        edges=[(START, record_authority_validation_repair)],
+    )
+
+
+def _failing_authority_leaf(*, name: str, calls: list[str]) -> Workflow:
+    """Raise one provider-like exception before any compiler output exists."""
+
+    @node(name=f"raise_{name}", rerun_on_resume=True)
+    async def raise_provider_failure(
+        node_input: SpecAuthorityCompilerInput,
+    ) -> object:
+        del node_input
+        calls.append(name)
+        message = "provider transport failed before output"
+        raise RuntimeError(message)
+
+    return Workflow(
+        name=f"{name}_workflow",
+        input_schema=SpecAuthorityCompilerInput,
+        edges=[(START, raise_provider_failure)],
+    )
 
 
 def _authority_input() -> AuthorityInputV2:
@@ -166,8 +244,7 @@ def _issue_208_compiler_input() -> SpecAuthorityCompilerInput:
 def _issue_208_response(*, gold: bool) -> str:
     candidate_dir = "gold-authority" if gold else "generated-authority"
     return (
-        ISSUE_208_FIXTURE_ROOT
-        / f"agileforge/{candidate_dir}/compiled-authority.json"
+        ISSUE_208_FIXTURE_ROOT / f"agileforge/{candidate_dir}/compiled-authority.json"
     ).read_text(encoding="utf-8")
 
 
@@ -175,6 +252,21 @@ def _issue_208_response_with_field_name(field_name: str) -> str:
     payload = json.loads(_issue_208_response(gold=True))
     payload["invariants"][0]["parameters"]["field_name"] = field_name
     return json.dumps(payload)
+
+
+def _issue_209_authority_input() -> AuthorityInputV2:
+    return AuthorityInputV2.model_validate_json(
+        (ISSUE_209_FIXTURE_ROOT / "authority-input.json").read_text(encoding="utf-8")
+    )
+
+
+def _issue_209_repair_payload(authority_input: AuthorityInputV2) -> dict[str, Any]:
+    payload = _success_payload(label="attempt-29-repaired")
+    payload["gaps"] = [
+        f"{item_id}: provider-free validation-repair fixture."
+        for item_id in authority_input.eligible_item_ids
+    ]
+    return payload
 
 
 def _success_payload(*, label: str = "compile") -> dict[str, Any]:
@@ -391,13 +483,17 @@ def _recipe_payload(
 
 def _registry(
     *,
-    compile_leaf: BaseAgent,
-    repair_leaf: BaseAgent,
+    compile_leaf: BaseAgent | Workflow,
+    repair_leaf: BaseAgent | Workflow,
+    compile_validation_repair_leaf: BaseAgent | Workflow,
+    repair_validation_repair_leaf: BaseAgent | Workflow,
 ) -> AdkRecipeRegistry:
     return build_agentic_recipe_registry(
         nodes=AgenticRecipeNodes(
             authority_compile=compile_leaf,
             authority_repair=repair_leaf,
+            authority_compile_validation_repair=compile_validation_repair_leaf,
+            authority_repair_validation_repair=repair_validation_repair_leaf,
             vision_interview=_unused_leaf("unused_vision_interview"),
             vision_repair=_unused_leaf("unused_vision_repair"),
             product_goal=_unused_leaf("unused_product_goal"),
@@ -416,12 +512,25 @@ async def _run_recipe_async(
     *,
     response: object,
     calls: list[str],
-    compiler_input: SpecAuthorityCompilerInput | None = None,
+    fixture: _RecipeRunFixture | None = None,
 ) -> RecipeOutput:
-    target_leaf = _counting_leaf(
-        name=node_id.replace(".", "_"),
-        response=response,
+    options = fixture or _RecipeRunFixture()
+    target_leaf = options.initial_leaf or _counting_leaf(
+        name=node_id.replace(".", "_"), response=response, calls=calls
+    )
+    observations = (
+        options.validation_repair_observations
+        if options.validation_repair_observations is not None
+        else []
+    )
+    validation_repair_leaf = _validation_repair_leaf(
+        response=(
+            response
+            if options.validation_repair_response is None
+            else options.validation_repair_response
+        ),
         calls=calls,
+        observations=observations,
     )
     registry = _registry(
         compile_leaf=(
@@ -429,6 +538,16 @@ async def _run_recipe_async(
         ),
         repair_leaf=(
             target_leaf if node_id == "authority.repair" else _unused_leaf("repair")
+        ),
+        compile_validation_repair_leaf=(
+            validation_repair_leaf
+            if node_id == "authority.compile"
+            else _unused_leaf("unused_compile_validation_repair")
+        ),
+        repair_validation_repair_leaf=(
+            validation_repair_leaf
+            if node_id == "authority.repair"
+            else _unused_leaf("unused_repair_validation_repair")
         ),
     )
     recipe = registry.require(node_id)
@@ -452,7 +571,7 @@ async def _run_recipe_async(
                 text=RecipeInput(
                     payload=_recipe_payload(
                         node_id,
-                        compiler_input=compiler_input,
+                        compiler_input=options.compiler_input,
                     )
                 ).model_dump_json()
             )
@@ -477,14 +596,14 @@ def _run_recipe(
     *,
     response: object,
     calls: list[str],
-    compiler_input: SpecAuthorityCompilerInput | None = None,
+    fixture: _RecipeRunFixture | None = None,
 ) -> RecipeOutput:
     return asyncio.run(
         _run_recipe_async(
             node_id,
             response=response,
             calls=calls,
-            compiler_input=compiler_input,
+            fixture=fixture,
         )
     )
 
@@ -561,7 +680,7 @@ def test_attempt_28_tooling_constraint_fails_closed_in_compile_and_repair(
             node_id,
             response=_issue_208_response(gold=False),
             calls=calls,
-            compiler_input=_issue_208_compiler_input(),
+            fixture=_RecipeRunFixture(compiler_input=_issue_208_compiler_input()),
         )
 
     error = captured.value
@@ -571,7 +690,76 @@ def test_attempt_28_tooling_constraint_fails_closed_in_compile_and_repair(
     assert code_value == "AUTHORITY_COMPILATION_FAILED"
     assert "INELIGIBLE_INVARIANT_SOURCE" in str(error)
     assert "CONSTRAINT.001 semantics" in str(error)
-    assert calls == [node_id.replace(".", "_")]
+    assert calls == [node_id.replace(".", "_"), "authority_validation_repair"]
+
+
+def test_attempt_29_rebinds_temporary_ids_then_repairs_semantic_failure() -> None:
+    """The exact Manual Test output crosses both bounded recovery boundaries."""
+    authority_input = _issue_209_authority_input()
+    raw_output = (ISSUE_209_FIXTURE_ROOT / "compiler-output.json").read_text(
+        encoding="utf-8"
+    )
+    manifest = json.loads(
+        (ISSUE_209_FIXTURE_ROOT / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert isinstance(manifest, dict)
+    assert (
+        hashlib.sha256(
+            (ISSUE_209_FIXTURE_ROOT / "authority-input.json").read_bytes()
+        ).hexdigest()
+        == manifest["authority_input_sha256"]
+    )
+    assert (
+        hashlib.sha256(
+            (ISSUE_209_FIXTURE_ROOT / "compiler-output.json").read_bytes()
+        ).hexdigest()
+        == manifest["compiler_output_sha256"]
+    )
+    assert [item["id"] for item in json.loads(raw_output)["invariants"][-4:]] == [
+        "INV-0000000000010",
+        "INV-0000000000011",
+        "INV-0000000000012",
+        "INV-0000000000013",
+    ]
+
+    initial = normalize_compiler_output(
+        raw_output,
+        authority_input=authority_input,
+    ).root
+    assert isinstance(initial, SpecAuthorityCompilationFailure)
+    assert initial.reason == manifest["expected_initial_host_failure"]
+    assert "parameters are not authorized" in initial.blocking_gaps[0]
+    assert "match pattern" not in initial.blocking_gaps[0]
+
+    calls: list[str] = []
+    observations: list[SpecAuthorityValidationRepairInput] = []
+    compiler_input = SpecAuthorityCompilerInput(
+        authority_input=authority_input,
+        project_id=1,
+        spec_version_id=2,
+        specification_fingerprint="sha256:" + ("d" * 64),
+    )
+    output = _run_recipe(
+        "authority.compile",
+        response=raw_output,
+        calls=calls,
+        fixture=_RecipeRunFixture(
+            compiler_input=compiler_input,
+            validation_repair_response=json.dumps(
+                _issue_209_repair_payload(authority_input)
+            ),
+            validation_repair_observations=observations,
+        ),
+    )
+
+    compiled = SpecAuthorityCompilationSuccess.model_validate(
+        output.payload["compiled_authority"]
+    )
+    assert len(compiled.gaps) == len(authority_input.eligible_item_ids)
+    assert calls == ["authority_compile", "authority_validation_repair"]
+    assert len(observations) == 1
+    assert observations[0].validation_failure == initial
+    assert observations[0].invalid_output_excerpt == raw_output
 
 
 @pytest.mark.parametrize("node_id", ["authority.compile", "authority.repair"])
@@ -588,7 +776,7 @@ def test_paraphrased_parameter_fails_closed_in_compile_and_repair(
             node_id,
             response=_issue_208_response_with_field_name(field_name),
             calls=calls,
-            compiler_input=_issue_208_compiler_input(),
+            fixture=_RecipeRunFixture(compiler_input=_issue_208_compiler_input()),
         )
 
     error = captured.value
@@ -598,7 +786,7 @@ def test_paraphrased_parameter_fails_closed_in_compile_and_repair(
     assert code_value == "AUTHORITY_COMPILATION_FAILED"
     assert "INELIGIBLE_INVARIANT_SOURCE" in str(error)
     assert "CONSTRAINT.002 semantics" in str(error)
-    assert calls == [node_id.replace(".", "_")]
+    assert calls == [node_id.replace(".", "_"), "authority_validation_repair"]
 
 
 @pytest.mark.parametrize("node_id", ["authority.compile", "authority.repair"])
@@ -612,15 +800,16 @@ def test_identifier_normalization_remains_supported_in_compile_and_repair(
         node_id,
         response=_issue_208_response_with_field_name("request_limit"),
         calls=calls,
-        compiler_input=_issue_208_compiler_input(),
+        fixture=_RecipeRunFixture(compiler_input=_issue_208_compiler_input()),
     )
 
     compiled = SpecAuthorityCompilationSuccess.model_validate(
         output.payload["compiled_authority"]
     )
-    assert compiled.invariants[0].parameters.model_dump(mode="json")[
-        "field_name"
-    ] == "request_limit"
+    assert (
+        compiled.invariants[0].parameters.model_dump(mode="json")["field_name"]
+        == "request_limit"
+    )
     assert calls == [node_id.replace(".", "_")]
 
 
@@ -635,7 +824,7 @@ def test_tooling_gap_and_measurable_constraint_normalize_in_compile_and_repair(
         node_id,
         response=_issue_208_response(gold=True),
         calls=calls,
-        compiler_input=_issue_208_compiler_input(),
+        fixture=_RecipeRunFixture(compiler_input=_issue_208_compiler_input()),
     )
 
     compiled = SpecAuthorityCompilationSuccess.model_validate(
@@ -651,6 +840,140 @@ def test_tooling_gap_and_measurable_constraint_normalize_in_compile_and_repair(
         "field_name": "request limit",
         "max_value": 100,
     }
+    assert calls == [node_id.replace(".", "_")]
+
+
+@pytest.mark.parametrize("node_id", ["authority.compile", "authority.repair"])
+def test_authority_recipes_run_one_feedback_informed_validation_repair(
+    node_id: str,
+) -> None:
+    """A repairable host failure gets one distinct, typed correction attempt."""
+    calls: list[str] = []
+    observations: list[SpecAuthorityValidationRepairInput] = []
+    compiler_input = _compiler_input()
+    invalid_output = json.dumps(_typed_source_violation_payload())
+
+    output = _run_recipe(
+        node_id,
+        response=invalid_output,
+        calls=calls,
+        fixture=_RecipeRunFixture(
+            compiler_input=compiler_input,
+            validation_repair_response=json.dumps(_success_payload(label="repaired")),
+            validation_repair_observations=observations,
+        ),
+    )
+
+    compiled = SpecAuthorityCompilationSuccess.model_validate(
+        output.payload["compiled_authority"]
+    )
+    assert compiled.gaps == [f"{SOURCE_ID}: represented by a provider-free gap."]
+    assert calls == [node_id.replace(".", "_"), "authority_validation_repair"]
+    assert len(observations) == 1
+    repair_input = observations[0]
+    assert repair_input.compiler_input == compiler_input
+    assert repair_input.validation_failure.reason == "INELIGIBLE_INVARIANT_SOURCE"
+    assert (
+        "outside-authority-input" in (repair_input.validation_failure.blocking_gaps[0])
+    )
+    assert repair_input.invalid_output_excerpt == invalid_output
+    assert repair_input.invalid_output_fingerprint == (
+        "sha256:" + hashlib.sha256(invalid_output.encode("utf-8")).hexdigest()
+    )
+    assert repair_input.invalid_output_length == len(invalid_output)
+    assert repair_input.invalid_output_truncated is False
+    assert repair_input.repair_ordinal == 1
+
+
+def test_authority_validation_repair_evidence_is_bounded() -> None:
+    """Large invalid output remains diagnostic data with a stable size and hash."""
+    calls: list[str] = []
+    observations: list[SpecAuthorityValidationRepairInput] = []
+    invalid_output = "x" * 140_000
+
+    _run_recipe(
+        "authority.compile",
+        response=invalid_output,
+        calls=calls,
+        fixture=_RecipeRunFixture(
+            validation_repair_response=json.dumps(_success_payload(label="repaired")),
+            validation_repair_observations=observations,
+        ),
+    )
+
+    assert calls == ["authority_compile", "authority_validation_repair"]
+    assert len(observations) == 1
+    repair_input = observations[0]
+    assert len(repair_input.invalid_output_excerpt) == INVALID_OUTPUT_EVIDENCE_LIMIT
+    assert "<authority-compiler-output-truncated>" in (
+        repair_input.invalid_output_excerpt
+    )
+    assert repair_input.invalid_output_excerpt.startswith("x")
+    assert repair_input.invalid_output_excerpt.endswith("x")
+    assert repair_input.invalid_output_length == len(invalid_output)
+    assert repair_input.invalid_output_truncated is True
+    assert repair_input.invalid_output_fingerprint == (
+        "sha256:" + hashlib.sha256(invalid_output.encode("utf-8")).hexdigest()
+    )
+
+
+@pytest.mark.parametrize("node_id", ["authority.compile", "authority.repair"])
+def test_authority_validation_repair_never_recurses(node_id: str) -> None:
+    """A second invalid output ends the action after exactly two model calls."""
+    calls: list[str] = []
+
+    with pytest.raises(RuntimeError) as captured:
+        _run_recipe(
+            node_id,
+            response="not initial JSON",
+            calls=calls,
+            fixture=_RecipeRunFixture(validation_repair_response="not repaired JSON"),
+        )
+
+    assert "Bounded Authority validation repair failed" in str(captured.value)
+    assert "Initial:" in str(captured.value)
+    assert "Final:" in str(captured.value)
+    assert calls == [node_id.replace(".", "_"), "authority_validation_repair"]
+
+
+@pytest.mark.parametrize("node_id", ["authority.compile", "authority.repair"])
+def test_model_declared_terminal_failure_does_not_run_validation_repair(
+    node_id: str,
+) -> None:
+    """A structured non-repairable provider failure remains terminal."""
+    calls: list[str] = []
+    failure = json.dumps(
+        {
+            "schema_version": "agileforge.compiled_authority.v3",
+            "error": "SPEC_COMPILATION_FAILED",
+            "reason": "MODEL_BLOCKED",
+            "blocking_gaps": ["The provider refused this request."],
+        }
+    )
+
+    with pytest.raises(RuntimeError, match="MODEL_BLOCKED"):
+        _run_recipe(node_id, response=failure, calls=calls)
+
+    assert calls == [node_id.replace(".", "_")]
+
+
+@pytest.mark.parametrize("node_id", ["authority.compile", "authority.repair"])
+def test_provider_exception_does_not_run_validation_repair(node_id: str) -> None:
+    """No correction call occurs when the initial leaf produced no output."""
+    calls: list[str] = []
+    failing_leaf = _failing_authority_leaf(
+        name=node_id.replace(".", "_"),
+        calls=calls,
+    )
+
+    with pytest.raises(RuntimeError, match="provider transport failed"):
+        _run_recipe(
+            node_id,
+            response={},
+            calls=calls,
+            fixture=_RecipeRunFixture(initial_leaf=failing_leaf),
+        )
+
     assert calls == [node_id.replace(".", "_")]
 
 
@@ -718,7 +1041,7 @@ def test_authority_recipes_raise_stable_domain_failures_after_normalization(
     assert reason in str(error)
     assert detail in str(error)
     assert "validation error for SpecAuthorityCompilerEnvelope" not in str(error)
-    assert calls == [node_id.replace(".", "_")]
+    assert calls == [node_id.replace(".", "_"), "authority_validation_repair"]
 
 
 def _seed_compile_target(engine: Engine) -> tuple[int, int, str]:
@@ -815,20 +1138,39 @@ def _build_runner(
     engine: Engine,
     *,
     project_id: int,
-    compile_response: object,
-    repair_response: object,
+    responses: _AuthorityRunnerResponses,
     calls: list[str],
 ) -> tuple[AdkWorkflowRunner, WorkflowDomain]:
+    compile_repair_observations: list[SpecAuthorityValidationRepairInput] = []
+    repair_repair_observations: list[SpecAuthorityValidationRepairInput] = []
     registry = _registry(
         compile_leaf=_counting_leaf(
             name="compile_provider",
-            response=compile_response,
+            response=responses.compile,
             calls=calls,
         ),
         repair_leaf=_counting_leaf(
             name="repair_provider",
-            response=repair_response,
+            response=responses.repair,
             calls=calls,
+        ),
+        compile_validation_repair_leaf=_validation_repair_leaf(
+            response=(
+                responses.compile
+                if responses.compile_validation_repair is None
+                else responses.compile_validation_repair
+            ),
+            calls=calls,
+            observations=compile_repair_observations,
+        ),
+        repair_validation_repair_leaf=_validation_repair_leaf(
+            response=(
+                responses.repair
+                if responses.repair_validation_repair is None
+                else responses.repair_validation_repair
+            ),
+            calls=calls,
+            observations=repair_repair_observations,
         ),
     )
     domain = WorkflowDomain(
@@ -984,8 +1326,10 @@ def test_raw_json_compile_and_repair_persist_one_pending_authority_and_replay(
     runner, domain = _build_runner(
         engine,
         project_id=project_id,
-        compile_response=json.dumps(_distinct_multi_invariant_payload(label="compile")),
-        repair_response=json.dumps(_distinct_multi_invariant_payload(label="repair")),
+        responses=_AuthorityRunnerResponses(
+            compile=json.dumps(_distinct_multi_invariant_payload(label="compile")),
+            repair=json.dumps(_distinct_multi_invariant_payload(label="repair")),
+        ),
         calls=calls,
     )
 
@@ -1050,6 +1394,83 @@ def test_raw_json_compile_and_repair_persist_one_pending_authority_and_replay(
         assert review.pending_authority_id == authorities[-1].authority_id
 
 
+def test_validation_repair_success_persists_once_for_both_lifecycle_paths(
+    engine: Engine,
+) -> None:
+    """Compile and post-human repair persist only their strictly repaired result."""
+    project_id, _spec_version_id, _spec_hash = _seed_issue_208_compile_target(engine)
+    calls: list[str] = []
+    runner, domain = _build_runner(
+        engine,
+        project_id=project_id,
+        responses=_AuthorityRunnerResponses(
+            compile=_issue_208_response(gold=False),
+            repair=_issue_208_response(gold=False),
+            compile_validation_repair=_issue_208_response(gold=True),
+            repair_validation_repair=_issue_208_response(gold=True),
+        ),
+        calls=calls,
+    )
+
+    compile_result, compile_decision, compile_input, compile_guards = _run_compile(
+        engine,
+        runner=runner,
+        domain=domain,
+        project_id=project_id,
+        idempotency_key="issue-209-repaired-compile",
+    )
+    compile_replay = runner.run(
+        compile_decision,
+        compile_input,
+        guards=compile_guards,
+    )
+    assert compile_result.ok is True
+    assert compile_replay == compile_result.model_copy(update={"replayed": True})
+
+    repair_decision = _reject_and_record_feedback(
+        engine,
+        domain=domain,
+        project_id=project_id,
+    )
+    repair_result, repair_input, repair_guards = _run_repair(
+        engine,
+        runner=runner,
+        domain=domain,
+        project_id=project_id,
+        decision=repair_decision,
+    )
+    repair_replay = runner.run(
+        repair_decision,
+        repair_input,
+        guards=repair_guards,
+    )
+
+    assert repair_result.ok is True
+    assert repair_replay == repair_result.model_copy(update={"replayed": True})
+    assert calls == [
+        "compile_provider",
+        "authority_validation_repair",
+        "repair_provider",
+        "authority_validation_repair",
+    ]
+    with Session(engine) as session:
+        authorities = session.exec(select(CompiledSpecAuthority)).all()
+        decisions = session.exec(select(SpecAuthorityAcceptance)).all()
+        assert len(authorities) == EXPECTED_REPAIRED_AUTHORITY_COUNT
+        assert len(decisions) == 1
+        assert decisions[0].status == "rejected"
+        for authority in authorities:
+            assert authority.compiled_artifact_json is not None
+            compiled = SpecAuthorityCompilerOutput.model_validate_json(
+                authority.compiled_artifact_json
+            ).root
+            assert isinstance(compiled, SpecAuthorityCompilationSuccess)
+            assert compiled.gaps == [
+                "CONSTRAINT.001: unsupported tooling requirement; enforce outside "
+                "compiled Authority."
+            ]
+
+
 def test_attempt_28_failure_persists_no_partial_authority_and_replays(
     engine: Engine,
 ) -> None:
@@ -1059,8 +1480,10 @@ def test_attempt_28_failure_persists_no_partial_authority_and_replays(
     runner, domain = _build_runner(
         engine,
         project_id=project_id,
-        compile_response=_issue_208_response(gold=False),
-        repair_response=_issue_208_response(gold=True),
+        responses=_AuthorityRunnerResponses(
+            compile=_issue_208_response(gold=False),
+            repair=_issue_208_response(gold=True),
+        ),
         calls=calls,
     )
 
@@ -1079,7 +1502,7 @@ def test_attempt_28_failure_persists_no_partial_authority_and_replays(
     assert "INELIGIBLE_INVARIANT_SOURCE" in result.error.message
     assert "CONSTRAINT.001 semantics" in result.error.message
     assert replay == result.model_copy(update={"replayed": True})
-    assert calls == ["compile_provider"]
+    assert calls == ["compile_provider", "authority_validation_repair"]
     with Session(engine) as session:
         assert session.exec(select(CompiledSpecAuthority)).all() == []
         assert session.exec(select(SpecAuthorityAcceptance)).all() == []
@@ -1113,8 +1536,10 @@ def test_tooling_gap_compile_and_repair_persist_once_and_replay(
     runner, domain = _build_runner(
         engine,
         project_id=project_id,
-        compile_response=_issue_208_response(gold=True),
-        repair_response=_issue_208_response(gold=True),
+        responses=_AuthorityRunnerResponses(
+            compile=_issue_208_response(gold=True),
+            repair=_issue_208_response(gold=True),
+        ),
         calls=calls,
     )
 
@@ -1189,8 +1614,10 @@ def test_ambiguous_raw_compile_records_actionable_failure_without_authority(
     runner, domain = _build_runner(
         engine,
         project_id=project_id,
-        compile_response=json.dumps(_ambiguous_payload()),
-        repair_response=json.dumps(_success_payload(label="unused-repair")),
+        responses=_AuthorityRunnerResponses(
+            compile=json.dumps(_ambiguous_payload()),
+            repair=json.dumps(_success_payload(label="unused-repair")),
+        ),
         calls=calls,
     )
 
@@ -1205,7 +1632,7 @@ def test_ambiguous_raw_compile_records_actionable_failure_without_authority(
 
     _assert_authority_failure(result)
     assert replay == result.model_copy(update={"replayed": True})
-    assert calls == ["compile_provider"]
+    assert calls == ["compile_provider", "authority_validation_repair"]
     with Session(engine) as session:
         assert session.exec(select(CompiledSpecAuthority)).all() == []
         assert session.exec(select(SpecAuthorityAcceptance)).all() == []
@@ -1246,8 +1673,10 @@ def test_ambiguous_raw_repair_records_actionable_failure_without_replacement(
     runner, domain = _build_runner(
         engine,
         project_id=project_id,
-        compile_response=structured_compile,
-        repair_response=json.dumps(_ambiguous_payload()),
+        responses=_AuthorityRunnerResponses(
+            compile=structured_compile,
+            repair=json.dumps(_ambiguous_payload()),
+        ),
         calls=calls,
     )
     compile_result, _decision_value, _input, _guards_value = _run_compile(
@@ -1275,7 +1704,11 @@ def test_ambiguous_raw_repair_records_actionable_failure_without_replacement(
 
     _assert_authority_failure(result)
     assert replay == result.model_copy(update={"replayed": True})
-    assert calls == ["compile_provider", "repair_provider"]
+    assert calls == [
+        "compile_provider",
+        "repair_provider",
+        "authority_validation_repair",
+    ]
     with Session(engine) as session:
         authorities = session.exec(select(CompiledSpecAuthority)).all()
         decisions = session.exec(select(SpecAuthorityAcceptance)).all()
