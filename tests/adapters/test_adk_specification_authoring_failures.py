@@ -356,14 +356,6 @@ def _system(  # noqa: PLR0913
         session.commit()
     registry = build_agentic_recipe_registry(
         nodes=AgenticRecipeNodes(
-            authority_compile=_unused_leaf("unused_authority_compile"),
-            authority_repair=_unused_leaf("unused_authority_repair"),
-            authority_compile_validation_repair=_unused_leaf(
-                "unused_authority_compile_validation_repair"
-            ),
-            authority_repair_validation_repair=_unused_leaf(
-                "unused_authority_repair_validation_repair"
-            ),
             vision_interview=_unused_leaf("unused_vision_interview"),
             vision_repair=_unused_leaf("unused_vision_repair"),
             product_goal=_unused_leaf("unused_product_goal"),

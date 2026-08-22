@@ -30,33 +30,11 @@ class ErrorCode(StrEnum):
     SPEC_FILE_NOT_FOUND = "SPEC_FILE_NOT_FOUND"
     SPEC_FILE_INVALID = "SPEC_FILE_INVALID"
     SPEC_SOURCE_FORMAT_UNSUPPORTED = "SPEC_SOURCE_FORMAT_UNSUPPORTED"
-    SPEC_COMPILE_FAILED = "SPEC_COMPILE_FAILED"
-    AUTHORITY_NOT_ACCEPTED = "AUTHORITY_NOT_ACCEPTED"
-    AUTHORITY_NOT_COMPILED = "AUTHORITY_NOT_COMPILED"
-    COMPILED_AUTHORITY_INVALID = "COMPILED_AUTHORITY_INVALID"
-    COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED = "COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED"
-    AUTHORITY_ACCEPTANCE_MISMATCH = "AUTHORITY_ACCEPTANCE_MISMATCH"
-    AUTHORITY_INVARIANTS_INVALID = "AUTHORITY_INVARIANTS_INVALID"
-    AUTHORITY_REVIEW_REQUIRED = "AUTHORITY_REVIEW_REQUIRED"
-    AUTHORITY_NOT_PENDING = "AUTHORITY_NOT_PENDING"
-    AUTHORITY_ALREADY_DECIDED = "AUTHORITY_ALREADY_DECIDED"
-    AUTHORITY_SOURCE_CHANGED = "AUTHORITY_SOURCE_CHANGED"
-    AUTHORITY_SOURCE_UNAVAILABLE = "AUTHORITY_SOURCE_UNAVAILABLE"
-    AUTHORITY_REVIEW_INCOMPLETE = "AUTHORITY_REVIEW_INCOMPLETE"
-    AUTHORITY_GUARD_INCOMPLETE = "AUTHORITY_GUARD_INCOMPLETE"
-    AUTHORITY_FEEDBACK_TARGET_NOT_FOUND = "AUTHORITY_FEEDBACK_TARGET_NOT_FOUND"
-    AUTHORITY_FEEDBACK_SCHEMA_INVALID = "AUTHORITY_FEEDBACK_SCHEMA_INVALID"
-    AUTHORITY_CURATED_DIFF_UNBOUNDED = "AUTHORITY_CURATED_DIFF_UNBOUNDED"
-    AUTHORITY_CURATION_MAX_ITERATIONS = "AUTHORITY_CURATION_MAX_ITERATIONS"
-    AUTHORITY_CURATION_TARGET_READ_ONLY = "AUTHORITY_CURATION_TARGET_READ_ONLY"
-    AUTHORITY_REPAIR_INTENT_INVALID = "AUTHORITY_REPAIR_INTENT_INVALID"
-    AUTHORITY_REPAIR_TARGET_NOT_FOUND = "AUTHORITY_REPAIR_TARGET_NOT_FOUND"
     STALE_STATE = "STALE_STATE"
     STALE_SPEC_HASH = "STALE_SPEC_HASH"
     STALE_SPEC_VERSION = "STALE_SPEC_VERSION"
     STALE_ARTIFACT_FINGERPRINT = "STALE_ARTIFACT_FINGERPRINT"
     STALE_CONTEXT_FINGERPRINT = "STALE_CONTEXT_FINGERPRINT"
-    STALE_AUTHORITY_VERSION = "STALE_AUTHORITY_VERSION"
     CONFIRMATION_REQUIRED = "CONFIRMATION_REQUIRED"
     ACTIVE_STATE_BLOCKS_DELETE = "ACTIVE_STATE_BLOCKS_DELETE"
     MUTATION_FAILED = "MUTATION_FAILED"
@@ -140,132 +118,6 @@ _ERROR_REGISTRY: dict[ErrorCode, ErrorMetadata] = {
         retryable=False,
         description="The requested spec source format is not supported.",
     ),
-    ErrorCode.SPEC_COMPILE_FAILED: ErrorMetadata(
-        code=ErrorCode.SPEC_COMPILE_FAILED.value,
-        default_exit_code=1,
-        retryable=True,
-        description="Spec authority compilation failed.",
-    ),
-    ErrorCode.AUTHORITY_NOT_ACCEPTED: ErrorMetadata(
-        code=ErrorCode.AUTHORITY_NOT_ACCEPTED.value,
-        default_exit_code=4,
-        retryable=False,
-        description="The project has no accepted authority.",
-    ),
-    ErrorCode.AUTHORITY_NOT_COMPILED: ErrorMetadata(
-        code=ErrorCode.AUTHORITY_NOT_COMPILED.value,
-        default_exit_code=4,
-        retryable=False,
-        description="The selected spec version has no compiled authority.",
-    ),
-    ErrorCode.COMPILED_AUTHORITY_INVALID: ErrorMetadata(
-        code=ErrorCode.COMPILED_AUTHORITY_INVALID.value,
-        default_exit_code=4,
-        retryable=False,
-        description="Compiled authority artifact is invalid.",
-    ),
-    ErrorCode.COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED: ErrorMetadata(
-        code=ErrorCode.COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED.value,
-        default_exit_code=4,
-        retryable=False,
-        description="Compiled authority artifact schema is unsupported.",
-    ),
-    ErrorCode.AUTHORITY_ACCEPTANCE_MISMATCH: ErrorMetadata(
-        code=ErrorCode.AUTHORITY_ACCEPTANCE_MISMATCH.value,
-        default_exit_code=4,
-        retryable=False,
-        description="Accepted authority does not match compiled authority.",
-    ),
-    ErrorCode.AUTHORITY_INVARIANTS_INVALID: ErrorMetadata(
-        code=ErrorCode.AUTHORITY_INVARIANTS_INVALID.value,
-        default_exit_code=4,
-        retryable=False,
-        description="Authority invariants are invalid.",
-    ),
-    ErrorCode.AUTHORITY_REVIEW_REQUIRED: ErrorMetadata(
-        code=ErrorCode.AUTHORITY_REVIEW_REQUIRED.value,
-        default_exit_code=4,
-        retryable=False,
-        description="Authority review is required before this operation.",
-    ),
-    ErrorCode.AUTHORITY_NOT_PENDING: ErrorMetadata(
-        code=ErrorCode.AUTHORITY_NOT_PENDING.value,
-        default_exit_code=4,
-        retryable=False,
-        description="The requested authority is not pending review.",
-    ),
-    ErrorCode.AUTHORITY_ALREADY_DECIDED: ErrorMetadata(
-        code=ErrorCode.AUTHORITY_ALREADY_DECIDED.value,
-        default_exit_code=10,
-        retryable=False,
-        description="The requested authority already has a terminal decision.",
-    ),
-    ErrorCode.AUTHORITY_SOURCE_CHANGED: ErrorMetadata(
-        code=ErrorCode.AUTHORITY_SOURCE_CHANGED.value,
-        default_exit_code=11,
-        retryable=True,
-        description="Authority source material changed during review.",
-    ),
-    ErrorCode.AUTHORITY_SOURCE_UNAVAILABLE: ErrorMetadata(
-        code=ErrorCode.AUTHORITY_SOURCE_UNAVAILABLE.value,
-        default_exit_code=11,
-        retryable=True,
-        description="Authority source material is unavailable for review.",
-    ),
-    ErrorCode.AUTHORITY_REVIEW_INCOMPLETE: ErrorMetadata(
-        code=ErrorCode.AUTHORITY_REVIEW_INCOMPLETE.value,
-        default_exit_code=20,
-        retryable=False,
-        description="Authority review is incomplete.",
-    ),
-    ErrorCode.AUTHORITY_GUARD_INCOMPLETE: ErrorMetadata(
-        code=ErrorCode.AUTHORITY_GUARD_INCOMPLETE.value,
-        default_exit_code=2,
-        retryable=False,
-        description="Required authority review guard inputs are incomplete.",
-    ),
-    ErrorCode.AUTHORITY_FEEDBACK_TARGET_NOT_FOUND: ErrorMetadata(
-        code=ErrorCode.AUTHORITY_FEEDBACK_TARGET_NOT_FOUND.value,
-        default_exit_code=4,
-        retryable=False,
-        description="Authority feedback references a target that does not exist.",
-    ),
-    ErrorCode.AUTHORITY_FEEDBACK_SCHEMA_INVALID: ErrorMetadata(
-        code=ErrorCode.AUTHORITY_FEEDBACK_SCHEMA_INVALID.value,
-        default_exit_code=2,
-        retryable=False,
-        description="Authority feedback payload is invalid.",
-    ),
-    ErrorCode.AUTHORITY_CURATED_DIFF_UNBOUNDED: ErrorMetadata(
-        code=ErrorCode.AUTHORITY_CURATED_DIFF_UNBOUNDED.value,
-        default_exit_code=1,
-        retryable=False,
-        description="Authority curation changed untargeted authority items.",
-    ),
-    ErrorCode.AUTHORITY_CURATION_MAX_ITERATIONS: ErrorMetadata(
-        code=ErrorCode.AUTHORITY_CURATION_MAX_ITERATIONS.value,
-        default_exit_code=1,
-        retryable=True,
-        description="Authority curation reached its maximum iteration count.",
-    ),
-    ErrorCode.AUTHORITY_CURATION_TARGET_READ_ONLY: ErrorMetadata(
-        code=ErrorCode.AUTHORITY_CURATION_TARGET_READ_ONLY.value,
-        default_exit_code=4,
-        retryable=False,
-        description="The authority curation target is read-only.",
-    ),
-    ErrorCode.AUTHORITY_REPAIR_INTENT_INVALID: ErrorMetadata(
-        code=ErrorCode.AUTHORITY_REPAIR_INTENT_INVALID.value,
-        default_exit_code=1,
-        retryable=False,
-        description="Authority repair selection violates the repair menu contract.",
-    ),
-    ErrorCode.AUTHORITY_REPAIR_TARGET_NOT_FOUND: ErrorMetadata(
-        code=ErrorCode.AUTHORITY_REPAIR_TARGET_NOT_FOUND.value,
-        default_exit_code=1,
-        retryable=False,
-        description="Authority repair menu handle resolves to a missing source target.",
-    ),
     ErrorCode.STALE_STATE: ErrorMetadata(
         code=ErrorCode.STALE_STATE.value,
         default_exit_code=3,
@@ -295,12 +147,6 @@ _ERROR_REGISTRY: dict[ErrorCode, ErrorMetadata] = {
         default_exit_code=3,
         retryable=True,
         description="Reviewed context fingerprint changed.",
-    ),
-    ErrorCode.STALE_AUTHORITY_VERSION: ErrorMetadata(
-        code=ErrorCode.STALE_AUTHORITY_VERSION.value,
-        default_exit_code=3,
-        retryable=True,
-        description="Accepted authority version changed.",
     ),
     ErrorCode.CONFIRMATION_REQUIRED: ErrorMetadata(
         code=ErrorCode.CONFIRMATION_REQUIRED.value,

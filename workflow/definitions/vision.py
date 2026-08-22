@@ -17,7 +17,6 @@ if TYPE_CHECKING:
     from datetime import datetime
 
     from workflow.facts import (
-        AuthorityFact,
         PhaseArtifactFact,
         VisionArtifactDecisionFact,
         VisionArtifactFact,
@@ -32,15 +31,6 @@ def _reference(fact_type: str, fact_id: int, fingerprint: str) -> FactReference:
         fact_type=fact_type,
         fact_id=str(fact_id),
         fingerprint=fingerprint,
-    )
-
-
-def authority_reference(authority: AuthorityFact) -> FactReference:
-    """Return the canonical graph reference for accepted authority."""
-    return _reference(
-        "authority",
-        authority.authority_id,
-        authority.authority_fingerprint,
     )
 
 
@@ -431,9 +421,7 @@ def _interview_rule_for_revision(
 ) -> tuple[RuleEvaluation, ...]:
     """Route clarification for an active revision lineage."""
     if not state.transcript:
-        return (
-            RuleEvaluation(RuleCategory.SATISFIED, "VISION_BOOTSTRAP_REQUIRED"),
-        )
+        return (RuleEvaluation(RuleCategory.SATISFIED, "VISION_BOOTSTRAP_REQUIRED"),)
     if state.open_revision is None:
         message = "Revision interview routing requires an open revision intent."
         raise RuntimeError(message)
@@ -453,9 +441,7 @@ def _interview_rule_for_candidate(
 ) -> tuple[RuleEvaluation, ...]:
     """Route bootstrap-derived draft clarification or review."""
     if not state.transcript:
-        return (
-            RuleEvaluation(RuleCategory.SATISFIED, "VISION_BOOTSTRAP_REQUIRED"),
-        )
+        return (RuleEvaluation(RuleCategory.SATISFIED, "VISION_BOOTSTRAP_REQUIRED"),)
     latest = state.transcript[-1]
     if latest.is_complete:
         return (RuleEvaluation(RuleCategory.SATISFIED, "VISION_REVIEW_PENDING"),)
@@ -654,9 +640,7 @@ VISION_INTERVIEW_NODES: tuple[NodeSpec, ...] = (
         child_graph_id="vision",
         request_kind="record_vision_interview_turn",
         recommendation_kind=RecommendationKind.REQUIRED,
-        required_inputs=(
-            InputField(name="user_text", value_type="string"),
-        ),
+        required_inputs=(InputField(name="user_text", value_type="string"),),
         evaluate_rule=_vision_interview_rule,
         agentic_execution=AgenticExecutionSpec(
             active_reason="VISION_INTERVIEW_ACTIVE",
@@ -695,6 +679,5 @@ __all__ = [
     "VISION_INTERVIEW_NODES",
     "VisionInterviewState",
     "artifact_reference",
-    "authority_reference",
     "select_vision_interview_state",
 ]

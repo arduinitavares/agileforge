@@ -8,18 +8,19 @@ from typing import Literal, cast
 import pytest
 from pydantic import ValidationError
 
-from services.contracts.backlog import InputSchema as BacklogInput
-from services.contracts.roadmap import RoadmapBuilderInput
+from services.contracts.backlog import BacklogAgentOutput
+from services.contracts.roadmap import RoadmapBuilderOutput
 from workflow.contracts import NodeCategory, NodeDecision, WorkflowPosition
 from workflow.definitions.root import project_graph
 from workflow.facts import (
-    AuthorityFact,
     NodeAttemptFact,
     PhaseArtifactFact,
     ProductGoalArtifactDecisionFact,
     ProductGoalArtifactFact,
     ProjectFact,
     ReviewDecisionFact,
+    SpecificationCandidateFact,
+    SpecificationDecisionFact,
     SpecVersionFact,
     VisionArtifactDecisionFact,
     VisionArtifactFact,
@@ -29,8 +30,10 @@ from workflow.facts import (
 EVALUATED_AT = datetime(2026, 8, 2, 12, tzinfo=UTC)
 PROJECT_ID = 10
 SPEC_ID = 101
-AUTHORITY_ID = 201
-AUTHORITY_FINGERPRINT = "sha256:authority-current"
+SPEC_HASH = "sha256:4f39ae394d3910bc52d73256eddc11edd66e57074025e1ec7f037e8e69a33025"
+CANDIDATE_FINGERPRINT = (
+    "sha256:f8714ebde7f56a1de259fa8df4283be6521881a814e036df5c61d33a1a1110ee"
+)
 GOAL_ID = 301
 GOAL_FINGERPRINT = "sha256:goal-current"
 PRODUCT_VISION_ID = 401
@@ -39,29 +42,11 @@ BACKLOG_ID = 501
 BACKLOG_FINGERPRINT = "sha256:backlog-current"
 
 
-def _authority(
-    *,
-    authority_id: int = AUTHORITY_ID,
-    spec_version_id: int = SPEC_ID,
-    fingerprint: str = AUTHORITY_FINGERPRINT,
-    status: str = "accepted",
-) -> AuthorityFact:
-    return AuthorityFact.model_validate(
-        {
-            "authority_id": authority_id,
-            "spec_version_id": spec_version_id,
-            "authority_fingerprint": fingerprint,
-            "status": status,
-            "decided_at": EVALUATED_AT,
-        }
-    )
-
-
 def _artifact(
     *,
     status: str,
-    authority_id: int = AUTHORITY_ID,
-    authority_fingerprint: str = AUTHORITY_FINGERPRINT,
+    spec_version_id: int = SPEC_ID,
+    spec_hash: str = SPEC_HASH,
     goal_id: int = GOAL_ID,
     goal_fingerprint: str = GOAL_FINGERPRINT,
 ) -> PhaseArtifactFact:
@@ -70,8 +55,9 @@ def _artifact(
             "artifact_type": "backlog",
             "artifact_id": BACKLOG_ID,
             "artifact_fingerprint": BACKLOG_FINGERPRINT,
-            "authority_id": authority_id,
-            "authority_fingerprint": authority_fingerprint,
+            "version_number": 1,
+            "spec_version_id": spec_version_id,
+            "spec_hash": spec_hash,
             "product_goal_artifact_id": goal_id,
             "product_goal_fingerprint": goal_fingerprint,
             "status": status,
@@ -81,12 +67,13 @@ def _artifact(
 
 def _snapshot(
     *,
-    authorities: tuple[AuthorityFact, ...] | None = None,
+    authorities: tuple[object, ...] = (),
     backlog: PhaseArtifactFact | None = None,
     active_goal: bool = True,
     vision_decision: Literal["accepted", "feedback", "rejected"] = "accepted",
     attempts: tuple[NodeAttemptFact, ...] = (),
 ) -> WorkflowFactSnapshot:
+    assert authorities == ()
     vision = VisionArtifactFact(
         vision_artifact_id=PRODUCT_VISION_ID,
         version_number=1,
@@ -112,20 +99,7 @@ def _snapshot(
         created_by="operator@example.com",
         created_at=EVALUATED_AT,
     )
-    current_authorities = authorities if authorities is not None else (_authority(),)
-    authority_decisions = tuple(
-        ReviewDecisionFact(
-            decision_id=item.authority_id,
-            artifact_type="authority",
-            artifact_id=item.authority_id,
-            artifact_fingerprint=item.authority_fingerprint,
-            decision="accepted",
-            decided_at=EVALUATED_AT,
-        )
-        for item in current_authorities
-        if item.status == "accepted"
-    )
-    review_decisions = authority_decisions + (
+    review_decisions = (
         (
             ReviewDecisionFact(
                 decision_id=BACKLOG_ID,
@@ -148,21 +122,61 @@ def _snapshot(
             name="Backlog lineage",
             created_at=EVALUATED_AT,
         ),
+        specification_candidates=(
+            SpecificationCandidateFact(
+                specification_candidate_id=2,
+                candidate_kind="initial",
+                specification_source_id=1,
+                specification_source_fingerprint="sha256:source",
+                vision_artifact_id=PRODUCT_VISION_ID,
+                vision_fingerprint=PRODUCT_VISION_FINGERPRINT,
+                product_goal_artifact_id=GOAL_ID,
+                product_goal_fingerprint=GOAL_FINGERPRINT,
+                base_spec_version_id=None,
+                base_spec_hash=None,
+                canonical_envelope={},
+                payload_fingerprint=SPEC_HASH,
+                source_manifest_fingerprint="sha256:manifest",
+                producer_input_fingerprint="sha256:producer",
+                rendered_view_fingerprint="sha256:rendered",
+                candidate_fingerprint=CANDIDATE_FINGERPRINT,
+                workflow_node_attempt_id=1,
+                attempt_fingerprint="sha256:attempt",
+                supersedes_specification_candidate_id=None,
+                supersedes_candidate_fingerprint=None,
+                recorded_by="operator",
+                recorded_at=EVALUATED_AT,
+            ),
+        ),
+        specification_decisions=(
+            SpecificationDecisionFact(
+                specification_decision_id=3,
+                specification_candidate_id=2,
+                candidate_fingerprint=CANDIDATE_FINGERPRINT,
+                decision="accepted",
+                rationale="Accepted.",
+                reviewer="operator",
+                idempotency_key="specification",
+                decided_at=EVALUATED_AT,
+            ),
+        ),
         spec_versions=(
             SpecVersionFact(
                 spec_version_id=SPEC_ID,
-                spec_hash="sha256:spec-current",
+                spec_hash=SPEC_HASH,
                 status="approved",
-                approved_at=EVALUATED_AT,
-                source_specification_candidate_id=1,
-                source_specification_candidate_fingerprint="sha256:candidate-1",
+                source_specification_decision_id=3,
+                accepted_at=EVALUATED_AT,
+                accepted_by="operator",
+                acceptance_notes="Accepted.",
+                source_specification_candidate_id=2,
+                source_specification_candidate_fingerprint=CANDIDATE_FINGERPRINT,
                 source_vision_artifact_id=PRODUCT_VISION_ID,
                 source_vision_fingerprint=PRODUCT_VISION_FINGERPRINT,
                 source_product_goal_artifact_id=GOAL_ID,
                 source_product_goal_fingerprint=GOAL_FINGERPRINT,
             ),
         ),
-        authorities=current_authorities,
         phase_artifacts=() if backlog is None else (backlog,),
         review_decisions=review_decisions,
         vision_artifacts=(vision,),
@@ -208,7 +222,7 @@ def _decision(snapshot: WorkflowFactSnapshot, node_id: str) -> NodeDecision:
 
 
 def test_backlog_requires_an_active_accepted_goal() -> None:
-    """Authority alone cannot expose Backlog generation."""
+    """A Specification alone cannot expose Backlog generation."""
     position = _position(_snapshot(active_goal=False))
 
     assert "backlog.generate" in position.blocked_nodes
@@ -226,9 +240,7 @@ def test_only_human_accepted_vision_unlocks_product_goal(
     goal_unlocked: bool,
 ) -> None:
     """Product Goal starts only after the operator accepts the exact Vision."""
-    position = _position(
-        _snapshot(active_goal=False, vision_decision=vision_decision)
-    )
+    position = _position(_snapshot(active_goal=False, vision_decision=vision_decision))
 
     assert ("goal.interview" in position.available_nodes) is goal_unlocked
 
@@ -238,12 +250,10 @@ def test_active_product_goal_blocks_accepted_vision_revision() -> None:
     position = _position(_snapshot())
 
     assert "vision.revision.start" not in position.available_nodes
-    assert "vision.revision.start" not in {
-        item.node_id for item in position.decisions
-    }
+    assert "vision.revision.start" not in {item.node_id for item in position.decisions}
 
 
-def test_backlog_generation_references_exact_goal_and_authority() -> None:
+def test_backlog_generation_references_exact_goal_and_specification() -> None:
     """Generation has both immutable current parents in its graph decision."""
     decision = _decision(_snapshot(), "backlog.generate")
 
@@ -253,13 +263,13 @@ def test_backlog_generation_references_exact_goal_and_authority() -> None:
         for item in decision.fact_references
     }
     assert fact_references == {
-        ("authority", str(AUTHORITY_ID), AUTHORITY_FINGERPRINT),
+        ("specification", str(SPEC_ID), SPEC_HASH),
         ("product_goal", str(GOAL_ID), GOAL_FINGERPRINT),
     }
 
 
 def test_backlog_attempt_waits_on_the_durable_generation_lease() -> None:
-    """A retry cannot replace an active Goal/Authority-bound generation attempt."""
+    """A retry cannot replace an active Goal/Specification-bound attempt."""
     attempt = NodeAttemptFact(
         attempt_id=1,
         node_id="backlog.generate",
@@ -297,17 +307,15 @@ def test_historical_goal_backlog_is_not_current_delivery_state() -> None:
     assert "planning.roadmap.generate" in position.blocked_nodes
 
 
-def test_authority_replacement_requires_fresh_backlog() -> None:
-    """An old-Authority Backlog never produces a reconciliation route."""
-    replacement_authority = _authority(
-        authority_id=AUTHORITY_ID + 1,
-        spec_version_id=SPEC_ID,
-        fingerprint="sha256:authority-replacement",
-    )
+def test_specification_replacement_requires_fresh_backlog() -> None:
+    """A Backlog pinned to another Specification is historical only."""
     position = _position(
         _snapshot(
-            authorities=(replacement_authority,),
-            backlog=_artifact(status="accepted"),
+            backlog=_artifact(
+                status="accepted",
+                spec_version_id=SPEC_ID + 1,
+                spec_hash="sha256:historical-specification",
+            ),
         )
     )
 
@@ -324,33 +332,28 @@ def test_accepted_current_backlog_unlocks_roadmap_with_goal_lineage() -> None:
 
     assert decision.category is NodeCategory.AVAILABLE
     assert {item.fact_type for item in decision.fact_references} == {
-        "authority",
         "backlog",
         "product_goal",
+        "specification",
     }
 
 
 def test_agent_inputs_reject_unknown_context() -> None:
-    """Agents receive only their declared product-delivery context."""
+    """Provider contracts remain closed to undeclared delivery context."""
     with pytest.raises(ValidationError):
-        BacklogInput.model_validate(
+        BacklogAgentOutput.model_validate(
             {
-                "product_vision_statement": "Vision",
-                "product_goal_statement": "Goal",
-                "technical_spec": "Spec",
-                "compiled_authority": "Authority",
-                "prior_backlog_state": "NO_HISTORY",
-                "user_input": None,
+                "backlog_items": [],
+                "is_complete": True,
                 "unknown_control": "invalid",
             }
         )
     with pytest.raises(ValidationError):
-        RoadmapBuilderInput.model_validate(
+        RoadmapBuilderOutput.model_validate(
             {
-                "backlog_items": [],
-                "product_vision": "Vision",
-                "technical_spec": "Spec",
-                "compiled_authority": "Authority",
+                "roadmap_releases": [],
+                "roadmap_summary": "Current delivery sequence",
+                "is_complete": True,
                 "unknown_control": {"invalid": True},
             }
         )

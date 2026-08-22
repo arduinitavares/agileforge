@@ -45,6 +45,7 @@ class NodeAttemptReplayQuery(FrozenModel):
     correlation_id: str | None = None
     user_text: str | None = None
     semantic_input: JsonObject | None = None
+    reuse_stored_instance_key: bool = False
 
 
 class TransitionReplayQuery(FrozenModel):
@@ -99,7 +100,9 @@ class DurableNodeAttemptReplayService:
                 correlation_id=query.correlation_id,
                 target_node_id=query.node_id,
                 target_instance_key=(
-                    query.instance_key
+                    stored.target_instance_key
+                    if _reuses_stored_story_correction_selector(stored, query)
+                    else query.instance_key
                     if query.node_id in _CALLER_OWNED_ATTEMPT_SELECTOR_NODES
                     else (
                         stored.target_instance_key
@@ -187,8 +190,49 @@ def _replay_normalized_input(
         else:
             normalized_input["user_response"] = query.user_text
     if query.semantic_input is not None:
-        normalized_input.update(query.semantic_input)
+        correction = query.semantic_input.get("correction")
+        stored_correction = normalized_input.get("correction")
+        if (
+            query.reuse_stored_instance_key
+            and isinstance(correction, dict)
+            and isinstance(stored_correction, dict)
+        ):
+            normalized_input["correction"] = {**stored_correction, **correction}
+            normalized_input.update(
+                {
+                    key: value
+                    for key, value in query.semantic_input.items()
+                    if key != "correction"
+                }
+            )
+        else:
+            normalized_input.update(query.semantic_input)
     return normalized_input
+
+
+def _reuses_stored_story_correction_selector(
+    stored: StartNodeAttempt,
+    query: NodeAttemptReplayQuery,
+) -> bool:
+    """Allow only an explicit exact correction retry to reuse its host selector."""
+    if (
+        not query.reuse_stored_instance_key
+        or query.node_id != "planning.story.generate"
+        or stored.target_node_id != query.node_id
+        or query.instance_key is not None
+        or query.semantic_input is None
+        or set(query.semantic_input) != {"correction"}
+    ):
+        return False
+    semantic = query.semantic_input.get("correction")
+    persisted = stored.normalized_input.get("correction")
+    if (
+        not isinstance(semantic, dict)
+        or set(semantic) != {"story_id", "guidance"}
+        or not isinstance(persisted, dict)
+    ):
+        return False
+    return all(persisted.get(key) == value for key, value in semantic.items())
 
 
 def _replay_attempt_result(

@@ -19,7 +19,6 @@ from adapters.adk.recipes import (
     RecipeOutput,
 )
 from models.core import Project
-from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance
 from models.workflow import (
     BacklogArtifact,
     WorkflowNodeAttempt,
@@ -30,9 +29,7 @@ from services.node_attempt_replay import (
     DurableNodeAttemptReplayService,
     NodeAttemptReplayQuery,
 )
-from services.specs.authority_selection import pending_authority_fingerprint
 from tests.workflow.lifecycle_fixtures import seed_accepted_specification
-from utils.spec_schemas import SpecAuthorityCompilationSuccess
 from workflow.contracts import (
     JsonObject,
     NodeDecision,
@@ -64,21 +61,7 @@ class MutableClock:
         return self.now_value
 
 
-def _authority_artifact() -> SpecAuthorityCompilationSuccess:
-    return SpecAuthorityCompilationSuccess(
-        scope_themes=["Durable attempts"],
-        invariants=[],
-        eligible_feature_rules=[],
-        gaps=[],
-        assumptions=[],
-        source_map=[],
-        compiler_version="3.0.0",
-        prompt_hash="a" * 64,
-    )
-
-
-def _seed_accepted_authority(engine: Engine) -> tuple[int, int, str]:
-    artifact = _authority_artifact()
+def _seed_accepted_specification_state(engine: Engine) -> tuple[int, int, str]:
     with Session(engine) as session:
         project = Project(name="Task 15")
         session.add(project)
@@ -87,48 +70,23 @@ def _seed_accepted_authority(engine: Engine) -> tuple[int, int, str]:
         lineage = seed_accepted_specification(
             session,
             project_id=project.project_id,
-            content='{"scope":"task-15"}',
+            content=(
+                '{"schema_version":"agileforge.spec.v2",'
+                '"artifact_id":"SPEC.task-15","title":"Durable attempts",'
+                '"summary":"Exercise durable provider attempts.",'
+                '"problem_statement":"Attempt state must remain recoverable.",'
+                '"items":[{"id":"REQ.task-15","type":"REQ",'
+                '"title":"Durable attempts",'
+                '"statement":"Persist one recoverable attempt.",'
+                '"level":"MUST","verification":"integration-test",'
+                '"acceptance":["The attempt is durable."]}]}'
+            ),
             recorded_at=EVALUATED_AT - timedelta(minutes=1),
         )
         spec_version_id = lineage.spec.spec_version_id
         assert spec_version_id is not None
-        authority = CompiledSpecAuthority(
-            spec_version_id=spec_version_id,
-            compiler_version=artifact.compiler_version,
-            prompt_hash=artifact.prompt_hash,
-            compiled_at=EVALUATED_AT,
-            compiled_artifact_json=artifact.model_dump_json(),
-            scope_themes="[]",
-            invariants="[]",
-            eligible_feature_ids="[]",
-            rejected_features="[]",
-            spec_gaps="[]",
-        )
-        session.add(authority)
-        session.flush()
-        assert authority.authority_id is not None
-        authority_fingerprint = pending_authority_fingerprint(authority)
-        assert authority_fingerprint is not None
-        session.add(
-            SpecAuthorityAcceptance(
-                project_id=project.project_id,
-                spec_version_id=spec_version_id,
-                status="accepted",
-                policy="manual",
-                decided_by="operator@example.com",
-                decided_at=EVALUATED_AT,
-                rationale="Accepted for attempt tests.",
-                compiler_version=authority.compiler_version,
-                prompt_hash=authority.prompt_hash,
-                spec_hash=lineage.spec.spec_hash,
-                pending_authority_id=authority.authority_id,
-                authority_fingerprint=authority_fingerprint,
-                review_fingerprint="sha256:review",
-                terminal_decision_key="task-15-authority",
-            )
-        )
         session.commit()
-        return project.project_id, authority.authority_id, authority_fingerprint
+        return project.project_id, spec_version_id, lineage.spec.spec_hash
 
 
 def _registry() -> AdkRecipeRegistry:
@@ -196,8 +154,8 @@ def _start_request(
     goal_reference = next(
         item for item in decision.fact_references if item.fact_type == "product_goal"
     )
-    authority_reference = next(
-        item for item in decision.fact_references if item.fact_type == "authority"
+    specification_reference = next(
+        item for item in decision.fact_references if item.fact_type == "specification"
     )
     return StartNodeAttempt(
         project_id=project_id,
@@ -212,8 +170,8 @@ def _start_request(
         normalized_input={
             "product_goal_artifact_id": int(goal_reference.fact_id),
             "product_goal_fingerprint": goal_reference.fingerprint,
-            "authority_id": int(authority_reference.fact_id),
-            "authority_fingerprint": authority_reference.fingerprint,
+            "spec_version_id": int(specification_reference.fact_id),
+            "spec_hash": specification_reference.fingerprint,
         },
         model_id=MODEL_ID,
         execution_settings=EXECUTION_SETTINGS,
@@ -249,10 +207,10 @@ def _completion_request(
     start_request: StartNodeAttempt,
     attempt_id: int,
     attempt_fingerprint: str,
-    authority: tuple[int, str],
+    specification: tuple[int, str],
     idempotency_key: str = "complete-backlog",
 ) -> RecordBacklogDraft:
-    authority_id, authority_fingerprint = authority
+    spec_version_id, spec_hash = specification
     product_goal_artifact_id = start_request.normalized_input.get(
         "product_goal_artifact_id"
     )
@@ -264,10 +222,10 @@ def _completion_request(
     content: JsonObject = {
         "backlog_items": [
             {
+                "backlog_item_id": "PBI-000001",
                 "priority": 1,
                 "requirement": "Persist durable node attempts",
-                "authority_ref": "REQ.task-15",
-                "capability_hint": None,
+                "spec_item_ids": ["REQ.task-15"],
                 "value_driver": "Strategic",
                 "justification": "Execution trace cannot own workflow position.",
                 "estimated_effort": "M",
@@ -290,8 +248,8 @@ def _completion_request(
         correlation_id=start_request.correlation_id,
         product_goal_artifact_id=product_goal_artifact_id,
         product_goal_fingerprint=product_goal_fingerprint,
-        authority_id=authority_id,
-        authority_fingerprint=authority_fingerprint,
+        spec_version_id=spec_version_id,
+        spec_hash=spec_hash,
         canonical_content=content,
         content_fingerprint=canonical_hash(content),
     )
@@ -322,7 +280,9 @@ def _backlog_outcomes(session: Session) -> list[WorkflowNodeAttemptOutcome]:
 
 def test_start_persists_attempt_and_returns_minimal_receipt(engine: Engine) -> None:
     """Persist immutable attempt input and return only its durable receipt."""
-    project_id, _authority_id, _authority_fingerprint = _seed_accepted_authority(engine)
+    project_id, _spec_version_id, _spec_hash = _seed_accepted_specification_state(
+        engine
+    )
     clock = MutableClock(EVALUATED_AT)
     domain = _domain(engine, clock, _registry())
 
@@ -349,7 +309,9 @@ def test_start_persists_attempt_and_returns_minimal_receipt(engine: Engine) -> N
 
 def test_duplicate_start_replays_without_second_attempt(engine: Engine) -> None:
     """Replay a duplicate start from its receipt without a second lease."""
-    project_id, _authority_id, _authority_fingerprint = _seed_accepted_authority(engine)
+    project_id, _spec_version_id, _spec_hash = _seed_accepted_specification_state(
+        engine
+    )
     domain = _domain(engine, MutableClock(EVALUATED_AT), _registry())
     request = _start_request(domain, project_id)
 
@@ -366,7 +328,9 @@ def test_replay_query_returns_in_flight_start_before_external_work(
     engine: Engine,
 ) -> None:
     """Expose the persisted start receipt without requiring normalized input."""
-    project_id, _authority_id, _authority_fingerprint = _seed_accepted_authority(engine)
+    project_id, _spec_version_id, _spec_hash = _seed_accepted_specification_state(
+        engine
+    )
     domain = _domain(engine, MutableClock(EVALUATED_AT), _registry())
     request = _start_request(domain, project_id, idempotency_key="replay-running")
     started = domain.transition(request)
@@ -382,7 +346,9 @@ def test_semantic_replay_uses_stored_guards_and_conflicts_on_changed_text(
     engine: Engine,
 ) -> None:
     """Ignore host guards for semantic retry while retaining operator input identity."""
-    project_id, _authority_id, _authority_fingerprint = _seed_accepted_authority(engine)
+    project_id, _spec_version_id, _spec_hash = _seed_accepted_specification_state(
+        engine
+    )
     domain = _domain(engine, MutableClock(EVALUATED_AT), _registry())
     request = _start_request(
         domain,
@@ -634,7 +600,7 @@ def test_replay_query_returns_terminal_result_after_position_advanced(
     engine: Engine,
 ) -> None:
     """Recover a lost terminal response before evaluating the new position."""
-    project_id, authority_id, authority_fingerprint = _seed_accepted_authority(engine)
+    project_id, spec_version_id, spec_hash = _seed_accepted_specification_state(engine)
     domain = _domain(engine, MutableClock(EVALUATED_AT), _registry())
     request = _start_request(domain, project_id, idempotency_key="replay-terminal")
     started = domain.transition(request)
@@ -644,7 +610,7 @@ def test_replay_query_returns_terminal_result_after_position_advanced(
             start_request=request,
             attempt_id=attempt_id,
             attempt_fingerprint=attempt_fingerprint,
-            authority=(authority_id, authority_fingerprint),
+            specification=(spec_version_id, spec_hash),
         )
     )
 
@@ -660,7 +626,7 @@ def test_replay_query_prefers_terminal_completion_receipt(
     engine: Engine,
 ) -> None:
     """Terminal replay remains correct even when the start receipt is retained."""
-    project_id, authority_id, authority_fingerprint = _seed_accepted_authority(engine)
+    project_id, spec_version_id, spec_hash = _seed_accepted_specification_state(engine)
     domain = _domain(engine, MutableClock(EVALUATED_AT), _registry())
     request = _start_request(domain, project_id, idempotency_key="replay-terminal-row")
     started = domain.transition(request)
@@ -670,7 +636,7 @@ def test_replay_query_prefers_terminal_completion_receipt(
             start_request=request,
             attempt_id=attempt_id,
             attempt_fingerprint=attempt_fingerprint,
-            authority=(authority_id, authority_fingerprint),
+            specification=(spec_version_id, spec_hash),
         )
     )
     with Session(engine) as session:
@@ -694,7 +660,9 @@ def test_replay_query_returns_failure_stored_under_original_start_receipt(
     engine: Engine,
 ) -> None:
     """Replay the exact failed command result instead of failure bookkeeping."""
-    project_id, _authority_id, _authority_fingerprint = _seed_accepted_authority(engine)
+    project_id, _spec_version_id, _spec_hash = _seed_accepted_specification_state(
+        engine
+    )
     domain = _domain(engine, MutableClock(EVALUATED_AT), _registry())
     request = _start_request(domain, project_id, idempotency_key="replay-failure")
     started = domain.transition(request)
@@ -727,7 +695,9 @@ def test_replay_query_returns_obsolete_result_from_original_start_receipt(
     engine: Engine,
 ) -> None:
     """Replay the exact obsolete command result stored under the caller's key."""
-    project_id, _authority_id, _authority_fingerprint = _seed_accepted_authority(engine)
+    project_id, _spec_version_id, _spec_hash = _seed_accepted_specification_state(
+        engine
+    )
     clock = MutableClock(EVALUATED_AT)
     domain = _domain(engine, clock, _registry())
     request = _start_request(domain, project_id, idempotency_key="replay-obsolete")
@@ -758,7 +728,9 @@ def test_replay_query_returns_obsolete_result_from_original_start_receipt(
 
 def test_live_attempt_changes_target_to_waiting(engine: Engine) -> None:
     """Render a target waiting until its live lease expires."""
-    project_id, _authority_id, _authority_fingerprint = _seed_accepted_authority(engine)
+    project_id, _spec_version_id, _spec_hash = _seed_accepted_specification_state(
+        engine
+    )
     domain = _domain(engine, MutableClock(EVALUATED_AT), _registry())
     started = domain.transition(_start_request(domain, project_id))
     assert started.ok is True
@@ -771,7 +743,9 @@ def test_live_attempt_changes_target_to_waiting(engine: Engine) -> None:
 
 def test_expired_attempt_is_obsoleted_when_recovery_starts(engine: Engine) -> None:
     """Obsolete the expired attempt atomically with its replacement."""
-    project_id, _authority_id, _authority_fingerprint = _seed_accepted_authority(engine)
+    project_id, _spec_version_id, _spec_hash = _seed_accepted_specification_state(
+        engine
+    )
     clock = MutableClock(EVALUATED_AT)
     domain = _domain(engine, clock, _registry())
     first = domain.transition(_start_request(domain, project_id))
@@ -803,7 +777,7 @@ def test_completion_writes_business_fact_and_success_outcome_atomically(
     engine: Engine,
 ) -> None:
     """Commit downstream artifact and success outcome in one transaction."""
-    project_id, authority_id, authority_fingerprint = _seed_accepted_authority(engine)
+    project_id, spec_version_id, spec_hash = _seed_accepted_specification_state(engine)
     domain = _domain(engine, MutableClock(EVALUATED_AT), _registry())
     start_request = _start_request(domain, project_id)
     started = domain.transition(start_request)
@@ -814,7 +788,7 @@ def test_completion_writes_business_fact_and_success_outcome_atomically(
             start_request=start_request,
             attempt_id=attempt_id,
             attempt_fingerprint=attempt_fingerprint,
-            authority=(authority_id, authority_fingerprint),
+            specification=(spec_version_id, spec_hash),
         )
     )
 
@@ -831,7 +805,7 @@ def test_completed_attempt_updates_start_receipt_with_terminal_command_result(
     engine: Engine,
 ) -> None:
     """Replay the prior command result through the original transport key."""
-    project_id, authority_id, authority_fingerprint = _seed_accepted_authority(engine)
+    project_id, spec_version_id, spec_hash = _seed_accepted_specification_state(engine)
     domain = _domain(engine, MutableClock(EVALUATED_AT), _registry())
     start_request = _start_request(domain, project_id)
     started = domain.transition(start_request)
@@ -841,7 +815,7 @@ def test_completed_attempt_updates_start_receipt_with_terminal_command_result(
             start_request=start_request,
             attempt_id=attempt_id,
             attempt_fingerprint=attempt_fingerprint,
-            authority=(authority_id, authority_fingerprint),
+            specification=(spec_version_id, spec_hash),
         )
     )
 
@@ -864,7 +838,9 @@ def test_process_crash_before_outcome_leaves_recoverable_active_attempt(
     engine: Engine,
 ) -> None:
     """Keep a crash-abandoned live lease visible after domain restart."""
-    project_id, _authority_id, _authority_fingerprint = _seed_accepted_authority(engine)
+    project_id, _spec_version_id, _spec_hash = _seed_accepted_specification_state(
+        engine
+    )
     registry = _registry()
     started = _domain(engine, MutableClock(EVALUATED_AT), registry).transition(
         _start_request(
@@ -881,8 +857,10 @@ def test_process_crash_before_outcome_leaves_recoverable_active_attempt(
 
 
 def test_failure_records_terminal_failure_without_business_fact(engine: Engine) -> None:
-    """Record provider failure without granting downstream authority."""
-    project_id, _authority_id, _authority_fingerprint = _seed_accepted_authority(engine)
+    """Record provider failure without granting downstream business state."""
+    project_id, _spec_version_id, _spec_hash = _seed_accepted_specification_state(
+        engine
+    )
     domain = _domain(engine, MutableClock(EVALUATED_AT), _registry())
     start_request = _start_request(domain, project_id)
     started = domain.transition(start_request)
@@ -909,11 +887,11 @@ def test_failure_records_terminal_failure_without_business_fact(engine: Engine) 
         assert outcome.failure_code == "PROVIDER_UNAVAILABLE"
 
 
-def test_late_model_result_is_recorded_obsolete_without_authority_fact(
+def test_late_model_result_is_recorded_obsolete_without_business_fact(
     engine: Engine,
 ) -> None:
     """Obsolete late model output after any business fact changes."""
-    project_id, authority_id, authority_fingerprint = _seed_accepted_authority(engine)
+    project_id, spec_version_id, spec_hash = _seed_accepted_specification_state(engine)
     domain = _domain(engine, MutableClock(EVALUATED_AT), _registry())
     start_request = _start_request(domain, project_id)
     started = domain.transition(start_request)
@@ -930,7 +908,7 @@ def test_late_model_result_is_recorded_obsolete_without_authority_fact(
             start_request=start_request,
             attempt_id=attempt_id,
             attempt_fingerprint=attempt_fingerprint,
-            authority=(authority_id, authority_fingerprint),
+            specification=(spec_version_id, spec_hash),
         )
     )
 

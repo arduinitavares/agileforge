@@ -28,15 +28,12 @@ from repositories.project import ProjectRepository
 from services.agent_workbench.version import agileforge_version
 from services.application import (
     AgileForgeApplication,
-    AuthorityCompileRequest,
-    AuthorityFeedbackRequest,
-    AuthorityRepairRequest,
-    AuthorityReviewRequest,
     BacklogReviewRequest,
     CloseStoryRequest,
     CompleteTaskRequest,
     CreateProjectCommand,
     DeliveryActionRequest,
+    ExpectedPlanningReviewBinding,
     PostSprintTriageRequest,
     ProductGoalOutcomeRequest,
     ProductGoalResponseRequest,
@@ -159,9 +156,7 @@ class RoadmapReviewApiRequest(ReviewApiRequest):
 
 
 class StoryReviewApiRequest(ReviewApiRequest):
-    """Semantic Story review with one exact repeated instance selector."""
-
-    instance_key: SemanticText
+    """Semantic Story review without caller-owned machine identity."""
 
 
 class SprintPlanReviewApiRequest(ReviewApiRequest):
@@ -186,19 +181,6 @@ class RepositoryAttachApiRequest(MutationApiRequest):
     path: str = Field(min_length=1)
 
 
-class AuthorityDecisionApiRequest(MutationApiRequest):
-    """Semantic authority review choice without derived identities."""
-
-    decision: Literal["accepted", "rejected"]
-    rationale: SemanticText
-
-
-class AuthorityFeedbackApiRequest(MutationApiRequest):
-    """Semantic human feedback without caller-owned authority identity."""
-
-    feedback: SemanticText
-
-
 class DeliveryActionApiRequest(MutationApiRequest):
     """Transport metadata and optional semantic decision selector only."""
 
@@ -217,7 +199,6 @@ class SprintPlanningApiRequest(MutationApiRequest):
     user_input: str | None = None
     selected_story_ids: list[int] = Field(default_factory=list)
     max_story_points: int | None = Field(default=None, gt=0)
-    include_task_decomposition: bool = True
     team_name: str = Field(min_length=1)
 
     @field_validator("selected_story_ids")
@@ -354,14 +335,11 @@ SEMANTIC_API_PATHS: dict[str, str] = {
     "begin_vision_revision": "vision/revision",
     "close_sprint": "sprint/close",
     "close_story": "story/close",
-    "compile_authority": "authority/compile",
     "complete_task": "sprint/task/complete",
-    "decide_authority": "authority/decision",
     "decide_backlog": "backlog/decide",
     "decide_roadmap": "roadmap/decide",
     "decide_sprint_plan": "sprint/decide",
     "decide_story": "story/decide",
-    "record_authority_feedback": "authority/feedback",
     "record_post_sprint_triage": "sprint/triage",
     "decide_product_goal_review": "goals/review",
     "decide_specification": "specifications/review",
@@ -373,7 +351,6 @@ SEMANTIC_API_PATHS: dict[str, str] = {
     "structure_specification": "specifications/structure",
     "record_sprint_plan": "sprint/generate",
     "record_vision_interview_turn": "vision/respond",
-    "repair_authority": "authority/repair",
     "repair_story_readiness": "story/readiness/repair",
     "review_sprint": "sprint/review",
     "start_sprint": "sprint/start",
@@ -381,7 +358,6 @@ SEMANTIC_API_PATHS: dict[str, str] = {
 
 _ACTIONABLE_WAITING_REQUEST_KINDS = frozenset(
     {
-        "decide_authority",
         "decide_backlog",
         "decide_product_goal_review",
         "decide_roadmap",
@@ -414,37 +390,6 @@ def build_create_project_command(req: CreateProjectRequest) -> CreateProjectComm
         repository_path=req.repository_path,
         idempotency_key=req.idempotency_key,
         actor=req.actor,
-    )
-
-
-def build_authority_decision_request(
-    project_id: int,
-    req: AuthorityDecisionApiRequest,
-    expected_candidate_fingerprint: str,
-) -> AuthorityReviewRequest:
-    """Translate one API choice plus its hidden browser expectation."""
-    return AuthorityReviewRequest(
-        project_id=project_id,
-        idempotency_key=req.idempotency_key,
-        actor=req.actor,
-        correlation_id=req.correlation_id,
-        decision=req.decision,
-        rationale=req.rationale,
-        expected_candidate_fingerprint=expected_candidate_fingerprint,
-    )
-
-
-def build_authority_feedback_request(
-    project_id: int,
-    req: AuthorityFeedbackApiRequest,
-) -> AuthorityFeedbackRequest:
-    """Translate feedback text without accepting durable authority identity."""
-    return AuthorityFeedbackRequest(
-        project_id=project_id,
-        feedback=req.feedback,
-        idempotency_key=req.idempotency_key,
-        actor=req.actor,
-        correlation_id=req.correlation_id,
     )
 
 
@@ -865,6 +810,30 @@ def get_specification_review(project_id: int) -> dict[str, object]:
     )
 
 
+@app.get("/api/projects/{project_id}/backlog/review")
+def get_backlog_review(project_id: int) -> dict[str, object]:
+    """Return the exact graph-selected Backlog review and machine binding."""
+    return _read_payload(_application().backlog_review(project_id))
+
+
+@app.get("/api/projects/{project_id}/roadmap/review")
+def get_roadmap_review(project_id: int) -> dict[str, object]:
+    """Return the exact graph-selected Roadmap review and machine binding."""
+    return _read_payload(_application().roadmap_review(project_id))
+
+
+@app.get("/api/projects/{project_id}/story/reviews")
+def get_story_reviews(project_id: int) -> dict[str, object]:
+    """Return every exact pending Story review in stable display order."""
+    return _read_payload(_application().story_reviews(project_id))
+
+
+@app.get("/api/projects/{project_id}/sprint/plan/review")
+def get_sprint_plan_review(project_id: int) -> dict[str, object]:
+    """Return the exact graph-selected Sprint-plan review and machine binding."""
+    return _read_payload(_application().sprint_plan_review(project_id))
+
+
 @app.post("/api/projects/{project_id}/specifications/review")
 def review_specification(
     project_id: int,
@@ -920,40 +889,6 @@ def refresh_repository(
     return _result_payload(
         _application().refresh_repository(
             RepositoryRefreshRequest(project_id=project_id, **_metadata(req))
-        )
-    )
-
-
-@app.get("/api/projects/{project_id}/authority/status")
-def get_authority_status(project_id: int) -> dict[str, object]:
-    """Return durable authority status without routing state."""
-    return _read_payload(_application().reads.authority_status(project_id=project_id))
-
-
-@app.get("/api/projects/{project_id}/authority/invariants")
-def get_authority_invariants(
-    project_id: int,
-    spec_version_id: int | None = None,
-) -> dict[str, object]:
-    """Return durable compiled authority invariants."""
-    return _read_payload(
-        _application().reads.authority_invariants(
-            project_id=project_id,
-            spec_version_id=spec_version_id,
-        )
-    )
-
-
-@app.get("/api/projects/{project_id}/authority/review")
-def get_authority_review(
-    project_id: int,
-    include_spec: str = "auto",
-) -> dict[str, object]:
-    """Return the pending authority review packet."""
-    return _read_payload(
-        _application().reads.authority_review(
-            project_id=project_id,
-            include_spec=include_spec,
         )
     )
 
@@ -1141,40 +1076,6 @@ def get_story_packet(
     )
 
 
-@app.post("/api/projects/{project_id}/authority/decision")
-def decide_project_authority(
-    project_id: int,
-    req: AuthorityDecisionApiRequest,
-    expected_candidate_fingerprint: Annotated[
-        str,
-        Header(alias="X-AgileForge-Expected-Candidate", include_in_schema=False),
-    ],
-) -> dict[str, object]:
-    """Record one human choice with server-derived authority identity."""
-    return _result_payload(
-        _application().decide_authority(
-            build_authority_decision_request(
-                project_id,
-                req,
-                expected_candidate_fingerprint,
-            )
-        )
-    )
-
-
-@app.post("/api/projects/{project_id}/authority/feedback")
-def record_project_authority_feedback(
-    project_id: int,
-    req: AuthorityFeedbackApiRequest,
-) -> dict[str, object]:
-    """Record feedback for the graph-selected rejected authority."""
-    return _result_payload(
-        _application().record_authority_feedback(
-            build_authority_feedback_request(project_id, req)
-        )
-    )
-
-
 def _delivery_request(
     project_id: int,
     req: DeliveryActionApiRequest,
@@ -1183,32 +1084,6 @@ def _delivery_request(
         project_id=project_id,
         instance_key=req.instance_key,
         **_metadata(req),
-    )
-
-
-@app.post("/api/projects/{project_id}/authority/compile")
-def compile_project_authority(
-    project_id: int,
-    req: MutationApiRequest,
-) -> dict[str, object]:
-    """Compile authority from host-prepared current specification input."""
-    return _result_payload(
-        _application().compile_authority(
-            AuthorityCompileRequest(project_id=project_id, **_metadata(req))
-        )
-    )
-
-
-@app.post("/api/projects/{project_id}/authority/repair")
-def repair_project_authority(
-    project_id: int,
-    req: MutationApiRequest,
-) -> dict[str, object]:
-    """Repair rejected authority from host-prepared compiler input."""
-    return _result_payload(
-        _application().repair_authority(
-            AuthorityRepairRequest(project_id=project_id, **_metadata(req))
-        )
     )
 
 
@@ -1258,7 +1133,6 @@ def generate_project_sprint(
                 guidance=req.user_input,
                 selected_story_ids=tuple(req.selected_story_ids),
                 max_story_points=req.max_story_points,
-                include_task_decomposition=req.include_task_decomposition,
                 team_name=req.team_name,
                 **_metadata(req),
             )
@@ -1270,6 +1144,14 @@ def generate_project_sprint(
 def decide_project_backlog(
     project_id: int,
     req: BacklogReviewApiRequest,
+    expected_decision: Annotated[
+        str,
+        Header(
+            alias="X-AgileForge-Expected-Decision",
+            min_length=1,
+            pattern=r"^\S+$",
+        ),
+    ],
 ) -> dict[str, object]:
     """Review the graph-selected Backlog from semantic operator input."""
     return _result_payload(
@@ -1279,7 +1161,11 @@ def decide_project_backlog(
                 decision=req.decision,
                 rationale=req.rationale,
                 **_metadata(req),
-            )
+            ),
+            expected=ExpectedPlanningReviewBinding(
+                decision_fingerprint=expected_decision,
+                instance_key=None,
+            ),
         )
     )
 
@@ -1288,6 +1174,14 @@ def decide_project_backlog(
 def decide_project_roadmap(
     project_id: int,
     req: RoadmapReviewApiRequest,
+    expected_decision: Annotated[
+        str,
+        Header(
+            alias="X-AgileForge-Expected-Decision",
+            min_length=1,
+            pattern=r"^\S+$",
+        ),
+    ],
 ) -> dict[str, object]:
     """Review the graph-selected Roadmap from semantic operator input."""
     return _result_payload(
@@ -1297,7 +1191,11 @@ def decide_project_roadmap(
                 decision=req.decision,
                 rationale=req.rationale,
                 **_metadata(req),
-            )
+            ),
+            expected=ExpectedPlanningReviewBinding(
+                decision_fingerprint=expected_decision,
+                instance_key=None,
+            ),
         )
     )
 
@@ -1306,17 +1204,36 @@ def decide_project_roadmap(
 def decide_project_story(
     project_id: int,
     req: StoryReviewApiRequest,
+    expected_decision: Annotated[
+        str,
+        Header(
+            alias="X-AgileForge-Expected-Decision",
+            min_length=1,
+            pattern=r"^\S+$",
+        ),
+    ],
+    expected_instance: Annotated[
+        str,
+        Header(
+            alias="X-AgileForge-Expected-Instance",
+            min_length=1,
+            pattern=r"^\S+$",
+        ),
+    ],
 ) -> dict[str, object]:
     """Review one exact graph-selected Story artifact instance."""
     return _result_payload(
         _application().decide_story(
             StoryReviewRequest(
                 project_id=project_id,
-                instance_key=req.instance_key,
                 decision=req.decision,
                 rationale=req.rationale,
                 **_metadata(req),
-            )
+            ),
+            expected=ExpectedPlanningReviewBinding(
+                decision_fingerprint=expected_decision,
+                instance_key=expected_instance,
+            ),
         )
     )
 
@@ -1325,6 +1242,14 @@ def decide_project_story(
 def decide_project_sprint_plan(
     project_id: int,
     req: SprintPlanReviewApiRequest,
+    expected_decision: Annotated[
+        str,
+        Header(
+            alias="X-AgileForge-Expected-Decision",
+            min_length=1,
+            pattern=r"^\S+$",
+        ),
+    ],
 ) -> dict[str, object]:
     """Review the graph-selected Sprint plan from semantic operator input."""
     return _result_payload(
@@ -1334,7 +1259,11 @@ def decide_project_sprint_plan(
                 decision=req.decision,
                 rationale=req.rationale,
                 **_metadata(req),
-            )
+            ),
+            expected=ExpectedPlanningReviewBinding(
+                decision_fingerprint=expected_decision,
+                instance_key=None,
+            ),
         )
     )
 

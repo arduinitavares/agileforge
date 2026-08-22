@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import importlib.util
 from typing import TYPE_CHECKING
 
 import pytest
@@ -13,7 +14,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.schema import CheckConstraint, UniqueConstraint
 from sqlmodel import Session, SQLModel
 
-from models import product_definition
+from models import product_definition, specs
 from models.db import _CURRENT_MODEL_MODULES
 from models.product_definition import (
     ProductGoalArtifact,
@@ -661,6 +662,12 @@ def test_product_definition_records_enforce_scoped_lineage_and_values() -> None:
         if isinstance(constraint, UniqueConstraint)
     }
     assert ("project_id", "specification_candidate_id") in decision_uniques
+    assert (
+        "project_id",
+        "specification_decision_id",
+        "specification_candidate_id",
+        "candidate_fingerprint",
+    ) in decision_uniques
 
     attempt_uniques = {
         tuple(constraint.columns.keys())
@@ -679,6 +686,7 @@ def test_spec_registry_requires_product_definition_lineage() -> None:
     table = SQLModel.metadata.tables["spec_registry"]
 
     expected_columns = {
+        "source_specification_decision_id",
         "source_specification_candidate_id",
         "source_specification_candidate_fingerprint",
         "source_vision_artifact_id",
@@ -717,6 +725,20 @@ def test_spec_registry_requires_product_definition_lineage() -> None:
     assert (
         (
             "project_id",
+            "source_specification_decision_id",
+            "source_specification_candidate_id",
+            "source_specification_candidate_fingerprint",
+        ),
+        (
+            "specification_decisions.project_id",
+            "specification_decisions.specification_decision_id",
+            "specification_decisions.specification_candidate_id",
+            "specification_decisions.candidate_fingerprint",
+        ),
+    ) in _foreign_keys("spec_registry")
+    assert (
+        (
+            "project_id",
             "source_specification_candidate_id",
             "source_specification_candidate_fingerprint",
             "spec_hash",
@@ -728,6 +750,18 @@ def test_spec_registry_requires_product_definition_lineage() -> None:
             "specification_candidates.payload_fingerprint",
         ),
     ) in _foreign_keys("spec_registry")
+    current_indexes = {
+        (
+            tuple(index.columns.keys()),
+            index.unique,
+            str(index.dialect_options["sqlite"].get("where")),
+        )
+        for index in table.indexes
+    }
+    assert (("project_id",), True, "status = 'approved'") in current_indexes
+    assert {"approved_at", "approved_by", "approval_notes"}.isdisjoint(
+        table.columns.keys()
+    )
     assert (
         (
             "project_id",
@@ -752,6 +786,194 @@ def test_spec_registry_requires_product_definition_lineage() -> None:
             "product_goal_artifacts.content_fingerprint",
         ),
     ) in _foreign_keys("spec_registry")
+
+
+def test_task3_planning_models_use_exact_lineage_scoped_identities() -> None:
+    """Require every immutable planning chain key and exact parent binding."""
+    expected_uniques = {
+        "backlog_artifacts": {
+            (
+                "project_id",
+                "product_goal_artifact_id",
+                "product_goal_fingerprint",
+                "spec_version_id",
+                "spec_hash",
+                "version_number",
+            ),
+            (
+                "project_id",
+                "product_goal_artifact_id",
+                "product_goal_fingerprint",
+                "spec_version_id",
+                "spec_hash",
+                "content_fingerprint",
+            ),
+        },
+        "roadmap_artifacts": {
+            (
+                "project_id",
+                "backlog_artifact_id",
+                "backlog_artifact_fingerprint",
+                "version_number",
+            ),
+            (
+                "project_id",
+                "backlog_artifact_id",
+                "backlog_artifact_fingerprint",
+                "content_fingerprint",
+            ),
+        },
+        "story_artifacts": {
+            (
+                "project_id",
+                "source_backlog_artifact_id",
+                "backlog_item_id",
+                "version_number",
+            ),
+            (
+                "project_id",
+                "source_backlog_artifact_id",
+                "backlog_item_id",
+                "content_fingerprint",
+            ),
+        },
+        "sprint_plan_artifacts": {
+            (
+                "project_id",
+                "spec_version_id",
+                "spec_hash",
+                "sprint_plan_stream_id",
+                "version_number",
+            ),
+            (
+                "project_id",
+                "spec_version_id",
+                "spec_hash",
+                "sprint_plan_stream_id",
+                "plan_fingerprint",
+            ),
+        },
+    }
+    forbidden_broad_uniques = {
+        "backlog_artifacts": {
+            ("project_id", "version_number"),
+            ("project_id", "content_fingerprint"),
+        },
+        "roadmap_artifacts": {
+            ("project_id", "version_number"),
+            ("project_id", "content_fingerprint"),
+        },
+        "sprint_plan_artifacts": {
+            ("project_id", "version_number"),
+            ("project_id", "plan_fingerprint"),
+        },
+    }
+
+    for table_name, required in expected_uniques.items():
+        table = SQLModel.metadata.tables[table_name]
+        observed = {
+            tuple(constraint.columns.keys())
+            for constraint in table.constraints
+            if isinstance(constraint, UniqueConstraint)
+        }
+        assert required <= observed, table_name
+        assert forbidden_broad_uniques.get(table_name, set()).isdisjoint(observed)
+
+    assert (
+        ("project_id", "spec_version_id", "spec_hash"),
+        (
+            "spec_registry.project_id",
+            "spec_registry.spec_version_id",
+            "spec_registry.spec_hash",
+        ),
+    ) in _foreign_keys("backlog_artifacts")
+    assert (
+        ("project_id", "product_goal_artifact_id", "product_goal_fingerprint"),
+        (
+            "product_goal_artifacts.project_id",
+            "product_goal_artifacts.product_goal_artifact_id",
+            "product_goal_artifacts.content_fingerprint",
+        ),
+    ) in _foreign_keys("backlog_artifacts")
+    assert (
+        (
+            "project_id",
+            "source_backlog_artifact_id",
+            "source_backlog_artifact_fingerprint",
+        ),
+        (
+            "backlog_artifacts.project_id",
+            "backlog_artifacts.backlog_artifact_id",
+            "backlog_artifacts.content_fingerprint",
+        ),
+    ) in _foreign_keys("story_artifacts")
+    assert (
+        ("project_id", "roadmap_artifact_id", "roadmap_artifact_fingerprint"),
+        (
+            "roadmap_artifacts.project_id",
+            "roadmap_artifacts.roadmap_artifact_id",
+            "roadmap_artifacts.content_fingerprint",
+        ),
+    ) in _foreign_keys("story_artifacts")
+    assert (
+        ("project_id", "spec_version_id", "spec_hash"),
+        (
+            "spec_registry.project_id",
+            "spec_registry.spec_version_id",
+            "spec_registry.spec_hash",
+        ),
+    ) in _foreign_keys("sprint_plan_artifacts")
+
+    backlog_columns = SQLModel.metadata.tables["backlog_artifacts"].columns
+    assert {"spec_version_id", "spec_hash"} <= set(backlog_columns.keys())
+    assert {"authority_id", "authority_fingerprint"}.isdisjoint(backlog_columns.keys())
+
+    story_columns = SQLModel.metadata.tables["story_artifacts"].columns
+    assert {
+        "source_backlog_artifact_id",
+        "source_backlog_artifact_fingerprint",
+        "backlog_item_id",
+        "story_item_ids_json",
+    } <= set(story_columns.keys())
+    assert {"requirement_id", "story_ids_json"}.isdisjoint(story_columns.keys())
+
+    plan_columns = SQLModel.metadata.tables["sprint_plan_artifacts"].columns
+    assert {"spec_version_id", "spec_hash", "sprint_plan_stream_id"} <= set(
+        plan_columns.keys()
+    )
+    assert "sprint_id" not in plan_columns
+
+
+def test_task3_sprint_decision_and_task_metadata_are_fail_closed() -> None:
+    """Bind accepted plans to a Sprint and require explicit v2 Task metadata."""
+    from models.core import Task  # noqa: PLC0415
+
+    decision = SQLModel.metadata.tables["sprint_plan_artifact_decisions"]
+    assert "activated_sprint_id" in decision.columns
+    assert decision.c.activated_sprint_id.nullable
+    assert (
+        "(decision = 'accepted' AND activated_sprint_id IS NOT NULL) OR "
+        "(decision IN ('feedback', 'rejected') AND activated_sprint_id IS NULL)"
+    ) in _checks("sprint_plan_artifact_decisions")
+
+    metadata_column = SQLModel.metadata.tables["tasks"].c.metadata_json
+    assert not metadata_column.nullable
+    assert metadata_column.default is None
+    assert metadata_column.server_default is None
+    assert Task.model_fields["metadata_json"].is_required()
+
+
+def test_task3_authority_models_and_tables_are_not_registered() -> None:
+    """The fresh business schema contains no Authority persistence surface."""
+    assert importlib.util.find_spec("models.authority_curation") is None
+    assert not hasattr(specs, "CompiledSpecAuthority")
+    assert not hasattr(specs, "SpecAuthorityAcceptance")
+    assert {
+        "compiled_spec_authority",
+        "spec_authority_acceptance",
+        "authority_feedback_attempts",
+        "authority_curation_attempts",
+    }.isdisjoint(SQLModel.metadata.tables)
 
 
 def _insert_vision_turn(

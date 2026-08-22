@@ -4,30 +4,46 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import hashlib
 import json
 import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
 from google.adk import Workflow as AdkWorkflow
 from google.adk.agents import BaseAgent, InvocationContext
+from google.adk.apps import App, ResumabilityConfig
 from google.adk.events import Event
+from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.adk.sessions import Session as AdkSession
 from google.adk.workflow import START, node
+from google.genai import types
 from openai import OpenAIError
 from pydantic import TypeAdapter
 from sqlmodel import Session, col, select
 
+from adapters.adk.agents.backlog import root_agent as backlog_agent
+from adapters.adk.agents.roadmap import root_agent as roadmap_agent
+from adapters.adk.agents.sprint import root_agent as sprint_agent
+from adapters.adk.agents.story import (
+    create_user_story_patch_agent,
+)
+from adapters.adk.agents.story import (
+    root_agent as story_agent,
+)
 from adapters.adk.errors import VisionAgenticPreflightError
-from adapters.adk.prompts.specification import SPEC_AUTHORITY_COMPILER_PROMPT_HASH
+from adapters.adk.model_roles import AGENTIC_MODEL_ROLES
 from adapters.adk.recipes import (
+    AGENTIC_NODE_IDS,
     AdkRecipe,
     AdkRecipeRegistry,
     AgenticRecipeNodes,
     AttemptCompletionContext,
+    RecipeInput,
     RecipeOutput,
     build_agentic_recipe_registry,
     build_backlog_generation_workflow,
@@ -45,28 +61,40 @@ from models.product_definition import (
     ProductGoalOutcome,
     VisionInterviewTurn,
 )
-from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance
 from models.workflow import (
     BacklogArtifact,
     WorkflowNodeAttempt,
     WorkflowNodeAttemptOutcome,
     WorkflowTransitionReceipt,
 )
-from services.authority_compilation_input import AuthorityCompilationInputService
+from services.contracts.backlog import (
+    BacklogAgentOutput,
+    BacklogBuilderInput,
+    BacklogItem,
+    BacklogOutput,
+)
 from services.contracts.product_goal import (
     ProductGoalInterviewInput,
     ProductGoalInterviewOutput,
 )
-from services.contracts.vision import VisionDraftOutput, VisionModelInput
-from services.specs import compiler_service
-from services.specs.authority_selection import pending_authority_fingerprint
-from tests.workflow.lifecycle_fixtures import seed_accepted_specification
-from utils.runtime_config import ADK_EXECUTION_TRACE_IDENTITY
-from utils.spec_schemas import (
-    SpecAuthorityCompilationSuccess,
-    SpecAuthorityCompilerEnvelope,
-    SpecAuthorityCompilerInput,
+from services.contracts.roadmap import RoadmapBuilderInput, RoadmapBuilderOutput
+from services.contracts.sprint import (
+    SprintPlannerInput,
+    SprintPlannerOutput,
+    SprintPlannerStory,
 )
+from services.contracts.story import (
+    CanonicalStoryOutput,
+    UserStoryWriterInput,
+    UserStoryWriterOutput,
+)
+from services.contracts.vision import VisionDraftOutput, VisionModelInput
+from services.specs.accepted_specification import (
+    require_current_accepted_specification,
+)
+from tests.workflow.lifecycle_fixtures import seed_accepted_specification
+from utils.agileforge_spec_profile_v2 import SpecificationPayload
+from utils.runtime_config import ADK_EXECUTION_TRACE_IDENTITY
 from workflow.clock import FixedClock
 from workflow.contracts import (
     JsonObject,
@@ -76,12 +104,14 @@ from workflow.contracts import (
     TransitionResult,
     WorkflowErrorCode,
 )
-from workflow.definitions.authority import authority_graph
 from workflow.definitions.root import ROOT_GRAPH
 from workflow.domain import WorkflowDomain
 from workflow.fingerprints import canonical_hash
 from workflow.requests import (
     RecordBacklogDraft,
+    RecordRoadmapDraft,
+    RecordSprintPlan,
+    RecordStoryDraft,
     StartNodeAttempt,
     TransitionRequest,
 )
@@ -97,8 +127,55 @@ EXPECTED_RECOVERY_ATTEMPT_COUNT = 2
 NEXT_GOAL_NUMBER = 2
 EXECUTION_SETTINGS: JsonObject = {"timeout_seconds": 5.0, "max_attempts": 1}
 JSON_OBJECT = TypeAdapter(JsonObject)
-_AUTHORITY_SOURCE_ID = "REQ.runner.authority-boundary"
-_NON_NORMATIVE_SENTINEL = "NON_NORMATIVE_SENTINEL_MUST_NEVER_REACH_AUTHORITY"
+GOLD_SPECIFICATION_PATH = (
+    Path(__file__).parents[1]
+    / "fixtures"
+    / "issue_210"
+    / "gold"
+    / "canonical-specification.json"
+)
+GOLD_SPECIFICATION_HASH = (
+    "sha256:4f39ae394d3910bc52d73256eddc11edd66e57074025e1ec7f037e8e69a33025"
+)
+GOLD_SPECIFICATION_ITEM_IDS = {
+    "ASSUMPTION.001",
+    "CONSTRAINT.001",
+    "CONSTRAINT.002",
+    "DATA.001",
+    "DATA.002",
+    "DECISION.001",
+    "DECISION.002",
+    "DECISION.003",
+    "EXAMPLE.001",
+    "GOAL.001",
+    "GOAL.002",
+    "INTERFACE.001",
+    "INTERFACE.002",
+    "NON_GOAL.001",
+    "NON_GOAL.002",
+    "NON_GOAL.003",
+    "NON_GOAL.004",
+    "OPEN_QUESTION.001",
+    "QUALITY.001",
+    "REQ.001",
+    "REQ.002",
+    "REQ.003",
+    "REQ.004",
+    "REQ.005",
+    "REQ.006",
+    "REQ.007",
+    "REQ.008",
+    "REQ.009",
+    "REQ.010",
+    "REQ.011",
+    "REQ.012",
+    "REQ.013",
+    "REQ.014",
+    "REQ.015",
+    "RISK.001",
+    "RISK.002",
+    "RISK.003",
+}
 
 
 @dataclass
@@ -297,21 +374,139 @@ class _BacklogLineage:
     project_id: int
     product_goal_artifact_id: int
     product_goal_fingerprint: str
-    authority_id: int
-    authority_fingerprint: str
+    spec_version_id: int
+    spec_hash: str
+    canonical_specification_json: str
+
+
+def _gold_agent_inputs() -> tuple[dict[str, object], ...]:
+    canonical_json = GOLD_SPECIFICATION_PATH.read_text(encoding="utf-8")
+    root = {
+        "accepted_specification_version_id": 11,
+        "accepted_specification_hash": GOLD_SPECIFICATION_HASH,
+        "accepted_specification_json": canonical_json,
+    }
+    backlog_item = BacklogItem(
+        backlog_item_id="PBI-000001",
+        priority=1,
+        requirement="Implement the accepted calculator operation",
+        spec_item_ids=("DATA.001", "REQ.001"),
+        value_driver="Strategic",
+        justification="It realizes the accepted first release.",
+        estimated_effort="M",
+    )
+    story = SprintPlannerStory(
+        story_id=41,
+        story_item_id="US-0001",
+        story_title="Implement the accepted calculator operation",
+        statement=(
+            "As a calculator user, I want the accepted operation, so that I can "
+            "obtain the specified result."
+        ),
+        persona="calculator user",
+        acceptance_criteria=("Verify the result against DATA.001.",),
+        spec_item_ids=("DATA.001", "REQ.001"),
+        story_points=3,
+        rank="1.1",
+    )
+    return (
+        {
+            **root,
+            "product_vision_statement": "Ship one bounded calculator release.",
+            "product_goal_statement": "Deliver the accepted first release.",
+            "prior_backlog_state": "NO_HISTORY",
+            "user_input": None,
+        },
+        {
+            **root,
+            "backlog_items": [backlog_item.model_dump(mode="json")],
+            "product_vision": "Ship one bounded calculator release.",
+            "time_increment": "Milestone-based",
+            "prior_roadmap_state": "NO_HISTORY",
+            "user_input": "",
+        },
+        {
+            **root,
+            "parent_backlog_item_id": "PBI-000001",
+            "parent_backlog_spec_item_ids": ["DATA.001", "REQ.001"],
+            "roadmap_context": "Release 1",
+            "user_input": None,
+        },
+        {
+            **root,
+            "available_stories": [story.model_dump(mode="json")],
+            "capacity_points": 3,
+            "capacity_source": "user_override",
+            "capacity_basis": "Three operator-provided points.",
+            "user_context": None,
+        },
+    )
+
+
+def test_live_recipe_and_model_role_catalogs_equal_graph_tuple_exactly() -> None:
+    """Keep recipe and model-role order equal to the eight live graph actions."""
+    expected = ROOT_GRAPH.agentic_node_ids
+
+    assert len(expected) == 8  # noqa: PLR2004
+    assert expected == AGENTIC_NODE_IDS
+    assert tuple(AGENTIC_MODEL_ROLES) == expected
+
+
+def test_delivery_agent_schemas_accept_the_complete_gold_root_without_aliases() -> None:
+    """Validate complete gold bytes through each retained delivery agent schema."""
+    agents_and_contracts = (
+        (backlog_agent, BacklogBuilderInput, BacklogAgentOutput),
+        (roadmap_agent, RoadmapBuilderInput, RoadmapBuilderOutput),
+        (story_agent, UserStoryWriterInput, UserStoryWriterOutput),
+        (create_user_story_patch_agent(), UserStoryWriterInput, UserStoryWriterOutput),
+        (sprint_agent, SprintPlannerInput, SprintPlannerOutput),
+    )
+    backlog_input, roadmap_input, story_input, sprint_input = _gold_agent_inputs()
+    inputs = (backlog_input, roadmap_input, story_input, story_input, sprint_input)
+    canonical_json = GOLD_SPECIFICATION_PATH.read_text(encoding="utf-8")
+    assert "sha256:" + hashlib.sha256(canonical_json.encode()).hexdigest() == (
+        GOLD_SPECIFICATION_HASH
+    )
+
+    for ordinal, (agent, input_contract, output_contract) in enumerate(
+        agents_and_contracts
+    ):
+        payload = inputs[ordinal]
+        assert agent.input_schema is input_contract
+        assert agent.output_schema is output_contract
+        parsed = input_contract.model_validate(payload)
+        dumped = parsed.model_dump(mode="json")
+        assert dumped["accepted_specification_json"] == canonical_json
+        assert dumped["accepted_specification_hash"] == GOLD_SPECIFICATION_HASH
+        assert not {"technical_spec", "invariants"} & dumped.keys()
+        specification = SpecificationPayload.model_validate_json(
+            dumped["accepted_specification_json"]
+        )
+        assert {item.id for item in specification.items} == GOLD_SPECIFICATION_ITEM_IDS
+        assert "DATA.001" in GOLD_SPECIFICATION_ITEM_IDS
+
+
+def test_delivery_agent_prompts_keep_direct_source_and_human_review_semantics() -> None:
+    """Keep every delivery prompt on the direct source and human review boundary."""
+    instructions = (
+        backlog_agent.instruction,
+        roadmap_agent.instruction,
+        story_agent.instruction,
+        create_user_story_patch_agent().instruction,
+        sprint_agent.instruction,
+    )
+
+    for instruction in instructions:
+        assert isinstance(instruction, str)
+        assert "accepted Specification" in instruction
+        assert "human reviewer" in instruction
+        lowered = instruction.casefold()
+        assert "technical_spec" not in lowered
+        assert "invariant" not in lowered
+        assert "generic gap" in lowered
 
 
 def _seed(engine: Engine) -> _BacklogLineage:
-    artifact = SpecAuthorityCompilationSuccess(
-        scope_themes=["Runner"],
-        invariants=[],
-        eligible_feature_rules=[],
-        gaps=[],
-        assumptions=[],
-        source_map=[],
-        compiler_version="3.0.0",
-        prompt_hash="a" * 64,
-    )
     with Session(engine) as session:
         project = Project(name="Runner")
         session.add(project)
@@ -320,53 +515,44 @@ def _seed(engine: Engine) -> _BacklogLineage:
         lineage = seed_accepted_specification(
             session,
             project_id=project.project_id,
-            content='{"scope":"runner"}',
+            content=json.dumps(
+                {
+                    "schema_version": "agileforge.spec.v2",
+                    "artifact_id": "SPEC.runner",
+                    "title": "Runner",
+                    "summary": "Exercise provider-free runner behavior.",
+                    "problem_statement": "Runner output needs exact evidence.",
+                    "items": [
+                        {
+                            "id": "REQ.runner",
+                            "type": "REQ",
+                            "title": "Runner execution",
+                            "statement": "The runner must execute one recipe.",
+                            "level": "MUST",
+                            "verification": "integration-test",
+                            "acceptance": ["One recipe result is durable."],
+                        }
+                    ],
+                }
+            ),
             recorded_at=EVALUATED_AT - timedelta(minutes=1),
         )
         spec_version_id = lineage.spec.spec_version_id
         assert spec_version_id is not None
-        authority = CompiledSpecAuthority(
+        accepted = require_current_accepted_specification(
+            session,
+            project_id=project.project_id,
             spec_version_id=spec_version_id,
-            compiler_version=artifact.compiler_version,
-            prompt_hash=artifact.prompt_hash,
-            compiled_at=EVALUATED_AT,
-            compiled_artifact_json=artifact.model_dump_json(),
-            scope_themes="[]",
-            invariants="[]",
-            eligible_feature_ids="[]",
-            rejected_features="[]",
-            spec_gaps="[]",
-        )
-        session.add(authority)
-        session.flush()
-        assert authority.authority_id is not None
-        fingerprint = pending_authority_fingerprint(authority)
-        assert fingerprint is not None
-        session.add(
-            SpecAuthorityAcceptance(
-                project_id=project.project_id,
-                spec_version_id=spec_version_id,
-                status="accepted",
-                policy="manual",
-                decided_by="operator@example.com",
-                decided_at=EVALUATED_AT,
-                rationale="Accepted.",
-                compiler_version=authority.compiler_version,
-                prompt_hash=authority.prompt_hash,
-                spec_hash=lineage.spec.spec_hash,
-                pending_authority_id=authority.authority_id,
-                authority_fingerprint=fingerprint,
-                review_fingerprint="sha256:review",
-                terminal_decision_key="runner-authority",
-            )
+            spec_hash=lineage.spec.spec_hash,
         )
         session.commit()
         return _BacklogLineage(
             project_id=project.project_id,
             product_goal_artifact_id=lineage.product_goal_artifact_id,
             product_goal_fingerprint=lineage.product_goal_fingerprint,
-            authority_id=authority.authority_id,
-            authority_fingerprint=fingerprint,
+            spec_version_id=spec_version_id,
+            spec_hash=lineage.spec.spec_hash,
+            canonical_specification_json=accepted.canonical_specification_json,
         )
 
 
@@ -376,8 +562,7 @@ def _backlog_payload() -> JsonObject:
             {
                 "priority": 1,
                 "requirement": "Execute graph nodes through ADK",
-                "authority_ref": "REQ.runner",
-                "capability_hint": None,
+                "spec_item_ids": ["REQ.runner"],
                 "value_driver": "Strategic",
                 "justification": "Keep durable facts authoritative.",
                 "estimated_effort": "M",
@@ -389,97 +574,25 @@ def _backlog_payload() -> JsonObject:
     }
 
 
-def _backlog_response(lineage: _BacklogLineage) -> JsonObject:
+def _backlog_response() -> JsonObject:
+    return _backlog_payload()
+
+
+def _backlog_recipe_input(lineage: _BacklogLineage) -> JsonObject:
     return {
+        "builder_input": {
+            "accepted_specification_version_id": lineage.spec_version_id,
+            "accepted_specification_hash": lineage.spec_hash,
+            "accepted_specification_json": lineage.canonical_specification_json,
+            "product_vision_statement": "Deliver a trusted runner.",
+            "product_goal_statement": "Complete the runner Backlog.",
+            "prior_backlog_state": "NO_HISTORY",
+            "user_input": None,
+        },
         "product_goal_artifact_id": lineage.product_goal_artifact_id,
         "product_goal_fingerprint": lineage.product_goal_fingerprint,
-        "authority_id": lineage.authority_id,
-        "authority_fingerprint": lineage.authority_fingerprint,
-        "content": _backlog_payload(),
+        "supersedes_backlog_artifact_id": None,
     }
-
-
-def _authority_artifact() -> SpecAuthorityCompilationSuccess:
-    return SpecAuthorityCompilationSuccess(
-        scope_themes=["Runner authority"],
-        invariants=[],
-        eligible_feature_rules=[],
-        gaps=[f"{_AUTHORITY_SOURCE_ID}: provider-free boundary regression."],
-        assumptions=[],
-        source_map=[],
-        compiler_version=compiler_service.SPEC_AUTHORITY_COMPILER_VERSION,
-        prompt_hash=SPEC_AUTHORITY_COMPILER_PROMPT_HASH,
-    )
-
-
-def _seed_authority_compile_target(engine: Engine) -> tuple[int, int, str]:
-    with Session(engine) as session:
-        project = Project(name="Runner compile")
-        session.add(project)
-        session.commit()
-        assert project.project_id is not None
-        lineage = seed_accepted_specification(
-            session,
-            project_id=project.project_id,
-            content=json.dumps(
-                {
-                    "schema_version": "agileforge.spec.v2",
-                    "artifact_id": "SPEC.runner-authority-boundary",
-                    "title": "Runner Authority boundary",
-                    "summary": _NON_NORMATIVE_SENTINEL,
-                    "problem_statement": _NON_NORMATIVE_SENTINEL,
-                    "items": [
-                        {
-                            "id": "GOAL.runner.review-context",
-                            "type": "GOAL",
-                            "title": "Review context",
-                            "statement": _NON_NORMATIVE_SENTINEL,
-                        },
-                        {
-                            "id": _AUTHORITY_SOURCE_ID,
-                            "type": "REQ",
-                            "title": "Provider boundary",
-                            "statement": "Authority input MUST remain typed.",
-                            "level": "MUST",
-                            "verification": "integration-test",
-                            "acceptance": [
-                                "The provider receives only typed Authority input."
-                            ],
-                        },
-                    ],
-                }
-            ),
-            recorded_at=EVALUATED_AT - timedelta(minutes=1),
-        )
-        assert lineage.spec.spec_version_id is not None
-        return (
-            project.project_id,
-            lineage.spec.spec_version_id,
-            lineage.spec.spec_hash,
-        )
-
-
-def _observing_authority_leaf(
-    *,
-    observer: ReceiptObserver,
-    provider_inputs: list[str],
-) -> AdkWorkflow:
-    """Capture the exact compiler DTO crossing the nested ADK node boundary."""
-
-    @node(name="observe_authority_compiler_input", rerun_on_resume=True)
-    async def observe_authority_compiler_input(
-        node_input: SpecAuthorityCompilerInput,
-    ) -> SpecAuthorityCompilerEnvelope:
-        observer.record()
-        provider_inputs.append(node_input.model_dump_json())
-        return SpecAuthorityCompilerEnvelope(result=_authority_artifact())
-
-    return AdkWorkflow(
-        name="observing_authority_compiler",
-        input_schema=SpecAuthorityCompilerInput,
-        output_schema=SpecAuthorityCompilerEnvelope,
-        edges=[(START, observe_authority_compiler_input)],
-    )
 
 
 def _unused_leaf(name: str) -> FakeLeafAgent:
@@ -513,7 +626,6 @@ def _validating_goal_leaf(
         node_input: ProductGoalInterviewInput,
     ) -> ProductGoalInterviewOutput:
         dumped = node_input.model_dump(mode="json")
-        assert "compiled_authority" not in dumped
         assert "specification" not in dumped
         assert node_input.accepted_vision_statement
         observations.append(node_input)
@@ -555,14 +667,6 @@ def _goal_registry(
 ) -> AdkRecipeRegistry:
     return build_agentic_recipe_registry(
         nodes=AgenticRecipeNodes(
-            authority_compile=_unused_leaf("unused_authority_compile"),
-            authority_repair=_unused_leaf("unused_authority_repair"),
-            authority_compile_validation_repair=_unused_leaf(
-                "unused_authority_compile_validation_repair"
-            ),
-            authority_repair_validation_repair=_unused_leaf(
-                "unused_authority_repair_validation_repair"
-            ),
             vision_interview=vision_leaf or _unused_leaf("unused_vision_interview"),
             vision_repair=_unused_leaf("unused_vision_repair"),
             product_goal=leaf,
@@ -574,6 +678,408 @@ def _goal_registry(
         ),
         execution_settings=EXECUTION_SETTINGS,
     )
+
+
+async def _run_provider_free_workflow(
+    workflow: AdkWorkflow,
+    payload: JsonObject,
+    *,
+    session_id: str,
+) -> RecipeOutput:
+    sessions = InMemorySessionService()
+    await sessions.create_session(
+        app_name="task6_delivery_recipes",
+        user_id="task6_provider_free",
+        session_id=session_id,
+    )
+    runner = Runner(
+        app=App(
+            name="task6_delivery_recipes",
+            root_agent=workflow,
+            resumability_config=ResumabilityConfig(is_resumable=True),
+        ),
+        session_service=sessions,
+    )
+    message = types.Content(
+        role="user",
+        parts=[types.Part(text=RecipeInput(payload=payload).model_dump_json())],
+    )
+    output: object | None = None
+    async for event in runner.run_async(
+        user_id="task6_provider_free",
+        session_id=session_id,
+        new_message=message,
+    ):
+        if event.output is not None:
+            output = event.output
+    if output is None:
+        message = "delivery recipe produced no structured output"
+        raise AssertionError(message)
+    return RecipeOutput.model_validate(output)
+
+
+@pytest.mark.asyncio
+async def test_delivery_recipe_fakes_use_production_contracts_and_canonicalizers() -> (
+    None
+):
+    """Run all delivery recipes provider-free through their host canonicalizers."""
+    backlog_input, roadmap_input, story_input, sprint_input = _gold_agent_inputs()
+    roadmap_output: JsonObject = {
+        "roadmap_releases": [
+            {
+                "release_name": "Release 1",
+                "theme": "Accepted calculator operation",
+                "focus_area": "User Value",
+                "backlog_item_ids": ["PBI-000001"],
+                "reasoning": "Deliver the exact accepted parent.",
+            }
+        ],
+        "roadmap_summary": "One exact reviewed release.",
+        "is_complete": True,
+        "clarifying_questions": [],
+    }
+    story_output: JsonObject = {
+        "user_stories": [
+            {
+                "story_title": "Deliver the accepted calculator operation",
+                "statement": (
+                    "As a calculator user, I want the accepted operation, so that "
+                    "I can obtain its specified result."
+                ),
+                "acceptance_criteria": ["Verify the result against DATA.001."],
+                "spec_item_ids": ["DATA.001", "REQ.001"],
+                "invest_score": "High",
+                "estimated_effort": "S",
+                "produced_artifacts": [],
+                "research_caveats": [],
+                "decomposition_warning": None,
+                "dependency_candidates": [],
+            }
+        ],
+        "is_complete": True,
+        "clarifying_questions": [],
+    }
+    sprint_output: JsonObject = {
+        "sprint_goal": "Deliver the accepted calculator operation.",
+        "selected_stories": [
+            {
+                "story_id": 41,
+                "story_item_id": "US-0001",
+                "tasks": [
+                    {
+                        "description": "Implement the accepted operation.",
+                        "relevant_spec_item_ids": ["DATA.001", "REQ.001"],
+                        "task_kind": "implementation",
+                        "artifact_targets": ["calculation service"],
+                        "workstream_tags": ["backend"],
+                        "checklist_items": ["Produce the specified result."],
+                    }
+                ],
+                "reason_for_selection": "The host locked this Story.",
+            }
+        ],
+    }
+    registry = build_agentic_recipe_registry(
+        nodes=AgenticRecipeNodes(
+            vision_interview=_unused_leaf("unused_vision"),
+            vision_repair=_unused_leaf("unused_vision_repair"),
+            product_goal=_unused_leaf("unused_goal"),
+            specification_structurer=_unused_leaf("unused_specification"),
+            backlog_generation=FakeLeafAgent(
+                name="fake_backlog_contract",
+                response={
+                    "backlog_items": [
+                        {
+                            "priority": 1,
+                            "requirement": "Deliver the accepted operation",
+                            "spec_item_ids": ["DATA.001", "REQ.001"],
+                            "value_driver": "Strategic",
+                            "justification": "It realizes the accepted release.",
+                            "estimated_effort": "M",
+                            "technical_note": None,
+                        }
+                    ],
+                    "is_complete": True,
+                    "clarifying_questions": [],
+                },
+            ),
+            roadmap_generation=FakeLeafAgent(
+                name="fake_roadmap_contract",
+                response=roadmap_output,
+            ),
+            story_generation=FakeLeafAgent(
+                name="fake_story_contract",
+                response=story_output,
+            ),
+            story_correction=_unused_leaf("unused_story_correction"),
+            sprint_planning=FakeLeafAgent(
+                name="fake_sprint_contract",
+                response=sprint_output,
+            ),
+        ),
+        execution_settings=EXECUTION_SETTINGS,
+    )
+    envelopes: tuple[tuple[str, JsonObject], ...] = (
+        (
+            "backlog.generate",
+            JSON_OBJECT.validate_python(
+                {
+                    "builder_input": backlog_input,
+                    "product_goal_artifact_id": 3,
+                    "product_goal_fingerprint": "sha256:goal",
+                    "supersedes_backlog_artifact_id": None,
+                }
+            ),
+        ),
+        (
+            "planning.roadmap.generate",
+            JSON_OBJECT.validate_python(
+                {
+                    "builder_input": roadmap_input,
+                    "backlog_artifact_id": 5,
+                    "backlog_artifact_fingerprint": "sha256:backlog",
+                    "supersedes_roadmap_artifact_id": None,
+                }
+            ),
+        ),
+        (
+            "planning.story.generate",
+            JSON_OBJECT.validate_python(
+                {
+                    "writer_input": story_input,
+                    "source_backlog_artifact_id": 5,
+                    "source_backlog_artifact_fingerprint": "sha256:backlog",
+                    "roadmap_artifact_id": 7,
+                    "roadmap_artifact_fingerprint": "sha256:roadmap",
+                    "supersedes_story_artifact_id": None,
+                }
+            ),
+        ),
+        (
+            "planning.sprint.plan",
+            JSON_OBJECT.validate_python(
+                {
+                    "planner_input": sprint_input,
+                    "capacity_points": 3,
+                    "capacity_source": "user_override",
+                    "capacity_basis": "Three operator-provided points.",
+                    "requested_max_story_points": 3,
+                    "requested_story_ids": [41],
+                    "locked_story_ids": [41],
+                    "team_name": "Platform",
+                    "guidance": None,
+                    "candidate_set_fingerprint": "sha256:candidates",
+                }
+            ),
+        ),
+    )
+
+    results = [
+        await _run_provider_free_workflow(
+            registry.require(node_id).workflow,
+            payload,
+            session_id=str(ordinal),
+        )
+        for ordinal, (node_id, payload) in enumerate(envelopes, start=1)
+    ]
+
+    backlog_result = BacklogOutput.model_validate(results[0].payload)
+    assert backlog_result.backlog_items[0].backlog_item_id == "PBI-000001"
+    assert results[1].payload == roadmap_output
+    story_items = results[2].payload["story_items"]
+    assert isinstance(story_items, list)
+    story_envelope = story_items[0]
+    assert isinstance(story_envelope, dict)
+    story_item = story_envelope["item"]
+    assert isinstance(story_item, dict)
+    assert story_item["story_item_id"] == "US-0001"
+    assert story_envelope["item_fingerprint"]
+    assert results[3].payload == sprint_output
+    requests = [
+        registry.require(node_id).output_adapter(
+            result,
+            AttemptCompletionContext(
+                project_id=17,
+                graph_version="agileforge.workflow.v2",
+                fact_fingerprint="sha256:facts",
+                decision_fingerprint=f"sha256:decision-{ordinal}",
+                instance_key=(
+                    "backlog_item:PBI-000001"
+                    if node_id == "planning.story.generate"
+                    else None
+                ),
+                attempt_id=ordinal,
+                attempt_fingerprint=f"sha256:attempt-{ordinal}",
+                idempotency_key=f"task6-delivery-{ordinal}",
+                actor="operator@example.com",
+                correlation_id=None,
+                normalized_input=payload,
+            ),
+        )
+        for ordinal, ((node_id, payload), result) in enumerate(
+            zip(envelopes, results, strict=True),
+            start=1,
+        )
+    ]
+    assert isinstance(requests[0], RecordBacklogDraft)
+    assert isinstance(requests[1], RecordRoadmapDraft)
+    assert isinstance(requests[2], RecordStoryDraft)
+    assert isinstance(requests[3], RecordSprintPlan)
+    assert requests[0].spec_hash == GOLD_SPECIFICATION_HASH
+    assert requests[2].backlog_item_id == "PBI-000001"
+    assert requests[3].spec_hash == GOLD_SPECIFICATION_HASH
+    for result in results:
+        serialized = json.dumps(result.payload, sort_keys=True)
+        assert "technical_spec" not in serialized
+
+
+@pytest.mark.asyncio
+async def test_story_correction_recipe_merges_middle_and_remints_once() -> None:
+    """Select only the patch leaf and emit one complete ordinary Story draft."""
+    _backlog, _roadmap, story_input, _sprint = _gold_agent_inputs()
+
+    def item(title: str, statement: str) -> JsonObject:
+        return {
+            "story_title": title,
+            "statement": statement,
+            "acceptance_criteria": [f"Verify {title}."],
+            "spec_item_ids": ["DATA.001", "REQ.001"],
+            "invest_score": "High",
+            "estimated_effort": "S",
+            "produced_artifacts": [],
+            "research_caveats": [],
+            "decomposition_warning": None,
+            "dependency_candidates": [],
+        }
+
+    source_items = [
+        item("First", "As a calculator user, I want first, so that it works."),
+        item("Middle", "As a calculator user, I want middle, so that it works."),
+        item("Last", "As a calculator user, I want last, so that it works."),
+    ]
+    regular_leaf = CountingLeafAgent(
+        name="regular_story_leaf",
+        response={
+            "user_stories": source_items,
+            "is_complete": True,
+            "clarifying_questions": [],
+        },
+        calls=[],
+    )
+    correction_leaf = CountingLeafAgent(
+        name="correction_story_leaf",
+        response={
+            "user_stories": [
+                item(
+                    "Corrected middle",
+                    "As a calculator user, I want corrected middle, so that it works.",
+                )
+            ],
+            "is_complete": True,
+            "clarifying_questions": [],
+        },
+        calls=[],
+    )
+    registry = build_agentic_recipe_registry(
+        nodes=AgenticRecipeNodes(
+            vision_interview=_unused_leaf("unused_vision_correction"),
+            vision_repair=_unused_leaf("unused_vision_repair_correction"),
+            product_goal=_unused_leaf("unused_goal_correction"),
+            specification_structurer=_unused_leaf("unused_spec_correction"),
+            backlog_generation=_unused_leaf("unused_backlog_correction"),
+            roadmap_generation=_unused_leaf("unused_roadmap_correction"),
+            story_generation=regular_leaf,
+            story_correction=correction_leaf,
+            sprint_planning=_unused_leaf("unused_sprint_correction"),
+        ),
+        execution_settings=EXECUTION_SETTINGS,
+    )
+    workflow = registry.require("planning.story.generate").workflow
+    base_payload = JSON_OBJECT.validate_python(
+        {
+            "writer_input": story_input,
+            "source_backlog_artifact_id": 5,
+            "source_backlog_artifact_fingerprint": "sha256:backlog",
+            "roadmap_artifact_id": 7,
+            "roadmap_artifact_fingerprint": "sha256:roadmap",
+            "supersedes_story_artifact_id": None,
+        }
+    )
+    source = await _run_provider_free_workflow(
+        workflow,
+        base_payload,
+        session_id="story-correction-source",
+    )
+    source_story_items = source.payload["story_items"]
+    assert isinstance(source_story_items, list)
+    middle = source_story_items[1]
+    assert isinstance(middle, dict)
+    middle_item = middle["item"]
+    assert isinstance(middle_item, dict)
+    correction_payload = JSON_OBJECT.validate_python(
+        {
+            **base_payload,
+            "writer_input": {
+                **story_input,
+                "user_input": (
+                    "Selected accepted Story:\n"
+                    + json.dumps(middle_item, ensure_ascii=False)
+                    + "\nHuman guidance:\nCorrect the middle only."
+                ),
+            },
+            "supersedes_story_artifact_id": 91,
+            "correction": {
+                "story_id": 42,
+                "guidance": "Correct the middle only.",
+                "source_story_artifact_id": 91,
+                "source_story_artifact_fingerprint": canonical_hash(source.payload),
+                "source_story_item_id": "US-0002",
+                "source_story_item_fingerprint": middle["item_fingerprint"],
+            },
+            "correction_source": source.payload,
+        }
+    )
+    corrected = await _run_provider_free_workflow(
+        workflow,
+        correction_payload,
+        session_id="story-correction-target",
+    )
+
+    corrected_content = CanonicalStoryOutput.model_validate(corrected.payload)
+    source_content = CanonicalStoryOutput.model_validate(source.payload)
+    corrected_items = corrected_content.story_items
+    assert regular_leaf.calls == ["provider"]
+    assert correction_leaf.calls == ["provider"]
+    assert [entry.item.story_item_id for entry in corrected_items] == [
+        "US-0001",
+        "US-0002",
+        "US-0003",
+    ]
+    assert corrected_items[0] == source_content.story_items[0]
+    assert corrected_items[2] == source_content.story_items[2]
+    assert corrected_items[1].item.story_title == "Corrected middle"
+    assert (
+        corrected_items[1].item_fingerprint
+        != source_content.story_items[1].item_fingerprint
+    )
+    request = registry.require("planning.story.generate").output_adapter(
+        corrected,
+        AttemptCompletionContext(
+            project_id=17,
+            graph_version="agileforge.workflow.v2",
+            fact_fingerprint="sha256:facts",
+            decision_fingerprint="sha256:decision",
+            instance_key="backlog_item:PBI-000001",
+            attempt_id=1,
+            attempt_fingerprint="sha256:attempt",
+            idempotency_key="story-correction",
+            actor="operator@example.com",
+            correlation_id=None,
+            normalized_input=correction_payload,
+        ),
+    )
+    assert isinstance(request, RecordStoryDraft)
+    assert request.canonical_content == corrected.payload
 
 
 def _vision_preflight_runner(
@@ -695,16 +1201,15 @@ def _adapter(
     context: AttemptCompletionContext,
 ) -> RecordBacklogDraft:
     recipe_output = RecipeOutput.model_validate(output)
-    payload = JSON_OBJECT.validate_python(recipe_output.payload)
-    product_goal_artifact_id = payload.pop("product_goal_artifact_id")
-    product_goal_fingerprint = payload.pop("product_goal_fingerprint")
-    authority_id = payload.pop("authority_id")
-    authority_fingerprint = payload.pop("authority_fingerprint")
-    content = JSON_OBJECT.validate_python(payload.pop("content"))
+    envelope = JSON_OBJECT.validate_python(context.normalized_input)
+    builder_input = BacklogBuilderInput.model_validate(envelope["builder_input"])
+    product_goal_artifact_id = envelope["product_goal_artifact_id"]
+    product_goal_fingerprint = envelope["product_goal_fingerprint"]
     assert isinstance(product_goal_artifact_id, int)
     assert isinstance(product_goal_fingerprint, str)
-    assert isinstance(authority_id, int)
-    assert isinstance(authority_fingerprint, str)
+    content = BacklogOutput.model_validate(recipe_output.payload).model_dump(
+        mode="json"
+    )
     return RecordBacklogDraft(
         project_id=context.project_id,
         graph_version=context.graph_version,
@@ -716,10 +1221,10 @@ def _adapter(
         idempotency_key=context.idempotency_key,
         actor=context.actor,
         correlation_id=context.correlation_id,
+        spec_version_id=builder_input.accepted_specification_version_id,
+        spec_hash=builder_input.accepted_specification_hash,
         product_goal_artifact_id=product_goal_artifact_id,
         product_goal_fingerprint=product_goal_fingerprint,
-        authority_id=authority_id,
-        authority_fingerprint=authority_fingerprint,
         canonical_content=content,
         content_fingerprint=canonical_hash(content),
     )
@@ -971,14 +1476,6 @@ def test_runner_loads_vision_input_from_persisted_attempt(
     observations: list[VisionModelInput] = []
     registry = build_agentic_recipe_registry(
         nodes=AgenticRecipeNodes(
-            authority_compile=_unused_leaf("unused_authority_compile"),
-            authority_repair=_unused_leaf("unused_authority_repair"),
-            authority_compile_validation_repair=_unused_leaf(
-                "unused_authority_compile_validation_repair"
-            ),
-            authority_repair_validation_repair=_unused_leaf(
-                "unused_authority_repair_validation_repair"
-            ),
             vision_interview=_observing_vision_leaf(observations, vision_response),
             vision_repair=_unused_leaf("unused_vision_repair"),
             product_goal=_unused_leaf("unused_product_goal"),
@@ -1097,13 +1594,13 @@ def test_runner_executes_fake_leaf_and_commits_validated_output(engine: Engine) 
     runner, domain = _build_runner(
         engine,
         project_id=lineage.project_id,
-        leaf=FakeLeafAgent(name="fake_backlog", response=_backlog_response(lineage)),
+        leaf=FakeLeafAgent(name="fake_backlog", response=_backlog_response()),
         sessions=sessions,
     )
 
     result = runner.run(
         _decision(domain, lineage.project_id),
-        {"prompt": "build backlog"},
+        _backlog_recipe_input(lineage),
     )
 
     assert result.ok is True
@@ -1124,7 +1621,7 @@ def test_runner_ignores_stale_trace_with_reused_numeric_attempt_id(
     calls: list[str] = []
     leaf = CountingLeafAgent(
         name="counting_backlog",
-        response=_backlog_response(lineage),
+        response=_backlog_response(),
         calls=calls,
     )
     runner, domain = _build_runner(
@@ -1136,7 +1633,7 @@ def test_runner_ignores_stale_trace_with_reused_numeric_attempt_id(
 
     result = runner.run(
         _decision(domain, lineage.project_id),
-        {"prompt": "build backlog"},
+        _backlog_recipe_input(lineage),
     )
 
     assert result.ok is True
@@ -1154,7 +1651,7 @@ def test_sequential_transport_retry_replays_terminal_result_without_provider(
     calls: list[str] = []
     leaf = CountingLeafAgent(
         name="counting_backlog",
-        response=_backlog_response(lineage),
+        response=_backlog_response(),
         calls=calls,
     )
     runner, domain = _build_runner(
@@ -1172,8 +1669,8 @@ def test_sequential_transport_retry_replays_terminal_result_without_provider(
         correlation_id="retry-41",
     )
 
-    first = runner.run(decision, {"prompt": "build backlog"}, guards=guards)
-    replay = runner.run(decision, {"prompt": "build backlog"}, guards=guards)
+    first = runner.run(decision, _backlog_recipe_input(lineage), guards=guards)
+    replay = runner.run(decision, _backlog_recipe_input(lineage), guards=guards)
 
     assert first.ok is True
     assert replay == first.model_copy(update={"replayed": True})
@@ -1193,7 +1690,7 @@ def test_concurrent_duplicate_start_never_enters_provider_twice(
     release = threading.Event()
     leaf = BlockingLeafAgent(
         name="blocking_backlog",
-        response=_backlog_response(lineage),
+        response=_backlog_response(),
         calls=calls,
         started=started,
         release=release,
@@ -1212,7 +1709,7 @@ def test_concurrent_duplicate_start_never_enters_provider_twice(
         actor="dashboard-user",
         correlation_id="concurrent-41",
     )
-    normalized_input: JsonObject = {"prompt": "build backlog"}
+    normalized_input: JsonObject = _backlog_recipe_input(lineage)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
         first_future = executor.submit(
@@ -1259,7 +1756,7 @@ def test_provider_failure_records_failure_and_returns_external_error(
 
     result = runner.run(
         _decision(domain, lineage.project_id),
-        {"prompt": "build backlog"},
+        _backlog_recipe_input(lineage),
     )
 
     assert result.ok is False
@@ -1279,7 +1776,7 @@ def test_trace_session_collision_records_failure_without_provider(
     calls: list[str] = []
     leaf = CountingLeafAgent(
         name="counting_backlog",
-        response=_backlog_response(lineage),
+        response=_backlog_response(),
         calls=calls,
     )
     runner, domain = _build_runner(
@@ -1291,7 +1788,7 @@ def test_trace_session_collision_records_failure_without_provider(
 
     result = runner.run(
         _decision(domain, lineage.project_id),
-        {"prompt": "build backlog"},
+        _backlog_recipe_input(lineage),
     )
 
     assert result.ok is False
@@ -1319,7 +1816,7 @@ def test_provider_sdk_failure_records_failure_and_returns_external_error(
 
     result = runner.run(
         _decision(domain, lineage.project_id),
-        {"prompt": "build backlog"},
+        _backlog_recipe_input(lineage),
     )
 
     assert result.ok is False
@@ -1345,7 +1842,7 @@ def test_output_validation_failure_records_failure_without_business_fact(
 
     result = runner.run(
         _decision(domain, lineage.project_id),
-        {"prompt": "build backlog"},
+        _backlog_recipe_input(lineage),
     )
 
     assert result.ok is False
@@ -1518,13 +2015,13 @@ def test_runner_replaces_expired_crash_attempt_after_old_trace_deletion(
 ) -> None:
     """Recover at least once after expiry without relying on old ADK trace."""
     lineage = _seed(engine)
-    normalized_input: JsonObject = {"prompt": "build backlog"}
+    normalized_input: JsonObject = _backlog_recipe_input(lineage)
     clock = MutableClock(EVALUATED_AT)
     sessions = TrackingSessionService()
     runner, domain = _build_runner(
         engine,
         project_id=lineage.project_id,
-        leaf=FakeLeafAgent(name="fake_backlog", response=_backlog_response(lineage)),
+        leaf=FakeLeafAgent(name="fake_backlog", response=_backlog_response()),
         sessions=sessions,
         clock=clock,
     )
@@ -1578,127 +2075,3 @@ def test_runner_replaces_expired_crash_attempt_after_old_trace_deletion(
             replacement_id: "success",
         }
         assert session.exec(select(BacklogArtifact)).one() is not None
-
-
-def test_authority_runner_executes_provider_once_before_completion_transaction(
-    engine: Engine,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Persist precomputed authority after one provider-free external call."""
-    project_id, spec_version_id, _spec_hash = _seed_authority_compile_target(engine)
-    calls: list[tuple[str, ...]] = []
-    provider_inputs: list[str] = []
-    observer = ReceiptObserver(engine=engine, calls=calls)
-    compiler_leaf = _observing_authority_leaf(
-        observer=observer,
-        provider_inputs=provider_inputs,
-    )
-    registry = build_agentic_recipe_registry(
-        nodes=AgenticRecipeNodes(
-            authority_compile=compiler_leaf,
-            authority_repair=_unused_leaf("unused_authority_repair"),
-            authority_compile_validation_repair=_unused_leaf(
-                "unused_authority_compile_validation_repair"
-            ),
-            authority_repair_validation_repair=_unused_leaf(
-                "unused_authority_repair_validation_repair"
-            ),
-            vision_interview=_unused_leaf("unused_vision_interview"),
-            vision_repair=_unused_leaf("unused_vision_repair"),
-            product_goal=_unused_leaf("unused_product_goal"),
-            specification_structurer=_unused_leaf("unused_specification_structurer"),
-            backlog_generation=_unused_leaf("unused_backlog"),
-            roadmap_generation=_unused_leaf("unused_roadmap"),
-            story_generation=_unused_leaf("unused_story"),
-            sprint_planning=_unused_leaf("unused_sprint"),
-        ),
-        execution_settings=EXECUTION_SETTINGS,
-    )
-    domain = WorkflowDomain(
-        engine=engine,
-        graph=authority_graph(),
-        clock=FixedClock(now_value=EVALUATED_AT),
-        adk_recipe_registry=registry,
-    )
-    runner = AdkWorkflowRunner(
-        domain=domain,
-        registry=registry,
-        session_service=TrackingSessionService(),
-        config=AdkExecutionConfig(
-            project_id=project_id,
-            model_id="fake/compiler",
-            execution_settings=EXECUTION_SETTINGS,
-            lease_seconds=LEASE_SECONDS,
-            actor="operator@example.com",
-        ),
-    )
-    transition = domain.transition
-
-    def observe_transition(request: TransitionRequest) -> TransitionResult:
-        observer.events.append(f"enter:{request.kind}")
-        try:
-            return transition(request)
-        finally:
-            observer.events.append(f"exit:{request.kind}")
-
-    monkeypatch.setattr(domain, "transition", observe_transition)
-
-    def provider_must_not_run(*_args: object, **_kwargs: object) -> None:
-        pytest.fail("completion transaction invoked the legacy compiler provider")
-
-    monkeypatch.setattr(
-        compiler_service,
-        "_invoke_compiler_for_version",
-        provider_must_not_run,
-    )
-    decision = next(
-        item
-        for item in domain.position(project_id).decisions
-        if item.node_id == "authority.compile"
-    )
-    normalized_input = AuthorityCompilationInputService(engine=engine).build(
-        project_id=project_id,
-        decision=decision,
-        compiler_model="fake/compiler",
-    )
-
-    result = runner.run(decision, normalized_input)
-
-    assert result.ok is True
-    assert len(provider_inputs) == 1
-    assert json.loads(provider_inputs[0]) == normalized_input["compiler_input"]
-    assert _NON_NORMATIVE_SENTINEL not in provider_inputs[0]
-    assert "GOAL.runner.review-context" not in provider_inputs[0]
-    provider_payload = json.loads(provider_inputs[0])
-    assert isinstance(provider_payload, dict)
-    authority_input = provider_payload["authority_input"]
-    assert isinstance(authority_input, dict)
-    assert set(authority_input) == {
-        "schema_version",
-        "artifact_id",
-        "normative_items",
-        "normative_relations",
-        "eligible_item_ids",
-        "authority_input_fingerprint",
-    }
-    assert "review_context_ids" not in authority_input
-    assert calls == [("start_node_attempt",)]
-    assert observer.events == [
-        "enter:start_node_attempt",
-        "exit:start_node_attempt",
-        "provider",
-        "enter:compile_authority",
-        "exit:compile_authority",
-    ]
-    with Session(engine) as session:
-        authority = session.exec(select(CompiledSpecAuthority)).one()
-        attempt = _node_attempts(session, "authority.compile")[0]
-        outcome = _node_outcomes(session, "authority.compile")[0]
-        receipts = session.exec(select(WorkflowTransitionReceipt)).all()
-        assert authority.spec_version_id == spec_version_id
-        assert outcome.workflow_node_attempt_id == attempt.workflow_node_attempt_id
-        assert outcome.status == "success"
-        assert {receipt.request_kind for receipt in receipts} == {
-            "start_node_attempt",
-            "compile_authority",
-        }

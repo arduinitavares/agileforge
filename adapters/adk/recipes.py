@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
@@ -14,23 +12,41 @@ from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 
 from adapters.adk.errors import (
     AttemptRevalidationError,
-    AuthorityAgenticExecutionError,
     SpecificationAgenticExecutionError,
     VisionAgenticPreflightError,
 )
 from adapters.adk.preflight import revalidate_specification_attempt
+from services.contracts.backlog import (
+    BacklogAgentOutput,
+    BacklogBuilderInput,
+    BacklogOutput,
+    canonicalize_backlog_items,
+)
 from services.contracts.product_goal import ProductGoalInterviewOutput
+from services.contracts.roadmap import (
+    RoadmapBuilderInput,
+    RoadmapBuilderOutput,
+    validate_roadmap_backlog_coverage,
+)
 from services.contracts.specification_authoring import (
     SpecificationStructuringInput,
     SpecificationStructuringOutput,
     specification_structuring_completion_payload,
 )
-from services.contracts.specification_normalizer import normalize_compiler_output
+from services.contracts.specification_references import (
+    AcceptedSpecificationReference,
+)
 from services.contracts.sprint import (
     SprintPlannerInput,
     SprintPlannerOutput,
-    validate_task_decomposition_quality,
-    validate_task_invariant_bindings,
+    validate_task_spec_references,
+)
+from services.contracts.story import (
+    CanonicalStoryOutput,
+    UserStoryAgentItem,
+    UserStoryWriterInput,
+    UserStoryWriterOutput,
+    canonicalize_story_items,
 )
 from services.contracts.vision import (
     VisionAgentInput,
@@ -43,17 +59,10 @@ from services.vision_output_validation import (
     VisionDraftValidationError,
     validate_vision_draft,
 )
-from utils.agileforge_spec_profile_v2 import SCHEMA_VERSION
-from utils.spec_schemas import (
-    SpecAuthorityCompilationFailure,
-    SpecAuthorityCompilationSuccess,
-    SpecAuthorityCompilerInput,
-    SpecAuthorityValidationRepairInput,
-)
+from utils.agileforge_spec_profile_v2 import SCHEMA_VERSION, SpecificationPayload
 from workflow.contracts import JsonObject, WorkflowErrorCode
 from workflow.fingerprints import canonical_hash
 from workflow.requests import (
-    CompileAuthority,
     CompleteSpecificationStructuring,
     GenerateVisionBootstrap,
     RecordBacklogDraft,
@@ -62,7 +71,6 @@ from workflow.requests import (
     RecordSprintPlan,
     RecordStoryDraft,
     RecordVisionInterviewTurn,
-    RepairAuthority,
 )
 from workflow.requests.base import PositionedRequest
 
@@ -71,8 +79,6 @@ if TYPE_CHECKING:
 
 _JSON_OBJECT = TypeAdapter(JsonObject)
 AGENTIC_NODE_IDS = (
-    "authority.compile",
-    "authority.repair",
     "vision.bootstrap",
     "vision.interview",
     "goal.interview",
@@ -101,6 +107,7 @@ class RecipeOutput(BaseModel):
 class _UnvalidatedRecipeOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     payload: object
+    input_payload: JsonObject
 
 
 class _JoinedBacklogValidations(BaseModel):
@@ -109,24 +116,50 @@ class _JoinedBacklogValidations(BaseModel):
     validate_round_trip: RecipeOutput
 
 
-class _CompileAuthorityRecipePayload(BaseModel):
-    """Normalized host guards and retained compiler input."""
+class _BacklogRecipePayload(BaseModel):
+    """Provider input beside host-only Backlog persistence guards."""
 
-    model_config = ConfigDict(extra="forbid")
-    project_id: int
-    spec_version_id: int
-    expected_spec_hash: str
-    compiler_model: str = "openrouter/openai/gpt-5.6-luna"
-    compiler_input: SpecAuthorityCompilerInput
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    builder_input: BacklogBuilderInput
+    product_goal_artifact_id: int
+    product_goal_fingerprint: str
+    supersedes_backlog_artifact_id: int | None = None
 
 
-class _RepairAuthorityRecipePayload(BaseModel):
-    """Normalized rejected-authority guards and retained compiler input."""
+class _RoadmapRecipePayload(BaseModel):
+    """Provider input beside host-only Roadmap persistence guards."""
 
-    model_config = ConfigDict(extra="forbid")
-    source_authority_id: int
-    source_authority_fingerprint: str
-    compiler_input: SpecAuthorityCompilerInput
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    builder_input: RoadmapBuilderInput
+    backlog_artifact_id: int
+    backlog_artifact_fingerprint: str
+    supersedes_roadmap_artifact_id: int | None = None
+
+
+class _StoryCorrectionRecipeInput(BaseModel):
+    """Closed host proof selecting one item from one accepted Story artifact."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    story_id: int
+    guidance: str
+    source_story_artifact_id: int
+    source_story_artifact_fingerprint: str
+    source_story_item_id: str
+    source_story_item_fingerprint: str
+
+
+class _StoryRecipePayload(BaseModel):
+    """Provider input beside exact immutable Story parent guards."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    writer_input: UserStoryWriterInput
+    source_backlog_artifact_id: int
+    source_backlog_artifact_fingerprint: str
+    roadmap_artifact_id: int
+    roadmap_artifact_fingerprint: str
+    supersedes_story_artifact_id: int | None = None
+    correction: _StoryCorrectionRecipeInput | None = None
+    correction_source: CanonicalStoryOutput | None = None
 
 
 class _SprintRecipePayload(BaseModel):
@@ -141,15 +174,8 @@ class _SprintRecipePayload(BaseModel):
     requested_story_ids: list[int]
     locked_story_ids: list[int]
     team_name: str
-    include_task_decomposition: bool
     guidance: str | None = None
     candidate_set_fingerprint: str
-    supersedes_sprint_plan_artifact_id: int | None = None
-
-
-type _AuthorityRecipePayload = (
-    _CompileAuthorityRecipePayload | _RepairAuthorityRecipePayload
-)
 
 
 @dataclass(frozen=True)
@@ -188,10 +214,6 @@ class AdkRecipe:
 class AgenticRecipeNodes:
     """Injected retained execution nodes used to compose the complete registry."""
 
-    authority_compile: BaseAgent | Workflow
-    authority_repair: BaseAgent | Workflow
-    authority_compile_validation_repair: BaseAgent | Workflow
-    authority_repair_validation_repair: BaseAgent | Workflow
     vision_interview: BaseAgent | Workflow
     vision_repair: BaseAgent | Workflow
     product_goal: BaseAgent | Workflow
@@ -200,6 +222,7 @@ class AgenticRecipeNodes:
     roadmap_generation: BaseAgent | Workflow
     story_generation: BaseAgent | Workflow
     sprint_planning: BaseAgent | Workflow
+    story_correction: BaseAgent | Workflow | None = None
 
 
 class UnknownAdkRecipeError(LookupError):
@@ -419,6 +442,113 @@ def _product_goal_interview_output_adapter(
     )
 
 
+def _specification_reference(
+    *,
+    version_id: int,
+    spec_hash: str,
+    canonical_json: str,
+) -> AcceptedSpecificationReference:
+    return AcceptedSpecificationReference(
+        spec_version_id=version_id,
+        spec_hash=spec_hash,
+        canonical_specification_json=canonical_json,
+        payload=SpecificationPayload.model_validate_json(canonical_json),
+    )
+
+
+def _backlog_output_adapter(
+    output: object,
+    context: AttemptCompletionContext,
+) -> RecordBacklogDraft:
+    envelope = _BacklogRecipePayload.model_validate(context.normalized_input)
+    content = BacklogOutput.model_validate(RecipeOutput.model_validate(output).payload)
+    canonical_content = _JSON_OBJECT.validate_python(content.model_dump(mode="json"))
+    return RecordBacklogDraft(
+        project_id=context.project_id,
+        graph_version=context.graph_version,
+        fact_fingerprint=context.fact_fingerprint,
+        decision_fingerprint=context.decision_fingerprint,
+        instance_key=context.instance_key,
+        attempt_id=context.attempt_id,
+        attempt_fingerprint=context.attempt_fingerprint,
+        idempotency_key=context.idempotency_key,
+        actor=context.actor,
+        correlation_id=context.correlation_id,
+        spec_version_id=envelope.builder_input.accepted_specification_version_id,
+        spec_hash=envelope.builder_input.accepted_specification_hash,
+        product_goal_artifact_id=envelope.product_goal_artifact_id,
+        product_goal_fingerprint=envelope.product_goal_fingerprint,
+        canonical_content=canonical_content,
+        content_fingerprint=canonical_hash(canonical_content),
+        supersedes_backlog_artifact_id=envelope.supersedes_backlog_artifact_id,
+    )
+
+
+def _roadmap_output_adapter(
+    output: object,
+    context: AttemptCompletionContext,
+) -> RecordRoadmapDraft:
+    envelope = _RoadmapRecipePayload.model_validate(context.normalized_input)
+    content = RoadmapBuilderOutput.model_validate(
+        RecipeOutput.model_validate(output).payload
+    )
+    validate_roadmap_backlog_coverage(
+        content,
+        (item.backlog_item_id for item in envelope.builder_input.backlog_items),
+    )
+    canonical_content = _JSON_OBJECT.validate_python(content.model_dump(mode="json"))
+    return RecordRoadmapDraft(
+        project_id=context.project_id,
+        graph_version=context.graph_version,
+        fact_fingerprint=context.fact_fingerprint,
+        decision_fingerprint=context.decision_fingerprint,
+        instance_key=context.instance_key,
+        attempt_id=context.attempt_id,
+        attempt_fingerprint=context.attempt_fingerprint,
+        idempotency_key=context.idempotency_key,
+        actor=context.actor,
+        correlation_id=context.correlation_id,
+        backlog_artifact_id=envelope.backlog_artifact_id,
+        backlog_artifact_fingerprint=envelope.backlog_artifact_fingerprint,
+        canonical_content=canonical_content,
+        content_fingerprint=canonical_hash(canonical_content),
+        supersedes_roadmap_artifact_id=envelope.supersedes_roadmap_artifact_id,
+    )
+
+
+def _story_output_adapter(
+    output: object,
+    context: AttemptCompletionContext,
+) -> RecordStoryDraft:
+    envelope = _StoryRecipePayload.model_validate(context.normalized_input)
+    content = CanonicalStoryOutput.model_validate(
+        RecipeOutput.model_validate(output).payload
+    )
+    canonical_content = _JSON_OBJECT.validate_python(content.model_dump(mode="json"))
+    return RecordStoryDraft(
+        project_id=context.project_id,
+        graph_version=context.graph_version,
+        fact_fingerprint=context.fact_fingerprint,
+        decision_fingerprint=context.decision_fingerprint,
+        instance_key=context.instance_key,
+        attempt_id=context.attempt_id,
+        attempt_fingerprint=context.attempt_fingerprint,
+        idempotency_key=context.idempotency_key,
+        actor=context.actor,
+        correlation_id=context.correlation_id,
+        backlog_item_id=envelope.writer_input.parent_backlog_item_id,
+        source_backlog_artifact_id=envelope.source_backlog_artifact_id,
+        source_backlog_artifact_fingerprint=(
+            envelope.source_backlog_artifact_fingerprint
+        ),
+        roadmap_artifact_id=envelope.roadmap_artifact_id,
+        roadmap_artifact_fingerprint=envelope.roadmap_artifact_fingerprint,
+        canonical_content=canonical_content,
+        content_fingerprint=canonical_hash(canonical_content),
+        supersedes_story_artifact_id=envelope.supersedes_story_artifact_id,
+    )
+
+
 def _sprint_output_adapter(
     output: object,
     context: AttemptCompletionContext,
@@ -435,8 +565,6 @@ def _sprint_output_adapter(
         envelope.capacity_points != planner_input.capacity_points
         or envelope.capacity_source != planner_input.capacity_source
         or envelope.capacity_basis != planner_input.capacity_basis
-        or envelope.include_task_decomposition
-        != planner_input.include_task_decomposition
         or envelope.guidance != planner_input.user_context
     ):
         message = "Sprint attempt envelope does not match its typed planner input."
@@ -455,57 +583,30 @@ def _sprint_output_adapter(
         RecipeOutput.model_validate(output).payload
     )
     selected_ids = tuple(item.story_id for item in parsed.selected_stories)
-    if selected_ids != locked_ids or parsed.deselected_stories:
+    if selected_ids != locked_ids:
         message = "Sprint planner changed the exact locked Story cohort or order."
         raise ValueError(message)
-    points_by_story = {
-        item.story_id: item.story_points for item in planner_input.available_stories
-    }
-    used_points = sum(points_by_story[story_id] or 0 for story_id in locked_ids)
-    analysis = parsed.capacity_analysis
-    if (
-        analysis.capacity_points != envelope.capacity_points
-        or analysis.capacity_source != envelope.capacity_source
-        or analysis.capacity_basis != envelope.capacity_basis
-        or analysis.selected_count != len(locked_ids)
-        or analysis.story_points_used != used_points
-        or analysis.remaining_capacity_points != envelope.capacity_points - used_points
-        or used_points > envelope.capacity_points
+    story_by_id = {item.story_id: item for item in planner_input.available_stories}
+    if any(
+        selected.story_item_id != story_by_id[selected.story_id].story_item_id
+        for selected in parsed.selected_stories
     ):
-        message = "Sprint planner capacity analysis changed the host-owned limit."
+        message = "Sprint planner changed a locked Story item identity."
         raise ValueError(message)
-
-    if not envelope.include_task_decomposition and any(
-        story.tasks for story in parsed.selected_stories
-    ):
-        message = "Sprint planner added tasks when decomposition was disabled."
-        raise ValueError(message)
-    quality_errors = validate_task_decomposition_quality(
-        parsed,
-        include_task_decomposition=envelope.include_task_decomposition,
-        has_acceptance_criteria_by_story={
-            item.story_id: bool(item.acceptance_criteria_items)
-            for item in planner_input.available_stories
-        },
-        acceptance_criteria_items_by_story={
-            item.story_id: item.acceptance_criteria_items
-            for item in planner_input.available_stories
-        },
+    specification = _specification_reference(
+        version_id=planner_input.accepted_specification_version_id,
+        spec_hash=planner_input.accepted_specification_hash,
+        canonical_json=planner_input.accepted_specification_json,
     )
-    binding_errors = validate_task_invariant_bindings(
-        parsed,
-        allowed_invariant_ids_by_story={
-            item.story_id: item.evaluated_invariant_ids
-            for item in planner_input.available_stories
-        },
-    )
-    if quality_errors or binding_errors:
-        message = "Sprint planner task validation failed: " + "; ".join(
-            (*quality_errors, *binding_errors)
-        )
-        raise ValueError(message)
+    for selected in parsed.selected_stories:
+        parent = story_by_id[selected.story_id]
+        for task in selected.tasks:
+            validate_task_spec_references(
+                specification,
+                task,
+                parent_story_spec_item_ids=parent.spec_item_ids,
+            )
 
-    canonical_plan = parsed.model_dump(mode="json")
     return RecordSprintPlan(
         project_id=context.project_id,
         graph_version=context.graph_version,
@@ -517,15 +618,10 @@ def _sprint_output_adapter(
         idempotency_key=context.idempotency_key,
         actor=context.actor,
         correlation_id=context.correlation_id,
+        spec_version_id=planner_input.accepted_specification_version_id,
+        spec_hash=planner_input.accepted_specification_hash,
         team_name=envelope.team_name,
-        selected_story_ids=tuple(sorted(locked_ids)),
-        canonical_task_plan=canonical_plan,
-        plan_fingerprint=canonical_hash(canonical_plan),
-        candidate_set_fingerprint=envelope.candidate_set_fingerprint,
-        supersedes_sprint_plan_artifact_id=(
-            envelope.supersedes_sprint_plan_artifact_id
-        ),
-        include_task_decomposition=envelope.include_task_decomposition,
+        planner_output=parsed.model_dump(mode="json"),
     )
 
 
@@ -600,6 +696,147 @@ def _build_sprint_workflow(
         input_schema=RecipeInput,
         output_schema=RecipeOutput,
         edges=[(START, execute_sprint_planner)],
+    )
+
+
+def _build_roadmap_workflow(
+    *,
+    leaf_agent: BaseAgent | Workflow,
+    execution_settings: JsonObject,
+) -> Workflow:
+    """Pass one exact typed Roadmap root and validate parent coverage."""
+    timeout_seconds, max_attempts = _execution_limits(execution_settings)
+    retry_config = RetryConfig(max_attempts=max_attempts)
+
+    @node(
+        name="execute_roadmap_generator",
+        rerun_on_resume=True,
+        retry_config=retry_config,
+        timeout=timeout_seconds,
+    )
+    async def execute_roadmap_generator(
+        context: Context,
+        node_input: RecipeInput,
+    ) -> RecipeOutput:
+        envelope = _RoadmapRecipePayload.model_validate(node_input.payload)
+        generated = await context.run_node(
+            leaf_agent,
+            node_input=envelope.builder_input.model_dump(mode="json"),
+        )
+        output = RoadmapBuilderOutput.model_validate(generated)
+        validate_roadmap_backlog_coverage(
+            output,
+            (item.backlog_item_id for item in envelope.builder_input.backlog_items),
+        )
+        return RecipeOutput(payload=output.model_dump(mode="json"))
+
+    return Workflow(
+        name="roadmap_generation",
+        retry_config=retry_config,
+        timeout=timeout_seconds,
+        input_schema=RecipeInput,
+        output_schema=RecipeOutput,
+        edges=[(START, execute_roadmap_generator)],
+    )
+
+
+def _build_story_workflow(
+    *,
+    leaf_agent: BaseAgent | Workflow,
+    correction_leaf_agent: BaseAgent | Workflow | None,
+    execution_settings: JsonObject,
+) -> Workflow:
+    """Pass one exact typed Story root and host-mint its immutable items."""
+    timeout_seconds, max_attempts = _execution_limits(execution_settings)
+    retry_config = RetryConfig(max_attempts=max_attempts)
+
+    @node(
+        name="execute_story_generator",
+        rerun_on_resume=True,
+        retry_config=retry_config,
+        timeout=timeout_seconds,
+    )
+    async def execute_story_generator(
+        context: Context,
+        node_input: RecipeInput,
+    ) -> RecipeOutput:
+        envelope = _StoryRecipePayload.model_validate(node_input.payload)
+        if envelope.correction is not None:
+            if correction_leaf_agent is None:
+                message = "Story correction requires its injected patch leaf."
+                raise ValueError(message)
+            leaf = correction_leaf_agent
+        else:
+            leaf = leaf_agent
+        generated = await context.run_node(
+            leaf,
+            node_input=envelope.writer_input.model_dump(mode="json"),
+        )
+        output = UserStoryWriterOutput.model_validate(generated)
+        writer_input = envelope.writer_input
+        specification = _specification_reference(
+            version_id=writer_input.accepted_specification_version_id,
+            spec_hash=writer_input.accepted_specification_hash,
+            canonical_json=writer_input.accepted_specification_json,
+        )
+        agent_items = output.user_stories
+        if envelope.correction is not None:
+            source = envelope.correction_source
+            correction = envelope.correction
+            if (
+                source is None
+                or envelope.supersedes_story_artifact_id
+                != correction.source_story_artifact_id
+                or canonical_hash(source.model_dump(mode="json"))
+                != correction.source_story_artifact_fingerprint
+                or not source.is_complete
+                or source.clarifying_questions
+                or not output.is_complete
+                or output.clarifying_questions
+                or len(output.user_stories) != 1
+            ):
+                message = "Story correction requires one complete replacement item."
+                raise ValueError(message)
+            matching = tuple(
+                index
+                for index, item in enumerate(source.story_items)
+                if item.item.story_item_id == correction.source_story_item_id
+                and item.item_fingerprint == correction.source_story_item_fingerprint
+            )
+            if len(matching) != 1:
+                message = "Story correction source item identity is invalid."
+                raise ValueError(message)
+            source_items = [
+                UserStoryAgentItem.model_validate(
+                    item.item.model_dump(
+                        mode="json",
+                        exclude={"story_item_id", "persona"},
+                    )
+                )
+                for item in source.story_items
+            ]
+            source_items[matching[0]] = output.user_stories[0]
+            agent_items = tuple(source_items)
+        canonical = CanonicalStoryOutput(
+            story_items=canonicalize_story_items(
+                specification,
+                parent_backlog_spec_item_ids=(
+                    writer_input.parent_backlog_spec_item_ids
+                ),
+                agent_items=agent_items,
+            ),
+            is_complete=output.is_complete,
+            clarifying_questions=output.clarifying_questions,
+        )
+        return RecipeOutput(payload=canonical.model_dump(mode="json"))
+
+    return Workflow(
+        name="story_generation",
+        retry_config=retry_config,
+        timeout=timeout_seconds,
+        input_schema=RecipeInput,
+        output_schema=RecipeOutput,
+        edges=[(START, execute_story_generator)],
     )
 
 
@@ -742,190 +979,6 @@ def build_vision_workflow(
     )
 
 
-def _authority_completion_payload(
-    payload: _AuthorityRecipePayload,
-    compiled_authority: SpecAuthorityCompilationSuccess,
-) -> JsonObject:
-    if isinstance(payload, _CompileAuthorityRecipePayload):
-        return {
-            "spec_version_id": payload.spec_version_id,
-            "expected_spec_hash": payload.expected_spec_hash,
-            "compiler_model": payload.compiler_model,
-            "compiled_authority": compiled_authority.model_dump(mode="json"),
-        }
-    return {
-        "source_authority_id": payload.source_authority_id,
-        "source_authority_fingerprint": payload.source_authority_fingerprint,
-        "compiled_authority": compiled_authority.model_dump(mode="json"),
-    }
-
-
-def _authority_compiler_json(generated: object) -> str:
-    """Serialize supported structured leaf output for the raw host boundary."""
-    if isinstance(generated, str):
-        return generated
-    try:
-        if isinstance(generated, BaseModel):
-            generated = generated.model_dump(mode="json")
-        return json.dumps(generated, allow_nan=False)
-    except (TypeError, ValueError):
-        return "unsupported structured Authority compiler output"
-
-
-def _authority_failure_message(failure: SpecAuthorityCompilationFailure) -> str:
-    """Render one bounded actionable failure without provider diagnostics."""
-    reason = failure.reason.strip()[:160] or "UNKNOWN_FAILURE"
-    details = [gap.strip()[:500] for gap in failure.blocking_gaps[:5] if gap.strip()]
-    message = f"Authority compiler output failed host normalization ({reason})"
-    if details:
-        message += ": " + "; ".join(details)
-    return message
-
-
-_AUTHORITY_REPAIRABLE_FAILURE_REASONS = frozenset(
-    {
-        "INVALID_JSON",
-        "JSON_VALIDATION_FAILED",
-        "INELIGIBLE_INVARIANT_SOURCE",
-        "INCOMPLETE_NORMATIVE_COVERAGE",
-    }
-)
-_AUTHORITY_INVALID_OUTPUT_LIMIT = 131_072
-_AUTHORITY_INVALID_OUTPUT_TRUNCATION_MARKER = (
-    "\n...<authority-compiler-output-truncated>...\n"
-)
-
-
-def _bounded_authority_invalid_output(raw_output: str) -> tuple[str, bool]:
-    """Return bounded untrusted output evidence with stable prefix and suffix."""
-    if len(raw_output) <= _AUTHORITY_INVALID_OUTPUT_LIMIT:
-        return raw_output, False
-    available = _AUTHORITY_INVALID_OUTPUT_LIMIT - len(
-        _AUTHORITY_INVALID_OUTPUT_TRUNCATION_MARKER
-    )
-    prefix_length = available // 2
-    suffix_length = available - prefix_length
-    return (
-        raw_output[:prefix_length]
-        + _AUTHORITY_INVALID_OUTPUT_TRUNCATION_MARKER
-        + raw_output[-suffix_length:],
-        True,
-    )
-
-
-def _authority_validation_repair_input(
-    *,
-    compiler_input: SpecAuthorityCompilerInput,
-    failure: SpecAuthorityCompilationFailure,
-    raw_output: str,
-) -> SpecAuthorityValidationRepairInput:
-    """Build one immutable, bounded correction request from host findings."""
-    excerpt, truncated = _bounded_authority_invalid_output(raw_output)
-    fingerprint = hashlib.sha256(raw_output.encode("utf-8")).hexdigest()
-    return SpecAuthorityValidationRepairInput(
-        compiler_input=compiler_input,
-        validation_failure=failure,
-        invalid_output_excerpt=excerpt,
-        invalid_output_fingerprint=f"sha256:{fingerprint}",
-        invalid_output_length=len(raw_output),
-        invalid_output_truncated=truncated,
-        repair_ordinal=1,
-    )
-
-
-def _authority_validation_repair_failure_message(
-    initial: SpecAuthorityCompilationFailure,
-    final: SpecAuthorityCompilationFailure,
-) -> str:
-    """Render both bounded host findings after the sole repair pass fails."""
-    return (
-        "Bounded Authority validation repair failed. Initial: "
-        f"{_authority_failure_message(initial)} Final: "
-        f"{_authority_failure_message(final)}"
-    )
-
-
-def _build_authority_workflow(
-    *,
-    workflow_name: str,
-    leaf_agent: BaseAgent | Workflow,
-    validation_repair_leaf: BaseAgent | Workflow,
-    execution_settings: JsonObject,
-    repair: bool,
-) -> Workflow:
-    """Invoke one retained compiler and emit strict precomputed authority."""
-    timeout_seconds, _max_attempts = _execution_limits(execution_settings)
-    retry_config = RetryConfig(max_attempts=1)
-    execution_node_name = (
-        "execute_authority_repair" if repair else "execute_authority_compiler"
-    )
-
-    @node(
-        name=execution_node_name,
-        rerun_on_resume=True,
-        retry_config=retry_config,
-        timeout=timeout_seconds,
-    )
-    async def execute_authority_leaf(
-        context: Context,
-        node_input: RecipeInput,
-    ) -> RecipeOutput:
-        payload: _AuthorityRecipePayload
-        if repair:
-            payload = _RepairAuthorityRecipePayload.model_validate(node_input.payload)
-        else:
-            payload = _CompileAuthorityRecipePayload.model_validate(node_input.payload)
-        generated = await context.run_node(
-            leaf_agent,
-            node_input=payload.compiler_input.model_dump(mode="json"),
-        )
-        raw_output = _authority_compiler_json(generated)
-        normalized = normalize_compiler_output(
-            raw_output,
-            authority_input=payload.compiler_input.authority_input,
-        )
-        if isinstance(normalized.root, SpecAuthorityCompilationFailure):
-            initial_failure = normalized.root
-            if initial_failure.reason not in _AUTHORITY_REPAIRABLE_FAILURE_REASONS:
-                raise AuthorityAgenticExecutionError(
-                    code=WorkflowErrorCode.AUTHORITY_COMPILATION_FAILED,
-                    message=_authority_failure_message(initial_failure),
-                )
-            repair_input = _authority_validation_repair_input(
-                compiler_input=payload.compiler_input,
-                failure=initial_failure,
-                raw_output=raw_output,
-            )
-            repaired = await context.run_node(
-                validation_repair_leaf,
-                node_input=repair_input.model_dump(mode="json"),
-            )
-            normalized = normalize_compiler_output(
-                _authority_compiler_json(repaired),
-                authority_input=payload.compiler_input.authority_input,
-            )
-            if isinstance(normalized.root, SpecAuthorityCompilationFailure):
-                raise AuthorityAgenticExecutionError(
-                    code=WorkflowErrorCode.AUTHORITY_COMPILATION_FAILED,
-                    message=_authority_validation_repair_failure_message(
-                        initial_failure,
-                        normalized.root,
-                    ),
-                )
-        return RecipeOutput(
-            payload=_authority_completion_payload(payload, normalized.root)
-        )
-
-    return Workflow(
-        name=workflow_name,
-        retry_config=retry_config,
-        timeout=timeout_seconds,
-        input_schema=RecipeInput,
-        output_schema=RecipeOutput,
-        edges=[(START, execute_authority_leaf)],
-    )
-
-
 def build_backlog_generation_workflow(
     *,
     leaf_agent: BaseAgent | Workflow,
@@ -934,6 +987,24 @@ def build_backlog_generation_workflow(
     """Generate once, validate in parallel, and join one Backlog artifact."""
     timeout_seconds, max_attempts = _execution_limits(execution_settings)
     retry_config = RetryConfig(max_attempts=max_attempts)
+
+    def canonical_backlog(node_input: _UnvalidatedRecipeOutput) -> RecipeOutput:
+        envelope = _BacklogRecipePayload.model_validate(node_input.input_payload)
+        output = BacklogAgentOutput.model_validate(node_input.payload)
+        specification = _specification_reference(
+            version_id=envelope.builder_input.accepted_specification_version_id,
+            spec_hash=envelope.builder_input.accepted_specification_hash,
+            canonical_json=envelope.builder_input.accepted_specification_json,
+        )
+        canonical = BacklogOutput(
+            backlog_items=canonicalize_backlog_items(
+                specification,
+                output.backlog_items,
+            ),
+            is_complete=output.is_complete,
+            clarifying_questions=output.clarifying_questions,
+        )
+        return RecipeOutput(payload=canonical.model_dump(mode="json"))
 
     @node(
         name="generate_backlog",
@@ -945,11 +1016,15 @@ def build_backlog_generation_workflow(
         context: Context,
         node_input: RecipeInput,
     ) -> _UnvalidatedRecipeOutput:
+        envelope = _BacklogRecipePayload.model_validate(node_input.payload)
         generated = await context.run_node(
             leaf_agent,
-            node_input=node_input.payload,
+            node_input=envelope.builder_input.model_dump(mode="json"),
         )
-        return _UnvalidatedRecipeOutput(payload=generated)
+        return _UnvalidatedRecipeOutput(
+            payload=generated,
+            input_payload=node_input.payload,
+        )
 
     @node(
         name="validate_structure",
@@ -960,7 +1035,7 @@ def build_backlog_generation_workflow(
     async def validate_structure(
         node_input: _UnvalidatedRecipeOutput,
     ) -> RecipeOutput:
-        return RecipeOutput(payload=validate_structured_output(node_input.payload))
+        return canonical_backlog(node_input)
 
     @node(
         name="validate_round_trip",
@@ -971,7 +1046,7 @@ def build_backlog_generation_workflow(
     async def validate_round_trip(
         node_input: _UnvalidatedRecipeOutput,
     ) -> RecipeOutput:
-        validated = RecipeOutput(payload=validate_structured_output(node_input.payload))
+        validated = canonical_backlog(node_input)
         return RecipeOutput.model_validate_json(validated.model_dump_json())
 
     join_validations = JoinNode(
@@ -1023,28 +1098,6 @@ def build_agentic_recipe_registry(
     return AdkRecipeRegistry(
         (
             AdkRecipe(
-                node_id="authority.compile",
-                workflow=_build_authority_workflow(
-                    workflow_name="authority_compilation",
-                    leaf_agent=nodes.authority_compile,
-                    validation_repair_leaf=(nodes.authority_compile_validation_repair),
-                    execution_settings=execution_settings,
-                    repair=False,
-                ),
-                output_adapter=_request_output_adapter(CompileAuthority),
-            ),
-            AdkRecipe(
-                node_id="authority.repair",
-                workflow=_build_authority_workflow(
-                    workflow_name="authority_repair",
-                    leaf_agent=nodes.authority_repair,
-                    validation_repair_leaf=(nodes.authority_repair_validation_repair),
-                    execution_settings=execution_settings,
-                    repair=True,
-                ),
-                output_adapter=_request_output_adapter(RepairAuthority),
-            ),
-            AdkRecipe(
                 node_id="vision.bootstrap",
                 workflow=build_vision_workflow(
                     primary_leaf=nodes.vision_interview,
@@ -1088,27 +1141,24 @@ def build_agentic_recipe_registry(
                     leaf_agent=nodes.backlog_generation,
                     execution_settings=execution_settings,
                 ),
-                output_adapter=_request_output_adapter(RecordBacklogDraft),
+                output_adapter=_backlog_output_adapter,
             ),
             AdkRecipe(
                 node_id="planning.roadmap.generate",
-                workflow=_build_single_leaf_workflow(
-                    workflow_name="roadmap_generation",
-                    execution_node_name="execute_roadmap_generator",
+                workflow=_build_roadmap_workflow(
                     leaf_agent=nodes.roadmap_generation,
                     execution_settings=execution_settings,
                 ),
-                output_adapter=_request_output_adapter(RecordRoadmapDraft),
+                output_adapter=_roadmap_output_adapter,
             ),
             AdkRecipe(
                 node_id="planning.story.generate",
-                workflow=_build_single_leaf_workflow(
-                    workflow_name="story_generation",
-                    execution_node_name="execute_story_generator",
+                workflow=_build_story_workflow(
                     leaf_agent=nodes.story_generation,
+                    correction_leaf_agent=nodes.story_correction,
                     execution_settings=execution_settings,
                 ),
-                output_adapter=_request_output_adapter(RecordStoryDraft),
+                output_adapter=_story_output_adapter,
             ),
             AdkRecipe(
                 node_id="planning.sprint.plan",

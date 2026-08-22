@@ -1,625 +1,217 @@
-# tests/test_story_validation_pinning.py
-"""
-Tests for Story Validation Pinning v2.
+"""Exact lineage, fingerprint, readiness, and replacement validation tests."""
+# ruff: noqa: D103
 
-These tests validate that:
-- Validation REQUIRES explicit spec_version_id (no defaults)
-- Validation fails fast if spec is not compiled
-- Evidence is ALWAYS persisted (pass or fail)
-- accepted_spec_version_id is only set on pass
-- Input hashing is deterministic
-- Wrong spec_version_id fails deterministically
-"""
+from __future__ import annotations
 
 import json
-from typing import Any, cast
+from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
-from pydantic import ValidationError
 from sqlmodel import Session
 
-from agile_sqlmodel import (
-    CompiledSpecAuthority,
-    Project,
-    SpecAuthorityAcceptance,
-    SpecRegistry,
-    UserStory,
+from models.core import UserStory
+from services.contracts.specification_validation import StorySpecificationReviewInput
+from services.contracts.story import CanonicalStoryOutput
+from services.specs.story_validation_service import (
+    StoryValidationReadinessError,
+    require_story_ready_for_sprint,
 )
-from models.core import Epic, Feature, Theme
-from services.agent_workbench.authority_projection import (
-    pending_authority_fingerprint,
+from tests.test_create_user_story import (
+    _decide_story,
+    _record_story,
+    _seed_story_parent,
+    _story_content,
 )
-from tests.workflow.lifecycle_fixtures import seed_accepted_specification
-from tools.spec_tools import (
-    VALIDATOR_VERSION,
-    ValidateStoryInput,
-    validate_story_with_spec_authority,
+from tests.test_story_validation_service import _accepted_story, _validate
+from tests.workflow.test_planning_transitions import (
+    _replace_specification_and_backlog,
 )
-from utils.spec_schemas import (
-    ForbiddenCapabilityParams,
-    Invariant,
-    InvariantType,
-    SourceMapEntry,
-    SpecAuthorityCompilationSuccess,
-    ValidationEvidence,
+from workflow.fingerprints import canonical_hash, canonical_json
+
+if TYPE_CHECKING:
+    from sqlalchemy.engine import Engine
+
+
+def test_gold_specification_fixture_contains_exact_37_item_direct_contract() -> None:
+    payload = json.loads(
+        Path("tests/fixtures/issue_210/gold/canonical-specification.json").read_text()
+    )
+    item_ids = tuple(item["id"] for item in payload["items"])
+    assert payload["schema_version"] == "agileforge.spec.v2"
+    assert len(item_ids) == 37  # noqa: PLR2004
+    assert len(set(item_ids)) == 37  # noqa: PLR2004
+    assert "DATA.001" in item_ids
+    story = CanonicalStoryOutput.model_validate(_story_content()).story_items[0].item
+    review_input = StorySpecificationReviewInput(
+        schema_version="agileforge.story-specification-review-input.v1",
+        accepted_specification_version_id=1,
+        accepted_specification_hash=canonical_hash(payload),
+        accepted_specification_json=canonical_json(payload),
+        parent_backlog_item_id="PBI-000001",
+        parent_backlog_spec_item_ids=("DATA.001",),
+        story=story.model_copy(update={"spec_item_ids": ("DATA.001",)}),
+    )
+    encoded = review_input.model_dump(mode="json")
+    assert tuple(encoded).count("accepted_specification_json") == 1
+    assert len(json.loads(review_input.accepted_specification_json)["items"]) == 37  # noqa: PLR2004
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("project_id", 2),
+        ("story_id", 3),
+        ("source_story_artifact_id", 5),
+        ("source_story_artifact_fingerprint", "sha256:" + "a" * 64),
+        ("source_story_item_id", "US-0002"),
+        ("source_story_item_fingerprint", "sha256:" + "b" * 64),
+        ("source_backlog_artifact_id", 7),
+        ("source_backlog_artifact_fingerprint", "sha256:" + "c" * 64),
+        ("source_backlog_item_id", "PBI-000002"),
+        ("spec_version_id", 11),
+        ("spec_hash", "sha256:" + "d" * 64),
+        ("spec_item_ids", ["DATA.002"]),
+        ("title", "Changed title"),
+        ("statement", "As a user I want another result so that it changes."),
+        ("persona", "user"),
+        ("acceptance_criteria", ["Changed criterion"]),
+        ("story_points", 8),
+        ("rank", "999"),
+    ],
 )
+def test_each_closed_validation_input_member_changes_fingerprint(
+    field: str,
+    replacement: object,
+) -> None:
+    payload: dict[str, object] = {
+        "schema_version": "agileforge.story-validation-input.v1",
+        "project_id": 1,
+        "story_id": 2,
+        "source_story_artifact_id": 4,
+        "source_story_artifact_fingerprint": "sha256:" + "1" * 64,
+        "source_story_item_id": "US-0001",
+        "source_story_item_fingerprint": "sha256:" + "2" * 64,
+        "source_backlog_artifact_id": 6,
+        "source_backlog_artifact_fingerprint": "sha256:" + "3" * 64,
+        "source_backlog_item_id": "PBI-000001",
+        "spec_version_id": 10,
+        "spec_hash": "sha256:" + "4" * 64,
+        "spec_item_ids": ["DATA.001"],
+        "title": "Title",
+        "statement": "As an operator I want a result so that it is useful.",
+        "persona": "operator",
+        "acceptance_criteria": ["Criterion"],
+        "story_points": 3,
+        "rank": "101",
+    }
+    original = canonical_hash(payload)
+    payload[field] = replacement
+    assert canonical_hash(payload) != original
 
 
-def _require_id(value: int | None, label: str) -> int:
-    """Narrow an optional persisted ID for static and runtime safety."""
-    assert value is not None, f"{label} should be persisted"
-    return value
-
-
-def _require_story(session: Session, story_id: int | None) -> UserStory:
-    """Fetch a persisted story and narrow away None."""
-    persisted_story = session.get(UserStory, _require_id(story_id, "story_id"))
-    assert persisted_story is not None
-    return persisted_story
-
-
-def _load_validation_evidence(story: UserStory | None) -> dict[str, Any]:
-    """Load persisted validation evidence from a non-null story."""
-    assert story is not None
-    evidence_json = story.validation_evidence
-    assert evidence_json is not None
-    return cast("dict[str, Any]", json.loads(evidence_json))
-
-
-def _fake_compilation_artifact() -> SpecAuthorityCompilationSuccess:
-    """Return a deterministic compiled authority artifact for tests."""
-    return SpecAuthorityCompilationSuccess(
-        scope_themes=["API", "Auth"],
-        domain=None,
-        invariants=[
-            Invariant(
-                id="INV-0000000000000001",
-                type=InvariantType.FORBIDDEN_CAPABILITY,
-                parameters=ForbiddenCapabilityParams(capability="redis"),
-            )
-        ],
-        eligible_feature_rules=[],
-        gaps=[],
-        assumptions=[],
-        source_map=[
-            SourceMapEntry(
-                invariant_id="INV-0000000000000001",
-                excerpt="Auth token required",
-                location="spec:line:1",
-            )
-        ],
-        compiler_version="3.0.0",
-        prompt_hash="a" * 64,
-    )
-
-
-def _accepted_spec(
-    session: Session,
-    *,
-    project_id: int,
-    content: str,
-) -> SpecRegistry:
-    """Persist an accepted specification through the current lifecycle."""
-    return seed_accepted_specification(
-        session,
-        project_id=project_id,
-        content=json.dumps({"specification": content}),
-    ).spec
-
-
-def _create_feature_hierarchy(
-    session: Session,
-    *,
-    project_id: int,
-    prefix: str,
-    detail: str,
-) -> Feature:
-    """Create theme/epic/feature records for a test project."""
-    theme = Theme(
-        project_id=project_id,
-        title=f"{prefix} Theme",
-        description=f"Theme for {detail}",
-    )
-    session.add(theme)
-    session.commit()
-    session.refresh(theme)
-
-    epic = Epic(
-        theme_id=_require_id(theme.theme_id, f"{prefix} theme_id"),
-        title=f"{prefix} Epic",
-        summary=f"Epic for {detail}",
-    )
-    session.add(epic)
-    session.commit()
-    session.refresh(epic)
-
-    feature = Feature(
-        epic_id=_require_id(epic.epic_id, f"{prefix} epic_id"),
-        title=f"{prefix} Feature",
-        description=f"Feature for {detail}",
-    )
-    session.add(feature)
-    session.commit()
-    session.refresh(feature)
-    return feature
-
-
-@pytest.fixture
-def sample_project(session: Session) -> Project:
-    """Create a project for testing."""
-    project = Project(
-        name="Validation Test Project",
-        description="Project for validation pinning tests",
-        vision="Test validation pinning",
-    )
-    session.add(project)
-    session.commit()
-    session.refresh(project)
-    return project
-
-
-@pytest.fixture
-def compiled_spec(session: Session, sample_project: Project) -> SpecRegistry:
-    """Create a registered, approved, and compiled spec version."""
-    spec_content = """
-# Test Specification
-
-## Requirements
-- All stories MUST have acceptance criteria
-- Stories MUST follow the "As a [persona]" format
-- Export formats: JSON only
-
-## Invariants
-- Auth token required for all operations
-- Maximum 10 items per page
-"""
-    spec = _accepted_spec(
-        session,
-        project_id=_require_id(sample_project.project_id, "project_id"),
-        content=spec_content,
-    )
-    spec_version_id = _require_id(spec.spec_version_id, "spec_version_id")
-
-    artifact = _fake_compilation_artifact()
-    authority = CompiledSpecAuthority(
-        spec_version_id=spec_version_id,
-        compiler_version=artifact.compiler_version,
-        prompt_hash=artifact.prompt_hash,
-        compiled_artifact_json=artifact.model_dump_json(),
-        scope_themes=json.dumps(artifact.scope_themes),
-        invariants=json.dumps(
-            [item.model_dump(mode="json") for item in artifact.invariants]
-        ),
-        eligible_feature_ids="[]",
-        rejected_features="[]",
-        spec_gaps="[]",
-    )
-    session.add(authority)
-    session.flush()
-    assert authority.authority_id is not None
-    session.add(
-        SpecAuthorityAcceptance(
-            project_id=_require_id(sample_project.project_id, "project_id"),
-            spec_version_id=spec_version_id,
-            status="accepted",
-            policy="test",
-            decided_by="test_reviewer",
-            compiler_version=authority.compiler_version,
-            prompt_hash=authority.prompt_hash,
-            spec_hash=spec.spec_hash,
-            pending_authority_id=authority.authority_id,
-            authority_fingerprint=pending_authority_fingerprint(authority),
-        )
-    )
-    session.commit()
-    session.refresh(spec)
-    return spec
-
-
-@pytest.fixture
-def sample_story(session: Session, sample_project: Project) -> UserStory:
-    """Create a user story for testing (with full hierarchy)."""
-    project_id = _require_id(sample_project.project_id, "sample_project.project_id")
-    feature = _create_feature_hierarchy(
-        session,
-        project_id=project_id,
-        prefix="Test",
-        detail="validation tests",
-    )
-
-    story = UserStory(
-        project_id=project_id,
-        feature_id=_require_id(feature.feature_id, "test feature_id"),
-        title="As a user, I want to export data",
-        story_description=(
-            "As a user, I want to export my data in JSON format so I can use it elsewhere."  # noqa: E501
-        ),
-        acceptance_criteria=(
-            "Given I have data, When I click export, Then I receive a JSON file"
-        ),
-    )
-    session.add(story)
-    session.commit()
-    session.refresh(story)
-    return story
-
-
-class TestFailFastWithoutSpecVersionId:
-    """Tests that validation fails immediately without spec_version_id."""
-
-    def test_validation_requires_spec_version_id_in_schema(self) -> None:
-        """Input schema requires spec_version_id (no default)."""
-        with pytest.raises(ValidationError) as exc_info:
-            ValidateStoryInput.model_validate({"story_id": 1})
-
-        errors = exc_info.value.errors()
-        assert any("spec_version_id" in str(e) for e in errors)
-
-    def test_validation_rejects_none_spec_version_id(self) -> None:
-        """spec_version_id=None is rejected."""
-        with pytest.raises(ValidationError):
-            ValidateStoryInput.model_validate({"story_id": 1, "spec_version_id": None})
-
-
-class TestFailFastIfNotCompiled:
-    """Tests that validation fails if spec is not compiled."""
-
-    def test_validation_fails_for_nonexistent_spec_version(
-        self, sample_story: UserStory
-    ) -> None:
-        """Clear error when spec_version_id doesn't exist."""
-        result = validate_story_with_spec_authority(
-            {"story_id": sample_story.story_id, "spec_version_id": 99999},
-            tool_context=None,
-        )
-
-        assert result["success"] is False
-        assert "not found" in result["error"].lower()
-
-    def test_validation_fails_for_approved_but_uncompiled_spec(
-        self,
-        session: Session,
-        sample_project: Project,
-        sample_story: UserStory,
-    ) -> None:
-        """Approved but uncompiled spec fails with clear message."""
-        spec = _accepted_spec(
-            session,
-            project_id=_require_id(sample_project.project_id, "project_id"),
-            content="Approved but not compiled",
-        )
-        spec_version_id = _require_id(spec.spec_version_id, "spec_version_id")
-
-        result = validate_story_with_spec_authority(
-            {"story_id": sample_story.story_id, "spec_version_id": spec_version_id},
-            tool_context=None,
-        )
-
-        assert result["success"] is False
-        assert "not compiled" in result["error"].lower()
-
-
-class TestEvidencePersistence:
-    """Tests that validation evidence is ALWAYS persisted."""
-
-    def test_evidence_persisted_on_validation_pass(
-        self,
-        session: Session,
-        sample_story: UserStory,
-        compiled_spec: SpecRegistry,
-    ) -> None:
-        """Evidence is stored when validation passes."""
-        result = validate_story_with_spec_authority(
-            {
-                "story_id": sample_story.story_id,
-                "spec_version_id": compiled_spec.spec_version_id,
-            },
-            tool_context=None,
-        )
-
-        session.expire(sample_story)
-        story = _require_story(session, sample_story.story_id)
-        evidence = _load_validation_evidence(story)
-
-        assert evidence["spec_version_id"] == compiled_spec.spec_version_id
-        assert "validated_at" in evidence
-        assert "passed" in evidence
-        assert "rules_checked" in evidence
-        assert "invariants_checked" in evidence
-        assert "validator_version" in evidence
-        assert "input_hash" in evidence
-
-        if result.get("passed", False):
-            assert story.accepted_spec_version_id == compiled_spec.spec_version_id
-
-    def test_evidence_persisted_on_validation_fail(
-        self,
-        session: Session,
-        sample_project: Project,
-        compiled_spec: SpecRegistry,
-    ) -> None:
-        """Evidence is stored even when validation fails."""
-        feature = _create_feature_hierarchy(
-            session,
-            project_id=_require_id(
-                sample_project.project_id,
-                "sample_project.project_id",
-            ),
-            prefix="Fail",
-            detail="fail test",
-        )
-
-        bad_story = UserStory(
-            project_id=_require_id(
-                sample_project.project_id,
-                "sample_project.project_id",
-            ),
-            feature_id=_require_id(feature.feature_id, "fail feature_id"),
-            title="Bad story title",
-            story_description="This is a poorly formatted story",
-            acceptance_criteria="",
-        )
-        session.add(bad_story)
+@pytest.mark.parametrize(
+    ("field", "replacement"), [("story_points", 8), ("rank", "999")]
+)
+def test_points_or_rank_change_stales_previous_evidence(
+    engine: Engine,
+    field: str,
+    replacement: object,
+) -> None:
+    story_id = _accepted_story(engine)
+    _validate(engine, story_id)
+    with Session(engine) as session:
+        story = session.get(UserStory, story_id)
+        assert story is not None
+        setattr(story, field, replacement)
         session.commit()
-        session.refresh(bad_story)
-
-        original_accepted = bad_story.accepted_spec_version_id
-
-        validate_story_with_spec_authority(
-            {
-                "story_id": bad_story.story_id,
-                "spec_version_id": compiled_spec.spec_version_id,
-            },
-            tool_context=None,
-        )
-
-        session.expire(bad_story)
-        story = _require_story(session, bad_story.story_id)
-        evidence = _load_validation_evidence(story)
-        assert evidence["spec_version_id"] == compiled_spec.spec_version_id
-        assert "failures" in evidence
-
-        assert story.accepted_spec_version_id == original_accepted
-
-    def test_evidence_contains_all_required_fields(
-        self,
-        session: Session,
-        sample_story: UserStory,
-        compiled_spec: SpecRegistry,
-    ) -> None:
-        """Evidence contains all required fields per schema."""
-        validate_story_with_spec_authority(
-            {
-                "story_id": sample_story.story_id,
-                "spec_version_id": compiled_spec.spec_version_id,
-            },
-            tool_context=None,
-        )
-
-        session.expire(sample_story)
-        story = _require_story(session, sample_story.story_id)
-        evidence = _load_validation_evidence(story)
-
-        validated = ValidationEvidence.model_validate(evidence)
-
-        assert validated.spec_version_id == compiled_spec.spec_version_id
-        assert validated.validator_version == VALIDATOR_VERSION
-        assert isinstance(validated.rules_checked, list)
-        assert isinstance(validated.invariants_checked, list)
-        assert len(validated.invariants_checked) == 1
-        assert isinstance(validated.evaluated_invariant_ids, list)
-        assert "INV-0000000000000001" in validated.evaluated_invariant_ids
-        assert isinstance(validated.finding_invariant_ids, list)
-        assert len(validated.finding_invariant_ids) == 0
-        assert isinstance(validated.failures, list)
-        assert isinstance(validated.warnings, list)
-        assert validated.input_hash is not None
+        with pytest.raises(StoryValidationReadinessError, match="failed or stale"):
+            require_story_ready_for_sprint(session, story=story)
 
 
-class TestDeterministicInputHashing:
-    """Tests that input hashing is deterministic and reproducible."""
+@pytest.mark.parametrize(
+    "raw_evidence",
+    [
+        None,
+        "not-json",
+        '{"spec_version_id":1,"passed":true}',
+    ],
+)
+def test_readiness_rejects_missing_malformed_or_v1_evidence(
+    engine: Engine,
+    raw_evidence: str | None,
+) -> None:
+    story_id = _accepted_story(engine)
+    with Session(engine) as session:
+        story = session.get(UserStory, story_id)
+        assert story is not None
+        story.validation_evidence = raw_evidence
+        with pytest.raises(StoryValidationReadinessError):
+            require_story_ready_for_sprint(session, story=story)
 
-    def test_same_story_content_produces_same_hash(
-        self,
-        session: Session,
-        sample_project: Project,
-        compiled_spec: SpecRegistry,
-    ) -> None:
-        """Identical story content produces identical input_hash."""
-        project_id = _require_id(sample_project.project_id, "sample_project.project_id")
-        feature = _create_feature_hierarchy(
+
+def test_validation_allows_exact_historical_pin_but_new_sprint_readiness_does_not(
+    engine: Engine,
+) -> None:
+    story_id = _accepted_story(engine)
+    with Session(engine) as session:
+        story = session.get(UserStory, story_id)
+        assert story is not None
+        project_id = story.project_id
+    _replace_specification_and_backlog(engine, project_id)
+
+    result = _validate(engine, story_id)
+    assert result["ready_for_sprint"] is True
+    with Session(engine) as session:
+        story = session.get(UserStory, story_id)
+        assert story is not None
+        with pytest.raises(StoryValidationReadinessError, match="current"):
+            require_story_ready_for_sprint(session, story=story)
+
+
+def test_feedback_preserves_a_evidence_and_accepted_c_starts_unvalidated(
+    engine: Engine,
+) -> None:
+    project_id, roadmap_id = _seed_story_parent(engine)
+    with Session(engine) as session:
+        artifact_a = _record_story(
             session,
             project_id=project_id,
-            prefix="Hash",
-            detail="hash test",
+            roadmap_id=roadmap_id,
+            title="Accepted A",
         )
-        feature_id = _require_id(feature.feature_id, "hash feature_id")
-
-        story_content = {
-            "title": "As a tester, I want determinism",
-            "description": "As a tester, I want deterministic hashing for reproducibility.",  # noqa: E501
-            "acceptance_criteria": "Given input X, When hashed, Then hash is always Y",
-        }
-
-        story1 = UserStory(
-            project_id=project_id,
-            feature_id=feature_id,
-            title=story_content["title"],
-            story_description=story_content["description"],
-            acceptance_criteria=story_content["acceptance_criteria"],
-        )
-        session.add(story1)
+        accepted_a = _decide_story(session, artifact_a, decision="accepted", offset=2)
+        artifact_a_id = artifact_a.story_artifact_id
         session.commit()
-        session.refresh(story1)
-
-        story2 = UserStory(
-            project_id=project_id,
-            feature_id=feature_id,
-            title=story_content["title"],
-            story_description=story_content["description"],
-            acceptance_criteria=story_content["acceptance_criteria"],
-        )
-        session.add(story2)
-        session.commit()
-        session.refresh(story2)
-
-        validate_story_with_spec_authority(
-            {
-                "story_id": story1.story_id,
-                "spec_version_id": compiled_spec.spec_version_id,
-            },
-            tool_context=None,
-        )
-        validate_story_with_spec_authority(
-            {
-                "story_id": story2.story_id,
-                "spec_version_id": compiled_spec.spec_version_id,
-            },
-            tool_context=None,
-        )
-
-        session.expire_all()
-        s1 = _require_story(session, story1.story_id)
-        s2 = _require_story(session, story2.story_id)
-
-        e1 = _load_validation_evidence(s1)
-        e2 = _load_validation_evidence(s2)
-
-        assert e1["input_hash"] == e2["input_hash"]
-
-    def test_different_story_content_produces_different_hash(
-        self,
-        session: Session,
-        sample_project: Project,
-        compiled_spec: SpecRegistry,
-    ) -> None:
-        """Different story content produces different input_hash."""
-        project_id = _require_id(sample_project.project_id, "sample_project.project_id")
-        feature = _create_feature_hierarchy(
+        story_a_id = accepted_a.activated_story_ids[0]
+    _validate(engine, story_a_id)
+    with Session(engine) as session:
+        story_a = session.get(UserStory, story_a_id)
+        assert story_a is not None
+        assert story_a.validation_evidence is not None
+        evidence_a = story_a.validation_evidence
+        artifact_b = _record_story(
             session,
             project_id=project_id,
-            prefix="Diff",
-            detail="diff test",
+            roadmap_id=roadmap_id,
+            title="Feedback B",
+            supersedes_id=artifact_a_id,
+            recorded_offset=3,
         )
-        feature_id = _require_id(feature.feature_id, "diff feature_id")
-
-        story1 = UserStory(
-            project_id=project_id,
-            feature_id=feature_id,
-            title="Story A",
-            story_description="Description A",
-            acceptance_criteria="AC A",
-        )
-        session.add(story1)
-        session.commit()
-        session.refresh(story1)
-
-        story2 = UserStory(
-            project_id=project_id,
-            feature_id=feature_id,
-            title="Story B",
-            story_description="Description B",
-            acceptance_criteria="AC B",
-        )
-        session.add(story2)
-        session.commit()
-        session.refresh(story2)
-
-        validate_story_with_spec_authority(
-            {
-                "story_id": story1.story_id,
-                "spec_version_id": compiled_spec.spec_version_id,
-            },
-            tool_context=None,
-        )
-        validate_story_with_spec_authority(
-            {
-                "story_id": story2.story_id,
-                "spec_version_id": compiled_spec.spec_version_id,
-            },
-            tool_context=None,
-        )
-
-        session.expire_all()
-        s1 = _require_story(session, story1.story_id)
-        s2 = _require_story(session, story2.story_id)
-
-        e1 = _load_validation_evidence(s1)
-        e2 = _load_validation_evidence(s2)
-
-        assert e1["input_hash"] != e2["input_hash"]
-
-
-class TestWrongSpecVersionIdFails:
-    """Tests that using wrong spec_version_id fails deterministically."""
-
-    def test_validation_fails_for_spec_from_different_project(
-        self,
-        session: Session,
-        sample_project: Project,
-        sample_story: UserStory,
-        compiled_spec: SpecRegistry,
-    ) -> None:
-        """Validation fails if spec belongs to different project."""
-        del sample_project, compiled_spec
-
-        other_project = Project(
-            name="Other Project",
-            description="Different project",
-            vision="Different vision",
-        )
-        session.add(other_project)
-        session.commit()
-        session.refresh(other_project)
-
-        other_spec = _accepted_spec(
+        _decide_story(session, artifact_b, decision="feedback", offset=4)
+        assert story_a.validation_evidence == evidence_a
+        artifact_c = _record_story(
             session,
-            project_id=_require_id(other_project.project_id, "other project_id"),
-            content="Other project spec",
+            project_id=project_id,
+            roadmap_id=roadmap_id,
+            title="Accepted C",
+            supersedes_id=artifact_b.story_artifact_id,
+            recorded_offset=5,
         )
-        other_spec_id = _require_id(
-            other_spec.spec_version_id,
-            "other spec_version_id",
-        )
-        result = validate_story_with_spec_authority(
-            {"story_id": sample_story.story_id, "spec_version_id": other_spec_id},
-            tool_context=None,
-        )
-
-        assert result["success"] is False
-        assert (
-            "project" in result["error"].lower()
-            or "mismatch" in result["error"].lower()
-        )
-
-
-class TestValidatorVersion:
-    """Tests for validator versioning."""
-
-    def test_validator_version_constant_exists(self) -> None:
-        """VALIDATOR_VERSION constant exists."""
-        assert VALIDATOR_VERSION is not None
-        assert isinstance(VALIDATOR_VERSION, str)
-        parts = VALIDATOR_VERSION.split(".")
-        assert len(parts) >= 2  # noqa: PLR2004
-
-    def test_validator_version_in_evidence(
-        self,
-        session: Session,
-        sample_story: UserStory,
-        compiled_spec: SpecRegistry,
-    ) -> None:
-        """validator_version is stored in evidence."""
-        validate_story_with_spec_authority(
-            {
-                "story_id": sample_story.story_id,
-                "spec_version_id": compiled_spec.spec_version_id,
-            },
-            tool_context=None,
-        )
-
-        session.expire(sample_story)
-        story = _require_story(session, sample_story.story_id)
-        evidence = _load_validation_evidence(story)
-
-        assert evidence["validator_version"] == VALIDATOR_VERSION
+        accepted_c = _decide_story(session, artifact_c, decision="accepted", offset=6)
+        story_c = session.get(UserStory, accepted_c.activated_story_ids[0])
+        assert story_c is not None
+        assert story_c.validation_evidence is None
+        assert story_a.validation_evidence == evidence_a
+        with pytest.raises(StoryValidationReadinessError):
+            require_story_ready_for_sprint(session, story=story_c)

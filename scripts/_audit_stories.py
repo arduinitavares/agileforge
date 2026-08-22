@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Quick audit: show acceptance_criteria status for project 8 stories."""
 
+import json
 import sys
 from pathlib import Path
 
@@ -23,8 +24,13 @@ with Session(get_engine()) as s:
     has_ac = 0
     no_ac = 0
     for st in stories:
-        ac = (st.acceptance_criteria or "").strip()
-        has = bool(ac)
+        try:
+            criteria = json.loads(st.acceptance_criteria_json)
+        except json.JSONDecodeError:
+            criteria = []
+        has = isinstance(criteria, list) and any(
+            isinstance(item, str) and item.strip() for item in criteria
+        )
         if has:
             has_ac += 1
         else:

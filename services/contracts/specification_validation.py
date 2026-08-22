@@ -1,123 +1,134 @@
-"""Schemas for the spec validator agent."""
+"""Closed contracts for direct-Specification Story validation."""
 
-from typing import Annotated
+from __future__ import annotations
 
-from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
+from typing import Annotated, Literal, Self
 
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
-class DomainComplianceInfo(BaseModel):
-    """Domain-specific compliance analysis."""
-
-    matched_domain: Annotated[
-        str | None,
-        Field(
-            default=None, description="Primary domain matched (e.g., review, ingestion)"
-        ),
-    ]
-    bound_requirement_count: Annotated[
-        int, Field(default=0, description="Number of requirements bound to this domain")
-    ]
-    satisfied_count: Annotated[
-        int,
-        Field(default=0, description="Number of bound requirements satisfied by AC"),
-    ]
-    critical_gaps: Annotated[
-        list[str],
-        Field(
-            default_factory=list,
-            description="Missing artifacts/invariants that MUST be added",
-        ),
-    ]
-    out_of_scope_invariants: Annotated[
-        list[str],
-        Field(
-            default_factory=list,
-            description=(
-                "Invariant IDs explicitly skipped because they are out of feature scope"
-            ),
-        ),
-    ]
+from services.contracts.specification_references import (
+    AcceptedSpecificationReference,
+    canonical_spec_item_ids,
+    validate_accepted_specification_root,
+    validate_backlog_item_id,
+)
+from services.contracts.story import CanonicalStoryItem  # noqa: TC001
 
 
-class SpecValidationResult(BaseModel):
-    """Structured specification compliance output with domain-aware validation."""
+class StorySpecificationReferences(BaseModel):
+    """Canonical derived reference set; never authored by a provider."""
 
-    is_compliant: Annotated[
-        bool,
-        Field(
-            description=(
-                "True if story complies with ALL spec requirements including "
-                "domain invariants"
-            )
-        ),
-    ]
-    issues: Annotated[
-        list[str],
-        Field(
-            default_factory=list,
-            description="Specific spec violations found. Empty if compliant.",
-        ),
-    ]
-    suggestions: Annotated[
-        list[str],
-        Field(
-            default_factory=list,
-            description="Actionable edits to fix spec violations. Empty if compliant.",
-        ),
-    ]
-    domain_compliance: Annotated[
-        DomainComplianceInfo | None,
-        Field(
-            default=None,
-            description="Domain-specific compliance analysis (null if no spec)",
-        ),
-    ]
-    verdict: Annotated[str, Field(description="Brief summary of spec compliance check")]
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
-    @field_validator("issues", "suggestions", mode="after")
-    @classmethod
-    def validate_compliant_has_no_issues(
-        cls, v: list[str], info: ValidationInfo
-    ) -> list[str]:
-        """If is_compliant=True, issues and suggestions must be empty."""
-        if info.data.get("is_compliant") is True and len(v) > 0:
-            field_name = info.field_name
-            message = (
-                "Logical inconsistency: is_compliant=True but "
-                f"{field_name} is not empty. "
-                f"When a story is compliant, there should be no {field_name}. "
-                f"Either set is_compliant=False or clear the {field_name} list."
-            )
-            raise ValueError(message)
-        return v
-
-    @field_validator("issues", mode="after")
-    @classmethod
-    def validate_non_compliant_has_issues(
-        cls, v: list[str], info: ValidationInfo
-    ) -> list[str]:
-        """If is_compliant=False, issues must not be empty."""
-        if info.data.get("is_compliant") is False and len(v) == 0:
-            message = (
-                "Logical inconsistency: is_compliant=False but issues list is empty. "
-                "If a story is non-compliant, you must specify at least one issue."
-            )
-            raise ValueError(message)
-        return v
+    referenced_spec_item_ids: tuple[str, ...]
 
     @model_validator(mode="after")
-    def validate_domain_compliance_consistency(self) -> "SpecValidationResult":
-        """If critical_gaps exist, is_compliant must be False."""
-        if (
-            self.domain_compliance
-            and self.domain_compliance.critical_gaps
-            and self.is_compliant
+    def validate_canonical_order(self) -> Self:
+        """Keep persisted/hashable derived references deterministic."""
+        if not self.referenced_spec_item_ids:
+            message = "referenced Specification item IDs must not be empty"
+            raise ValueError(message)
+        if tuple(sorted(set(self.referenced_spec_item_ids))) != (
+            self.referenced_spec_item_ids
         ):
-            message = (
-                "Logical inconsistency: is_compliant=True but "
-                "domain_compliance.critical_gaps is not empty: "
-                f"{self.domain_compliance.critical_gaps}. Critical gaps are blocking "
-                "issues that MUST be resolved. Set is_compliant=False."
-            )
+            message = "referenced Specification item IDs must be unique and sorted"
             raise ValueError(message)
         return self
+
+
+class StorySpecificationFinding(BaseModel):
+    """One bounded semantic finding tied to an exact Specification item."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    code: Literal[
+        "SPEC_ITEM_CONTRADICTION",
+        "SPEC_ITEM_OMISSION",
+        "SPEC_ITEM_UNTESTABLE",
+    ]
+    spec_item_id: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+    message: Annotated[
+        str,
+        StringConstraints(strip_whitespace=True, min_length=1, max_length=2000),
+    ]
+    suggested_change: (
+        Annotated[
+            str,
+            StringConstraints(strip_whitespace=True, min_length=1, max_length=2000),
+        ]
+        | None
+    ) = None
+
+
+class StorySpecificationReviewOutput(BaseModel):
+    """Strict, complete one-shot semantic review response."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["agileforge.story-specification-review.v1"]
+    compliant: bool
+    complete: bool
+    findings: tuple[StorySpecificationFinding, ...] = Field(max_length=50)
+
+    @model_validator(mode="after")
+    def validate_complete_consistent_unique_result(self) -> Self:
+        """Reject incomplete, contradictory, or duplicate provider output."""
+        if not self.complete:
+            message = "semantic review output must be complete"
+            raise ValueError(message)
+        if self.compliant != (not self.findings):
+            message = "semantic compliant flag must equal not findings"
+            raise ValueError(message)
+        pairs = tuple((item.spec_item_id, item.code) for item in self.findings)
+        if len(pairs) != len(set(pairs)):
+            message = "semantic review findings contain duplicate item/code pairs"
+            raise ValueError(message)
+        return self
+
+
+class StorySpecificationReviewInput(BaseModel):
+    """One accepted Specification root, parent PBI boundary, and Story item."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["agileforge.story-specification-review-input.v1"]
+    accepted_specification_version_id: Annotated[int, Field(gt=0)]
+    accepted_specification_hash: Annotated[str, Field(pattern=r"^sha256:[0-9a-f]{64}$")]
+    accepted_specification_json: Annotated[str, Field(min_length=1)]
+    parent_backlog_item_id: str
+    parent_backlog_spec_item_ids: tuple[str, ...]
+    story: CanonicalStoryItem
+
+    @model_validator(mode="after")
+    def validate_exact_source_bounds(self) -> Self:
+        """Prove the exact root and both nested evidence boundaries."""
+        validate_backlog_item_id(self.parent_backlog_item_id)
+        specification = AcceptedSpecificationReference.model_validate(
+            {
+                "spec_version_id": self.accepted_specification_version_id,
+                "spec_hash": self.accepted_specification_hash,
+                "canonical_specification_json": self.accepted_specification_json,
+                "payload": validate_accepted_specification_root(
+                    spec_hash=self.accepted_specification_hash,
+                    canonical_specification_json=self.accepted_specification_json,
+                ),
+            }
+        )
+        parent_ids = canonical_spec_item_ids(
+            specification,
+            self.parent_backlog_spec_item_ids,
+        )
+        canonical_spec_item_ids(
+            specification,
+            self.story.spec_item_ids,
+            parent_spec_item_ids=parent_ids,
+        )
+        return self
+
+
+__all__ = [
+    "StorySpecificationFinding",
+    "StorySpecificationReferences",
+    "StorySpecificationReviewInput",
+    "StorySpecificationReviewOutput",
+]

@@ -1,94 +1,47 @@
 # tests/test_db_tools.py
-"""
-Test suite for db_tools module using TDD approach.
+"""Provider-free tests for the retained Project hierarchy tools."""
 
-Run with: pytest tests/test_db_tools.py -v.
-"""
+from __future__ import annotations
 
-# Monkey-patch the engine for tests
-import sys
-from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
-from sqlalchemy.engine import Engine
 from sqlmodel import Session, select
 
-from agile_sqlmodel import Project, Task, UserStory
+from agile_sqlmodel import Project
 from models.core import Epic, Feature, Theme
 from models.product_definition import VisionInterviewTurn
 from tests.vision_lineage_fixtures import seed_accepted_vision
 from tools.db_tools import (
     CreateOrGetProjectInput,
-    CreateTaskInput,
-    CreateUserStoryInput,
     QueryProjectStructureFailure,
+    QueryProjectStructureSuccess,
     create_or_get_project,
-    create_task,
-    create_user_story,
-    get_story_details,
     persist_roadmap,
     query_project_structure,
 )
 
-# Add parent directory to path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+if TYPE_CHECKING:
+    from sqlalchemy.engine import Engine
 
 
-def test_create_project_new(engine: Engine) -> None:
-    """Test creating a new Project."""
-    del engine
-
-    result = create_or_get_project(
-        CreateOrGetProjectInput(
-            project_name="Test Project",
-            vision="To revolutionize testing",
-            description=None,
-        )
-    )
-
-    assert result["success"] is True
-    assert result["action"] == "created"
-    assert result["project_id"] == 1
-    assert "Test Project" in result["message"]
+EXPECTED_FEATURE_COUNT = 2
 
 
-def test_create_project_existing(engine: Engine) -> None:
-    """Test getting an existing Project without duplication."""
-    # Create first Project
-    result1 = create_or_get_project(
-        CreateOrGetProjectInput(
-            project_name="Existing Project", vision=None, description=None
-        )
-    )
-    assert result1["action"] == "created"
-
-    # Get same Project again
-    result2 = create_or_get_project(
-        CreateOrGetProjectInput(
-            project_name="Existing Project", vision=None, description=None
-        )
-    )
-    assert result2["action"] == "updated"
-    assert result2["project_id"] == result1["project_id"]
-
-    # Verify only one Project exists
-    with Session(engine) as session:
-        projects = session.exec(select(Project)).all()
-        assert len(projects) == 1
+def _created_roadmap_count(result: object, kind: str) -> int:
+    """Read one successful roadmap collection without exporting a test-only type."""
+    assert isinstance(result, dict)
+    result_mapping = cast("dict[str, object]", result)
+    assert result_mapping["success"] is True
+    created = result_mapping["created"]
+    assert isinstance(created, dict)
+    created_mapping = cast("dict[str, object]", created)
+    entries = created_mapping[kind]
+    assert isinstance(entries, list)
+    return len(entries)
 
 
-def test_persist_roadmap(engine: Engine) -> None:
-    """Test persisting a roadmap hierarchy."""
-    # Create Project first
-    project_result = create_or_get_project(
-        CreateOrGetProjectInput(
-            project_name="Roadmap Project", vision=None, description=None
-        )
-    )
-    project_id = project_result["project_id"]
-
-    # Define roadmap
-    roadmap = [
+def _roadmap() -> list[dict[str, object]]:
+    return [
         {
             "quarter": "Q1",
             "theme_title": "Authentication",
@@ -106,246 +59,118 @@ def test_persist_roadmap(engine: Engine) -> None:
         }
     ]
 
-    # Persist roadmap
-    result = persist_roadmap(project_id, roadmap)
+
+def test_create_project_new(engine: Engine) -> None:
+    """Create one Project through the retained project tool."""
+    del engine
+
+    result = create_or_get_project(
+        CreateOrGetProjectInput(
+            project_name="Test Project",
+            vision="To revolutionize testing",
+            description=None,
+        )
+    )
+
+    assert result == {
+        "success": True,
+        "project_id": 1,
+        "action": "created",
+        "message": "Created project 'Test Project' with ID 1",
+    }
+
+
+def test_create_project_existing(engine: Engine) -> None:
+    """Keep the Project tool idempotent by name."""
+    first = create_or_get_project(
+        CreateOrGetProjectInput(
+            project_name="Existing Project", vision=None, description=None
+        )
+    )
+    second = create_or_get_project(
+        CreateOrGetProjectInput(
+            project_name="Existing Project", vision=None, description=None
+        )
+    )
+
+    assert first["action"] == "created"
+    assert second["action"] == "updated"
+    assert second["project_id"] == first["project_id"]
+    with Session(engine) as session:
+        assert len(session.exec(select(Project)).all()) == 1
+
+
+def test_persist_roadmap_retains_only_theme_epic_feature_hierarchy(
+    engine: Engine,
+) -> None:
+    """Persist the honest hierarchy without a false Feature-to-Story edge."""
+    project_id = create_or_get_project(
+        CreateOrGetProjectInput(
+            project_name="Roadmap Project", vision=None, description=None
+        )
+    )["project_id"]
+
+    result = persist_roadmap(project_id, _roadmap())
 
     assert result["success"] is True
-    created = result.get("created")
-    assert created is not None
-    assert created["themes"][0]["id"] == 1
-    assert len(created["epics"]) == 1
-    expected_feature_count = 2
-    assert len(created["features"]) == expected_feature_count
-
-    # Verify hierarchy in database
+    assert _created_roadmap_count(result, "themes") == 1
+    assert _created_roadmap_count(result, "epics") == 1
+    assert _created_roadmap_count(result, "features") == EXPECTED_FEATURE_COUNT
     with Session(engine) as session:
-        themes = session.exec(select(Theme)).all()
-        assert len(themes) == 1
-        assert themes[0].project_id == project_id
-
-        epics = session.exec(select(Epic)).all()
-        assert len(epics) == 1
-        assert epics[0].theme_id == themes[0].theme_id
-
-        features = session.exec(select(Feature)).all()
-        assert len(features) == 2  # noqa: PLR2004
+        assert len(session.exec(select(Theme)).all()) == 1
+        assert len(session.exec(select(Epic)).all()) == 1
+        assert len(session.exec(select(Feature)).all()) == EXPECTED_FEATURE_COUNT
 
 
-def test_create_user_story(engine: Engine) -> None:
-    """Test creating a user story under a feature."""
-    # Setup hierarchy
-    project_result = create_or_get_project(
-        CreateOrGetProjectInput(
-            project_name="Story Project", vision=None, description=None
-        )
-    )
-    project_id = project_result["project_id"]
-
-    roadmap = [
-        {
-            "quarter": "Q1",
-            "theme_title": "Auth",
-            "theme_description": "",
-            "epics": [
-                {
-                    "epic_title": "Login",
-                    "epic_summary": "",
-                    "features": [
-                        {"title": "Email Login", "description": ""},
-                    ],
-                }
-            ],
-        }
-    ]
-
-    roadmap_result = persist_roadmap(project_id, roadmap)
-    created = roadmap_result.get("created")
-    assert created is not None
-    feature_id = created["features"][0]["id"]
-
-    # Create user story
-    story_result = create_user_story(
-        CreateUserStoryInput(
-            project_id=project_id,
-            feature_id=feature_id,
-            title="Login with email",
-            description="As a user, I want to log in with email and password.",
-            acceptance_criteria="User can enter email/password and be authenticated.",
-            story_points=5,
-        )
-    )
-
-    assert story_result["success"] is True
-    assert story_result.get("story_id") == 1
-    assert story_result.get("feature_id") == feature_id
-
-    # Verify in database
-    with Session(engine) as session:
-        stories = session.exec(select(UserStory)).all()
-        assert len(stories) == 1
-        assert stories[0].story_points == 5  # noqa: PLR2004
-
-
-def test_create_task(engine: Engine) -> None:
-    """Test creating a task under a story."""
-    # Setup full hierarchy
-    project_result = create_or_get_project(
-        CreateOrGetProjectInput(
-            project_name="Task Project", vision=None, description=None
-        )
-    )
-    project_id = project_result["project_id"]
-
-    roadmap = [
-        {
-            "quarter": "Q1",
-            "theme_title": "Auth",
-            "theme_description": "",
-            "epics": [
-                {
-                    "epic_title": "Login",
-                    "epic_summary": "",
-                    "features": [
-                        {"title": "Email Login", "description": ""},
-                    ],
-                }
-            ],
-        }
-    ]
-
-    roadmap_result = persist_roadmap(project_id, roadmap)
-    created = roadmap_result.get("created")
-    assert created is not None
-    feature_id = created["features"][0]["id"]
-
-    story_result = create_user_story(
-        CreateUserStoryInput(
-            project_id=project_id,
-            feature_id=feature_id,
-            title="Login with email",
-            description="As a user, I want to log in.",
-            acceptance_criteria=None,
-            story_points=None,
-        )
-    )
-    story_id = story_result.get("story_id")
-    assert story_id is not None
-
-    # Create task
-    task_result = create_task(
-        CreateTaskInput(
-            story_id=story_id,
-            title="Set up email validation",
-            description="Implement email regex validation",
-        )
-    )
-
-    assert task_result["success"] is True
-    assert task_result.get("task_id") == 1
-
-    # Verify in database
-    with Session(engine) as session:
-        tasks = session.exec(select(Task)).all()
-        assert len(tasks) == 1
-
-
-def test_query_project_structure(engine: Engine) -> None:
-    """Test querying full Project structure."""
-    # Setup hierarchy
-    project_result = create_or_get_project(
+def test_query_project_structure_returns_only_current_hierarchy(engine: Engine) -> None:
+    """Expose exactly Theme, Epic, and Feature records for a Project."""
+    project_id = create_or_get_project(
         CreateOrGetProjectInput(
             project_name="Query Project",
             vision="Test vision statement",
             description=None,
         )
-    )
-    project_id = project_result["project_id"]
+    )["project_id"]
     with Session(engine) as session:
         seed_accepted_vision(
             session,
             project_id=project_id,
             statement="Test vision statement",
         )
+    persist_roadmap(project_id, _roadmap())
 
-    roadmap = [
-        {
-            "quarter": "Q1",
-            "theme_title": "Auth",
-            "theme_description": "Authentication features",
-            "epics": [
-                {
-                    "epic_title": "Login",
-                    "epic_summary": "Login implementation",
-                    "features": [
-                        {"title": "Email Login", "description": "Email auth"},
-                    ],
-                }
-            ],
-        }
-    ]
-
-    roadmap_result = persist_roadmap(project_id, roadmap)
-    created = roadmap_result.get("created")
-    assert created is not None
-    feature_id = created["features"][0]["id"]
-
-    create_user_story(
-        CreateUserStoryInput(
-            project_id=project_id,
-            feature_id=feature_id,
-            title="User can login",
-            description="As a user...",
-            story_points=5,
-            acceptance_criteria=None,
-        )
-    )
-
-    # Query structure
     result = query_project_structure(project_id)
 
     assert result["success"] is True
-    structure = result.get("structure")
-    assert structure is not None
+    success = cast("QueryProjectStructureSuccess", result)
+    structure = success["structure"]
     assert structure["project"]["name"] == "Query Project"
     assert structure["project"]["vision"] == "Test vision statement"
-    assert len(structure["themes"]) == 1
-    assert len(structure["themes"][0]["epics"]) == 1
-    assert len(structure["themes"][0]["epics"][0]["features"]) == 1
-    assert (
-        len(structure["themes"][0]["epics"][0]["features"][0]["stories"]) == 1
-    )
+    feature = structure["themes"][0]["epics"][0]["features"][0]
+    assert feature == {"id": 1, "title": "Email Login"}
 
 
 def test_query_project_structure_fails_closed_on_ambiguous_vision(
     engine: Engine,
 ) -> None:
     """Reject two accepted Vision roots instead of selecting one arbitrarily."""
-    project_result = create_or_get_project(
+    project_id = create_or_get_project(
         CreateOrGetProjectInput(
-            project_name="Ambiguous Vision Project",
-            vision=None,
-            description=None,
+            project_name="Ambiguous Vision Project", vision=None, description=None
         )
-    )
-    project_id = project_result["project_id"]
+    )["project_id"]
     with Session(engine) as session:
+        seed_accepted_vision(session, project_id=project_id, statement="First root.")
         seed_accepted_vision(
             session,
             project_id=project_id,
-            statement="First accepted root.",
-        )
-        seed_accepted_vision(
-            session,
-            project_id=project_id,
-            statement="Second accepted root.",
+            statement="Second root.",
             version_number=2,
         )
 
     result = query_project_structure(project_id)
 
-    if result["success"]:
-        message = "Ambiguous Vision lineage unexpectedly produced a structure."
-        raise AssertionError(message)
+    assert result["success"] is False
     failure = cast("QueryProjectStructureFailure", result)
     assert "Vision lineage is invalid" in failure["error"]
 
@@ -354,14 +179,11 @@ def test_query_project_structure_fails_closed_on_corrupt_vision_source_turn(
     engine: Engine,
 ) -> None:
     """Expose corrupt durable Vision source evidence through the tool envelope."""
-    project_result = create_or_get_project(
+    project_id = create_or_get_project(
         CreateOrGetProjectInput(
-            project_name="Corrupt Vision Source Project",
-            vision=None,
-            description=None,
+            project_name="Corrupt Vision Source Project", vision=None, description=None
         )
-    )
-    project_id = project_result["project_id"]
+    )["project_id"]
     with Session(engine) as session:
         artifact = seed_accepted_vision(
             session,
@@ -376,100 +198,6 @@ def test_query_project_structure_fails_closed_on_corrupt_vision_source_turn(
 
     result = query_project_structure(project_id)
 
-    if result["success"]:
-        message = "Corrupt Vision source turn unexpectedly produced a structure."
-        raise AssertionError(message)
+    assert result["success"] is False
     failure = cast("QueryProjectStructureFailure", result)
     assert "Vision lineage is invalid" in failure["error"]
-
-
-def test_get_story_details(engine: Engine) -> None:
-    """Test fetching details for a specific story by ID."""
-    del engine
-
-    # Arrange: Create a Project and story
-    project_result = create_or_get_project(
-        CreateOrGetProjectInput(
-            project_name="Story Details Test Project",
-            vision="Test vision for story details",
-            description=None,
-        )
-    )
-    project_id = project_result["project_id"]
-
-    # Create roadmap structure
-    roadmap = [
-        {
-            "theme_title": "Feature Theme",
-            "theme_description": "Theme for testing story details",
-            "epics": [
-                {
-                    "epic_title": "Test Epic",
-                    "epic_summary": "Epic for testing",
-                    "features": [
-                        {
-                            "title": "Test Feature",
-                            "description": "Feature for testing story details",
-                        },
-                    ],
-                }
-            ],
-        }
-    ]
-
-    roadmap_result = persist_roadmap(project_id, roadmap)
-    created = roadmap_result.get("created")
-    assert created is not None
-    feature_id = created["features"][0]["id"]
-
-    # Create a test story
-    expected_story_points = 3
-    story_result = create_user_story(
-        CreateUserStoryInput(
-            project_id=project_id,
-            feature_id=feature_id,
-            title="Test Story for Details",
-            description="As a tester, I want to retrieve story details so that I can verify the functionality.",  # noqa: E501
-            story_points=expected_story_points,
-            acceptance_criteria="- Story details can be fetched\n- All fields are returned correctly",  # noqa: E501
-        )
-    )
-    story_id = story_result.get("story_id")
-    assert story_id is not None
-
-    # Act: Call the get_story_details function
-    result = get_story_details(story_id)
-
-    # Assert: Verify the returned details
-    assert result["success"] is True
-    assert result["story_id"] == story_id
-    assert result.get("title") == "Test Story for Details"
-    assert (
-        result.get("description")
-        == "As a tester, I want to retrieve story details so that I can verify the functionality."  # noqa: E501
-    )
-    assert (
-        result.get("acceptance_criteria")
-        == "- Story details can be fetched\n- All fields are returned correctly"
-    )
-    assert result.get("status") == "To Do"  # StoryStatus enum value
-    assert result.get("story_points") == expected_story_points
-    assert result.get("feature_id") == feature_id
-    assert result.get("project_id") == project_id
-    assert "created_at" in result
-    assert "updated_at" in result
-
-
-def test_get_story_details_not_found(engine: Engine) -> None:
-    """Test fetching details for a non-existent story."""
-    del engine
-
-    # Act: Try to fetch a story that doesn't exist
-    result = get_story_details(999999)
-
-    # Assert: Verify the error message
-    assert result["success"] is False
-    message = result.get("message")
-    assert message is not None
-    assert "not found" in message.lower()
-    assert result["story_id"] == 999999  # noqa: PLR2004

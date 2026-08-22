@@ -81,6 +81,18 @@ def _active_sprint(
         return RuleEvaluation(RuleCategory.INVALID, "MULTIPLE_ACTIVE_SPRINTS")
     if not active:
         return None
+    starts = tuple(
+        item for item in snapshot.sprint_starts if item.sprint_id == active[0].sprint_id
+    )
+    if len(starts) != 1 or any(
+        not _active_sprint_lineage_is_proven(
+            snapshot,
+            active[0].sprint_id,
+            story_id=story_id,
+        )
+        for story_id in starts[0].selected_story_ids
+    ):
+        return RuleEvaluation(RuleCategory.INVALID, "WORKFLOW_FACT_CONFLICT")
     try:
         execution_contract(snapshot, active[0].sprint_id)
     except ExecutionIntegrityError:
@@ -90,6 +102,56 @@ def _active_sprint(
         if history_problem is not None:
             return history_problem
     return active[0]
+
+
+def _active_sprint_lineage_is_proven(
+    snapshot: WorkflowFactSnapshot,
+    sprint_id: int,
+    *,
+    story_id: int,
+) -> bool:
+    """Prove one old-lineage Story belongs to its exact active SprintStart."""
+    sprint = next(
+        (
+            item
+            for item in snapshot.sprints
+            if item.sprint_id == sprint_id and item.status == "active"
+        ),
+        None,
+    )
+    starts = tuple(
+        item for item in snapshot.sprint_starts if item.sprint_id == sprint_id
+    )
+    if sprint is None or len(starts) != 1:
+        return False
+    start = starts[0]
+    plans = tuple(
+        item
+        for item in snapshot.planning_artifacts
+        if item.artifact_type == "sprint_plan"
+        and item.artifact_id == start.sprint_plan_artifact_id
+    )
+    stories = tuple(item for item in snapshot.stories if item.story_id == story_id)
+    if len(plans) != 1 or len(stories) != 1:
+        return False
+    plan = plans[0]
+    story = stories[0]
+    return (
+        plan.status in {"accepted", "superseded"}
+        and plan.activated_sprint_id == sprint_id
+        and plan.artifact_fingerprint == start.plan_fingerprint
+        and plan.spec_version_id == start.spec_version_id
+        and plan.spec_hash == start.spec_hash
+        and story_id in start.selected_story_ids
+        and story_id in plan.selected_story_ids
+        and sprint_id in story.sprint_ids
+        and story.accepted_spec_version_id == start.spec_version_id
+        and story.accepted_spec_hash == start.spec_hash
+        and any(
+            task.sprint_id == sprint_id and task.story_id == story_id
+            for task in snapshot.tasks
+        )
+    )
 
 
 def _completed_sprint(

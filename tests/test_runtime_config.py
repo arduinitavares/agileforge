@@ -54,12 +54,12 @@ def test_sqlite_targets_are_normalized_to_absolute_paths(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Verify sqlite targets are normalized to absolute paths."""
-    monkeypatch.setenv("AGILEFORGE_DB_URL", "sqlite:///./db/spec_authority_dev.db")
+    monkeypatch.setenv("AGILEFORGE_DB_URL", "sqlite:///./db/agileforge_dev.db")
     business = get_business_db_target()
 
     assert business.sqlite_path is not None
     assert business.sqlite_path.is_absolute()
-    assert business.sqlite_url.endswith("db/spec_authority_dev.db")
+    assert business.sqlite_url.endswith("db/agileforge_dev.db")
 
 
 def test_config_root_resolves_relative_sqlite_targets(
@@ -70,13 +70,11 @@ def test_config_root_resolves_relative_sqlite_targets(
     config_root = tmp_path / "agileforge-root"
     config_root.mkdir()
     monkeypatch.setenv("AGILEFORGE_CONFIG_ROOT", str(config_root))
-    monkeypatch.setenv("AGILEFORGE_DB_URL", "sqlite:///./db/spec_authority_dev.db")
+    monkeypatch.setenv("AGILEFORGE_DB_URL", "sqlite:///./db/agileforge_dev.db")
 
     target = get_business_db_target()
 
-    assert (
-        target.sqlite_path == (config_root / "db" / "spec_authority_dev.db").resolve()
-    )
+    assert target.sqlite_path == (config_root / "db" / "agileforge_dev.db").resolve()
 
 
 def test_runtime_env_loads_from_config_root(

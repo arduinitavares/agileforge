@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
 from http import HTTPStatus
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -15,18 +14,8 @@ from fastapi.testclient import TestClient
 import api as api_module
 from cli.main import main
 from models.core import Project
-from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance
 from repositories.workflow import WorkflowFactLoadError, WorkflowFactRepository
-from services.agent_workbench.authority_projection import pending_authority_fingerprint
 from services.read_projections import DurableReadProjectionService
-from tests.workflow.lifecycle_fixtures import seed_accepted_specification
-from utils.spec_schemas import (
-    Invariant,
-    InvariantType,
-    RequiredFieldParams,
-    SourceMapEntry,
-    SpecAuthorityCompilationSuccess,
-)
 
 if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
@@ -62,38 +51,6 @@ class _FakeReadApplication:
     def project_show(self, *, project_id: int) -> JsonObject:
         self.calls.append(("project_show", {"project_id": project_id}))
         return _read_result("project-show")
-
-    def authority_status(self, *, project_id: int) -> JsonObject:
-        self.calls.append(("authority_status", {"project_id": project_id}))
-        return _read_result("authority-status")
-
-    def authority_invariants(
-        self,
-        *,
-        project_id: int,
-        spec_version_id: int | None = None,
-    ) -> JsonObject:
-        self.calls.append(
-            (
-                "authority_invariants",
-                {"project_id": project_id, "spec_version_id": spec_version_id},
-            )
-        )
-        return _read_result("authority-invariants")
-
-    def authority_review(
-        self,
-        *,
-        project_id: int,
-        include_spec: str = "auto",
-    ) -> JsonObject:
-        self.calls.append(
-            (
-                "authority_review",
-                {"project_id": project_id, "include_spec": include_spec},
-            )
-        )
-        return _read_result("authority-review")
 
     def artifact_history(
         self,
@@ -271,46 +228,6 @@ class _ProjectionApplication:
         return self._reads
 
 
-_FORBIDDEN_AUTHORITY_KEYS = frozenset(
-    {
-        "command",
-        "expected_setup_status",
-        "expected_state",
-        "fsm" + "_state",
-        "guard_tokens",
-        "next_" + "actions",
-        "recommendation",
-        "review_token",
-        "setup_status",
-    }
-)
-_FORBIDDEN_AUTHORITY_VALUES = frozenset(
-    {
-        "SETUP_REQUIRED",
-        "authority_pending_review",
-    }
-)
-_FORBIDDEN_AUTHORITY_COMMANDS = (
-    "agileforge authority " + "accept",
-    "agileforge authority " + "reject",
-)
-
-
-def _assert_facts_only_authority_payload(value: object) -> None:
-    if isinstance(value, dict):
-        for key, child in value.items():
-            assert key not in _FORBIDDEN_AUTHORITY_KEYS
-            _assert_facts_only_authority_payload(child)
-        return
-    if isinstance(value, list):
-        for child in value:
-            _assert_facts_only_authority_payload(child)
-        return
-    if isinstance(value, str):
-        assert value not in _FORBIDDEN_AUTHORITY_VALUES
-        assert all(command not in value for command in _FORBIDDEN_AUTHORITY_COMMANDS)
-
-
 def _seed_project(session: Session, *, name: str = "Read projection") -> int:
     project = Project(name=name)
     session.add(project)
@@ -318,117 +235,6 @@ def _seed_project(session: Session, *, name: str = "Read projection") -> int:
     session.refresh(project)
     assert project.project_id is not None
     return project.project_id
-
-
-def _compiled_authority_json(*, theme: str, gap: str) -> str:
-    artifact = SpecAuthorityCompilationSuccess(
-        scope_themes=[theme],
-        domain="workflow",
-        invariants=[
-            Invariant(
-                id="INV-0123456789abcdef",
-                type=InvariantType.REQUIRED_FIELD,
-                parameters=RequiredFieldParams(field_name="project_id"),
-            )
-        ],
-        eligible_feature_rules=[],
-        rejected_features=[],
-        gaps=[gap],
-        assumptions=[],
-        source_map=[
-            SourceMapEntry(
-                invariant_id="INV-0123456789abcdef",
-                excerpt="Every durable read identifies its Project.",
-                location="REQ.project-read",
-            )
-        ],
-        compiler_version="3.0.0",
-        prompt_hash="a" * 64,
-    )
-    return artifact.model_dump_json()
-
-
-def _seed_authority_review_project(session: Session) -> tuple[int, int, int]:
-    project_id = _seed_project(session, name="Authority review")
-    accepted_lineage = seed_accepted_specification(
-        session,
-        project_id=project_id,
-        content=json.dumps({"title": "Accepted authority source"}),
-        recorded_at=datetime(2026, 8, 1, tzinfo=UTC),
-    )
-    pending_lineage = seed_accepted_specification(
-        session,
-        project_id=project_id,
-        content=json.dumps({"title": "Pending authority source"}),
-        recorded_at=datetime(2026, 8, 2, tzinfo=UTC),
-    )
-    accepted_spec = accepted_lineage.spec
-    pending_spec = pending_lineage.spec
-    assert accepted_spec.spec_version_id is not None
-    assert pending_spec.spec_version_id is not None
-
-    accepted_authority = CompiledSpecAuthority(
-        spec_version_id=accepted_spec.spec_version_id,
-        compiler_version="3.0.0",
-        prompt_hash="a" * 64,
-        compiled_at=datetime(2026, 8, 1, 1, tzinfo=UTC),
-        compiled_artifact_json=_compiled_authority_json(
-            theme="Accepted scope",
-            gap="Accepted historical gap",
-        ),
-        scope_themes='["Accepted scope"]',
-        invariants="[]",
-        eligible_feature_ids="[]",
-        rejected_features="[]",
-        spec_gaps='["Accepted historical gap"]',
-    )
-    pending_authority = CompiledSpecAuthority(
-        spec_version_id=pending_spec.spec_version_id,
-        compiler_version="3.0.0",
-        prompt_hash="a" * 64,
-        compiled_at=datetime(2026, 8, 2, 1, tzinfo=UTC),
-        compiled_artifact_json=_compiled_authority_json(
-            theme="Pending scope",
-            gap="Pending review gap",
-        ),
-        scope_themes='["Pending scope"]',
-        invariants="[]",
-        eligible_feature_ids="[]",
-        rejected_features="[]",
-        spec_gaps='["Pending review gap"]',
-    )
-    session.add(accepted_authority)
-    session.add(pending_authority)
-    session.commit()
-    session.refresh(accepted_authority)
-    session.refresh(pending_authority)
-    assert accepted_authority.authority_id is not None
-    assert pending_authority.authority_id is not None
-    fingerprint = pending_authority_fingerprint(accepted_authority)
-    assert fingerprint is not None
-    session.add(
-        SpecAuthorityAcceptance(
-            project_id=project_id,
-            spec_version_id=accepted_spec.spec_version_id,
-            status="accepted",
-            policy="test",
-            decided_by="reviewer",
-            decided_at=datetime(2026, 8, 1, 2, tzinfo=UTC),
-            rationale="Accepted durable authority.",
-            compiler_version=accepted_authority.compiler_version,
-            prompt_hash=accepted_authority.prompt_hash,
-            spec_hash=accepted_spec.spec_hash,
-            pending_authority_id=accepted_authority.authority_id,
-            authority_fingerprint=fingerprint,
-            review_token=f"legacy-token-{fingerprint}",
-        )
-    )
-    session.commit()
-    return (
-        project_id,
-        accepted_authority.authority_id,
-        pending_authority.authority_id,
-    )
 
 
 def test_production_api_registers_retained_read_routes() -> None:
@@ -441,9 +247,6 @@ def test_production_api_registers_retained_read_routes() -> None:
     }
     expected = {
         ("GET", "/api/projects/{project_id}"),
-        ("GET", "/api/projects/{project_id}/authority/status"),
-        ("GET", "/api/projects/{project_id}/authority/invariants"),
-        ("GET", "/api/projects/{project_id}/authority/review"),
         ("GET", "/api/projects/{project_id}/vision/history"),
         ("GET", "/api/projects/{project_id}/backlog/history"),
         ("GET", "/api/projects/{project_id}/roadmap/history"),
@@ -501,10 +304,6 @@ def test_production_api_registers_semantic_lifecycle_routes() -> None:
         ("POST", "/api/projects/{project_id}/repository"),
         ("GET", "/api/projects/{project_id}/repository"),
         ("POST", "/api/projects/{project_id}/repository/refresh"),
-        ("POST", "/api/projects/{project_id}/authority/compile"),
-        ("GET", "/api/projects/{project_id}/authority/review"),
-        ("POST", "/api/projects/{project_id}/authority/decision"),
-        ("POST", "/api/projects/{project_id}/authority/feedback"),
     }
 
     assert expected <= routes
@@ -514,14 +313,13 @@ def test_production_api_registers_semantic_lifecycle_routes() -> None:
 def test_production_api_read_handlers_use_injected_non_routing_projection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Exercise project, authority, history, pending, status, and packet reads."""
+    """Exercise project, history, pending, status, and packet reads."""
     application = _FakeReadApplication()
     monkeypatch.setattr(api_module, "_application", lambda: application)
     client = TestClient(api_module.app)
 
     responses = [
         client.get("/api/projects/41"),
-        client.get("/api/projects/41/authority/review?include_spec=summary"),
         client.get("/api/projects/41/vision/history"),
         client.get("/api/projects/41/story/pending"),
         client.get("/api/projects/41/sprints/7"),
@@ -531,7 +329,6 @@ def test_production_api_read_handlers_use_injected_non_routing_projection(
     assert all(response.status_code == HTTPStatus.OK for response in responses)
     assert [response.json()["data"]["marker"] for response in responses] == [
         "project-show",
-        "authority-review",
         "artifact-history",
         "story-pending",
         "sprint-status",
@@ -539,10 +336,6 @@ def test_production_api_read_handlers_use_injected_non_routing_projection(
     ]
     assert application.calls == [
         ("project_show", {"project_id": 41}),
-        (
-            "authority_review",
-            {"project_id": 41, "include_spec": "summary"},
-        ),
         (
             "artifact_history",
             {"project_id": 41, "node_id": "vision.interview", "instance_key": None},
@@ -561,8 +354,6 @@ def test_production_api_read_handlers_use_injected_non_routing_projection(
     [
         (["project", "list"], "project_list"),
         (["project", "show", "--project-id", "41"], "project_show"),
-        (["authority", "status", "--project-id", "41"], "authority_status"),
-        (["authority", "review", "--project-id", "41"], "authority_review"),
         (["vision", "history", "--project-id", "41"], "artifact_history"),
         (["backlog", "history", "--project-id", "41"], "artifact_history"),
         (["roadmap", "history", "--project-id", "41"], "artifact_history"),
@@ -602,76 +393,6 @@ def test_production_cli_retains_read_commands(
     assert payload["ok"] is True
 
 
-def test_authority_review_projection_is_facts_only_and_keeps_review_data(
-    engine: Engine,
-    session: Session,
-) -> None:
-    """Keep durable review evidence while excluding the legacy routing packet."""
-    project_id, accepted_authority_id, pending_authority_id = (
-        _seed_authority_review_project(session)
-    )
-    projection = DurableReadProjectionService(engine=engine)
-
-    result = projection.authority_review(
-        project_id=project_id,
-        include_spec="summary",
-    )
-
-    assert result["ok"] is True
-    _assert_facts_only_authority_payload(result)
-    data = result["data"]
-    assert isinstance(data, dict)
-    assert data["schema_version"] == "agileforge.authority_review_projection.v1"
-    accepted = data["accepted_authority"]
-    pending = data["pending_authority"]
-    findings = data["findings"]
-    assert isinstance(accepted, dict)
-    assert isinstance(pending, dict)
-    assert isinstance(findings, list)
-    assert accepted["authority_id"] == accepted_authority_id
-    assert accepted["status"] == "accepted"
-    assert pending["authority_id"] == pending_authority_id
-    assert pending["status"] == "pending_review"
-    assert pending["invariants"] == [
-        {
-            "id": "INV-0123456789abcdef",
-            "type": "REQUIRED_FIELD",
-            "source_item_id": None,
-            "source_level": None,
-            "parameters": {"field_name": "project_id"},
-        }
-    ]
-    assert pending["artifact"] is not None
-    assert {item["message"] for item in findings if isinstance(item, dict)} == {
-        "Pending review gap"
-    }
-
-
-def test_live_authority_review_api_returns_only_durable_review_facts(
-    engine: Engine,
-    session: Session,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Prove the live authority endpoint returns the facts-only projection."""
-    project_id, accepted_authority_id, pending_authority_id = (
-        _seed_authority_review_project(session)
-    )
-    application = _ProjectionApplication(DurableReadProjectionService(engine=engine))
-    monkeypatch.setattr(api_module, "_application", lambda: application)
-
-    response = TestClient(api_module.app).get(
-        f"/api/projects/{project_id}/authority/review?include_spec=summary"
-    )
-
-    assert response.status_code == HTTPStatus.OK
-    payload = response.json()
-    _assert_facts_only_authority_payload(payload)
-    data = payload["data"]
-    assert data["accepted_authority"]["authority_id"] == accepted_authority_id
-    assert data["pending_authority"]["authority_id"] == pending_authority_id
-    assert data["findings"][0]["message"] == "Pending review gap"
-
-
 def test_production_read_composition_does_not_import_legacy_review_service() -> None:
     """Keep the legacy review service unreachable from production reads."""
     source = Path("services/read_projections.py").read_text(encoding="utf-8")
@@ -688,9 +409,6 @@ def test_every_project_scoped_read_uses_project_not_found(
 
     results = [
         projection.project_show(project_id=missing_project_id),
-        projection.authority_status(project_id=missing_project_id),
-        projection.authority_invariants(project_id=missing_project_id),
-        projection.authority_review(project_id=missing_project_id),
         projection.artifact_history(
             project_id=missing_project_id,
             node_id="vision.interview",
@@ -834,3 +552,214 @@ def test_production_cli_returns_failure_for_missing_project_read(
     assert exit_code == 1
     payload = json.loads(capsys.readouterr().out)
     assert payload["errors"][0]["code"] == "PROJECT_NOT_FOUND"
+
+
+# Retained Task 11 planning-review read coverage.
+def _review(phase: str) -> dict[str, object]:
+    evidence = [
+        {
+            "title": "Exact evidence",
+            "statement": "The exact planning source is reviewed.",
+            "level": "MUST",
+            "acceptance_criteria": ["The planning source remains exact."],
+            "verification_method": "acceptance-test",
+        }
+    ]
+    backlog_item = {
+        "requirement": "Review exact planning content",
+        "priority": 1,
+        "value_driver": "Strategic",
+        "justification": "The operator needs exact evidence.",
+        "estimated_effort": "M",
+        "technical_note": None,
+        "specification_evidence": evidence,
+    }
+    if phase == "backlog":
+        candidate = {
+            "backlog_items": [backlog_item],
+            "is_complete": True,
+            "clarifying_questions": [],
+        }
+        lineage = {}
+    elif phase == "roadmap":
+        candidate = {
+            "roadmap_summary": "Deliver exact planning.",
+            "roadmap_releases": [
+                {
+                    "release_name": "Exact release",
+                    "theme": "Trust",
+                    "focus_area": "User Value",
+                    "reasoning": "Review evidence first.",
+                    "backlog_items": [backlog_item],
+                }
+            ],
+            "is_complete": True,
+            "clarifying_questions": [],
+        }
+        lineage = {}
+    elif phase == "story":
+        candidate = {
+            "story_items": [
+                {
+                    "story_title": "Review exact Story",
+                    "statement": "As an operator, I want exact evidence.",
+                    "persona": "operator",
+                    "acceptance_criteria": ["Evidence is visible."],
+                    "specification_evidence": evidence,
+                }
+            ],
+            "is_complete": True,
+            "clarifying_questions": [],
+        }
+        lineage = {"backlog_item": backlog_item}
+    else:
+        story = {
+            "title": "Review exact Story",
+            "statement": "As an operator, I want exact evidence.",
+            "persona": "operator",
+            "acceptance_criteria": ["Evidence is visible."],
+            "specification_evidence": evidence,
+            "reason_for_selection": "Highest value.",
+            "tasks": [
+                {
+                    "description": "Implement exact review",
+                    "task_kind": "implementation",
+                    "checklist_items": ["Verify evidence"],
+                    "specification_evidence": evidence,
+                }
+            ],
+        }
+        candidate = {
+            "team_name": "Review team",
+            "sprint_goal": "Deliver exact review.",
+            "selected_stories": [story],
+        }
+        lineage = {}
+    return {"phase": phase, "lineage": lineage, "candidate": candidate}
+
+
+def _result(marker: str) -> dict[str, object]:
+    phase = {
+        "backlog-review": "backlog",
+        "roadmap-review": "roadmap",
+        "story-reviews": "story",
+        "sprint-plan-review": "sprint_plan",
+    }[marker]
+    selected = {
+        "binding": {"decision_fingerprint": "hidden", "instance_key": None},
+        "review": _review(phase),
+    }
+    data = (
+        {"marker": marker, "items": [selected]}
+        if phase == "story"
+        else {"marker": marker, **selected}
+    )
+    return {"ok": True, "data": data, "warnings": [], "errors": []}
+
+
+class _Application:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, int]] = []
+
+    def backlog_review(self, project_id: int) -> dict[str, object]:
+        self.calls.append(("backlog_review", project_id))
+        return _result("backlog-review")
+
+    def roadmap_review(self, project_id: int) -> dict[str, object]:
+        self.calls.append(("roadmap_review", project_id))
+        return _result("roadmap-review")
+
+    def story_reviews(self, project_id: int) -> dict[str, object]:
+        self.calls.append(("story_reviews", project_id))
+        return _result("story-reviews")
+
+    def sprint_plan_review(self, project_id: int) -> dict[str, object]:
+        self.calls.append(("sprint_plan_review", project_id))
+        return _result("sprint-plan-review")
+
+
+def _routes() -> set[tuple[str, str]]:
+    return {
+        (method, route.path)
+        for route in api_module.app.routes
+        if isinstance(route, APIRoute)
+        for method in route.methods or set()
+    }
+
+
+def test_production_api_registers_exact_planning_review_routes() -> None:
+    """Register the four retained planning-review read routes."""
+    assert {
+        ("GET", "/api/projects/{project_id}/backlog/review"),
+        ("GET", "/api/projects/{project_id}/roadmap/review"),
+        ("GET", "/api/projects/{project_id}/story/reviews"),
+        ("GET", "/api/projects/{project_id}/sprint/plan/review"),
+    } <= _routes()
+
+
+def test_production_api_has_no_retired_operator_routes() -> None:
+    """Keep removed operator routes absent from the production API."""
+    paths = {path.casefold() for _, path in _routes()}
+    assert all("auth" + "ority" not in path for path in paths)
+    assert all("invar" + "iant" not in path for path in paths)
+
+
+@pytest.mark.parametrize(
+    ("path", "marker"),
+    [
+        ("/api/projects/41/backlog/review", "backlog-review"),
+        ("/api/projects/41/roadmap/review", "roadmap-review"),
+        ("/api/projects/41/story/reviews", "story-reviews"),
+        ("/api/projects/41/sprint/plan/review", "sprint-plan-review"),
+    ],
+)
+def test_review_gets_use_injected_application(
+    path: str,
+    marker: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Serve each planning-review read through the injected application."""
+    application = _Application()
+    monkeypatch.setattr(api_module, "_application", lambda: application)
+
+    response = TestClient(api_module.app).get(path)
+
+    assert response.status_code == HTTPStatus.OK
+    assert response.json()["data"]["marker"] == marker
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected_call"),
+    [
+        (["backlog", "review", "--project-id", "41"], "backlog_review"),
+        (["roadmap", "review", "--project-id", "41"], "roadmap_review"),
+        (["story", "reviews", "--project-id", "41"], "story_reviews"),
+        (["sprint", "plan-review", "--project-id", "41"], "sprint_plan_review"),
+    ],
+)
+def test_production_cli_exposes_exact_review_reads(
+    argv: list[str], expected_call: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Dispatch each retained CLI review read to the matching application call."""
+    application = _Application()
+
+    assert main(argv, application=application) == 0
+
+    assert application.calls == [(expected_call, 41)]
+    output = capsys.readouterr().out
+    assert "Exact" in output
+    assert "{" not in output
+
+
+def test_live_task11_read_paths_have_no_retired_names() -> None:
+    """Keep retired operator terminology out of active Task 11 read paths."""
+    for path in (
+        "api.py",
+        "cli/main.py",
+        "cli/workflow_commands.py",
+        "services/application.py",
+        "services/read_projections.py",
+    ):
+        source = Path(path).read_text(encoding="utf-8").casefold()
+        assert "auth" + "ority" not in source
+        assert "invar" + "iant" not in source

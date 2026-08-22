@@ -1,7 +1,7 @@
 # Store discovery artifacts in AgileForge state
 
 **Status:** Superseded by
-[ADR 0003](0003-make-to-spec-the-canonical-specification-boundary.md)
+[ADR 0005](0005-use-accepted-specification-as-delivery-contract.md)
 
 This ADR records the former Challenge Artifact and PRD design. ADR 0003 removes
 that persisted intermediate chain from the active single-Project lifecycle.

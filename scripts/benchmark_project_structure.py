@@ -6,7 +6,7 @@ from sqlalchemy import Engine, event
 from sqlmodel import Session, SQLModel, create_engine
 
 import tools.db_tools
-from agile_sqlmodel import Project, StoryStatus, UserStory
+from agile_sqlmodel import Project
 from models.core import Epic, Feature, Theme
 from tools.db_tools import query_project_structure
 from utils.cli_output import emit
@@ -14,6 +14,7 @@ from utils.cli_output import emit
 # Setup in-memory DB for benchmarking
 engine = create_engine("sqlite:///:memory:")
 SQLModel.metadata.create_all(engine)
+
 
 # Patch the engine in db_tools
 def _benchmark_engine() -> Engine:
@@ -35,7 +36,6 @@ def seed_database(
     themes_per_project: int = 5,
     epics_per_theme: int = 5,
     features_per_epic: int = 5,
-    stories_per_feature: int = 5,
 ) -> None:
     """Return seed database."""
     with Session(engine) as session:
@@ -75,23 +75,11 @@ def seed_database(
                         session.add(feature)
                         session.commit()
                         session.refresh(feature)
-                        feature_id = _require_id(feature.feature_id, "Feature ID")
-
-                        for s in range(stories_per_feature):
-                            story = UserStory(
-                                title=f"Story {s}",
-                                story_description="Desc",
-                                status=StoryStatus.TO_DO,
-                                project_id=project_id,
-                                feature_id=feature_id,
-                            )
-                            session.add(story)
         session.commit()
     emit(
         f"Seeded DB with {project_count} projects, "
         f"{themes_per_project} themes/project, {epics_per_theme} epics/theme, "
-        f"{features_per_epic} features/epic, "
-        f"{stories_per_feature} stories/feature."
+        f"{features_per_epic} features/epic."
     )
 
 

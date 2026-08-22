@@ -86,12 +86,3 @@ class TimeFrame(StrEnum):
     NOW = "Now"
     NEXT = "Next"
     LATER = "Later"
-
-
-class SpecAuthorityStatus(StrEnum):
-    """Status of compiled spec authority for a Project."""
-
-    CURRENT = "current"
-    STALE = "stale"
-    NOT_COMPILED = "not_compiled"
-    PENDING_REVIEW = "pending_review"

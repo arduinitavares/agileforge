@@ -5,6 +5,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
+from services.planning_lineage import (
+    ArtifactLineageNode,
+    PlanningLineageCode,
+    PlanningLineageError,
+    SprintStreamState,
+    select_current_accepted_artifact,
+    select_current_sprint_stream,
+    validate_artifact_lineage,
+)
 from services.story_rank import story_rank_is_valid
 from workflow.contracts import (
     GRAPH_VERSION,
@@ -15,7 +24,6 @@ from workflow.contracts import (
 )
 from workflow.definitions.backlog import current_backlog_lineage
 from workflow.definitions.product_goal import lifecycle_is_quiescent
-from workflow.definitions.vision import artifact_reference, authority_reference
 from workflow.fingerprints import canonical_hash
 from workflow.graph import (
     AgenticExecutionSpec,
@@ -35,11 +43,12 @@ if TYPE_CHECKING:
     from datetime import datetime
 
     from workflow.facts import (
-        AuthorityFact,
-        BacklogRequirementFact,
+        BacklogItemFact,
         PhaseArtifactFact,
         PlanningArtifactFact,
         ProductGoalArtifactFact,
+        SpecVersionFact,
+        SprintStartFact,
         StoryDependencyFact,
         StoryFact,
         WorkflowFactSnapshot,
@@ -49,12 +58,13 @@ if TYPE_CHECKING:
 @dataclass(frozen=True)
 class _ArtifactState:
     latest: PlanningArtifactFact | None
+    accepted: PlanningArtifactFact | None
     conflict: bool
 
 
 @dataclass(frozen=True)
 class _BacklogLineage:
-    authority: AuthorityFact | None
+    specification: SpecVersionFact | None
     goal: ProductGoalArtifactFact | None
     backlog: PhaseArtifactFact | None
     conflict: bool
@@ -92,12 +102,12 @@ def story_dependency_source_fingerprint(stories: tuple[StoryFact, ...]) -> str:
         [
             {
                 "story_id": item.story_id,
-                "requirement_id": item.requirement_id,
+                "source_story_item_id": item.source_story_item_id,
                 "content_fingerprint": item.content_fingerprint,
                 "content_accepted": item.content_accepted,
                 "story_artifact_id": item.story_artifact_id,
-                "authority_id": item.authority_id,
-                "authority_fingerprint": item.authority_fingerprint,
+                "accepted_spec_version_id": item.accepted_spec_version_id,
+                "accepted_spec_hash": item.accepted_spec_hash,
                 "backlog_artifact_id": item.backlog_artifact_id,
                 "backlog_artifact_fingerprint": item.backlog_artifact_fingerprint,
                 "roadmap_artifact_id": item.roadmap_artifact_id,
@@ -138,7 +148,7 @@ def _blocked(reason: str, message: str) -> tuple[RuleEvaluation, ...]:
 def _accepted_backlog(snapshot: WorkflowFactSnapshot) -> _BacklogLineage:
     current = current_backlog_lineage(snapshot)
     return _BacklogLineage(
-        authority=current.authority,
+        specification=current.specification,
         goal=current.goal,
         backlog=current.backlog,
         conflict=current.conflict,
@@ -151,16 +161,10 @@ def _artifact_matches_lineage(
     *,
     roadmap: PlanningArtifactFact | None = None,
 ) -> bool:
-    authority = lineage.authority
-    backlog = lineage.backlog
-    if authority is None or backlog is None or not isinstance(backlog.artifact_id, int):
+    if not _artifact_matches_backlog_lineage(artifact, lineage):
         return False
-    if (
-        artifact.authority_id != authority.authority_id
-        or artifact.authority_fingerprint != authority.authority_fingerprint
-        or artifact.backlog_artifact_id != backlog.artifact_id
-        or artifact.backlog_artifact_fingerprint != backlog.artifact_fingerprint
-    ):
+    backlog = lineage.backlog
+    if backlog is None:
         return False
     if roadmap is None:
         return (
@@ -175,78 +179,334 @@ def _artifact_matches_lineage(
     )
 
 
+def _artifact_matches_backlog_lineage(
+    artifact: PlanningArtifactFact,
+    lineage: _BacklogLineage,
+) -> bool:
+    """Match the exact Backlog root while allowing a Story's Roadmap to change."""
+    backlog = lineage.backlog
+    if lineage.specification is None or backlog is None:
+        return False
+    return not (
+        artifact.backlog_artifact_id != backlog.artifact_id
+        or artifact.backlog_artifact_fingerprint != backlog.artifact_fingerprint
+    )
+
+
+def _roadmap_replacement_story_successor(
+    latest: PlanningArtifactFact,
+    lineage: _BacklogLineage,
+    roadmap: PlanningArtifactFact,
+    backlog_item_reference: FactReference,
+    instance_key: str,
+) -> RuleEvaluation | None:
+    if latest.status != "accepted" or not _artifact_matches_backlog_lineage(
+        latest, lineage
+    ):
+        return None
+    if (
+        latest.roadmap_artifact_id is None
+        or latest.roadmap_artifact_id == roadmap.artifact_id
+        or latest.source_artifact_id != latest.roadmap_artifact_id
+        or latest.source_fingerprint != latest.roadmap_artifact_fingerprint
+    ):
+        return None
+    return RuleEvaluation(
+        RuleCategory.AVAILABLE,
+        "STORY_GENERATION_REQUIRED",
+        instance_key=instance_key,
+        fact_references=(
+            *_lineage_references(lineage),
+            _artifact_reference(roadmap),
+            backlog_item_reference,
+            _artifact_reference(latest),
+        ),
+    )
+
+
 def _lineage_references(lineage: _BacklogLineage) -> tuple[FactReference, ...]:
-    if lineage.authority is None or lineage.goal is None or lineage.backlog is None:
+    if lineage.specification is None or lineage.goal is None or lineage.backlog is None:
         return ()
     return (
-        artifact_reference(lineage.backlog),
+        FactReference(
+            fact_type="backlog",
+            fact_id=str(lineage.backlog.artifact_id),
+            fingerprint=lineage.backlog.artifact_fingerprint,
+        ),
         FactReference(
             fact_type="product_goal",
             fact_id=str(lineage.goal.product_goal_artifact_id),
             fingerprint=lineage.goal.content_fingerprint,
         ),
-        authority_reference(lineage.authority),
+        FactReference(
+            fact_type="specification",
+            fact_id=str(lineage.specification.spec_version_id),
+            fingerprint=lineage.specification.spec_hash,
+        ),
     )
 
 
-def _artifact_state(
+def _sprint_stream_nodes(
+    artifacts: tuple[PlanningArtifactFact, ...],
+) -> tuple[ArtifactLineageNode, ...]:
+    stream_id = artifacts[0].sprint_plan_stream_id
+    chain_key = (
+        artifacts[0].spec_version_id,
+        artifacts[0].spec_hash,
+        stream_id,
+    )
+    return tuple(
+        ArtifactLineageNode(
+            artifact_id=item.artifact_id,
+            chain_key=chain_key,
+            version_number=item.version_number,
+            supersedes_artifact_id=item.supersedes_artifact_id,
+            decision=(
+                "accepted"
+                if item.status in {"accepted", "superseded"}
+                else item.status
+                if item.status in {"feedback", "rejected"}
+                else None
+            ),
+        )
+        for item in artifacts
+    )
+
+
+def _sprint_stream_starts(
+    snapshot: WorkflowFactSnapshot,
+    artifacts: tuple[PlanningArtifactFact, ...],
+    accepted: PlanningArtifactFact | None,
+) -> tuple[SprintStartFact, ...]:
+    artifact_ids = {item.artifact_id for item in artifacts}
+    activated_sprint_id = None if accepted is None else accepted.activated_sprint_id
+    starts = tuple(
+        item
+        for item in snapshot.sprint_starts
+        if item.sprint_plan_artifact_id in artifact_ids
+        or (activated_sprint_id is not None and item.sprint_id == activated_sprint_id)
+    )
+    if starts and (
+        len(starts) != 1
+        or accepted is None
+        or not _plan_has_matching_sprint_start(snapshot, accepted)
+    ):
+        raise PlanningLineageError(PlanningLineageCode.SPRINT_STREAM_AMBIGUOUS)
+    return starts
+
+
+def _sprint_stream_lifecycle(
+    snapshot: WorkflowFactSnapshot,
+    artifacts: tuple[PlanningArtifactFact, ...],
+    accepted: PlanningArtifactFact | None,
+) -> tuple[bool, bool, tuple[datetime, ...]]:
+    starts = _sprint_stream_starts(snapshot, artifacts, accepted)
+    if accepted is None:
+        return False, False, ()
+    activated_sprint_id = accepted.activated_sprint_id
+    matching_sprints = tuple(
+        item for item in snapshot.sprints if item.sprint_id == activated_sprint_id
+    )
+    if len(matching_sprints) != 1:
+        raise PlanningLineageError(PlanningLineageCode.SPRINT_STREAM_AMBIGUOUS)
+    sprint = matching_sprints[0]
+    if sprint.status in {"planned", "active"} and sprint.completed_at is not None:
+        raise PlanningLineageError(PlanningLineageCode.SPRINT_STREAM_AMBIGUOUS)
+    if sprint.status == "planned" and not starts:
+        return False, False, ()
+    if sprint.status not in {"active", "completed"} or not starts:
+        raise PlanningLineageError(PlanningLineageCode.SPRINT_STREAM_AMBIGUOUS)
+    if sprint.status == "completed" and (
+        sprint.completed_at is None or sprint.completed_at < starts[0].started_at
+    ):
+        raise PlanningLineageError(PlanningLineageCode.SPRINT_STREAM_AMBIGUOUS)
+    markers = (
+        starts[0].started_at,
+        *((sprint.completed_at,) if sprint.completed_at is not None else ()),
+    )
+    return True, sprint.status == "completed", markers
+
+
+def _current_sprint_stream_artifacts(
+    snapshot: WorkflowFactSnapshot,
+    artifacts: tuple[PlanningArtifactFact, ...],
+    *,
+    spec_identity: tuple[int, str],
+) -> tuple[PlanningArtifactFact, ...]:
+    streams: dict[str, tuple[PlanningArtifactFact, ...]] = {}
+    for artifact in artifacts:
+        stream_id = artifact.sprint_plan_stream_id
+        if stream_id is None:
+            raise PlanningLineageError(PlanningLineageCode.SPRINT_STREAM_AMBIGUOUS)
+        streams[stream_id] = (*streams.get(stream_id, ()), artifact)
+
+    lifecycle_markers: dict[str, datetime] = {}
+    state_parts: list[tuple[str, bool, bool]] = []
+    for stream_id, stream_artifacts in streams.items():
+        nodes = _sprint_stream_nodes(stream_artifacts)
+        validate_artifact_lineage(nodes)
+        accepted: PlanningArtifactFact | None = None
+        try:
+            accepted_id = select_current_accepted_artifact(
+                nodes,
+                chain_key=nodes[0].chain_key,
+            ).artifact_id
+            accepted = next(
+                item for item in stream_artifacts if item.artifact_id == accepted_id
+            )
+        except PlanningLineageError as error:
+            if error.code is not PlanningLineageCode.ACCEPTED_LEAF_MISSING:
+                raise
+
+        sprint_started, sprint_terminal, markers = _sprint_stream_lifecycle(
+            snapshot,
+            stream_artifacts,
+            accepted,
+        )
+        if markers:
+            lifecycle_markers[stream_id] = max(markers)
+        state_parts.append((stream_id, sprint_started, sprint_terminal))
+
+    if len(set(lifecycle_markers.values())) != len(lifecycle_markers):
+        raise PlanningLineageError(PlanningLineageCode.SPRINT_STREAM_AMBIGUOUS)
+    lifecycle_order = {
+        stream_id: order
+        for order, (stream_id, _marker) in enumerate(
+            sorted(lifecycle_markers.items(), key=lambda item: item[1]),
+            start=1,
+        )
+    }
+    open_order = len(lifecycle_order) + 1
+    states = tuple(
+        SprintStreamState(
+            spec_identity=spec_identity,
+            stream_id=stream_id,
+            created_order=lifecycle_order.get(stream_id, open_order),
+            sprint_started=sprint_started,
+            sprint_terminal=sprint_terminal,
+        )
+        for stream_id, sprint_started, sprint_terminal in state_parts
+    )
+    selected_stream_id = select_current_sprint_stream(
+        states,
+        spec_identity=spec_identity,
+    )
+    if selected_stream_id is None:
+        raise PlanningLineageError(PlanningLineageCode.SPRINT_STREAM_AMBIGUOUS)
+    return streams[selected_stream_id]
+
+
+def _artifact_state(  # noqa: PLR0911
     snapshot: WorkflowFactSnapshot,
     artifact_type: Literal["roadmap", "story", "sprint_plan"],
     *,
-    requirement_id: str | None = None,
+    backlog_item_id: str | None = None,
 ) -> _ArtifactState:
+    lineage = _accepted_backlog(snapshot)
+    backlog = lineage.backlog
+    specification = lineage.specification
     artifacts = tuple(
         item
         for item in snapshot.planning_artifacts
         if item.artifact_type == artifact_type
-        and (requirement_id is None or item.requirement_id == requirement_id)
+        and (backlog_item_id is None or item.backlog_item_id == backlog_item_id)
+        and (
+            (
+                artifact_type == "sprint_plan"
+                and specification is not None
+                and item.spec_version_id == specification.spec_version_id
+                and item.spec_hash == specification.spec_hash
+            )
+            or (
+                artifact_type != "sprint_plan"
+                and backlog is not None
+                and item.backlog_artifact_id == backlog.artifact_id
+                and item.backlog_artifact_fingerprint == backlog.artifact_fingerprint
+            )
+        )
     )
-    by_id = {item.artifact_id: item for item in artifacts}
-    conflict = len(by_id) != len(artifacts)
-    superseded_ids: set[int] = set()
-    for item in artifacts:
-        parent_id = item.supersedes_artifact_id
-        if parent_id is None:
-            continue
-        if parent_id not in by_id or parent_id >= item.artifact_id:
-            conflict = True
-        superseded_ids.add(parent_id)
-    current = tuple(
-        item
+    if not artifacts:
+        return _ArtifactState(latest=None, accepted=None, conflict=False)
+    if artifact_type == "sprint_plan":
+        if specification is None:
+            return _ArtifactState(latest=None, accepted=None, conflict=True)
+        try:
+            artifacts = _current_sprint_stream_artifacts(
+                snapshot,
+                artifacts,
+                spec_identity=(
+                    specification.spec_version_id,
+                    specification.spec_hash,
+                ),
+            )
+        except PlanningLineageError:
+            return _ArtifactState(latest=None, accepted=None, conflict=True)
+    chain_keys = {
+        (
+            item.backlog_artifact_id,
+            item.backlog_artifact_fingerprint,
+        )
+        if artifact_type == "roadmap"
+        else (
+            item.backlog_artifact_id,
+            item.backlog_item_id,
+        )
+        if artifact_type == "story"
+        else (
+            item.spec_version_id,
+            item.spec_hash,
+            item.sprint_plan_stream_id,
+        )
         for item in artifacts
-        if item.artifact_id not in superseded_ids and item.status != "superseded"
+    }
+    if len(chain_keys) != 1:
+        return _ArtifactState(latest=None, accepted=None, conflict=True)
+    chain_key = next(iter(chain_keys))
+    nodes = tuple(
+        ArtifactLineageNode(
+            artifact_id=item.artifact_id,
+            chain_key=chain_key,
+            version_number=item.version_number,
+            supersedes_artifact_id=item.supersedes_artifact_id,
+            decision=(
+                "accepted"
+                if item.status in {"accepted", "superseded"}
+                else item.status
+                if item.status in {"feedback", "rejected"}
+                else None
+            ),
+        )
+        for item in artifacts
     )
-    if len(current) > 1:
-        conflict = True
-    latest = current[0] if len(current) == 1 else None
-    review_type = "sprint" if artifact_type == "sprint_plan" else artifact_type
-    decisions = tuple(
-        item
-        for item in snapshot.review_decisions
-        if item.artifact_type == review_type and item.artifact_id in by_id
+    try:
+        validate_artifact_lineage(nodes)
+    except PlanningLineageError:
+        return _ArtifactState(latest=None, accepted=None, conflict=True)
+    parent_ids = {
+        item.supersedes_artifact_id
+        for item in artifacts
+        if item.supersedes_artifact_id is not None
+    }
+    latest_items = tuple(
+        item for item in artifacts if item.artifact_id not in parent_ids
     )
-    decisions_by_artifact: dict[int, list[object]] = {}
-    for decision in decisions:
-        decisions_by_artifact.setdefault(decision.artifact_id, []).append(decision)
-        artifact = by_id[decision.artifact_id]
-        if artifact.artifact_fingerprint != decision.artifact_fingerprint or (
-            artifact.status not in {"superseded", decision.decision}
-        ):
-            conflict = True
-    if any(len(items) > 1 for items in decisions_by_artifact.values()):
-        conflict = True
-    orphan_decisions = tuple(
-        item
-        for item in snapshot.review_decisions
-        if item.artifact_type == review_type
-        and item.artifact_id
-        not in {
-            artifact.artifact_id
-            for artifact in snapshot.planning_artifacts
-            if artifact.artifact_type == artifact_type
-        }
+    if len(latest_items) != 1:
+        return _ArtifactState(latest=None, accepted=None, conflict=True)
+    accepted: PlanningArtifactFact | None = None
+    try:
+        accepted_id = select_current_accepted_artifact(
+            nodes,
+            chain_key=chain_key,
+        ).artifact_id
+        accepted = next(item for item in artifacts if item.artifact_id == accepted_id)
+    except PlanningLineageError as error:
+        if error.code is not PlanningLineageCode.ACCEPTED_LEAF_MISSING:
+            return _ArtifactState(latest=None, accepted=None, conflict=True)
+    return _ArtifactState(
+        latest=latest_items[0],
+        accepted=accepted,
+        conflict=False,
     )
-    return _ArtifactState(latest=latest, conflict=conflict or bool(orphan_decisions))
 
 
 def _artifact_reference(artifact: PlanningArtifactFact) -> FactReference:
@@ -300,10 +560,10 @@ def _roadmap_generate_rule(
     lineage = _accepted_backlog(snapshot)
     if lineage.conflict:
         return (RuleEvaluation(RuleCategory.INVALID, "WORKFLOW_FACT_CONFLICT"),)
-    if lineage.authority is None:
+    if lineage.specification is None:
         return _blocked(
-            "ACCEPTED_CURRENT_AUTHORITY_REQUIRED",
-            "Roadmap generation requires the accepted current authority.",
+            "ACCEPTED_CURRENT_SPECIFICATION_REQUIRED",
+            "Roadmap generation requires the accepted current Specification.",
         )
     backlog = lineage.backlog
     if backlog is None:
@@ -350,20 +610,19 @@ def _accepted_current_roadmap(
     state = _artifact_state(snapshot, "roadmap")
     if lineage.conflict or state.conflict:
         return None, True
-    roadmap = state.latest
+    roadmap = state.accepted
     if (
         lineage.backlog is None
         or roadmap is None
-        or roadmap.status != "accepted"
         or not _artifact_matches_lineage(roadmap, lineage)
     ):
         return None, False
     return roadmap, False
 
 
-def _current_requirements(
+def _current_backlog_items(
     snapshot: WorkflowFactSnapshot,
-) -> tuple[BacklogRequirementFact, ...]:
+) -> tuple[BacklogItemFact, ...]:
     lineage = _accepted_backlog(snapshot)
     backlog = lineage.backlog
     if lineage.conflict or backlog is None:
@@ -372,11 +631,11 @@ def _current_requirements(
         sorted(
             (
                 item
-                for item in snapshot.backlog_requirements
-                if item.backlog_artifact_id == int(backlog.artifact_id)
+                for item in snapshot.backlog_items
+                if item.backlog_artifact_id == backlog.artifact_id
                 and item.backlog_artifact_fingerprint == backlog.artifact_fingerprint
             ),
-            key=lambda item: item.requirement_id,
+            key=lambda item: item.backlog_item_id,
         )
     )
 
@@ -394,17 +653,22 @@ def _story_generate_rule(
             "Story generation requires the accepted current Roadmap.",
         )
     lineage = _accepted_backlog(snapshot)
-    requirements = _current_requirements(snapshot)
-    if not requirements:
-        return (RuleEvaluation(RuleCategory.INVALID, "BACKLOG_REQUIREMENTS_MISSING"),)
+    backlog_items = _current_backlog_items(snapshot)
+    if not backlog_items:
+        return (RuleEvaluation(RuleCategory.INVALID, "BACKLOG_ITEMS_MISSING"),)
     evaluations: list[RuleEvaluation] = []
-    for requirement in requirements:
-        requirement_id = requirement.requirement_id
-        instance_key = f"requirement:{requirement_id}"
+    for backlog_item in backlog_items:
+        backlog_item_id = backlog_item.backlog_item_id
+        instance_key = f"backlog_item:{backlog_item_id}"
         state = _artifact_state(
             snapshot,
             "story",
-            requirement_id=requirement_id,
+            backlog_item_id=backlog_item_id,
+        )
+        backlog_item_reference = FactReference(
+            fact_type="backlog_item",
+            fact_id=backlog_item_id,
+            fingerprint=backlog_item.item_fingerprint,
         )
         if state.conflict:
             evaluations.append(
@@ -418,8 +682,16 @@ def _story_generate_rule(
         latest = state.latest
         if latest is not None:
             if not _artifact_matches_lineage(latest, lineage, roadmap=roadmap):
+                replacement_successor = _roadmap_replacement_story_successor(
+                    latest,
+                    lineage,
+                    roadmap,
+                    backlog_item_reference,
+                    instance_key,
+                )
                 evaluations.append(
-                    RuleEvaluation(
+                    replacement_successor
+                    or RuleEvaluation(
                         RuleCategory.INVALID,
                         "STORY_ARTIFACT_STALE",
                         instance_key=instance_key,
@@ -434,9 +706,25 @@ def _story_generate_rule(
                         fact_references=(
                             *_lineage_references(lineage),
                             _artifact_reference(roadmap),
+                            backlog_item_reference,
                             _artifact_reference(latest),
                         ),
                         recommendation_kind=RecommendationKind.RECOVERY,
+                    )
+                )
+            elif latest.status == "accepted":
+                evaluations.append(
+                    RuleEvaluation(
+                        RuleCategory.AVAILABLE,
+                        "STORY_CORRECTION_AVAILABLE",
+                        instance_key=instance_key,
+                        fact_references=(
+                            *_lineage_references(lineage),
+                            _artifact_reference(roadmap),
+                            backlog_item_reference,
+                            _artifact_reference(latest),
+                        ),
+                        recommendation_kind=RecommendationKind.OPTIONAL_REENTRY,
                     )
                 )
             continue
@@ -448,11 +736,7 @@ def _story_generate_rule(
                 fact_references=(
                     *_lineage_references(lineage),
                     _artifact_reference(roadmap),
-                    FactReference(
-                        fact_type="backlog_requirement",
-                        fact_id=requirement_id,
-                        fingerprint=requirement.backlog_artifact_fingerprint,
-                    ),
+                    backlog_item_reference,
                 ),
             )
         )
@@ -466,22 +750,22 @@ def _story_review_rule(
     roadmap, roadmap_conflict = _accepted_current_roadmap(snapshot)
     lineage = _accepted_backlog(snapshot)
     evaluations: list[RuleEvaluation] = []
-    requirement_ids = sorted(
+    backlog_item_ids = sorted(
         {
-            item.requirement_id
+            item.backlog_item_id
             for item in snapshot.planning_artifacts
-            if item.artifact_type == "story" and item.requirement_id is not None
+            if item.artifact_type == "story" and item.backlog_item_id is not None
         }
     )
-    for requirement_id in requirement_ids:
-        state = _artifact_state(snapshot, "story", requirement_id=requirement_id)
+    for backlog_item_id in backlog_item_ids:
+        state = _artifact_state(snapshot, "story", backlog_item_id=backlog_item_id)
         latest = state.latest
         if state.conflict or roadmap_conflict or lineage.conflict:
             evaluations.append(
                 RuleEvaluation(
                     RuleCategory.INVALID,
                     "WORKFLOW_FACT_CONFLICT",
-                    instance_key=f"requirement:{requirement_id}",
+                    instance_key=f"backlog_item:{backlog_item_id}",
                 )
             )
         elif (
@@ -490,15 +774,17 @@ def _story_review_rule(
             and (
                 roadmap is None
                 or not _artifact_matches_lineage(latest, lineage, roadmap=roadmap)
-                or requirement_id
-                not in {item.requirement_id for item in _current_requirements(snapshot)}
+                or backlog_item_id
+                not in {
+                    item.backlog_item_id for item in _current_backlog_items(snapshot)
+                }
             )
         ):
             evaluations.append(
                 RuleEvaluation(
                     RuleCategory.INVALID,
                     "STORY_REVIEW_SOURCE_STALE",
-                    instance_key=f"requirement:{requirement_id}",
+                    instance_key=f"backlog_item:{backlog_item_id}",
                 )
             )
         elif latest is not None and latest.status == "pending_review":
@@ -507,7 +793,7 @@ def _story_review_rule(
                     RuleEvaluation(
                         RuleCategory.INVALID,
                         "STORY_REVIEW_SOURCE_STALE",
-                        instance_key=f"requirement:{requirement_id}",
+                        instance_key=f"backlog_item:{backlog_item_id}",
                     )
                 )
                 continue
@@ -515,7 +801,7 @@ def _story_review_rule(
                 RuleEvaluation(
                     RuleCategory.WAITING,
                     "STORY_REVIEW_REQUIRED",
-                    instance_key=f"requirement:{requirement_id}",
+                    instance_key=f"backlog_item:{backlog_item_id}",
                     fact_references=(
                         *_lineage_references(lineage),
                         _artifact_reference(roadmap),
@@ -545,11 +831,13 @@ def _story_lineage_problem(
     lineage = _accepted_backlog(snapshot)
     if conflict or lineage.conflict:
         return RuleEvaluation(RuleCategory.INVALID, "WORKFLOW_FACT_CONFLICT")
-    authority = lineage.authority
+    specification = lineage.specification
     backlog = lineage.backlog
-    if roadmap is None or authority is None or backlog is None:
+    if roadmap is None or specification is None or backlog is None:
         return RuleEvaluation(RuleCategory.INVALID, "STORY_PLANNING_LINEAGE_STALE")
-    requirement_ids = {item.requirement_id for item in _current_requirements(snapshot)}
+    backlog_item_ids = {
+        item.backlog_item_id for item in _current_backlog_items(snapshot)
+    }
     artifacts = {
         item.artifact_id: item
         for item in snapshot.planning_artifacts
@@ -564,15 +852,23 @@ def _story_lineage_problem(
         if not story.content_accepted:
             continue
         if (
-            story.requirement_id not in requirement_ids
-            or story.authority_id != authority.authority_id
-            or story.authority_fingerprint != authority.authority_fingerprint
+            artifact is None
+            or story.source_story_item_id not in artifact.story_item_ids
+            or artifact.backlog_item_id not in backlog_item_ids
+            or story.accepted_spec_version_id != specification.spec_version_id
+            or story.accepted_spec_hash != specification.spec_hash
+            or story.source_story_artifact_id != artifact.artifact_id
+            or story.source_story_artifact_fingerprint != artifact.artifact_fingerprint
             or story.backlog_artifact_id != backlog.artifact_id
             or story.backlog_artifact_fingerprint != backlog.artifact_fingerprint
             or story.roadmap_artifact_id != roadmap.artifact_id
             or story.roadmap_artifact_fingerprint != roadmap.artifact_fingerprint
-            or artifact is None
-            or artifact.status != "accepted"
+            or _artifact_state(
+                snapshot,
+                "story",
+                backlog_item_id=artifact.backlog_item_id,
+            ).accepted
+            != artifact
             or not _artifact_matches_lineage(artifact, lineage, roadmap=roadmap)
         ):
             return RuleEvaluation(
@@ -837,7 +1133,9 @@ def _sprint_plan_freshness_reason(
     review: bool,
 ) -> str | None:
     candidate_ids = {item.story_id for item in stories}
-    if not plan.story_ids or any(item not in candidate_ids for item in plan.story_ids):
+    if not plan.selected_story_ids or any(
+        item not in candidate_ids for item in plan.selected_story_ids
+    ):
         return (
             "SPRINT_PLAN_REVIEW_SOURCE_STALE"
             if review
@@ -849,14 +1147,13 @@ def _sprint_plan_freshness_reason(
     )
     if plan.candidate_set_fingerprint != current_candidates:
         return "SPRINT_PLAN_REVIEW_SOURCE_STALE" if review else "SPRINT_PLAN_STALE"
-    if (
-        plan.sprint_id is None
-        or plan.task_content_fingerprint is None
+    if plan.activated_sprint_id is not None and (
+        plan.task_content_fingerprint is None
         or plan.task_content_fingerprint
         != current_task_content_fingerprint(
             snapshot.tasks,
-            sprint_id=plan.sprint_id,
-            story_ids=plan.story_ids,
+            sprint_id=plan.activated_sprint_id,
+            story_ids=plan.selected_story_ids,
         )
     ):
         return (
@@ -890,23 +1187,61 @@ def _sprint_plan_references(
     )
 
 
+def _plan_has_matching_sprint_start(
+    snapshot: WorkflowFactSnapshot,
+    plan: PlanningArtifactFact,
+) -> bool:
+    sprint_id = plan.activated_sprint_id
+    if sprint_id is None:
+        return False
+    starts = tuple(
+        item for item in snapshot.sprint_starts if item.sprint_id == sprint_id
+    )
+    return len(starts) == 1 and (
+        starts[0].sprint_plan_artifact_id == plan.artifact_id
+        and starts[0].plan_fingerprint == plan.artifact_fingerprint
+        and starts[0].spec_version_id == plan.spec_version_id
+        and starts[0].spec_hash == plan.spec_hash
+        and starts[0].candidate_set_fingerprint == plan.candidate_set_fingerprint
+        and starts[0].selected_story_ids == plan.selected_story_ids
+        and starts[0].task_content_fingerprint == plan.task_content_fingerprint
+    )
+
+
+def _sprint_plan_cycle_head(
+    snapshot: WorkflowFactSnapshot,
+    state: _ArtifactState,
+) -> PlanningArtifactFact | None:
+    """Freeze one started stream on its semantic accepted plan."""
+    accepted = state.accepted
+    if accepted is not None and _plan_has_matching_sprint_start(snapshot, accepted):
+        return accepted
+    return state.latest
+
+
 def _existing_sprint_plan_evaluation(
     snapshot: WorkflowFactSnapshot,
     latest: PlanningArtifactFact,
     stories: tuple[StoryFact, ...],
 ) -> tuple[RuleEvaluation, ...]:
     completed = any(
-        sprint.sprint_id == latest.sprint_id and sprint.status == "completed"
+        sprint.sprint_id == latest.activated_sprint_id and sprint.status == "completed"
         for sprint in snapshot.sprints
     )
-    if latest.status == "accepted" and completed:
-        if not lifecycle_is_quiescent(snapshot):
-            return (
-                RuleEvaluation(
-                    RuleCategory.SATISFIED,
-                    "NEXT_SPRINT_AWAITS_QUIESCENT_LIFECYCLE",
-                ),
-            )
+    if (
+        latest.status == "accepted"
+        and completed
+        and not lifecycle_is_quiescent(snapshot)
+    ):
+        return (
+            RuleEvaluation(
+                RuleCategory.SATISFIED,
+                "NEXT_SPRINT_AWAITS_QUIESCENT_LIFECYCLE",
+            ),
+        )
+    if latest.status == "accepted" and (
+        completed or _plan_has_matching_sprint_start(snapshot, latest)
+    ):
         return (
             RuleEvaluation(
                 RuleCategory.AVAILABLE,
@@ -952,15 +1287,15 @@ def _sprint_plan_rule(
     snapshot: WorkflowFactSnapshot,
     _evaluated_at: datetime,
 ) -> tuple[RuleEvaluation, ...]:
-    joined = _sprint_join(snapshot)
-    if isinstance(joined, RuleEvaluation):
-        return (joined,)
     state = _artifact_state(snapshot, "sprint_plan")
     if state.conflict:
         return (RuleEvaluation(RuleCategory.INVALID, "WORKFLOW_FACT_CONFLICT"),)
-    latest = state.latest
-    if latest is not None:
-        return _existing_sprint_plan_evaluation(snapshot, latest, joined)
+    joined = _sprint_join(snapshot)
+    if isinstance(joined, RuleEvaluation):
+        return (joined,)
+    cycle_head = _sprint_plan_cycle_head(snapshot, state)
+    if cycle_head is not None:
+        return _existing_sprint_plan_evaluation(snapshot, cycle_head, joined)
     return (
         RuleEvaluation(
             RuleCategory.AVAILABLE,
@@ -977,7 +1312,8 @@ def _sprint_review_rule(
     state = _artifact_state(snapshot, "sprint_plan")
     if state.conflict:
         return (RuleEvaluation(RuleCategory.INVALID, "WORKFLOW_FACT_CONFLICT"),)
-    if state.latest is None or state.latest.status != "pending_review":
+    cycle_head = _sprint_plan_cycle_head(snapshot, state)
+    if cycle_head is None or cycle_head.status != "pending_review":
         return (RuleEvaluation(RuleCategory.SATISFIED, "SPRINT_REVIEW_NOT_PENDING"),)
     joined = _sprint_join(snapshot)
     if isinstance(joined, RuleEvaluation):
@@ -987,7 +1323,7 @@ def _sprint_review_rule(
                 "SPRINT_PLAN_REVIEW_SOURCE_STALE",
             ),
         )
-    return _sprint_review_evaluation(snapshot, state.latest, joined)
+    return _sprint_review_evaluation(snapshot, cycle_head, joined)
 
 
 def _sprint_review_evaluation(
@@ -1003,31 +1339,11 @@ def _sprint_review_evaluation(
     )
     if stale_reason is not None:
         return (RuleEvaluation(RuleCategory.INVALID, stale_reason),)
-    sprint_id = plan.sprint_id
-    if sprint_id is None:
-        return (
-            RuleEvaluation(
-                RuleCategory.INVALID,
-                "SPRINT_PLAN_REVIEW_TASK_CONTENT_STALE",
-            ),
-        )
-    current_tasks = current_task_content_fingerprint(
-        snapshot.tasks,
-        sprint_id=sprint_id,
-        story_ids=plan.story_ids,
-    )
     return (
         RuleEvaluation(
             RuleCategory.WAITING,
             "SPRINT_PLAN_REVIEW_REQUIRED",
-            fact_references=(
-                *_sprint_plan_references(snapshot, stories, plan=plan),
-                FactReference(
-                    fact_type="sprint_plan_tasks",
-                    fact_id=str(sprint_id),
-                    fingerprint=current_tasks,
-                ),
-            ),
+            fact_references=_sprint_plan_references(snapshot, stories, plan=plan),
         ),
     )
 
@@ -1045,13 +1361,22 @@ def _sprint_start_evaluation(
     )
     if stale_reason is not None:
         return (RuleEvaluation(RuleCategory.INVALID, stale_reason),)
-    sprint_id = plan.sprint_id
+    sprint_id = plan.activated_sprint_id
     if sprint_id is None:
         return (
             RuleEvaluation(
                 RuleCategory.INVALID,
                 "SPRINT_PLAN_TASK_CONTENT_STALE",
             ),
+        )
+    if any(
+        item.status == "active" and item.sprint_id != sprint_id
+        for item in snapshot.sprints
+    ):
+        return _blocked(
+            "ACTIVE_SPRINT_EXISTS",
+            "Another Sprint is already active for this Project. Close it before "
+            "starting this Sprint.",
         )
     return (
         RuleEvaluation(
@@ -1065,7 +1390,7 @@ def _sprint_start_evaluation(
                     fingerprint=current_task_content_fingerprint(
                         snapshot.tasks,
                         sprint_id=sprint_id,
-                        story_ids=plan.story_ids,
+                        story_ids=plan.selected_story_ids,
                     ),
                 ),
             ),
@@ -1073,21 +1398,93 @@ def _sprint_start_evaluation(
     )
 
 
+def _sprint_start_artifact_state(snapshot: WorkflowFactSnapshot) -> _ArtifactState:
+    """Select the current start target and validate older lifecycle roles."""
+    current_state = _artifact_state(snapshot, "sprint_plan")
+    current_target = current_state.accepted
+    older_states = tuple(
+        (item, _sprint_start_lifecycle_state(snapshot, item))
+        for item in snapshot.planning_artifacts
+        if item.artifact_type == "sprint_plan"
+        and item.status == "accepted"
+        and (current_target is None or item.artifact_id != current_target.artifact_id)
+    )
+    if current_state.conflict or any(
+        state == "conflict" for _item, state in older_states
+    ):
+        return _ArtifactState(latest=None, accepted=None, conflict=True)
+    older_targets = tuple(item for item, state in older_states if state != "terminal")
+    if current_target is not None:
+        if (
+            any(state == "unstarted" for _item, state in older_states)
+            or sum(state == "started" for _item, state in older_states) > 1
+        ):
+            return _ArtifactState(latest=None, accepted=None, conflict=True)
+        return current_state
+    if len(older_targets) > 1:
+        return _ArtifactState(latest=None, accepted=None, conflict=True)
+    if len(older_targets) == 1:
+        plan = older_targets[0]
+        return _ArtifactState(latest=plan, accepted=plan, conflict=False)
+    return current_state
+
+
+def _sprint_start_lifecycle_state(
+    snapshot: WorkflowFactSnapshot,
+    plan: PlanningArtifactFact,
+) -> Literal["unstarted", "started", "terminal", "conflict"]:
+    """Classify the exact activated Sprint and SprintStart relationship."""
+    try:
+        started, terminal, _markers = _sprint_stream_lifecycle(
+            snapshot,
+            (plan,),
+            plan,
+        )
+    except PlanningLineageError:
+        return "conflict"
+    if terminal:
+        return "terminal"
+    if started:
+        return "started"
+    return "unstarted"
+
+
 def _sprint_start_rule(
     snapshot: WorkflowFactSnapshot,
     _evaluated_at: datetime,
 ) -> tuple[RuleEvaluation, ...]:
-    if any(item.status == "active" for item in snapshot.sprints):
-        return (RuleEvaluation(RuleCategory.SATISFIED, "SPRINT_ALREADY_ACTIVE"),)
-    state = _artifact_state(snapshot, "sprint_plan")
+    state = _sprint_start_artifact_state(snapshot)
     if state.conflict:
         return (RuleEvaluation(RuleCategory.INVALID, "WORKFLOW_FACT_CONFLICT"),)
-    plan = state.latest
-    if plan is None or plan.status != "accepted":
+    plan = state.accepted
+    if plan is None:
         return _blocked(
             "ACCEPTED_SPRINT_PLAN_REQUIRED",
             "Sprint start requires an accepted exact Sprint plan.",
         )
+    lifecycle_state = _sprint_start_lifecycle_state(snapshot, plan)
+    if lifecycle_state != "unstarted":
+        return (
+            RuleEvaluation(
+                (
+                    RuleCategory.INVALID
+                    if lifecycle_state == "conflict"
+                    else RuleCategory.SATISFIED
+                ),
+                (
+                    "WORKFLOW_FACT_CONFLICT"
+                    if lifecycle_state == "conflict"
+                    else "SPRINT_ALREADY_STARTED"
+                ),
+            ),
+        )
+    specification = _accepted_backlog(snapshot).specification
+    if (
+        specification is None
+        or plan.spec_version_id != specification.spec_version_id
+        or plan.spec_hash != specification.spec_hash
+    ):
+        return (RuleEvaluation(RuleCategory.INVALID, "STALE_SPECIFICATION"),)
     joined = _sprint_join(snapshot)
     if isinstance(joined, RuleEvaluation):
         return (joined,)
@@ -1132,7 +1529,12 @@ PLANNING_NODES: tuple[NodeSpec, ...] = (
         request_kind="record_story_draft",
         recommendation_kind=RecommendationKind.REQUIRED,
         required_inputs=(
-            InputField(name="requirement_id", value_type="string"),
+            InputField(name="backlog_item_id", value_type="string"),
+            InputField(name="source_backlog_artifact_id", value_type="integer"),
+            InputField(
+                name="source_backlog_artifact_fingerprint",
+                value_type="string",
+            ),
             InputField(name="roadmap_artifact_id", value_type="integer"),
             InputField(name="canonical_content", value_type="object"),
             InputField(name="content_fingerprint", value_type="string"),
@@ -1191,9 +1593,9 @@ PLANNING_NODES: tuple[NodeSpec, ...] = (
         recommendation_kind=RecommendationKind.REQUIRED,
         required_inputs=(
             InputField(name="team_name", value_type="string"),
-            InputField(name="selected_story_ids", value_type="array"),
-            InputField(name="canonical_task_plan", value_type="object"),
-            InputField(name="candidate_set_fingerprint", value_type="string"),
+            InputField(name="spec_version_id", value_type="integer"),
+            InputField(name="spec_hash", value_type="string"),
+            InputField(name="planner_output", value_type="object"),
         ),
         evaluate_rule=_sprint_plan_rule,
         agentic_execution=AgenticExecutionSpec(
@@ -1220,12 +1622,7 @@ PLANNING_NODES: tuple[NodeSpec, ...] = (
         child_graph_id="planning",
         request_kind="start_sprint",
         recommendation_kind=RecommendationKind.REQUIRED,
-        required_inputs=(
-            InputField(name="sprint_plan_artifact_id", value_type="integer"),
-            InputField(name="sprint_id", value_type="integer"),
-            InputField(name="plan_fingerprint", value_type="string"),
-            InputField(name="candidate_set_fingerprint", value_type="string"),
-        ),
+        required_inputs=(),
         evaluate_rule=_sprint_start_rule,
     ),
 )

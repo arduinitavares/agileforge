@@ -46,10 +46,8 @@ from workflow.handlers import (
     as_utc,
     execute_abandon_product_goal,
     execute_begin_vision_revision,
-    execute_compile_authority,
     execute_complete_specification_structuring,
     execute_create_project,
-    execute_decide_authority,
     execute_decide_backlog,
     execute_decide_product_goal_review,
     execute_decide_specification,
@@ -58,20 +56,17 @@ from workflow.handlers import (
     execute_fulfill_product_goal,
     execute_generate_vision_bootstrap,
     execute_planning_request,
-    execute_record_authority_feedback,
     execute_record_backlog_draft,
     execute_record_product_goal_interview_turn,
     execute_record_repository_binding,
     execute_record_vision_interview_turn,
     execute_register_specification_source,
-    execute_repair_authority,
     execute_start_node_attempt,
     load_attempt,
     load_attempt_outcome,
     record_failure_outcome,
     record_obsolete_outcome,
     record_success_outcome,
-    validate_decide_authority_review,
     validate_decide_backlog_review,
     validate_planning_review,
 )
@@ -81,11 +76,9 @@ from workflow.requests import (
     BeginVisionRevision,
     CloseSprint,
     CloseStory,
-    CompileAuthority,
     CompleteSpecificationStructuring,
     CompleteTask,
     CreateProject,
-    DecideAuthority,
     DecideBacklog,
     DecideProductGoalReview,
     DecideRoadmap,
@@ -97,7 +90,6 @@ from workflow.requests import (
     FulfillProductGoal,
     GenerateVisionBootstrap,
     ObsoleteNodeAttempt,
-    RecordAuthorityFeedback,
     RecordBacklogDraft,
     RecordPostSprintTriage,
     RecordProductGoalInterviewTurn,
@@ -107,7 +99,6 @@ from workflow.requests import (
     RecordStoryDraft,
     RecordVisionInterviewTurn,
     RegisterSpecificationSource,
-    RepairAuthority,
     RepairStoryReadiness,
     RevalidateNodeAttempt,
     ReviewSprint,
@@ -163,9 +154,6 @@ class SpecificationRegistrationCheck(Protocol):
 _SQLITE_BUSY_TIMEOUT_MS = 1_000
 _SQLITE_LOCK_MESSAGES = ("database is locked", "database table is locked")
 
-type _AuthorityRequest = (
-    CompileAuthority | DecideAuthority | RecordAuthorityFeedback | RepairAuthority
-)
 type _ProductGoalRequest = (
     RecordProductGoalInterviewTurn
     | DecideProductGoalReview
@@ -197,8 +185,7 @@ type _ExecutionRequest = (
     CompleteTask | CloseStory | ReviewSprint | CloseSprint | RecordPostSprintTriage
 )
 type _PositionedTransitionRequest = (
-    _AuthorityRequest
-    | GenerateVisionBootstrap
+    GenerateVisionBootstrap
     | RecordVisionInterviewTurn
     | DecideVisionReview
     | BeginVisionRevision
@@ -349,8 +336,7 @@ class WorkflowDomain:
         self._begin_write(session)
         if isinstance(
             request,
-            DecideAuthority
-            | DecideVisionReview
+            DecideVisionReview
             | DecideBacklog
             | DecideRoadmap
             | DecideStory
@@ -362,9 +348,7 @@ class WorkflowDomain:
                     msg = "An existing receipt claim did not produce a result."
                     raise RuntimeError(msg)
                 return existing.immediate_result
-            if isinstance(request, DecideAuthority):
-                review_failure = validate_decide_authority_review(session, request)
-            elif isinstance(request, DecideVisionReview):
+            if isinstance(request, DecideVisionReview):
                 review_failure = None
             elif isinstance(request, DecideBacklog):
                 review_failure = validate_decide_backlog_review(session, request)
@@ -604,7 +588,7 @@ class WorkflowDomain:
         request: RevalidateNodeAttempt,
         evaluated_at: datetime,
     ) -> TransitionResult:
-        """Recheck Specification attempt authority before external execution."""
+        """Recheck Specification attempt authorization before external execution."""
         row = load_attempt(
             session,
             project_id=request.project_id,
@@ -1026,7 +1010,6 @@ class WorkflowDomain:
         )
         precise_failure_codes = {
             WorkflowErrorCode.VISION_EVIDENCE_STALE,
-            WorkflowErrorCode.AUTHORITY_COMPILATION_FAILED,
             WorkflowErrorCode.INVALID_SPECIFICATION_PAYLOAD,
             WorkflowErrorCode.UNSUPPORTED_SPECIFICATION_SCHEMA,
             WorkflowErrorCode.SPECIFICATION_OUTPUT_INCOMPLETE,
@@ -1219,14 +1202,6 @@ class WorkflowDomain:
             )
         elif isinstance(
             request,
-            CompileAuthority
-            | DecideAuthority
-            | RecordAuthorityFeedback
-            | RepairAuthority,
-        ):
-            result = self._dispatch_authority(session, request, decision, evaluated_at)
-        elif isinstance(
-            request,
             GenerateVisionBootstrap
             | RecordVisionInterviewTurn
             | DecideVisionReview
@@ -1392,25 +1367,6 @@ class WorkflowDomain:
         )
 
     @staticmethod
-    def _dispatch_authority(
-        session: Session,
-        request: _AuthorityRequest,
-        decision: NodeDecision,
-        evaluated_at: datetime,
-    ) -> TransitionResult:
-        if isinstance(request, CompileAuthority):
-            return execute_compile_authority(session, request, decision, evaluated_at)
-        if isinstance(request, DecideAuthority):
-            return execute_decide_authority(session, request, decision, evaluated_at)
-        if isinstance(request, RecordAuthorityFeedback):
-            return execute_record_authority_feedback(
-                session, request, decision, evaluated_at
-            )
-        if isinstance(request, RepairAuthority):
-            return execute_repair_authority(session, request, decision, evaluated_at)
-        assert_never(request)
-
-    @staticmethod
     def _dispatch_vision(
         session: Session,
         request: _VisionRequest,
@@ -1530,8 +1486,7 @@ class WorkflowDomain:
             )
         human_review_waiting = isinstance(
             request,
-            DecideAuthority
-            | DecideVisionReview
+            DecideVisionReview
             | DecideBacklog
             | DecideRoadmap
             | DecideStory

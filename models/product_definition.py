@@ -732,6 +732,13 @@ class SpecificationDecision(SQLModel, table=True):
             "specification_candidate_id",
             name="uq_specification_decision_candidate",
         ),
+        UniqueConstraint(
+            "project_id",
+            "specification_decision_id",
+            "specification_candidate_id",
+            "candidate_fingerprint",
+            name="uq_specification_decision_registry_parent",
+        ),
         ForeignKeyConstraint(
             ["project_id", "specification_candidate_id", "candidate_fingerprint"],
             [

@@ -800,17 +800,21 @@ def seed_accepted_specification(  # noqa: PLR0915
         attempt=candidate_attempt,
         recorded_at=base_time + timedelta(seconds=9),
     )
-    session.add(
-        SpecificationDecision(
-            project_id=project_id,
-            specification_candidate_id=candidate_id,
-            candidate_fingerprint=envelope.candidate_fingerprint,
-            decision="accepted",
-            rationale="Accepted for fixture delivery.",
-            reviewer="fixture",
-            idempotency_key=f"fixture-specification-accepted-{project_id}-{ordinal}",
-            decided_at=base_time + timedelta(seconds=10),
-        )
+    specification_decision = SpecificationDecision(
+        project_id=project_id,
+        specification_candidate_id=candidate_id,
+        candidate_fingerprint=envelope.candidate_fingerprint,
+        decision="accepted",
+        rationale="Accepted for fixture delivery.",
+        reviewer="fixture",
+        idempotency_key=f"fixture-specification-accepted-{project_id}-{ordinal}",
+        decided_at=base_time + timedelta(seconds=10),
+    )
+    session.add(specification_decision)
+    session.flush()
+    specification_decision_id = _required(
+        specification_decision.specification_decision_id,
+        "specification decision",
     )
     if current_spec is not None:
         current_spec.status = "superseded"
@@ -819,9 +823,8 @@ def seed_accepted_specification(  # noqa: PLR0915
         project_id=project_id,
         spec_hash=envelope.payload_fingerprint,
         status="approved",
-        approved_at=base_time + timedelta(seconds=10),
-        approved_by="fixture",
-        approval_notes="Accepted for fixture delivery.",
+        created_at=base_time + timedelta(seconds=10),
+        source_specification_decision_id=specification_decision_id,
         source_specification_candidate_id=candidate_id,
         source_specification_candidate_fingerprint=envelope.candidate_fingerprint,
         source_vision_artifact_id=vision_id,

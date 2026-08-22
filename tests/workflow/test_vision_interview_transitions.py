@@ -455,6 +455,9 @@ def _assert_active_goal_blocks_revision_acceptance(
     assert blocked.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
     with Session(engine) as session:
         assert len(session.exec(select(VisionArtifactDecision)).all()) == 1
+        registry = session.get(SpecRegistry, resolved_lineage.spec_version_id)
+        assert registry is not None
+        assert registry.status == "approved"
         session.add(
             ProductGoalOutcome(
                 project_id=lineage.project_id,
@@ -468,19 +471,25 @@ def _assert_active_goal_blocks_revision_acceptance(
             )
         )
         session.commit()
-    accepted = _review_vision(
-        domain,
-        lineage.project_id,
-        _VisionReview(
-            artifact_id=lineage.revised_vision_artifact_id,
-            fingerprint=lineage.revised_vision_fingerprint,
-            decision="accepted",
-            rationale="Revised Vision accepted.",
-            idempotency_key="revision-accept",
-        ),
+    position = domain.position(lineage.project_id)
+    review = _decision(domain, lineage.project_id, "vision.review")
+    request = DecideVisionReview(
+        project_id=lineage.project_id,
+        graph_version=position.graph_version,
+        fact_fingerprint=position.fact_fingerprint,
+        decision_fingerprint=review.decision_fingerprint,
+        idempotency_key="revision-accept",
+        actor="operator@example.com",
+        vision_artifact_id=lineage.revised_vision_artifact_id,
+        vision_fingerprint=lineage.revised_vision_fingerprint,
+        decision="accepted",
+        rationale="Revised Vision accepted.",
     )
+    accepted = domain.transition(request)
+    replay = domain.transition(request)
 
     assert accepted.ok
+    assert replay.replayed
     current_goal = _decision(domain, lineage.project_id, "goal.interview")
     assert current_goal.fact_references[0].fact_id == str(
         lineage.revised_vision_artifact_id
@@ -688,7 +697,9 @@ def test_feedback_reopens_the_same_vision_interview(engine: Engine) -> None:
         assert len(session.exec(select(VisionArtifactDecision)).all()) == 1
 
 
-def test_accepted_revision_creates_only_a_new_vision(engine: Engine) -> None:
+def test_accepted_revision_creates_only_a_new_vision(  # noqa: PLR0915
+    engine: Engine,
+) -> None:
     """Revision completion and acceptance create Vision without a Product Goal."""
     with Session(engine) as session:
         project = Project(name="Vision revision")
@@ -804,6 +815,9 @@ def test_accepted_revision_creates_only_a_new_vision(engine: Engine) -> None:
         assert resolved_lineage.spec_version_id not in {
             item.spec_version_id for item in current_specs
         }
+        original_spec = session.get(SpecRegistry, resolved_lineage.spec_version_id)
+        assert original_spec is not None
+        assert original_spec.status == "superseded"
         artifacts = session.exec(select(VisionArtifact)).all()
         assert len(artifacts) == EXPECTED_VISION_ARTIFACT_COUNT
         assert artifacts[-1].supersedes_vision_artifact_id == artifact_id

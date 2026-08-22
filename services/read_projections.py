@@ -4,40 +4,68 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Literal, cast
 
-from pydantic import TypeAdapter
+from pydantic import TypeAdapter, ValidationError
 from sqlmodel import Session, col, select
 
 from models.core import Project, Sprint, UserStory
 from models.events import TaskExecutionLog
-from models.product_definition import SpecificationCandidate, SpecificationDecision
-from models.repository import RepositoryBinding, repository_binding_fingerprint
-from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance, SpecRegistry
-from models.workflow import WorkflowNodeAttempt, WorkflowNodeAttemptOutcome
-from repositories.workflow import WorkflowFactLoadError, WorkflowFactRepository
-from services.agent_workbench.authority_projection import (
-    AuthorityProjectionService,
-    pending_authority_fingerprint,
+from models.product_definition import (
+    ProductGoalArtifact,
+    ProductGoalArtifactDecision,
+    SpecificationCandidate,
+    SpecificationDecision,
 )
+from models.repository import RepositoryBinding, repository_binding_fingerprint
+from models.specs import SpecRegistry
+from models.workflow import (
+    BacklogArtifact,
+    BacklogArtifactDecision,
+    RoadmapArtifact,
+    RoadmapArtifactDecision,
+    SprintPlanArtifact,
+    SprintPlanArtifactDecision,
+    StoryArtifact,
+    StoryArtifactDecision,
+    WorkflowNodeAttempt,
+    WorkflowNodeAttemptOutcome,
+)
+from repositories.workflow import WorkflowFactLoadError, WorkflowFactRepository
 from services.contracts.specification_source import (
     SpecificationSourceBundle,
     SpecificationSourceDocument,
     source_bundle_fingerprint,
 )
-from services.packet_renderer import render_packet
-from services.packets.canonical import (
-    CanonicalPacketError,
-    build_story_packet,
-    build_task_packet,
-)
+from services.packet_renderer import PacketRenderError, render_packet
 from services.phases.sprint_metrics import build_durable_sprint_metrics
+from services.planning_artifact_content import (
+    load_bound_sprint_plan_envelope,
+    load_stored_backlog_planning_content,
+    load_stored_roadmap_planning_content,
+)
+from services.planning_lineage import (
+    ArtifactLineageNode,
+    PlanningLineageCode,
+    PlanningLineageError,
+    select_current_accepted_artifact,
+    select_physical_leaf,
+    validate_artifact_lineage,
+)
+from services.planning_lineage import Decision as PlanningLineageDecision
+from services.specs.accepted_specification import (
+    AcceptedSpecification,
+    AcceptedSpecificationIntegrityError,
+    load_accepted_specification,
+    load_current_accepted_specification,
+)
 from services.specs.candidate_contract import (
     load_candidate_contract,
     render_candidate_review_markdown,
 )
-from services.specs.compiler_service import load_compiled_artifact
 from workflow.contracts import JsonObject, JsonValue
+from workflow.definitions.backlog import current_backlog_lineage
+from workflow.definitions.planning import candidate_set_fingerprint
 from workflow.definitions.product_discovery import select_product_definition_state
 from workflow.definitions.product_goal import (
     accepted_current_goal,
@@ -45,13 +73,19 @@ from workflow.definitions.product_goal import (
     select_product_goal_interview_state,
 )
 from workflow.definitions.vision import select_vision_interview_state
+from workflow.fingerprints import canonical_json
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
+    from typing import Never
 
     from sqlalchemy.engine import Engine
 
+    from services.contracts.backlog import BacklogItem, BacklogOutput
+    from services.contracts.roadmap import RoadmapBuilderOutput
+    from services.contracts.story import CanonicalStoryOutput
     from workflow.facts import (
+        PlanningArtifactFact,
         ProductGoalArtifactDecisionFact,
         ProductGoalArtifactFact,
         ProductGoalInterviewTurnFact,
@@ -67,6 +101,7 @@ if TYPE_CHECKING:
     )
 
 _JSON_OBJECT = TypeAdapter(JsonObject)
+_STRING_LIST = TypeAdapter(list[str])
 _SPECIFICATION_REVIEW_SCHEMA_VERSION = "agileforge.specification_review.v2"
 _VISION_COMPONENT_NAMES: tuple[str, ...] = (
     "project_name",
@@ -95,6 +130,17 @@ def _error(code: str, message: str, **details: JsonValue) -> JsonObject:
     }
 
 
+def _packet_read(packet: JsonObject, flavor: str | None) -> JsonObject:
+    """Keep the canonical packet root exact and render only an explicit view."""
+    if flavor is None:
+        return _success(packet)
+    try:
+        rendered = render_packet(packet, flavor)
+    except PacketRenderError as error:
+        return _error(error.code, str(error))
+    return _success({"packet": packet, "render": rendered})
+
+
 def _validated(value: object) -> JsonObject:
     return _JSON_OBJECT.validate_python(value)
 
@@ -117,6 +163,84 @@ def _enum_value(value: object) -> JsonValue:
 def _result_data(result: JsonObject) -> JsonObject:
     data = result.get("data")
     return data if isinstance(data, dict) else {}
+
+
+def _canonical_acceptance_criteria(raw: str) -> list[str]:
+    """Parse one exact nonempty, nonblank canonical Story criteria array."""
+    try:
+        criteria = _STRING_LIST.validate_json(raw, strict=True)
+    except ValidationError as error:
+        message = "Stored Story acceptance criteria are invalid."
+        raise ValueError(message) from error
+    if (
+        not criteria
+        or any(not criterion.strip() for criterion in criteria)
+        or canonical_json(criteria) != raw
+    ):
+        message = "Stored Story acceptance criteria are invalid."
+        raise ValueError(message)
+    return criteria
+
+
+def _story_lineage_decision(
+    status: Literal["pending_review", "accepted", "rejected", "feedback", "superseded"],
+) -> PlanningLineageDecision:
+    """Recover the terminal review outcome represented by a Story fact."""
+    if status in {"superseded", "accepted"}:
+        return "accepted"
+    if status == "feedback":
+        return "feedback"
+    if status == "rejected":
+        return "rejected"
+    return None
+
+
+def _current_story_artifacts(
+    snapshot: WorkflowFactSnapshot,
+    *,
+    backlog_artifact_id: int,
+    backlog_artifact_fingerprint: str,
+) -> dict[tuple[int, str], PlanningArtifactFact]:
+    """Select one valid Story leaf per item of the exact current Backlog root."""
+    chains: dict[tuple[int, str], list[PlanningArtifactFact]] = {}
+    for artifact in snapshot.planning_artifacts:
+        artifact_backlog_id = artifact.backlog_artifact_id
+        backlog_item_id = artifact.backlog_item_id
+        if (
+            artifact.artifact_type != "story"
+            or artifact_backlog_id is None
+            or artifact_backlog_id != backlog_artifact_id
+            or artifact.backlog_artifact_fingerprint != backlog_artifact_fingerprint
+            or backlog_item_id is None
+        ):
+            continue
+        chains.setdefault((artifact_backlog_id, backlog_item_id), []).append(artifact)
+
+    selected: dict[tuple[int, str], PlanningArtifactFact] = {}
+    for key, artifacts in chains.items():
+        nodes = tuple(
+            ArtifactLineageNode(
+                artifact_id=artifact.artifact_id,
+                chain_key=key,
+                version_number=artifact.version_number,
+                supersedes_artifact_id=artifact.supersedes_artifact_id,
+                decision=_story_lineage_decision(artifact.status),
+            )
+            for artifact in artifacts
+        )
+        physical_leaf = select_physical_leaf(nodes, chain_key=key)
+        try:
+            current = select_current_accepted_artifact(nodes, chain_key=key)
+        except PlanningLineageError as error:
+            if error.code is not PlanningLineageCode.ACCEPTED_LEAF_MISSING:
+                raise
+            current = physical_leaf
+        selected[key] = next(
+            artifact
+            for artifact in artifacts
+            if artifact.artifact_id == current.artifact_id
+        )
+    return selected
 
 
 def _latest_resolved_goal(
@@ -631,8 +755,7 @@ def _specification_registry_data(
         "spec_version_id": spec.spec_version_id,
         "spec_hash": spec.spec_hash,
         "status": spec.status,
-        "approved_at": _iso(spec.approved_at),
-        "approved_by": spec.approved_by,
+        "created_at": _iso(spec.created_at),
         "source_specification_candidate_id": (spec.source_specification_candidate_id),
         "source_specification_candidate_fingerprint": (
             spec.source_specification_candidate_fingerprint
@@ -701,16 +824,609 @@ def _accepted_registry_candidate_payloads(
     return payloads
 
 
-def _authority_decisions_by_id(
-    decisions: list[SpecAuthorityAcceptance],
-) -> dict[int, SpecAuthorityAcceptance]:
-    """Index persisted Authority decisions that retain a pending identity."""
-    indexed: dict[int, SpecAuthorityAcceptance] = {}
-    for decision in decisions:
-        authority_id = decision.pending_authority_id
-        if authority_id is not None:
-            indexed[authority_id] = decision
-    return indexed
+class _PlanningArtifactProjectionError(RuntimeError):
+    """Closed Task 7 projection failure with one stable error code."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+@dataclass(frozen=True)
+class _BacklogReviewRecord:
+    artifact: BacklogArtifact
+    specification: AcceptedSpecification
+    content: BacklogOutput
+    decision: BacklogArtifactDecision | None
+
+
+@dataclass(frozen=True)
+class _RoadmapReviewRecord:
+    artifact: RoadmapArtifact
+    backlog: _BacklogReviewRecord
+    content: RoadmapBuilderOutput
+    decision: RoadmapArtifactDecision | None
+
+
+@dataclass(frozen=True)
+class _StoryReviewRecord:
+    artifact: StoryArtifact
+    roadmap: _RoadmapReviewRecord
+    backlog_item: BacklogItem
+    content: CanonicalStoryOutput
+    decision: StoryArtifactDecision | None
+
+
+def _raise_planning_failure(
+    code: str,
+    message: str,
+    *,
+    cause: Exception | None = None,
+) -> Never:
+    error = _PlanningArtifactProjectionError(code, message)
+    if cause is None:
+        raise error
+    raise error from cause
+
+
+def _backlog_terminal_decision(
+    session: Session,
+    *,
+    artifact: BacklogArtifact,
+) -> BacklogArtifactDecision | None:
+    decisions = session.exec(
+        select(BacklogArtifactDecision).where(
+            col(BacklogArtifactDecision.project_id) == artifact.project_id,
+            col(BacklogArtifactDecision.backlog_artifact_id)
+            == artifact.backlog_artifact_id,
+        )
+    ).all()
+    if not decisions:
+        return None
+    if len(decisions) != 1 or (
+        decisions[0].artifact_fingerprint != artifact.content_fingerprint
+        or decisions[0].decision not in {"accepted", "feedback", "rejected"}
+    ):
+        _raise_planning_failure(
+            "PLANNING_ARTIFACT_LINEAGE_INVALID",
+            "Backlog review decision does not match its exact artifact.",
+        )
+    return decisions[0]
+
+
+def _roadmap_terminal_decision(
+    session: Session,
+    *,
+    artifact: RoadmapArtifact,
+) -> RoadmapArtifactDecision | None:
+    decisions = session.exec(
+        select(RoadmapArtifactDecision).where(
+            col(RoadmapArtifactDecision.project_id) == artifact.project_id,
+            col(RoadmapArtifactDecision.roadmap_artifact_id)
+            == artifact.roadmap_artifact_id,
+        )
+    ).all()
+    if not decisions:
+        return None
+    if len(decisions) != 1 or (
+        decisions[0].artifact_fingerprint != artifact.content_fingerprint
+        or decisions[0].decision not in {"accepted", "feedback", "rejected"}
+    ):
+        _raise_planning_failure(
+            "PLANNING_ARTIFACT_LINEAGE_INVALID",
+            "Roadmap review decision does not match its exact artifact.",
+        )
+    return decisions[0]
+
+
+def _story_terminal_decision(
+    session: Session,
+    *,
+    artifact: StoryArtifact,
+) -> StoryArtifactDecision | None:
+    decisions = session.exec(
+        select(StoryArtifactDecision).where(
+            col(StoryArtifactDecision.project_id) == artifact.project_id,
+            col(StoryArtifactDecision.story_artifact_id) == artifact.story_artifact_id,
+        )
+    ).all()
+    if not decisions:
+        return None
+    if len(decisions) != 1 or (
+        decisions[0].artifact_fingerprint != artifact.content_fingerprint
+        or decisions[0].decision not in {"accepted", "feedback", "rejected"}
+    ):
+        _raise_planning_failure(
+            "PLANNING_ARTIFACT_LINEAGE_INVALID",
+            "Story review decision does not match its exact artifact.",
+        )
+    return decisions[0]
+
+
+def _load_backlog_review_record(
+    session: Session,
+    *,
+    project_id: int,
+    backlog_artifact_id: int,
+) -> _BacklogReviewRecord:
+    from services.agent_workbench.backlog_phase import (  # noqa: PLC0415
+        _backlog_lineage_nodes,
+    )
+    from services.planning_lineage import (  # noqa: PLC0415
+        PlanningLineageError,
+        validate_artifact_lineage,
+    )
+
+    artifact = session.exec(
+        select(BacklogArtifact).where(
+            col(BacklogArtifact.project_id) == project_id,
+            col(BacklogArtifact.backlog_artifact_id) == backlog_artifact_id,
+        )
+    ).one_or_none()
+    if artifact is None:
+        _raise_planning_failure(
+            "BACKLOG_ARTIFACT_NOT_FOUND",
+            f"Backlog artifact {backlog_artifact_id} was not found in this Project.",
+        )
+    specification = load_accepted_specification(
+        session,
+        project_id=project_id,
+        spec_version_id=artifact.spec_version_id,
+        spec_hash=artifact.spec_hash,
+    )
+    registry = session.get(SpecRegistry, artifact.spec_version_id)
+    goal = session.exec(
+        select(ProductGoalArtifact).where(
+            col(ProductGoalArtifact.project_id) == project_id,
+            col(ProductGoalArtifact.product_goal_artifact_id)
+            == artifact.product_goal_artifact_id,
+            col(ProductGoalArtifact.content_fingerprint)
+            == artifact.product_goal_fingerprint,
+        )
+    ).one_or_none()
+    goal_decision = session.exec(
+        select(ProductGoalArtifactDecision).where(
+            col(ProductGoalArtifactDecision.project_id) == project_id,
+            col(ProductGoalArtifactDecision.product_goal_artifact_id)
+            == artifact.product_goal_artifact_id,
+            col(ProductGoalArtifactDecision.artifact_fingerprint)
+            == artifact.product_goal_fingerprint,
+            col(ProductGoalArtifactDecision.decision) == "accepted",
+        )
+    ).one_or_none()
+    if (
+        registry is None
+        or (
+            registry.project_id,
+            registry.spec_hash,
+            registry.source_product_goal_artifact_id,
+            registry.source_product_goal_fingerprint,
+        )
+        != (
+            project_id,
+            artifact.spec_hash,
+            artifact.product_goal_artifact_id,
+            artifact.product_goal_fingerprint,
+        )
+        or goal is None
+        or goal_decision is None
+    ):
+        _raise_planning_failure(
+            "PLANNING_ARTIFACT_LINEAGE_INVALID",
+            "Backlog artifact does not resolve its exact Specification and "
+            "Goal lineage.",
+        )
+    try:
+        _canonical_content, content = load_stored_backlog_planning_content(
+            artifact.canonical_content_json,
+            expected_fingerprint=artifact.content_fingerprint,
+            specification=specification,
+        )
+    except (TypeError, ValidationError, ValueError) as error:
+        _raise_planning_failure(
+            "PLANNING_ARTIFACT_CONTENT_INVALID",
+            "Backlog artifact canonical content is invalid.",
+            cause=error,
+        )
+    try:
+        validate_artifact_lineage(
+            _backlog_lineage_nodes(session, project_id=project_id)
+        )
+    except (PlanningLineageError, ValueError) as error:
+        _raise_planning_failure(
+            "PLANNING_ARTIFACT_LINEAGE_INVALID",
+            "Backlog artifact ancestry is invalid.",
+            cause=error,
+        )
+    return _BacklogReviewRecord(
+        artifact=artifact,
+        specification=specification,
+        content=content,
+        decision=_backlog_terminal_decision(session, artifact=artifact),
+    )
+
+
+def _load_roadmap_review_record(
+    session: Session,
+    *,
+    project_id: int,
+    roadmap_artifact_id: int,
+) -> _RoadmapReviewRecord:
+    from services.agent_workbench.roadmap_phase import (  # noqa: PLC0415
+        _roadmap_lineage_nodes,
+    )
+    from services.planning_lineage import (  # noqa: PLC0415
+        PlanningLineageError,
+        validate_artifact_lineage,
+    )
+
+    artifact = session.exec(
+        select(RoadmapArtifact).where(
+            col(RoadmapArtifact.project_id) == project_id,
+            col(RoadmapArtifact.roadmap_artifact_id) == roadmap_artifact_id,
+        )
+    ).one_or_none()
+    if artifact is None:
+        _raise_planning_failure(
+            "ROADMAP_ARTIFACT_NOT_FOUND",
+            f"Roadmap artifact {roadmap_artifact_id} was not found in this Project.",
+        )
+    backlog = _load_backlog_review_record(
+        session,
+        project_id=project_id,
+        backlog_artifact_id=artifact.backlog_artifact_id,
+    )
+    if (
+        backlog.artifact.content_fingerprint != artifact.backlog_artifact_fingerprint
+        or backlog.decision is None
+        or backlog.decision.decision != "accepted"
+    ):
+        _raise_planning_failure(
+            "PLANNING_ARTIFACT_LINEAGE_INVALID",
+            "Roadmap artifact does not resolve one exact accepted Backlog parent.",
+        )
+    try:
+        _canonical_content, content = load_stored_roadmap_planning_content(
+            artifact.canonical_content_json,
+            expected_fingerprint=artifact.content_fingerprint,
+            parent_backlog_item_ids=tuple(
+                item.backlog_item_id for item in backlog.content.backlog_items
+            ),
+        )
+    except (TypeError, ValidationError, ValueError) as error:
+        _raise_planning_failure(
+            "PLANNING_ARTIFACT_CONTENT_INVALID",
+            "Roadmap artifact canonical content or Backlog coverage is invalid.",
+            cause=error,
+        )
+    try:
+        validate_artifact_lineage(
+            _roadmap_lineage_nodes(session, project_id=project_id)
+        )
+    except (PlanningLineageError, ValueError) as error:
+        _raise_planning_failure(
+            "PLANNING_ARTIFACT_LINEAGE_INVALID",
+            "Roadmap artifact ancestry is invalid.",
+            cause=error,
+        )
+    return _RoadmapReviewRecord(
+        artifact=artifact,
+        backlog=backlog,
+        content=content,
+        decision=_roadmap_terminal_decision(session, artifact=artifact),
+    )
+
+
+def _load_story_review_record(
+    session: Session,
+    *,
+    project_id: int,
+    story_artifact_id: int,
+) -> _StoryReviewRecord:
+    from services.agent_workbench.story_phase import (  # noqa: PLC0415
+        _story_lineage_nodes,
+        load_stored_story_planning_content,
+    )
+    from services.planning_lineage import (  # noqa: PLC0415
+        PlanningLineageError,
+        validate_artifact_lineage,
+    )
+
+    artifact = session.exec(
+        select(StoryArtifact).where(
+            col(StoryArtifact.project_id) == project_id,
+            col(StoryArtifact.story_artifact_id) == story_artifact_id,
+        )
+    ).one_or_none()
+    if artifact is None:
+        _raise_planning_failure(
+            "STORY_ARTIFACT_NOT_FOUND",
+            f"Story artifact {story_artifact_id} was not found in this Project.",
+        )
+    roadmap = _load_roadmap_review_record(
+        session,
+        project_id=project_id,
+        roadmap_artifact_id=artifact.roadmap_artifact_id,
+    )
+    backlog = roadmap.backlog
+    if (
+        artifact.roadmap_artifact_fingerprint != roadmap.artifact.content_fingerprint
+        or roadmap.decision is None
+        or roadmap.decision.decision != "accepted"
+        or artifact.source_backlog_artifact_id != backlog.artifact.backlog_artifact_id
+        or artifact.source_backlog_artifact_fingerprint
+        != backlog.artifact.content_fingerprint
+        or roadmap.artifact.backlog_artifact_id != artifact.source_backlog_artifact_id
+        or roadmap.artifact.backlog_artifact_fingerprint
+        != artifact.source_backlog_artifact_fingerprint
+    ):
+        _raise_planning_failure(
+            "PLANNING_ARTIFACT_LINEAGE_INVALID",
+            (
+                "Story artifact does not resolve exact accepted Roadmap and "
+                "Backlog parents."
+            ),
+        )
+    backlog_items = tuple(
+        item
+        for item in backlog.content.backlog_items
+        if item.backlog_item_id == artifact.backlog_item_id
+    )
+    occurrences = sum(
+        release.backlog_item_ids.count(artifact.backlog_item_id)
+        for release in roadmap.content.roadmap_releases
+    )
+    if len(backlog_items) != 1 or occurrences != 1:
+        _raise_planning_failure(
+            "PLANNING_ARTIFACT_LINEAGE_INVALID",
+            "Story artifact Backlog item is missing from its exact Roadmap lineage.",
+        )
+    try:
+        _canonical_content, content = load_stored_story_planning_content(
+            artifact.canonical_content_json,
+            expected_fingerprint=artifact.content_fingerprint,
+            specification=backlog.specification,
+            backlog_item=backlog_items[0],
+        )
+    except (TypeError, ValidationError, ValueError) as error:
+        _raise_planning_failure(
+            "PLANNING_ARTIFACT_CONTENT_INVALID",
+            "Story artifact canonical content is invalid.",
+            cause=error,
+        )
+    item_ids = tuple(envelope.item.story_item_id for envelope in content.story_items)
+    if artifact.story_item_ids_json != canonical_json(list(item_ids)):
+        _raise_planning_failure(
+            "PLANNING_ARTIFACT_CONTENT_INVALID",
+            "Story artifact item IDs do not match its exact canonical content.",
+        )
+    try:
+        validate_artifact_lineage(_story_lineage_nodes(session, project_id=project_id))
+    except (PlanningLineageError, ValueError) as error:
+        _raise_planning_failure(
+            "PLANNING_ARTIFACT_LINEAGE_INVALID",
+            "Story artifact ancestry is invalid.",
+            cause=error,
+        )
+    return _StoryReviewRecord(
+        artifact=artifact,
+        roadmap=roadmap,
+        backlog_item=backlog_items[0],
+        content=content,
+        decision=_story_terminal_decision(session, artifact=artifact),
+    )
+
+
+def _planning_review_data(
+    decision: (
+        BacklogArtifactDecision | RoadmapArtifactDecision | StoryArtifactDecision | None
+    ),
+) -> JsonObject:
+    if decision is None:
+        return {"state": "pending"}
+    return {
+        "state": decision.decision,
+        "rationale": decision.rationale,
+        "reviewer": decision.reviewer,
+        "decided_at": _iso(decision.decided_at),
+    }
+
+
+def _specification_evidence(
+    specification: AcceptedSpecification,
+    spec_item_ids: tuple[str, ...],
+) -> list[JsonValue]:
+    items_by_id = {item.id: item for item in specification.payload.items}
+    evidence: list[JsonValue] = []
+    for item_id in spec_item_ids:
+        item = items_by_id.get(item_id)
+        if item is None:
+            _raise_planning_failure(
+                "PLANNING_ARTIFACT_CONTENT_INVALID",
+                f"Planning artifact cites unknown Specification item {item_id}.",
+            )
+        evidence.append(
+            {
+                "spec_item_id": item.id,
+                "title": item.title,
+                "statement": item.statement,
+                "level": None if item.level is None else item.level.value,
+                "acceptance_criteria": list(item.acceptance),
+                "verification_method": (
+                    None if item.verification is None else item.verification.value
+                ),
+            }
+        )
+    return evidence
+
+
+def _planning_backlog_item(
+    item: BacklogItem,
+    *,
+    specification: AcceptedSpecification,
+) -> JsonObject:
+    data = _validated(item.model_dump(mode="json", exclude={"spec_item_ids"}))
+    data["specification_evidence"] = _specification_evidence(
+        specification, item.spec_item_ids
+    )
+    return data
+
+
+def _backlog_review_projection(record: _BacklogReviewRecord) -> JsonObject:
+    artifact = record.artifact
+    return {
+        "schema_version": "agileforge.planning-artifact-review.v1",
+        "phase": "backlog",
+        "project_id": artifact.project_id,
+        "lineage": {
+            "specification": {
+                "spec_version_id": record.specification.spec_version_id,
+                "spec_hash": record.specification.spec_hash,
+                "status": record.specification.status,
+            },
+            "product_goal": {
+                "product_goal_artifact_id": artifact.product_goal_artifact_id,
+                "product_goal_fingerprint": artifact.product_goal_fingerprint,
+            },
+        },
+        "candidate": {
+            "backlog_artifact_id": artifact.backlog_artifact_id,
+            "artifact_fingerprint": artifact.content_fingerprint,
+            "version_number": artifact.version_number,
+            "supersedes_backlog_artifact_id": (artifact.supersedes_backlog_artifact_id),
+            "created_by": artifact.created_by,
+            "created_at": _iso(artifact.created_at),
+            "backlog_items": [
+                _planning_backlog_item(
+                    item,
+                    specification=record.specification,
+                )
+                for item in record.content.backlog_items
+            ],
+            "is_complete": record.content.is_complete,
+            "clarifying_questions": list(record.content.clarifying_questions),
+        },
+        "review": _planning_review_data(record.decision),
+    }
+
+
+def _roadmap_review_projection(record: _RoadmapReviewRecord) -> JsonObject:
+    artifact = record.artifact
+    backlog_items = {
+        item.backlog_item_id: item for item in record.backlog.content.backlog_items
+    }
+
+    releases: list[JsonValue] = []
+    for release in record.content.roadmap_releases:
+        release_data = _validated(
+            release.model_dump(mode="json", exclude={"backlog_item_ids"})
+        )
+        release_data["backlog_items"] = [
+            _planning_backlog_item(
+                backlog_items[item_id],
+                specification=record.backlog.specification,
+            )
+            for item_id in release.backlog_item_ids
+        ]
+        releases.append(release_data)
+    return {
+        "schema_version": "agileforge.planning-artifact-review.v1",
+        "phase": "roadmap",
+        "project_id": artifact.project_id,
+        "lineage": {
+            "specification": {
+                "spec_version_id": record.backlog.specification.spec_version_id,
+                "spec_hash": record.backlog.specification.spec_hash,
+                "status": record.backlog.specification.status,
+            },
+            "product_goal": {
+                "product_goal_artifact_id": (
+                    record.backlog.artifact.product_goal_artifact_id
+                ),
+                "product_goal_fingerprint": (
+                    record.backlog.artifact.product_goal_fingerprint
+                ),
+            },
+            "backlog": {
+                "backlog_artifact_id": artifact.backlog_artifact_id,
+                "backlog_artifact_fingerprint": (artifact.backlog_artifact_fingerprint),
+            },
+        },
+        "candidate": {
+            "roadmap_artifact_id": artifact.roadmap_artifact_id,
+            "artifact_fingerprint": artifact.content_fingerprint,
+            "version_number": artifact.version_number,
+            "supersedes_roadmap_artifact_id": (artifact.supersedes_roadmap_artifact_id),
+            "created_by": artifact.created_by,
+            "created_at": _iso(artifact.created_at),
+            "roadmap_releases": releases,
+            "roadmap_summary": record.content.roadmap_summary,
+            "is_complete": record.content.is_complete,
+            "clarifying_questions": list(record.content.clarifying_questions),
+        },
+        "review": _planning_review_data(record.decision),
+    }
+
+
+def _story_review_projection(record: _StoryReviewRecord) -> JsonObject:
+    artifact = record.artifact
+    backlog = record.roadmap.backlog
+    story_items: list[JsonValue] = []
+    for envelope in record.content.story_items:
+        item = envelope.item
+        item_data = _validated(
+            item.model_dump(
+                mode="json",
+                exclude={"spec_item_ids"},
+            )
+        )
+        item_data["specification_evidence"] = _specification_evidence(
+            backlog.specification,
+            item.spec_item_ids,
+        )
+        story_items.append(item_data)
+    return {
+        "schema_version": "agileforge.planning-artifact-review.v1",
+        "phase": "story",
+        "project_id": artifact.project_id,
+        "lineage": {
+            "specification": {
+                "spec_version_id": backlog.specification.spec_version_id,
+                "spec_hash": backlog.specification.spec_hash,
+                "status": backlog.specification.status,
+            },
+            "product_goal": {
+                "product_goal_artifact_id": (backlog.artifact.product_goal_artifact_id),
+                "product_goal_fingerprint": (backlog.artifact.product_goal_fingerprint),
+            },
+            "backlog": {
+                "backlog_artifact_id": artifact.source_backlog_artifact_id,
+                "backlog_artifact_fingerprint": (
+                    artifact.source_backlog_artifact_fingerprint
+                ),
+            },
+            "backlog_item": _planning_backlog_item(
+                record.backlog_item,
+                specification=backlog.specification,
+            ),
+            "roadmap": {
+                "roadmap_artifact_id": artifact.roadmap_artifact_id,
+                "roadmap_artifact_fingerprint": (artifact.roadmap_artifact_fingerprint),
+            },
+        },
+        "candidate": {
+            "story_artifact_id": artifact.story_artifact_id,
+            "artifact_fingerprint": artifact.content_fingerprint,
+            "version_number": artifact.version_number,
+            "supersedes_story_artifact_id": artifact.supersedes_story_artifact_id,
+            "created_by": artifact.created_by,
+            "created_at": _iso(artifact.created_at),
+            "story_items": story_items,
+            "is_complete": record.content.is_complete,
+            "clarifying_questions": list(record.content.clarifying_questions),
+        },
+        "review": _planning_review_data(record.decision),
+    }
 
 
 @dataclass(frozen=True)
@@ -743,261 +1459,12 @@ class _SpecificationReadFailure:
     error: JsonObject
 
 
-class _AuthorityReviewProjection(Protocol):
-    """Facts-only authority review projection injected into retained reads."""
-
-    def project(
-        self,
-        *,
-        project: Project,
-        include_spec: str,
-    ) -> JsonObject: ...
-
-
-class DurableAuthorityReviewProjection:
-    """Project durable authority records without workflow recommendations."""
-
-    def __init__(self, *, engine: Engine) -> None:
-        """Bind the projection to durable authority records."""
-        self._engine = engine
-
-    def project(
-        self,
-        *,
-        project: Project,
-        include_spec: str,
-    ) -> JsonObject:
-        """Return accepted and pending authority facts for operator review."""
-        if include_spec not in {"auto", "full", "summary"}:
-            return _error(
-                "INVALID_INPUT",
-                f"Unsupported include_spec value: {include_spec}.",
-                field="include_spec",
-                value=include_spec,
-                allowed=["auto", "full", "summary"],
-            )
-        project_id = project.project_id
-        if project_id is None:
-            return _error(
-                "PROJECT_NOT_FOUND",
-                "Project identity is unavailable.",
-            )
-        with Session(self._engine) as session:
-            specifications = list(
-                session.exec(
-                    select(SpecRegistry)
-                    .where(col(SpecRegistry.project_id) == project_id)
-                    .order_by(col(SpecRegistry.spec_version_id))
-                ).all()
-            )
-            specification_candidates = list(
-                session.exec(
-                    select(SpecificationCandidate)
-                    .where(col(SpecificationCandidate.project_id) == project_id)
-                    .order_by(col(SpecificationCandidate.specification_candidate_id))
-                ).all()
-            )
-            specification_decisions = list(
-                session.exec(
-                    select(SpecificationDecision)
-                    .where(col(SpecificationDecision.project_id) == project_id)
-                    .order_by(col(SpecificationDecision.specification_decision_id))
-                ).all()
-            )
-            authorities = list(
-                session.exec(
-                    select(CompiledSpecAuthority)
-                    .join(
-                        SpecRegistry,
-                        col(CompiledSpecAuthority.spec_version_id)
-                        == col(SpecRegistry.spec_version_id),
-                    )
-                    .where(col(SpecRegistry.project_id) == project_id)
-                    .order_by(col(CompiledSpecAuthority.authority_id))
-                ).all()
-            )
-            decisions = list(
-                session.exec(
-                    select(SpecAuthorityAcceptance)
-                    .where(col(SpecAuthorityAcceptance.project_id) == project_id)
-                    .order_by(
-                        col(SpecAuthorityAcceptance.decided_at),
-                        col(SpecAuthorityAcceptance.id),
-                    )
-                ).all()
-            )
-
-        specs_by_id = {
-            spec.spec_version_id: spec
-            for spec in specifications
-            if spec.spec_version_id is not None
-        }
-        try:
-            candidate_payloads = _accepted_registry_candidate_payloads(
-                project_id=project_id,
-                specifications=specifications,
-                candidates=specification_candidates,
-                decisions=specification_decisions,
-            )
-        except (TypeError, ValueError) as error:
-            return _error(
-                "SPECIFICATION_CANDIDATE_UNAVAILABLE",
-                "Stored Specification candidate contract is unavailable.",
-                project_id=project_id,
-                reason=str(error),
-            )
-        decisions_by_authority = _authority_decisions_by_id(decisions)
-
-        rendered: list[JsonValue] = []
-        rendered_by_id: dict[int, JsonObject] = {}
-        accepted_authority_id: int | None = None
-        pending_authority_id: int | None = None
-        for authority in authorities:
-            authority_id = authority.authority_id
-            spec = specs_by_id.get(authority.spec_version_id)
-            if authority_id is None or spec is None:
-                return _error(
-                    "AUTHORITY_FACTS_UNAVAILABLE",
-                    "Stored authority ownership is incomplete.",
-                    project_id=project_id,
-                )
-            decision = decisions_by_authority.get(authority_id)
-            status = self._authority_status(spec=spec, decision=decision)
-            payload_or_error = self._authority_payload(
-                authority=authority,
-                spec=spec,
-                candidate=candidate_payloads[authority.spec_version_id],
-                decision=decision,
-                status=status,
-            )
-            if payload_or_error.get("ok") is False:
-                return payload_or_error
-            rendered.append(payload_or_error)
-            rendered_by_id[authority_id] = payload_or_error
-            if status == "accepted":
-                accepted_authority_id = authority_id
-            elif status == "pending_review":
-                pending_authority_id = authority_id
-
-        accepted = rendered_by_id.get(accepted_authority_id or -1)
-        pending = rendered_by_id.get(pending_authority_id or -1)
-        findings = pending.get("findings", []) if pending is not None else []
-        return _success(
-            {
-                "schema_version": "agileforge.authority_review_projection.v1",
-                "project": {
-                    "project_id": project_id,
-                    "name": project.name,
-                },
-                "specifications": [
-                    _specification_registry_data(
-                        spec,
-                        candidate=candidate_payloads[spec.spec_version_id],
-                    )
-                    for spec in specifications
-                    if spec.spec_version_id is not None
-                ],
-                "authorities": rendered,
-                "accepted_authority": accepted,
-                "pending_authority": pending,
-                "findings": findings,
-            }
-        )
-
-    @staticmethod
-    def _authority_status(
-        *,
-        spec: SpecRegistry,
-        decision: SpecAuthorityAcceptance | None,
-    ) -> str:
-        if decision is not None and decision.status in {"accepted", "rejected"}:
-            return decision.status
-        return "stale" if spec.status == "superseded" else "pending_review"
-
-    def _authority_payload(
-        self,
-        *,
-        authority: CompiledSpecAuthority,
-        spec: SpecRegistry,
-        candidate: JsonObject,
-        decision: SpecAuthorityAcceptance | None,
-        status: str,
-    ) -> JsonObject:
-        load_result = load_compiled_artifact(authority)
-        artifact = load_result.artifact
-        if artifact is None:
-            return _error(
-                "AUTHORITY_ARTIFACT_UNAVAILABLE",
-                load_result.message or "Stored authority artifact is unavailable.",
-                authority_id=authority.authority_id,
-                artifact_status=load_result.status,
-            )
-        findings: list[JsonValue] = [
-            {
-                "kind": "gap",
-                "severity": "review",
-                "message": gap,
-            }
-            for gap in artifact.gaps
-        ]
-        quality = artifact.authority_quality
-        if quality is not None:
-            findings.extend(
-                {
-                    "kind": "authority_quality",
-                    "finding_id": group.group_id,
-                    "severity": group.severity,
-                    "message": group.reason,
-                    "member_ids": list(group.member_ids),
-                }
-                for group in quality.review_groups
-            )
-        terminal_decision: JsonObject | None = None
-        if decision is not None:
-            terminal_decision = {
-                "status": decision.status,
-                "policy": decision.policy,
-                "decided_by": decision.decided_by,
-                "decided_at": _iso(decision.decided_at),
-                "rationale": decision.rationale,
-            }
-        return {
-            "authority_id": authority.authority_id,
-            "authority_fingerprint": pending_authority_fingerprint(authority),
-            "spec_version_id": authority.spec_version_id,
-            "status": status,
-            "compiler_version": authority.compiler_version,
-            "prompt_hash": authority.prompt_hash,
-            "compiled_at": _iso(authority.compiled_at),
-            "terminal_decision": terminal_decision,
-            "specification": _specification_registry_data(
-                spec,
-                candidate=candidate,
-            ),
-            "invariants": [
-                _validated(invariant.model_dump(mode="json"))
-                for invariant in artifact.invariants
-            ],
-            "findings": findings,
-            "artifact": _validated(artifact.model_dump(mode="json")),
-        }
-
-
 class DurableReadProjectionService:
     """Read supported operator views without deriving workflow availability."""
 
-    def __init__(
-        self,
-        *,
-        engine: Engine,
-        authority_review_projection: _AuthorityReviewProjection | None = None,
-    ) -> None:
-        """Bind durable records and injected read-only authority projections."""
+    def __init__(self, *, engine: Engine) -> None:
+        """Bind durable records used by read-only projections."""
         self._engine = engine
-        self._authority = AuthorityProjectionService(engine=engine)
-        self._authority_review = authority_review_projection or (
-            DurableAuthorityReviewProjection(engine=engine)
-        )
 
     def project_list(self) -> JsonObject:
         """Return durable Project identities and aggregate counts."""
@@ -1089,6 +1556,105 @@ class DurableReadProjectionService:
         if isinstance(context, _ProjectReadFailure):
             return context.error
         return _success({"repository": self._repository_data(context.project)})
+
+    def backlog_review(
+        self,
+        *,
+        project_id: int,
+        backlog_artifact_id: int,
+    ) -> JsonObject:
+        """Render one exact Backlog candidate with pinned Specification evidence."""
+        context = self._project(project_id)
+        if isinstance(context, _ProjectReadFailure):
+            return context.error
+        try:
+            with Session(self._engine) as session:
+                record = _load_backlog_review_record(
+                    session,
+                    project_id=project_id,
+                    backlog_artifact_id=backlog_artifact_id,
+                )
+                return _success(_backlog_review_projection(record))
+        except AcceptedSpecificationIntegrityError as error:
+            return _error(
+                error.code,
+                str(error),
+                project_id=project_id,
+                backlog_artifact_id=backlog_artifact_id,
+            )
+        except _PlanningArtifactProjectionError as error:
+            return _error(
+                error.code,
+                str(error),
+                project_id=project_id,
+                backlog_artifact_id=backlog_artifact_id,
+            )
+
+    def roadmap_review(
+        self,
+        *,
+        project_id: int,
+        roadmap_artifact_id: int,
+    ) -> JsonObject:
+        """Render one exact Roadmap candidate with resolved Backlog evidence."""
+        context = self._project(project_id)
+        if isinstance(context, _ProjectReadFailure):
+            return context.error
+        try:
+            with Session(self._engine) as session:
+                record = _load_roadmap_review_record(
+                    session,
+                    project_id=project_id,
+                    roadmap_artifact_id=roadmap_artifact_id,
+                )
+                return _success(_roadmap_review_projection(record))
+        except AcceptedSpecificationIntegrityError as error:
+            return _error(
+                error.code,
+                str(error),
+                project_id=project_id,
+                roadmap_artifact_id=roadmap_artifact_id,
+            )
+        except _PlanningArtifactProjectionError as error:
+            return _error(
+                error.code,
+                str(error),
+                project_id=project_id,
+                roadmap_artifact_id=roadmap_artifact_id,
+            )
+
+    def story_review(
+        self,
+        *,
+        project_id: int,
+        story_artifact_id: int,
+    ) -> JsonObject:
+        """Render one exact Story candidate with resolved pinned evidence."""
+        context = self._project(project_id)
+        if isinstance(context, _ProjectReadFailure):
+            return context.error
+        try:
+            with Session(self._engine) as session:
+                record = _load_story_review_record(
+                    session,
+                    project_id=project_id,
+                    story_artifact_id=story_artifact_id,
+                )
+                return _success(_story_review_projection(record))
+        except AcceptedSpecificationIntegrityError as error:
+            return _error(
+                error.code,
+                str(error),
+                project_id=project_id,
+                story_artifact_id=story_artifact_id,
+            )
+        except _PlanningArtifactProjectionError as error:
+            return _error(
+                error.code,
+                str(error),
+                project_id=project_id,
+                story_artifact_id=story_artifact_id,
+            )
 
     def _repository_data(self, project: Project) -> JsonObject | None:
         if project.active_repository_binding_id is None:
@@ -1484,45 +2050,6 @@ class DurableReadProjectionService:
             }
         )
 
-    def authority_status(self, *, project_id: int) -> JsonObject:
-        """Delegate to the durable authority projection."""
-        project_or_error = self._project(project_id)
-        if isinstance(project_or_error, _ProjectReadFailure):
-            return project_or_error.error
-        return _validated(self._authority.status(project_id=project_id))
-
-    def authority_invariants(
-        self,
-        *,
-        project_id: int,
-        spec_version_id: int | None = None,
-    ) -> JsonObject:
-        """Delegate to the durable invariant projection."""
-        project_or_error = self._project(project_id)
-        if isinstance(project_or_error, _ProjectReadFailure):
-            return project_or_error.error
-        return _validated(
-            self._authority.invariants(
-                project_id=project_id,
-                spec_version_id=spec_version_id,
-            )
-        )
-
-    def authority_review(
-        self,
-        *,
-        project_id: int,
-        include_spec: str = "auto",
-    ) -> JsonObject:
-        """Return facts-only accepted and pending authority inspection data."""
-        project_or_error = self._project(project_id)
-        if isinstance(project_or_error, _ProjectReadFailure):
-            return project_or_error.error
-        return self._authority_review.project(
-            project=project_or_error.project,
-            include_spec=include_spec,
-        )
-
     def artifact_history(
         self,
         *,
@@ -1608,18 +2135,28 @@ class DurableReadProjectionService:
                 f"Story {story_id} was not found.",
                 story_id=story_id,
             )
+        try:
+            acceptance_criteria = _canonical_acceptance_criteria(
+                story.acceptance_criteria_json
+            )
+        except ValueError:
+            return _error(
+                "ACCEPTANCE_CRITERIA_INVALID",
+                "Stored Story acceptance criteria are invalid.",
+                story_id=story_id,
+            )
+        acceptance_criteria_value: list[JsonValue] = list(acceptance_criteria)
         return _success(
             {
                 "story_id": story_id,
                 "project_id": story.project_id,
                 "title": story.title,
                 "description": story.story_description,
-                "acceptance_criteria": story.acceptance_criteria,
+                "acceptance_criteria": acceptance_criteria_value,
                 "status": _enum_value(story.status),
                 "story_points": story.story_points,
                 "rank": story.rank,
-                "source_requirement": story.source_requirement,
-                "is_refined": story.is_refined,
+                "source_story_item_id": story.source_story_item_id,
                 "is_superseded": story.is_superseded,
                 "updated_at": _iso(story.updated_at),
             }
@@ -1631,37 +2168,64 @@ class DurableReadProjectionService:
         if isinstance(snapshot_or_error, dict):
             return snapshot_or_error
         snapshot = snapshot_or_error
-        story_artifacts = {
-            item.requirement_id: item
-            for item in sorted(
-                (
-                    item
-                    for item in snapshot.planning_artifacts
-                    if item.artifact_type == "story"
-                    and item.requirement_id is not None
-                    and item.status != "superseded"
-                ),
-                key=lambda item: item.artifact_id,
+        backlog_lineage = current_backlog_lineage(snapshot)
+        if backlog_lineage.conflict:
+            return _error(
+                "PROJECT_FACTS_UNAVAILABLE",
+                "Stored Backlog artifact lineage is invalid.",
+                project_id=project_id,
+                reason="BACKLOG_LINEAGE_INVALID",
             )
-        }
+        backlog = backlog_lineage.backlog
+        if backlog is None:
+            return _success(
+                {
+                    "project_id": project_id,
+                    "items": [],
+                    "count": 0,
+                    "pending_count": 0,
+                }
+            )
+        try:
+            story_artifacts = _current_story_artifacts(
+                snapshot,
+                backlog_artifact_id=backlog.artifact_id,
+                backlog_artifact_fingerprint=backlog.artifact_fingerprint,
+            )
+        except PlanningLineageError as error:
+            return _error(
+                "PROJECT_FACTS_UNAVAILABLE",
+                "Stored Story artifact lineage is invalid.",
+                project_id=project_id,
+                reason=error.code.value,
+            )
         items: list[JsonValue] = []
         pending_count = 0
-        for requirement in snapshot.backlog_requirements:
-            artifact = story_artifacts.get(requirement.requirement_id)
+        for requirement in snapshot.backlog_items:
+            if (
+                requirement.backlog_artifact_id != backlog.artifact_id
+                or requirement.backlog_artifact_fingerprint
+                != backlog.artifact_fingerprint
+            ):
+                continue
+            artifact = story_artifacts.get(
+                (requirement.backlog_artifact_id, requirement.backlog_item_id)
+            )
             status = artifact.status if artifact is not None else "pending"
             if status != "accepted":
                 pending_count += 1
             items.append(
                 {
-                    "requirement_id": requirement.requirement_id,
-                    "requirement": requirement.requirement,
-                    "rank": requirement.rank,
+                    "backlog_item_id": requirement.backlog_item_id,
+                    "backlog_artifact_id": requirement.backlog_artifact_id,
+                    "spec_item_ids": list(requirement.spec_item_ids),
+                    "priority": requirement.priority,
                     "status": status,
                     "story_artifact_id": (
                         artifact.artifact_id if artifact is not None else None
                     ),
-                    "story_ids": (
-                        list(artifact.story_ids) if artifact is not None else []
+                    "story_item_ids": (
+                        list(artifact.story_item_ids) if artifact is not None else []
                     ),
                 }
             )
@@ -1705,6 +2269,284 @@ class DurableReadProjectionService:
             if item.sprint_candidate
         ]
         return _success({"project_id": project_id, "items": items, "count": len(items)})
+
+    def sprint_plan_review(  # noqa: C901, PLR0911
+        self,
+        *,
+        project_id: int,
+        sprint_plan_artifact_id: int,
+    ) -> JsonObject:
+        """Return one immutable Sprint-plan review with pinned evidence."""
+        with Session(self._engine) as session:
+            if session.get(Project, project_id) is None:
+                return _error(
+                    "PROJECT_NOT_FOUND",
+                    "Project was not found.",
+                    project_id=project_id,
+                )
+            artifact = session.get(SprintPlanArtifact, sprint_plan_artifact_id)
+            if artifact is None or artifact.project_id != project_id:
+                return _error(
+                    "SPRINT_PLAN_ARTIFACT_NOT_FOUND",
+                    "Sprint plan artifact was not found.",
+                    project_id=project_id,
+                    sprint_plan_artifact_id=sprint_plan_artifact_id,
+                )
+            try:
+                envelope = load_bound_sprint_plan_envelope(
+                    artifact.canonical_task_plan_json,
+                    expected_fingerprint=artifact.plan_fingerprint,
+                    spec_version_id=artifact.spec_version_id,
+                    spec_hash=artifact.spec_hash,
+                    candidate_set_fingerprint=artifact.candidate_set_fingerprint,
+                    selected_story_ids_json=artifact.selected_story_ids_json,
+                )
+                specification = load_accepted_specification(
+                    session,
+                    project_id=project_id,
+                    spec_version_id=artifact.spec_version_id,
+                    spec_hash=artifact.spec_hash,
+                )
+            except (AcceptedSpecificationIntegrityError, ValidationError, ValueError):
+                return _error(
+                    "PLANNING_ARTIFACT_CONTENT_INVALID",
+                    "Sprint plan artifact content is invalid.",
+                    project_id=project_id,
+                    sprint_plan_artifact_id=sprint_plan_artifact_id,
+                )
+
+            artifacts = session.exec(
+                select(SprintPlanArtifact).where(
+                    col(SprintPlanArtifact.project_id) == project_id
+                )
+            ).all()
+            decisions = {
+                row.sprint_plan_artifact_id: row
+                for row in session.exec(
+                    select(SprintPlanArtifactDecision).where(
+                        col(SprintPlanArtifactDecision.project_id) == project_id
+                    )
+                ).all()
+            }
+            try:
+                lineage_decisions: dict[int, PlanningLineageDecision] = {
+                    artifact_id: cast("PlanningLineageDecision", row.decision)
+                    for artifact_id, row in decisions.items()
+                }
+                validate_artifact_lineage(
+                    tuple(
+                        ArtifactLineageNode(
+                            artifact_id=int(row.sprint_plan_artifact_id),
+                            chain_key=(
+                                row.project_id,
+                                row.spec_version_id,
+                                row.spec_hash,
+                                row.sprint_plan_stream_id,
+                            ),
+                            version_number=row.version_number,
+                            supersedes_artifact_id=(
+                                row.supersedes_sprint_plan_artifact_id
+                            ),
+                            decision=lineage_decisions.get(
+                                int(row.sprint_plan_artifact_id)
+                            ),
+                        )
+                        for row in artifacts
+                        if row.sprint_plan_artifact_id is not None
+                    )
+                )
+            except PlanningLineageError:
+                return _error(
+                    "PLANNING_ARTIFACT_LINEAGE_INVALID",
+                    "Sprint plan artifact lineage is invalid.",
+                    project_id=project_id,
+                    sprint_plan_artifact_id=sprint_plan_artifact_id,
+                )
+
+            decision = decisions.get(sprint_plan_artifact_id)
+            if decision is None:
+                current_spec = load_current_accepted_specification(
+                    session,
+                    project_id=project_id,
+                )
+                if (
+                    current_spec is None
+                    or current_spec.spec_version_id != artifact.spec_version_id
+                    or current_spec.spec_hash != artifact.spec_hash
+                ):
+                    return _error(
+                        "STALE_SPECIFICATION",
+                        (
+                            "Sprint plan review requires the current accepted "
+                            "Specification."
+                        ),
+                        project_id=project_id,
+                        sprint_plan_artifact_id=sprint_plan_artifact_id,
+                    )
+                try:
+                    snapshot = WorkflowFactRepository(session).load(project_id)
+                except WorkflowFactLoadError:
+                    return _error(
+                        "PLANNING_ARTIFACT_LINEAGE_INVALID",
+                        "Sprint plan artifact lineage is invalid.",
+                        project_id=project_id,
+                        sprint_plan_artifact_id=sprint_plan_artifact_id,
+                    )
+                candidates = tuple(
+                    item for item in snapshot.stories if item.sprint_candidate
+                )
+                if (
+                    candidate_set_fingerprint(
+                        candidates,
+                        snapshot.story_dependencies,
+                    )
+                    != artifact.candidate_set_fingerprint
+                ):
+                    return _error(
+                        "SPRINT_PLAN_REVIEW_SOURCE_STALE",
+                        "Sprint plan review source changed. Draft a new Sprint plan.",
+                        project_id=project_id,
+                        sprint_plan_artifact_id=sprint_plan_artifact_id,
+                    )
+
+            story_rows = {
+                row.story_id: row
+                for row in session.exec(
+                    select(UserStory).where(col(UserStory.project_id) == project_id)
+                ).all()
+            }
+            selected_stories: list[JsonValue] = []
+            try:
+                for selected in envelope.planner_output.selected_stories:
+                    story = story_rows[selected.story_id]
+                    if (
+                        story.source_story_item_id != selected.story_item_id
+                        or story.source_story_artifact_id is None
+                        or story.source_story_artifact_fingerprint is None
+                        or story.source_story_item_fingerprint is None
+                    ):
+                        message = "Selected Story identity changed."
+                        raise ValueError(message)  # noqa: TRY301
+                    story_record = _load_story_review_record(
+                        session,
+                        project_id=project_id,
+                        story_artifact_id=story.source_story_artifact_id,
+                    )
+                    source_specification = story_record.roadmap.backlog.specification
+                    source_items = tuple(
+                        item
+                        for item in story_record.content.story_items
+                        if item.item.story_item_id == selected.story_item_id
+                    )
+                    if (
+                        story_record.artifact.content_fingerprint
+                        != story.source_story_artifact_fingerprint
+                        or story_record.decision is None
+                        or story_record.decision.decision != "accepted"
+                        or source_specification.spec_version_id
+                        != artifact.spec_version_id
+                        or source_specification.spec_hash != artifact.spec_hash
+                        or len(source_items) != 1
+                        or source_items[0].item_fingerprint
+                        != story.source_story_item_fingerprint
+                    ):
+                        message = "Selected Story immutable source changed."
+                        raise ValueError(message)  # noqa: TRY301
+                    source_item = source_items[0].item
+                    story_evidence = _specification_evidence(
+                        specification,
+                        source_item.spec_item_ids,
+                    )
+                    tasks: list[JsonValue] = [
+                        {
+                            "description": task.description,
+                            "task_kind": task.task_kind,
+                            "artifact_targets": list(task.artifact_targets),
+                            "workstream_tags": list(task.workstream_tags),
+                            "checklist_items": list(task.checklist_items),
+                            "specification_evidence": _specification_evidence(
+                                specification,
+                                task.relevant_spec_item_ids,
+                            ),
+                        }
+                        for task in selected.tasks
+                    ]
+                    selected_stories.append(
+                        {
+                            "story_id": selected.story_id,
+                            "story_artifact_id": story.source_story_artifact_id,
+                            "story_artifact_fingerprint": (
+                                story.source_story_artifact_fingerprint
+                            ),
+                            "story_item_id": story.source_story_item_id,
+                            "title": source_item.story_title,
+                            "statement": source_item.statement,
+                            "persona": source_item.persona,
+                            "acceptance_criteria": list(
+                                source_item.acceptance_criteria
+                            ),
+                            "specification_evidence": story_evidence,
+                            "reason_for_selection": selected.reason_for_selection,
+                            "tasks": tasks,
+                        }
+                    )
+            except (
+                KeyError,
+                TypeError,
+                ValueError,
+                json.JSONDecodeError,
+                _PlanningArtifactProjectionError,
+            ):
+                return _error(
+                    "PLANNING_ARTIFACT_CONTENT_INVALID",
+                    "Sprint plan artifact content is invalid.",
+                    project_id=project_id,
+                    sprint_plan_artifact_id=sprint_plan_artifact_id,
+                )
+
+            review: JsonObject = {
+                "state": "pending" if decision is None else decision.decision,
+                "rationale": None if decision is None else decision.rationale,
+                "reviewer": None if decision is None else decision.reviewer,
+                "decided_at": None if decision is None else _iso(decision.decided_at),
+                "activated_sprint_id": (
+                    None if decision is None else decision.activated_sprint_id
+                ),
+            }
+            return _success(
+                {
+                    "schema_version": "agileforge.planning-artifact-review.v1",
+                    "phase": "sprint_plan",
+                    "project_id": project_id,
+                    "lineage": {
+                        "specification": {
+                            "spec_version_id": specification.spec_version_id,
+                            "spec_hash": specification.spec_hash,
+                            "status": specification.status,
+                        },
+                        "sprint_plan": {
+                            "sprint_plan_stream_id": artifact.sprint_plan_stream_id,
+                            "version_number": artifact.version_number,
+                            "supersedes_sprint_plan_artifact_id": (
+                                artifact.supersedes_sprint_plan_artifact_id
+                            ),
+                        },
+                    },
+                    "candidate": {
+                        "sprint_plan_artifact_id": sprint_plan_artifact_id,
+                        "artifact_fingerprint": artifact.plan_fingerprint,
+                        "candidate_set_fingerprint": (
+                            artifact.candidate_set_fingerprint
+                        ),
+                        "created_by": artifact.created_by,
+                        "created_at": _iso(artifact.created_at),
+                        "team_name": envelope.team_name,
+                        "sprint_goal": envelope.planner_output.sprint_goal,
+                        "selected_stories": selected_stories,
+                    },
+                    "review": review,
+                }
+            )
 
     def sprint_history(self, *, project_id: int) -> JsonObject:
         """Combine durable Sprint-plan attempts with execution lifecycle facts."""
@@ -1964,7 +2806,12 @@ class DurableReadProjectionService:
         task_id: int,
         flavor: str | None = None,
     ) -> JsonObject:
-        """Return canonical task_packet.v2 from durable current records."""
+        """Return canonical task_packet.v3 from exact accepted delivery lineage."""
+        from services.packets.canonical import (  # noqa: PLC0415
+            CanonicalPacketError,
+            build_task_packet,
+        )
+
         try:
             with Session(self._engine) as session:
                 packet = build_task_packet(
@@ -1975,9 +2822,7 @@ class DurableReadProjectionService:
                 )
         except CanonicalPacketError as error:
             return _error(error.code, str(error), **error.details)
-        if flavor:
-            packet["render"] = render_packet(packet, flavor)
-        return _success(packet)
+        return _packet_read(packet, flavor)
 
     def story_packet(
         self,
@@ -1987,7 +2832,12 @@ class DurableReadProjectionService:
         story_id: int,
         flavor: str | None = None,
     ) -> JsonObject:
-        """Return canonical story_packet.v1 from durable current records."""
+        """Return canonical story_packet.v2 from exact accepted delivery lineage."""
+        from services.packets.canonical import (  # noqa: PLC0415
+            CanonicalPacketError,
+            build_story_packet,
+        )
+
         try:
             with Session(self._engine) as session:
                 packet = build_story_packet(
@@ -1998,22 +2848,18 @@ class DurableReadProjectionService:
                 )
         except CanonicalPacketError as error:
             return _error(error.code, str(error), **error.details)
-        if flavor:
-            packet["render"] = render_packet(packet, flavor)
-        return _success(packet)
+        return _packet_read(packet, flavor)
 
     def context_pack(self, *, project_id: int, phase: str) -> JsonObject:
         """Return bounded non-routing context for retained automation readers."""
         project = self.project_show(project_id=project_id)
         if project.get("ok") is not True:
             return project
-        authority = self.authority_status(project_id=project_id)
         return _success(
             {
                 "schema_version": "agileforge.context_pack.v1",
                 "phase": phase,
                 "project": _result_data(project),
-                "authority": _result_data(authority),
             }
         )
 
@@ -2022,12 +2868,10 @@ class DurableReadProjectionService:
         project = self.project_show(project_id=project_id)
         if project.get("ok") is not True:
             return project
-        authority = self.authority_status(project_id=project_id)
         sprint = self.sprint_status(project_id=project_id)
         return _success(
             {
                 "project": _result_data(project),
-                "authority": _result_data(authority),
                 "sprint": _result_data(sprint) if sprint.get("ok") is True else None,
             }
         )
@@ -2177,21 +3021,5 @@ class DurableReadProjectionService:
             default=None,
         )
 
-    def _story_record(self, story_id: int) -> JsonObject | None:
-        with Session(self._engine) as session:
-            story = session.get(UserStory, story_id)
-        if story is None:
-            return None
-        return {
-            "story_id": story_id,
-            "project_id": story.project_id,
-            "title": story.title,
-            "description": story.story_description,
-            "acceptance_criteria": story.acceptance_criteria,
-            "status": _enum_value(story.status),
-            "story_points": story.story_points,
-            "source_requirement": story.source_requirement,
-        }
 
-
-__all__ = ["DurableAuthorityReviewProjection", "DurableReadProjectionService"]
+__all__ = ["DurableReadProjectionService"]

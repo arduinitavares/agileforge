@@ -1,7 +1,6 @@
 """Root product-lifecycle workflow graph hierarchy."""
 
 from workflow.contracts import GRAPH_VERSION
-from workflow.definitions.authority import AUTHORITY_NODES
 from workflow.definitions.backlog import BACKLOG_NODES
 from workflow.definitions.execution import EXECUTION_NODES
 from workflow.definitions.planning import PLANNING_NODES
@@ -22,7 +21,6 @@ ROOT_GRAPH: WorkflowGraph = WorkflowGraph(
                 child_graph_id="specification",
                 nodes=SPECIFICATION_NODES,
             ),
-            ChildGraphSpec(child_graph_id="authority", nodes=AUTHORITY_NODES),
             ChildGraphSpec(child_graph_id="backlog", nodes=BACKLOG_NODES),
             ChildGraphSpec(child_graph_id="planning", nodes=PLANNING_NODES),
             ChildGraphSpec(child_graph_id="execution", nodes=EXECUTION_NODES),

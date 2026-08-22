@@ -219,7 +219,10 @@ def test_specification_facts_expose_direct_v2_lineage_without_discovery() -> Non
         "spec_version_id",
         "spec_hash",
         "status",
-        "approved_at",
+        "source_specification_decision_id",
+        "accepted_at",
+        "accepted_by",
+        "acceptance_notes",
         "source_specification_candidate_id",
         "source_specification_candidate_fingerprint",
         "source_vision_artifact_id",
@@ -973,22 +976,24 @@ def _seed_product_definition(  # noqa: PLR0915
     session.add(candidate)
     session.flush()
     candidate_id = _id(candidate.specification_candidate_id)
-    session.add(
-        SpecificationDecision(
-            project_id=project_id,
-            specification_candidate_id=candidate_id,
-            candidate_fingerprint=candidate.candidate_fingerprint,
-            decision="accepted",
-            rationale="Ready for registration.",
-            reviewer="operator",
-            idempotency_key=f"specification-review-{project_id}",
-            decided_at=candidate_recorded_at + timedelta(seconds=30),
-        )
+    specification_decision = SpecificationDecision(
+        project_id=project_id,
+        specification_candidate_id=candidate_id,
+        candidate_fingerprint=candidate.candidate_fingerprint,
+        decision="accepted",
+        rationale="Ready for registration.",
+        reviewer="operator",
+        idempotency_key=f"specification-review-{project_id}",
+        decided_at=candidate_recorded_at + timedelta(seconds=30),
     )
+    session.add(specification_decision)
+    session.flush()
+    specification_decision_id = _id(specification_decision.specification_decision_id)
     registered_spec = SpecRegistry(
         project_id=project_id,
         spec_hash=candidate.payload_fingerprint,
         status="approved",
+        source_specification_decision_id=specification_decision_id,
         source_specification_candidate_id=candidate_id,
         source_specification_candidate_fingerprint=candidate.candidate_fingerprint,
         source_vision_artifact_id=vision_id,

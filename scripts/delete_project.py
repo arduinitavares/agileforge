@@ -36,7 +36,7 @@ def resolve_db_path(explicit_path: str | None = None) -> str:
 
 
 def delete_project(project_id: int, db_path: str) -> None:
-    """Delete one pre-authority Project through the guarded repository path."""
+    """Delete one Project through the guarded repository path."""
     emit(f"Connecting to database at: {db_path}")
     if db_path != ":memory:" and not Path(db_path).exists():
         msg = f"Database file not found: {db_path}"

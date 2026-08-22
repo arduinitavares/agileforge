@@ -17,6 +17,7 @@ from models.product_definition import (
     VisionInterviewTurn,
     VisionRevisionIntent,
 )
+from models.specs import SpecRegistry
 from models.workflow import WorkflowNodeAttempt
 from services.contracts.vision import (
     VisionAssumption,
@@ -61,9 +62,7 @@ if TYPE_CHECKING:
 class _GenerationContext:
     """Validated request context before durable Vision rows are inserted."""
 
-    input_payload: (
-        VisionBootstrapInput | VisionClarificationInput | VisionRevisionInput
-    )
+    input_payload: VisionBootstrapInput | VisionClarificationInput | VisionRevisionInput
     snapshot: VisionEvidenceSnapshot | None
     revision: VisionRevisionIntent | None
     revision_intent_id: int | None
@@ -117,6 +116,26 @@ def _active_goal_exists(session: Session, project_id: int) -> bool:
         ).all()
     }
     return bool(accepted_ids - outcome_ids)
+
+
+def _supersede_prior_approved_specification(
+    session: Session,
+    artifact: VisionArtifact,
+) -> None:
+    """Retire the delivery root attached to an accepted Vision replacement."""
+    prior_vision_id = artifact.supersedes_vision_artifact_id
+    if prior_vision_id is None:
+        return
+    registries = session.exec(
+        select(SpecRegistry).where(
+            col(SpecRegistry.project_id) == artifact.project_id,
+            col(SpecRegistry.source_vision_artifact_id) == prior_vision_id,
+            col(SpecRegistry.status) == "approved",
+        )
+    ).all()
+    for registry in registries:
+        registry.status = "superseded"
+        session.add(registry)
 
 
 def _open_revision_intent(
@@ -792,6 +811,8 @@ def execute_decide_vision_review(
         decided_at=evaluated_at,
     )
     session.add(row)
+    if request.decision == "accepted":
+        _supersede_prior_approved_specification(session, artifact)
     session.flush()
     if row.vision_artifact_decision_id is None:
         return _conflict("Vision decision did not receive a durable identity.")

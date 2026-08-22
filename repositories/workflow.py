@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, cast
 
 from pydantic import TypeAdapter, ValidationError
 from sqlmodel import Session, col, select
 
-from models.authority_curation import AuthorityFeedbackAttempt
 from models.core import (
     Project,
     Sprint,
@@ -34,7 +33,7 @@ from models.product_definition import (
     VisionRevisionIntent,
 )
 from models.repository import RepositoryBinding
-from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance, SpecRegistry
+from models.specs import SpecRegistry
 from models.workflow import (
     BacklogArtifact,
     BacklogArtifactDecision,
@@ -63,22 +62,38 @@ from services.contracts.specification_source import (
     SpecificationSourceBundle,
     source_bundle_fingerprint,
 )
-from services.contracts.sprint import (
-    SprintPlannerOutput,
-)
 from services.contracts.vision_evidence import VisionEvidenceBundle
-from services.specs.authority_selection import pending_authority_fingerprint
+from services.planning_artifact_content import (
+    load_bound_sprint_plan_envelope,
+    load_stored_backlog_planning_content,
+    load_stored_roadmap_planning_content,
+)
+from services.planning_lineage import (
+    ArtifactLineageNode,
+    PlanningLineageError,
+    accepted_ancestor_ids,
+)
+from services.planning_lineage import (
+    Decision as PlanningLineageDecision,
+)
+from services.specs.accepted_specification import (
+    AcceptedSpecificationIntegrityError,
+    load_accepted_specification,
+)
 from services.specs.candidate_contract import (
     SpecificationCandidateEnvelope,
     canonical_candidate_json,
     load_candidate_contract,
 )
+from services.specs.story_validation_service import (
+    StoryValidationReadinessError,
+    require_story_ready_for_sprint,
+)
 from utils.agileforge_spec_profile_v2 import (
     SpecificationPayload,
     canonical_spec_hash,
 )
-from utils.spec_schemas import SpecAuthorityCompilationSuccess
-from utils.task_metadata import TaskMetadata, serialize_task_metadata
+from utils.task_metadata import parse_task_metadata, serialize_task_metadata
 from workflow.contracts import JsonValue
 from workflow.execution_integrity import (
     ExecutionIntegrityError,
@@ -91,9 +106,7 @@ from workflow.execution_integrity import (
     triage_payload_fingerprint,
 )
 from workflow.facts import (
-    AuthorityFact,
-    AuthorityFeedbackFact,
-    BacklogRequirementFact,
+    BacklogItemFact,
     NodeAttemptFact,
     PhaseArtifactFact,
     PlanningArtifactFact,
@@ -146,15 +159,15 @@ if TYPE_CHECKING:
     from collections.abc import Iterable
     from datetime import datetime
 
+    from services.contracts.backlog import BacklogOutput
+
 _JSON_OBJECT = TypeAdapter(dict[str, JsonValue])
 _JSON_OBJECT_LIST = TypeAdapter(list[dict[str, JsonValue]])
 _STRING_LIST = TypeAdapter(list[str])
 _INT_LIST = TypeAdapter(list[int])
 _DEPENDENCY_EDGE_LIST = TypeAdapter(list[StoryDependencyReviewEdgeFact])
-type _AuthorityStatus = Literal["pending_review", "accepted", "rejected", "stale"]
 type _AttemptOutcome = Literal["success", "failure", "obsolete"]
 type _ReviewArtifactType = Literal[
-    "authority",
     "vision",
     "backlog",
     "roadmap",
@@ -194,25 +207,6 @@ class _ReviewDecisionSource:
     artifact_fingerprint: str
     decision: str
     decided_at: datetime
-
-
-@dataclass(frozen=True)
-class _AuthorityAcceptanceSource:
-    """Validated authority decision tied to one exact compiled artifact."""
-
-    decision_id: int
-    authority_id: int
-    authority_fingerprint: str
-    status: str
-    decided_at: datetime
-
-
-@dataclass(frozen=True)
-class _AuthorityLoad:
-    """Authority facts and their validated review facts from one row set."""
-
-    facts: tuple[AuthorityFact, ...]
-    reviews: tuple[ReviewDecisionFact, ...]
 
 
 @dataclass(frozen=True)
@@ -391,16 +385,12 @@ class WorkflowFactRepository:
         spec_versions = {
             item.spec_version_id: item.spec_hash for item in spec_version_facts
         }
-        authority_load = self._authorities(project_id, spec_versions)
-        phase_load = self._phase_artifacts(
-            project_id,
-            {item.authority_id: item for item in authority_load.facts},
-        )
+        phase_load = self._phase_artifacts(project_id)
         planning_load = self._planning_artifacts(project_id)
         sprints = self._sprints(project_id)
         stories = self._stories(
             project_id,
-            frozenset(spec_versions),
+            spec_versions,
             planning_load.facts,
             frozenset(item.sprint_id for item in sprints),
         )
@@ -413,6 +403,7 @@ class WorkflowFactRepository:
             project_id,
             frozenset(item.sprint_id for item in sprints),
             stories,
+            planning_load.facts,
         )
         sprint_starts = self._sprint_starts(
             project_id,
@@ -462,7 +453,6 @@ class WorkflowFactRepository:
             review_decisions=tuple(
                 sorted(
                     (
-                        *authority_load.reviews,
                         *phase_load.reviews,
                         *planning_load.reviews,
                     ),
@@ -487,13 +477,8 @@ class WorkflowFactRepository:
             specification_candidates=product_definition.specification_candidates,
             specification_decisions=product_definition.specification_decisions,
             spec_versions=spec_version_facts,
-            authorities=authority_load.facts,
-            authority_feedback=self._authority_feedback(
-                project_id,
-                {item.authority_id: item for item in authority_load.facts},
-            ),
             phase_artifacts=phase_load.facts,
-            backlog_requirements=self._backlog_requirements(
+            backlog_items=self._backlog_items(
                 project_id,
                 phase_load.facts,
             ),
@@ -549,27 +534,36 @@ class WorkflowFactRepository:
         ).all()
         facts: list[SpecVersionFact] = []
         for row in rows:
-            self._require_product_condition(
-                row.status in {"approved", "superseded"},
-                "Specification registry has an invalid status.",
+            spec_version_id = self._required_id(
+                row.spec_version_id,
+                "specification registry row",
             )
-            status: Literal["approved", "superseded"] = (
-                "approved" if row.status == "approved" else "superseded"
-            )
+            try:
+                accepted = load_accepted_specification(
+                    self._session,
+                    project_id=project_id,
+                    spec_version_id=spec_version_id,
+                    spec_hash=row.spec_hash,
+                )
+            except AcceptedSpecificationIntegrityError as exc:
+                message = f"{exc.code}: {exc}"
+                raise self._error(message) from exc
             facts.append(
                 SpecVersionFact(
-                    spec_version_id=self._required_id(
-                        row.spec_version_id,
-                        "specification registry row",
+                    spec_version_id=accepted.spec_version_id,
+                    spec_hash=accepted.spec_hash,
+                    status=accepted.status,
+                    source_specification_decision_id=(
+                        accepted.specification_decision_id
                     ),
-                    spec_hash=row.spec_hash,
-                    status=status,
-                    approved_at=row.approved_at,
+                    accepted_at=accepted.accepted_at,
+                    accepted_by=accepted.accepted_by,
+                    acceptance_notes=accepted.acceptance_notes,
                     source_specification_candidate_id=(
-                        row.source_specification_candidate_id
+                        accepted.source_specification_candidate_id
                     ),
                     source_specification_candidate_fingerprint=(
-                        row.source_specification_candidate_fingerprint
+                        accepted.source_specification_candidate_fingerprint
                     ),
                     source_vision_artifact_id=row.source_vision_artifact_id,
                     source_vision_fingerprint=row.source_vision_fingerprint,
@@ -1968,9 +1962,19 @@ class WorkflowFactRepository:
                 candidate_fingerprints,
                 "Specification decision",
             )
+            fact = SpecificationDecisionFact(
+                specification_decision_id=identifier,
+                specification_candidate_id=row.specification_candidate_id,
+                candidate_fingerprint=row.candidate_fingerprint,
+                decision=self._product_goal_decision(row.decision),
+                rationale=row.rationale,
+                reviewer=row.reviewer,
+                idempotency_key=row.idempotency_key,
+                decided_at=row.decided_at,
+            )
             candidate = candidates.get(row.specification_candidate_id)
             self._require_product_condition(
-                candidate is not None and candidate.recorded_at < row.decided_at,
+                candidate is not None and candidate.recorded_at < fact.decided_at,
                 "Specification decision must follow candidate creation.",
             )
             self._require_product_condition(
@@ -1982,16 +1986,7 @@ class WorkflowFactRepository:
                 "Rejected or feedback specification decisions require rationale.",
             )
             decided_candidates.add(row.specification_candidate_id)
-            facts[identifier] = SpecificationDecisionFact(
-                specification_decision_id=identifier,
-                specification_candidate_id=row.specification_candidate_id,
-                candidate_fingerprint=row.candidate_fingerprint,
-                decision=self._product_goal_decision(row.decision),
-                rationale=row.rationale,
-                reviewer=row.reviewer,
-                idempotency_key=row.idempotency_key,
-                decided_at=row.decided_at,
-            )
+            facts[identifier] = fact
         return facts
 
     def _spec_versions_with_lineage(
@@ -1999,178 +1994,45 @@ class WorkflowFactRepository:
         spec_versions: tuple[SpecVersionFact, ...],
         product_definition: _ProductDefinitionFactLoad,
     ) -> tuple[SpecVersionFact, ...]:
-        """Validate staging lineage and retain only the current Vision spec line."""
+        """Validate each registry fact against its exact accepted decision fact."""
         candidates = {
             item.specification_candidate_id: item
             for item in product_definition.specification_candidates
         }
-        versions_by_id = {item.spec_version_id: item for item in spec_versions}
-        accepted_candidate_ids = {
-            decision.specification_candidate_id
-            for decision in product_definition.specification_decisions
-            if decision.decision == "accepted"
+        decisions = {
+            item.specification_decision_id: item
+            for item in product_definition.specification_decisions
         }
-        current_vision = self._accepted_current_vision(product_definition)
-        enriched: list[SpecVersionFact] = []
         for item in spec_versions:
             candidate = candidates.get(item.source_specification_candidate_id)
-            source_values = (
-                item.source_vision_artifact_id,
-                item.source_vision_fingerprint,
-                item.source_product_goal_artifact_id,
-                item.source_product_goal_fingerprint,
-            )
+            decision = decisions.get(item.source_specification_decision_id)
             self._require_product_condition(
                 candidate is not None,
                 "Specification registry source candidate is missing.",
             )
-            if candidate is None:
-                continue
-            expected = (
-                candidate.vision_artifact_id,
-                candidate.vision_fingerprint,
-                candidate.product_goal_artifact_id,
-                candidate.product_goal_fingerprint,
+            self._require_product_condition(
+                decision is not None
+                and decision.decision == "accepted"
+                and decision.specification_candidate_id
+                == item.source_specification_candidate_id
+                and decision.candidate_fingerprint
+                == item.source_specification_candidate_fingerprint,
+                "Specification registry accepted decision changed.",
             )
             self._require_product_condition(
-                source_values == expected,
-                "Specification registry source lineage changed.",
+                candidate is not None
+                and item.source_specification_candidate_fingerprint
+                == candidate.candidate_fingerprint
+                and item.spec_hash == candidate.payload_fingerprint,
+                "Specification registry candidate identity changed.",
             )
-            self._require_product_condition(
-                candidate.specification_candidate_id in accepted_candidate_ids,
-                "Specification registry requires an accepted candidate decision.",
-            )
-            self._require_product_condition(
-                item.source_specification_candidate_fingerprint
-                == candidate.candidate_fingerprint,
-                "Specification registry candidate fingerprint changed.",
-            )
-            self._require_product_condition(
-                item.spec_hash == candidate.payload_fingerprint,
-                "Specification registry hash does not match its accepted candidate.",
-            )
-            if (
-                item.supersedes_spec_version_id is not None
-                and item.supersedes_spec_version_id not in versions_by_id
-            ):
-                self._require_product_condition(
-                    False,
-                    "Specification registry supersession is invalid.",
-                )
-            enriched.append(
-                item.model_copy(
-                    update={
-                        "status": (
-                            "superseded"
-                            if self._specification_precedes_current_vision(
-                                item,
-                                current_vision,
-                            )
-                            else item.status
-                        ),
-                    }
-                )
-            )
-        return tuple(enriched)
-
-    @staticmethod
-    def _accepted_current_vision(
-        product_definition: _ProductDefinitionFactLoad,
-    ) -> VisionArtifactFact | None:
-        """Return one accepted Vision chain leaf without selecting by timestamp."""
-        artifacts = product_definition.visions
-        by_id = {item.vision_artifact_id: item for item in artifacts}
-        superseded_ids = {
-            item.supersedes_vision_artifact_id
-            for item in artifacts
-            if item.supersedes_vision_artifact_id is not None
-        }
-        current = [
-            item for item in artifacts if item.vision_artifact_id not in superseded_ids
-        ]
-        if len(current) != 1:
-            return None
-        artifact = current[0]
-        decisions = [
-            item
-            for item in product_definition.vision_decisions
-            if item.vision_artifact_id == artifact.vision_artifact_id
-        ]
-        if (
-            artifact.vision_artifact_id not in by_id
-            or len(decisions) != 1
-            or decisions[0].decision != "accepted"
-            or decisions[0].artifact_fingerprint != artifact.content_fingerprint
-        ):
-            return None
-        return artifact
-
-    @staticmethod
-    def _specification_precedes_current_vision(
-        spec: SpecVersionFact,
-        current_vision: VisionArtifactFact | None,
-    ) -> bool:
-        """Keep staged legacy specifications while retiring replaced Vision lines."""
-        return (
-            current_vision is not None
-            and spec.status == "approved"
-            and spec.source_vision_artifact_id is not None
-            and (
-                spec.source_vision_artifact_id,
-                spec.source_vision_fingerprint,
-            )
-            != (
-                current_vision.vision_artifact_id,
-                current_vision.content_fingerprint,
-            )
-        )
-
-    def _authority_feedback(
-        self,
-        project_id: int,
-        authorities: dict[int, AuthorityFact],
-    ) -> tuple[AuthorityFeedbackFact, ...]:
-        rows = self._session.exec(
-            select(AuthorityFeedbackAttempt)
-            .where(col(AuthorityFeedbackAttempt.project_id) == project_id)
-            .order_by(
-                col(AuthorityFeedbackAttempt.created_at),
-                col(AuthorityFeedbackAttempt.feedback_row_id),
-            ),
-            execution_options=self._query_options(),
-        ).all()
-        facts: list[AuthorityFeedbackFact] = []
-        for row in rows:
-            authority = authorities.get(row.source_authority_id)
-            if (
-                authority is None
-                or authority.authority_fingerprint != row.source_authority_fingerprint
-            ):
-                message = (
-                    "Forced relationship corruption in authority feedback: "
-                    f"source authority {row.source_authority_id} does not match."
-                )
-                raise self._error(message)
-            facts.append(
-                AuthorityFeedbackFact(
-                    feedback_id=self._required_id(
-                        row.feedback_row_id,
-                        "authority feedback",
-                    ),
-                    source_authority_id=row.source_authority_id,
-                    source_authority_fingerprint=row.source_authority_fingerprint,
-                    feedback_fingerprint=row.feedback_fingerprint,
-                    recorded_at=row.created_at,
-                )
-            )
-        return tuple(facts)
+        return spec_versions
 
     def _phase_artifacts(
         self,
         project_id: int,
-        authorities: dict[int, AuthorityFact],
     ) -> _PhaseArtifactLoad:
-        """Load generic authority-derived phase artifacts, excluding Vision."""
+        """Load immutable Backlog artifacts bound directly to Specifications."""
         backlog_rows = self._session.exec(
             select(BacklogArtifact)
             .where(col(BacklogArtifact.project_id) == project_id)
@@ -2219,21 +2081,33 @@ class WorkflowFactRepository:
                 )
             )
 
-        superseded_backlog_ids = {
-            row.supersedes_backlog_artifact_id
-            for row in backlog_rows
-            if row.supersedes_backlog_artifact_id is not None
-        }
+        superseded_backlog_ids = self._superseded_accepted_ids(
+            tuple(
+                ArtifactLineageNode(
+                    artifact_id=artifact_id,
+                    chain_key=(
+                        project_id,
+                        row.product_goal_artifact_id,
+                        row.product_goal_fingerprint,
+                        row.spec_version_id,
+                        row.spec_hash,
+                    ),
+                    version_number=row.version_number,
+                    supersedes_artifact_id=row.supersedes_backlog_artifact_id,
+                    decision=self._lineage_decision(
+                        None
+                        if artifact_id not in backlog_decisions_by_id
+                        else backlog_decisions_by_id[artifact_id].decision
+                    ),
+                )
+                for artifact_id, row in backlog_by_id.items()
+            )
+        )
         facts: list[PhaseArtifactFact] = []
         for artifact_id, row in backlog_by_id.items():
             self._validate_phase_artifact(
                 artifact_id=artifact_id,
-                canonical_content_json=row.canonical_content_json,
-                content_fingerprint=row.content_fingerprint,
-                authority_id=row.authority_id,
-                authority_fingerprint=row.authority_fingerprint,
-                authorities=authorities,
-                supersedes_artifact_id=row.supersedes_backlog_artifact_id,
+                artifact=row,
                 known_artifact_ids=frozenset(backlog_by_id),
                 label="Backlog",
             )
@@ -2243,8 +2117,9 @@ class WorkflowFactRepository:
                     artifact_type="backlog",
                     artifact_id=artifact_id,
                     artifact_fingerprint=row.content_fingerprint,
-                    authority_id=row.authority_id,
-                    authority_fingerprint=row.authority_fingerprint,
+                    version_number=row.version_number,
+                    spec_version_id=row.spec_version_id,
+                    spec_hash=row.spec_hash,
                     product_goal_artifact_id=row.product_goal_artifact_id,
                     product_goal_fingerprint=row.product_goal_fingerprint,
                     supersedes_artifact_id=row.supersedes_backlog_artifact_id,
@@ -2263,40 +2138,41 @@ class WorkflowFactRepository:
             ),
         )
 
-    @staticmethod
-    def _validate_phase_artifact(  # noqa: PLR0913
+    def _validate_phase_artifact(
+        self,
         *,
         artifact_id: int,
-        canonical_content_json: str,
-        content_fingerprint: str,
-        authority_id: int,
-        authority_fingerprint: str,
-        authorities: dict[int, AuthorityFact],
-        supersedes_artifact_id: int | None,
+        artifact: BacklogArtifact,
         known_artifact_ids: frozenset[int],
         label: str,
     ) -> None:
-        authority = authorities.get(authority_id)
-        if (
-            authority is None
-            or authority.authority_fingerprint != authority_fingerprint
-        ):
-            message = f"{label} artifact authority does not match."
-            raise WorkflowFactRepository._error(message)
-        try:
-            canonical_content = _JSON_OBJECT.validate_json(canonical_content_json)
-        except ValidationError as exc:
-            message = f"Stored canonical {label} artifact JSON is invalid."
-            raise WorkflowFactRepository._error(message) from exc
-        if canonical_hash(canonical_content) != content_fingerprint:
-            message = f"Stored canonical {label} artifact fingerprint changed."
-            raise WorkflowFactRepository._error(message)
+        self._validated_backlog_artifact_content(artifact, label=label)
+        supersedes_artifact_id = artifact.supersedes_backlog_artifact_id
         if supersedes_artifact_id is not None and (
             supersedes_artifact_id not in known_artifact_ids
             or supersedes_artifact_id >= artifact_id
         ):
             message = f"{label} artifact supersession is invalid."
             raise WorkflowFactRepository._error(message)
+
+    @staticmethod
+    def _superseded_accepted_ids(
+        nodes: tuple[ArtifactLineageNode, ...],
+    ) -> frozenset[int]:
+        """Delegate accepted-history displacement to the lineage service."""
+        try:
+            return accepted_ancestor_ids(nodes)
+        except PlanningLineageError as exc:
+            message = "Stored planning artifact lineage is invalid."
+            raise WorkflowFactRepository._error(message) from exc
+
+    @staticmethod
+    def _lineage_decision(decision: str | None) -> PlanningLineageDecision:
+        """Narrow one persisted terminal outcome for lineage projection."""
+        if decision is None or decision in {"accepted", "feedback", "rejected"}:
+            return cast("PlanningLineageDecision", decision)
+        message = "Stored planning artifact decision is invalid."
+        raise WorkflowFactRepository._error(message)
 
     @staticmethod
     def _phase_status(decision: str | None, *, superseded: bool) -> _PhaseStatus:
@@ -2306,16 +2182,16 @@ class WorkflowFactRepository:
             return "pending_review"
         return WorkflowFactRepository._review_outcome(decision)
 
-    def _backlog_requirements(
+    def _backlog_items(
         self,
         project_id: int,
         phase_artifacts: tuple[PhaseArtifactFact, ...],
-    ) -> tuple[BacklogRequirementFact, ...]:
-        """Load stable normalized requirement identities from Backlog content."""
+    ) -> tuple[BacklogItemFact, ...]:
+        """Load immutable host-minted Backlog item identities without prose keys."""
         phase_by_id = {
-            int(item.artifact_id): item
+            item.artifact_id: item
             for item in phase_artifacts
-            if item.artifact_type == "backlog" and isinstance(item.artifact_id, int)
+            if item.artifact_type == "backlog"
         }
         rows = self._session.exec(
             select(BacklogArtifact)
@@ -2323,7 +2199,7 @@ class WorkflowFactRepository:
             .order_by(col(BacklogArtifact.backlog_artifact_id)),
             execution_options=self._query_options(),
         ).all()
-        facts: list[BacklogRequirementFact] = []
+        facts: list[BacklogItemFact] = []
         for row in rows:
             artifact_id = self._required_id(
                 row.backlog_artifact_id,
@@ -2334,55 +2210,74 @@ class WorkflowFactRepository:
                 artifact is None
                 or artifact.artifact_fingerprint != row.content_fingerprint
             ):
-                message = "Backlog requirements do not match their artifact fact."
+                message = "Backlog items do not match their artifact fact."
                 raise self._error(message)
-            content = self._canonical_object(
-                row.canonical_content_json,
-                row.content_fingerprint,
-                "Backlog",
+            content = self._validated_backlog_artifact_content(
+                row,
+                label="Backlog",
             )
-            raw_items = content.get("backlog_items")
-            if not isinstance(raw_items, list):
-                message = "Canonical Backlog artifact has no backlog_items list."
-                raise self._error(message)
-            seen: set[str] = set()
-            for fallback_rank, raw_item in enumerate(raw_items, start=1):
-                if not isinstance(raw_item, dict):
-                    message = "Canonical Backlog artifact contains an invalid item."
-                    raise self._error(message)
-                requirement = raw_item.get("requirement")
-                if not isinstance(requirement, str) or not requirement.strip():
-                    message = "Canonical Backlog item has no requirement text."
-                    raise self._error(message)
-                requirement_id = " ".join(requirement.strip().lower().split())
-                if requirement_id in seen:
-                    message = "Canonical Backlog artifact has duplicate requirements."
-                    raise self._error(message)
-                seen.add(requirement_id)
-                raw_rank = raw_item.get("priority")
-                rank = (
-                    raw_rank
-                    if isinstance(raw_rank, int) and raw_rank > 0
-                    else fallback_rank
+            facts.extend(
+                BacklogItemFact(
+                    backlog_item_id=item.backlog_item_id,
+                    backlog_artifact_id=artifact_id,
+                    backlog_artifact_fingerprint=row.content_fingerprint,
+                    item_fingerprint=canonical_hash(item.model_dump(mode="json")),
+                    spec_item_ids=item.spec_item_ids,
+                    priority=item.priority,
                 )
-                facts.append(
-                    BacklogRequirementFact(
-                        requirement_id=requirement_id,
-                        backlog_artifact_id=artifact_id,
-                        backlog_artifact_fingerprint=row.content_fingerprint,
-                        requirement=requirement.strip(),
-                        rank=rank,
-                    )
-                )
+                for item in content.backlog_items
+            )
         return tuple(
             sorted(
                 facts,
                 key=lambda item: (
                     item.backlog_artifact_id,
-                    item.requirement_id,
+                    item.backlog_item_id,
                 ),
             )
         )
+
+    def _validated_backlog_artifact_content(
+        self,
+        artifact: BacklogArtifact,
+        *,
+        label: str,
+    ) -> BacklogOutput:
+        """Load one exact pinned Backlog and its strict host-owned content."""
+        try:
+            specification = load_accepted_specification(
+                self._session,
+                project_id=artifact.project_id,
+                spec_version_id=artifact.spec_version_id,
+                spec_hash=artifact.spec_hash,
+            )
+        except AcceptedSpecificationIntegrityError as exc:
+            message = f"Stored canonical {label} artifact content is invalid."
+            raise self._error(message) from exc
+        registry = self._session.get(SpecRegistry, artifact.spec_version_id)
+        if registry is None or (
+            registry.project_id,
+            registry.spec_hash,
+            registry.source_product_goal_artifact_id,
+            registry.source_product_goal_fingerprint,
+        ) != (
+            artifact.project_id,
+            artifact.spec_hash,
+            artifact.product_goal_artifact_id,
+            artifact.product_goal_fingerprint,
+        ):
+            message = f"Stored canonical {label} artifact root lineage is invalid."
+            raise self._error(message)
+        try:
+            _canonical_content, content = load_stored_backlog_planning_content(
+                artifact.canonical_content_json,
+                expected_fingerprint=artifact.content_fingerprint,
+                specification=specification,
+            )
+        except (TypeError, ValidationError, ValueError) as exc:
+            message = f"Stored canonical {label} artifact content is invalid."
+            raise self._error(message) from exc
+        return content
 
     @staticmethod
     def _canonical_specification_envelope(
@@ -2647,29 +2542,54 @@ class WorkflowFactRepository:
 
     def _roadmap_planning_facts(
         self,
-        rows: _PlanningRows,
         indexes: _PlanningIndexes,
         decisions: _PlanningDecisionLoad,
     ) -> tuple[PlanningArtifactFact, ...]:
-        superseded = {
-            row.supersedes_roadmap_artifact_id
-            for row in rows.roadmaps
-            if row.supersedes_roadmap_artifact_id is not None
-        }
+        superseded = self._superseded_accepted_ids(
+            tuple(
+                ArtifactLineageNode(
+                    artifact_id=artifact_id,
+                    chain_key=(
+                        row.project_id,
+                        row.backlog_artifact_id,
+                        row.backlog_artifact_fingerprint,
+                    ),
+                    version_number=row.version_number,
+                    supersedes_artifact_id=row.supersedes_roadmap_artifact_id,
+                    decision=self._lineage_decision(
+                        None
+                        if artifact_id not in decisions.roadmaps
+                        else decisions.roadmaps[artifact_id].decision
+                    ),
+                )
+                for artifact_id, row in indexes.roadmaps.items()
+            )
+        )
         facts: list[PlanningArtifactFact] = []
         for artifact_id, row in indexes.roadmaps.items():
-            self._canonical_object(
-                row.canonical_content_json,
-                row.content_fingerprint,
-                "Roadmap",
-            )
             backlog = indexes.backlogs.get(row.backlog_artifact_id)
             if (
                 backlog is None
+                or backlog.project_id != row.project_id
                 or backlog.content_fingerprint != row.backlog_artifact_fingerprint
             ):
                 message = "Roadmap artifact source Backlog changed."
                 raise self._error(message)
+            backlog_content = self._validated_backlog_artifact_content(
+                backlog,
+                label="Roadmap source Backlog",
+            )
+            try:
+                load_stored_roadmap_planning_content(
+                    row.canonical_content_json,
+                    expected_fingerprint=row.content_fingerprint,
+                    parent_backlog_item_ids=tuple(
+                        item.backlog_item_id for item in backlog_content.backlog_items
+                    ),
+                )
+            except (TypeError, ValidationError, ValueError) as exc:
+                message = "Stored canonical Roadmap artifact content is invalid."
+                raise self._error(message) from exc
             decision = decisions.roadmaps.get(artifact_id)
             facts.append(
                 PlanningArtifactFact(
@@ -2678,8 +2598,7 @@ class WorkflowFactRepository:
                     artifact_fingerprint=row.content_fingerprint,
                     source_artifact_id=row.backlog_artifact_id,
                     source_fingerprint=row.backlog_artifact_fingerprint,
-                    authority_id=backlog.authority_id,
-                    authority_fingerprint=backlog.authority_fingerprint,
+                    version_number=row.version_number,
                     backlog_artifact_id=row.backlog_artifact_id,
                     backlog_artifact_fingerprint=row.backlog_artifact_fingerprint,
                     roadmap_artifact_id=artifact_id,
@@ -2695,15 +2614,29 @@ class WorkflowFactRepository:
 
     def _story_planning_facts(
         self,
-        rows: _PlanningRows,
         indexes: _PlanningIndexes,
         decisions: _PlanningDecisionLoad,
     ) -> tuple[PlanningArtifactFact, ...]:
-        superseded = {
-            row.supersedes_story_artifact_id
-            for row in rows.stories
-            if row.supersedes_story_artifact_id is not None
-        }
+        superseded = self._superseded_accepted_ids(
+            tuple(
+                ArtifactLineageNode(
+                    artifact_id=artifact_id,
+                    chain_key=(
+                        row.project_id,
+                        row.source_backlog_artifact_id,
+                        row.backlog_item_id,
+                    ),
+                    version_number=row.version_number,
+                    supersedes_artifact_id=row.supersedes_story_artifact_id,
+                    decision=self._lineage_decision(
+                        None
+                        if artifact_id not in decisions.stories
+                        else decisions.stories[artifact_id].decision
+                    ),
+                )
+                for artifact_id, row in indexes.stories.items()
+            )
+        )
         facts: list[PlanningArtifactFact] = []
         for artifact_id, row in indexes.stories.items():
             self._canonical_object(
@@ -2725,9 +2658,8 @@ class WorkflowFactRepository:
             ):
                 message = "Story artifact source Backlog changed."
                 raise self._error(message)
-            story_ids = self._canonical_story_ids(
-                row.story_ids_json,
-                "Story artifact",
+            story_item_ids = self._canonical_string_list(
+                row.story_item_ids_json, "Story artifact item IDs"
             )
             decision = decisions.stories.get(artifact_id)
             facts.append(
@@ -2737,14 +2669,15 @@ class WorkflowFactRepository:
                     artifact_fingerprint=row.content_fingerprint,
                     source_artifact_id=row.roadmap_artifact_id,
                     source_fingerprint=row.roadmap_artifact_fingerprint,
-                    authority_id=backlog.authority_id,
-                    authority_fingerprint=backlog.authority_fingerprint,
-                    backlog_artifact_id=roadmap.backlog_artifact_id,
-                    backlog_artifact_fingerprint=roadmap.backlog_artifact_fingerprint,
+                    version_number=row.version_number,
+                    backlog_artifact_id=row.source_backlog_artifact_id,
+                    backlog_artifact_fingerprint=(
+                        row.source_backlog_artifact_fingerprint
+                    ),
                     roadmap_artifact_id=row.roadmap_artifact_id,
                     roadmap_artifact_fingerprint=row.roadmap_artifact_fingerprint,
-                    requirement_id=row.requirement_id,
-                    story_ids=story_ids,
+                    backlog_item_id=row.backlog_item_id,
+                    story_item_ids=story_item_ids,
                     supersedes_artifact_id=row.supersedes_story_artifact_id,
                     status=self._phase_status(
                         None if decision is None else decision.decision,
@@ -2768,44 +2701,101 @@ class WorkflowFactRepository:
             raise self._error(message)
         return story_ids
 
+    def _canonical_ordered_story_ids(
+        self,
+        raw_json: str,
+        label: str,
+    ) -> tuple[int, ...]:
+        try:
+            story_ids = tuple(_INT_LIST.validate_json(raw_json))
+        except ValidationError as exc:
+            message = f"{label} IDs are invalid."
+            raise self._error(message) from exc
+        if (
+            not story_ids
+            or len(story_ids) != len(set(story_ids))
+            or canonical_json(list(story_ids)) != raw_json
+        ):
+            message = f"{label} IDs are not canonical."
+            raise self._error(message)
+        return story_ids
+
     def _sprint_planning_facts(
         self,
-        rows: _PlanningRows,
         indexes: _PlanningIndexes,
         decisions: _PlanningDecisionLoad,
     ) -> tuple[PlanningArtifactFact, ...]:
-        superseded = {
-            row.supersedes_sprint_plan_artifact_id
-            for row in rows.sprint_plans
-            if row.supersedes_sprint_plan_artifact_id is not None
-        }
+        superseded = self._superseded_accepted_ids(
+            tuple(
+                ArtifactLineageNode(
+                    artifact_id=artifact_id,
+                    chain_key=(
+                        row.project_id,
+                        row.spec_version_id,
+                        row.spec_hash,
+                        row.sprint_plan_stream_id,
+                    ),
+                    version_number=row.version_number,
+                    supersedes_artifact_id=row.supersedes_sprint_plan_artifact_id,
+                    decision=self._lineage_decision(
+                        None
+                        if artifact_id not in decisions.sprint_plans
+                        else decisions.sprint_plans[artifact_id].decision
+                    ),
+                )
+                for artifact_id, row in indexes.sprint_plans.items()
+            )
+        )
         facts: list[PlanningArtifactFact] = []
         for artifact_id, row in indexes.sprint_plans.items():
-            canonical_plan = self._canonical_object(
-                row.canonical_task_plan_json,
-                row.plan_fingerprint,
-                "Sprint plan",
-            )
             try:
-                plan = SprintPlannerOutput.model_validate(canonical_plan)
-            except ValidationError as exc:
+                envelope = load_bound_sprint_plan_envelope(
+                    row.canonical_task_plan_json,
+                    expected_fingerprint=row.plan_fingerprint,
+                    spec_version_id=row.spec_version_id,
+                    spec_hash=row.spec_hash,
+                    candidate_set_fingerprint=row.candidate_set_fingerprint,
+                    selected_story_ids_json=row.selected_story_ids_json,
+                )
+            except (ValidationError, ValueError) as exc:
                 message = "Sprint plan task content is invalid."
                 raise self._error(message) from exc
-            story_ids = self._canonical_story_ids(
+            story_ids = self._canonical_ordered_story_ids(
                 row.selected_story_ids_json,
                 "Sprint plan selected Story",
             )
+            if (
+                tuple(
+                    item.story_id for item in envelope.planner_output.selected_stories
+                )
+                != story_ids
+            ):
+                message = "Sprint plan envelope does not match durable columns."
+                raise self._error(message)
             decision = decisions.sprint_plans.get(artifact_id)
             facts.append(
                 PlanningArtifactFact(
                     artifact_type="sprint_plan",
                     artifact_id=artifact_id,
                     artifact_fingerprint=row.plan_fingerprint,
+                    version_number=row.version_number,
                     source_fingerprint=row.candidate_set_fingerprint,
-                    story_ids=story_ids,
-                    sprint_id=row.sprint_id,
+                    spec_version_id=row.spec_version_id,
+                    spec_hash=row.spec_hash,
+                    sprint_plan_stream_id=row.sprint_plan_stream_id,
+                    selected_story_ids=story_ids,
+                    activated_sprint_id=(
+                        None if decision is None else decision.activated_sprint_id
+                    ),
                     candidate_set_fingerprint=row.candidate_set_fingerprint,
-                    task_content_fingerprint=planned_task_content_fingerprint(plan),
+                    task_content_fingerprint=planned_task_content_fingerprint(
+                        envelope.planner_output,
+                        spec_version_id=row.spec_version_id,
+                        spec_hash=row.spec_hash,
+                        sprint_plan_stream_id=row.sprint_plan_stream_id,
+                        sprint_plan_artifact_id=artifact_id,
+                        sprint_plan_fingerprint=row.plan_fingerprint,
+                    ),
                     supersedes_artifact_id=row.supersedes_sprint_plan_artifact_id,
                     status=self._phase_status(
                         None if decision is None else decision.decision,
@@ -2821,9 +2811,9 @@ class WorkflowFactRepository:
         indexes = self._planning_indexes(rows)
         decisions = self._planning_decisions(rows, indexes)
         facts = (
-            *self._roadmap_planning_facts(rows, indexes, decisions),
-            *self._story_planning_facts(rows, indexes, decisions),
-            *self._sprint_planning_facts(rows, indexes, decisions),
+            *self._roadmap_planning_facts(indexes, decisions),
+            *self._story_planning_facts(indexes, decisions),
+            *self._sprint_planning_facts(indexes, decisions),
         )
         return _PlanningArtifactLoad(
             facts=tuple(
@@ -2834,102 +2824,6 @@ class WorkflowFactRepository:
             ),
             reviews=decisions.reviews,
         )
-
-    def _authorities(
-        self,
-        project_id: int,
-        spec_versions: dict[int, str],
-    ) -> _AuthorityLoad:
-        rows = self._session.exec(
-            select(CompiledSpecAuthority, SpecRegistry)
-            .join(
-                SpecRegistry,
-                col(CompiledSpecAuthority.spec_version_id)
-                == col(SpecRegistry.spec_version_id),
-            )
-            .where(col(SpecRegistry.project_id) == project_id)
-            .order_by(col(CompiledSpecAuthority.authority_id)),
-            execution_options=self._query_options(),
-        ).all()
-        authority_records: list[
-            tuple[int, CompiledSpecAuthority, SpecRegistry, str]
-        ] = []
-        authorities_by_id: dict[
-            int,
-            tuple[CompiledSpecAuthority, SpecRegistry, str],
-        ] = {}
-        for authority, spec in rows:
-            authority_id = self._required_id(authority.authority_id, "authority")
-            self._require_fingerprint_reference(
-                authority.spec_version_id,
-                spec.spec_hash,
-                spec_versions,
-                "authority specification",
-            )
-            self._validate_authority_json(
-                authority.compiled_artifact_json,
-                authority_id,
-                authority.compiler_version,
-                authority.prompt_hash,
-            )
-            authority_fingerprint = pending_authority_fingerprint(authority)
-            if authority_fingerprint is None:
-                message = (
-                    "Forced relationship corruption in authority: "
-                    f"compiled authority {authority_id} has no fingerprint."
-                )
-                raise self._error(message)
-            record = (authority, spec, authority_fingerprint)
-            authorities_by_id[authority_id] = record
-            authority_records.append((authority_id, *record))
-
-        acceptance_rows = self._session.exec(
-            select(SpecAuthorityAcceptance)
-            .where(col(SpecAuthorityAcceptance.project_id) == project_id)
-            .order_by(
-                col(SpecAuthorityAcceptance.decided_at),
-                col(SpecAuthorityAcceptance.id),
-            ),
-            execution_options=self._query_options(),
-        ).all()
-        acceptances = tuple(
-            self._authority_acceptance_source(
-                row,
-                spec_versions,
-                authorities_by_id,
-            )
-            for row in acceptance_rows
-        )
-        facts: list[AuthorityFact] = []
-        for authority_id, authority, spec, authority_fingerprint in authority_records:
-            acceptance = self._latest_acceptance(authority_id, acceptances)
-            status, decided_at = self._authority_state(
-                spec.status,
-                acceptance,
-            )
-            facts.append(
-                AuthorityFact(
-                    authority_id=authority_id,
-                    spec_version_id=authority.spec_version_id,
-                    authority_fingerprint=authority_fingerprint,
-                    status=status,
-                    decided_at=decided_at,
-                )
-            )
-        reviews = tuple(
-            self._review_decision_fact(
-                _ReviewDecisionSource(
-                    decision_id=item.decision_id,
-                    artifact_type="authority",
-                    artifact_id=item.authority_id,
-                    artifact_fingerprint=item.authority_fingerprint,
-                    decision=item.status,
-                    decided_at=item.decided_at,
-                )
-            )
-            for item in acceptances
-        )
-        return _AuthorityLoad(facts=tuple(facts), reviews=reviews)
 
     def _sprints(self, project_id: int) -> tuple[SprintFact, ...]:
         rows = self._session.exec(
@@ -3022,16 +2916,19 @@ class WorkflowFactRepository:
                 or sprint.started_at != row.started_at
                 or plan is None
                 or plan.status not in {"accepted", "superseded"}
-                or plan.sprint_id != row.sprint_id
+                or plan.activated_sprint_id != row.sprint_id
                 or plan.artifact_fingerprint != row.plan_fingerprint
                 or plan.candidate_set_fingerprint != row.candidate_set_fingerprint
-                or plan.story_ids != selected_story_ids
+                or plan.selected_story_ids != selected_story_ids
                 or plan.task_content_fingerprint != row.task_content_fingerprint
                 or decision is None
                 or decision.project_id != project_id
                 or decision.sprint_plan_artifact_id != row.sprint_plan_artifact_id
                 or decision.plan_fingerprint != row.plan_fingerprint
                 or decision.decision != "accepted"
+                or decision.activated_sprint_id != row.sprint_id
+                or plan.spec_version_id is None
+                or plan.spec_hash is None
                 or dependency_review is None
                 or dependency_review_row is None
                 or dependency_review_row.project_id != project_id
@@ -3076,6 +2973,8 @@ class WorkflowFactRepository:
                 SprintStartFact(
                     start_id=self._required_id(row.sprint_start_id, "Sprint start"),
                     sprint_id=row.sprint_id,
+                    spec_version_id=plan.spec_version_id,
+                    spec_hash=plan.spec_hash,
                     sprint_plan_artifact_id=row.sprint_plan_artifact_id,
                     sprint_plan_artifact_decision_id=(
                         row.sprint_plan_artifact_decision_id
@@ -3101,40 +3000,33 @@ class WorkflowFactRepository:
         self,
         planning_artifacts: tuple[PlanningArtifactFact, ...],
     ) -> dict[int, PlanningArtifactFact]:
-        accepted_content_by_story: dict[int, PlanningArtifactFact] = {}
+        accepted_by_id: dict[int, PlanningArtifactFact] = {}
         for artifact in planning_artifacts:
             if artifact.artifact_type != "story" or artifact.status != "accepted":
                 continue
-            if artifact.requirement_id is None:
-                message = "Accepted Story artifact has no requirement identity."
+            if artifact.backlog_item_id is None or not artifact.story_item_ids:
+                message = "Accepted Story artifact has no immutable item identity."
                 raise self._error(message)
-            for story_id in artifact.story_ids:
-                if story_id in accepted_content_by_story:
-                    message = "Story row belongs to multiple accepted artifacts."
-                    raise self._error(message)
-                accepted_content_by_story[story_id] = artifact
-        return accepted_content_by_story
+            if artifact.artifact_id in accepted_by_id:
+                message = "Accepted Story artifact identity is duplicated."
+                raise self._error(message)
+            accepted_by_id[artifact.artifact_id] = artifact
+        return accepted_by_id
 
     def _validate_story_relationships(
         self,
         rows: tuple[UserStory, ...],
         dependencies: tuple[UserStoryDependency, ...],
         story_ids: frozenset[int],
-        spec_version_ids: frozenset[int],
+        spec_versions: dict[int, str],
     ) -> None:
         for row in rows:
-            if row.accepted_spec_version_id is not None:
-                self._require_member(
-                    row.accepted_spec_version_id,
-                    spec_version_ids,
-                    "story accepted specification",
-                )
-            if row.superseded_by_story_id is not None:
-                self._require_member(
-                    row.superseded_by_story_id,
-                    story_ids,
-                    "story supersession",
-                )
+            self._require_fingerprint_reference(
+                row.accepted_spec_version_id,
+                row.accepted_spec_hash,
+                spec_versions,
+                "story accepted specification",
+            )
         for dependency in dependencies:
             self._require_member(
                 dependency.dependent_story_id,
@@ -3157,20 +3049,18 @@ class WorkflowFactRepository:
     ) -> StoryFact:
         return StoryFact(
             story_id=story_id,
-            requirement_id=(
-                artifact.requirement_id
-                if artifact is not None
-                else row.source_requirement
+            source_story_artifact_id=row.source_story_artifact_id,
+            source_story_artifact_fingerprint=row.source_story_artifact_fingerprint,
+            source_story_item_id=row.source_story_item_id,
+            source_story_item_fingerprint=row.source_story_item_fingerprint,
+            accepted_spec_version_id=row.accepted_spec_version_id,
+            accepted_spec_hash=row.accepted_spec_hash,
+            spec_item_ids=WorkflowFactRepository._canonical_string_list(
+                row.spec_item_ids_json, "Story Specification item IDs"
             ),
-            content_fingerprint=(
-                artifact.artifact_fingerprint if artifact is not None else None
-            ),
+            content_fingerprint=row.source_story_item_fingerprint,
             content_accepted=artifact is not None,
-            story_artifact_id=(artifact.artifact_id if artifact is not None else None),
-            authority_id=(artifact.authority_id if artifact is not None else None),
-            authority_fingerprint=(
-                artifact.authority_fingerprint if artifact is not None else None
-            ),
+            story_artifact_id=row.source_story_artifact_id,
             backlog_artifact_id=(
                 artifact.backlog_artifact_id if artifact is not None else None
             ),
@@ -3194,7 +3084,7 @@ class WorkflowFactRepository:
     def _stories(
         self,
         project_id: int,
-        spec_version_ids: frozenset[int],
+        spec_versions: dict[int, str],
         planning_artifacts: tuple[PlanningArtifactFact, ...],
         sprint_ids: frozenset[int],
     ) -> tuple[StoryFact, ...]:
@@ -3240,19 +3130,33 @@ class WorkflowFactRepository:
                 "task sprint relationship",
             )
             sprint_ids_by_story[membership.story_id].append(membership.sprint_id)
-        accepted_content_by_story = self._accepted_story_artifacts(planning_artifacts)
+        accepted_artifacts = self._accepted_story_artifacts(planning_artifacts)
         self._validate_story_relationships(
             rows,
             dependencies,
             story_ids,
-            spec_version_ids,
+            spec_versions,
         )
         blockers = self._story_readiness_blockers(rows, dependencies, stories_by_id)
         return tuple(
             self._story_fact(
                 row,
                 story_id,
-                accepted_content_by_story.get(story_id),
+                (
+                    artifact
+                    if (
+                        (
+                            artifact := accepted_artifacts.get(
+                                row.source_story_artifact_id
+                            )
+                        )
+                        is not None
+                        and row.source_story_item_id in artifact.story_item_ids
+                        and row.source_story_artifact_fingerprint
+                        == artifact.artifact_fingerprint
+                    )
+                    else None
+                ),
                 blockers[story_id],
                 tuple(sprint_ids_by_story[story_id]),
             )
@@ -3384,6 +3288,7 @@ class WorkflowFactRepository:
         project_id: int,
         sprint_ids: frozenset[int],
         stories: tuple[StoryFact, ...],
+        planning_artifacts: tuple[PlanningArtifactFact, ...],
     ) -> tuple[TaskFact, ...]:
         rows = self._session.exec(
             select(Task, UserStory)
@@ -3415,6 +3320,11 @@ class WorkflowFactRepository:
             )
             sprint_ids_by_story[membership.story_id].append(membership.sprint_id)
         facts: list[TaskFact] = []
+        sprint_plans = {
+            item.artifact_id: item
+            for item in planning_artifacts
+            if item.artifact_type == "sprint_plan"
+        }
         for task, _story in rows:
             task_id = self._required_id(task.task_id, "task")
             if not task.description.strip():
@@ -3424,8 +3334,8 @@ class WorkflowFactRepository:
                 message = f"Task {task_id} has no canonical metadata."
                 raise self._error(message)
             try:
-                metadata = TaskMetadata.model_validate_json(task.metadata_json)
-            except ValidationError as exc:
+                metadata = parse_task_metadata(task.metadata_json)
+            except (ValidationError, ValueError) as exc:
                 message = f"Task {task_id} metadata is invalid."
                 raise self._error(message) from exc
             canonical_metadata = serialize_task_metadata(metadata)
@@ -3433,6 +3343,19 @@ class WorkflowFactRepository:
                 message = f"Task {task_id} metadata is not canonical."
                 raise self._error(message)
             task_sprint_ids = sprint_ids_by_story[task.story_id]
+            plan = sprint_plans.get(metadata.sprint_plan_artifact_id)
+            if (
+                plan is None
+                or plan.activated_sprint_id is None
+                or plan.activated_sprint_id not in task_sprint_ids
+                or plan.spec_version_id != metadata.spec_version_id
+                or plan.spec_hash != metadata.spec_hash
+                or plan.sprint_plan_stream_id != metadata.sprint_plan_stream_id
+                or plan.artifact_fingerprint != metadata.sprint_plan_fingerprint
+                or task.story_id not in plan.selected_story_ids
+            ):
+                message = f"Task {task_id} metadata plan lineage is invalid."
+                raise self._error(message)
             if not task_sprint_ids:
                 message = (
                     "Forced relationship corruption in task sprint relationship: "
@@ -3440,17 +3363,16 @@ class WorkflowFactRepository:
                 )
                 raise self._error(message)
             story = stories_by_id[task.story_id]
-            facts.extend(
+            facts.append(
                 TaskFact(
                     task_id=task_id,
-                    sprint_id=sprint_id,
+                    sprint_id=plan.activated_sprint_id,
                     story_id=task.story_id,
                     description=task.description,
                     metadata_json=canonical_metadata,
                     status=task.status.value,
                     dependencies_satisfied=not story.readiness_blockers,
                 )
-                for sprint_id in task_sprint_ids
             )
         return tuple(sorted(facts, key=lambda item: (item.sprint_id, item.task_id)))
 
@@ -3904,33 +3826,6 @@ class WorkflowFactRepository:
         return tuple(value)
 
     @staticmethod
-    def _validate_authority_json(
-        content: str | None,
-        authority_id: int,
-        compiler_version: str,
-        prompt_hash: str,
-    ) -> None:
-        if content is None:
-            message = f"Stored canonical authority {authority_id} JSON is missing."
-            raise WorkflowFactRepository._error(message)
-        try:
-            artifact = SpecAuthorityCompilationSuccess.model_validate_json(content)
-        except ValidationError as exc:
-            message = f"Stored canonical authority {authority_id} JSON is invalid."
-            raise WorkflowFactRepository._error(message) from exc
-        duplicated_provenance = (
-            ("compiler_version", artifact.compiler_version, compiler_version),
-            ("prompt_hash", artifact.prompt_hash, prompt_hash),
-        )
-        for field_name, artifact_value, authoritative_value in duplicated_provenance:
-            if artifact_value != authoritative_value:
-                message = (
-                    f"Stored canonical authority {authority_id} {field_name} "
-                    "does not match the authoritative compiled authority row."
-                )
-                raise WorkflowFactRepository._error(message)
-
-    @staticmethod
     def _review_decision_fact(source: _ReviewDecisionSource) -> ReviewDecisionFact:
         return ReviewDecisionFact(
             decision_id=source.decision_id,
@@ -3939,88 +3834,6 @@ class WorkflowFactRepository:
             artifact_fingerprint=source.artifact_fingerprint,
             decision=WorkflowFactRepository._review_outcome(source.decision),
             decided_at=source.decided_at,
-        )
-
-    @staticmethod
-    def _authority_acceptance_source(
-        row: SpecAuthorityAcceptance,
-        spec_versions: dict[int, str],
-        authorities_by_id: dict[
-            int,
-            tuple[CompiledSpecAuthority, SpecRegistry, str],
-        ],
-    ) -> _AuthorityAcceptanceSource:
-        decision_id = WorkflowFactRepository._required_id(
-            row.id,
-            "authority acceptance",
-        )
-        WorkflowFactRepository._require_fingerprint_reference(
-            row.spec_version_id,
-            row.spec_hash,
-            spec_versions,
-            "authority acceptance specification",
-        )
-        authority_id = row.pending_authority_id
-        if authority_id is None:
-            message = (
-                "Forced relationship corruption in authority acceptance: "
-                f"decision {decision_id} has no compiled authority."
-            )
-            raise WorkflowFactRepository._error(message)
-        authority_record = authorities_by_id.get(authority_id)
-        if authority_record is None:
-            message = (
-                "Forced relationship corruption in authority acceptance: "
-                f"authority {authority_id} is not owned by this Project."
-            )
-            raise WorkflowFactRepository._error(message)
-        authority, spec, expected_fingerprint = authority_record
-        if (
-            authority.spec_version_id != row.spec_version_id
-            or spec.spec_version_id != row.spec_version_id
-            or authority.compiler_version != row.compiler_version
-            or authority.prompt_hash != row.prompt_hash
-        ):
-            message = (
-                "Forced relationship corruption in authority acceptance: "
-                f"decision {decision_id} does not match authority {authority_id}."
-            )
-            raise WorkflowFactRepository._error(message)
-        if row.authority_fingerprint != expected_fingerprint:
-            message = (
-                "Forced relationship corruption in authority acceptance: "
-                f"decision {decision_id} has the wrong authority fingerprint."
-            )
-            raise WorkflowFactRepository._error(message)
-        WorkflowFactRepository._authority_status(row.status)
-        return _AuthorityAcceptanceSource(
-            decision_id=decision_id,
-            authority_id=authority_id,
-            authority_fingerprint=expected_fingerprint,
-            status=row.status,
-            decided_at=row.decided_at,
-        )
-
-    @staticmethod
-    def _latest_acceptance(
-        authority_id: int,
-        acceptances: Iterable[_AuthorityAcceptanceSource],
-    ) -> _AuthorityAcceptanceSource | None:
-        matching = (item for item in acceptances if item.authority_id == authority_id)
-        return next(reversed(tuple(matching)), None)
-
-    @staticmethod
-    def _authority_state(
-        spec_status: str,
-        acceptance: _AuthorityAcceptanceSource | None,
-    ) -> tuple[_AuthorityStatus, datetime | None]:
-        if spec_status == "superseded":
-            return "stale", None
-        if acceptance is None:
-            return "pending_review", None
-        return (
-            WorkflowFactRepository._authority_status(acceptance.status),
-            acceptance.decided_at,
         )
 
     @staticmethod
@@ -4066,15 +3879,6 @@ class WorkflowFactRepository:
         raise WorkflowFactRepository._error(message)
 
     @staticmethod
-    def _authority_status(value: str) -> Literal["accepted", "rejected"]:
-        if value == "accepted":
-            return "accepted"
-        if value == "rejected":
-            return "rejected"
-        message = f"Authority acceptance has invalid status {value!r}."
-        raise WorkflowFactRepository._error(message)
-
-    @staticmethod
     def _attempt_outcome(value: str) -> _AttemptOutcome:
         if value == "success":
             return "success"
@@ -4105,8 +3909,8 @@ class WorkflowFactRepository:
     def _error(message: str) -> WorkflowFactLoadError:
         return WorkflowFactLoadError(message)
 
-    @staticmethod
     def _story_readiness_blockers(
+        self,
         stories: Iterable[UserStory],
         dependencies: Iterable[UserStoryDependency],
         stories_by_id: dict[int, UserStory],
@@ -4118,6 +3922,10 @@ class WorkflowFactRepository:
                 blockers[story_id].append("STORY_SUPERSEDED")
             if story.accepted_spec_version_id is None:
                 blockers[story_id].append("SPECIFICATION_NOT_ACCEPTED")
+            try:
+                require_story_ready_for_sprint(self._session, story=story)
+            except StoryValidationReadinessError:
+                blockers[story_id].append("STORY_VALIDATION_REQUIRED")
         for dependency in dependencies:
             if dependency.status != "active":
                 continue

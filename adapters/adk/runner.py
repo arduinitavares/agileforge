@@ -21,7 +21,6 @@ from sqlalchemy.exc import SQLAlchemyError
 from adapters.adk.errors import (
     AttemptRevalidationError,
     AttemptRevalidationInfrastructureError,
-    AuthorityAgenticExecutionError,
     SpecificationAgenticExecutionError,
     VisionAgenticPreflightError,
 )
@@ -109,7 +108,6 @@ _ADK_EXECUTION_ERRORS: tuple[type[BaseException], ...] = (
 _AGENTIC_EXECUTION_ERRORS: tuple[type[BaseException], ...] = (
     AttemptRevalidationError,
     AttemptRevalidationInfrastructureError,
-    AuthorityAgenticExecutionError,
     VisionAgenticPreflightError,
     SpecificationAgenticExecutionError,
     *_ADK_EXECUTION_ERRORS,
@@ -440,7 +438,7 @@ class AdkWorkflowRunner:
             )
         if isinstance(
             error,
-            (AuthorityAgenticExecutionError, VisionAgenticPreflightError),
+            VisionAgenticPreflightError,
         ):
             return self._fail_attempt(
                 request=request,

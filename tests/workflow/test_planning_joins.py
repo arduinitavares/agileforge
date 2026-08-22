@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+from utils.task_metadata import TaskMetadata, serialize_task_metadata
 from workflow.contracts import NodeCategory, NodeDecision
 from workflow.definitions.planning import (
     candidate_set_fingerprint,
@@ -11,15 +12,16 @@ from workflow.definitions.planning import (
     story_dependency_source_fingerprint,
 )
 from workflow.facts import (
-    AuthorityFact,
-    BacklogRequirementFact,
+    BacklogItemFact,
     PhaseArtifactFact,
     PlanningArtifactFact,
     ProductGoalArtifactDecisionFact,
     ProductGoalArtifactFact,
     ProjectFact,
     ReviewDecisionFact,
+    SpecificationCandidateFact,
     SpecVersionFact,
+    SprintFact,
     StoryDependencyFact,
     StoryDependencyReviewEdgeFact,
     StoryDependencyReviewFact,
@@ -36,9 +38,9 @@ from workflow.planning_integrity import (
 )
 
 EVALUATED_AT = datetime(2026, 8, 2, 12, tzinfo=UTC)
-AUTHORITY_ID = 5
-AUTHORITY_FINGERPRINT = "sha256:authority"
 SPEC_VERSION_ID = 4
+SPEC_HASH = "sha256:" + "a" * 64
+PLAN_FINGERPRINT = "sha256:" + "b" * 64
 
 
 def _story(
@@ -51,12 +53,16 @@ def _story(
 ) -> StoryFact:
     return StoryFact(
         story_id=story_id,
-        requirement_id=f"req-{story_id}",
+        source_story_artifact_id=100 + story_id,
+        source_story_artifact_fingerprint=f"sha256:story-{story_id}",
+        source_story_item_id=f"US-{story_id:06d}",
+        source_story_item_fingerprint=f"sha256:story-item-{story_id}",
+        accepted_spec_version_id=SPEC_VERSION_ID,
+        accepted_spec_hash=SPEC_HASH,
+        spec_item_ids=(f"SPEC-{story_id:03d}",),
         content_fingerprint=f"sha256:story-{story_id}",
         content_accepted=accepted,
         story_artifact_id=100 + story_id if accepted else None,
-        authority_id=AUTHORITY_ID if accepted else None,
-        authority_fingerprint=AUTHORITY_FINGERPRINT if accepted else None,
         backlog_artifact_id=10 if accepted else None,
         backlog_artifact_fingerprint="sha256:backlog" if accepted else None,
         roadmap_artifact_id=20 if accepted else None,
@@ -98,12 +104,13 @@ def _snapshot(
     tasks: tuple[TaskFact, ...] | None = None,
 ) -> WorkflowFactSnapshot:
     requirements = tuple(
-        BacklogRequirementFact(
-            requirement_id=f"req-{story.story_id}",
+        BacklogItemFact(
+            backlog_item_id=f"req-{story.story_id}",
             backlog_artifact_id=10,
             backlog_artifact_fingerprint="sha256:backlog",
-            requirement=f"Requirement {story.story_id}",
-            rank=story.story_id,
+            item_fingerprint=f"sha256:item-{story.story_id}",
+            spec_item_ids=(f"SPEC-{story.story_id:03d}",),
+            priority=story.story_id,
         )
         for story in stories
     )
@@ -114,13 +121,10 @@ def _snapshot(
             "artifact_fingerprint": "sha256:roadmap",
             "source_artifact_id": 10,
             "source_fingerprint": "sha256:backlog",
-            "authority_id": AUTHORITY_ID,
-            "authority_fingerprint": AUTHORITY_FINGERPRINT,
             "backlog_artifact_id": 10,
             "backlog_artifact_fingerprint": "sha256:backlog",
             "roadmap_artifact_id": 20,
             "roadmap_artifact_fingerprint": "sha256:roadmap",
-            "story_ids": [],
             "status": "accepted",
         }
     )
@@ -132,14 +136,12 @@ def _snapshot(
                 "artifact_fingerprint": story.content_fingerprint,
                 "source_artifact_id": 20,
                 "source_fingerprint": "sha256:roadmap",
-                "authority_id": AUTHORITY_ID,
-                "authority_fingerprint": AUTHORITY_FINGERPRINT,
                 "backlog_artifact_id": 10,
                 "backlog_artifact_fingerprint": "sha256:backlog",
                 "roadmap_artifact_id": 20,
                 "roadmap_artifact_fingerprint": "sha256:roadmap",
-                "requirement_id": story.requirement_id,
-                "story_ids": [story.story_id],
+                "backlog_item_id": f"req-{story.story_id}",
+                "story_item_ids": [story.source_story_item_id],
                 "status": "accepted" if story.content_accepted else "pending_review",
             }
         )
@@ -151,14 +153,6 @@ def _snapshot(
         *((sprint_plan,) if sprint_plan is not None else ()),
     )
     decisions = (
-        ReviewDecisionFact(
-            decision_id=5,
-            artifact_type="authority",
-            artifact_id=AUTHORITY_ID,
-            artifact_fingerprint=AUTHORITY_FINGERPRINT,
-            decision="accepted",
-            decided_at=EVALUATED_AT,
-        ),
         ReviewDecisionFact(
             decision_id=10,
             artifact_type="backlog",
@@ -230,9 +224,12 @@ def _snapshot(
         spec_versions=(
             SpecVersionFact(
                 spec_version_id=SPEC_VERSION_ID,
-                spec_hash="sha256:spec",
+                spec_hash=SPEC_HASH,
                 status="approved",
-                approved_at=EVALUATED_AT,
+                source_specification_decision_id=1,
+                accepted_at=EVALUATED_AT,
+                accepted_by="operator@example.com",
+                acceptance_notes="Accepted.",
                 source_specification_candidate_id=1,
                 source_specification_candidate_fingerprint="sha256:candidate-1",
                 source_vision_artifact_id=1,
@@ -241,13 +238,30 @@ def _snapshot(
                 source_product_goal_fingerprint="sha256:goal",
             ),
         ),
-        authorities=(
-            AuthorityFact(
-                authority_id=AUTHORITY_ID,
-                spec_version_id=SPEC_VERSION_ID,
-                authority_fingerprint=AUTHORITY_FINGERPRINT,
-                status="accepted",
-                decided_at=EVALUATED_AT,
+        specification_candidates=(
+            SpecificationCandidateFact(
+                specification_candidate_id=1,
+                candidate_kind="initial",
+                specification_source_id=1,
+                specification_source_fingerprint="sha256:source",
+                vision_artifact_id=1,
+                vision_fingerprint="sha256:vision",
+                product_goal_artifact_id=1,
+                product_goal_fingerprint="sha256:goal",
+                base_spec_version_id=None,
+                base_spec_hash=None,
+                canonical_envelope={},
+                payload_fingerprint=SPEC_HASH,
+                source_manifest_fingerprint="sha256:manifest",
+                producer_input_fingerprint="sha256:producer-input",
+                rendered_view_fingerprint="sha256:rendered",
+                candidate_fingerprint="sha256:candidate-1",
+                workflow_node_attempt_id=1,
+                attempt_fingerprint="sha256:attempt",
+                supersedes_specification_candidate_id=None,
+                supersedes_candidate_fingerprint=None,
+                recorded_by="operator@example.com",
+                recorded_at=EVALUATED_AT,
             ),
         ),
         phase_artifacts=(
@@ -255,8 +269,8 @@ def _snapshot(
                 artifact_type="backlog",
                 artifact_id=10,
                 artifact_fingerprint="sha256:backlog",
-                authority_id=AUTHORITY_ID,
-                authority_fingerprint=AUTHORITY_FINGERPRINT,
+                spec_version_id=SPEC_VERSION_ID,
+                spec_hash=SPEC_HASH,
                 product_goal_artifact_id=1,
                 product_goal_fingerprint="sha256:goal",
                 status="accepted",
@@ -315,13 +329,26 @@ def _snapshot(
                 decided_at=EVALUATED_AT,
             ),
         ),
-        backlog_requirements=requirements,
+        backlog_items=requirements,
         planning_artifacts=planning_artifacts,
         review_decisions=decisions,
         stories=stories,
         story_dependencies=dependencies,
         story_dependency_reviews=current_reviews,
         tasks=current_tasks or (),
+        sprints=(
+            (
+                SprintFact(
+                    sprint_id=sprint_plan.activated_sprint_id,
+                    status="planned",
+                    completed_at=None,
+                ),
+            )
+            if sprint_plan is not None
+            and sprint_plan.status == "accepted"
+            and sprint_plan.activated_sprint_id is not None
+            else ()
+        ),
     )
 
 
@@ -342,10 +369,13 @@ def _accepted_plan(
         {
             "artifact_type": "sprint_plan",
             "artifact_id": 500,
-            "artifact_fingerprint": "sha256:plan",
+            "artifact_fingerprint": PLAN_FINGERPRINT,
             "source_fingerprint": "sha256:roadmap",
-            "story_ids": [story.story_id for story in stories],
-            "sprint_id": 600,
+            "spec_version_id": SPEC_VERSION_ID,
+            "spec_hash": SPEC_HASH,
+            "sprint_plan_stream_id": "SPS-0123456789abcdef0123456789abcdef",
+            "selected_story_ids": [story.story_id for story in stories],
+            "activated_sprint_id": 600,
             "candidate_set_fingerprint": candidate_set_fingerprint(
                 stories,
                 dependencies,
@@ -366,10 +396,19 @@ def _task(story_id: int) -> TaskFact:
         sprint_id=600,
         story_id=story_id,
         description=f"Implement Story {story_id}",
-        metadata_json=(
-            '{"artifact_targets":[],"checklist_items":[],'
-            '"relevant_invariant_ids":[],"task_kind":"implementation",'
-            '"version":"task_metadata.v1","workstream_tags":[]}'
+        metadata_json=serialize_task_metadata(
+            TaskMetadata(
+                spec_version_id=SPEC_VERSION_ID,
+                spec_hash=SPEC_HASH,
+                sprint_plan_stream_id="SPS-0123456789abcdef0123456789abcdef",
+                sprint_plan_artifact_id=500,
+                sprint_plan_fingerprint=PLAN_FINGERPRINT,
+                relevant_spec_item_ids=("SPEC-001",),
+                task_kind="implementation",
+                artifact_targets=(),
+                workstream_tags=(),
+                checklist_items=("Implementation is complete.",),
+            )
         ),
         status="To Do",
         dependencies_satisfied=True,
@@ -500,13 +539,13 @@ def test_sprint_plan_review_waits_on_exact_immutable_plan() -> None:
         "planning.sprint.review",
     )
     assert review.category is NodeCategory.WAITING
-    assert review.fact_references[0].fingerprint == "sha256:plan"
+    assert review.fact_references[0].fingerprint == PLAN_FINGERPRINT
 
 
 def test_sprint_plan_selected_ids_must_be_current_candidates() -> None:
     """Reject Sprint plans selecting IDs outside current candidates."""
     stories = (_story(1), _story(2))
-    plan = _accepted_plan(stories).model_copy(update={"story_ids": (1, 99)})
+    plan = _accepted_plan(stories).model_copy(update={"selected_story_ids": (1, 99)})
     start = _decision(
         _snapshot(stories, sprint_plan=plan),
         "planning.sprint.start",

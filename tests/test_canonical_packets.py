@@ -1,849 +1,1308 @@
-"""Canonical task/story packet regressions over current durable records."""
+"""Canonical direct-Spec Story and Task packet contracts."""
 
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
-from datetime import UTC, date, datetime
-from http import HTTPStatus
-from typing import TYPE_CHECKING
+from pathlib import Path
+from typing import TYPE_CHECKING, cast
 
-from fastapi.testclient import TestClient
-from pydantic import TypeAdapter
-from sqlmodel import Session, col, select
+import pytest
+from sqlmodel import Session, select
 
-import api as api_module
-from models.core import Project, Sprint, SprintStory, Task, Team, UserStory
+from models.core import Project, Sprint, Task, UserStory
 from models.enums import SprintStatus
-from models.product_definition import VisionArtifact, VisionInterviewTurn
-from models.specs import (
-    CompiledSpecAuthority,
-    SpecAuthorityAcceptance,
-    SpecRegistry,
+from models.specs import SpecRegistry
+from models.workflow import SprintStart
+from repositories.workflow import WorkflowFactRepository
+from services.contracts.sprint import SprintPlannerOutput
+from services.packets.canonical import (
+    CanonicalPacketError,
+    build_story_packet,
+    build_task_packet,
+    validate_canonical_packet,
 )
-from services.read_projections import DurableReadProjectionService
-from services.specs.authority_selection import pending_authority_fingerprint
-from services.specs.story_validation_service import compute_story_input_hash
-from tests.vision_lineage_fixtures import seed_accepted_vision
-from tests.workflow.lifecycle_fixtures import seed_accepted_specification
-from utils.spec_schemas import (
-    AlignmentFinding,
-    Invariant,
-    InvariantType,
-    RequiredFieldParams,
-    SourceMapEntry,
-    SpecAuthorityCompilationSuccess,
-    SpecAuthorityCompilerOutput,
-    ValidationEvidence,
-    ValidationFailure,
+from services.specs.story_validation_service import (
+    story_validation_input_fingerprint,
+    story_validation_input_payload,
 )
-from utils.task_metadata import TaskMetadata, serialize_task_metadata
-from workflow.contracts import JsonObject, JsonValue
+from tests.workflow.execution_fixtures import seed_started_execution
+from tests.workflow.test_planning_transitions import (
+    _domain as _planning_domain,
+)
+from tests.workflow.test_planning_transitions import (
+    _guards as _planning_guards,
+)
+from tests.workflow.test_planning_transitions import (
+    _record_and_accept_roadmap,
+    _record_and_accept_story,
+    _record_sprint_plan_draft,
+    _seed_accepted_backlog,
+)
+from workflow.definitions.product_discovery import accepted_current_spec
+from workflow.fingerprints import canonical_hash, canonical_json
+from workflow.requests import DecideSprintPlan, RecordSprintPlan
 
 if TYPE_CHECKING:
-    import pytest
     from sqlalchemy.engine import Engine
 
-_JSON_OBJECT = TypeAdapter(JsonObject)
-_JSON_LIST = TypeAdapter(list[JsonValue])
-_SHA256_HEX_LENGTH = 64
-_INVARIANT_ID = "INV-0123456789abcdef"
-_ACCEPTED_VISION_STATEMENT = "Deliver one verified product increment."
+    from workflow.contracts import JsonObject, JsonValue
 
 
-@dataclass(frozen=True)
-class _PacketSeed:
-    project_id: int
-    sprint_id: int
-    story_id: int
-    task_id: int
-    spec_version_id: int | None
-    authority_id: int | None
+def _seed(engine: Engine) -> tuple[int, int, int, int]:
+    return seed_started_execution(engine)
 
 
-class _PacketApplication:
-    """Expose only the retained read projection to API packet routes."""
-
-    def __init__(self, reads: DurableReadProjectionService) -> None:
-        self.reads = reads
-
-
-def _required_id(value: int | None, label: str) -> int:
-    assert value is not None, label
+def _object(value: JsonValue) -> JsonObject:
+    assert isinstance(value, dict)
     return value
 
 
-def _object(value: object) -> JsonObject:
-    return _JSON_OBJECT.validate_python(value)
+def _items(value: JsonValue) -> list[JsonValue]:
+    assert isinstance(value, list)
+    return value
 
 
-def _list(value: object) -> list[JsonValue]:
-    return _JSON_LIST.validate_python(value)
+def _rehashed_packet(packet: JsonObject) -> JsonObject:
+    """Return a packet mutation with its caller-recomputable hash refreshed."""
+    mutated = cast("JsonObject", json.loads(json.dumps(packet)))
+    metadata = _object(mutated["metadata"])
+    metadata["source_fingerprint"] = canonical_hash(
+        {key: mutated[key] for key in ("lineage", "context", "evidence", "work")}
+    )
+    return mutated
 
 
-def _data(result: JsonObject) -> JsonObject:
-    assert result.get("ok") is True, result
-    return _object(result.get("data"))
+def _refresh_validation_story_fingerprints(packet: JsonObject) -> None:
+    """Refresh validation fields that intentionally duplicate Story evidence."""
+    context = _object(packet["context"])
+    lineage = _object(packet["lineage"])
+    evidence = _object(packet["evidence"])
+    work = _object(packet["work"])
+    specification = _object(lineage["specification"])
+    backlog = _object(lineage["backlog"])
+    story = _object(lineage["story"])
+    story_item = _object(evidence["story_item"])
+    validation = _object(evidence["story_validation"])
+    work_story = _object(work["story"])
+    validation["source_story_item_fingerprint"] = canonical_hash(story_item)
+    validation["story_validation_input_fingerprint"] = (
+        story_validation_input_fingerprint(
+            project_id=cast("int", _object(context["project"])["project_id"]),
+            story_id=cast("int", story["story_id"]),
+            source_story_artifact_id=cast("int", story["story_artifact_id"]),
+            source_story_artifact_fingerprint=cast(
+                "str", story["artifact_fingerprint"]
+            ),
+            source_story_item_id=cast("str", story["story_item_id"]),
+            source_story_item_fingerprint=canonical_hash(story_item),
+            source_backlog_artifact_id=cast("int", backlog["backlog_artifact_id"]),
+            source_backlog_artifact_fingerprint=cast(
+                "str", backlog["artifact_fingerprint"]
+            ),
+            source_backlog_item_id=cast("str", backlog["backlog_item_id"]),
+            spec_version_id=cast("int", specification["spec_version_id"]),
+            spec_hash=cast("str", specification["spec_hash"]),
+            spec_item_ids=tuple(
+                cast("str", item) for item in _items(story_item["spec_item_ids"])
+            ),
+            title=cast("str", work_story["title"]),
+            statement=cast("str", work_story["statement"]),
+            persona=cast("str", work_story["persona"]),
+            acceptance_criteria=tuple(
+                cast("str", criterion)
+                for criterion in _items(work_story["acceptance_criteria"])
+            ),
+            story_points=cast("int | None", work_story["story_points"]),
+            rank=cast("str | None", work_story["rank"]),
+        )
+    )
 
 
-def _error_code(result: JsonObject) -> str:
-    assert result.get("ok") is False, result
-    errors = _list(result.get("errors"))
-    first = _object(errors[0])
-    code = first.get("code")
-    assert isinstance(code, str)
-    return code
-
-
-def _seed_packet_context(
-    session: Session,
+def _owned_story_validation_input_for_test(
     *,
-    pinned: bool = True,
-    task_metadata: TaskMetadata | None = None,
-) -> _PacketSeed:
-    project = Project(name="Task Packet Project")
-    team = Team(name="Packet Team")
-    session.add(project)
-    session.add(team)
-    session.flush()
-    project_id = _required_id(project.project_id, "project_id")
-    team_id = _required_id(team.team_id, "team_id")
-
-    story = UserStory(
-        project_id=project_id,
-        title="Payload Validation Story",
-        story_description=(
-            "As a developer, I want payload validation so that requests are safe."
-        ),
-        acceptance_criteria="- include user_id\n- reject invalid payloads",
-        persona="Developer",
+    title: str,
+    spec_item_ids: tuple[str, ...],
+    rank: str | None,
+) -> tuple[JsonObject, str]:
+    """Invoke both public pure validation-input owners with one fixed source."""
+    payload = story_validation_input_payload(
+        project_id=1,
+        story_id=2,
+        source_story_artifact_id=3,
+        source_story_artifact_fingerprint="sha256:" + "1" * 64,
+        source_story_item_id="US-000001",
+        source_story_item_fingerprint="sha256:" + "2" * 64,
+        source_backlog_artifact_id=4,
+        source_backlog_artifact_fingerprint="sha256:" + "3" * 64,
+        source_backlog_item_id="PBI-000001",
+        spec_version_id=5,
+        spec_hash="sha256:" + "4" * 64,
+        spec_item_ids=spec_item_ids,
+        title=title,
+        statement="As a member, I want access so that I can work.",
+        persona="Member",
+        acceptance_criteria=("Access is granted.",),
         story_points=3,
-        rank="1",
-        source_requirement="api_payload_validation",
+        rank=rank,
     )
-    session.add(story)
-    session.flush()
-    story_id = _required_id(story.story_id, "story_id")
-
-    task = Task(
-        description="Implement payload validation for incoming requests",
-        story_id=story_id,
-        metadata_json=serialize_task_metadata(
-            task_metadata
-            or TaskMetadata(
-                task_kind="implementation",
-                artifact_targets=["payload validator", "request contract tests"],
-                workstream_tags=["backend", "api"],
-                relevant_invariant_ids=[_INVARIANT_ID],
-                checklist_items=[
-                    "Validate user_id inputs",
-                    "Cover invalid payload cases",
-                ],
-            )
-        ),
+    fingerprint = story_validation_input_fingerprint(
+        project_id=1,
+        story_id=2,
+        source_story_artifact_id=3,
+        source_story_artifact_fingerprint="sha256:" + "1" * 64,
+        source_story_item_id="US-000001",
+        source_story_item_fingerprint="sha256:" + "2" * 64,
+        source_backlog_artifact_id=4,
+        source_backlog_artifact_fingerprint="sha256:" + "3" * 64,
+        source_backlog_item_id="PBI-000001",
+        spec_version_id=5,
+        spec_hash="sha256:" + "4" * 64,
+        spec_item_ids=spec_item_ids,
+        title=title,
+        statement="As a member, I want access so that I can work.",
+        persona="Member",
+        acceptance_criteria=("Access is granted.",),
+        story_points=3,
+        rank=rank,
     )
-    sprint = Sprint(
-        goal="Ship a trustworthy task packet API",
-        start_date=date(2026, 4, 1),
-        end_date=date(2026, 4, 14),
-        status=SprintStatus.PLANNED,
-        project_id=project_id,
-        team_id=team_id,
-    )
-    session.add(task)
-    session.add(sprint)
-    session.flush()
-    task_id = _required_id(task.task_id, "task_id")
-    sprint_id = _required_id(sprint.sprint_id, "sprint_id")
-    session.add(SprintStory(sprint_id=sprint_id, story_id=story_id))
-
-    spec_version_id: int | None = None
-    authority_id: int | None = None
-    if pinned:
-        lineage = seed_accepted_specification(
-            session,
-            project_id=project_id,
-            content=json.dumps(
-                {"requirements": ["Requests must include user_id."]},
-                separators=(",", ":"),
-            ),
-        )
-        spec = lineage.spec
-        spec_version_id = _required_id(spec.spec_version_id, "spec_version_id")
-        invariant = Invariant(
-            id=_INVARIANT_ID,
-            type=InvariantType.REQUIRED_FIELD,
-            parameters=RequiredFieldParams(field_name="user_id"),
-        )
-        artifact = SpecAuthorityCompilationSuccess(
-            scope_themes=["API"],
-            domain="api",
-            invariants=[invariant],
-            eligible_feature_rules=[],
-            gaps=[],
-            assumptions=[],
-            source_map=[
-                SourceMapEntry(
-                    invariant_id=_INVARIANT_ID,
-                    excerpt="Requests must include user_id.",
-                    location="Spec section 1",
-                )
-            ],
-            compiler_version="3.0.0",
-            prompt_hash="0" * 64,
-        )
-        authority = CompiledSpecAuthority(
-            spec_version_id=spec_version_id,
-            compiler_version=artifact.compiler_version,
-            prompt_hash=artifact.prompt_hash,
-            scope_themes='["API"]',
-            invariants='["REQUIRED_FIELD:user_id"]',
-            eligible_feature_ids="[]",
-            rejected_features="[]",
-            spec_gaps="[]",
-            compiled_artifact_json=SpecAuthorityCompilerOutput(
-                root=artifact
-            ).model_dump_json(),
-        )
-        session.add(authority)
-        session.flush()
-        authority_id = _required_id(authority.authority_id, "authority_id")
-        session.add(
-            SpecAuthorityAcceptance(
-                project_id=project_id,
-                spec_version_id=spec_version_id,
-                status="accepted",
-                policy="test",
-                decided_by="packet-test",
-                compiler_version=authority.compiler_version,
-                prompt_hash=authority.prompt_hash,
-                spec_hash=spec.spec_hash,
-                pending_authority_id=authority_id,
-                authority_fingerprint=pending_authority_fingerprint(authority),
-            )
-        )
-        story.accepted_spec_version_id = spec_version_id
-        story.validation_evidence = ValidationEvidence(
-            spec_version_id=spec_version_id,
-            validated_at=datetime.now(UTC),
-            passed=True,
-            rules_checked=["SPEC_VERSION_EXISTS", "SPEC_PROJECT_MATCH"],
-            invariants_checked=["REQUIRED_FIELD:user_id"],
-            evaluated_invariant_ids=[_INVARIANT_ID],
-            finding_invariant_ids=[_INVARIANT_ID],
-            failures=[],
-            warnings=["Double-check payload casing."],
-            alignment_warnings=[
-                AlignmentFinding(
-                    code="REQUIRED_FIELD_MISSING",
-                    invariant=_INVARIANT_ID,
-                    capability=None,
-                    message="Payload coverage needs explicit review.",
-                    severity="warning",
-                    created_at=datetime.now(UTC),
-                )
-            ],
-            alignment_failures=[],
-            validator_version="1.0.0",
-            input_hash=compute_story_input_hash(story),
-        ).model_dump_json()
-        session.add(story)
-    else:
-        seed_accepted_vision(
-            session,
-            project_id=project_id,
-            statement=_ACCEPTED_VISION_STATEMENT,
-        )
-
-    session.commit()
-    return _PacketSeed(
-        project_id=project_id,
-        sprint_id=sprint_id,
-        story_id=story_id,
-        task_id=task_id,
-        spec_version_id=spec_version_id,
-        authority_id=authority_id,
-    )
+    return payload, fingerprint
 
 
-def test_task_and_story_packets_restore_canonical_project_shape(
-    engine: Engine,
-    session: Session,
+def _append_specification_item(packet: JsonObject, item_id: str) -> None:
+    """Append a shape-valid forged Specification item for packet mutation tests."""
+    evidence = _object(packet["evidence"])
+    items = _items(_object(evidence["specification"])["items"])
+    forged = dict(_object(items[0]))
+    forged["spec_item_id"] = item_id
+    items.append(forged)
+    items.sort(key=lambda item: cast("str", _object(item)["spec_item_id"]))
+
+
+def _replace_projected_specification_id(
+    packet: JsonObject, *, original: str, replacement: str
 ) -> None:
-    """Restore canonical packets with pinned authority and execution constraints."""
-    seed = _seed_packet_context(session)
-    reads = DurableReadProjectionService(engine=engine)
+    """Keep every packet reference coherent while forging one projected ID."""
+    evidence = _object(packet["evidence"])
+    work = _object(packet["work"])
 
-    task_packet = _data(
-        reads.task_packet(
-            project_id=seed.project_id,
-            sprint_id=seed.sprint_id,
-            task_id=seed.task_id,
+    def replace_ids(value: JsonValue) -> list[str]:
+        return sorted(
+            replacement if item == original else cast("str", item)
+            for item in _items(value)
+        )
+
+    for item in _items(_object(evidence["specification"])["items"]):
+        projected = _object(item)
+        if projected["spec_item_id"] == original:
+            projected["spec_item_id"] = replacement
+    _items(_object(evidence["specification"])["items"]).sort(
+        key=lambda item: cast("str", _object(item)["spec_item_id"])
+    )
+    _object(evidence["backlog_item"])["spec_item_ids"] = cast(
+        "JsonValue", replace_ids(_object(evidence["backlog_item"])["spec_item_ids"])
+    )
+    _object(evidence["story_item"])["spec_item_ids"] = cast(
+        "JsonValue", replace_ids(_object(evidence["story_item"])["spec_item_ids"])
+    )
+    validation = _object(evidence["story_validation"])
+    validation["referenced_spec_item_ids"] = cast(
+        "JsonValue", replace_ids(validation["referenced_spec_item_ids"])
+    )
+    for finding in _items(validation["semantic_findings"]):
+        item = _object(finding)
+        if item["spec_item_id"] == original:
+            item["spec_item_id"] = replacement
+    selected_story = _object(evidence["sprint_plan_story"])
+    for proposal in _items(selected_story["tasks"]):
+        _object(proposal)["relevant_spec_item_ids"] = cast(
+            "JsonValue",
+            replace_ids(_object(proposal)["relevant_spec_item_ids"]),
+        )
+    work_tasks = (
+        [_object(work["task"])]
+        if "task" in work
+        else [_object(task) for task in _items(work["tasks"])]
+    )
+    for task in work_tasks:
+        _object(task["metadata"])["relevant_spec_item_ids"] = cast(
+            "JsonValue",
+            replace_ids(_object(task["metadata"])["relevant_spec_item_ids"]),
+        )
+    _refresh_validation_story_fingerprints(packet)
+
+
+def _make_informative_requirement_references(packet: JsonObject) -> None:
+    """Keep packet references coherent while removing qualifying evidence."""
+    evidence = _object(packet["evidence"])
+    work = _object(packet["work"])
+    specification = _object(evidence["specification"])
+    projected_requirement = next(
+        _object(item)
+        for item in _items(specification["items"])
+        if cast("str", _object(item)["spec_item_id"]).startswith("REQ.")
+    )
+    requirement_id = cast("str", projected_requirement["spec_item_id"])
+    projected_requirement["level"] = "INFORMATIVE"
+
+    def only_requirement() -> JsonValue:
+        return cast("JsonValue", [requirement_id])
+
+    specification["items"] = cast("JsonValue", [projected_requirement])
+    _object(evidence["backlog_item"])["spec_item_ids"] = only_requirement()
+    _object(evidence["story_item"])["spec_item_ids"] = only_requirement()
+    validation = _object(evidence["story_validation"])
+    validation["semantic_findings"] = cast("JsonValue", [])
+    validation["referenced_spec_item_ids"] = only_requirement()
+    selected_story = _object(evidence["sprint_plan_story"])
+    for proposal in _items(selected_story["tasks"]):
+        _object(proposal)["relevant_spec_item_ids"] = only_requirement()
+    work_tasks = (
+        [_object(work["task"])]
+        if "task" in work
+        else [_object(task) for task in _items(work["tasks"])]
+    )
+    for task in work_tasks:
+        _object(task["metadata"])["relevant_spec_item_ids"] = only_requirement()
+    _refresh_validation_story_fingerprints(packet)
+
+
+def _add_informative_requirement(packet: JsonObject) -> tuple[str, str]:
+    """Add one valid informative REQ beside the packet's qualifying REQ."""
+    specification = _object(_object(packet["evidence"])["specification"])
+    items = _items(specification["items"])
+    qualifying_requirement = next(
+        _object(item)
+        for item in items
+        if cast("str", _object(item)["spec_item_id"]).startswith("REQ.")
+    )
+    qualifying_id = cast("str", qualifying_requirement["spec_item_id"])
+    informative_id = "REQ.packet-informative"
+    assert all(_object(item)["spec_item_id"] != informative_id for item in items)
+    informative_requirement = dict(qualifying_requirement)
+    informative_requirement["spec_item_id"] = informative_id
+    informative_requirement["level"] = "INFORMATIVE"
+    items.append(informative_requirement)
+    items.sort(key=lambda item: cast("str", _object(item)["spec_item_id"]))
+    return qualifying_id, informative_id
+
+
+def _set_packet_planning_reference_sets(
+    packet: JsonObject,
+    *,
+    backlog_ids: tuple[str, ...],
+    story_ids: tuple[str, ...],
+    task_ids: tuple[str, ...],
+) -> None:
+    """Apply coherent canonical planning evidence references to one packet."""
+    evidence = _object(packet["evidence"])
+    work = _object(packet["work"])
+
+    def canonical_ids(ids: tuple[str, ...]) -> JsonValue:
+        return cast("JsonValue", sorted(ids))
+
+    _object(evidence["backlog_item"])["spec_item_ids"] = canonical_ids(backlog_ids)
+    story_item = _object(evidence["story_item"])
+    story_item["spec_item_ids"] = canonical_ids(story_ids)
+    validation = _object(evidence["story_validation"])
+    validation["semantic_findings"] = cast("JsonValue", [])
+    validation["referenced_spec_item_ids"] = canonical_ids(story_ids)
+    for proposal in _items(_object(evidence["sprint_plan_story"])["tasks"]):
+        _object(proposal)["relevant_spec_item_ids"] = canonical_ids(task_ids)
+    work_tasks = (
+        [_object(work["task"])]
+        if "task" in work
+        else [_object(task) for task in _items(work["tasks"])]
+    )
+    for task in work_tasks:
+        _object(task["metadata"])["relevant_spec_item_ids"] = canonical_ids(task_ids)
+    _refresh_validation_story_fingerprints(packet)
+
+
+def _seed_replaced_planned_execution(engine: Engine) -> tuple[int, int, int, int]:
+    """Persist accepted A then accepted replacement C on one unstarted Sprint."""
+    project_id = _seed_accepted_backlog(engine)
+    domain = _planning_domain(engine)
+    _record_and_accept_roadmap(domain, project_id)
+    _story_artifact_id, story_id = _record_and_accept_story(
+        engine,
+        domain,
+        project_id,
+    )
+    plan_a_id, _candidate, plan, plan_a_fingerprint = _record_sprint_plan_draft(
+        engine,
+        domain,
+        project_id,
+        story_id,
+        team_name="Packet replacement team",
+        idempotency_key="packet-replacement-a",
+    )
+    accepted_a = domain.transition(
+        DecideSprintPlan(
+            **_planning_guards(domain.position(project_id), "planning.sprint.review"),
+            idempotency_key="packet-accept-a",
+            sprint_plan_artifact_id=plan_a_id,
+            plan_fingerprint=plan_a_fingerprint,
+            decision="accepted",
+            rationale="Accept initial packet plan.",
         )
     )
-    story_packet = _data(
-        reads.story_packet(
-            project_id=seed.project_id,
-            sprint_id=seed.sprint_id,
-            story_id=seed.story_id,
+    assert accepted_a.ok is True
+    sprint_id = cast("int", accepted_a.output["activated_sprint_id"])
+    with Session(engine) as session:
+        specification = accepted_current_spec(
+            WorkflowFactRepository(session).load(project_id)
+        )
+    assert specification is not None
+    plan["sprint_goal"] = "Replacement packet goal."
+    recorded_c = domain.transition(
+        RecordSprintPlan(
+            **_planning_guards(domain.position(project_id), "planning.sprint.plan"),
+            idempotency_key="packet-replacement-c",
+            team_name="Packet replacement team",
+            spec_version_id=specification.spec_version_id,
+            spec_hash=specification.spec_hash,
+            planner_output=SprintPlannerOutput.model_validate(plan),
         )
     )
+    assert recorded_c.ok is True
+    plan_c_id = cast("int", recorded_c.output["sprint_plan_artifact_id"])
+    accepted_c = domain.transition(
+        DecideSprintPlan(
+            **_planning_guards(domain.position(project_id), "planning.sprint.review"),
+            idempotency_key="packet-accept-c",
+            sprint_plan_artifact_id=plan_c_id,
+            plan_fingerprint=cast("str", recorded_c.output["plan_fingerprint"]),
+            decision="accepted",
+            rationale="Accept replacement packet plan.",
+        )
+    )
+    assert accepted_c.ok is True
+    assert accepted_c.output["activated_sprint_id"] == sprint_id
+    return project_id, sprint_id, story_id, plan_c_id
 
-    assert set(task_packet) == {
+
+def test_packets_have_exact_versions_order_and_deterministic_metadata(
+    engine: Engine,
+) -> None:
+    """Packets contain no clock and identical durable state yields identical bytes."""
+    project_id, sprint_id, story_id, task_id = _seed(engine)
+    with Session(engine) as session:
+        story = build_story_packet(
+            session,
+            project_id=project_id,
+            sprint_id=sprint_id,
+            story_id=story_id,
+        )
+        story_again = build_story_packet(
+            session,
+            project_id=project_id,
+            sprint_id=sprint_id,
+            story_id=story_id,
+        )
+        task = build_task_packet(
+            session,
+            project_id=project_id,
+            sprint_id=sprint_id,
+            task_id=task_id,
+        )
+
+    assert story == story_again
+    assert canonical_json(story) == canonical_json(story_again)
+    assert list(story) == [
         "schema_version",
+        "packet_kind",
         "metadata",
-        "source_snapshot",
-        "task",
+        "lineage",
         "context",
-        "constraints",
-    }
-    assert task_packet["schema_version"] == "task_packet.v2"
-    task_metadata = _object(task_packet["metadata"])
-    assert str(task_metadata["packet_id"]).startswith("tp_")
-    assert task_metadata["generator_version"] == "v2"
-    assert len(str(task_metadata["source_fingerprint"])) == _SHA256_HEX_LENGTH
-
-    task_snapshot = _object(task_packet["source_snapshot"])
-    assert task_snapshot["project_id"] == seed.project_id
-    assert task_snapshot["accepted_spec_version_id"] == seed.spec_version_id
-    assert task_snapshot["compiled_authority_id"] == seed.authority_id
-    assert len(str(task_snapshot["task_metadata_hash"])) == _SHA256_HEX_LENGTH
-
-    task = _object(task_packet["task"])
-    assert task == {
-        "task_id": seed.task_id,
-        "label": "Implement payload validation for incoming requests",
-        "description": "Implement payload validation for incoming requests",
-        "status": "To Do",
-        "assignee_member_id": None,
-        "assignee_name": None,
-        "task_kind": "implementation",
-        "artifact_targets": ["payload validator", "request contract tests"],
-        "workstream_tags": ["backend", "api"],
-        "checklist_items": [
-            "Validate user_id inputs",
-            "Cover invalid payload cases",
-        ],
-        "is_executable": True,
-    }
-
-    task_context = _object(task_packet["context"])
-    project_context = _object(task_context["project"])
-    assert project_context == {
-        "project_id": seed.project_id,
-        "name": "Task Packet Project",
-        "vision_excerpt": _ACCEPTED_VISION_STATEMENT,
-    }
-    assert _object(task_context["story"])["story_id"] == seed.story_id
-    assert _object(task_context["sprint"])["sprint_id"] == seed.sprint_id
-
-    task_constraints = _object(task_packet["constraints"])
-    assert _object(task_constraints["spec_binding"]) == {
-        "mode": "pinned_story_authority",
-        "binding_status": "pinned",
-        "spec_version_id": seed.spec_version_id,
-        "authority_artifact_status": "available",
-    }
-    assert _object(task_constraints["validation"])["freshness_status"] == "current"
-    expected_constraint = {
-        "invariant_id": _INVARIANT_ID,
-        "type": "REQUIRED_FIELD",
-        "parameters": {"field_name": "user_id"},
-        "source_excerpt": "Requests must include user_id.",
-        "source_location": "Spec section 1",
-    }
-    assert _list(task_constraints["task_hard_constraints"]) == [expected_constraint]
-    assert _list(task_constraints["story_compliance_boundaries"]) == [
-        expected_constraint
+        "evidence",
+        "work",
     ]
-    assert {
-        _object(item)["source"] for item in _list(task_constraints["findings"])
-    } == {"validation_warning", "alignment_warning"}
+    assert story["schema_version"] == "story_packet.v2"
+    assert story["packet_kind"] == "story"
+    assert task["schema_version"] == "task_packet.v3"
+    assert task["packet_kind"] == "task"
+    metadata = _object(story["metadata"])
+    assert list(metadata) == ["packet_id", "source_fingerprint"]
+    source = {key: story[key] for key in ("lineage", "context", "evidence", "work")}
+    assert metadata["source_fingerprint"] == canonical_hash(source)
+    assert "generated_at" not in canonical_json(story)
 
-    assert story_packet["schema_version"] == "story_packet.v1"
-    assert set(story_packet) == {
-        "schema_version",
-        "metadata",
-        "source_snapshot",
+
+def test_packet_evidence_and_work_are_exact_direct_spec_contracts(
+    engine: Engine,
+) -> None:
+    """Packet evidence follows accepted Spec/Backlog/Roadmap/Story/plan order."""
+    project_id, sprint_id, story_id, task_id = _seed(engine)
+    with Session(engine) as session:
+        story = build_story_packet(
+            session,
+            project_id=project_id,
+            sprint_id=sprint_id,
+            story_id=story_id,
+        )
+        task = build_task_packet(
+            session,
+            project_id=project_id,
+            sprint_id=sprint_id,
+            task_id=task_id,
+        )
+
+    story_lineage = _object(story["lineage"])
+    task_lineage = _object(task["lineage"])
+    evidence = _object(story["evidence"])
+    story_work = _object(story["work"])
+    task_work = _object(task["work"])
+    assert list(story_lineage) == [
+        "specification",
+        "backlog",
+        "roadmap",
         "story",
-        "task_plan",
-        "context",
-        "constraints",
-    }
-    story_metadata = _object(story_packet["metadata"])
-    assert str(story_metadata["packet_id"]).startswith("sp_")
-    assert story_metadata["generator_version"] == "v1"
-    story_snapshot = _object(story_packet["source_snapshot"])
-    assert story_snapshot["project_id"] == seed.project_id
-    assert len(str(story_snapshot["task_plan_hash"])) == _SHA256_HEX_LENGTH
-    story = _object(story_packet["story"])
-    assert story["story_id"] == seed.story_id
-    task_plan = _object(story_packet["task_plan"])
-    assert _object(_list(task_plan["tasks"])[0])["id"] == seed.task_id
-    story_context = _object(story_packet["context"])
-    assert _object(story_context["project"])["project_id"] == seed.project_id
-    story_constraints = _object(story_packet["constraints"])
-    assert story_constraints["story_acceptance_criteria_items"] == [
-        "include user_id",
-        "reject invalid payloads",
+        "sprint_plan",
+        "sprint",
     ]
-    assert "task_hard_constraints" not in story_constraints
+    assert list(task_lineage)[-1] == "task"
+    assert list(evidence) == [
+        "specification",
+        "backlog_item",
+        "roadmap_release",
+        "story_item",
+        "sprint_plan_story",
+        "story_validation",
+    ]
+    specification_evidence = _object(evidence["specification"])
+    story_validation = _object(evidence["story_validation"])
+    assert specification_evidence["currentness"] == "current"
+    assert story_validation["schema_version"] == (
+        "agileforge.story-validation-evidence.v2"
+    )
+    accepted = _object(evidence["story_item"])
+    operational = _object(story_work["story"])
+    assert operational["title"] == accepted["story_title"]
+    assert operational["statement"] == accepted["statement"]
+    assert operational["acceptance_criteria"] == accepted["acceptance_criteria"]
+    story_tasks = _items(story_work["tasks"])
+    first_story_task = _object(story_tasks[0])
+    story_task_metadata = _object(first_story_task["metadata"])
+    task_value = _object(task_work["task"])
+    assert story_task_metadata["version"] == "task_metadata.v2"
+    assert task_value["metadata"] == story_task_metadata
 
 
-def test_packets_fail_closed_on_malformed_durable_vision_lineage(
-    engine: Engine,
-    session: Session,
+@pytest.mark.parametrize(
+    ("mutation", "packet_kind"),
+    [
+        ("work_story_title", "story"),
+        ("work_story_statement", "story"),
+        ("validation_backlog_fingerprint", "story"),
+        ("duplicate_specification_item", "story"),
+        ("missing_referenced_specification_item", "story"),
+        ("task_metadata_spec_hash", "task"),
+        ("root_key_order", "story"),
+        ("nested_key_order", "story"),
+    ],
+)
+def test_validator_rejects_rehashed_cross_object_and_order_mutations(
+    engine: Engine, mutation: str, packet_kind: str
 ) -> None:
-    """Reject a packet when durable Vision content no longer matches its hash."""
-    seed = _seed_packet_context(session, pinned=False)
-    vision = session.exec(
-        select(VisionArtifact).where(col(VisionArtifact.project_id) == seed.project_id)
-    ).one()
-    vision.components_json = '{"purpose":"tampered"}'
-    session.add(vision)
-    session.commit()
+    """Reject rehashed contradictions, duplicates, and reordering."""
+    project_id, sprint_id, story_id, task_id = _seed(engine)
+    with Session(engine) as session:
+        packet = (
+            build_task_packet(
+                session,
+                project_id=project_id,
+                sprint_id=sprint_id,
+                task_id=task_id,
+            )
+            if packet_kind == "task"
+            else build_story_packet(
+                session,
+                project_id=project_id,
+                sprint_id=sprint_id,
+                story_id=story_id,
+            )
+        )
 
-    result = DurableReadProjectionService(engine=engine).task_packet(
-        project_id=seed.project_id,
-        sprint_id=seed.sprint_id,
-        task_id=seed.task_id,
-    )
+    mutated = _rehashed_packet(packet)
+    evidence = _object(mutated["evidence"])
+    work = _object(mutated["work"])
+    if mutation == "work_story_title":
+        _object(work["story"])["title"] = "Forged story title"
+    elif mutation == "work_story_statement":
+        _object(work["story"])["statement"] = "Forged story statement"
+    elif mutation == "validation_backlog_fingerprint":
+        _object(evidence["story_validation"])["source_backlog_artifact_fingerprint"] = (
+            "sha256:" + "0" * 64
+        )
+    elif mutation == "duplicate_specification_item":
+        items = _items(_object(evidence["specification"])["items"])
+        items.append(items[0])
+    elif mutation == "missing_referenced_specification_item":
+        _object(evidence["specification"])["items"] = []
+    elif mutation == "task_metadata_spec_hash":
+        _object(_object(work["task"])["metadata"])["spec_hash"] = "sha256:" + "0" * 64
+    elif mutation == "root_key_order":
+        mutated = {key: mutated[key] for key in reversed(tuple(mutated))}
+    else:
+        mutated["lineage"] = {
+            key: _object(mutated["lineage"])[key]
+            for key in reversed(tuple(_object(mutated["lineage"])))
+        }
+    mutated = _rehashed_packet(mutated)
 
-    assert _error_code(result) == "VISION_LINEAGE_INVALID"
+    with pytest.raises(CanonicalPacketError) as error:
+        validate_canonical_packet(mutated)
+
+    assert error.value.code == "PACKET_CONTENT_INVALID"
 
 
-def test_packets_fail_closed_on_corrupt_vision_source_turn(
-    engine: Engine,
-    session: Session,
+def test_packet_vision_does_not_claim_removed_task_fields() -> None:
+    """The public vision reflects the closed Task Packet v3 work contract."""
+    text = Path("docs/task-packet-vision.md").read_text()
+
+    assert "executability flag" not in text
+    assert "constraints" not in text
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "story_outside_backlog",
+        "validation_reference_not_derived",
+        "plan_reference_outside_story",
+    ],
+)
+def test_validator_rejects_inconsistent_reference_boundaries(
+    engine: Engine, mutation: str
 ) -> None:
-    """Expose source-turn corruption through the packet error envelope."""
-    seed = _seed_packet_context(session, pinned=False)
-    vision = session.exec(
-        select(VisionArtifact).where(col(VisionArtifact.project_id) == seed.project_id)
-    ).one()
-    turn = session.get(VisionInterviewTurn, vision.source_interview_turn_id)
-    assert turn is not None
-    turn.output_fingerprint = "corrupt"
-    session.add(turn)
-    session.commit()
+    """Reference sets stay inside their immutable parent evidence."""
+    project_id, sprint_id, story_id, _task_id = _seed(engine)
+    with Session(engine) as session:
+        packet = build_story_packet(
+            session,
+            project_id=project_id,
+            sprint_id=sprint_id,
+            story_id=story_id,
+        )
 
-    result = DurableReadProjectionService(engine=engine).task_packet(
-        project_id=seed.project_id,
-        sprint_id=seed.sprint_id,
-        task_id=seed.task_id,
-    )
+    mutated = _rehashed_packet(packet)
+    evidence = _object(mutated["evidence"])
+    forged_id = "FORGED-REFERENCE"
+    _append_specification_item(mutated, forged_id)
+    if mutation == "story_outside_backlog":
+        _object(evidence["story_item"])["spec_item_ids"] = [forged_id]
+        _object(evidence["story_validation"])["referenced_spec_item_ids"] = [forged_id]
+        _refresh_validation_story_fingerprints(mutated)
+    elif mutation == "validation_reference_not_derived":
+        _object(evidence["story_validation"])["referenced_spec_item_ids"] = [forged_id]
+    else:
+        proposal = _object(_items(_object(evidence["sprint_plan_story"])["tasks"])[0])
+        proposal["relevant_spec_item_ids"] = [forged_id]
+        work_task = _object(_items(_object(mutated["work"])["tasks"])[0])
+        _object(work_task["metadata"])["relevant_spec_item_ids"] = [forged_id]
+    mutated = _rehashed_packet(mutated)
 
-    assert _error_code(result) == "VISION_LINEAGE_INVALID"
+    with pytest.raises(CanonicalPacketError) as error:
+        validate_canonical_packet(mutated)
+
+    assert error.value.code == "PACKET_CONTENT_INVALID"
 
 
-def test_packet_fingerprints_track_task_metadata_and_story_task_plan(
+@pytest.mark.parametrize("packet_kind", ["story", "task"])
+def test_validator_rejects_rehashed_informative_only_normative_references(
     engine: Engine,
-    session: Session,
+    packet_kind: str,
 ) -> None:
-    """Include task metadata and the complete task plan in packet freshness."""
-    seed = _seed_packet_context(session)
-    reads = DurableReadProjectionService(engine=engine)
-    first_task = _data(
-        reads.task_packet(
-            project_id=seed.project_id,
-            sprint_id=seed.sprint_id,
-            task_id=seed.task_id,
+    """Every durable planning reference needs qualifying normative evidence."""
+    project_id, sprint_id, story_id, task_id = _seed(engine)
+    with Session(engine) as session:
+        packet = (
+            build_task_packet(
+                session,
+                project_id=project_id,
+                sprint_id=sprint_id,
+                task_id=task_id,
+            )
+            if packet_kind == "task"
+            else build_story_packet(
+                session,
+                project_id=project_id,
+                sprint_id=sprint_id,
+                story_id=story_id,
+            )
         )
-    )
-    first_story = _data(
-        reads.story_packet(
-            project_id=seed.project_id,
-            sprint_id=seed.sprint_id,
-            story_id=seed.story_id,
-        )
-    )
 
-    task = session.get(Task, seed.task_id)
-    assert task is not None
-    task.metadata_json = serialize_task_metadata(
-        TaskMetadata(
-            task_kind="testing",
-            artifact_targets=["contract suite"],
-            workstream_tags=["qa"],
-            checklist_items=["Run invalid payload cases"],
-        )
-    )
-    session.add(task)
-    session.commit()
+    mutated = _rehashed_packet(packet)
+    _make_informative_requirement_references(mutated)
+    mutated = _rehashed_packet(mutated)
 
-    second_task = _data(
-        reads.task_packet(
-            project_id=seed.project_id,
-            sprint_id=seed.sprint_id,
-            task_id=seed.task_id,
-        )
-    )
-    second_story = _data(
-        reads.story_packet(
-            project_id=seed.project_id,
-            sprint_id=seed.sprint_id,
-            story_id=seed.story_id,
-        )
-    )
+    with pytest.raises(CanonicalPacketError) as error:
+        validate_canonical_packet(mutated)
 
-    assert (
-        _object(first_task["source_snapshot"])["task_metadata_hash"]
-        != _object(second_task["source_snapshot"])["task_metadata_hash"]
-    )
-    assert (
-        _object(first_task["metadata"])["source_fingerprint"]
-        != _object(second_task["metadata"])["source_fingerprint"]
-    )
-    assert (
-        _object(first_story["source_snapshot"])["task_plan_hash"]
-        != _object(second_story["source_snapshot"])["task_plan_hash"]
-    )
-    assert (
-        _object(first_story["metadata"])["source_fingerprint"]
-        != _object(second_story["metadata"])["source_fingerprint"]
-    )
+    assert error.value.code == "PACKET_CONTENT_INVALID"
 
 
-def test_packet_fingerprints_cover_complete_canonical_validation_evidence(
+@pytest.mark.parametrize("packet_kind", ["story", "task"])
+def test_validator_rejects_informative_story_and_task_reference_sets(
     engine: Engine,
-    session: Session,
+    packet_kind: str,
 ) -> None:
-    """Fingerprint every persisted validation input that shapes either packet."""
-    seed = _seed_packet_context(session)
-    reads = DurableReadProjectionService(engine=engine)
-    story = session.get(UserStory, seed.story_id)
-    assert story is not None
-    assert story.validation_evidence is not None
-    original_updated_at = story.updated_at
-    original = ValidationEvidence.model_validate_json(story.validation_evidence)
-
-    def packets() -> tuple[JsonObject, JsonObject]:
-        return (
-            _data(
-                reads.task_packet(
-                    project_id=seed.project_id,
-                    sprint_id=seed.sprint_id,
-                    task_id=seed.task_id,
-                )
-            ),
-            _data(
-                reads.story_packet(
-                    project_id=seed.project_id,
-                    sprint_id=seed.sprint_id,
-                    story_id=seed.story_id,
-                )
-            ),
+    """A qualifying Backlog cannot mask nonqualifying child evidence sets."""
+    project_id, sprint_id, story_id, task_id = _seed(engine)
+    with Session(engine) as session:
+        packet = (
+            build_task_packet(
+                session,
+                project_id=project_id,
+                sprint_id=sprint_id,
+                task_id=task_id,
+            )
+            if packet_kind == "task"
+            else build_story_packet(
+                session,
+                project_id=project_id,
+                sprint_id=sprint_id,
+                story_id=story_id,
+            )
         )
 
-    def store(raw_evidence: str) -> None:
-        stored_story = session.get(UserStory, seed.story_id)
-        assert stored_story is not None
-        stored_story.validation_evidence = raw_evidence
-        stored_story.updated_at = original_updated_at
-        session.add(stored_story)
+    mutated = _rehashed_packet(packet)
+    qualifying_id, informative_id = _add_informative_requirement(mutated)
+    _set_packet_planning_reference_sets(
+        mutated,
+        backlog_ids=(qualifying_id, informative_id),
+        story_ids=(informative_id,),
+        task_ids=(informative_id,),
+    )
+    mutated = _rehashed_packet(mutated)
+
+    with pytest.raises(CanonicalPacketError) as error:
+        validate_canonical_packet(mutated)
+
+    assert error.value.code == "PACKET_CONTENT_INVALID"
+
+
+@pytest.mark.parametrize("packet_kind", ["story", "task"])
+def test_validator_rejects_informative_selected_task_reference_set(
+    engine: Engine,
+    packet_kind: str,
+) -> None:
+    """A qualifying Story cannot mask a nonqualifying selected Task."""
+    project_id, sprint_id, story_id, task_id = _seed(engine)
+    with Session(engine) as session:
+        packet = (
+            build_task_packet(
+                session,
+                project_id=project_id,
+                sprint_id=sprint_id,
+                task_id=task_id,
+            )
+            if packet_kind == "task"
+            else build_story_packet(
+                session,
+                project_id=project_id,
+                sprint_id=sprint_id,
+                story_id=story_id,
+            )
+        )
+
+    mutated = _rehashed_packet(packet)
+    qualifying_id, informative_id = _add_informative_requirement(mutated)
+    _set_packet_planning_reference_sets(
+        mutated,
+        backlog_ids=(qualifying_id, informative_id),
+        story_ids=(qualifying_id, informative_id),
+        task_ids=(informative_id,),
+    )
+    mutated = _rehashed_packet(mutated)
+
+    with pytest.raises(CanonicalPacketError) as error:
+        validate_canonical_packet(mutated)
+
+    assert error.value.code == "PACKET_CONTENT_INVALID"
+
+
+@pytest.mark.parametrize("packet_kind", ["story", "task"])
+def test_validator_accepts_mixed_qualifying_planning_reference_sets(
+    engine: Engine,
+    packet_kind: str,
+) -> None:
+    """Each reference boundary may retain informative evidence beside a requirement."""
+    project_id, sprint_id, story_id, task_id = _seed(engine)
+    with Session(engine) as session:
+        packet = (
+            build_task_packet(
+                session,
+                project_id=project_id,
+                sprint_id=sprint_id,
+                task_id=task_id,
+            )
+            if packet_kind == "task"
+            else build_story_packet(
+                session,
+                project_id=project_id,
+                sprint_id=sprint_id,
+                story_id=story_id,
+            )
+        )
+
+    mutated = _rehashed_packet(packet)
+    qualifying_id, informative_id = _add_informative_requirement(mutated)
+    mixed_ids = (qualifying_id, informative_id)
+    _set_packet_planning_reference_sets(
+        mutated,
+        backlog_ids=mixed_ids,
+        story_ids=mixed_ids,
+        task_ids=mixed_ids,
+    )
+    mutated = _rehashed_packet(mutated)
+
+    assert validate_canonical_packet(mutated) == mutated
+
+
+def test_task_packet_allows_indistinguishable_duplicate_plan_tasks(
+    engine: Engine,
+) -> None:
+    """Task packets cannot manufacture an ordinal absent from their schema."""
+    project_id, sprint_id, _story_id, task_id = _seed(engine)
+    with Session(engine) as session:
+        packet = build_task_packet(
+            session,
+            project_id=project_id,
+            sprint_id=sprint_id,
+            task_id=task_id,
+        )
+
+    mutated = _rehashed_packet(packet)
+    selected_story = _object(_object(mutated["evidence"])["sprint_plan_story"])
+    tasks = _items(selected_story["tasks"])
+    tasks.append(dict(_object(tasks[0])))
+    mutated = _rehashed_packet(mutated)
+
+    assert validate_canonical_packet(mutated) == mutated
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["duplicate_unrelated_roadmap_id", "superseded_specification_on_planned_sprint"],
+)
+def test_validator_rejects_invalid_roadmap_and_historical_execution_states(
+    engine: Engine, mutation: str
+) -> None:
+    """Canonical packets retain closed Roadmap coverage and execution state."""
+    project_id, sprint_id, story_id, _task_id = _seed(engine)
+    with Session(engine) as session:
+        packet = build_story_packet(
+            session,
+            project_id=project_id,
+            sprint_id=sprint_id,
+            story_id=story_id,
+        )
+
+    mutated = _rehashed_packet(packet)
+    if mutation == "duplicate_unrelated_roadmap_id":
+        roadmap_release = _object(_object(mutated["evidence"])["roadmap_release"])
+        roadmap_ids = _items(roadmap_release["backlog_item_ids"])
+        roadmap_ids.extend(["PBI-999999", "PBI-999999"])
+    else:
+        _object(_object(mutated["evidence"])["specification"])["currentness"] = (
+            "superseded"
+        )
+        _object(_object(mutated["context"])["sprint"])["status"] = "Planned"
+    mutated = _rehashed_packet(mutated)
+
+    with pytest.raises(CanonicalPacketError) as error:
+        validate_canonical_packet(mutated)
+
+    assert error.value.code == "PACKET_CONTENT_INVALID"
+
+
+@pytest.mark.parametrize(
+    ("packet_kind", "status_field"),
+    [
+        ("story", "sprint"),
+        ("story", "story"),
+        ("story", "story_task"),
+        ("task", "task"),
+    ],
+)
+def test_validator_rejects_unknown_execution_statuses(
+    engine: Engine, packet_kind: str, status_field: str
+) -> None:
+    """Every execution status comes from the closed durable enum."""
+    project_id, sprint_id, story_id, task_id = _seed(engine)
+    with Session(engine) as session:
+        packet = (
+            build_task_packet(
+                session,
+                project_id=project_id,
+                sprint_id=sprint_id,
+                task_id=task_id,
+            )
+            if packet_kind == "task"
+            else build_story_packet(
+                session,
+                project_id=project_id,
+                sprint_id=sprint_id,
+                story_id=story_id,
+            )
+        )
+
+    mutated = _rehashed_packet(packet)
+    if status_field == "sprint":
+        _object(_object(mutated["context"])["sprint"])["status"] = "Unknown"
+    elif status_field == "story":
+        _object(_object(mutated["work"])["story"])["status"] = "Unknown"
+    elif status_field == "story_task":
+        task = _object(_items(_object(mutated["work"])["tasks"])[0])
+        task["status"] = "Unknown"
+    else:
+        _object(_object(mutated["work"])["task"])["status"] = "Unknown"
+    mutated = _rehashed_packet(mutated)
+
+    with pytest.raises(CanonicalPacketError) as error:
+        validate_canonical_packet(mutated)
+
+    assert error.value.code == "PACKET_CONTENT_INVALID"
+
+
+def test_validator_rejects_noncanonical_validation_evidence_timestamp(
+    engine: Engine,
+) -> None:
+    """Embedded evidence keeps its exact canonical JSON representation."""
+    project_id, sprint_id, story_id, _task_id = _seed(engine)
+    with Session(engine) as session:
+        packet = build_story_packet(
+            session,
+            project_id=project_id,
+            sprint_id=sprint_id,
+            story_id=story_id,
+        )
+
+    mutated = _rehashed_packet(packet)
+    validation = _object(_object(mutated["evidence"])["story_validation"])
+    validated_at = cast("str", validation["validated_at"])
+    assert validated_at.endswith("Z")
+    validation["validated_at"] = validated_at.removesuffix("Z") + "+00:00"
+    mutated = _rehashed_packet(mutated)
+
+    with pytest.raises(CanonicalPacketError) as error:
+        validate_canonical_packet(mutated)
+
+    assert error.value.code == "PACKET_CONTENT_INVALID"
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "normative_without_criterion",
+        "normative_without_level",
+        "normative_without_verification",
+        "blank_criterion",
+        "malformed_id",
+        "blank_id",
+        "blank_title",
+        "blank_statement",
+    ],
+)
+def test_validator_rejects_invalid_projected_specification_items(
+    engine: Engine, mutation: str
+) -> None:
+    """Projected Specification evidence retains public profile semantics."""
+    project_id, sprint_id, story_id, _task_id = _seed(engine)
+    with Session(engine) as session:
+        packet = build_story_packet(
+            session,
+            project_id=project_id,
+            sprint_id=sprint_id,
+            story_id=story_id,
+        )
+
+    mutated = _rehashed_packet(packet)
+    items = _items(_object(_object(mutated["evidence"])["specification"])["items"])
+    normative = next(
+        _object(item)
+        for item in items
+        if cast("str", _object(item)["spec_item_id"]).split(".", maxsplit=1)[0]
+        in {"REQ", "QUALITY", "CONSTRAINT", "INTERFACE", "DATA"}
+    )
+    assert normative["level"] == "MUST"
+    if mutation == "normative_without_criterion":
+        normative["acceptance_criteria"] = []
+    elif mutation == "normative_without_level":
+        normative["level"] = None
+    elif mutation == "normative_without_verification":
+        normative["verification_method"] = None
+    elif mutation == "blank_criterion":
+        normative["acceptance_criteria"] = ["   "]
+    elif mutation == "malformed_id":
+        original = cast("str", normative["spec_item_id"])
+        _replace_projected_specification_id(
+            mutated,
+            original=original,
+            replacement="REQ.not valid!",
+        )
+    elif mutation == "blank_id":
+        original = cast("str", normative["spec_item_id"])
+        _replace_projected_specification_id(
+            mutated,
+            original=original,
+            replacement="",
+        )
+    elif mutation == "blank_title":
+        normative["title"] = "   "
+    else:
+        normative["statement"] = "   "
+    mutated = _rehashed_packet(mutated)
+
+    with pytest.raises(CanonicalPacketError) as error:
+        validate_canonical_packet(mutated)
+
+    assert error.value.code == "PACKET_CONTENT_INVALID"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("started_at", "not-a-datetime"),
+        ("started_at", "2026-08-21T12:00:00+00:00"),
+        ("started_at", "2026-08-21T12:00:00.0Z"),
+        ("start_date", "2026-2-3"),
+        ("start_date", "2026-02-30"),
+        ("end_date", "not-a-date"),
+        ("end_date", "2026-08-21T00:00:00Z"),
+    ],
+)
+def test_validator_rejects_noncanonical_context_temporals(
+    engine: Engine, field: str, value: str
+) -> None:
+    """Snapshot temporal fields use the exact canonical projection forms."""
+    project_id, sprint_id, story_id, _task_id = _seed(engine)
+    with Session(engine) as session:
+        packet = build_story_packet(
+            session,
+            project_id=project_id,
+            sprint_id=sprint_id,
+            story_id=story_id,
+        )
+
+    mutated = _rehashed_packet(packet)
+    _object(_object(mutated["context"])["sprint"])[field] = value
+    mutated = _rehashed_packet(mutated)
+
+    with pytest.raises(CanonicalPacketError) as error:
+        validate_canonical_packet(mutated)
+
+    assert error.value.code == "PACKET_CONTENT_INVALID"
+
+
+@pytest.mark.parametrize(
+    ("title", "spec_item_ids", "rank"),
+    [
+        (
+            "Changed account access.",
+            ("QUALITY.latency", "REQ.account-access"),
+            "100",
+        ),
+        (
+            "Account access.",
+            ("QUALITY.new-latency", "REQ.account-access"),
+            "100",
+        ),
+        (
+            "Account access.",
+            ("QUALITY.latency", "REQ.account-access"),
+            "200",
+        ),
+    ],
+)
+def test_story_validation_input_owner_controls_payload_and_fingerprint(
+    title: str,
+    spec_item_ids: tuple[str, ...],
+    rank: str,
+) -> None:
+    """One pure owner defines the payload bytes and fingerprint together."""
+    baseline_payload, baseline_fingerprint = _owned_story_validation_input_for_test(
+        title="Account access.",
+        spec_item_ids=("QUALITY.latency", "REQ.account-access"),
+        rank="100",
+    )
+    payload, fingerprint = _owned_story_validation_input_for_test(
+        title=title,
+        spec_item_ids=spec_item_ids,
+        rank=rank,
+    )
+
+    assert _items(payload["spec_item_ids"]) == sorted(spec_item_ids)
+    assert fingerprint == canonical_hash(payload)
+    assert payload != baseline_payload
+    assert fingerprint != baseline_fingerprint
+
+
+def test_started_packet_keeps_exact_superseded_specification(
+    engine: Engine,
+) -> None:
+    """Older active execution remains pinned and is labelled superseded."""
+    project_id, sprint_id, story_id, _task_id = _seed(engine)
+    with Session(engine) as session:
+        before = build_story_packet(
+            session,
+            project_id=project_id,
+            sprint_id=sprint_id,
+            story_id=story_id,
+        )
+        before_lineage = _object(before["lineage"])
+        before_specification_lineage = _object(before_lineage["specification"])
+        specification = session.get(
+            SpecRegistry,
+            cast("int", before_specification_lineage["spec_version_id"]),
+        )
+        assert specification is not None
+        specification.status = "superseded"
+        session.add(specification)
         session.commit()
-        session.expire_all()
+        after = build_story_packet(
+            session,
+            project_id=project_id,
+            sprint_id=sprint_id,
+            story_id=story_id,
+        )
 
-    baseline_packets = packets()
-    baseline_hashes = tuple(
-        str(_object(packet["source_snapshot"])["validation_evidence_hash"])
-        for packet in baseline_packets
+    after_specification_lineage = _object(_object(after["lineage"])["specification"])
+    after_specification_evidence = _object(_object(after["evidence"])["specification"])
+    before_specification_evidence = _object(
+        _object(before["evidence"])["specification"]
     )
-    baseline_fingerprints = tuple(
-        str(_object(packet["metadata"])["source_fingerprint"])
-        for packet in baseline_packets
+    assert after_specification_lineage == before_specification_lineage
+    assert (
+        after_specification_evidence["items"] == before_specification_evidence["items"]
     )
-    assert baseline_hashes[0] == baseline_hashes[1]
-    assert len(baseline_hashes[0]) == _SHA256_HEX_LENGTH
+    assert after_specification_evidence["currentness"] == "superseded"
 
-    mutations = (
-        original.model_copy(
-            update={"warnings": [*original.warnings, "A new warning."]}
-        ),
-        original.model_copy(
-            update={
-                "failures": [
-                    *original.failures,
-                    ValidationFailure(
-                        rule="PAYLOAD_CASE",
-                        expected="lowercase",
-                        actual="mixed case",
-                        message="Payload casing is invalid.",
-                    ),
-                ]
-            }
-        ),
-        original.model_copy(
-            update={"rules_checked": [*original.rules_checked, "PAYLOAD_CASE"]}
-        ),
-        original.model_copy(update={"finding_invariant_ids": []}),
+
+def test_current_accepted_replacement_plan_builds_packet_for_same_planned_sprint(
+    engine: Engine,
+) -> None:
+    """Accepted historical A cannot make the current accepted leaf C ambiguous."""
+    project_id, sprint_id, story_id, plan_c_id = _seed_replaced_planned_execution(
+        engine
     )
-    for changed_evidence in mutations:
-        assert changed_evidence.validated_at == original.validated_at
-        assert changed_evidence.input_hash == original.input_hash
-        store(changed_evidence.model_dump_json())
-        changed_packets = packets()
-        for index, changed_packet in enumerate(changed_packets):
-            changed_snapshot = _object(changed_packet["source_snapshot"])
-            changed_metadata = _object(changed_packet["metadata"])
-            assert (
-                changed_snapshot["validation_evidence_hash"]
-                != baseline_hashes[index]
+
+    with Session(engine) as session:
+        packet = build_story_packet(
+            session,
+            project_id=project_id,
+            sprint_id=sprint_id,
+            story_id=story_id,
+        )
+
+    sprint_plan = _object(_object(packet["lineage"])["sprint_plan"])
+    assert sprint_plan["sprint_plan_artifact_id"] == plan_c_id
+
+
+def test_superseded_packet_rejects_planned_sprint_even_with_start_row(
+    engine: Engine,
+) -> None:
+    """SprintStart is historical proof only while execution is active or terminal."""
+    project_id, sprint_id, story_id, _task_id = _seed(engine)
+    with Session(engine) as session:
+        packet = build_story_packet(
+            session,
+            project_id=project_id,
+            sprint_id=sprint_id,
+            story_id=story_id,
+        )
+        specification = session.get(
+            SpecRegistry,
+            _object(_object(packet["lineage"])["specification"])["spec_version_id"],
+        )
+        sprint = session.get(Sprint, sprint_id)
+        assert specification is not None
+        assert sprint is not None
+        specification.status = "superseded"
+        sprint.status = SprintStatus.PLANNED
+        session.add(specification)
+        session.add(sprint)
+        session.commit()
+
+        with pytest.raises(CanonicalPacketError) as error:
+            build_story_packet(
+                session,
+                project_id=project_id,
+                sprint_id=sprint_id,
+                story_id=story_id,
             )
-            assert (
-                changed_metadata["source_fingerprint"]
-                != baseline_fingerprints[index]
+
+    assert error.value.code == "PACKET_LINEAGE_INVALID"
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("plan_fingerprint", "sha256:" + "b" * 64),
+        ("task_content_fingerprint", "sha256:" + "c" * 64),
+        ("dependency_rows_fingerprint", "sha256:" + "d" * 64),
+        ("decision_fingerprint", "sha256:" + "f" * 64),
+    ],
+)
+def test_superseded_packet_rejects_corrupt_execution_contract_proof(
+    engine: Engine,
+    field: str,
+    replacement: str,
+) -> None:
+    """Historical reads reject corrupt start, Task, dependency, or decision proof."""
+    project_id, sprint_id, story_id, _task_id = _seed(engine)
+    with Session(engine) as session:
+        packet = build_story_packet(
+            session,
+            project_id=project_id,
+            sprint_id=sprint_id,
+            story_id=story_id,
+        )
+        specification = session.get(
+            SpecRegistry,
+            _object(_object(packet["lineage"])["specification"])["spec_version_id"],
+        )
+        start = session.exec(
+            select(SprintStart).where(SprintStart.sprint_id == sprint_id)
+        ).one()
+        assert specification is not None
+        specification.status = "superseded"
+        setattr(start, field, replacement)
+        session.add(specification)
+        session.add(start)
+        session.commit()
+
+        with pytest.raises(CanonicalPacketError) as error:
+            build_story_packet(
+                session,
+                project_id=project_id,
+                sprint_id=sprint_id,
+                story_id=story_id,
             )
 
-    persisted = _object(json.loads(original.model_dump_json()))
-    reordered = {key: persisted[key] for key in reversed(tuple(persisted))}
-    store(json.dumps(reordered, ensure_ascii=True, separators=(",", ":")))
-    canonical_packets = packets()
-    for index, canonical_packet in enumerate(canonical_packets):
-        assert (
-            _object(canonical_packet["source_snapshot"])[
-                "validation_evidence_hash"
-            ]
-            == baseline_hashes[index]
-        )
-        assert (
-            _object(canonical_packet["metadata"])["source_fingerprint"]
-            == baseline_fingerprints[index]
-        )
+    assert error.value.code == "PACKET_LINEAGE_INVALID"
 
 
-def test_packet_validation_freshness_and_unpinned_authority_are_exact(
+def test_packet_reuses_deep_story_validation_evidence_owner(
     engine: Engine,
-    session: Session,
 ) -> None:
-    """Mark changed Story input stale and never fall back from an unpinned Story."""
-    seed = _seed_packet_context(session)
-    reads = DurableReadProjectionService(engine=engine)
-    story = session.get(UserStory, seed.story_id)
-    assert story is not None
-    story.acceptance_criteria = f"{story.acceptance_criteria or ''}\n- log failures"
-    story.ac_updated_at = datetime.now(UTC)
-    session.add(story)
-    session.commit()
+    """Canonical but source-mismatched v2 evidence cannot enter a packet."""
+    project_id, sprint_id, story_id, _task_id = _seed(engine)
+    with Session(engine) as session:
+        story = session.get(UserStory, story_id)
+        assert story is not None
+        evidence = json.loads(cast("str", story.validation_evidence))
+        evidence["source_backlog_artifact_id"] += 10_000
+        story.validation_evidence = canonical_json(evidence)
+        session.add(story)
+        session.commit()
 
-    stale_packet = _data(
-        reads.task_packet(
-            project_id=seed.project_id,
-            sprint_id=seed.sprint_id,
-            task_id=seed.task_id,
-        )
-    )
-    stale_validation = _object(_object(stale_packet["constraints"])["validation"])
-    assert stale_validation["freshness_status"] == "stale"
-    assert stale_validation["input_hash_matches"] is False
-    assert _object(stale_packet["source_snapshot"])["story_ac_updated_at"] is not None
+        with pytest.raises(CanonicalPacketError) as error:
+            build_story_packet(
+                session,
+                project_id=project_id,
+                sprint_id=sprint_id,
+                story_id=story_id,
+            )
 
-    story.accepted_spec_version_id = None
-    story.validation_evidence = None
-    session.add(story)
-    session.commit()
-    unpinned_packet = _data(
-        reads.task_packet(
-            project_id=seed.project_id,
-            sprint_id=seed.sprint_id,
-            task_id=seed.task_id,
-        )
-    )
-    constraints = _object(unpinned_packet["constraints"])
-    assert _object(constraints["spec_binding"]) == {
-        "mode": "pinned_story_authority",
-        "binding_status": "unpinned",
-        "spec_version_id": None,
-        "authority_artifact_status": "missing",
-    }
-    assert _object(constraints["validation"])["freshness_status"] == "missing"
-    assert constraints["task_hard_constraints"] == []
-    assert constraints["story_compliance_boundaries"] == []
+    assert error.value.code == "PACKET_LINEAGE_INVALID"
 
 
-def test_packets_reject_unlinked_and_cross_project_records(
+def test_packet_rejects_noncanonical_or_mismatched_task_metadata(
     engine: Engine,
-    session: Session,
 ) -> None:
-    """Fail closed for sprint linkage and task/Story Project ownership."""
-    seed = _seed_packet_context(session, pinned=False)
-    foreign_project = Project(name="Foreign Project")
-    foreign_team = Team(name="Foreign Team")
-    session.add(foreign_project)
-    session.add(foreign_team)
-    session.flush()
-    foreign_sprint = Sprint(
-        goal="Foreign work",
-        project_id=_required_id(foreign_project.project_id, "foreign_project_id"),
-        team_id=_required_id(foreign_team.team_id, "foreign_team_id"),
-    )
-    session.add(foreign_sprint)
-    session.commit()
-    foreign_sprint_id = _required_id(foreign_sprint.sprint_id, "foreign_sprint_id")
-    reads = DurableReadProjectionService(engine=engine)
-
-    unlinked = reads.task_packet(
-        project_id=seed.project_id,
-        sprint_id=foreign_sprint_id,
-        task_id=seed.task_id,
-    )
-    cross_project = reads.story_packet(
-        project_id=_required_id(foreign_project.project_id, "foreign_project_id"),
-        sprint_id=seed.sprint_id,
-        story_id=seed.story_id,
-    )
-
-    assert _error_code(unlinked) == "TASK_PACKET_CONTEXT_NOT_FOUND"
-    assert _error_code(cross_project) == "STORY_NOT_FOUND"
+    """No missing, reformatted, legacy, or identity-drifted Task metadata is read."""
+    project_id, sprint_id, _story_id, task_id = _seed(engine)
+    with Session(engine) as session:
+        row = session.get(Task, task_id)
+        assert row is not None
+        payload = json.loads(row.metadata_json)
+        payload["extra"] = True
+        row.metadata_json = json.dumps(payload, sort_keys=True)
+        session.add(row)
+        session.commit()
+        with pytest.raises(CanonicalPacketError) as error:
+            build_task_packet(
+                session,
+                project_id=project_id,
+                sprint_id=sprint_id,
+                task_id=task_id,
+            )
+    assert error.value.code == "TASK_METADATA_INVALID"
 
 
-def test_pinned_packet_rejects_foreign_spec_and_missing_acceptance(
+def test_packet_rejects_canonical_metadata_from_different_specification(
     engine: Engine,
-    session: Session,
 ) -> None:
-    """Require current Project ownership and one exact accepted authority row."""
-    seed = _seed_packet_context(session)
-    assert seed.spec_version_id is not None
-    reads = DurableReadProjectionService(engine=engine)
-    foreign_project = Project(name="Foreign Spec Owner")
-    session.add(foreign_project)
-    session.commit()
-    session.refresh(foreign_project)
-    foreign_lineage = seed_accepted_specification(
-        session,
-        project_id=_required_id(foreign_project.project_id, "foreign_project_id"),
-        content=json.dumps({"requirements": ["A foreign specification."]}),
-    )
-    foreign_spec_id = _required_id(
-        foreign_lineage.spec.spec_version_id,
-        "foreign_spec_version_id",
-    )
-    story = session.get(UserStory, seed.story_id)
-    assert story is not None
-    story.accepted_spec_version_id = foreign_spec_id
-    session.add(story)
-    session.commit()
-
-    foreign_owned = reads.task_packet(
-        project_id=seed.project_id,
-        sprint_id=seed.sprint_id,
-        task_id=seed.task_id,
-    )
-    assert _error_code(foreign_owned) == "SPEC_VERSION_NOT_FOUND"
-
-    spec = session.get(SpecRegistry, seed.spec_version_id)
-    assert spec is not None
-    assert spec.source_specification_candidate_id is not None
-    assert spec.source_specification_candidate_fingerprint is not None
-    story.accepted_spec_version_id = seed.spec_version_id
-    session.add(story)
-    acceptance = session.exec(
-        select(SpecAuthorityAcceptance).where(
-            col(SpecAuthorityAcceptance.project_id) == seed.project_id,
-            col(SpecAuthorityAcceptance.spec_version_id) == seed.spec_version_id,
-        )
-    ).one()
-    session.delete(acceptance)
-    session.commit()
-
-    missing_acceptance = reads.story_packet(
-        project_id=seed.project_id,
-        sprint_id=seed.sprint_id,
-        story_id=seed.story_id,
-    )
-    assert _error_code(missing_acceptance) == "AUTHORITY_NOT_ACCEPTED"
+    """A well-formed v2 object must still equal the accepted plan identity."""
+    project_id, sprint_id, _story_id, task_id = _seed(engine)
+    with Session(engine) as session:
+        row = session.get(Task, task_id)
+        assert row is not None
+        payload = json.loads(row.metadata_json)
+        payload["spec_hash"] = "sha256:" + "f" * 64
+        row.metadata_json = canonical_json(payload)
+        session.add(row)
+        session.commit()
+        with pytest.raises(CanonicalPacketError) as error:
+            build_task_packet(
+                session,
+                project_id=project_id,
+                sprint_id=sprint_id,
+                task_id=task_id,
+            )
+    assert error.value.code == "TASK_METADATA_INVALID"
 
 
-def test_pinned_packet_rejects_acceptance_authority_mismatch(
+def test_packet_rejects_mutable_story_substitution(
     engine: Engine,
-    session: Session,
 ) -> None:
-    """Reject an acceptance that points at authority for a different spec."""
-    seed = _seed_packet_context(session)
-    assert seed.spec_version_id is not None
-    second_lineage = seed_accepted_specification(
-        session,
-        project_id=seed.project_id,
-        content=json.dumps(
-            {"requirements": ["A different specification."]},
-            separators=(",", ":"),
-        ),
-    )
-    second_spec = second_lineage.spec
-    second_authority = CompiledSpecAuthority(
-        spec_version_id=_required_id(second_spec.spec_version_id, "second_spec_id"),
-        compiler_version="3.0.0",
-        prompt_hash="1" * 64,
-        scope_themes="[]",
-        invariants="[]",
-        eligible_feature_ids="[]",
-        rejected_features="[]",
-        spec_gaps="[]",
-    )
-    session.add(second_authority)
-    session.flush()
-    acceptance = session.exec(
-        select(SpecAuthorityAcceptance).where(
-            col(SpecAuthorityAcceptance.project_id) == seed.project_id,
-            col(SpecAuthorityAcceptance.spec_version_id) == seed.spec_version_id,
-        )
-    ).one()
-    acceptance.pending_authority_id = _required_id(
-        second_authority.authority_id,
-        "second_authority_id",
-    )
-    session.add(acceptance)
-    session.commit()
-
-    result = DurableReadProjectionService(engine=engine).task_packet(
-        project_id=seed.project_id,
-        sprint_id=seed.sprint_id,
-        task_id=seed.task_id,
-    )
-
-    assert _error_code(result) == "AUTHORITY_ACCEPTANCE_MISMATCH"
+    """Operational display fields cannot replace accepted canonical Story bytes."""
+    project_id, sprint_id, story_id, _task_id = _seed(engine)
+    with Session(engine) as session:
+        row = session.get(UserStory, story_id)
+        assert row is not None
+        row.title = "Mutable substitute"
+        session.add(row)
+        session.commit()
+        with pytest.raises(CanonicalPacketError) as error:
+            build_story_packet(
+                session,
+                project_id=project_id,
+                sprint_id=sprint_id,
+                story_id=story_id,
+            )
+    assert error.value.code == "PACKET_LINEAGE_INVALID"
 
 
-def test_packet_api_returns_canonical_render_and_not_found_contract(
-    engine: Engine,
-    session: Session,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Exercise canonical packets and renderer through the production API routes."""
-    seed = _seed_packet_context(session)
-    application = _PacketApplication(DurableReadProjectionService(engine=engine))
-    monkeypatch.setattr(api_module, "_application", lambda: application)
-    client = TestClient(api_module.app)
-
-    task_response = client.get(
-        f"/api/projects/{seed.project_id}/sprints/{seed.sprint_id}"
-        f"/tasks/{seed.task_id}/packet?flavor=cursor"
-    )
-    story_response = client.get(
-        f"/api/projects/{seed.project_id}/sprints/{seed.sprint_id}"
-        f"/stories/{seed.story_id}/packet?flavor=human"
-    )
-    missing_response = client.get(
-        f"/api/projects/{seed.project_id}/sprints/{seed.sprint_id}/tasks/999999/packet"
-    )
-
-    assert task_response.status_code == HTTPStatus.OK
-    task_payload = _object(_object(task_response.json())["data"])
-    assert task_payload["schema_version"] == "task_packet.v2"
-    task_render = task_payload["render"]
-    assert isinstance(task_render, str)
-    assert "<task_kind>implementation</task_kind>" in task_render
-    assert "Task Checklist" in task_render
-    assert "Story Acceptance Criteria" not in task_render
-
-    assert story_response.status_code == HTTPStatus.OK
-    story_payload = _object(_object(story_response.json())["data"])
-    assert story_payload["schema_version"] == "story_packet.v1"
-    story_render = story_payload["render"]
-    assert isinstance(story_render, str)
-    assert "# Story: Payload Validation Story" in story_render
-    assert "## Story Acceptance Criteria" in story_render
-
-    assert missing_response.status_code == HTTPStatus.NOT_FOUND
-    missing_detail = _object(_object(missing_response.json())["detail"])
-    assert _error_code(missing_detail) == "TASK_PACKET_CONTEXT_NOT_FOUND"
+def test_packet_context_errors_are_closed(engine: Engine) -> None:
+    """Unknown Project and missing packet contexts use only public closed codes."""
+    project_id, sprint_id, story_id, task_id = _seed(engine)
+    with Session(engine) as session:
+        project = session.get(Project, project_id)
+        assert project is not None
+        with pytest.raises(CanonicalPacketError) as missing_project:
+            build_story_packet(
+                session,
+                project_id=999_999,
+                sprint_id=sprint_id,
+                story_id=story_id,
+            )
+        with pytest.raises(CanonicalPacketError) as missing_story:
+            build_story_packet(
+                session,
+                project_id=project_id,
+                sprint_id=999_999,
+                story_id=story_id,
+            )
+        with pytest.raises(CanonicalPacketError) as missing_task:
+            build_task_packet(
+                session,
+                project_id=project_id,
+                sprint_id=sprint_id,
+                task_id=task_id + 999_999,
+            )
+    assert missing_project.value.code == "PROJECT_NOT_FOUND"
+    assert missing_story.value.code == "STORY_PACKET_CONTEXT_NOT_FOUND"
+    assert missing_task.value.code == "TASK_PACKET_CONTEXT_NOT_FOUND"

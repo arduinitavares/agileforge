@@ -130,32 +130,25 @@ and transport metadata such as idempotency key and actor.
 Use a new idempotency key for each distinct request. Reuse a key only to retry
 the exact same request after an uncertain transport result.
 
-## Specification And Authority Boundary
+## Accepted Specification Boundary
 
 An accepted Product Goal enables `specification source register`, not direct
-authoring. An external agent performs optional Discovery through
-`grill-with-docs`, updates `CONTEXT.md` when terminology is resolved, creates
-ADRs only when warranted, and runs `to-spec` to produce a human-readable source
-Specification. `grill-with-docs` is provenance attestation; AgileForge does not
-claim to prove the agent's internal reasoning.
-
-Register the exact source and applicable ADR paths using the command returned by
-`workflow next`:
+authoring. An external agent may perform optional Discovery, update
+`CONTEXT.md`, create warranted ADRs, and run `to-spec` to produce a
+human-readable source. Register the exact source and applicable ADR paths using
+the command returned by `workflow next`:
 
 ```sh
 ./agileforge-dev cli --profile local -- specification source register \
   --project-id 41 \
   --source-path specs/product-specification.md \
   --preparation-capability grill-with-docs \
-  --adr-path docs/adr/0004-register-to-spec-source-before-structuring.md \
+  --adr-path docs/adr/0005-use-accepted-specification-as-delivery-contract.md \
   --idempotency-key specification-source-41-1 \
   --actor operator
 ```
 
-AgileForge atomically captures exact bytes, the accepted Vision fingerprint,
-active Product Goal fingerprint, repository binding and revision, an explicit
-`CONTEXT.md` present/absent state, and applicable ADR fingerprints. Once the
-source is registered, execute the advertised `specification structure` command:
+After capture, execute the advertised structuring command:
 
 ```sh
 ./agileforge-dev cli --profile local -- specification structure \
@@ -164,24 +157,16 @@ source is registered, execute the advertised `specification structure` command:
   --actor operator
 ```
 
-The internal Specification Structuring Agent receives the captured Vision,
-Goal, exact source, present Context, ADRs, repository evidence, pinned amendment
-base, and prior human feedback when applicable. It returns semantic content
-through the closed `agileforge.spec.v2` contract. AgileForge owns identities,
-canonical ordering, hashes, lineage, timestamps, persistence, and rendering.
+The structurer receives captured Vision, Goal, source, Context, ADR, repository,
+amendment, and prior-feedback evidence. It returns the closed
+`agileforge.spec.v2` payload. AgileForge owns canonical identities, ordering,
+hashes, lineage, persistence, and rendering.
 
-`specification review` resolves the graph-selected immutable candidate. The
-human supplies only the decision and rationale plus normal transport metadata.
-Acceptance does not rewrite payload or envelope bytes. Authority compilation
-then consumes only the accepted typed clauses, never source Markdown,
-`CONTEXT.md`, ADR or repository prose, or rendered Markdown. A
-separate `authority review` and `authority decide` gate remains required before
-Backlog work.
-
-There is no Discovery artifact, lifecycle node, API route, CLI command, or UI
-state. `CONTEXT.md` is optional because domain modeling creates it lazily.
-Source, Context, ADR, Vision, Goal, repository, or binding drift invalidates the
-attempt; read `workflow next` again and register a new immutable source.
+`specification review` resolves the graph-selected immutable candidate. Human
+acceptance does not rewrite payload or envelope bytes. The exact accepted
+Specification then binds Backlog, Roadmap, Story, Sprint, Task, and execution
+artifacts directly. There is no intermediate compiled contract or separate
+review gate.
 
 ## Command Catalog
 
@@ -192,7 +177,6 @@ The current fixed request kinds map to these prefixes:
 | Vision | `vision bootstrap`, `vision respond`, `vision status`, `vision review`, `vision revision` |
 | Product Goal | `goal respond`, `goal review`, `goal complete`, `goal abandon` |
 | Specification | `specification source register`, `specification structure`, `specification status`, `specification review` |
-| Authority | `authority compile`, `authority feedback`, `authority decide`, `authority repair` |
 | Backlog | `backlog generate`, `backlog decide` |
 | Roadmap | `roadmap generate`, `roadmap decide` |
 | Story | `story generate`, `story decide`, `story dependencies apply`, `story readiness repair`, `story close` |
@@ -209,9 +193,6 @@ Reads never advance the workflow:
 ./agileforge-dev cli --profile local -- project list
 ./agileforge-dev cli --profile local -- project show --project-id 41
 ./agileforge-dev cli --profile local -- specification status --project-id 41
-./agileforge-dev cli --profile local -- authority status --project-id 41
-./agileforge-dev cli --profile local -- authority invariants --project-id 41
-./agileforge-dev cli --profile local -- authority review --project-id 41
 ./agileforge-dev cli --profile local -- workflow position --project-id 41
 ./agileforge-dev cli --profile local -- workflow next --project-id 41
 ```
@@ -223,8 +204,6 @@ A read result is evidence, not permission to mutate.
 The production recipe catalog contains:
 
 ```text
-authority.compile
-authority.repair
 specification.structure
 vision.bootstrap
 vision.interview
@@ -235,9 +214,9 @@ planning.story.generate
 planning.sprint.plan
 ```
 
-Each recipe receives host-normalized input, invokes one configured leaf, validates
-structured output, and returns a positioned transition request. Recipes do not
-read persistence or choose graph routes.
+Each recipe receives host-normalized input, invokes one configured leaf,
+validates structured output, and returns a positioned transition request.
+Recipes do not read persistence or choose graph routes.
 
 ## Stale Position Recovery
 

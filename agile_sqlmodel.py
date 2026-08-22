@@ -3,10 +3,6 @@
 from importlib import import_module
 from types import ModuleType
 
-from models.authority_curation import (
-    AuthorityCurationAttempt,
-    AuthorityFeedbackAttempt,
-)
 from models.core import (
     Epic,
     Feature,
@@ -24,7 +20,6 @@ from models.core import (
     UserStoryDependency,
 )
 from models.enums import (
-    SpecAuthorityStatus,
     SprintStatus,
     StoryResolution,
     StoryStatus,
@@ -52,16 +47,9 @@ from models.product_definition import (
     VisionRevisionIntent,
 )
 from models.repository import RepositoryBinding
-from models.specs import (
-    CompiledSpecAuthority,
-    SpecAuthorityAcceptance,
-    SpecRegistry,
-)
+from models.specs import SpecRegistry
 
 __all__ = [
-    "AuthorityCurationAttempt",
-    "AuthorityFeedbackAttempt",
-    "CompiledSpecAuthority",
     "Epic",
     "Feature",
     "ProductGoalArtifact",
@@ -72,8 +60,6 @@ __all__ = [
     "ProjectPersona",
     "ProjectTeam",
     "RepositoryBinding",
-    "SpecAuthorityAcceptance",
-    "SpecAuthorityStatus",
     "SpecRegistry",
     "SpecificationCandidate",
     "SpecificationDecision",

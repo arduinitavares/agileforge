@@ -20,8 +20,8 @@ model: LiteLlm = LiteLlm(
 root_agent: Agent = Agent(
     name="sprint_planner_tool",
     description=(
-        "An agent that converts a prioritized product backlog into a committed "
-        "sprint backlog with sprint goal, capacity reasoning, and tasks."
+        "An agent that plans tasks for one host-locked Story cohort using exact "
+        "accepted-Specification evidence."
     ),
     model=model,
     input_schema=SprintPlannerInput,

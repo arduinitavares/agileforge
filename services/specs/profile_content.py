@@ -22,7 +22,7 @@ INVALID_SPECIFICATION_PAYLOAD: str = "INVALID_SPECIFICATION_PAYLOAD"
 
 
 class SpecContentNormalizationError(ValueError):
-    """Raised when spec content cannot be normalized for authority compilation."""
+    """Raised when spec content cannot be normalized for registry storage."""
 
     def __init__(self, message: str, *, error_code: str) -> None:
         """Store the normalization error message and stable error code."""

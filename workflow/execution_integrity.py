@@ -122,12 +122,12 @@ def _fail(message: str, *, cause: Exception | None = None) -> NoReturn:
 def _accepted_story_payload(story: StoryFact) -> dict[str, object]:
     return {
         "story_id": story.story_id,
-        "requirement_id": story.requirement_id,
+        "source_story_item_id": story.source_story_item_id,
         "content_fingerprint": story.content_fingerprint,
         "content_accepted": story.content_accepted,
         "story_artifact_id": story.story_artifact_id,
-        "authority_id": story.authority_id,
-        "authority_fingerprint": story.authority_fingerprint,
+        "accepted_spec_version_id": story.accepted_spec_version_id,
+        "accepted_spec_hash": story.accepted_spec_hash,
         "backlog_artifact_id": story.backlog_artifact_id,
         "backlog_artifact_fingerprint": story.backlog_artifact_fingerprint,
         "roadmap_artifact_id": story.roadmap_artifact_id,
@@ -169,8 +169,10 @@ def selected_story_dependency_snapshot(
     selected_story_ids: tuple[int, ...],
 ) -> SelectedStoryDependencySnapshot:
     """Scope dependency identity, edges, and Story source to selected Stories."""
-    canonical_story_ids = tuple(sorted(set(selected_story_ids)))
-    if not canonical_story_ids or canonical_story_ids != selected_story_ids:
+    canonical_story_ids = selected_story_ids
+    if not canonical_story_ids or len(canonical_story_ids) != len(
+        set(canonical_story_ids)
+    ):
         _fail("Selected Story dependency scope is not canonical.")
     stories_by_id = {item.story_id: item for item in snapshot.stories}
     if len(stories_by_id) != len(snapshot.stories):
@@ -394,7 +396,9 @@ def _start_contract_facts(
     if (
         plan.artifact_type != "sprint_plan"
         or plan.status not in {"accepted", "superseded"}
-        or plan.sprint_id != sprint_id
+        or plan.activated_sprint_id != sprint_id
+        or plan.spec_version_id != start.spec_version_id
+        or plan.spec_hash != start.spec_hash
         or plan.source_fingerprint != plan.candidate_set_fingerprint
         or decision.artifact_type != "sprint"
         or decision.artifact_id != plan.artifact_id
@@ -402,7 +406,7 @@ def _start_contract_facts(
         or decision.decision != "accepted"
         or start.plan_fingerprint != plan.artifact_fingerprint
         or start.candidate_set_fingerprint != plan.candidate_set_fingerprint
-        or start.selected_story_ids != plan.story_ids
+        or start.selected_story_ids != plan.selected_story_ids
         or start.task_content_fingerprint != plan.task_content_fingerprint
         or not start.decision_fingerprint
         or start.audit_event_id <= 0
@@ -417,17 +421,19 @@ def _contract_stories(
     start: SprintStartFact,
     dependency_review: StoryDependencyReviewFact,
 ) -> tuple[StoryFact, ...]:
-    selected_story_ids = tuple(sorted(set(start.selected_story_ids)))
-    if not selected_story_ids or selected_story_ids != start.selected_story_ids:
+    selected_story_ids = start.selected_story_ids
+    if not selected_story_ids or len(selected_story_ids) != len(
+        set(selected_story_ids)
+    ):
         _fail("Sprint start selected Story IDs are not canonical.")
-    attached = tuple(
-        sorted(
-            (item for item in snapshot.stories if start.sprint_id in item.sprint_ids),
-            key=lambda item: item.story_id,
-        )
-    )
-    if tuple(item.story_id for item in attached) != selected_story_ids:
+    attached_by_id = {
+        item.story_id: item
+        for item in snapshot.stories
+        if start.sprint_id in item.sprint_ids
+    }
+    if set(attached_by_id) != set(selected_story_ids):
         _fail("Sprint Story membership changed after plan acceptance.")
+    attached = tuple(attached_by_id[story_id] for story_id in selected_story_ids)
     if dependency_review.selected_story_ids != selected_story_ids:
         _fail("Sprint dependency review Story set is stale.")
     if any(

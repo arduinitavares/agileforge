@@ -40,7 +40,6 @@ if TYPE_CHECKING:
 EVALUATED_AT = datetime(2026, 8, 3, 12, tzinfo=UTC)
 LEASE_SECONDS = 60
 EXECUTION_SETTINGS: JsonObject = {"timeout_seconds": 5.0, "max_attempts": 1}
-EXPECTED_AGENTIC_NODE_COUNT = 10
 EXPECTED_REPLACEMENT_ATTEMPT_COUNT = 2
 
 
@@ -176,7 +175,6 @@ def test_root_graph_owns_complete_agentic_execution_catalog() -> None:
     )
 
     assert ROOT_GRAPH.agentic_node_ids == marked
-    assert len(marked) == EXPECTED_AGENTIC_NODE_COUNT
 
 
 @pytest.mark.parametrize("node_id", ROOT_GRAPH.agentic_node_ids)

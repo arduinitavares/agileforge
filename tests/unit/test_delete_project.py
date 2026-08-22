@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from datetime import date, timedelta
 from typing import TYPE_CHECKING
 
@@ -11,10 +10,8 @@ from sqlalchemy import event
 from sqlmodel import Session, SQLModel, create_engine, select
 
 from agile_sqlmodel import (
-    CompiledSpecAuthority,
     Project,
     ProjectTeam,
-    SpecAuthorityAcceptance,
     SpecRegistry,
     Sprint,
     SprintStory,
@@ -24,11 +21,13 @@ from agile_sqlmodel import (
     UserStory,
 )
 from models.core import Epic, Feature, Team, Theme
-from repositories.project import ProjectDeletionConflictError
+from models.product_definition import SpecificationDecision
+from models.workflow import BacklogArtifact, RoadmapArtifact, StoryArtifact
 from scripts.delete_project import delete_project, resolve_db_path
 from tests.typing_helpers import require_id
 from tests.workflow.lifecycle_fixtures import seed_accepted_specification
 from utils.runtime_config import RuntimeConfigError, clear_runtime_config_cache
+from workflow.fingerprints import canonical_hash
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -61,7 +60,9 @@ def _clear_runtime_cache() -> Iterator[None]:
     clear_runtime_config_cache()
 
 
-def test_delete_project_removes_sprints_and_story_logs(tmp_path: Path) -> None:
+def test_delete_project_removes_sprints_and_story_logs(  # noqa: PLR0915
+    tmp_path: Path,
+) -> None:
     """Ensure delete_project clears sprints and story completion logs."""
     db_path = tmp_path / "delete_project_test.db"
     engine = _create_sqlite_engine(db_path)
@@ -90,18 +91,116 @@ def test_delete_project_removes_sprints_and_story_logs(tmp_path: Path) -> None:
         feature = Feature(title="Feature", epic_id=epic_id)
         session.add(feature)
         session.flush()
-        feature_id = require_id(feature.feature_id, "feature_id")
+
+        def bind_current_specification_decision(
+            flush_session: Session,
+            *_args: object,
+        ) -> None:
+            decisions = [
+                row
+                for row in flush_session.new
+                if isinstance(row, SpecificationDecision)
+            ]
+            registries = [
+                row for row in flush_session.new if isinstance(row, SpecRegistry)
+            ]
+            if len(decisions) != 1 or len(registries) != 1:
+                return
+            decision = decisions[0]
+            registry = registries[0]
+            if decision.specification_decision_id is None:
+                decision.specification_decision_id = 1_000_000 + project_id
+            registry.source_specification_decision_id = (
+                decision.specification_decision_id
+            )
+
+        event.listen(session, "before_flush", bind_current_specification_decision)
+        try:
+            lineage = seed_accepted_specification(
+                session,
+                project_id=project_id,
+                content='{"title":"Accepted specification"}',
+            )
+        finally:
+            event.remove(session, "before_flush", bind_current_specification_decision)
+
+        spec_id = require_id(lineage.spec.spec_version_id, "spec_version_id")
+        backlog_fingerprint = canonical_hash({"artifact": "backlog"})
+        backlog = BacklogArtifact(
+            project_id=project_id,
+            spec_version_id=spec_id,
+            spec_hash=lineage.spec.spec_hash,
+            product_goal_artifact_id=lineage.product_goal_artifact_id,
+            product_goal_fingerprint=lineage.product_goal_fingerprint,
+            version_number=1,
+            canonical_content_json='{"items":["BACKLOG-1"]}',
+            content_fingerprint=backlog_fingerprint,
+            created_by="fixture",
+        )
+        session.add(backlog)
+        session.flush()
+        backlog_id = require_id(backlog.backlog_artifact_id, "backlog_artifact_id")
+
+        roadmap_fingerprint = canonical_hash({"artifact": "roadmap"})
+        roadmap = RoadmapArtifact(
+            project_id=project_id,
+            backlog_artifact_id=backlog_id,
+            backlog_artifact_fingerprint=backlog_fingerprint,
+            version_number=1,
+            canonical_content_json='{"items":["ROADMAP-1"]}',
+            content_fingerprint=roadmap_fingerprint,
+            created_by="fixture",
+        )
+        session.add(roadmap)
+        session.flush()
+        roadmap_id = require_id(roadmap.roadmap_artifact_id, "roadmap_artifact_id")
+
+        story_artifact_fingerprint = canonical_hash({"artifact": "story"})
+        story_artifact = StoryArtifact(
+            project_id=project_id,
+            source_backlog_artifact_id=backlog_id,
+            source_backlog_artifact_fingerprint=backlog_fingerprint,
+            backlog_item_id="BACKLOG-1",
+            roadmap_artifact_id=roadmap_id,
+            roadmap_artifact_fingerprint=roadmap_fingerprint,
+            version_number=1,
+            canonical_content_json='{"items":["STORY-1"]}',
+            content_fingerprint=story_artifact_fingerprint,
+            story_item_ids_json='["STORY-1"]',
+            created_by="fixture",
+        )
+        session.add(story_artifact)
+        session.flush()
+        story_artifact_id = require_id(
+            story_artifact.story_artifact_id,
+            "story_artifact_id",
+        )
 
         story = UserStory(
-            title="Story",
             project_id=project_id,
-            feature_id=feature_id,
+            source_story_artifact_id=story_artifact_id,
+            source_story_artifact_fingerprint=story_artifact_fingerprint,
+            source_story_item_id="STORY-1",
+            source_story_item_fingerprint=canonical_hash({"story": "STORY-1"}),
+            accepted_spec_version_id=spec_id,
+            accepted_spec_hash=lineage.spec.spec_hash,
+            spec_item_ids_json='["GOAL.fixture.accepted-specification"]',
+            title="Story",
+            story_description="As a user, I want deletion coverage.",
+            acceptance_criteria_json='["Every dependent row is deleted."]',
+            persona="user",
         )
         session.add(story)
         session.flush()
         story_id = require_id(story.story_id, "story_id")
 
-        session.add(Task(description="Task", story_id=story_id))
+        session.add(
+            Task(
+                description="Task",
+                metadata_json='{"version":"task_metadata.v2"}',
+                story_id=story_id,
+            )
+        )
 
         sprint = Sprint(
             goal="Goal",
@@ -141,102 +240,6 @@ def test_delete_project_removes_sprints_and_story_logs(tmp_path: Path) -> None:
         assert session.exec(select(Feature)).first() is None
         assert session.exec(select(Epic)).first() is None
         assert session.exec(select(Theme)).first() is None
-
-
-def test_delete_project_allows_pre_acceptance_authority_shell(tmp_path: Path) -> None:
-    """Allow script deletion before any authority has been accepted."""
-    db_path = tmp_path / "delete_project_spec.db"
-    engine = _create_sqlite_engine(db_path)
-
-    with Session(engine) as session:
-        project = Project(name="Spec Project")
-        session.add(project)
-        session.flush()
-        project_id = require_id(project.project_id, "project_id")
-
-        spec = seed_accepted_specification(
-            session,
-            project_id=project_id,
-            content=json.dumps({"title": "Pre-authority specification"}),
-        ).spec
-        spec_version_id = require_id(spec.spec_version_id, "spec_version_id")
-
-        session.add(
-            CompiledSpecAuthority(
-                spec_version_id=spec_version_id,
-                compiler_version="1.0.0",
-                prompt_hash="prompt-hash",
-                scope_themes="[]",
-                invariants="[]",
-                eligible_feature_ids="[]",
-            )
-        )
-        session.commit()
-
-    delete_project(project_id, str(db_path))
-
-    with Session(engine) as session:
-        assert session.get(Project, project_id) is None
-        assert session.exec(select(CompiledSpecAuthority)).first() is None
-        assert session.exec(select(SpecRegistry)).first() is None
-
-
-def test_delete_project_preserves_historically_accepted_authority(
-    tmp_path: Path,
-) -> None:
-    """Refuse script deletion before mutating accepted authority evidence."""
-    db_path = tmp_path / "delete_project_accepted_authority.db"
-    engine = _create_sqlite_engine(db_path)
-
-    with Session(engine) as session:
-        project = Project(name="Accepted Authority Project")
-        session.add(project)
-        session.flush()
-        project_id = require_id(project.project_id, "project_id")
-
-        spec = seed_accepted_specification(
-            session,
-            project_id=project_id,
-            content=json.dumps({"title": "Accepted authority specification"}),
-        ).spec
-        spec_version_id = require_id(spec.spec_version_id, "spec_version_id")
-
-        authority = CompiledSpecAuthority(
-            spec_version_id=spec_version_id,
-            compiler_version="3.0.0",
-            prompt_hash="accepted-prompt-hash",
-            scope_themes="[]",
-            invariants="[]",
-            eligible_feature_ids="[]",
-        )
-        session.add(authority)
-        session.flush()
-        authority_id = require_id(authority.authority_id, "authority_id")
-
-        acceptance = SpecAuthorityAcceptance(
-            project_id=project_id,
-            spec_version_id=spec_version_id,
-            status="accepted",
-            policy="test",
-            decided_by="reviewer",
-            compiler_version=authority.compiler_version,
-            prompt_hash=authority.prompt_hash,
-            spec_hash=spec.spec_hash,
-            pending_authority_id=authority_id,
-        )
-        session.add(acceptance)
-        session.commit()
-        acceptance_id = require_id(acceptance.id, "acceptance_id")
-
-    with pytest.raises(ProjectDeletionConflictError) as exc_info:
-        delete_project(project_id, str(db_path))
-
-    assert exc_info.value.references == ("spec_authority_acceptance.status",)
-    with Session(engine) as session:
-        assert session.get(Project, project_id) is not None
-        assert session.get(SpecRegistry, spec_version_id) is not None
-        assert session.get(CompiledSpecAuthority, authority_id) is not None
-        assert session.get(SpecAuthorityAcceptance, acceptance_id) is not None
 
 
 def test_resolve_db_path_prefers_explicit_argument(

@@ -1,190 +1,129 @@
-"""Input and output schemas for the Roadmap Builder agent."""
+"""Closed Roadmap contracts that reference exact Backlog items."""
 
-from typing import Annotated, Literal
+from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field
+from typing import TYPE_CHECKING, Annotated, Literal, Self
 
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-class BacklogItem(BaseModel):
-    """A single high-level backlog requirement with priority and estimate."""
+from services.contracts.backlog import BacklogItem  # noqa: TC001
+from services.contracts.specification_references import (
+    AcceptedSpecificationReference,
+    canonical_spec_item_ids,
+    require_nonblank_text,
+    validate_accepted_specification_root,
+    validate_backlog_item_id,
+)
 
-    model_config = ConfigDict(extra="forbid")
-
-    priority: Annotated[
-        int,
-        Field(
-            ge=1,
-            description="Priority rank (1 is highest). Must be a positive integer.",
-        ),
-    ]
-    requirement: Annotated[
-        str,
-        Field(
-            min_length=3,
-            description="Action-oriented backlog work item title.",
-        ),
-    ]
-    authority_ref: Annotated[
-        str | None,
-        Field(
-            default=None,
-            description=(
-                "Optional authority target reference associated with this item."
-            ),
-        ),
-    ]
-    capability_hint: Annotated[
-        str | None,
-        Field(
-            default=None,
-            description=(
-                "Optional host-derived capability hint associated with this item."
-            ),
-        ),
-    ]
-    value_driver: Annotated[
-        Literal["Revenue", "Customer Satisfaction", "Strategic"],
-        Field(description="Primary value driver for prioritization."),
-    ]
-    justification: Annotated[
-        str,
-        Field(
-            min_length=3,
-            description="Why this priority (linked to vision and value driver).",
-        ),
-    ]
-    estimated_effort: Annotated[
-        Literal["S", "M", "L", "XL"],
-        Field(description="Relative effort using T-shirt size: S, M, L, XL."),
-    ]
-    technical_note: Annotated[
-        str | None,
-        Field(
-            default=None,
-            description="Optional technical rationale for sizing.",
-        ),
-    ]
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
 
 class RoadmapBuilderInput(BaseModel):
-    """Input for the Roadmap Builder agent."""
+    """Roadmap invocation root carrying one exact Backlog and Specification."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
-    backlog_items: Annotated[
-        list[BacklogItem],
-        Field(description="List of prioritized backlog items from Stage 1."),
-    ]
-    product_vision: Annotated[
-        str,
-        Field(description="The full product vision text."),
-    ]
-    technical_spec: Annotated[
-        str,
-        Field(description="The technical specification text."),
-    ]
-    compiled_authority: Annotated[
-        str,
-        Field(description="The compiled authority text/JSON."),
-    ]
-    time_increment: Annotated[
-        str,
-        Field(
-            default="Milestone-based",
-            description="Start date or time increment strategy.",
-        ),
-    ]
-    prior_roadmap_state: Annotated[
-        str,
-        Field(
-            default="NO_HISTORY",
-            description=(
-                "Previous roadmap JSON for refinement, or 'NO_HISTORY' for first call."
-            ),
-        ),
-    ]
-    user_input: Annotated[
-        str,
-        Field(
-            default="",
-            description="User's specific requests, feedback, or constraints.",
-        ),
-    ]
+    accepted_specification_version_id: Annotated[int, Field(gt=0)]
+    accepted_specification_hash: Annotated[str, Field(pattern=r"^sha256:[0-9a-f]{64}$")]
+    accepted_specification_json: Annotated[str, Field(min_length=1)]
+    backlog_items: tuple[BacklogItem, ...]
+    product_vision: Annotated[str, Field(min_length=1)]
+    time_increment: Annotated[str, Field(min_length=1)] = "Milestone-based"
+    prior_roadmap_state: Annotated[str, Field(min_length=1)] = "NO_HISTORY"
+    user_input: str = ""
+
+    @field_validator("product_vision", "time_increment", "prior_roadmap_state")
+    @classmethod
+    def validate_nonblank_context(cls, value: str) -> str:
+        """Reject blank Roadmap context without rewriting valid bytes."""
+        return require_nonblank_text(value, field_name="Roadmap input context")
+
+    @model_validator(mode="after")
+    def validate_specification_root_and_backlog_evidence(self) -> Self:
+        """Prove root bytes/hash and every exact Backlog evidence reference."""
+        payload = validate_accepted_specification_root(
+            spec_hash=self.accepted_specification_hash,
+            canonical_specification_json=self.accepted_specification_json,
+        )
+        specification = AcceptedSpecificationReference(
+            spec_version_id=self.accepted_specification_version_id,
+            spec_hash=self.accepted_specification_hash,
+            canonical_specification_json=self.accepted_specification_json,
+            payload=payload,
+        )
+        for item in self.backlog_items:
+            canonical_spec_item_ids(specification, item.spec_item_ids)
+        return self
 
 
 class RoadmapRelease(BaseModel):
-    """A single release/milestone in the roadmap."""
+    """One ordered release containing exact parent Backlog item IDs."""
 
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
-    release_name: Annotated[
-        str,
-        Field(description="Name of the release (e.g., 'Milestone 1')."),
-    ]
-    theme: Annotated[
-        str,
-        Field(description="Short goal description or theme derived from Vision."),
-    ]
-    focus_area: Annotated[
-        Literal["Technical Foundation", "User Value", "Scale", "Other"],
-        Field(description="Primary focus area of this release."),
-    ]
-    items: Annotated[
-        list[str],
-        Field(description="List of Requirement Names included in this release."),
-    ]
-    reasoning: Annotated[
-        str,
-        Field(description="Reasoning for item selection (dependencies, value)."),
-    ]
+    release_name: Annotated[str, Field(min_length=1)]
+    theme: Annotated[str, Field(min_length=1)]
+    focus_area: Literal["Technical Foundation", "User Value", "Scale", "Other"]
+    backlog_item_ids: tuple[str, ...]
+    reasoning: Annotated[str, Field(min_length=1)]
+
+    @field_validator("release_name", "theme", "reasoning")
+    @classmethod
+    def validate_nonblank_content(cls, value: str) -> str:
+        """Preserve valid release prose while rejecting blank canonical text."""
+        return require_nonblank_text(value, field_name="Roadmap release content")
+
+    @field_validator("backlog_item_ids")
+    @classmethod
+    def validate_backlog_ids(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        """Reject impossible host Backlog IDs before Roadmap coverage validation."""
+        return tuple(validate_backlog_item_id(item_id) for item_id in value)
 
 
 class RoadmapBuilderOutput(BaseModel):
-    """Output schema for the Roadmap."""
+    """Provider output whose references are checked against one Backlog parent."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
-    roadmap_releases: Annotated[
-        list[RoadmapRelease],
-        Field(description="Ordered list of roadmap releases/milestones."),
-    ]
-    roadmap_summary: Annotated[
-        str,
-        Field(description="Narrative summary of the roadmap strategy."),
-    ]
-    is_complete: Annotated[
-        bool,
-        Field(
-            description=(
-                "True if roadmap is complete and ready for review. False if "
-                "clarification is needed."
-            )
-        ),
-    ]
-    clarifying_questions: Annotated[
-        list[str],
-        Field(
-            default_factory=list,
-            description="Questions to ask user if is_complete=False.",
-        ),
-    ]
+    roadmap_releases: tuple[RoadmapRelease, ...]
+    roadmap_summary: Annotated[str, Field(min_length=1)]
+    is_complete: bool
+    clarifying_questions: tuple[str, ...] = ()
 
 
-class SaveRoadmapToolInput(BaseModel):
-    """Input schema for the temporary legacy Roadmap write entry point."""
+def validate_roadmap_backlog_coverage(
+    roadmap: RoadmapBuilderOutput,
+    parent_backlog_item_ids: Iterable[str],
+) -> None:
+    """Require every exact parent Backlog item once across all releases."""
+    parent_ids = tuple(parent_backlog_item_ids)
+    parent_id_set = set(parent_ids)
+    if len(parent_id_set) != len(parent_ids):
+        message = "parent Backlog item IDs must be unique"
+        raise ValueError(message)
 
-    project_id: Annotated[
-        int,
-        Field(description="The ID of the Project to update."),
-    ]
-    roadmap_data: Annotated[
-        RoadmapBuilderOutput,
-        Field(description="The comprehensive roadmap data to save."),
-    ]
-    idempotency_key: Annotated[
-        str | None,
-        Field(
-            default=None,
-            description="Optional save idempotency key supplied by guarded callers.",
-        ),
-    ]
+    seen: set[str] = set()
+    for release in roadmap.roadmap_releases:
+        for backlog_item_id in release.backlog_item_ids:
+            if backlog_item_id in seen:
+                message = f"duplicate backlog item ID: {backlog_item_id}"
+                raise ValueError(message)
+            seen.add(backlog_item_id)
+            if backlog_item_id not in parent_id_set:
+                message = f"unknown backlog item ID: {backlog_item_id}"
+                raise ValueError(message)
+    if seen != parent_id_set:
+        missing = ", ".join(sorted(parent_id_set - seen))
+        message = (
+            f"Roadmap must reference every parent Backlog item exactly once: {missing}"
+        )
+        raise ValueError(message)
+
+
+__all__ = [
+    "RoadmapBuilderInput",
+    "RoadmapBuilderOutput",
+    "RoadmapRelease",
+    "validate_roadmap_backlog_coverage",
+]

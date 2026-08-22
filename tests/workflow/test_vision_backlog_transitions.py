@@ -1,8 +1,9 @@
-"""Durable Backlog Goal/Authority lineage tests."""
+"""Durable Backlog Goal/Specification lineage tests."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import copy
+import json
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
@@ -10,20 +11,16 @@ import pytest
 from pydantic import ValidationError
 from sqlmodel import Session, select
 
-from models.core import Project
+from models.core import Project, UserStory
+from models.enums import WorkflowEventType
+from models.events import WorkflowEvent
 from models.product_definition import (
     VisionEvidenceSnapshot,
     VisionInterviewTurn,
     VisionRevisionIntent,
 )
-from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance
-from models.workflow import BacklogArtifact
-from services.agent_workbench.backlog_phase import record_backlog_draft_in_session
-from services.specs.authority_selection import pending_authority_fingerprint
-from tests.workflow.lifecycle_fixtures import (
-    PersistedSpecificationLineage,
-    seed_accepted_specification,
-)
+from models.workflow import BacklogArtifact, BacklogArtifactDecision
+from tests.workflow.lifecycle_fixtures import seed_accepted_specification
 from tests.workflow.test_vision_interview_transitions import (
     _domain as _vision_domain,
 )
@@ -40,27 +37,17 @@ from tests.workflow.test_vision_interview_transitions import (
 from tests.workflow.test_vision_interview_transitions import (
     _start as _start_vision,
 )
-from utils.spec_schemas import SpecAuthorityCompilationSuccess
-from workflow.fingerprints import canonical_hash
+from workflow.fingerprints import canonical_hash, canonical_json
 from workflow.requests import BeginVisionRevision
 from workflow.requests.product_definition import RecordBacklogDraft
 
 if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
 
-    from workflow.contracts import JsonObject
+    from tests.workflow.lifecycle_fixtures import PersistedSpecificationLineage
+    from workflow.contracts import JsonObject, JsonValue
 
 EVALUATED_AT = datetime(2026, 8, 5, 12, tzinfo=UTC)
-AUTHORITY_FINGERPRINT = "sha256:authority-current"
-
-
-@dataclass(frozen=True)
-class _DeliveryLineage:
-    project_id: int
-    product_goal_artifact_id: int
-    product_goal_fingerprint: str
-    authority_id: int
-    authority_fingerprint: str
 
 
 def _backlog_content(
@@ -69,10 +56,10 @@ def _backlog_content(
     return {
         "backlog_items": [
             {
+                "backlog_item_id": "PBI-000001",
                 "priority": 1,
                 "requirement": requirement,
-                "authority_ref": "REQ.lineage",
-                "capability_hint": None,
+                "spec_item_ids": ["GOAL.delivery", "REQ.delivery"],
                 "value_driver": "Strategic",
                 "justification": "Keeps delivery decisions restart-safe.",
                 "estimated_effort": "M",
@@ -82,6 +69,42 @@ def _backlog_content(
         "is_complete": True,
         "clarifying_questions": [],
     }
+
+
+def _specification_content(
+    summary: str = "Persist immutable planning artifacts.",
+) -> str:
+    return canonical_json(
+        {
+            "schema_version": "agileforge.spec.v2",
+            "artifact_id": "SPEC.task-7-delivery",
+            "title": "Task 7 delivery contract",
+            "summary": summary,
+            "problem_statement": "Planning drafts need exact durable lineage.",
+            "items": [
+                {
+                    "id": "GOAL.delivery",
+                    "type": "GOAL",
+                    "title": "Immutable delivery",
+                    "statement": "Planning review uses immutable artifacts.",
+                },
+                {
+                    "id": "REQ.delivery",
+                    "type": "REQ",
+                    "title": "Exact planning lineage",
+                    "statement": "Persist exact accepted Specification lineage.",
+                    "level": "MUST",
+                    "verification": "acceptance-test",
+                    "acceptance": [
+                        "The persisted artifact retains exact parent identities."
+                    ],
+                },
+            ],
+            "relations": [],
+            "controlled_terms": [],
+            "external_references": [],
+        }
+    )
 
 
 def _vision_content(statement: str = "Build reliable product decisions.") -> JsonObject:
@@ -101,89 +124,54 @@ def _vision_content(statement: str = "Build reliable product decisions.") -> Jso
     }
 
 
-def _accept_authority(
+def _seed_project_specification(
     session: Session,
-    *,
-    project_id: int,
-    specification: PersistedSpecificationLineage,
-    ordinal: int,
-) -> _DeliveryLineage:
-    artifact = SpecAuthorityCompilationSuccess(
-        scope_themes=[f"Backlog lineage {ordinal}"],
-        invariants=[],
-        eligible_feature_rules=[],
-        gaps=[],
-        assumptions=[],
-        source_map=[],
-        compiler_version="3.0.0",
-        prompt_hash=f"{ordinal}" * 64,
-    )
-    spec_version_id = specification.spec.spec_version_id
-    assert spec_version_id is not None
-    approved_at = specification.spec.approved_at
-    assert approved_at is not None
-    authority_at = approved_at + timedelta(seconds=1)
-    authority = CompiledSpecAuthority(
-        spec_version_id=spec_version_id,
-        compiler_version=artifact.compiler_version,
-        prompt_hash=artifact.prompt_hash,
-        compiled_at=authority_at,
-        compiled_artifact_json=artifact.model_dump_json(),
-        scope_themes="[]",
-        invariants="[]",
-        eligible_feature_ids="[]",
-        rejected_features="[]",
-        spec_gaps="[]",
-    )
-    session.add(authority)
-    session.flush()
-    assert authority.authority_id is not None
-    authority_fingerprint = pending_authority_fingerprint(authority)
-    assert authority_fingerprint is not None
-    session.add(
-        SpecAuthorityAcceptance(
-            project_id=project_id,
-            spec_version_id=spec_version_id,
-            status="accepted",
-            policy="manual",
-            decided_by="operator@example.com",
-            decided_at=authority_at + timedelta(seconds=1),
-            rationale="Accepted for Backlog lineage tests.",
-            compiler_version=authority.compiler_version,
-            prompt_hash=authority.prompt_hash,
-            spec_hash=specification.spec.spec_hash,
-            pending_authority_id=authority.authority_id,
-            authority_fingerprint=authority_fingerprint,
-            review_fingerprint=f"sha256:review-{ordinal}",
-            terminal_decision_key=f"backlog-authority-{ordinal}",
-        )
-    )
-    session.commit()
-    return _DeliveryLineage(
-        project_id=project_id,
-        product_goal_artifact_id=specification.product_goal_artifact_id,
-        product_goal_fingerprint=specification.product_goal_fingerprint,
-        authority_id=authority.authority_id,
-        authority_fingerprint=authority_fingerprint,
-    )
-
-
-def _seed_project_authority(session: Session) -> _DeliveryLineage:
+) -> PersistedSpecificationLineage:
     project = Project(name="Backlog lineage")
     session.add(project)
     session.commit()
     assert project.project_id is not None
-    specification = seed_accepted_specification(
+    return seed_accepted_specification(
         session,
         project_id=project.project_id,
-        content='{"increment":1}',
+        content=_specification_content(),
         recorded_at=EVALUATED_AT - timedelta(minutes=1),
     )
-    return _accept_authority(
+
+
+def _record_backlog_draft_in_session(  # noqa: PLR0913
+    session: Session,
+    *,
+    project_id: int,
+    spec_version_id: int,
+    spec_hash: str,
+    product_goal_artifact_id: int,
+    product_goal_fingerprint: str,
+    canonical_content: JsonObject,
+    content_fingerprint: str,
+    supersedes_backlog_artifact_id: int | None,
+    artifact_id: int,
+    actor: str,
+    recorded_at: datetime,
+) -> BacklogArtifact:
+    """Lazy Task 7 persistence seam; Task 5 still exercises request contracts."""
+    from services.agent_workbench.backlog_phase import (  # noqa: PLC0415
+        record_backlog_draft_in_session,
+    )
+
+    return record_backlog_draft_in_session(
         session,
-        project_id=project.project_id,
-        specification=specification,
-        ordinal=1,
+        project_id=project_id,
+        spec_version_id=spec_version_id,
+        spec_hash=spec_hash,
+        product_goal_artifact_id=product_goal_artifact_id,
+        product_goal_fingerprint=product_goal_fingerprint,
+        canonical_content=canonical_content,
+        content_fingerprint=content_fingerprint,
+        supersedes_backlog_artifact_id=supersedes_backlog_artifact_id,
+        artifact_id=artifact_id,
+        actor=actor,
+        recorded_at=recorded_at,
     )
 
 
@@ -328,16 +316,21 @@ def test_vision_revision_reopens_with_grounded_clarification_reason(
         session.commit()
 
 
-def test_backlog_row_persists_exact_goal_and_authority_lineage(engine: Engine) -> None:
+def test_backlog_row_persists_exact_goal_and_specification_lineage(
+    engine: Engine,
+) -> None:
     """A stored Backlog carries both durable upstream identities."""
     content = _backlog_content()
     with Session(engine) as session:
-        lineage = _seed_project_authority(session)
-        row = record_backlog_draft_in_session(
+        lineage = _seed_project_specification(session)
+        spec_version_id = lineage.spec.spec_version_id
+        spec_hash = lineage.spec.spec_hash
+        assert spec_version_id is not None
+        row = _record_backlog_draft_in_session(
             session,
-            project_id=lineage.project_id,
-            authority_id=lineage.authority_id,
-            authority_fingerprint=lineage.authority_fingerprint,
+            project_id=lineage.spec.project_id,
+            spec_version_id=spec_version_id,
+            spec_hash=spec_hash,
             product_goal_artifact_id=lineage.product_goal_artifact_id,
             product_goal_fingerprint=lineage.product_goal_fingerprint,
             canonical_content=content,
@@ -352,22 +345,26 @@ def test_backlog_row_persists_exact_goal_and_authority_lineage(engine: Engine) -
         stored = session.get(BacklogArtifact, row.backlog_artifact_id)
 
     assert stored is not None
-    assert stored.authority_id == lineage.authority_id
-    assert stored.authority_fingerprint == lineage.authority_fingerprint
+    assert stored.spec_version_id == spec_version_id
+    assert stored.spec_hash == spec_hash
     assert stored.product_goal_artifact_id == lineage.product_goal_artifact_id
     assert stored.product_goal_fingerprint == lineage.product_goal_fingerprint
 
 
-def test_backlog_replacement_rejects_cross_goal_supersession(engine: Engine) -> None:
-    """A later Goal must create a replacement chain instead of mutating old work."""
+def test_backlog_replacement_rejects_wrong_goal_before_persistence(
+    engine: Engine,
+) -> None:
+    """A wrong Goal identity cannot enter an existing Backlog chain."""
     content = _backlog_content()
     with Session(engine) as session:
-        lineage = _seed_project_authority(session)
-        parent = record_backlog_draft_in_session(
+        lineage = _seed_project_specification(session)
+        spec_version_id = lineage.spec.spec_version_id
+        assert spec_version_id is not None
+        parent = _record_backlog_draft_in_session(
             session,
-            project_id=lineage.project_id,
-            authority_id=lineage.authority_id,
-            authority_fingerprint=lineage.authority_fingerprint,
+            project_id=lineage.spec.project_id,
+            spec_version_id=spec_version_id,
+            spec_hash=lineage.spec.spec_hash,
             product_goal_artifact_id=lineage.product_goal_artifact_id,
             product_goal_fingerprint=lineage.product_goal_fingerprint,
             canonical_content=content,
@@ -379,12 +376,12 @@ def test_backlog_replacement_rejects_cross_goal_supersession(engine: Engine) -> 
         )
         assert parent.backlog_artifact_id is not None
 
-        with pytest.raises(ValueError, match="different Product Goal lineage"):
-            record_backlog_draft_in_session(
+        with pytest.raises(ValueError, match="Specification's Product Goal"):
+            _record_backlog_draft_in_session(
                 session,
-                project_id=lineage.project_id,
-                authority_id=lineage.authority_id,
-                authority_fingerprint=lineage.authority_fingerprint,
+                project_id=lineage.spec.project_id,
+                spec_version_id=spec_version_id,
+                spec_hash=lineage.spec.spec_hash,
                 product_goal_artifact_id=lineage.product_goal_artifact_id + 1,
                 product_goal_fingerprint="sha256:goal-replacement",
                 canonical_content=content,
@@ -395,64 +392,428 @@ def test_backlog_replacement_rejects_cross_goal_supersession(engine: Engine) -> 
                 recorded_at=EVALUATED_AT,
             )
 
+        rows = session.exec(select(BacklogArtifact)).all()
+        assert [item.backlog_artifact_id for item in rows] == [101]
 
-def test_backlog_replacement_carries_same_goal_across_authority_versions(
+
+@pytest.mark.parametrize(
+    ("field", "invalid_value", "message"),
+    [
+        ("backlog_item_id", "PBI-000002", "host-minted"),
+        ("backlog_item_id", "PBI-999999", "host-minted"),
+        ("spec_item_ids", ["REQ.unknown"], "unknown Specification item ID"),
+        (
+            "spec_item_ids",
+            ["REQ.delivery", "GOAL.delivery"],
+            "unique and sorted",
+        ),
+    ],
+)
+def test_backlog_revalidates_host_owned_items_before_persistence(
+    engine: Engine,
+    field: str,
+    invalid_value: JsonValue,
+    message: str,
+) -> None:
+    """Persistence rejects host-looking IDs/evidence that Task 6 did not mint."""
+    content = _backlog_content()
+    items = content["backlog_items"]
+    assert isinstance(items, list)
+    item = items[0]
+    assert isinstance(item, dict)
+    item[field] = invalid_value
+    with Session(engine) as session:
+        lineage = _seed_project_specification(session)
+        spec_version_id = lineage.spec.spec_version_id
+        assert spec_version_id is not None
+
+        with pytest.raises(ValueError, match=message):
+            _record_backlog_draft_in_session(
+                session,
+                project_id=lineage.spec.project_id,
+                spec_version_id=spec_version_id,
+                spec_hash=lineage.spec.spec_hash,
+                product_goal_artifact_id=lineage.product_goal_artifact_id,
+                product_goal_fingerprint=lineage.product_goal_fingerprint,
+                canonical_content=content,
+                content_fingerprint=canonical_hash(content),
+                supersedes_backlog_artifact_id=None,
+                artifact_id=101,
+                actor="operator@example.com",
+                recorded_at=EVALUATED_AT,
+            )
+
+        assert session.exec(select(BacklogArtifact)).all() == []
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "incomplete",
+        "empty",
+        "wrong_hash",
+        "extra_field",
+        "duplicate_ids",
+        "is_complete_int",
+    ],
+)
+def test_backlog_rejects_noncanonical_or_incomplete_content_without_rows(
+    engine: Engine,
+    mutation: str,
+) -> None:
+    """Malformed host output never reaches artifact or decision persistence."""
+    content = copy.deepcopy(_backlog_content())
+    fingerprint = canonical_hash(content)
+    if mutation == "incomplete":
+        content["is_complete"] = False
+        fingerprint = canonical_hash(content)
+    elif mutation == "empty":
+        content["backlog_items"] = []
+        fingerprint = canonical_hash(content)
+    elif mutation == "wrong_hash":
+        fingerprint = "sha256:" + "0" * 64
+    elif mutation == "extra_field":
+        content["provider_metadata"] = "not canonical host output"
+        fingerprint = canonical_hash(content)
+    elif mutation == "duplicate_ids":
+        items = content["backlog_items"]
+        assert isinstance(items, list)
+        items.append(copy.deepcopy(items[0]))
+        fingerprint = canonical_hash(content)
+    else:
+        content["is_complete"] = 1
+        fingerprint = canonical_hash(content)
+
+    with Session(engine) as session:
+        lineage = _seed_project_specification(session)
+        spec_version_id = lineage.spec.spec_version_id
+        assert spec_version_id is not None
+        with pytest.raises((ValidationError, ValueError)):
+            _record_backlog_draft_in_session(
+                session,
+                project_id=lineage.spec.project_id,
+                spec_version_id=spec_version_id,
+                spec_hash=lineage.spec.spec_hash,
+                product_goal_artifact_id=lineage.product_goal_artifact_id,
+                product_goal_fingerprint=lineage.product_goal_fingerprint,
+                canonical_content=content,
+                content_fingerprint=fingerprint,
+                supersedes_backlog_artifact_id=None,
+                artifact_id=101,
+                actor="operator@example.com",
+                recorded_at=EVALUATED_AT,
+            )
+        assert session.exec(select(BacklogArtifact)).all() == []
+        assert session.exec(select(BacklogArtifactDecision)).all() == []
+
+
+def test_backlog_decisions_are_append_only_and_create_zero_stories(
     engine: Engine,
 ) -> None:
-    """A later Authority preserves the immutable same-Goal Backlog chain."""
-    first_content = _backlog_content()
-    replacement_content = _backlog_content("Deliver the next discovered increment")
+    """Acceptance records one decision and never materializes placeholder Stories."""
+    from services.agent_workbench.backlog_phase import (  # noqa: PLC0415
+        record_backlog_decision_in_session,
+    )
+
+    content = _backlog_content()
     with Session(engine) as session:
-        first = _seed_project_authority(session)
-        parent = record_backlog_draft_in_session(
+        lineage = _seed_project_specification(session)
+        spec_version_id = lineage.spec.spec_version_id
+        assert spec_version_id is not None
+        artifact = _record_backlog_draft_in_session(
             session,
-            project_id=first.project_id,
-            authority_id=first.authority_id,
-            authority_fingerprint=first.authority_fingerprint,
-            product_goal_artifact_id=first.product_goal_artifact_id,
-            product_goal_fingerprint=first.product_goal_fingerprint,
-            canonical_content=first_content,
-            content_fingerprint=canonical_hash(first_content),
+            project_id=lineage.spec.project_id,
+            spec_version_id=spec_version_id,
+            spec_hash=lineage.spec.spec_hash,
+            product_goal_artifact_id=lineage.product_goal_artifact_id,
+            product_goal_fingerprint=lineage.product_goal_fingerprint,
+            canonical_content=content,
+            content_fingerprint=canonical_hash(content),
             supersedes_backlog_artifact_id=None,
             artifact_id=101,
             actor="operator@example.com",
             recorded_at=EVALUATED_AT,
         )
-        session.commit()
-        assert parent.backlog_artifact_id is not None
-        specification = seed_accepted_specification(
+
+        decision = record_backlog_decision_in_session(
             session,
-            project_id=first.project_id,
-            content='{"increment":2}',
-            recorded_at=EVALUATED_AT + timedelta(minutes=1),
+            artifact=artifact,
+            decision="accepted",
+            rationale="Exact immutable content is ready.",
+            reviewer="operator@example.com",
+            idempotency_key="accept-backlog-101",
+            decided_at=EVALUATED_AT + timedelta(seconds=1),
         )
-        replacement = _accept_authority(
+        session.commit()
+
+        assert decision.decision == "accepted"
+        assert len(session.exec(select(BacklogArtifactDecision)).all()) == 1
+        assert session.exec(select(UserStory)).all() == []
+        stored = session.get(BacklogArtifact, 101)
+        assert stored is not None
+        assert stored.canonical_content_json == canonical_json(content)
+        assert stored.content_fingerprint == canonical_hash(content)
+
+
+def test_backlog_decision_rejects_formatting_only_stored_corruption(
+    engine: Engine,
+) -> None:
+    """A decision never accepts or rewrites noncanonical stored Backlog bytes."""
+    from services.agent_workbench.backlog_phase import (  # noqa: PLC0415
+        record_backlog_decision_in_session,
+    )
+
+    content = _backlog_content()
+    corrupted = json.dumps(content, indent=2, sort_keys=True)
+    assert corrupted != canonical_json(content)
+    assert canonical_hash(json.loads(corrupted)) == canonical_hash(content)
+
+    with Session(engine) as session:
+        lineage = _seed_project_specification(session)
+        spec_version_id = lineage.spec.spec_version_id
+        assert spec_version_id is not None
+        artifact = _record_backlog_draft_in_session(
             session,
-            project_id=first.project_id,
-            specification=specification,
-            ordinal=2,
+            project_id=lineage.spec.project_id,
+            spec_version_id=spec_version_id,
+            spec_hash=lineage.spec.spec_hash,
+            product_goal_artifact_id=lineage.product_goal_artifact_id,
+            product_goal_fingerprint=lineage.product_goal_fingerprint,
+            canonical_content=content,
+            content_fingerprint=canonical_hash(content),
+            supersedes_backlog_artifact_id=None,
+            artifact_id=101,
+            actor="operator@example.com",
+            recorded_at=EVALUATED_AT,
+        )
+        artifact.canonical_content_json = corrupted
+        session.add(artifact)
+        session.commit()
+
+        with pytest.raises(ValueError, match="canonical"):
+            record_backlog_decision_in_session(
+                session,
+                artifact=artifact,
+                decision="accepted",
+                rationale="Formatting corruption must fail closed.",
+                reviewer="operator@example.com",
+                idempotency_key="reject-noncanonical-backlog",
+                decided_at=EVALUATED_AT + timedelta(seconds=1),
+            )
+
+        stored = session.get(BacklogArtifact, 101)
+        assert stored is not None
+        assert stored.canonical_content_json == corrupted
+        assert session.exec(select(BacklogArtifactDecision)).all() == []
+
+
+def test_backlog_a_feedback_b_accepted_c_is_append_only_and_current(
+    engine: Engine,
+) -> None:
+    """A stays immutable through feedback B; accepted C becomes the sole leaf."""
+    from services.agent_workbench.backlog_phase import (  # noqa: PLC0415
+        _backlog_lineage_nodes,
+        record_backlog_decision_in_session,
+    )
+    from services.planning_lineage import (  # noqa: PLC0415
+        select_current_accepted_artifact,
+    )
+
+    with Session(engine) as session:
+        lineage = _seed_project_specification(session)
+        spec_version_id = lineage.spec.spec_version_id
+        assert spec_version_id is not None
+        key = (
+            lineage.spec.project_id,
+            lineage.product_goal_artifact_id,
+            lineage.product_goal_fingerprint,
+            spec_version_id,
+            lineage.spec.spec_hash,
+        )
+        artifacts: list[BacklogArtifact] = []
+        contents: list[JsonObject] = []
+        for index, (label, decision) in enumerate(
+            (
+                ("Accepted A", "accepted"),
+                ("Feedback B", "feedback"),
+                ("Accepted C", "accepted"),
+            ),
+            start=1,
+        ):
+            content = _backlog_content(label)
+            artifact = _record_backlog_draft_in_session(
+                session,
+                project_id=lineage.spec.project_id,
+                spec_version_id=spec_version_id,
+                spec_hash=lineage.spec.spec_hash,
+                product_goal_artifact_id=lineage.product_goal_artifact_id,
+                product_goal_fingerprint=lineage.product_goal_fingerprint,
+                canonical_content=content,
+                content_fingerprint=canonical_hash(content),
+                supersedes_backlog_artifact_id=(
+                    None if not artifacts else artifacts[-1].backlog_artifact_id
+                ),
+                artifact_id=100 + index,
+                actor="operator@example.com",
+                recorded_at=EVALUATED_AT + timedelta(seconds=index),
+            )
+            record_backlog_decision_in_session(
+                session,
+                artifact=artifact,
+                decision=decision,
+                rationale=f"Review {label}.",
+                reviewer="operator@example.com",
+                idempotency_key=f"backlog-{index}-{decision}",
+                decided_at=EVALUATED_AT + timedelta(seconds=index, milliseconds=1),
+            )
+            artifacts.append(artifact)
+            contents.append(content)
+            if decision == "feedback":
+                assert (
+                    select_current_accepted_artifact(
+                        _backlog_lineage_nodes(
+                            session,
+                            project_id=lineage.spec.project_id,
+                        ),
+                        chain_key=key,
+                    ).artifact_id
+                    == artifacts[0].backlog_artifact_id
+                )
+        session.commit()
+
+        assert [artifact.version_number for artifact in artifacts] == [1, 2, 3]
+        assert (
+            select_current_accepted_artifact(
+                _backlog_lineage_nodes(
+                    session,
+                    project_id=lineage.spec.project_id,
+                ),
+                chain_key=key,
+            ).artifact_id
+            == artifacts[-1].backlog_artifact_id
+        )
+        first = session.get(BacklogArtifact, artifacts[0].backlog_artifact_id)
+        assert first is not None
+        assert first.canonical_content_json == canonical_json(contents[0])
+        assert first.content_fingerprint == canonical_hash(contents[0])
+        assert session.exec(select(UserStory)).all() == []
+        assert (
+            session.exec(
+                select(WorkflowEvent).where(
+                    WorkflowEvent.event_type == WorkflowEventType.BACKLOG_SAVED
+                )
+            ).all()
+            == []
         )
 
-        child = record_backlog_draft_in_session(
+
+def test_backlog_flush_rolls_back_artifact_and_decision(engine: Engine) -> None:
+    """Caller rollback removes every flushed Backlog row atomically."""
+    from services.agent_workbench.backlog_phase import (  # noqa: PLC0415
+        record_backlog_decision_in_session,
+    )
+
+    with Session(engine) as session:
+        lineage = _seed_project_specification(session)
+        spec_version_id = lineage.spec.spec_version_id
+        assert spec_version_id is not None
+        content = _backlog_content()
+        artifact = _record_backlog_draft_in_session(
             session,
-            project_id=replacement.project_id,
-            authority_id=replacement.authority_id,
-            authority_fingerprint=replacement.authority_fingerprint,
-            product_goal_artifact_id=replacement.product_goal_artifact_id,
-            product_goal_fingerprint=replacement.product_goal_fingerprint,
-            canonical_content=replacement_content,
-            content_fingerprint=canonical_hash(replacement_content),
-            supersedes_backlog_artifact_id=parent.backlog_artifact_id,
-            artifact_id=102,
+            project_id=lineage.spec.project_id,
+            spec_version_id=spec_version_id,
+            spec_hash=lineage.spec.spec_hash,
+            product_goal_artifact_id=lineage.product_goal_artifact_id,
+            product_goal_fingerprint=lineage.product_goal_fingerprint,
+            canonical_content=content,
+            content_fingerprint=canonical_hash(content),
+            supersedes_backlog_artifact_id=None,
+            artifact_id=101,
             actor="operator@example.com",
-            recorded_at=EVALUATED_AT + timedelta(minutes=2),
+            recorded_at=EVALUATED_AT,
         )
-        session.commit()
-        assert child.supersedes_backlog_artifact_id == parent.backlog_artifact_id
-        assert child.authority_id == replacement.authority_id
-        assert child.authority_id != parent.authority_id
-        assert child.product_goal_artifact_id == parent.product_goal_artifact_id
-        assert child.product_goal_fingerprint == parent.product_goal_fingerprint
+        record_backlog_decision_in_session(
+            session,
+            artifact=artifact,
+            decision="accepted",
+            rationale="Flushed then forced to roll back.",
+            reviewer="operator@example.com",
+            idempotency_key="backlog-rollback",
+            decided_at=EVALUATED_AT,
+        )
+        session.rollback()
+
+    with Session(engine) as session:
+        assert session.exec(select(BacklogArtifact)).all() == []
+        assert session.exec(select(BacklogArtifactDecision)).all() == []
+
+
+def test_new_specification_starts_independent_backlog_lineage(
+    engine: Engine,
+) -> None:
+    """Reject cross-Spec parents and preserve the version-1 historical roots."""
+    from services.planning_lineage import (  # noqa: PLC0415
+        ArtifactLineageNode,
+        PlanningLineageError,
+        next_artifact_version,
+        validate_artifact_lineage,
+    )
+
+    with Session(engine) as session:
+        first = _seed_project_specification(session)
+        first_spec_version_id = first.spec.spec_version_id
+        assert first_spec_version_id is not None
+        specification = seed_accepted_specification(
+            session,
+            project_id=first.spec.project_id,
+            content=_specification_content("Persist amended immutable artifacts."),
+            recorded_at=EVALUATED_AT + timedelta(minutes=1),
+        )
+        replacement_spec_version_id = specification.spec.spec_version_id
+        assert replacement_spec_version_id is not None
+        project_id = first.spec.project_id
+        old_key = (
+            project_id,
+            first.product_goal_artifact_id,
+            first.product_goal_fingerprint,
+            first_spec_version_id,
+            first.spec.spec_hash,
+        )
+        new_key = (
+            project_id,
+            specification.product_goal_artifact_id,
+            specification.product_goal_fingerprint,
+            replacement_spec_version_id,
+            specification.spec.spec_hash,
+        )
+    old_root = ArtifactLineageNode(
+        artifact_id=101,
+        chain_key=old_key,
+        version_number=1,
+        decision="accepted",
+    )
+    cross_key_child = ArtifactLineageNode(
+        artifact_id=102,
+        chain_key=new_key,
+        version_number=2,
+        supersedes_artifact_id=old_root.artifact_id,
+        decision="accepted",
+    )
+
+    with pytest.raises(PlanningLineageError, match="CROSS_KEY_PARENT"):
+        validate_artifact_lineage((old_root, cross_key_child))
+
+    assert next_artifact_version((), chain_key=new_key, supersedes_id=None) == 1
+    new_root = ArtifactLineageNode(
+        artifact_id=102,
+        chain_key=new_key,
+        version_number=1,
+        decision="accepted",
+    )
+    validate_artifact_lineage((old_root, new_root))
+    assert old_root.chain_key == old_key
+    assert old_root.version_number == 1
+    assert new_root.supersedes_artifact_id is None
 
 
 def test_record_request_requires_exact_goal_identity_and_fingerprint() -> None:
@@ -466,8 +827,8 @@ def test_record_request_requires_exact_goal_identity_and_fingerprint() -> None:
                 "decision_fingerprint": "sha256:decision",
                 "idempotency_key": "request",
                 "actor": "operator@example.com",
-                "authority_id": 2,
-                "authority_fingerprint": AUTHORITY_FINGERPRINT,
+                "spec_version_id": 2,
+                "spec_hash": "sha256:spec",
                 "canonical_content": _backlog_content(),
                 "content_fingerprint": canonical_hash(_backlog_content()),
             }

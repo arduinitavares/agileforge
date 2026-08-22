@@ -123,9 +123,10 @@ For each target, collect evidence in this order:
    `pyproject.toml`, `specs/spec.json`, `specs/spec.md`, `docs/spec/spec.json`,
    or `docs/spec/spec.md`) and refresh the repository binding after the final
    write.
-5. Execute the host-owned `specification author` command advertised by
+5. Execute the host-owned `specification source register` command advertised by
    `workflow next`.
-6. Verify the review packet contains the complete canonical
+6. Execute the advertised `specification structure` command and verify the
+   review packet contains the complete canonical
    `agileforge.spec.v2` payload, deterministic Markdown, direct Vision and
    Product Goal lineage, source and producer evidence, attempt identity,
    amendment base and diff when applicable, and exact payload, view, and
@@ -133,36 +134,34 @@ For each target, collect evidence in this order:
    Verify each source warning is nested under its own manifest entry.
 7. Have the human accept, reject, or provide feedback on that exact
    Specification candidate.
-8. Compile Authority from the accepted typed payload.
-9. Review and accept the compiled Authority through its separate human gate.
-10. Generate and accept Backlog.
-11. Generate and accept Roadmap.
-12. Generate and accept Stories.
-13. Review Story dependencies and readiness.
-14. Generate, review, and start a Sprint plan.
-15. Complete Tasks and close Stories.
-16. Review and close the Sprint.
-17. Record post-Sprint triage.
-18. Fulfill or abandon the Product Goal through the graph.
+8. Generate and accept Backlog using the exact accepted Specification.
+9. Generate and accept Roadmap.
+10. Generate and accept Stories.
+11. Review Story dependencies and readiness.
+12. Generate, review, and start a Sprint plan.
+13. Complete Tasks and close Stories.
+14. Review and close the Sprint.
+15. Record post-Sprint triage.
+16. Fulfill or abandon the Product Goal through the graph.
 
 At each boundary record durable IDs, fingerprints, human decisions, model IDs
 for model-backed nodes, and the before/after Workflow Position.
 
 Confirm that no Discovery node, command, endpoint, or dashboard state appears.
-Do not treat a Markdown or file projection as Specification or Authority input.
+Do not treat a Markdown or file projection as an accepted Specification.
 
 ## Target Notes
 
 ### caRtola
 
 Use the repository as evidence for deterministic repository binding and a
-provider-backed path through accepted Authority. Record repository SHA and dirty
+provider-backed path through an accepted Specification. Record repository SHA and dirty
 state before and after the run.
 
 ### ASA
 
 Use the repository as evidence that structured technical specification content
-can reach accepted Authority and downstream planning without repository
+can reach an accepted Specification and downstream planning without repository
 mutation by AgileForge.
 
 ### MyFinance
@@ -241,7 +240,6 @@ Stop and report without repair when:
 - any transport requests raw Specification JSON, a file path, Markdown, an ID,
   a hash, a fingerprint, or lineage data from the human
 - a Discovery artifact, gate, API, CLI command, or UI control appears
-- Authority compilation accepts anything except the exact accepted typed v2
-  payload
+- downstream planning receives anything except the exact accepted typed v2 payload
 - target repository state changes without Operator ownership
 - credential values appear in captured evidence

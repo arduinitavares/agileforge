@@ -53,13 +53,8 @@ def test_selected_test_modules_import_hierarchy_models_from_models_core() -> Non
     """Verify selected test modules import hierarchy models from models core."""
     root = Path(__file__).resolve().parents[1]
     selected_modules = [
-        Path("tests/test_export_snapshot.py"),
         Path("tests/unit/test_delete_project.py"),
-        Path("tests/test_export_import_labels.py"),
-        Path("tests/test_spec_validation_modes.py"),
-        Path("tests/test_alignment_evidence_persistence.py"),
         Path("tests/test_db_tools.py"),
-        Path("tests/test_story_validation_pinning.py"),
     ]
 
     for module_path in selected_modules:
@@ -105,15 +100,11 @@ def test_models_package_exports_specs_and_events_boundaries() -> None:
     from models import events, specs  # noqa: PLC0415
 
     assert specs.SpecRegistry.__module__ == "models.specs"
-    assert specs.CompiledSpecAuthority.__module__ == "models.specs"
-    assert specs.SpecAuthorityAcceptance.__module__ == "models.specs"
     assert events.TaskExecutionLog.__module__ == "models.events"
     assert events.StoryCompletionLog.__module__ == "models.events"
     assert events.WorkflowEvent.__module__ == "models.events"
 
     assert agile_sqlmodel.SpecRegistry is specs.SpecRegistry
-    assert agile_sqlmodel.CompiledSpecAuthority is specs.CompiledSpecAuthority
-    assert agile_sqlmodel.SpecAuthorityAcceptance is specs.SpecAuthorityAcceptance
     assert agile_sqlmodel.TaskExecutionLog is events.TaskExecutionLog
     assert agile_sqlmodel.StoryCompletionLog is events.StoryCompletionLog
     assert agile_sqlmodel.WorkflowEvent is events.WorkflowEvent
@@ -124,7 +115,7 @@ def test_models_package_exports_specs_and_events_boundaries() -> None:
     models_events_text = (root / "models" / "events.py").read_text(encoding="utf-8")
 
     assert "from models.events import (" in agile_sqlmodel_text
-    assert "from models.specs import (" in agile_sqlmodel_text
+    assert "from models.specs import SpecRegistry" in agile_sqlmodel_text
     assert "class SpecRegistry(SQLModel, table=True):" in models_specs_text
     assert "class WorkflowEvent(SQLModel, table=True):" in models_events_text
 
@@ -137,20 +128,9 @@ def test_specs_relationship_contract_is_preserved() -> None:
 
     project_relationships = inspect(core.Project).relationships
     spec_registry_relationships = inspect(specs.SpecRegistry).relationships
-    compiled_authority_relationships = inspect(
-        specs.CompiledSpecAuthority
-    ).relationships
 
     assert project_relationships["spec_versions"].mapper.class_ is specs.SpecRegistry
     assert spec_registry_relationships["project"].mapper.class_ is core.Project
-    assert (
-        spec_registry_relationships["compiled_authority"].mapper.class_
-        is specs.CompiledSpecAuthority
-    )
-    assert (
-        compiled_authority_relationships["spec_version"].mapper.class_
-        is specs.SpecRegistry
-    )
 
 
 def test_models_package_exports_core_persona_boundary() -> None:
@@ -445,7 +425,6 @@ def test_core_hierarchy_relationship_contract_is_preserved() -> None:
     from models import core  # noqa: PLC0415
 
     project_relationships = inspect(agile_sqlmodel.Project).relationships
-    story_relationships = inspect(agile_sqlmodel.UserStory).relationships
     theme_relationships = inspect(core.Theme).relationships
     epic_relationships = inspect(core.Epic).relationships
     feature_relationships = inspect(core.Feature).relationships
@@ -456,8 +435,6 @@ def test_core_hierarchy_relationship_contract_is_preserved() -> None:
     assert epic_relationships["theme"].mapper.class_ is core.Theme
     assert epic_relationships["features"].mapper.class_ is core.Feature
     assert feature_relationships["epic"].mapper.class_ is core.Epic
-    assert feature_relationships["stories"].mapper.class_ is agile_sqlmodel.UserStory
-    assert story_relationships["feature"].mapper.class_ is core.Feature
 
 
 def test_core_user_story_relationship_contract_is_preserved() -> None:
@@ -467,13 +444,10 @@ def test_core_user_story_relationship_contract_is_preserved() -> None:
     from models import core  # noqa: PLC0415
 
     project_relationships = inspect(core.Project).relationships
-    feature_relationships = inspect(core.Feature).relationships
     story_relationships = inspect(core.UserStory).relationships
 
     assert project_relationships["stories"].mapper.class_ is core.UserStory
-    assert feature_relationships["stories"].mapper.class_ is core.UserStory
     assert story_relationships["project"].mapper.class_ is core.Project
-    assert story_relationships["feature"].mapper.class_ is core.Feature
     assert story_relationships["sprints"].mapper.class_ is core.Sprint
     assert story_relationships["tasks"].mapper.class_ is core.Task
 
@@ -484,7 +458,7 @@ def test_core_user_story_boundary_is_safe_in_fresh_process(
     """Verify core user story boundary is safe in fresh process."""
     root = Path(__file__).resolve().parents[1]
     command = (
-        "from models import core; "
+        "from models import core, workflow; "
         "from sqlalchemy import inspect; "
         "rels = inspect(core.UserStory).relationships; "
         "assert rels['sprints'].mapper.class_.__name__ == 'Sprint'; "
@@ -499,6 +473,26 @@ def test_core_user_story_boundary_is_safe_in_fresh_process(
         [sys.executable, "-c", command],
         cwd=root,
         env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
+def test_story_validation_evidence_schema_is_complete_in_fresh_process() -> None:
+    """Resolve the Task 9 evidence schema without relying on import order."""
+    root = Path(__file__).resolve().parents[1]
+    command = (
+        "from utils.spec_schemas import ValidationEvidence; "
+        "schema = ValidationEvidence.model_json_schema(); "
+        "assert schema['properties']['validated_at']['format'] == 'date-time'"
+    )
+
+    result = subprocess.run(  # noqa: S603  # nosec B603
+        [sys.executable, "-c", command],
+        cwd=root,
         capture_output=True,
         text=True,
         check=False,
@@ -631,22 +625,6 @@ def test_runtime_modules_import_new_core_boundary() -> None:
     assert "ProjectPersona" in db_tools_text
 
 
-def test_runtime_modules_import_new_core_project_boundary() -> None:
-    """Verify current spec services import the canonical Project model."""
-    root = Path(__file__).resolve().parents[1]
-
-    compiler_core_imports = _imported_names_from(
-        root / "services" / "specs" / "compiler_service.py",
-        "models.core",
-    )
-    compiler_agile_imports = _imported_names_from(
-        root / "services" / "specs" / "compiler_service.py",
-        "agile_sqlmodel",
-    )
-    assert {"Project"} <= compiler_core_imports
-    assert "Project" not in compiler_agile_imports
-
-
 def test_runtime_modules_import_new_core_link_boundary() -> None:
     """Verify the canonical repository imports Project link models."""
     root = Path(__file__).resolve().parents[1]
@@ -661,11 +639,7 @@ def test_runtime_modules_import_new_core_link_boundary() -> None:
 def test_runtime_modules_import_new_core_hierarchy_boundary() -> None:
     """Verify runtime modules import new core hierarchy boundary."""
     root = Path(__file__).resolve().parents[1]
-    story_validation_text = (
-        root / "services" / "specs" / "story_validation_service.py"
-    ).read_text(encoding="utf-8")
 
-    assert "from models.core import Feature" in story_validation_text
     assert {"Epic", "Feature", "ProjectPersona", "Theme"} <= _imported_names_from(
         root / "tools" / "db_tools.py", "models.core"
     )
@@ -676,10 +650,6 @@ def test_runtime_modules_import_new_core_hierarchy_cleanup_boundary() -> None:
     root = Path(__file__).resolve().parents[1]
     expected_names = {"Epic", "Feature", "Theme"}
 
-    story_query_imports = _imported_names_from(
-        root / "tools" / "story_query_tools.py",
-        "models.core",
-    )
     export_snapshot_imports = _imported_names_from(
         root / "tools" / "export_snapshot.py",
         "models.core",
@@ -689,7 +659,6 @@ def test_runtime_modules_import_new_core_hierarchy_cleanup_boundary() -> None:
         "models.core",
     )
 
-    assert expected_names <= story_query_imports
     assert expected_names <= export_snapshot_imports
     assert expected_names <= project_repo_imports
 
@@ -698,9 +667,7 @@ def test_runtime_scripts_import_hierarchy_models_from_core() -> None:
     """Verify runtime scripts import hierarchy models from core."""
     root = Path(__file__).resolve().parents[1]
     script_expectations = {
-        "scripts/verify_query_features_performance.py": {"Theme", "Epic", "Feature"},
         "scripts/benchmark_project_structure.py": {"Theme", "Epic", "Feature"},
-        "scripts/fix_persona_drift.py": {"Feature"},
     }
 
     for script_relpath, expected_names in script_expectations.items():
@@ -716,14 +683,8 @@ def test_runtime_modules_import_new_spec_and_event_boundaries() -> None:
     """Verify runtime modules import new spec and event boundaries."""
     root = Path(__file__).resolve().parents[1]
     api_text = (root / "api.py").read_text(encoding="utf-8")
-    authority_handler_text = (
-        root / "workflow" / "handlers" / "authority.py"
-    ).read_text(encoding="utf-8")
     execution_handler_text = (
         root / "workflow" / "handlers" / "execution.py"
-    ).read_text(encoding="utf-8")
-    compiler_service_text = (
-        root / "services" / "specs" / "compiler_service.py"
     ).read_text(encoding="utf-8")
     story_validation_text = (
         root / "services" / "specs" / "story_validation_service.py"
@@ -731,7 +692,5 @@ def test_runtime_modules_import_new_spec_and_event_boundaries() -> None:
 
     assert "from models.events" not in api_text
     assert "from models.specs" not in api_text
-    assert "from models.specs import " in authority_handler_text
     assert "from services.task_execution_service import (" in execution_handler_text
-    assert "from models.specs import " in compiler_service_text
-    assert "from models.specs import " in story_validation_text
+    assert "from models.specs import " not in story_validation_text

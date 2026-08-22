@@ -2,18 +2,15 @@
 
 import logging
 
-from sqlalchemy import delete, or_, update
+from sqlalchemy import delete, or_
 from sqlmodel import Session, col, select
 
-from models.authority_curation import (
-    AuthorityCurationAttempt,
-    AuthorityFeedbackAttempt,
-)
 from models.core import (
     Epic,
     Feature,
     Project,
     ProjectPersona,
+    ProjectTeam,
     Sprint,
     SprintStory,
     Task,
@@ -38,8 +35,26 @@ from models.product_definition import (
     VisionRevisionIntent,
 )
 from models.repository import RepositoryBinding
-from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance, SpecRegistry
-from models.workflow import WorkflowNodeAttempt, WorkflowNodeAttemptOutcome
+from models.specs import SpecRegistry
+from models.workflow import (
+    BacklogArtifact,
+    BacklogArtifactDecision,
+    PostSprintTriage,
+    RoadmapArtifact,
+    RoadmapArtifactDecision,
+    SprintClosure,
+    SprintPlanArtifact,
+    SprintPlanArtifactDecision,
+    SprintReview,
+    SprintStart,
+    StoryArtifact,
+    StoryArtifactDecision,
+    StoryClosure,
+    StoryDependencyReview,
+    TaskCompletionEvidence,
+    WorkflowNodeAttempt,
+    WorkflowNodeAttemptOutcome,
+)
 
 logger: logging.Logger = logging.getLogger(name=__name__)
 
@@ -56,82 +71,21 @@ class ProjectDeletionConflictError(RuntimeError):
         self.references = references
 
 
-def _ensure_project_authority_deletable(session: Session, project_id: int) -> None:
-    """Reject deletion before removing any historically accepted authority."""
-    accepted_authority_id = session.exec(
-        select(SpecAuthorityAcceptance.id)
-        .join(
-            SpecRegistry,
-            col(SpecRegistry.spec_version_id)
-            == col(SpecAuthorityAcceptance.spec_version_id),
-        )
-        .where(
-            or_(
-                col(SpecAuthorityAcceptance.project_id) == project_id,
-                col(SpecRegistry.project_id) == project_id,
-            ),
-            col(SpecAuthorityAcceptance.status) == "accepted",
-        )
-    ).first()
-    if accepted_authority_id is not None:
-        raise ProjectDeletionConflictError(
-            project_id=project_id,
-            references=("spec_authority_acceptance.status",),
-        )
-
-
-def _neutralize_surviving_spec_pins(session: Session, project_id: int) -> None:
-    """Clear nullable story pins to spec versions that will be deleted."""
-    spec_version_ids = list(
-        session.exec(
-            select(SpecRegistry.spec_version_id).where(
-                SpecRegistry.project_id == project_id
-            )
-        ).all()
-    )
-    if not spec_version_ids:
-        return
-    session.exec(
-        update(UserStory)
-        .where(
-            col(UserStory.project_id) != project_id,
-            col(UserStory.accepted_spec_version_id).in_(spec_version_ids),
-        )
-        .values(accepted_spec_version_id=None)
-    )
-
-
 def _delete_project_spec_rows(session: Session, project_id: int) -> None:
     """Delete the cyclic candidate/registry pair in foreign-key-safe order."""
-    _neutralize_surviving_spec_pins(session, project_id)
     spec_versions = session.exec(
-        select(SpecRegistry).where(SpecRegistry.project_id == project_id)
+        select(SpecRegistry)
+        .where(SpecRegistry.project_id == project_id)
+        .order_by(col(SpecRegistry.spec_version_id).desc())
     ).all()
-    spec_version_ids = [
-        spec_version.spec_version_id
-        for spec_version in spec_versions
-        if spec_version.spec_version_id is not None
-    ]
-    if spec_version_ids:
-        session.exec(
-            delete(SpecAuthorityAcceptance).where(
-                col(SpecAuthorityAcceptance.spec_version_id).in_(spec_version_ids)
-            )
-        )
+    for spec_version in spec_versions:
+        session.delete(spec_version)
+    session.flush()
     session.exec(
         delete(SpecificationDecision).where(
             col(SpecificationDecision.project_id) == project_id
         )
     )
-    for spec_version in spec_versions:
-        for compiled in session.exec(
-            select(CompiledSpecAuthority).where(
-                CompiledSpecAuthority.spec_version_id == spec_version.spec_version_id
-            )
-        ).all():
-            session.delete(compiled)
-    session.flush()
-    session.exec(delete(SpecRegistry).where(col(SpecRegistry.project_id) == project_id))
     session.flush()
     session.exec(
         delete(SpecificationCandidate).where(
@@ -151,35 +105,38 @@ def _delete_project_story_dependencies(
     session: Session,
     *,
     project_id: int,
+) -> None:
+    """Delete only dependency associations owned by the deleted Project."""
+    session.exec(
+        delete(UserStoryDependency).where(
+            col(UserStoryDependency.project_id) == project_id
+        )
+    )
+
+
+def _ensure_no_cross_project_story_dependencies(
+    session: Session,
+    *,
+    project_id: int,
     story_ids: list[int],
 ) -> None:
-    """Delete dependency associations owned by or linked to the project."""
-    statement = delete(UserStoryDependency)
-    if story_ids:
-        statement = statement.where(
+    """Fail before mutation when another Project owns an inbound Story edge."""
+    if not story_ids:
+        return
+    inbound = session.exec(
+        select(UserStoryDependency.dependency_id).where(
+            col(UserStoryDependency.project_id) != project_id,
             or_(
-                col(UserStoryDependency.project_id) == project_id,
                 col(UserStoryDependency.dependent_story_id).in_(story_ids),
                 col(UserStoryDependency.prerequisite_story_id).in_(story_ids),
-            )
+            ),
         )
-    else:
-        statement = statement.where(col(UserStoryDependency.project_id) == project_id)
-    session.exec(statement)
-
-
-def _delete_project_curation_rows(session: Session, project_id: int) -> None:
-    """Delete authority curation rows that directly reference a project."""
-    session.exec(
-        delete(AuthorityCurationAttempt).where(
-            col(AuthorityCurationAttempt.project_id) == project_id
+    ).first()
+    if inbound is not None:
+        raise ProjectDeletionConflictError(
+            project_id=project_id,
+            references=("user_story_dependencies.project_id",),
         )
-    )
-    session.exec(
-        delete(AuthorityFeedbackAttempt).where(
-            col(AuthorityFeedbackAttempt.project_id) == project_id
-        )
-    )
 
 
 def _delete_task_execution_logs(
@@ -228,18 +185,6 @@ def _delete_project_workflow_events(
     session.exec(statement)
 
 
-def _delete_project_acceptances(session: Session, project_id: int) -> None:
-    """Delete non-accepted authority rows owned by the project."""
-    rows = session.exec(
-        select(SpecAuthorityAcceptance).where(
-            SpecAuthorityAcceptance.project_id == project_id
-        )
-    ).all()
-    for row in rows:
-        session.delete(row)
-    session.flush()
-
-
 def _delete_project_personas(session: Session, project_id: int) -> None:
     """Delete personas owned by the project."""
     rows = session.exec(
@@ -250,12 +195,94 @@ def _delete_project_personas(session: Session, project_id: int) -> None:
 
 
 def _delete_project_sprints(session: Session, sprints: list[Sprint]) -> None:
-    """Delete sprint-story links before their sprints."""
+    """Delete already-unlinked Sprints."""
     for sprint in sprints:
-        session.exec(
-            delete(SprintStory).where(col(SprintStory.sprint_id) == sprint.sprint_id)
-        )
         session.delete(sprint)
+
+
+def _delete_project_sprint_plan_rows(session: Session, project_id: int) -> None:
+    """Delete Sprint-plan decisions and immutable rows from newest to oldest."""
+    session.exec(
+        delete(SprintPlanArtifactDecision).where(
+            col(SprintPlanArtifactDecision.project_id) == project_id
+        )
+    )
+    rows = session.exec(
+        select(SprintPlanArtifact)
+        .where(col(SprintPlanArtifact.project_id) == project_id)
+        .order_by(col(SprintPlanArtifact.version_number).desc())
+    ).all()
+    for row in rows:
+        session.delete(row)
+    session.flush()
+
+
+def _delete_project_execution_rows(
+    session: Session,
+    *,
+    project_id: int,
+    sprint_ids: list[int],
+    story_ids: list[int],
+    task_ids: list[int],
+) -> None:
+    """Delete Sprint/Story/Task dependents before operational parent rows."""
+    for model in (
+        TaskCompletionEvidence,
+        StoryClosure,
+        SprintClosure,
+        SprintReview,
+        PostSprintTriage,
+    ):
+        session.exec(delete(model).where(col(model.project_id) == project_id))
+    _delete_task_execution_logs(
+        session,
+        task_ids=task_ids,
+        sprint_ids=sprint_ids,
+    )
+    if story_ids:
+        session.exec(
+            delete(StoryCompletionLog).where(
+                col(StoryCompletionLog.story_id).in_(story_ids)
+            )
+        )
+    link_statement = delete(SprintStory)
+    if sprint_ids and story_ids:
+        link_statement = link_statement.where(
+            or_(
+                col(SprintStory.sprint_id).in_(sprint_ids),
+                col(SprintStory.story_id).in_(story_ids),
+            )
+        )
+    elif sprint_ids:
+        link_statement = link_statement.where(
+            col(SprintStory.sprint_id).in_(sprint_ids)
+        )
+    elif story_ids:
+        link_statement = link_statement.where(col(SprintStory.story_id).in_(story_ids))
+    else:
+        return
+    session.exec(link_statement)
+
+
+def _delete_project_planning_artifacts(session: Session, project_id: int) -> None:
+    """Delete reviewed Story, Roadmap, and Backlog chains child-first."""
+    for decision_model in (
+        StoryArtifactDecision,
+        RoadmapArtifactDecision,
+        BacklogArtifactDecision,
+    ):
+        session.exec(
+            delete(decision_model).where(col(decision_model.project_id) == project_id)
+        )
+    for artifact_model in (StoryArtifact, RoadmapArtifact, BacklogArtifact):
+        rows = session.exec(
+            select(artifact_model)
+            .where(col(artifact_model.project_id) == project_id)
+            .order_by(col(artifact_model.version_number).desc())
+        ).all()
+        for row in rows:
+            session.delete(row)
+        session.flush()
 
 
 def _delete_project_stories(
@@ -264,35 +291,15 @@ def _delete_project_stories(
     project_id: int,
     stories: list[UserStory],
 ) -> None:
-    """Delete project stories and dependent task/completion rows."""
-    story_ids = [story.story_id for story in stories if story.story_id is not None]
+    """Delete project Tasks and Stories after all dependent rows are gone."""
     _delete_project_story_dependencies(
         session,
         project_id=project_id,
-        story_ids=story_ids,
     )
-    if story_ids:
-        referring_stories = session.exec(
-            select(UserStory).where(
-                col(UserStory.superseded_by_story_id).in_(story_ids)
-            )
-        ).all()
-        for story in referring_stories:
-            story.superseded_by_story_id = None
-            session.add(story)
-        session.flush()
-
     for story in stories:
         tasks = session.exec(select(Task).where(Task.story_id == story.story_id)).all()
         for task in tasks:
             session.delete(task)
-        logs = session.exec(
-            select(StoryCompletionLog).where(
-                StoryCompletionLog.story_id == story.story_id
-            )
-        ).all()
-        for log in logs:
-            session.delete(log)
         session.delete(story)
 
 
@@ -455,28 +462,12 @@ class ProjectRepository:
             if not project:
                 return False
 
-            _ensure_project_authority_deletable(session, project_id)
-            _delete_project_spec_rows(session, project_id)
-            _delete_project_lifecycle_rows(session, project)
-
             sprints = session.exec(
                 select(Sprint).where(Sprint.project_id == project_id)
             ).all()
             sprint_ids = [
                 sprint.sprint_id for sprint in sprints if sprint.sprint_id is not None
             ]
-            _delete_project_workflow_events(
-                session,
-                project_id=project_id,
-                sprint_ids=sprint_ids,
-            )
-
-            _delete_project_acceptances(session, project_id)
-
-            _delete_project_curation_rows(session, project_id)
-
-            _delete_project_personas(session, project_id)
-
             stories = session.exec(
                 select(UserStory).where(UserStory.project_id == project_id)
             ).all()
@@ -492,13 +483,36 @@ class ProjectRepository:
                 if story_ids
                 else []
             )
-
-            _delete_task_execution_logs(
+            _ensure_no_cross_project_story_dependencies(
                 session,
-                task_ids=task_ids,
-                sprint_ids=sprint_ids,
+                project_id=project_id,
+                story_ids=story_ids,
             )
 
+            session.exec(
+                delete(SprintStart).where(col(SprintStart.project_id) == project_id)
+            )
+            session.exec(
+                delete(StoryDependencyReview).where(
+                    col(StoryDependencyReview.project_id) == project_id
+                )
+            )
+            _delete_project_workflow_events(
+                session,
+                project_id=project_id,
+                sprint_ids=sprint_ids,
+            )
+            _delete_project_execution_rows(
+                session,
+                project_id=project_id,
+                sprint_ids=sprint_ids,
+                story_ids=story_ids,
+                task_ids=task_ids,
+            )
+
+            _delete_project_personas(session, project_id)
+
+            _delete_project_sprint_plan_rows(session, project_id)
             _delete_project_sprints(session, list(sprints))
             _delete_project_stories(
                 session,
@@ -507,7 +521,13 @@ class ProjectRepository:
             )
             session.flush()
 
+            _delete_project_planning_artifacts(session, project_id)
+            _delete_project_spec_rows(session, project_id)
+            _delete_project_lifecycle_rows(session, project)
             _delete_project_roadmap(session, project_id)
+            session.exec(
+                delete(ProjectTeam).where(col(ProjectTeam.project_id) == project_id)
+            )
             session.delete(project)
 
             session.commit()

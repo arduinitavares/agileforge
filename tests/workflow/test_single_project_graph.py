@@ -4,37 +4,31 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict
+from unittest.mock import patch
 
+from git import Repo
 from pydantic import TypeAdapter
 from sqlmodel import Session, select
 
 from adapters.git.repository_probe import GitPythonRepositoryProbe
 from models.core import Project, Task
 from repositories.workflow import WorkflowFactRepository
-from services.authority_review_projection import (
-    AuthorityReviewSnapshot,
-    build_authority_review_snapshot_in_session,
-)
-from services.contracts.specification import (
-    SPEC_AUTHORITY_COMPILER_PROMPT_HASH,
-    SPEC_AUTHORITY_COMPILER_VERSION,
-    compute_invariant_id_from_payload,
-)
+from services.contracts.sprint import SprintPlannerOutput
 from services.specification_authoring_input import SpecificationStructuringInputService
+from services.specs import story_validation_service as story_validation_service_module
 from tests.workflow.test_product_discovery_transitions import (
     _record_binding,
     _register_source,
     _repository,
 )
-from utils.agileforge_spec_profile_v2 import SpecificationPayload
-from utils.spec_schemas import (
-    Invariant,
-    InvariantType,
-    RequiredFieldParams,
-    SourceMapEntry,
-    SpecAuthorityCompilationSuccess,
+from utils.agileforge_spec_profile_v2 import (
+    SpecificationPayload,
+    canonical_spec_hash,
+    canonical_spec_json,
 )
+from utils.task_metadata import parse_task_metadata
 from workflow.contracts import (
     JsonObject,
     NodeCategory,
@@ -44,9 +38,9 @@ from workflow.contracts import (
     WorkflowPosition,
 )
 from workflow.definitions.planning import (
-    candidate_set_fingerprint,
     story_dependency_source_fingerprint,
 )
+from workflow.definitions.product_discovery import accepted_current_spec
 from workflow.definitions.root import ROOT_GRAPH, project_graph
 from workflow.domain import WorkflowDomain
 from workflow.fingerprints import canonical_hash
@@ -54,10 +48,8 @@ from workflow.requests import (
     ApplyStoryDependencies,
     CloseSprint,
     CloseStory,
-    CompileAuthority,
     CompleteSpecificationStructuring,
     CompleteTask,
-    DecideAuthority,
     DecideBacklog,
     DecideProductGoalReview,
     DecideRoadmap,
@@ -79,13 +71,22 @@ from workflow.requests import (
 )
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from sqlalchemy.engine import Engine
 
 
 JOURNEY_AT = datetime(2026, 8, 9, 12, tzinfo=UTC)
 _JSON_OBJECT = TypeAdapter(JsonObject)
+_GOLD_SPECIFICATION_PATH = (
+    Path(__file__).parents[1]
+    / "fixtures"
+    / "issue_210"
+    / "gold"
+    / "canonical-specification.json"
+)
+_GOLD_SPECIFICATION_HASH = (
+    "sha256:4f39ae394d3910bc52d73256eddc11edd66e57074025e1ec7f037e8e69a33025"
+)
+_GOLD_LIFECYCLE_SPEC_ITEM_IDS = ("DATA.001", "REQ.001")
 
 
 class _RequestGuards(TypedDict):
@@ -250,48 +251,24 @@ def _specification_payload() -> SpecificationPayload:
     )
 
 
-def _authority_artifact() -> SpecAuthorityCompilationSuccess:
-    parameters = RequiredFieldParams(field_name="project_id")
-    invariant_id = compute_invariant_id_from_payload(
-        InvariantType.REQUIRED_FIELD,
-        parameters,
-        source_item_id="REQ.lifecycle.persist",
-        source_level="MUST",
-    )
-    return SpecAuthorityCompilationSuccess(
-        scope_themes=["Lifecycle"],
-        invariants=[
-            Invariant(
-                id=invariant_id,
-                type=InvariantType.REQUIRED_FIELD,
-                source_item_id="REQ.lifecycle.persist",
-                source_level="MUST",
-                parameters=parameters,
-            )
-        ],
-        eligible_feature_rules=[],
-        gaps=[],
-        assumptions=[],
-        source_map=[
-            SourceMapEntry(
-                invariant_id=invariant_id,
-                excerpt=("Every persisted lifecycle fact MUST include project_id."),
-                location="REQ.lifecycle.persist",
-            )
-        ],
-        compiler_version=SPEC_AUTHORITY_COMPILER_VERSION,
-        prompt_hash=SPEC_AUTHORITY_COMPILER_PROMPT_HASH,
-    )
+def _gold_specification_payload() -> tuple[SpecificationPayload, str]:
+    """Load the exact canonical String Calculator delivery root."""
+    canonical = _GOLD_SPECIFICATION_PATH.read_text(encoding="utf-8")
+    return SpecificationPayload.model_validate_json(canonical), canonical
 
 
-def _backlog_content(requirements: tuple[str, ...]) -> JsonObject:
+def _backlog_content(
+    requirements: tuple[str, ...],
+    *,
+    spec_item_ids: tuple[str, ...] = ("REQ.lifecycle.persist",),
+) -> JsonObject:
     return {
         "backlog_items": [
             {
+                "backlog_item_id": f"PBI-{index:06d}",
                 "priority": index,
                 "requirement": requirement,
-                "authority_ref": "REQ.lifecycle.persist",
-                "capability_hint": None,
+                "spec_item_ids": list(spec_item_ids),
                 "value_driver": "Strategic",
                 "justification": f"Deliver {requirement}.",
                 "estimated_effort": "M",
@@ -311,7 +288,10 @@ def _roadmap_content(requirements: tuple[str, ...]) -> JsonObject:
                 "release_name": "Lifecycle release",
                 "theme": "Persistence",
                 "focus_area": "Technical Foundation",
-                "items": list(requirements),
+                "backlog_item_ids": [
+                    f"PBI-{index:06d}"
+                    for index, _requirement in enumerate(requirements, start=1)
+                ],
                 "reasoning": "Deliver the accepted requirements in order.",
             }
         ],
@@ -321,70 +301,63 @@ def _roadmap_content(requirements: tuple[str, ...]) -> JsonObject:
     }
 
 
-def _story_content(requirement: str, ordinal: int) -> JsonObject:
+def _story_content(
+    requirement: str,
+    ordinal: int,
+    *,
+    spec_item_ids: tuple[str, ...] = ("REQ.lifecycle.persist",),
+) -> JsonObject:
+    del requirement
+    item: JsonObject = {
+        "story_item_id": "US-0001",
+        "story_title": f"Persist lifecycle boundary {ordinal}",
+        "statement": (
+            "As an operator, I want durable lifecycle facts, so that "
+            "workflow routing survives restarts."
+        ),
+        "persona": "operator",
+        "acceptance_criteria": ["Verify the persisted semantic boundary."],
+        "spec_item_ids": list(spec_item_ids),
+        "invest_score": "High",
+        "estimated_effort": "M",
+        "produced_artifacts": ["workflow records"],
+        "research_caveats": [],
+        "dependency_candidates": [],
+        "decomposition_warning": None,
+    }
     return {
-        "parent_requirement": requirement,
-        "user_stories": [
-            {
-                "story_title": f"Persist lifecycle boundary {ordinal}",
-                "statement": (
-                    "As an operator, I want durable lifecycle facts, so that "
-                    "workflow routing survives restarts."
-                ),
-                "acceptance_criteria": ["Verify the persisted semantic boundary."],
-                "invest_score": "High",
-                "estimated_effort": "M",
-                "produced_artifacts": ["workflow records"],
-                "research_caveats": [],
-                "dependency_candidates": [],
-            }
-        ],
-        "quality_schema_version": "agileforge.story_quality.v1",
-        "coverage_status": "complete",
-        "remaining_scope": [],
-        "quality_findings": [],
+        "story_items": [{"item": item, "item_fingerprint": canonical_hash(item)}],
         "is_complete": True,
         "clarifying_questions": [],
     }
 
 
-def _sprint_plan(selected_story_id: int, deferred_story_id: int) -> JsonObject:
+def _sprint_plan(
+    selected_story_id: int,
+    deferred_story_id: int,
+    *,
+    spec_item_ids: tuple[str, ...] = ("REQ.lifecycle.persist",),
+) -> JsonObject:
+    del deferred_story_id
     return {
         "sprint_goal": "Persist the first lifecycle increment.",
-        "sprint_number": 1,
         "selected_stories": [
             {
                 "story_id": selected_story_id,
-                "story_title": "Persist lifecycle boundary 1",
+                "story_item_id": "US-0001",
                 "tasks": [
                     {
                         "description": "Implement persisted lifecycle boundary",
+                        "relevant_spec_item_ids": list(spec_item_ids),
                         "task_kind": "implementation",
                         "artifact_targets": ["workflow lifecycle"],
                         "workstream_tags": ["workflow"],
-                        "relevant_invariant_ids": [],
                         "checklist_items": ["Run focused tests"],
                     }
                 ],
                 "reason_for_selection": "Deliver the highest priority increment.",
             }
         ],
-        "deselected_stories": [
-            {
-                "story_id": deferred_story_id,
-                "reason": "Carry unresolved work into the next Sprint cycle.",
-            }
-        ],
-        "capacity_analysis": {
-            "capacity_points": 3,
-            "capacity_source": "user_override",
-            "capacity_basis": "One medium Story fits the available capacity.",
-            "selected_count": 1,
-            "story_points_used": 3,
-            "remaining_capacity_points": 0,
-            "commitment_note": "The selected scope is achievable.",
-            "reasoning": "The plan carries remaining work forward.",
-        },
     }
 
 
@@ -582,11 +555,22 @@ def _accept_initial_goal(journey: _Journey) -> None:
 def _accept_specification(
     journey: _Journey,
     tmp_path: Path,
+    *,
+    payload: SpecificationPayload | None = None,
+    include_context: bool = False,
 ) -> tuple[int, str]:
     domain = journey.domain
     project_id = journey.project_id
     probe = GitPythonRepositoryProbe()
     repository = _repository(tmp_path, name="journey-specification-source")
+    if include_context:
+        (repository / "CONTEXT.md").write_text(
+            "# Exact registered context\n\nRetain source provenance.\n",
+            encoding="utf-8",
+        )
+        with Repo(repository) as source_repository:
+            source_repository.index.add(["CONTEXT.md"])
+            source_repository.index.commit("register source context")
     _record_binding(
         journey.engine,
         project_id=project_id,
@@ -640,7 +624,7 @@ def _accept_specification(
             idempotency_key="journey-specification-complete",
             attempt_id=_output_int(started, "attempt_id"),
             attempt_fingerprint=str(started.output["attempt_fingerprint"]),
-            payload=_specification_payload(),
+            payload=payload or _specification_payload(),
         )
     )
     assert structured.ok is True
@@ -660,74 +644,34 @@ def _accept_specification(
         )
     )
     assert accepted.ok is True
-    position, compile_decision = _assert_next(
-        domain, project_id, "authority.compile", NodeCategory.AVAILABLE
+    position, backlog_decision = _assert_next(
+        domain, project_id, "backlog.generate", NodeCategory.AVAILABLE
     )
-    spec_version_id, registered_hash = _reference(compile_decision, "spec_version")
+    spec_version_id, registered_hash = _reference(backlog_decision, "specification")
     assert registered_hash == specification_hash
     return spec_version_id, specification_hash
 
 
-def _accept_authority(
+def _accept_backlog(
     journey: _Journey,
-    spec_version_id: int,
-    specification_hash: str,
+    requirements: tuple[str, ...],
+    *,
+    spec_item_ids: tuple[str, ...] = ("REQ.lifecycle.persist",),
 ) -> None:
     domain = journey.domain
     project_id = journey.project_id
-    position, _ = _assert_next(
-        domain, project_id, "authority.compile", NodeCategory.AVAILABLE
-    )
-    compiled = domain.transition(
-        CompileAuthority(
-            **_guards(position, "authority.compile"),
-            idempotency_key="journey-authority-compile",
-            spec_version_id=spec_version_id,
-            expected_spec_hash=specification_hash,
-            compiler_model="fake/compiler",
-            compiled_authority=_authority_artifact(),
-        )
-    )
-    assert compiled.ok is True
-    position, _ = _assert_next(
-        domain, project_id, "authority.review", NodeCategory.WAITING
-    )
-    with Session(journey.engine) as session:
-        review = build_authority_review_snapshot_in_session(
-            session, project_id=project_id
-        )
-    assert isinstance(review, AuthorityReviewSnapshot)
-    assert review.pending_authority_id is not None
-    assert review.authority_fingerprint is not None
-    accepted = domain.transition(
-        DecideAuthority(
-            **_guards(position, "authority.review"),
-            idempotency_key="journey-authority-accept",
-            pending_authority_id=review.pending_authority_id,
-            authority_fingerprint=review.authority_fingerprint,
-            review_fingerprint=review.review_fingerprint,
-            decision="accepted",
-            rationale="The Authority matches the accepted specification.",
-        )
-    )
-    assert accepted.ok is True
-
-
-def _accept_backlog(journey: _Journey, requirements: tuple[str, ...]) -> None:
-    domain = journey.domain
-    project_id = journey.project_id
-    content = _backlog_content(requirements)
+    content = _backlog_content(requirements, spec_item_ids=spec_item_ids)
     position, generate = _assert_next(
         domain, project_id, "backlog.generate", NodeCategory.AVAILABLE
     )
     goal_id, goal_fingerprint = _reference(generate, "product_goal")
-    authority_id, authority_fingerprint = _reference(generate, "authority")
+    spec_version_id, spec_hash = _reference(generate, "specification")
     recorded = domain.transition(
         RecordBacklogDraft(
             **_guards(position, "backlog.generate"),
             idempotency_key="journey-backlog",
-            authority_id=authority_id,
-            authority_fingerprint=authority_fingerprint,
+            spec_version_id=spec_version_id,
+            spec_hash=spec_hash,
             product_goal_artifact_id=goal_id,
             product_goal_fingerprint=goal_fingerprint,
             canonical_content=content,
@@ -746,7 +690,7 @@ def _accept_backlog(journey: _Journey, requirements: tuple[str, ...]) -> None:
             backlog_artifact_id=backlog_id,
             artifact_fingerprint=backlog_fingerprint,
             decision="accepted",
-            rationale="The Backlog preserves Goal and Authority lineage.",
+            rationale="The Backlog preserves Goal and Specification lineage.",
         )
     )
     assert accepted.ok is True
@@ -797,11 +741,13 @@ def _accept_roadmap(journey: _Journey, requirements: tuple[str, ...]) -> None:
 def _accept_stories(
     journey: _Journey,
     requirements: tuple[str, ...],
+    *,
+    spec_item_ids: tuple[str, ...] = ("REQ.lifecycle.persist",),
 ) -> tuple[int, ...]:
     story_ids: list[int] = []
     for ordinal, requirement in enumerate(requirements, start=1):
-        requirement_id = " ".join(requirement.lower().split())
-        instance_key = f"requirement:{requirement_id}"
+        backlog_item_id = f"PBI-{ordinal:06d}"
+        instance_key = f"backlog_item:{backlog_item_id}"
         position, generate = _assert_next(
             journey.domain,
             journey.project_id,
@@ -810,12 +756,19 @@ def _accept_stories(
             instance_key,
         )
         roadmap_id, roadmap_fingerprint = _reference(generate, "roadmap")
-        content = _story_content(requirement, ordinal)
+        backlog_id, backlog_fingerprint = _reference(generate, "backlog")
+        content = _story_content(
+            requirement,
+            ordinal,
+            spec_item_ids=spec_item_ids,
+        )
         recorded = journey.domain.transition(
             RecordStoryDraft(
                 **_guards(position, "planning.story.generate", instance_key),
                 idempotency_key=f"journey-story-{ordinal}",
-                requirement_id=requirement_id,
+                backlog_item_id=backlog_item_id,
+                source_backlog_artifact_id=backlog_id,
+                source_backlog_artifact_fingerprint=backlog_fingerprint,
                 roadmap_artifact_id=roadmap_id,
                 roadmap_artifact_fingerprint=roadmap_fingerprint,
                 canonical_content=content,
@@ -823,7 +776,6 @@ def _accept_stories(
             )
         )
         assert recorded.ok is True
-        story_ids.append(_first_output_int(recorded, "story_ids"))
         position, review = _assert_next(
             journey.domain,
             journey.project_id,
@@ -836,7 +788,7 @@ def _accept_stories(
             DecideStory(
                 **_guards(position, "planning.story.review", instance_key),
                 idempotency_key=f"journey-story-{ordinal}-accept",
-                requirement_id=requirement_id,
+                backlog_item_id=backlog_item_id,
                 story_artifact_id=artifact_id,
                 artifact_fingerprint=fingerprint,
                 decision="accepted",
@@ -844,12 +796,27 @@ def _accept_stories(
             )
         )
         assert accepted.ok is True
+        story_id = _first_output_int(accepted, "activated_story_ids")
+        with patch.object(
+            story_validation_service_module,
+            "get_engine",
+            return_value=journey.engine,
+        ):
+            validation = (
+                story_validation_service_module.validate_story_with_specification(
+                    {"story_id": story_id}
+                )
+            )
+        assert validation["ready_for_sprint"] is True
+        story_ids.append(story_id)
     return tuple(story_ids)
 
 
 def _review_dependencies_and_start_sprint(
     journey: _Journey,
     story_ids: tuple[int, ...],
+    *,
+    spec_item_ids: tuple[str, ...] = ("REQ.lifecycle.persist",),
 ) -> int:
     position, _ = _assert_next(
         journey.domain,
@@ -880,24 +847,26 @@ def _review_dependencies_and_start_sprint(
     with Session(journey.engine) as session:
         snapshot = WorkflowFactRepository(session).load(journey.project_id)
     candidates = tuple(item for item in snapshot.stories if item.sprint_candidate)
-    candidate_fingerprint = candidate_set_fingerprint(
-        candidates, snapshot.story_dependencies
+    specification = accepted_current_spec(snapshot)
+    assert specification is not None
+    content = _sprint_plan(
+        story_ids[0],
+        story_ids[1],
+        spec_item_ids=spec_item_ids,
     )
-    content = _sprint_plan(story_ids[0], story_ids[1])
     recorded = journey.domain.transition(
         RecordSprintPlan(
             **_guards(position, "planning.sprint.plan"),
             idempotency_key="journey-sprint-plan",
             team_name="Lifecycle Team",
-            selected_story_ids=(story_ids[0],),
-            canonical_task_plan=content,
-            plan_fingerprint=canonical_hash(content),
-            candidate_set_fingerprint=candidate_fingerprint,
+            spec_version_id=specification.spec_version_id,
+            spec_hash=specification.spec_hash,
+            planner_output=SprintPlannerOutput.model_validate(content),
         )
     )
     assert recorded.ok is True
     plan_id = _output_int(recorded, "sprint_plan_artifact_id")
-    sprint_id = _output_int(recorded, "sprint_id")
+    plan_fingerprint = str(recorded.output["plan_fingerprint"])
     position, _ = _assert_next(
         journey.domain,
         journey.project_id,
@@ -909,12 +878,13 @@ def _review_dependencies_and_start_sprint(
             **_guards(position, "planning.sprint.review"),
             idempotency_key="journey-sprint-plan-accept",
             sprint_plan_artifact_id=plan_id,
-            plan_fingerprint=canonical_hash(content),
+            plan_fingerprint=plan_fingerprint,
             decision="accepted",
             rationale="The plan fits one increment of capacity.",
         )
     )
     assert accepted.ok is True
+    sprint_id = _output_int(accepted, "activated_sprint_id")
     position, _ = _assert_next(
         journey.domain,
         journey.project_id,
@@ -925,10 +895,6 @@ def _review_dependencies_and_start_sprint(
         StartSprint(
             **_guards(position, "planning.sprint.start"),
             idempotency_key="journey-sprint-start",
-            sprint_plan_artifact_id=plan_id,
-            sprint_id=sprint_id,
-            plan_fingerprint=canonical_hash(content),
-            candidate_set_fingerprint=candidate_fingerprint,
         )
     )
     assert started.ok is True
@@ -1048,7 +1014,7 @@ def _complete_sprint_and_triage(
             sprint_id=sprint_id,
             impact="none",
             canonical_payload={
-                "learning": "The Goal and Authority lineage remained stable."
+                "learning": "The Goal and Specification lineage remained stable."
             },
         )
     )
@@ -1096,7 +1062,6 @@ def test_root_graph_has_exact_v2_lifecycle_order() -> None:
         "vision",
         "product_goal",
         "specification",
-        "authority",
         "backlog",
         "planning",
         "execution",
@@ -1111,8 +1076,7 @@ def test_provider_free_persisted_v2_journey_reaches_triage_and_next_goal(
     journey = _new_journey(engine)
     _accept_initial_vision(journey)
     _accept_initial_goal(journey)
-    spec_version_id, specification_hash = _accept_specification(journey, tmp_path)
-    _accept_authority(journey, spec_version_id, specification_hash)
+    _spec_version_id, _specification_hash = _accept_specification(journey, tmp_path)
     requirements = (
         "Persist the primary lifecycle boundary",
         "Carry remaining work into another Sprint",
@@ -1123,3 +1087,81 @@ def test_provider_free_persisted_v2_journey_reaches_triage_and_next_goal(
     sprint_id = _review_dependencies_and_start_sprint(journey, story_ids)
     _complete_sprint_and_triage(journey, sprint_id, story_ids[0])
     _assert_next_cycle_and_fulfill_goal(journey)
+
+
+def test_provider_free_persisted_gold_lifecycle_preserves_data_contract(
+    engine: Engine,
+    tmp_path: Path,
+) -> None:
+    """Persist the exact gold root through Backlog, Story, Sprint, and start."""
+    gold_payload, canonical_gold = _gold_specification_payload()
+    assert canonical_spec_json(gold_payload) == canonical_gold
+    assert canonical_spec_hash(gold_payload) == _GOLD_SPECIFICATION_HASH
+    journey = _new_journey(engine)
+    _accept_initial_vision(journey)
+    _accept_initial_goal(journey)
+    spec_version_id, spec_hash = _accept_specification(
+        journey,
+        tmp_path,
+        payload=gold_payload,
+        include_context=True,
+    )
+    assert spec_hash == _GOLD_SPECIFICATION_HASH
+    requirements = (
+        "Define the supported Number List data contract.",
+        "Expose the public calculator operation.",
+    )
+    _accept_backlog(
+        journey,
+        requirements,
+        spec_item_ids=_GOLD_LIFECYCLE_SPEC_ITEM_IDS,
+    )
+    _accept_roadmap(journey, requirements)
+    story_ids = _accept_stories(
+        journey,
+        requirements,
+        spec_item_ids=_GOLD_LIFECYCLE_SPEC_ITEM_IDS,
+    )
+    sprint_id = _review_dependencies_and_start_sprint(
+        journey,
+        story_ids,
+        spec_item_ids=_GOLD_LIFECYCLE_SPEC_ITEM_IDS,
+    )
+
+    with Session(engine) as session:
+        snapshot = WorkflowFactRepository(session).load(journey.project_id)
+        accepted = accepted_current_spec(snapshot)
+        assert accepted is not None
+        assert (accepted.spec_version_id, accepted.spec_hash) == (
+            spec_version_id,
+            _GOLD_SPECIFICATION_HASH,
+        )
+        assert all(
+            item.spec_item_ids == _GOLD_LIFECYCLE_SPEC_ITEM_IDS
+            for item in snapshot.backlog_items
+        )
+        active_stories = tuple(
+            item for item in snapshot.stories if item.story_id in story_ids
+        )
+        assert len(active_stories) == len(story_ids)
+        assert all(
+            item.spec_item_ids == _GOLD_LIFECYCLE_SPEC_ITEM_IDS
+            and item.accepted_spec_version_id == spec_version_id
+            and item.accepted_spec_hash == _GOLD_SPECIFICATION_HASH
+            for item in active_stories
+        )
+        task = session.exec(select(Task).where(Task.story_id == story_ids[0])).one()
+        metadata = parse_task_metadata(task.metadata_json)
+        assert metadata.relevant_spec_item_ids == _GOLD_LIFECYCLE_SPEC_ITEM_IDS
+        assert (metadata.spec_version_id, metadata.spec_hash) == (
+            spec_version_id,
+            _GOLD_SPECIFICATION_HASH,
+        )
+        assert snapshot.sprints[0].sprint_id == sprint_id
+        assert all(
+            "authority" not in item.artifact_type for item in snapshot.phase_artifacts
+        )
+        assert all(
+            "authority" not in item.artifact_type
+            for item in snapshot.planning_artifacts
+        )

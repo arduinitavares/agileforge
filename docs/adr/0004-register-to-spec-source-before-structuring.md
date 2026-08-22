@@ -1,6 +1,7 @@
 # Register the to-spec source before Specification structuring
 
-**Status:** Accepted
+**Status:** Superseded by
+[ADR 0005](0005-use-accepted-specification-as-delivery-contract.md)
 
 **Date:** 2026-08-12
 

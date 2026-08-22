@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
 from pydantic import TypeAdapter, ValidationError
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, col, select
 
 from models.core import Project
@@ -33,6 +34,7 @@ from services.contracts.specification_authoring import (
     specification_structuring_input_fingerprint,
 )
 from services.contracts.specification_source import source_bundle_fingerprint
+from services.specs.accepted_specification import load_current_accepted_specification
 from services.specs.candidate_contract import (
     CandidateBuildInput,
     CandidateKind,
@@ -1414,6 +1416,51 @@ def _validated_review_target(
     return candidate, prior_approved
 
 
+def _persist_accepted_registry(
+    session: Session,
+    *,
+    candidate: SpecificationCandidate,
+    review: SpecificationDecision,
+    prior_approved: SpecRegistry | None,
+) -> None:
+    """Persist the initial or amendment acceptance sequence in exact order."""
+    if candidate.candidate_kind == CandidateKind.INITIAL.value:
+        if prior_approved is not None:
+            raise _GuardError(
+                WorkflowErrorCode.STALE_SPECIFICATION,
+                "Initial Specification acceptance requires no current version.",
+            )
+    elif prior_approved is None or (
+        prior_approved.spec_version_id,
+        prior_approved.spec_hash,
+    ) != (candidate.base_spec_version_id, candidate.base_spec_hash):
+        raise _GuardError(
+            WorkflowErrorCode.STALE_SPECIFICATION,
+            "The accepted amendment base changed before registration.",
+        )
+    else:
+        prior_approved.status = "superseded"
+        session.add(prior_approved)
+        session.flush()
+    registry = SpecRegistry(
+        project_id=candidate.project_id,
+        spec_hash=candidate.payload_fingerprint,
+        status="approved",
+        source_specification_decision_id=review.specification_decision_id,
+        source_specification_candidate_id=candidate.specification_candidate_id,
+        source_specification_candidate_fingerprint=candidate.candidate_fingerprint,
+        source_vision_artifact_id=candidate.vision_artifact_id,
+        source_vision_fingerprint=candidate.vision_fingerprint,
+        source_product_goal_artifact_id=candidate.product_goal_artifact_id,
+        source_product_goal_fingerprint=candidate.product_goal_fingerprint,
+        supersedes_spec_version_id=(
+            None if prior_approved is None else prior_approved.spec_version_id
+        ),
+    )
+    session.add(registry)
+    session.flush()
+
+
 def execute_decide_specification(
     session: Session,
     request: DecideSpecification,
@@ -1441,41 +1488,64 @@ def execute_decide_specification(
         decided_at=evaluated_at,
     )
     session.add(review)
-    if request.decision == "accepted":
-        if prior_approved is not None:
-            prior_approved.status = "superseded"
-            session.add(prior_approved)
-        session.add(
-            SpecRegistry(
-                project_id=request.project_id,
-                spec_hash=candidate.payload_fingerprint,
-                status="approved",
-                approved_at=evaluated_at,
-                approved_by=request.actor,
-                approval_notes=request.rationale.strip() or None,
-                source_specification_candidate_id=request.specification_candidate_id,
-                source_specification_candidate_fingerprint=(
-                    candidate.candidate_fingerprint
-                ),
-                source_vision_artifact_id=candidate.vision_artifact_id,
-                source_vision_fingerprint=candidate.vision_fingerprint,
-                source_product_goal_artifact_id=(candidate.product_goal_artifact_id),
-                source_product_goal_fingerprint=(candidate.product_goal_fingerprint),
-                supersedes_spec_version_id=(
-                    None if prior_approved is None else prior_approved.spec_version_id
-                ),
-            )
-        )
     session.flush()
     if review.specification_decision_id is None:
         return _failure(
             WorkflowErrorCode.SPECIFICATION_CANDIDATE_CONFLICT,
             "Specification review did not receive a durable identity.",
         )
+    if request.decision == "accepted":
+        candidate_kind = candidate.candidate_kind
+        base_identity = (candidate.base_spec_version_id, candidate.base_spec_hash)
+        try:
+            _persist_accepted_registry(
+                session,
+                candidate=candidate,
+                review=review,
+                prior_approved=prior_approved,
+            )
+        except _GuardError as exc:
+            session.rollback()
+            return _failure(exc.code, exc.message)
+        except IntegrityError as exc:
+            if not _is_current_specification_race(exc):
+                raise
+            session.rollback()
+            current = load_current_accepted_specification(
+                session,
+                project_id=request.project_id,
+            )
+            current_identity = (
+                None
+                if current is None
+                else (current.spec_version_id, current.spec_hash)
+            )
+            committed_winner = (
+                candidate_kind == CandidateKind.INITIAL.value and current is not None
+            ) or (
+                candidate_kind == CandidateKind.AMENDMENT.value
+                and current is not None
+                and current_identity != base_identity
+            )
+            if not committed_winner:
+                raise
+            return _failure(
+                WorkflowErrorCode.STALE_SPECIFICATION,
+                "The current accepted Specification changed during acceptance.",
+            )
     return TransitionResult(
         ok=True,
         applied_node_id=decision.node_id,
         output={"specification_decision_id": review.specification_decision_id},
+    )
+
+
+def _is_current_specification_race(exc: IntegrityError) -> bool:
+    """Recognize only the approved-row partial-unique race."""
+    detail = str(exc.orig)
+    return (
+        "uq_spec_registry_current_approved" in detail
+        or detail == "UNIQUE constraint failed: spec_registry.project_id"
     )
 
 

@@ -8,13 +8,14 @@ import importlib.util
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from pathlib import Path
+from typing import TYPE_CHECKING, Literal
 
 import pytest
 from pydantic import TypeAdapter
-from sqlmodel import Session
+from sqlmodel import Session, select
 
-from models.core import Project
+from models.core import Project, UserStory
 from models.product_definition import (
     ProductGoalArtifact,
     ProductGoalArtifactDecision,
@@ -31,7 +32,7 @@ from models.product_definition import (
 )
 from models.repository import RepositoryBinding, repository_binding_fingerprint
 from models.specs import SpecRegistry
-from models.workflow import WorkflowNodeAttempt
+from models.workflow import BacklogArtifact, RoadmapArtifact, WorkflowNodeAttempt
 from repositories.workflow import WorkflowFactRepository
 from services.contracts.specification_authoring import (
     SPECIFICATION_PRODUCT_GOAL_SOURCE_ID,
@@ -79,6 +80,13 @@ from workflow.contracts import (
 from workflow.definitions.product_discovery import select_product_definition_state
 from workflow.definitions.product_goal import _goal_interview_rule, _goal_review_rule
 from workflow.definitions.root import ROOT_GRAPH
+from workflow.facts import (
+    BacklogItemFact,
+    PhaseArtifactFact,
+    PlanningArtifactFact,
+    ProjectFact,
+    WorkflowFactSnapshot,
+)
 from workflow.fingerprints import (
     canonical_hash,
     canonical_json,
@@ -96,7 +104,323 @@ if TYPE_CHECKING:
 
 
 NOW = datetime(2026, 8, 5, 14, tzinfo=UTC)
+GOLD_SPECIFICATION_ITEM_COUNT = 37
 _JSON_OBJECT = TypeAdapter(JsonObject)
+
+
+def _story_pending_snapshot(
+    *,
+    phase_artifacts: tuple[PhaseArtifactFact, ...],
+    backlog_items: tuple[BacklogItemFact, ...],
+    planning_artifacts: tuple[PlanningArtifactFact, ...],
+) -> WorkflowFactSnapshot:
+    """Attach Story projection facts to one otherwise accepted source lineage."""
+    from tests.workflow.test_direct_specification_lineage import (  # noqa: PLC0415
+        _accepted_snapshot,
+    )
+
+    base = _accepted_snapshot()
+    return base.model_copy(
+        update={
+            "project": ProjectFact(
+                project_id=71,
+                name="Story pending projection",
+                created_at=NOW,
+            ),
+            "phase_artifacts": phase_artifacts,
+            "backlog_items": backlog_items,
+            "planning_artifacts": planning_artifacts,
+        }
+    )
+
+
+def _story_artifact(
+    artifact_id: int,
+    *,
+    backlog_artifact_id: int,
+    status: Literal["pending_review", "accepted", "rejected", "feedback"],
+    supersedes_artifact_id: int | None = None,
+    version_number: int = 1,
+) -> PlanningArtifactFact:
+    """Build one exact Story lineage node for a current Backlog item."""
+    return PlanningArtifactFact(
+        artifact_type="story",
+        artifact_id=artifact_id,
+        artifact_fingerprint=f"sha256:story-{artifact_id}",
+        version_number=version_number,
+        source_fingerprint=f"sha256:roadmap-{backlog_artifact_id}",
+        backlog_artifact_id=backlog_artifact_id,
+        backlog_artifact_fingerprint=f"sha256:backlog-{backlog_artifact_id}",
+        backlog_item_id="PBI-000001",
+        story_item_ids=(f"US-{artifact_id}",),
+        supersedes_artifact_id=supersedes_artifact_id,
+        status=status,
+    )
+
+
+def _backlog_item(backlog_artifact_id: int, *, spec_item_id: str) -> BacklogItemFact:
+    """Build one item whose parent identity is visible in public projection data."""
+    return BacklogItemFact(
+        backlog_item_id="PBI-000001",
+        backlog_artifact_id=backlog_artifact_id,
+        backlog_artifact_fingerprint=f"sha256:backlog-{backlog_artifact_id}",
+        item_fingerprint=f"sha256:item-{backlog_artifact_id}",
+        spec_item_ids=(spec_item_id,),
+        priority=backlog_artifact_id - 100,
+    )
+
+
+@pytest.mark.parametrize(
+    "status",
+    ["pending_review", "feedback", "rejected"],
+)
+def test_story_pending_exposes_valid_unaccepted_story_leaf(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    status: Literal["pending_review", "feedback", "rejected"],
+) -> None:
+    """A valid first Story review leaf is pending coverage, not corrupt facts."""
+    from tests.workflow.test_direct_specification_lineage import (  # noqa: PLC0415
+        _chain_backlog,
+    )
+
+    snapshot = _story_pending_snapshot(
+        phase_artifacts=(_chain_backlog(101, "accepted", None),),
+        backlog_items=(_backlog_item(101, spec_item_id="REQ.001"),),
+        planning_artifacts=(
+            _story_artifact(301, backlog_artifact_id=101, status=status),
+        ),
+    )
+    projection = DurableReadProjectionService(engine=engine)
+    monkeypatch.setattr(projection, "_snapshot", lambda _project_id: snapshot)
+
+    result = projection.story_pending(project_id=71)
+
+    assert result["ok"] is True
+    data = result["data"]
+    assert isinstance(data, dict)
+    items = data["items"]
+    assert isinstance(items, list)
+    assert items == [
+        {
+            "backlog_item_id": "PBI-000001",
+            "backlog_artifact_id": 101,
+            "spec_item_ids": ["REQ.001"],
+            "priority": 1,
+            "status": status,
+            "story_artifact_id": 301,
+            "story_item_ids": ["US-301"],
+        }
+    ]
+    assert data["count"] == 1
+    assert data["pending_count"] == 1
+    assert all("story_ids" not in item for item in items if isinstance(item, dict))
+
+
+@pytest.mark.parametrize(
+    "descendant_status",
+    ["feedback", "rejected"],
+)
+def test_story_pending_keeps_accepted_story_current_across_review_descendants(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    descendant_status: Literal["feedback", "rejected"],
+) -> None:
+    """Feedback or rejection cannot displace the existing accepted coverage."""
+    from tests.workflow.test_direct_specification_lineage import (  # noqa: PLC0415
+        _chain_backlog,
+    )
+
+    accepted_artifact_id = 301
+    snapshot = _story_pending_snapshot(
+        phase_artifacts=(_chain_backlog(101, "accepted", None),),
+        backlog_items=(_backlog_item(101, spec_item_id="REQ.001"),),
+        planning_artifacts=(
+            _story_artifact(
+                accepted_artifact_id,
+                backlog_artifact_id=101,
+                status="accepted",
+            ),
+            _story_artifact(
+                302,
+                backlog_artifact_id=101,
+                status=descendant_status,
+                supersedes_artifact_id=301,
+                version_number=2,
+            ),
+        ),
+    )
+    projection = DurableReadProjectionService(engine=engine)
+    monkeypatch.setattr(projection, "_snapshot", lambda _project_id: snapshot)
+
+    result = projection.story_pending(project_id=71)
+
+    assert result["ok"] is True
+    data = result["data"]
+    assert isinstance(data, dict)
+    items = data["items"]
+    assert isinstance(items, list)
+    item = items[0]
+    assert isinstance(item, dict)
+    assert item["status"] == "accepted"
+    assert item["story_artifact_id"] == accepted_artifact_id
+    assert data["pending_count"] == 0
+
+
+def test_story_pending_selects_only_the_current_accepted_backlog_root(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Historical Backlog reuse never leaks an equal item ID into the public list."""
+    from tests.workflow.test_direct_specification_lineage import (  # noqa: PLC0415
+        _chain_backlog,
+    )
+
+    snapshot = _story_pending_snapshot(
+        phase_artifacts=(
+            _chain_backlog(101, "superseded", None),
+            _chain_backlog(102, "accepted", 101),
+        ),
+        backlog_items=(
+            _backlog_item(101, spec_item_id="REQ.HISTORICAL"),
+            _backlog_item(102, spec_item_id="REQ.CURRENT"),
+        ),
+        planning_artifacts=(
+            _story_artifact(301, backlog_artifact_id=101, status="accepted"),
+            _story_artifact(401, backlog_artifact_id=102, status="accepted"),
+        ),
+    )
+    projection = DurableReadProjectionService(engine=engine)
+    monkeypatch.setattr(projection, "_snapshot", lambda _project_id: snapshot)
+
+    result = projection.story_pending(project_id=71)
+
+    assert result["ok"] is True
+    data = result["data"]
+    assert isinstance(data, dict)
+    assert data["items"] == [
+        {
+            "backlog_item_id": "PBI-000001",
+            "backlog_artifact_id": 102,
+            "spec_item_ids": ["REQ.CURRENT"],
+            "priority": 2,
+            "status": "accepted",
+            "story_artifact_id": 401,
+            "story_item_ids": ["US-401"],
+        }
+    ]
+    assert data["count"] == 1
+    assert data["pending_count"] == 0
+
+
+def test_story_pending_fails_closed_on_conflicting_current_backlog_lineage(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Do not mix Story coverage when the accepted Backlog root is ambiguous."""
+    from tests.workflow.test_direct_specification_lineage import (  # noqa: PLC0415
+        _chain_backlog,
+    )
+
+    snapshot = _story_pending_snapshot(
+        phase_artifacts=(
+            _chain_backlog(101, "accepted", None),
+            _chain_backlog(102, "accepted", None).model_copy(
+                update={"version_number": 1}
+            ),
+        ),
+        backlog_items=(_backlog_item(101, spec_item_id="REQ.001"),),
+        planning_artifacts=(
+            _story_artifact(301, backlog_artifact_id=101, status="accepted"),
+        ),
+    )
+    projection = DurableReadProjectionService(engine=engine)
+    monkeypatch.setattr(projection, "_snapshot", lambda _project_id: snapshot)
+
+    result = projection.story_pending(project_id=71)
+
+    assert result["ok"] is False
+    errors = result["errors"]
+    assert isinstance(errors, list)
+    error = errors[0]
+    assert isinstance(error, dict)
+    assert error["code"] == "PROJECT_FACTS_UNAVAILABLE"
+
+
+def _accepted_story_for_show(engine: Engine) -> int:
+    """Persist one accepted Story row for public criteria-read regressions."""
+    from tests.workflow.test_planning_transitions import (  # noqa: PLC0415
+        _domain,
+        _record_and_accept_roadmap,
+        _record_and_accept_story,
+        _seed_accepted_backlog,
+    )
+
+    project_id = _seed_accepted_backlog(engine)
+    domain = _domain(engine)
+    _record_and_accept_roadmap(domain, project_id)
+    return _record_and_accept_story(engine, domain, project_id)[1]
+
+
+def test_story_show_returns_exact_parsed_canonical_acceptance_criteria(
+    engine: Engine,
+) -> None:
+    """Expose a persisted canonical Unicode/newline criteria list unchanged."""
+    story_id = _accepted_story_for_show(engine)
+    expected_criteria = ["First line\nsecond line", "- Unicode ✓", "Third criterion"]
+    with Session(engine) as session:
+        story = session.get(UserStory, story_id)
+        assert story is not None
+        story.acceptance_criteria_json = canonical_json(expected_criteria)
+        session.add(story)
+        session.commit()
+
+    result = DurableReadProjectionService(engine=engine).story_show(story_id=story_id)
+
+    assert result["ok"] is True
+    data = _data(result)
+    criteria = data["acceptance_criteria"]
+    assert isinstance(criteria, list)
+    assert criteria == expected_criteria
+
+
+@pytest.mark.parametrize(
+    "stored_criteria",
+    [
+        '["unterminated"',
+        "[]",
+        '["   "]',
+        '["criterion", 1]',
+        '[ "criterion" ]',
+        '["✓"]',
+    ],
+)
+def test_story_show_rejects_invalid_persisted_acceptance_criteria(
+    engine: Engine,
+    stored_criteria: str,
+) -> None:
+    """Never normalize corrupt immutable criteria into a successful public read."""
+    story_id = _accepted_story_for_show(engine)
+    with Session(engine) as session:
+        story = session.get(UserStory, story_id)
+        assert story is not None
+        story.acceptance_criteria_json = stored_criteria
+        session.add(story)
+        session.commit()
+
+    result = DurableReadProjectionService(engine=engine).story_show(story_id=story_id)
+
+    assert result["ok"] is False
+    assert result["data"] == {"story_id": story_id}
+    errors = result["errors"]
+    assert isinstance(errors, list)
+    error = errors[0]
+    assert isinstance(error, dict)
+    assert error == {
+        "code": "ACCEPTANCE_CRITERIA_INVALID",
+        "message": "Stored Story acceptance criteria are invalid.",
+        "details": {"story_id": story_id},
+    }
 
 
 def _vision_output_fingerprint(
@@ -209,6 +533,7 @@ def _seed_lineage(  # noqa: PLR0915
     engine: Engine,
     *,
     goal_number: int = 1,
+    specification_payload_override: SpecificationPayload | None = None,
 ) -> dict[str, object]:
     """Seed one valid durable Vision, Goal, and typed candidate chain."""
     with Session(engine) as session:
@@ -525,6 +850,8 @@ def _seed_lineage(  # noqa: PLR0915
                 ],
             }
         )
+        if specification_payload_override is not None:
+            specification_payload = specification_payload_override
         source_manifest = (
             CandidateSourceManifestEntry(
                 source_id=SPECIFICATION_VISION_SOURCE_ID,
@@ -1618,6 +1945,40 @@ def test_vision_feedback_keeps_reviewed_candidate_separate_from_revision_chain(
     )
 
 
+def _mutate_backlog_fact_content(content: JsonObject, corruption: str) -> None:
+    items = content["backlog_items"]
+    assert isinstance(items, list)
+    first_item = items[0]
+    assert isinstance(first_item, dict)
+    if corruption == "is_complete_int":
+        content["is_complete"] = 1
+    elif corruption == "priority_bool":
+        first_item["priority"] = True
+    elif corruption == "backlog_item_id_bool":
+        first_item["backlog_item_id"] = True
+    elif corruption == "incomplete":
+        content["is_complete"] = False
+    elif corruption == "empty":
+        content["backlog_items"] = []
+    elif corruption == "clarifying_question":
+        content["clarifying_questions"] = ["Which requirement is authoritative?"]
+    elif corruption == "skipped_backlog_item_id":
+        first_item["backlog_item_id"] = "PBI-000002"
+    elif corruption == "duplicate_backlog_item_id":
+        items.append(
+            {
+                **first_item,
+                "priority": 2,
+                "requirement": "Persist a second exact planning artifact.",
+            }
+        )
+    elif corruption == "unknown_spec_item_id":
+        first_item["spec_item_ids"] = ["REQ.unknown"]
+    else:
+        assert corruption == "noncanonical_spec_item_ids"
+        first_item["spec_item_ids"] = ["REQ.delivery", "GOAL.delivery"]
+
+
 @pytest.mark.parametrize(
     "review_decision",
     ["feedback", "rejected"],
@@ -2260,24 +2621,26 @@ def test_successor_source_retains_current_accepted_spec_before_amendment(
         assert candidate is not None
         assert source is not None
         payload_fingerprint = candidate.payload_fingerprint
-        session.add(
-            SpecificationDecision(
-                project_id=project_id,
-                specification_candidate_id=candidate_id,
-                candidate_fingerprint=candidate.candidate_fingerprint,
-                decision="accepted",
-                rationale="Approved base.",
-                reviewer="operator",
-                idempotency_key="accepted-base-before-successor-source",
-                decided_at=NOW + timedelta(seconds=8),
-            )
+        decision = SpecificationDecision(
+            project_id=project_id,
+            specification_candidate_id=candidate_id,
+            candidate_fingerprint=candidate.candidate_fingerprint,
+            decision="accepted",
+            rationale="Approved base.",
+            reviewer="operator",
+            idempotency_key="accepted-base-before-successor-source",
+            decided_at=NOW + timedelta(seconds=8),
         )
+        session.add(decision)
+        session.flush()
+        assert decision.specification_decision_id is not None
         registry = SpecRegistry(
             project_id=project_id,
             spec_hash=candidate.payload_fingerprint,
             status="approved",
             approved_at=NOW + timedelta(seconds=8),
             approved_by="operator",
+            source_specification_decision_id=(decision.specification_decision_id),
             source_specification_candidate_id=candidate_id,
             source_specification_candidate_fingerprint=(
                 candidate.candidate_fingerprint
@@ -2351,24 +2714,26 @@ def test_pending_amendment_review_projects_the_exact_amendment_candidate(  # noq
         original_source = session.get(SpecificationSource, source_id)
         assert initial_candidate is not None
         assert original_source is not None
-        session.add(
-            SpecificationDecision(
-                project_id=project_id,
-                specification_candidate_id=initial_candidate_id,
-                candidate_fingerprint=initial_candidate.candidate_fingerprint,
-                decision="accepted",
-                rationale="Approved base.",
-                reviewer="operator",
-                idempotency_key="approve-base-before-amendment",
-                decided_at=NOW + timedelta(seconds=8),
-            )
+        base_decision = SpecificationDecision(
+            project_id=project_id,
+            specification_candidate_id=initial_candidate_id,
+            candidate_fingerprint=initial_candidate.candidate_fingerprint,
+            decision="accepted",
+            rationale="Approved base.",
+            reviewer="operator",
+            idempotency_key="approve-base-before-amendment",
+            decided_at=NOW + timedelta(seconds=8),
         )
+        session.add(base_decision)
+        session.flush()
+        assert base_decision.specification_decision_id is not None
         base_registry = SpecRegistry(
             project_id=project_id,
             spec_hash=initial_candidate.payload_fingerprint,
             status="approved",
             approved_at=NOW + timedelta(seconds=8),
             approved_by="operator",
+            source_specification_decision_id=(base_decision.specification_decision_id),
             source_specification_candidate_id=initial_candidate_id,
             source_specification_candidate_fingerprint=(
                 initial_candidate.candidate_fingerprint
@@ -2662,24 +3027,28 @@ def test_specification_projections_expose_terminal_review_and_registry_content(
     assert isinstance(candidate_fingerprint, str)
     assert isinstance(payload_fingerprint, str)
     with Session(engine) as session:
-        session.add(
-            SpecificationDecision(
-                project_id=project_id,
-                specification_candidate_id=candidate_id,
-                candidate_fingerprint=candidate_fingerprint,
-                decision=decision,
-                rationale="Ready.",
-                reviewer="operator",
-                idempotency_key="spec-accepted",
-                decided_at=NOW + timedelta(seconds=8),
-            )
+        terminal_decision = SpecificationDecision(
+            project_id=project_id,
+            specification_candidate_id=candidate_id,
+            candidate_fingerprint=candidate_fingerprint,
+            decision=decision,
+            rationale="Ready.",
+            reviewer="operator",
+            idempotency_key="spec-accepted",
+            decided_at=NOW + timedelta(seconds=8),
         )
+        session.add(terminal_decision)
+        session.flush()
+        assert terminal_decision.specification_decision_id is not None
         registry: SpecRegistry | None = None
         if expect_registry:
             registry = SpecRegistry(
                 project_id=project_id,
                 spec_hash=payload_fingerprint,
                 status="approved",
+                source_specification_decision_id=(
+                    terminal_decision.specification_decision_id
+                ),
                 source_specification_candidate_id=candidate_id,
                 source_specification_candidate_fingerprint=candidate_fingerprint,
                 source_vision_artifact_id=seeded["vision_id"],
@@ -2695,9 +3064,6 @@ def test_specification_projections_expose_terminal_review_and_registry_content(
     reads = DurableReadProjectionService(engine=engine)
     status = _data(reads.specification_status(project_id=project_id))
     review = _data(reads.specification_review(project_id=project_id))
-    authority_review = _data(
-        reads.authority_review(project_id=project_id, include_spec="summary")
-    )
 
     current = status["current"]
     if registry is None:
@@ -2725,21 +3091,6 @@ def test_specification_projections_expose_terminal_review_and_registry_content(
         "rationale": "Ready.",
         "reviewer": "operator",
     }
-    specifications = authority_review["specifications"]
-    assert isinstance(specifications, list)
-    if registry is None:
-        assert specifications == []
-    else:
-        assert len(specifications) == 1
-        authority_spec = _json_object(specifications[0])
-        assert authority_spec["spec_hash"] == payload_fingerprint
-        _assert_complete_candidate_projection(
-            _json_object(authority_spec["candidate"]),
-            seeded,
-            decision_state="accepted",
-        )
-        assert "content" not in authority_spec
-        assert "content_ref" not in authority_spec
 
 
 def test_obsolete_product_discovery_selection_service_is_removed() -> None:
@@ -2835,3 +3186,1072 @@ def test_malformed_durable_projection_data_returns_typed_error(engine: Engine) -
     )
 
     assert _error_code(result) == "PROJECT_FACTS_UNAVAILABLE"
+
+
+def _seed_task_7_backlog(engine: Engine) -> tuple[int, int, str, int]:
+    from services.agent_workbench.backlog_phase import (  # noqa: PLC0415
+        record_backlog_draft_in_session,
+    )
+    from tests.workflow.test_vision_backlog_transitions import (  # noqa: PLC0415
+        EVALUATED_AT,
+        _backlog_content,
+        _seed_project_specification,
+    )
+
+    with Session(engine) as session:
+        lineage = _seed_project_specification(session)
+        project_id = lineage.spec.project_id
+        spec_version_id = lineage.spec.spec_version_id
+        assert spec_version_id is not None
+        content = _backlog_content()
+        backlog = record_backlog_draft_in_session(
+            session,
+            project_id=project_id,
+            spec_version_id=spec_version_id,
+            spec_hash=lineage.spec.spec_hash,
+            product_goal_artifact_id=lineage.product_goal_artifact_id,
+            product_goal_fingerprint=lineage.product_goal_fingerprint,
+            canonical_content=content,
+            content_fingerprint=canonical_hash(content),
+            supersedes_backlog_artifact_id=None,
+            artifact_id=101,
+            actor="operator@example.com",
+            recorded_at=EVALUATED_AT,
+        )
+        session.commit()
+        return (
+            project_id,
+            int(backlog.backlog_artifact_id or 0),
+            backlog.content_fingerprint,
+            spec_version_id,
+        )
+
+
+def _seed_task_7_roadmap(engine: Engine) -> tuple[int, int]:
+    from services.agent_workbench.backlog_phase import (  # noqa: PLC0415
+        record_backlog_decision_in_session,
+    )
+    from services.agent_workbench.roadmap_phase import (  # noqa: PLC0415
+        RecordRoadmapDraftInput,
+        record_roadmap_draft_in_session,
+    )
+    from tests.workflow.test_planning_transitions import (  # noqa: PLC0415
+        _roadmap_content,
+    )
+    from tests.workflow.test_vision_backlog_transitions import (  # noqa: PLC0415
+        EVALUATED_AT,
+    )
+
+    project_id, backlog_id, backlog_fingerprint, _spec_version_id = (
+        _seed_task_7_backlog(engine)
+    )
+    with Session(engine) as session:
+        backlog = session.get(BacklogArtifact, backlog_id)
+        assert backlog is not None
+        record_backlog_decision_in_session(
+            session,
+            artifact=backlog,
+            decision="accepted",
+            rationale="Accept projection parent.",
+            reviewer="operator@example.com",
+            idempotency_key="accept-projection-parent",
+            decided_at=EVALUATED_AT + timedelta(seconds=1),
+        )
+        content = _roadmap_content()
+        roadmap = record_roadmap_draft_in_session(
+            session,
+            inputs=RecordRoadmapDraftInput(
+                project_id=project_id,
+                backlog_artifact_id=backlog_id,
+                backlog_artifact_fingerprint=backlog_fingerprint,
+                canonical_content=content,
+                content_fingerprint=canonical_hash(content),
+                supersedes_roadmap_artifact_id=None,
+                actor="operator@example.com",
+                recorded_at=EVALUATED_AT + timedelta(seconds=2),
+            ),
+        )
+        session.commit()
+        return project_id, int(roadmap.roadmap_artifact_id or 0)
+
+
+def test_backlog_and_roadmap_reviews_render_exact_pinned_specification_evidence(
+    engine: Engine,
+) -> None:
+    """Review packets expose canonical candidates with only their cited evidence."""
+    from services.agent_workbench.backlog_phase import (  # noqa: PLC0415
+        record_backlog_decision_in_session,
+    )
+    from services.agent_workbench.roadmap_phase import (  # noqa: PLC0415
+        RecordRoadmapDraftInput,
+        record_roadmap_draft_in_session,
+    )
+    from tests.workflow.test_planning_transitions import (  # noqa: PLC0415
+        _roadmap_content,
+    )
+    from tests.workflow.test_vision_backlog_transitions import (  # noqa: PLC0415
+        EVALUATED_AT,
+    )
+
+    project_id, backlog_id, backlog_fingerprint, spec_version_id = _seed_task_7_backlog(
+        engine
+    )
+    reads = DurableReadProjectionService(engine=engine)
+    backlog_data = _data(
+        reads.backlog_review(
+            project_id=project_id,
+            backlog_artifact_id=backlog_id,
+        )
+    )
+    candidate = _json_object(backlog_data["candidate"])
+    lineage_data = _json_object(backlog_data["lineage"])
+    specification_lineage = _json_object(lineage_data["specification"])
+    items = candidate["backlog_items"]
+    assert isinstance(items, list)
+    backlog_item = _json_object(items[0])
+    assert backlog_data == {
+        "schema_version": "agileforge.planning-artifact-review.v1",
+        "phase": "backlog",
+        "project_id": project_id,
+        "lineage": {
+            "specification": {
+                "spec_version_id": spec_version_id,
+                "spec_hash": specification_lineage["spec_hash"],
+                "status": "approved",
+            },
+            "product_goal": lineage_data["product_goal"],
+        },
+        "candidate": candidate,
+        "review": {"state": "pending"},
+    }
+    assert candidate["backlog_artifact_id"] == backlog_id
+    assert candidate["artifact_fingerprint"] == backlog_fingerprint
+    assert candidate["version_number"] == 1
+    assert candidate["supersedes_backlog_artifact_id"] is None
+    assert candidate["created_by"] == "operator@example.com"
+    assert candidate["created_at"] == EVALUATED_AT.replace(tzinfo=None).isoformat()
+    assert candidate["is_complete"] is True
+    assert candidate["clarifying_questions"] == []
+    assert "spec_item_ids" not in backlog_item
+    assert backlog_item["backlog_item_id"] == "PBI-000001"
+    assert backlog_item["specification_evidence"] == [
+        {
+            "spec_item_id": "GOAL.delivery",
+            "title": "Immutable delivery",
+            "statement": "Planning review uses immutable artifacts.",
+            "level": None,
+            "acceptance_criteria": [],
+            "verification_method": None,
+        },
+        {
+            "spec_item_id": "REQ.delivery",
+            "title": "Exact planning lineage",
+            "statement": "Persist exact accepted Specification lineage.",
+            "level": "MUST",
+            "acceptance_criteria": [
+                "The persisted artifact retains exact parent identities."
+            ],
+            "verification_method": "acceptance-test",
+        },
+    ]
+
+    with Session(engine) as session:
+        backlog = session.get(BacklogArtifact, backlog_id)
+        assert backlog is not None
+        record_backlog_decision_in_session(
+            session,
+            artifact=backlog,
+            decision="accepted",
+            rationale="Accept exact Backlog.",
+            reviewer="operator@example.com",
+            idempotency_key="projection-accept-backlog",
+            decided_at=EVALUATED_AT + timedelta(seconds=1),
+        )
+        roadmap_content = _roadmap_content()
+        roadmap = record_roadmap_draft_in_session(
+            session,
+            inputs=RecordRoadmapDraftInput(
+                project_id=project_id,
+                backlog_artifact_id=backlog_id,
+                backlog_artifact_fingerprint=backlog_fingerprint,
+                canonical_content=roadmap_content,
+                content_fingerprint=canonical_hash(roadmap_content),
+                supersedes_roadmap_artifact_id=None,
+                actor="operator@example.com",
+                recorded_at=EVALUATED_AT + timedelta(seconds=2),
+            ),
+        )
+        session.commit()
+        roadmap_id = int(roadmap.roadmap_artifact_id or 0)
+
+    terminal_backlog_data = _data(
+        reads.backlog_review(
+            project_id=project_id,
+            backlog_artifact_id=backlog_id,
+        )
+    )
+    assert terminal_backlog_data == {
+        **backlog_data,
+        "review": {
+            "state": "accepted",
+            "rationale": "Accept exact Backlog.",
+            "reviewer": "operator@example.com",
+            "decided_at": (
+                EVALUATED_AT.replace(tzinfo=None) + timedelta(seconds=1)
+            ).isoformat(),
+        },
+    }
+
+    roadmap_data = _data(
+        reads.roadmap_review(
+            project_id=project_id,
+            roadmap_artifact_id=roadmap_id,
+        )
+    )
+    roadmap_candidate = _json_object(roadmap_data["candidate"])
+    releases = roadmap_candidate["roadmap_releases"]
+    assert isinstance(releases, list)
+    release = _json_object(releases[0])
+    resolved_items = release["backlog_items"]
+    assert isinstance(resolved_items, list)
+    assert resolved_items == [backlog_item]
+    assert "backlog_item_ids" not in release
+    assert roadmap_data == {
+        "schema_version": "agileforge.planning-artifact-review.v1",
+        "phase": "roadmap",
+        "project_id": project_id,
+        "lineage": {
+            "specification": specification_lineage,
+            "product_goal": lineage_data["product_goal"],
+            "backlog": {
+                "backlog_artifact_id": backlog_id,
+                "backlog_artifact_fingerprint": backlog_fingerprint,
+            },
+        },
+        "candidate": {
+            "roadmap_artifact_id": roadmap_id,
+            "artifact_fingerprint": canonical_hash(roadmap_content),
+            "version_number": 1,
+            "supersedes_roadmap_artifact_id": None,
+            "created_by": "operator@example.com",
+            "created_at": (
+                EVALUATED_AT.replace(tzinfo=None) + timedelta(seconds=2)
+            ).isoformat(),
+            "roadmap_releases": [release],
+            "roadmap_summary": roadmap_content["roadmap_summary"],
+            "is_complete": True,
+            "clarifying_questions": [],
+        },
+        "review": {"state": "pending"},
+    }
+
+
+def test_backlog_review_uses_historical_superseded_specification(
+    engine: Engine,
+) -> None:
+    """Historical review never substitutes a newer current Specification."""
+    from tests.workflow.lifecycle_fixtures import (  # noqa: PLC0415
+        seed_accepted_specification,
+    )
+    from tests.workflow.test_vision_backlog_transitions import (  # noqa: PLC0415
+        EVALUATED_AT,
+        _specification_content,
+    )
+
+    project_id, backlog_id, _fingerprint, _spec_version_id = _seed_task_7_backlog(
+        engine
+    )
+    with Session(engine) as session:
+        seed_accepted_specification(
+            session,
+            project_id=project_id,
+            content=_specification_content("A newer planning contract."),
+            recorded_at=EVALUATED_AT + timedelta(minutes=1),
+        )
+        session.commit()
+
+    data = _data(
+        DurableReadProjectionService(engine=engine).backlog_review(
+            project_id=project_id,
+            backlog_artifact_id=backlog_id,
+        )
+    )
+
+    assert (
+        _json_object(_json_object(data["lineage"])["specification"])["status"]
+        == "superseded"
+    )
+    candidate = _json_object(data["candidate"])
+    items = candidate["backlog_items"]
+    assert isinstance(items, list)
+    evidence = _json_object(items[0])["specification_evidence"]
+    assert isinstance(evidence, list)
+    assert [_json_object(item)["spec_item_id"] for item in evidence] == [
+        "GOAL.delivery",
+        "REQ.delivery",
+    ]
+
+
+@pytest.mark.parametrize("decision", [None, "accepted", "feedback", "rejected"])
+def test_story_review_renders_exact_candidate_and_only_cited_evidence(
+    engine: Engine,
+    decision: str | None,
+) -> None:
+    """Story review resolves immutable item content through its pinned lineage."""
+    from services.agent_workbench.roadmap_phase import (  # noqa: PLC0415
+        RecordRoadmapDecisionInput,
+        record_roadmap_decision_in_session,
+    )
+    from services.agent_workbench.story_phase import (  # noqa: PLC0415
+        RecordStoryDecisionInput,
+        RecordStoryDraftInput,
+        record_story_decision_in_session,
+        record_story_draft_in_session,
+    )
+    from tests.workflow.test_planning_transitions import (  # noqa: PLC0415
+        _story_content,
+    )
+    from tests.workflow.test_vision_backlog_transitions import (  # noqa: PLC0415
+        EVALUATED_AT,
+    )
+
+    project_id, roadmap_id = _seed_task_7_roadmap(engine)
+    with Session(engine) as session:
+        roadmap = session.get(RoadmapArtifact, roadmap_id)
+        assert roadmap is not None
+        record_roadmap_decision_in_session(
+            session,
+            inputs=RecordRoadmapDecisionInput(
+                artifact=roadmap,
+                decision="accepted",
+                rationale="Accept Roadmap for Story review.",
+                reviewer="operator@example.com",
+                idempotency_key="projection-story-roadmap",
+                decided_at=EVALUATED_AT + timedelta(seconds=3),
+            ),
+        )
+        backlog = session.get(BacklogArtifact, roadmap.backlog_artifact_id)
+        assert backlog is not None
+        content = _story_content(spec_item_id="REQ.delivery")
+        story = record_story_draft_in_session(
+            session,
+            inputs=RecordStoryDraftInput(
+                project_id=project_id,
+                source_backlog_artifact_id=int(backlog.backlog_artifact_id or 0),
+                source_backlog_artifact_fingerprint=backlog.content_fingerprint,
+                backlog_item_id="PBI-000001",
+                roadmap_artifact_id=roadmap_id,
+                roadmap_artifact_fingerprint=roadmap.content_fingerprint,
+                canonical_content=content,
+                content_fingerprint=canonical_hash(content),
+                supersedes_story_artifact_id=None,
+                actor="operator@example.com",
+                recorded_at=EVALUATED_AT + timedelta(seconds=4),
+            ),
+        )
+        if decision is not None:
+            record_story_decision_in_session(
+                session,
+                inputs=RecordStoryDecisionInput(
+                    artifact=story,
+                    decision=decision,
+                    rationale=f"Story {decision} rationale.",
+                    reviewer="story-reviewer",
+                    idempotency_key=f"projection-story-{decision}",
+                    decided_at=EVALUATED_AT + timedelta(seconds=5),
+                ),
+            )
+        session.commit()
+        story_id = int(story.story_artifact_id or 0)
+
+    result = DurableReadProjectionService(engine=engine).story_review(
+        project_id=project_id,
+        story_artifact_id=story_id,
+    )
+    data = _data(result)
+    lineage = _json_object(data["lineage"])
+    candidate = _json_object(data["candidate"])
+    story_items = candidate["story_items"]
+    assert isinstance(story_items, list)
+    story_item = _json_object(story_items[0])
+
+    assert data["schema_version"] == "agileforge.planning-artifact-review.v1"
+    assert data["phase"] == "story"
+    assert data["project_id"] == project_id
+    assert _json_object(lineage["backlog_item"])["backlog_item_id"] == "PBI-000001"
+    assert _json_object(lineage["roadmap"])["roadmap_artifact_id"] == roadmap_id
+    assert candidate["story_artifact_id"] == story_id
+    assert candidate["version_number"] == 1
+    assert candidate["is_complete"] is True
+    assert candidate["clarifying_questions"] == []
+    assert data["review"] == (
+        {"state": "pending"}
+        if decision is None
+        else {
+            "state": decision,
+            "rationale": f"Story {decision} rationale.",
+            "reviewer": "story-reviewer",
+            "decided_at": (
+                EVALUATED_AT.replace(tzinfo=None) + timedelta(seconds=5)
+            ).isoformat(),
+        }
+    )
+    assert story_item == {
+        "story_item_id": "US-0001",
+        "story_title": "Story for Plan immutable work",
+        "statement": (
+            "As an operator, I want durable planning facts, so that routing "
+            "survives restarts."
+        ),
+        "persona": "operator",
+        "acceptance_criteria": ["Verify that planning survives restart."],
+        "invest_score": "High",
+        "estimated_effort": "M",
+        "produced_artifacts": ["planning records"],
+        "research_caveats": [],
+        "decomposition_warning": None,
+        "dependency_candidates": [],
+        "specification_evidence": [
+            {
+                "spec_item_id": "REQ.delivery",
+                "title": "Exact planning lineage",
+                "statement": "Persist exact accepted Specification lineage.",
+                "level": "MUST",
+                "acceptance_criteria": [
+                    "The persisted artifact retains exact parent identities."
+                ],
+                "verification_method": "acceptance-test",
+            }
+        ],
+    }
+    assert "spec_item_ids" not in story_item
+    assert "story_id" not in candidate
+
+
+def test_story_review_returns_no_partial_candidate_for_corrupt_item_ids(
+    engine: Engine,
+) -> None:
+    """Reject exact Story item-list drift with only typed identity context."""
+    from services.agent_workbench.roadmap_phase import (  # noqa: PLC0415
+        RecordRoadmapDecisionInput,
+        record_roadmap_decision_in_session,
+    )
+    from services.agent_workbench.story_phase import (  # noqa: PLC0415
+        RecordStoryDraftInput,
+        record_story_draft_in_session,
+    )
+    from tests.workflow.test_planning_transitions import (  # noqa: PLC0415
+        _story_content,
+    )
+    from tests.workflow.test_vision_backlog_transitions import (  # noqa: PLC0415
+        EVALUATED_AT,
+    )
+
+    project_id, roadmap_id = _seed_task_7_roadmap(engine)
+    with Session(engine) as session:
+        roadmap = session.get(RoadmapArtifact, roadmap_id)
+        assert roadmap is not None
+        record_roadmap_decision_in_session(
+            session,
+            inputs=RecordRoadmapDecisionInput(
+                artifact=roadmap,
+                decision="accepted",
+                rationale="Accept Roadmap for corrupt Story read.",
+                reviewer="operator@example.com",
+                idempotency_key="projection-corrupt-story-roadmap",
+                decided_at=EVALUATED_AT + timedelta(seconds=3),
+            ),
+        )
+        backlog = session.get(BacklogArtifact, roadmap.backlog_artifact_id)
+        assert backlog is not None
+        content = _story_content(spec_item_id="REQ.delivery")
+        story = record_story_draft_in_session(
+            session,
+            inputs=RecordStoryDraftInput(
+                project_id=project_id,
+                source_backlog_artifact_id=int(backlog.backlog_artifact_id or 0),
+                source_backlog_artifact_fingerprint=backlog.content_fingerprint,
+                backlog_item_id="PBI-000001",
+                roadmap_artifact_id=roadmap_id,
+                roadmap_artifact_fingerprint=roadmap.content_fingerprint,
+                canonical_content=content,
+                content_fingerprint=canonical_hash(content),
+                supersedes_story_artifact_id=None,
+                actor="operator@example.com",
+                recorded_at=EVALUATED_AT + timedelta(seconds=4),
+            ),
+        )
+        session.flush()
+        story_id = int(story.story_artifact_id or 0)
+        story.story_item_ids_json = canonical_json(["US-9999"])
+        session.add(story)
+        session.commit()
+
+    result = DurableReadProjectionService(engine=engine).story_review(
+        project_id=project_id,
+        story_artifact_id=story_id,
+    )
+
+    assert _error_code(result) == "PLANNING_ARTIFACT_CONTENT_INVALID"
+    assert result["data"] == {
+        "project_id": project_id,
+        "story_artifact_id": story_id,
+    }
+
+
+def test_backlog_review_returns_typed_error_for_corrupt_canonical_content(
+    engine: Engine,
+) -> None:
+    """A read returns no partial candidate when exact artifact bytes are corrupt."""
+    project_id, backlog_id, _fingerprint, _spec_version_id = _seed_task_7_backlog(
+        engine
+    )
+    with Session(engine) as session:
+        backlog = session.get(BacklogArtifact, backlog_id)
+        assert backlog is not None
+        backlog.canonical_content_json = "{}"
+        session.add(backlog)
+        session.commit()
+
+    result = DurableReadProjectionService(engine=engine).backlog_review(
+        project_id=project_id,
+        backlog_artifact_id=backlog_id,
+    )
+
+    assert _error_code(result) == "PLANNING_ARTIFACT_CONTENT_INVALID"
+    assert result["data"] == {
+        "project_id": project_id,
+        "backlog_artifact_id": backlog_id,
+    }
+
+
+@pytest.mark.parametrize("artifact_kind", ["backlog", "roadmap"])
+@pytest.mark.parametrize("corruption", ["formatting", "is_complete_int"])
+def test_planning_review_rejects_stored_canonical_content_corruption(
+    engine: Engine,
+    artifact_kind: str,
+    corruption: str,
+) -> None:
+    """Exact review returns no partial candidate and never rewrites stored bytes."""
+    if artifact_kind == "backlog":
+        project_id, artifact_id, _fingerprint, _spec_version_id = _seed_task_7_backlog(
+            engine
+        )
+        model = BacklogArtifact
+        id_field = "backlog_artifact_id"
+    else:
+        project_id, artifact_id = _seed_task_7_roadmap(engine)
+        model = RoadmapArtifact
+        id_field = "roadmap_artifact_id"
+
+    with Session(engine) as session:
+        artifact = session.get(model, artifact_id)
+        assert artifact is not None
+        content = json.loads(artifact.canonical_content_json)
+        if corruption == "formatting":
+            corrupted = json.dumps(content, indent=2, sort_keys=True)
+            assert corrupted != artifact.canonical_content_json
+            assert canonical_hash(content) == artifact.content_fingerprint
+        else:
+            content["is_complete"] = 1
+            corrupted = canonical_json(content)
+            assert corrupted != artifact.canonical_content_json
+            artifact.content_fingerprint = canonical_hash(content)
+        artifact.canonical_content_json = corrupted
+        session.add(artifact)
+        session.commit()
+
+    reads = DurableReadProjectionService(engine=engine)
+    if artifact_kind == "backlog":
+        result = reads.backlog_review(
+            project_id=project_id,
+            backlog_artifact_id=artifact_id,
+        )
+    else:
+        result = reads.roadmap_review(
+            project_id=project_id,
+            roadmap_artifact_id=artifact_id,
+        )
+
+    assert _error_code(result) == "PLANNING_ARTIFACT_CONTENT_INVALID"
+    assert result["data"] == {
+        "project_id": project_id,
+        id_field: artifact_id,
+    }
+    with Session(engine) as session:
+        stored = session.get(model, artifact_id)
+        assert stored is not None
+        assert stored.canonical_content_json == corrupted
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "formatting",
+        "is_complete_int",
+        "priority_bool",
+        "backlog_item_id_bool",
+        "incomplete",
+        "empty",
+        "clarifying_question",
+        "skipped_backlog_item_id",
+        "duplicate_backlog_item_id",
+        "unknown_spec_item_id",
+        "noncanonical_spec_item_ids",
+    ],
+)
+def test_workflow_facts_reject_invalid_stored_backlog_content(
+    engine: Engine,
+    corruption: str,
+) -> None:
+    """Backlog fact loading returns no snapshot and never repairs invalid bytes."""
+    from repositories.workflow import WorkflowFactLoadError  # noqa: PLC0415
+
+    project_id, backlog_id, _fingerprint, _spec_version_id = _seed_task_7_backlog(
+        engine
+    )
+    with Session(engine) as session:
+        backlog = session.get(BacklogArtifact, backlog_id)
+        assert backlog is not None
+        original = backlog.canonical_content_json
+        content = _JSON_OBJECT.validate_json(original)
+        if corruption == "formatting":
+            corrupted = json.dumps(content, indent=2, sort_keys=True)
+            assert canonical_hash(content) == backlog.content_fingerprint
+        else:
+            _mutate_backlog_fact_content(content, corruption)
+            corrupted = canonical_json(content)
+            backlog.content_fingerprint = canonical_hash(content)
+        assert corrupted != original
+        corrupted_fingerprint = backlog.content_fingerprint
+        backlog.canonical_content_json = corrupted
+        session.add(backlog)
+        session.commit()
+
+    snapshot = None
+    with Session(engine) as session:
+        with pytest.raises(WorkflowFactLoadError):
+            snapshot = WorkflowFactRepository(session).load(project_id)
+        assert snapshot is None
+        stored = session.get(BacklogArtifact, backlog_id)
+        assert stored is not None
+        assert stored.canonical_content_json == corrupted
+        assert stored.content_fingerprint == corrupted_fingerprint
+
+
+def _mutate_roadmap_fact_content(content: JsonObject, corruption: str) -> None:
+    releases = content["roadmap_releases"]
+    assert isinstance(releases, list)
+    first_release = releases[0]
+    assert isinstance(first_release, dict)
+    if corruption == "is_complete_int":
+        content["is_complete"] = 1
+    elif corruption == "release_name_int":
+        first_release["release_name"] = 7
+    elif corruption == "backlog_item_id_bool":
+        first_release["backlog_item_ids"] = [True]
+    elif corruption == "incomplete":
+        content["is_complete"] = False
+    elif corruption == "empty":
+        content["roadmap_releases"] = []
+    elif corruption == "clarifying_question":
+        content["clarifying_questions"] = ["Which PBI belongs in release one?"]
+    elif corruption == "missing_backlog_item":
+        first_release["backlog_item_ids"] = []
+    elif corruption == "duplicate_backlog_item":
+        first_release["backlog_item_ids"] = ["PBI-000001", "PBI-000001"]
+    else:
+        assert corruption == "unknown_backlog_item"
+        first_release["backlog_item_ids"] = ["PBI-999999"]
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "formatting",
+        "is_complete_int",
+        "release_name_int",
+        "backlog_item_id_bool",
+        "incomplete",
+        "empty",
+        "clarifying_question",
+        "missing_backlog_item",
+        "duplicate_backlog_item",
+        "unknown_backlog_item",
+    ],
+)
+def test_workflow_facts_reject_invalid_stored_roadmap_content(
+    engine: Engine,
+    corruption: str,
+) -> None:
+    """Roadmap fact loading returns no snapshot and never repairs invalid bytes."""
+    from repositories.workflow import WorkflowFactLoadError  # noqa: PLC0415
+
+    project_id, roadmap_id = _seed_task_7_roadmap(engine)
+    with Session(engine) as session:
+        roadmap = session.get(RoadmapArtifact, roadmap_id)
+        assert roadmap is not None
+        original = roadmap.canonical_content_json
+        content = _JSON_OBJECT.validate_json(original)
+        if corruption == "formatting":
+            corrupted = json.dumps(content, indent=2, sort_keys=True)
+            assert canonical_hash(content) == roadmap.content_fingerprint
+        else:
+            _mutate_roadmap_fact_content(content, corruption)
+            corrupted = canonical_json(content)
+            roadmap.content_fingerprint = canonical_hash(content)
+        assert corrupted != original
+        corrupted_fingerprint = roadmap.content_fingerprint
+        roadmap.canonical_content_json = corrupted
+        session.add(roadmap)
+        session.commit()
+
+    snapshot = None
+    with Session(engine) as session:
+        with pytest.raises(WorkflowFactLoadError):
+            snapshot = WorkflowFactRepository(session).load(project_id)
+        assert snapshot is None
+        stored = session.get(RoadmapArtifact, roadmap_id)
+        assert stored is not None
+        assert stored.canonical_content_json == corrupted
+        assert stored.content_fingerprint == corrupted_fingerprint
+
+
+@pytest.mark.parametrize(
+    "backlog_item_ids",
+    [[], ["PBI-unknown"], ["PBI-000001", "PBI-000001"]],
+)
+def test_roadmap_review_returns_typed_error_for_invalid_exact_coverage(
+    engine: Engine,
+    backlog_item_ids: list[JsonValue],
+) -> None:
+    """Invalid stored PBI coverage returns no partial Roadmap candidate."""
+    project_id, roadmap_id = _seed_task_7_roadmap(engine)
+    with Session(engine) as session:
+        roadmap = session.get(RoadmapArtifact, roadmap_id)
+        assert roadmap is not None
+        content = _JSON_OBJECT.validate_json(roadmap.canonical_content_json)
+        releases = content["roadmap_releases"]
+        assert isinstance(releases, list)
+        release = _json_object(releases[0])
+        release["backlog_item_ids"] = list(backlog_item_ids)
+        releases[0] = release
+        roadmap.canonical_content_json = canonical_json(content)
+        roadmap.content_fingerprint = canonical_hash(content)
+        session.add(roadmap)
+        session.commit()
+
+    result = DurableReadProjectionService(engine=engine).roadmap_review(
+        project_id=project_id,
+        roadmap_artifact_id=roadmap_id,
+    )
+
+    assert _error_code(result) == "PLANNING_ARTIFACT_CONTENT_INVALID"
+    assert result["data"] == {
+        "project_id": project_id,
+        "roadmap_artifact_id": roadmap_id,
+    }
+
+
+def test_backlog_review_deep_loads_whole_gold_and_renders_only_cited_evidence(  # noqa: PLR0915
+    engine: Engine,
+) -> None:
+    """The 37-item gold contract survives deep load without bloating review data."""
+    from services.agent_workbench.backlog_phase import (  # noqa: PLC0415
+        record_backlog_draft_in_session,
+    )
+    from services.specs.accepted_specification import (  # noqa: PLC0415
+        load_accepted_specification,
+    )
+    from tests.workflow.test_vision_backlog_transitions import (  # noqa: PLC0415
+        EVALUATED_AT,
+    )
+
+    gold_path = (
+        Path(__file__).parents[1]
+        / "fixtures"
+        / "issue_210"
+        / "gold"
+        / "canonical-specification.json"
+    )
+    gold_json = gold_path.read_text(encoding="utf-8")
+    gold = _JSON_OBJECT.validate_json(gold_json)
+    gold_items = gold["items"]
+    assert isinstance(gold_items, list)
+    expected_ids = [_json_object(item)["id"] for item in gold_items]
+    assert len(expected_ids) == GOLD_SPECIFICATION_ITEM_COUNT
+    assert "DATA.001" in expected_ids
+    assert "REQ.001" in expected_ids
+    content: JsonObject = {
+        "backlog_items": [
+            {
+                "backlog_item_id": "PBI-000001",
+                "priority": 1,
+                "requirement": "Implement the String Calculator public contract",
+                "spec_item_ids": ["DATA.001", "REQ.001"],
+                "value_driver": "Strategic",
+                "justification": "Cites only the exact input and public API contract.",
+                "estimated_effort": "M",
+                "technical_note": None,
+            }
+        ],
+        "is_complete": True,
+        "clarifying_questions": [],
+    }
+    gold_payload = SpecificationPayload.model_validate(gold)
+    seeded = _seed_lineage(
+        engine,
+        specification_payload_override=gold_payload,
+    )
+    project_id = _seeded_int(seeded, "project_id")
+    candidate_id = _seeded_int(seeded, "candidate_id")
+    candidate_fingerprint = seeded["candidate_fingerprint"]
+    spec_hash = seeded["payload_fingerprint"]
+    goal_id = _seeded_int(seeded, "goal_id")
+    goal_fingerprint = seeded["goal_fingerprint"]
+    vision_id = _seeded_int(seeded, "vision_id")
+    vision_fingerprint = seeded["vision_fingerprint"]
+    assert isinstance(candidate_fingerprint, str)
+    assert isinstance(spec_hash, str)
+    assert isinstance(goal_fingerprint, str)
+    assert isinstance(vision_fingerprint, str)
+    with Session(engine) as session:
+        decision = SpecificationDecision(
+            project_id=project_id,
+            specification_candidate_id=candidate_id,
+            candidate_fingerprint=candidate_fingerprint,
+            decision="accepted",
+            rationale="Accept the whole gold contract.",
+            reviewer="operator@example.com",
+            idempotency_key="accept-gold-specification",
+            decided_at=EVALUATED_AT,
+        )
+        session.add(decision)
+        session.flush()
+        decision_id = decision.specification_decision_id
+        assert decision_id is not None
+        registry = SpecRegistry(
+            project_id=project_id,
+            spec_hash=spec_hash,
+            status="approved",
+            created_at=EVALUATED_AT,
+            source_specification_decision_id=decision_id,
+            source_specification_candidate_id=candidate_id,
+            source_specification_candidate_fingerprint=candidate_fingerprint,
+            source_vision_artifact_id=vision_id,
+            source_vision_fingerprint=vision_fingerprint,
+            source_product_goal_artifact_id=goal_id,
+            source_product_goal_fingerprint=goal_fingerprint,
+        )
+        session.add(registry)
+        session.flush()
+        spec_version_id = registry.spec_version_id
+        assert spec_version_id is not None
+        backlog = record_backlog_draft_in_session(
+            session,
+            project_id=project_id,
+            spec_version_id=spec_version_id,
+            spec_hash=spec_hash,
+            product_goal_artifact_id=goal_id,
+            product_goal_fingerprint=goal_fingerprint,
+            canonical_content=content,
+            content_fingerprint=canonical_hash(content),
+            supersedes_backlog_artifact_id=None,
+            artifact_id=101,
+            actor="operator@example.com",
+            recorded_at=EVALUATED_AT + timedelta(seconds=1),
+        )
+        loaded = load_accepted_specification(
+            session,
+            project_id=project_id,
+            spec_version_id=spec_version_id,
+            spec_hash=spec_hash,
+        )
+        session.commit()
+        backlog_id = int(backlog.backlog_artifact_id or 0)
+
+    assert loaded.canonical_specification_json == gold_json
+    assert [item.id for item in loaded.payload.items] == expected_ids
+    data = _data(
+        DurableReadProjectionService(engine=engine).backlog_review(
+            project_id=project_id,
+            backlog_artifact_id=backlog_id,
+        )
+    )
+    candidate = _json_object(data["candidate"])
+    candidate_items = candidate["backlog_items"]
+    assert isinstance(candidate_items, list)
+    evidence = _json_object(candidate_items[0])["specification_evidence"]
+    assert isinstance(evidence, list)
+    assert [_json_object(item)["spec_item_id"] for item in evidence] == [
+        "DATA.001",
+        "REQ.001",
+    ]
+    source_items = {_json_object(item)["id"]: _json_object(item) for item in gold_items}
+    for rendered in evidence:
+        rendered_item = _json_object(rendered)
+        source = source_items[rendered_item["spec_item_id"]]
+        assert rendered_item == {
+            "spec_item_id": source["id"],
+            "title": source["title"],
+            "statement": source["statement"],
+            "level": source.get("level"),
+            "acceptance_criteria": source.get("acceptance", []),
+            "verification_method": source.get("verification"),
+        }
+
+
+def test_sprint_plan_review_is_durable_before_activation_and_after_drift(  # noqa: PLR0915
+    engine: Engine,
+) -> None:
+    """Render pinned ordered Sprint evidence without operational draft rows."""
+    from models.core import Sprint, Task, Team, UserStory  # noqa: PLC0415
+    from models.workflow import StoryArtifact  # noqa: PLC0415
+    from tests.workflow.test_planning_transitions import (  # noqa: PLC0415
+        _domain,
+        _guards,
+        _record_and_accept_roadmap,
+        _record_and_accept_story,
+        _record_sprint_plan_draft,
+        _seed_accepted_backlog,
+    )
+    from workflow.requests import DecideSprintPlan  # noqa: PLC0415
+
+    project_id = _seed_accepted_backlog(engine)
+    domain = _domain(engine)
+    _record_and_accept_roadmap(domain, project_id)
+    _artifact_id, story_id = _record_and_accept_story(
+        engine,
+        domain,
+        project_id,
+    )
+    plan_id, _candidate, _plan, plan_fingerprint = _record_sprint_plan_draft(
+        engine,
+        domain,
+        project_id,
+        story_id,
+        team_name="Review Projection Team",
+        idempotency_key="review-projection-plan",
+    )
+    reads = DurableReadProjectionService(engine=engine)
+    pending = reads.sprint_plan_review(
+        project_id=project_id,
+        sprint_plan_artifact_id=plan_id,
+    )
+    assert tuple(pending) == ("ok", "data", "warnings", "errors")
+    assert pending["ok"] is True
+    data = _json_object(pending["data"])
+    assert data["schema_version"] == "agileforge.planning-artifact-review.v1"
+    assert data["phase"] == "sprint_plan"
+    candidate = _json_object(data["candidate"])
+    selected = candidate["selected_stories"]
+    assert isinstance(selected, list)
+    selected_story = _json_object(selected[0])
+    assert selected_story["story_id"] == story_id
+    assert selected_story["specification_evidence"]
+    tasks = selected_story["tasks"]
+    assert isinstance(tasks, list)
+    assert _json_object(tasks[0])["specification_evidence"]
+    assert _json_object(data["review"])["state"] == "pending"
+    with Session(engine) as session:
+        assert session.exec(select(Team)).first() is None
+        assert session.exec(select(Sprint)).first() is None
+        assert session.exec(select(Task)).first() is None
+
+    position = domain.position(project_id)
+    accepted = domain.transition(
+        DecideSprintPlan(
+            **_guards(position, "planning.sprint.review"),
+            idempotency_key="review-projection-accept",
+            sprint_plan_artifact_id=plan_id,
+            plan_fingerprint=plan_fingerprint,
+            decision="accepted",
+            rationale="Pinned review is complete.",
+        )
+    )
+    assert accepted.ok is True
+    with Session(engine) as session:
+        story = session.get(UserStory, story_id)
+        assert story is not None
+        story.title = "MUTATED OPERATIONAL TITLE"
+        story.story_description = "MUTATED OPERATIONAL STATEMENT"
+        story.persona = "mutated persona"
+        story.acceptance_criteria_json = canonical_json(["Mutated criterion."])
+        session.add(story)
+        session.commit()
+    terminal = reads.sprint_plan_review(
+        project_id=project_id,
+        sprint_plan_artifact_id=plan_id,
+    )
+    assert terminal["ok"] is True
+    terminal_data = _json_object(terminal["data"])
+    assert _json_object(terminal_data["review"])["state"] == "accepted"
+    terminal_candidate = _json_object(terminal_data["candidate"])
+    terminal_selected = terminal_candidate["selected_stories"]
+    assert isinstance(terminal_selected, list)
+    assert _json_object(terminal_selected[0]) == selected_story
+
+    with Session(engine) as session:
+        story_artifact_id = selected_story["story_artifact_id"]
+        assert isinstance(story_artifact_id, (int, str))
+        story_artifact = session.get(StoryArtifact, int(story_artifact_id))
+        assert story_artifact is not None
+        story_artifact.canonical_content_json += " "
+        session.add(story_artifact)
+        session.commit()
+    corrupted = reads.sprint_plan_review(
+        project_id=project_id,
+        sprint_plan_artifact_id=plan_id,
+    )
+    assert corrupted["ok"] is False
+    errors = corrupted["errors"]
+    assert isinstance(errors, list)
+    assert _json_object(errors[0])["code"] == "PLANNING_ARTIFACT_CONTENT_INVALID"
+
+
+def test_pending_sprint_plan_review_reports_exact_source_stale_error(
+    engine: Engine,
+) -> None:
+    """Recompute pending candidate identity and fail with the ruled read error."""
+    from models.core import UserStory  # noqa: PLC0415
+    from tests.workflow.test_planning_transitions import (  # noqa: PLC0415
+        _domain,
+        _record_and_accept_roadmap,
+        _record_and_accept_story,
+        _record_sprint_plan_draft,
+        _seed_accepted_backlog,
+    )
+
+    project_id = _seed_accepted_backlog(engine)
+    domain = _domain(engine)
+    _record_and_accept_roadmap(domain, project_id)
+    _artifact_id, story_id = _record_and_accept_story(engine, domain, project_id)
+    plan_id, _candidate, _plan, _fingerprint = _record_sprint_plan_draft(
+        engine,
+        domain,
+        project_id,
+        story_id,
+        team_name="Stale Projection Team",
+        idempotency_key="stale-review-projection-plan",
+    )
+    with Session(engine) as session:
+        story = session.get(UserStory, story_id)
+        assert story is not None
+        story.story_points = 8
+        session.add(story)
+        session.commit()
+    result = DurableReadProjectionService(engine=engine).sprint_plan_review(
+        project_id=project_id,
+        sprint_plan_artifact_id=plan_id,
+    )
+    assert result["ok"] is False
+    errors = result["errors"]
+    assert isinstance(errors, list)
+    assert _json_object(errors[0]) == {
+        "code": "SPRINT_PLAN_REVIEW_SOURCE_STALE",
+        "message": "Sprint plan review source changed. Draft a new Sprint plan.",
+        "details": {
+            "project_id": project_id,
+            "sprint_plan_artifact_id": plan_id,
+        },
+    }

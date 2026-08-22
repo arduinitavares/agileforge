@@ -23,7 +23,7 @@ def utc_now() -> datetime:
 
 
 class BacklogArtifact(SQLModel, table=True):
-    """Immutable Backlog artifact bound to one Goal and accepted authority."""
+    """Immutable Backlog artifact bound to one Goal and Specification."""
 
     __tablename__ = "backlog_artifacts"
     __table_args__ = (
@@ -40,13 +40,39 @@ class BacklogArtifact(SQLModel, table=True):
         ),
         UniqueConstraint(
             "project_id",
+            "product_goal_artifact_id",
+            "product_goal_fingerprint",
+            "spec_version_id",
+            "spec_hash",
             "version_number",
             name="uq_backlog_artifact_version",
         ),
         UniqueConstraint(
             "project_id",
+            "product_goal_artifact_id",
+            "product_goal_fingerprint",
+            "spec_version_id",
+            "spec_hash",
             "content_fingerprint",
             name="uq_backlog_artifact_fingerprint",
+        ),
+        ForeignKeyConstraint(
+            ["project_id", "spec_version_id", "spec_hash"],
+            [
+                "spec_registry.project_id",
+                "spec_registry.spec_version_id",
+                "spec_registry.spec_hash",
+            ],
+            name="fk_backlog_artifact_specification",
+        ),
+        ForeignKeyConstraint(
+            ["project_id", "product_goal_artifact_id", "product_goal_fingerprint"],
+            [
+                "product_goal_artifacts.project_id",
+                "product_goal_artifacts.product_goal_artifact_id",
+                "product_goal_artifacts.content_fingerprint",
+            ],
+            name="fk_backlog_artifact_product_goal",
         ),
         ForeignKeyConstraint(
             ["project_id", "supersedes_backlog_artifact_id"],
@@ -60,11 +86,8 @@ class BacklogArtifact(SQLModel, table=True):
 
     backlog_artifact_id: int | None = Field(default=None, primary_key=True)
     project_id: int = Field(foreign_key="projects.project_id", index=True)
-    authority_id: int = Field(
-        foreign_key="compiled_spec_authority.authority_id",
-        index=True,
-    )
-    authority_fingerprint: str = Field(index=True)
+    spec_version_id: int = Field(index=True)
+    spec_hash: str = Field(index=True)
     product_goal_artifact_id: int = Field(index=True)
     product_goal_fingerprint: str = Field(index=True)
     version_number: int
@@ -125,9 +148,17 @@ class RoadmapArtifact(SQLModel, table=True):
             "content_fingerprint",
             name="uq_roadmap_review_parent",
         ),
-        UniqueConstraint("project_id", "version_number", name="uq_roadmap_version"),
         UniqueConstraint(
             "project_id",
+            "backlog_artifact_id",
+            "backlog_artifact_fingerprint",
+            "version_number",
+            name="uq_roadmap_version",
+        ),
+        UniqueConstraint(
+            "project_id",
+            "backlog_artifact_id",
+            "backlog_artifact_fingerprint",
             "content_fingerprint",
             name="uq_roadmap_fingerprint",
         ),
@@ -209,15 +240,30 @@ class StoryArtifact(SQLModel, table=True):
         ),
         UniqueConstraint(
             "project_id",
-            "requirement_id",
+            "source_backlog_artifact_id",
+            "backlog_item_id",
             "version_number",
             name="uq_story_artifact_version",
         ),
         UniqueConstraint(
             "project_id",
-            "requirement_id",
+            "source_backlog_artifact_id",
+            "backlog_item_id",
             "content_fingerprint",
             name="uq_story_artifact_fingerprint",
+        ),
+        ForeignKeyConstraint(
+            [
+                "project_id",
+                "source_backlog_artifact_id",
+                "source_backlog_artifact_fingerprint",
+            ],
+            [
+                "backlog_artifacts.project_id",
+                "backlog_artifacts.backlog_artifact_id",
+                "backlog_artifacts.content_fingerprint",
+            ],
+            name="fk_story_artifact_backlog",
         ),
         ForeignKeyConstraint(
             ["project_id", "roadmap_artifact_id", "roadmap_artifact_fingerprint"],
@@ -237,13 +283,15 @@ class StoryArtifact(SQLModel, table=True):
 
     story_artifact_id: int | None = Field(default=None, primary_key=True)
     project_id: int = Field(foreign_key="projects.project_id", index=True)
-    requirement_id: str = Field(index=True)
+    source_backlog_artifact_id: int = Field(index=True)
+    source_backlog_artifact_fingerprint: str = Field(index=True)
+    backlog_item_id: str = Field(index=True)
     roadmap_artifact_id: int = Field(index=True)
     roadmap_artifact_fingerprint: str = Field(index=True)
     version_number: int
     canonical_content_json: str = Field(sa_type=Text)
     content_fingerprint: str = Field(index=True)
-    story_ids_json: str = Field(sa_type=Text)
+    story_item_ids_json: str = Field(sa_type=Text)
     supersedes_story_artifact_id: int | None = Field(default=None, index=True)
     created_by: str = Field(index=True)
     created_at: datetime = Field(default_factory=utc_now, nullable=False)
@@ -325,13 +373,28 @@ class SprintPlanArtifact(SQLModel, table=True):
         ),
         UniqueConstraint(
             "project_id",
+            "spec_version_id",
+            "spec_hash",
+            "sprint_plan_stream_id",
             "version_number",
             name="uq_sprint_plan_version",
         ),
         UniqueConstraint(
             "project_id",
+            "spec_version_id",
+            "spec_hash",
+            "sprint_plan_stream_id",
             "plan_fingerprint",
             name="uq_sprint_plan_fingerprint",
+        ),
+        ForeignKeyConstraint(
+            ["project_id", "spec_version_id", "spec_hash"],
+            [
+                "spec_registry.project_id",
+                "spec_registry.spec_version_id",
+                "spec_registry.spec_hash",
+            ],
+            name="fk_sprint_plan_specification",
         ),
         ForeignKeyConstraint(
             ["project_id", "supersedes_sprint_plan_artifact_id"],
@@ -345,7 +408,9 @@ class SprintPlanArtifact(SQLModel, table=True):
 
     sprint_plan_artifact_id: int | None = Field(default=None, primary_key=True)
     project_id: int = Field(foreign_key="projects.project_id", index=True)
-    sprint_id: int = Field(foreign_key="sprints.sprint_id", index=True)
+    spec_version_id: int = Field(index=True)
+    spec_hash: str = Field(index=True)
+    sprint_plan_stream_id: str = Field(index=True)
     version_number: int
     selected_story_ids_json: str = Field(sa_type=Text)
     canonical_task_plan_json: str = Field(sa_type=Text)
@@ -376,6 +441,11 @@ class SprintPlanArtifactDecision(SQLModel, table=True):
             "decision IN ('accepted', 'rejected', 'feedback')",
             name="ck_sprint_plan_decision",
         ),
+        CheckConstraint(
+            "(decision = 'accepted' AND activated_sprint_id IS NOT NULL) OR "
+            "(decision IN ('feedback', 'rejected') AND activated_sprint_id IS NULL)",
+            name="ck_sprint_plan_decision_activation",
+        ),
         ForeignKeyConstraint(
             ["project_id", "sprint_plan_artifact_id", "plan_fingerprint"],
             [
@@ -395,6 +465,11 @@ class SprintPlanArtifactDecision(SQLModel, table=True):
     sprint_plan_artifact_id: int = Field(index=True)
     plan_fingerprint: str = Field(index=True)
     decision: str = Field(index=True)
+    activated_sprint_id: int | None = Field(
+        default=None,
+        foreign_key="sprints.sprint_id",
+        index=True,
+    )
     rationale: str = Field(sa_type=Text)
     reviewer: str = Field(index=True)
     idempotency_key: str = Field(index=True)

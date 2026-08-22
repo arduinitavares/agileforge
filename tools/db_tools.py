@@ -13,7 +13,7 @@ from typing import Literal, TypedDict, TypeGuard
 from pydantic import BaseModel
 from sqlmodel import Session, col, select
 
-from models.core import Epic, Feature, Project, ProjectPersona, Task, Theme, UserStory
+from models.core import Epic, Feature, Project, ProjectPersona, Theme
 from models.db import get_engine
 from services.vision_projection import (
     VisionLineageError,
@@ -148,8 +148,7 @@ def seed_project_personas(
 
         session.commit()
         message = (
-            f"Seeded {created_count} default personas for project "
-            f"'{project.name}'"
+            f"Seeded {created_count} default personas for project '{project.name}'"
         )
         return {
             "success": True,
@@ -215,8 +214,7 @@ def create_or_get_project(params: CreateOrGetProjectInput) -> CreateOrGetProject
                 "project_id": project_id,
                 "action": "created",
                 "message": (
-                    f"Created project '{params.project_name}' "
-                    f"with ID {project_id}"
+                    f"Created project '{params.project_name}' with ID {project_id}"
                 ),
             }
 
@@ -232,9 +230,7 @@ def create_or_get_project(params: CreateOrGetProjectInput) -> CreateOrGetProject
             "success": True,
             "project_id": project_id,
             "action": "updated",
-            "message": (
-                f"Updated project '{params.project_name}' (ID {project_id})"
-            ),
+            "message": (f"Updated project '{params.project_name}' (ID {project_id})"),
         }
 
 
@@ -279,9 +275,7 @@ def _mapping_list(
 
 
 def _is_string_mapping(value: object) -> TypeGuard[Mapping[str, object]]:
-    return isinstance(value, Mapping) and all(
-        isinstance(key, str) for key in value
-    )
+    return isinstance(value, Mapping) and all(isinstance(key, str) for key in value)
 
 
 def persist_roadmap(
@@ -375,146 +369,9 @@ def persist_roadmap(
         }
 
 
-class CreateUserStoryInput(BaseModel):
-    """Input schema for create_user_story tool."""
-
-    project_id: int
-    feature_id: int
-    title: str
-    description: str
-    acceptance_criteria: str | None
-    story_points: int | None
-
-
-class _CreateUserStorySuccess(TypedDict):
-    success: Literal[True]
-    story_id: int
-    feature_id: int
-    project_id: int
-    message: str
-
-
-type CreateUserStoryResult = _ToolFailure | _CreateUserStorySuccess
-
-
-def _require_identity(value: int | None, model_name: str) -> int:
-    if value is None:
-        message = f"Persisted {model_name} did not receive an identity."
-        raise RuntimeError(message)
-    return value
-
-
-def create_user_story(params: CreateUserStoryInput) -> CreateUserStoryResult:
-    """
-    Agent tool: Create a user story under a feature.
-
-    Args:
-        params: Input data for creating a user story.
-
-    Returns:
-        Dict with story_id and status
-    """
-    with Session(get_engine()) as session:
-        feature = session.get(Feature, params.feature_id)
-        if not feature:
-            return {
-                "success": False,
-                "error": f"Feature {params.feature_id} not found",
-            }
-
-        story = UserStory(
-            title=params.title,
-            story_description=params.description,
-            acceptance_criteria=params.acceptance_criteria,
-            story_points=params.story_points,
-            feature_id=params.feature_id,
-            project_id=params.project_id,
-        )
-        session.add(story)
-        session.commit()
-        session.refresh(story)
-        story_id = _require_identity(story.story_id, "UserStory")
-
-        return {
-            "success": True,
-            "story_id": story_id,
-            "feature_id": params.feature_id,
-            "project_id": params.project_id,
-            "message": (
-                f"Created user story '{params.title}' with ID {story.story_id}"
-            ),
-        }
-
-
-class CreateTaskInput(BaseModel):
-    """Input schema for create_task tool."""
-
-    story_id: int
-    title: str
-    description: str | None
-
-
-class _CreateTaskSuccess(TypedDict):
-    success: Literal[True]
-    task_id: int
-    story_id: int
-    message: str
-
-
-type CreateTaskResult = _ToolFailure | _CreateTaskSuccess
-
-
-def create_task(params: CreateTaskInput) -> CreateTaskResult:
-    """
-    Agent tool: Create a task under a user story.
-
-    Args:
-        params: Input data for creating a task.
-
-    Returns:
-        Dict with task_id and status
-    """
-    with Session(get_engine()) as session:
-        story = session.get(UserStory, params.story_id)
-        if not story:
-            return {
-                "success": False,
-                "error": f"User story {params.story_id} not found",
-            }
-
-        # Fix for Pylance (reportCallIssue):
-        # The 'Task' model only has a required 'description' field.
-        # We combine the 'title' and optional 'description' from this
-        # function to satisfy the model's requirement.
-        task_description = params.title
-        if params.description is not None:
-            task_description = f"{params.title}\n\n{params.description}"
-
-        task = Task(description=task_description, story_id=params.story_id)
-        session.add(task)
-        session.commit()
-        session.refresh(task)
-        task_id = _require_identity(task.task_id, "Task")
-
-        return {
-            "success": True,
-            "task_id": task_id,
-            "story_id": params.story_id,
-            "message": f"Created task '{params.title}' with ID {task.task_id}",
-        }
-
-
-class _StoryStructure(TypedDict):
-    id: int | None
-    title: str
-    description: str | None
-    points: int | None
-
-
 class _FeatureStructure(TypedDict):
     id: int
     title: str
-    stories: list[_StoryStructure]
 
 
 class _EpicStructure(TypedDict):
@@ -565,7 +422,7 @@ def query_project_structure(project_id: int) -> QueryProjectStructureResult:
     """
     Agent tool: Query the full hierarchy of a project (for verification).
 
-    Returns the entire Theme -> Epic -> Feature -> Story structure.
+    Returns the Theme -> Epic -> Feature project structure.
     """
     with Session(get_engine()) as session:
         project = session.get(Project, project_id)
@@ -586,10 +443,6 @@ def query_project_structure(project_id: int) -> QueryProjectStructureResult:
         epics = _load_epics_for_theme_ids(session, theme_ids)
         epic_ids = [epic.epic_id for epic in epics if epic.epic_id is not None]
         features = _load_features_for_epic_ids(session, epic_ids)
-        feature_ids = [
-            feature.feature_id for feature in features if feature.feature_id is not None
-        ]
-        stories = _load_stories_for_feature_ids(session, feature_ids)
         project_summary: _ProjectStructureSummary = {
             "id": _require_project_id(project),
             "name": project.name,
@@ -600,7 +453,6 @@ def query_project_structure(project_id: int) -> QueryProjectStructureResult:
             themes=themes,
             epics=epics,
             features=features,
-            stories=stories,
         )
 
         return {"success": True, "structure": structure}
@@ -614,9 +466,7 @@ def _load_epics_for_theme_ids(session: Session, theme_ids: list[int]) -> list[Ep
     if not theme_ids:
         return []
     return list(
-        session.exec(
-            select(Epic).where(col(Epic.theme_id).in_(theme_ids))
-        ).all()
+        session.exec(select(Epic).where(col(Epic.theme_id).in_(theme_ids))).all()
     )
 
 
@@ -624,22 +474,7 @@ def _load_features_for_epic_ids(session: Session, epic_ids: list[int]) -> list[F
     if not epic_ids:
         return []
     return list(
-        session.exec(
-            select(Feature).where(col(Feature.epic_id).in_(epic_ids))
-        ).all()
-    )
-
-
-def _load_stories_for_feature_ids(
-    session: Session,
-    feature_ids: list[int],
-) -> list[UserStory]:
-    if not feature_ids:
-        return []
-    return list(
-        session.exec(
-            select(UserStory).where(col(UserStory.feature_id).in_(feature_ids))
-        ).all()
+        session.exec(select(Feature).where(col(Feature.epic_id).in_(epic_ids))).all()
     )
 
 
@@ -667,35 +502,17 @@ def _group_features_by_epic(
     return grouped
 
 
-def _group_stories_by_feature(
-    stories: list[UserStory],
-    feature_ids: list[int],
-) -> dict[int, list[UserStory]]:
-    grouped: dict[int, list[UserStory]] = {feature_id: [] for feature_id in feature_ids}
-    for story in stories:
-        feature_id = story.feature_id
-        if feature_id is not None and feature_id in grouped:
-            grouped[feature_id].append(story)
-    return grouped
-
-
 def _build_project_structure(
     *,
     project: _ProjectStructureSummary,
     themes: list[Theme],
     epics: list[Epic],
     features: list[Feature],
-    stories: list[UserStory],
 ) -> ProjectStructure:
     theme_ids = [theme.theme_id for theme in themes if theme.theme_id is not None]
     epic_ids = [epic.epic_id for epic in epics if epic.epic_id is not None]
-    feature_ids = [
-        feature.feature_id for feature in features if feature.feature_id is not None
-    ]
-
     epics_by_theme = _group_epics_by_theme(epics, theme_ids)
     features_by_epic = _group_features_by_epic(features, epic_ids)
-    stories_by_feature = _group_stories_by_feature(stories, feature_ids)
 
     theme_entries: list[_ThemeStructure] = []
     structure: ProjectStructure = {
@@ -711,7 +528,6 @@ def _build_project_structure(
             theme=theme,
             epics=epics_by_theme.get(theme_id, []),
             features_by_epic=features_by_epic,
-            stories_by_feature=stories_by_feature,
         )
         theme_entries.append(theme_data)
 
@@ -723,7 +539,6 @@ def _build_theme_data(
     theme: Theme,
     epics: list[Epic],
     features_by_epic: dict[int, list[Feature]],
-    stories_by_feature: dict[int, list[UserStory]],
 ) -> _ThemeStructure:
     if theme.theme_id is None:
         message = "Theme structure requires a persisted identity."
@@ -742,7 +557,6 @@ def _build_theme_data(
         epic_data = _build_epic_data(
             epic=epic,
             features=features_by_epic.get(epic_id, []),
-            stories_by_feature=stories_by_feature,
         )
         epic_entries.append(epic_data)
     return theme_data
@@ -752,7 +566,6 @@ def _build_epic_data(
     *,
     epic: Epic,
     features: list[Feature],
-    stories_by_feature: dict[int, list[UserStory]],
 ) -> _EpicStructure:
     if epic.epic_id is None:
         message = "Epic structure requires a persisted identity."
@@ -767,84 +580,9 @@ def _build_epic_data(
     for feature in features:
         if feature.feature_id is None:
             continue
-        feature_id = feature.feature_id
         feature_data: _FeatureStructure = {
-            "id": feature_id,
+            "id": feature.feature_id,
             "title": feature.title,
-            "stories": _build_story_entries(stories_by_feature.get(feature_id, [])),
         }
         feature_entries.append(feature_data)
     return epic_data
-
-
-def _build_story_entries(stories: list[UserStory]) -> list[_StoryStructure]:
-    return [
-        {
-            "id": story.story_id,
-            "title": story.title,
-            "description": story.story_description,
-            "points": story.story_points,
-        }
-        for story in stories
-    ]
-
-
-class _StoryDetailsFailure(TypedDict):
-    success: Literal[False]
-    story_id: int
-    message: str
-
-
-class _StoryDetailsSuccess(TypedDict):
-    success: Literal[True]
-    story_id: int
-    title: str
-    description: str | None
-    acceptance_criteria: str | None
-    status: str
-    story_points: int | None
-    rank: str | None
-    feature_id: int | None
-    project_id: int
-    created_at: str
-    updated_at: str
-
-
-type StoryDetailsResult = _StoryDetailsFailure | _StoryDetailsSuccess
-
-
-def get_story_details(story_id: int) -> StoryDetailsResult:
-    """
-    Agent tool: Fetch details for a specific story by its ID.
-
-    Args:
-        story_id: The ID of the story to fetch
-
-    Returns:
-        Dict with story details or error message
-    """
-    with Session(get_engine()) as session:
-        story = session.get(UserStory, story_id)
-
-        if not story:
-            return {
-                "success": False,
-                "story_id": story_id,
-                "message": f"Story with ID {story_id} not found.",
-            }
-
-        persisted_story_id = _require_identity(story.story_id, "UserStory")
-        return {
-            "success": True,
-            "story_id": persisted_story_id,
-            "title": story.title,
-            "description": story.story_description,
-            "acceptance_criteria": story.acceptance_criteria,
-            "status": str(story.status.value),
-            "story_points": story.story_points,
-            "rank": story.rank,
-            "feature_id": story.feature_id,
-            "project_id": story.project_id,
-            "created_at": str(story.created_at),
-            "updated_at": str(story.updated_at),
-        }

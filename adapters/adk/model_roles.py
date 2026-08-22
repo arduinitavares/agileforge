@@ -9,8 +9,6 @@ from workflow.definitions.root import ROOT_GRAPH
 
 AGENTIC_MODEL_ROLES: Final[MappingProxyType[str, str]] = MappingProxyType(
     {
-        "authority.compile": "spec_authority_compiler",
-        "authority.repair": "spec_authority_compiler",
         "vision.bootstrap": "product_vision",
         "vision.interview": "product_vision",
         "goal.interview": "product_goal",
@@ -25,7 +23,7 @@ RETAINED_MODEL_ROLES: Final[frozenset[str]] = frozenset(
     {*AGENTIC_MODEL_ROLES.values(), "spec_validator"}
 )
 
-if not set(ROOT_GRAPH.agentic_node_ids).issubset(AGENTIC_MODEL_ROLES):
+if tuple(AGENTIC_MODEL_ROLES) != ROOT_GRAPH.agentic_node_ids:
     message = "Model roles must exactly match the live agentic recipe catalog."
     raise RuntimeError(message)
 

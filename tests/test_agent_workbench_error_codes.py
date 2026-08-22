@@ -20,33 +20,11 @@ EXPECTED_ERROR_METADATA = {
     ErrorCode.SPEC_FILE_NOT_FOUND: (2, False),
     ErrorCode.SPEC_FILE_INVALID: (2, False),
     ErrorCode.SPEC_SOURCE_FORMAT_UNSUPPORTED: (2, False),
-    ErrorCode.SPEC_COMPILE_FAILED: (1, True),
-    ErrorCode.AUTHORITY_NOT_ACCEPTED: (4, False),
-    ErrorCode.AUTHORITY_NOT_COMPILED: (4, False),
-    ErrorCode.COMPILED_AUTHORITY_INVALID: (4, False),
-    ErrorCode.COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED: (4, False),
-    ErrorCode.AUTHORITY_ACCEPTANCE_MISMATCH: (4, False),
-    ErrorCode.AUTHORITY_INVARIANTS_INVALID: (4, False),
-    ErrorCode.AUTHORITY_REVIEW_REQUIRED: (4, False),
-    ErrorCode.AUTHORITY_NOT_PENDING: (4, False),
-    ErrorCode.AUTHORITY_ALREADY_DECIDED: (10, False),
-    ErrorCode.AUTHORITY_SOURCE_CHANGED: (11, True),
-    ErrorCode.AUTHORITY_SOURCE_UNAVAILABLE: (11, True),
-    ErrorCode.AUTHORITY_REVIEW_INCOMPLETE: (20, False),
-    ErrorCode.AUTHORITY_GUARD_INCOMPLETE: (2, False),
-    ErrorCode.AUTHORITY_FEEDBACK_TARGET_NOT_FOUND: (4, False),
-    ErrorCode.AUTHORITY_FEEDBACK_SCHEMA_INVALID: (2, False),
-    ErrorCode.AUTHORITY_CURATED_DIFF_UNBOUNDED: (1, False),
-    ErrorCode.AUTHORITY_CURATION_MAX_ITERATIONS: (1, True),
-    ErrorCode.AUTHORITY_REPAIR_INTENT_INVALID: (1, False),
-    ErrorCode.AUTHORITY_REPAIR_TARGET_NOT_FOUND: (1, False),
-    ErrorCode.AUTHORITY_CURATION_TARGET_READ_ONLY: (4, False),
     ErrorCode.STALE_STATE: (3, True),
     ErrorCode.STALE_SPEC_HASH: (3, True),
     ErrorCode.STALE_SPEC_VERSION: (3, True),
     ErrorCode.STALE_ARTIFACT_FINGERPRINT: (3, True),
     ErrorCode.STALE_CONTEXT_FINGERPRINT: (3, True),
-    ErrorCode.STALE_AUTHORITY_VERSION: (3, True),
     ErrorCode.CONFIRMATION_REQUIRED: (2, False),
     ErrorCode.ACTIVE_STATE_BLOCKS_DELETE: (4, False),
     ErrorCode.MUTATION_FAILED: (1, False),
@@ -86,93 +64,8 @@ def test_registry_covers_representative_phase_2a_error_codes() -> None:
     assert all(isinstance(code, str) for code in codes)
 
 
-def test_registry_covers_authority_review_decision_error_codes() -> None:
-    """Expose stable authority review decision error taxonomy."""
-    codes = registered_error_codes()
-
-    for code in [
-        "AUTHORITY_REVIEW_REQUIRED",
-        "AUTHORITY_NOT_PENDING",
-        "AUTHORITY_ALREADY_DECIDED",
-        "AUTHORITY_SOURCE_CHANGED",
-        "AUTHORITY_SOURCE_UNAVAILABLE",
-        "AUTHORITY_REVIEW_INCOMPLETE",
-        "AUTHORITY_GUARD_INCOMPLETE",
-    ]:
-        assert code in codes, code
-
-
-def test_registry_covers_authority_curation_error_codes() -> None:
-    """Expose stable authority curation error taxonomy."""
-    codes = registered_error_codes()
-
-    for code in [
-        "AUTHORITY_FEEDBACK_TARGET_NOT_FOUND",
-        "AUTHORITY_FEEDBACK_SCHEMA_INVALID",
-        "AUTHORITY_CURATED_DIFF_UNBOUNDED",
-        "AUTHORITY_CURATION_MAX_ITERATIONS",
-        "AUTHORITY_REPAIR_INTENT_INVALID",
-        "AUTHORITY_REPAIR_TARGET_NOT_FOUND",
-        "AUTHORITY_CURATION_TARGET_READ_ONLY",
-    ]:
-        assert code in codes, code
-
-    assert (
-        error_metadata(ErrorCode.AUTHORITY_FEEDBACK_TARGET_NOT_FOUND).description
-        == "Authority feedback references a target that does not exist."
-    )
-
-
-def test_authority_repair_v2_error_codes_are_registered() -> None:
-    """Expose stable metadata for repair-menu contract failures."""
-    invalid = error_metadata(ErrorCode.AUTHORITY_REPAIR_INTENT_INVALID)
-    missing = error_metadata(ErrorCode.AUTHORITY_REPAIR_TARGET_NOT_FOUND)
-
-    assert invalid.code == "AUTHORITY_REPAIR_INTENT_INVALID"
-    assert invalid.default_exit_code == 1
-    assert invalid.retryable is False
-    assert missing.code == "AUTHORITY_REPAIR_TARGET_NOT_FOUND"
-    assert missing.default_exit_code == 1
-    assert missing.retryable is False
-
-
-def test_authority_curation_read_only_target_error_is_registered() -> None:
-    """Structured authority claims are permanently read-only during curation."""
-    expected_exit_code = 4
-    metadata = error_metadata(ErrorCode.AUTHORITY_CURATION_TARGET_READ_ONLY)
-
-    assert metadata.code == "AUTHORITY_CURATION_TARGET_READ_ONLY"
-    assert metadata.default_exit_code == expected_exit_code
-    assert metadata.retryable is False
-    assert metadata.description == "The authority curation target is read-only."
-
-
-def test_compiled_authority_schema_unsupported_error_is_registered() -> None:
-    """Expose stable metadata for unsupported compiled-authority artifacts."""
-    expected_exit_code = 4
-    metadata = error_metadata(ErrorCode.COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED)
-
-    assert metadata.code == "COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED"
-    assert metadata.default_exit_code == expected_exit_code
-    assert metadata.retryable is False
-    assert metadata.description == "Compiled authority artifact schema is unsupported."
-
-
-def test_compiled_authority_invalid_error_is_registered() -> None:
-    """Expose stable metadata for malformed compiled-authority artifacts."""
-    expected_exit_code = 4
-    code = getattr(ErrorCode, "COMPILED_AUTHORITY_INVALID", None)
-
-    assert code is not None
-    metadata = error_metadata(code)
-    assert metadata.code == "COMPILED_AUTHORITY_INVALID"
-    assert metadata.default_exit_code == expected_exit_code
-    assert metadata.retryable is False
-    assert metadata.description == "Compiled authority artifact is invalid."
-
-
-def test_authority_compile_stale_guard_error_codes_are_registered() -> None:
-    """Expose stable metadata for authority compile stale guards."""
+def test_specification_stale_guard_error_codes_are_registered() -> None:
+    """Expose stable metadata for Specification stale guards."""
     expected_exit_code = 3
 
     assert ErrorCode.STALE_SPEC_HASH.value == "STALE_SPEC_HASH"

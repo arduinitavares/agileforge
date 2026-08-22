@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from http import HTTPStatus
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from fastapi.testclient import TestClient
@@ -14,12 +14,8 @@ from sqlmodel import Session, select
 import api as api_module
 import services.application as application_module
 from api import (
-    AuthorityDecisionApiRequest,
-    AuthorityFeedbackApiRequest,
     CreateProjectRequest,
     SprintPlanningApiRequest,
-    build_authority_decision_request,
-    build_authority_feedback_request,
     build_create_project_command,
 )
 from cli.workflow_commands import COMMAND_PREFIXES
@@ -35,17 +31,12 @@ from repositories.workflow import WorkflowFactRepository
 from services.application import (
     AgenticActionRequest,
     AgileForgeApplication,
-    AuthorityCompileRequest,
-    AuthorityFeedbackRequest,
-    AuthorityRepairInputService,
-    AuthorityRepairRequest,
-    AuthorityReviewRequest,
-    AuthorityReviewSelectionService,
     BacklogReviewRequest,
     CreateProjectCommand,
     DeliveryActionInputService,
     DeliveryActionRequest,
     DeliveryReviewSelectionService,
+    ExpectedPlanningReviewBinding,
     ProductGoalLifecycleServices,
     ProductGoalResponseRequest,
     ProductGoalReviewRequest,
@@ -56,13 +47,14 @@ from services.application import (
     SprintPlanningInputService,
     SprintPlanningRequest,
     SprintPlanReviewRequest,
+    StoryCorrectionRequest,
     StoryReviewRequest,
     VisionBootstrapRequest,
     VisionResponseRequest,
     VisionReviewRequest,
     WorkflowDomainPort,
 )
-from services.contracts.backlog import InputSchema as BacklogInput
+from services.contracts.backlog import BacklogBuilderInput
 from services.contracts.roadmap import RoadmapBuilderInput
 from services.contracts.sprint import SprintPlannerInput
 from services.contracts.story import UserStoryWriterInput
@@ -92,6 +84,7 @@ from tests.workflow.test_planning_transitions import (
     _record_and_accept_story,
     _record_sprint_plan_draft,
     _seed_accepted_backlog,
+    _validate_story_structurally,
 )
 from tests.workflow.test_planning_transitions import (
     _domain as planning_domain,
@@ -114,13 +107,11 @@ from workflow.requests import (
     CloseSprint,
     CloseStory,
     CompleteTask,
-    DecideAuthority,
     DecideBacklog,
     DecideRoadmap,
     DecideSpecification,
     DecideSprintPlan,
     DecideStory,
-    RecordAuthorityFeedback,
     RecordPostSprintTriage,
     ReviewSprint,
     StartNodeAttempt,
@@ -282,22 +273,6 @@ def test_create_project_api_rejects_unknown_or_internal_fields(
             "binding_fingerprint",
         ),
         (
-            "/api/projects/41/authority/compile",
-            {
-                "idempotency_key": "compile-41",
-                "actor": "operator",
-            },
-            "compiler_input",
-        ),
-        (
-            "/api/projects/41/authority/compile",
-            {
-                "idempotency_key": "compile-41",
-                "actor": "operator",
-            },
-            "model_id",
-        ),
-        (
             "/api/projects/41/specifications/source",
             {
                 "source_path": "SPECIFICATION.md",
@@ -357,7 +332,6 @@ def test_semantic_api_models_reject_internal_fields(
         ("/api/projects/41/vision/review", "accepted"),
         ("/api/projects/41/goals/review", "accepted"),
         ("/api/projects/41/specifications/review", "accepted"),
-        ("/api/projects/41/authority/decision", "accepted"),
         ("/api/projects/41/goals/complete", None),
         ("/api/projects/41/goals/abandon", None),
     ],
@@ -389,7 +363,7 @@ def test_semantic_decision_api_rejects_blank_rationale(
         ("/api/projects/41/roadmap/decide", {}),
         (
             "/api/projects/41/story/decide",
-            {"instance_key": "requirement:req-7"},
+            {},
         ),
         ("/api/projects/41/sprint/decide", {}),
     ],
@@ -401,6 +375,7 @@ def test_delivery_review_api_rejects_whitespace_rationale(
     """Reject normalized-empty reasons at every delivery review route."""
     response = TestClient(api_module.app).post(
         path,
+        headers=_planning_review_headers(path),
         json={
             "decision": "accepted",
             "rationale": "  \t",
@@ -493,16 +468,40 @@ class _FakeApiApplication:
     def generate_sprint(self, request: object) -> TransitionResult:
         return self._record_delivery_request(request)
 
-    def decide_backlog(self, request: object) -> TransitionResult:
+    def decide_backlog(
+        self,
+        request: object,
+        *,
+        expected: ExpectedPlanningReviewBinding,
+    ) -> TransitionResult:
+        del expected
         return self._record_delivery_request(request)
 
-    def decide_roadmap(self, request: object) -> TransitionResult:
+    def decide_roadmap(
+        self,
+        request: object,
+        *,
+        expected: ExpectedPlanningReviewBinding,
+    ) -> TransitionResult:
+        del expected
         return self._record_delivery_request(request)
 
-    def decide_story(self, request: object) -> TransitionResult:
+    def decide_story(
+        self,
+        request: object,
+        *,
+        expected: ExpectedPlanningReviewBinding,
+    ) -> TransitionResult:
+        del expected
         return self._record_delivery_request(request)
 
-    def decide_sprint_plan(self, request: object) -> TransitionResult:
+    def decide_sprint_plan(
+        self,
+        request: object,
+        *,
+        expected: ExpectedPlanningReviewBinding,
+    ) -> TransitionResult:
+        del expected
         return self._record_delivery_request(request)
 
     def apply_story_dependencies(self, request: object) -> TransitionResult:
@@ -536,13 +535,6 @@ class _FakeApiApplication:
             position=self._position,
         )
 
-    def decide_authority(self, request: AuthorityReviewRequest) -> TransitionResult:
-        self.requests.append(request)
-        return self._transition_result or TransitionResult(
-            ok=True,
-            position=self._position,
-        )
-
     def review_vision(self, request: VisionReviewRequest) -> TransitionResult:
         return self._record_delivery_request(request)
 
@@ -569,16 +561,6 @@ class _FakeApiApplication:
         request: SpecificationStructuringRequest,
     ) -> TransitionResult:
         return self._record_delivery_request(request)
-
-    def record_authority_feedback(
-        self,
-        request: AuthorityFeedbackRequest,
-    ) -> TransitionResult:
-        self.requests.append(request)
-        return self._transition_result or TransitionResult(
-            ok=True,
-            position=self._position,
-        )
 
 
 class _BoundaryDomain:
@@ -667,26 +649,6 @@ class _ProductGoalInput:
         }
 
 
-class _AuthorityInput:
-    def __init__(self, replay: TransitionResult) -> None:
-        self.replay_result = replay
-        self.replay_queries: list[NodeAttemptReplayQuery] = []
-
-    def replay(self, query: NodeAttemptReplayQuery) -> TransitionResult:
-        self.replay_queries.append(query)
-        return self.replay_result
-
-    def build(
-        self,
-        *,
-        project_id: int,
-        decision: NodeDecision,
-        compiler_model: str,
-    ) -> JsonObject:
-        del project_id, decision, compiler_model
-        pytest.fail("replayed Authority compile rebuilt current input")
-
-
 class _DeliveryInput:
     def __init__(
         self,
@@ -711,6 +673,17 @@ class _DeliveryInput:
     ) -> JsonObject | None:
         self.build_calls.append((project_id, decision.decision_fingerprint, node_id))
         return self.payload
+
+    def build_story_correction(
+        self,
+        *,
+        project_id: int,
+        decisions: tuple[NodeDecision, ...],
+        request: StoryCorrectionRequest,
+    ) -> tuple[NodeDecision, JsonObject] | WorkflowError | None:
+        """Supply no correction payload in tests that only exercise generation."""
+        _ = project_id, decisions, request
+        return None
 
 
 class _DeliveryReviewSelection:
@@ -1026,6 +999,14 @@ def _delivery_decision(
     )
 
 
+def _planning_review_headers(path: str) -> dict[str, str]:
+    """Supply the machine-only binding captured by the review read."""
+    headers = {"X-AgileForge-Expected-Decision": "decision-shown"}
+    if path.endswith("/story/decide"):
+        headers["X-AgileForge-Expected-Instance"] = "backlog_item:PBI-000007"
+    return headers
+
+
 @pytest.mark.parametrize(
     "case",
     [
@@ -1098,12 +1079,7 @@ def _delivery_decision(
             "start_sprint",
             "planning.sprint.start",
             {},
-            {
-                "sprint_plan_artifact_id": 29,
-                "sprint_id": 31,
-                "plan_fingerprint": "plan-current",
-                "candidate_set_fingerprint": "candidates-current",
-            },
+            {},
             {},
         ),
     ],
@@ -1897,7 +1873,7 @@ def test_planning_selection_derives_dependency_and_readiness_guards(
     project_id = _seed_accepted_backlog(engine)
     domain = planning_domain(engine)
     _record_and_accept_roadmap(domain, project_id)
-    _story_artifact_id, story_id = _record_and_accept_story(domain, project_id)
+    _story_artifact_id, story_id = _record_and_accept_story(engine, domain, project_id)
     service_type = application_module.PlanningActionSelectionService
     service = service_type(engine=engine)
     position = domain.position(project_id)
@@ -1917,10 +1893,11 @@ def test_planning_selection_derives_dependency_and_readiness_guards(
     with Session(engine) as session:
         story = session.get(UserStory, story_id)
         assert story is not None
-        story.story_points = None
-        story.rank = None
+        story.story_points = 3
+        story.rank = "0"
         session.add(story)
         session.commit()
+    _validate_story_structurally(engine, story_id)
     position = domain.position(project_id)
     readiness_decision = next(
         item
@@ -1954,7 +1931,7 @@ def test_application_repairs_durable_invalid_story_rank_and_replays(
     project_id = _seed_accepted_backlog(engine)
     domain = planning_domain(engine)
     _record_and_accept_roadmap(domain, project_id)
-    _story_artifact_id, story_id = _record_and_accept_story(domain, project_id)
+    _story_artifact_id, story_id = _record_and_accept_story(engine, domain, project_id)
     _apply_current_dependencies(
         engine,
         domain,
@@ -1968,6 +1945,7 @@ def test_application_repairs_durable_invalid_story_rank_and_replays(
         story.rank = "0"
         session.add(story)
         session.commit()
+    _validate_story_structurally(engine, story_id)
 
     application = AgileForgeApplication(
         workflow_domain=domain,
@@ -2017,16 +1995,17 @@ def test_planning_selection_derives_sprint_start_from_accepted_current_plan(
     project_id = _seed_accepted_backlog(engine)
     domain = planning_domain(engine)
     _record_and_accept_roadmap(domain, project_id)
-    _story_artifact_id, story_id = _record_and_accept_story(domain, project_id)
-    plan_id, sprint_id, candidate_fingerprint, plan = _record_sprint_plan_draft(
-        engine,
-        domain,
-        project_id,
-        story_id,
-        team_name="Planning Selection Team",
-        idempotency_key="selection-sprint-plan",
+    _story_artifact_id, story_id = _record_and_accept_story(engine, domain, project_id)
+    plan_id, _candidate_fingerprint, _plan, plan_fingerprint = (
+        _record_sprint_plan_draft(
+            engine,
+            domain,
+            project_id,
+            story_id,
+            team_name="Planning Selection Team",
+            idempotency_key="selection-sprint-plan",
+        )
     )
-    plan_fingerprint = canonical_hash(plan)
     position = domain.position(project_id)
     accepted = domain.transition(
         DecideSprintPlan(
@@ -2039,45 +2018,22 @@ def test_planning_selection_derives_sprint_start_from_accepted_current_plan(
         )
     )
     assert accepted.ok is True
-    position = domain.position(project_id)
-    start_decision = next(
-        item for item in position.decisions if item.node_id == "planning.sprint.start"
+    application = AgileForgeApplication(
+        workflow_domain=domain,
+        planning_action_selection=application_module.PlanningActionSelectionService(
+            engine=engine
+        ),
     )
-    service_type = application_module.PlanningActionSelectionService
-    service = service_type(engine=engine)
-
-    target = service.prepare_sprint_start(
-        project_id=project_id,
-        decision=start_decision,
-    )
-
-    assert target == (
-        plan_id,
-        sprint_id,
-        plan_fingerprint,
-        candidate_fingerprint,
-    )
-    candidate_reference = next(
-        item
-        for item in start_decision.fact_references
-        if item.fact_type == "candidate_set"
-    )
-    assert (
-        service.prepare_sprint_start(
+    started = application.start_sprint(
+        application_module.SprintStartRequest(
             project_id=project_id,
-            decision=start_decision.model_copy(
-                update={
-                    "fact_references": tuple(
-                        item.model_copy(update={"fingerprint": "tampered"})
-                        if item == candidate_reference
-                        else item
-                        for item in start_decision.fact_references
-                    )
-                }
-            ),
+            idempotency_key="selection-start-sprint",
+            actor="operator",
         )
-        is None
     )
+
+    assert started.ok is True
+    assert started.applied_node_id == "planning.sprint.start"
 
 
 @dataclass(frozen=True)
@@ -2125,7 +2081,7 @@ class _DeliveryReviewCase:
             fact_type="story",
             identity_field="story_artifact_id",
             fingerprint_field="artifact_fingerprint",
-            instance_key="requirement:req-7",
+            instance_key="backlog_item:PBI-000007",
         ),
         _DeliveryReviewCase(
             method_name="decide_sprint_plan",
@@ -2175,11 +2131,12 @@ def test_semantic_delivery_reviews_derive_internal_guards(
         "idempotency_key": f"{case.request_kind}-41",
         "actor": "operator",
     }
-    if case.instance_key is not None:
-        request_values["instance_key"] = case.instance_key
-
     result = getattr(application, case.method_name)(
-        case.request_type.model_validate(request_values)
+        case.request_type.model_validate(request_values),
+        expected=ExpectedPlanningReviewBinding(
+            decision_fingerprint=f"decision-{case.request_kind}",
+            instance_key=case.instance_key,
+        ),
     )
 
     assert result.ok is True
@@ -2360,98 +2317,6 @@ def test_semantic_product_goal_response_forwards_graph_selected_instance_key() -
     assert application.agent_requests[0].instance_key == "after-turn:1"
 
 
-def test_semantic_authority_compile_replays_before_advanced_position() -> None:
-    """Recover a compile receipt before rejecting its now-advanced position."""
-    replayed = TransitionResult(
-        ok=True,
-        replayed=True,
-        applied_node_id="authority.compile",
-    )
-    domain = _BoundaryDomain(_vision_position())
-    authority_input = _AuthorityInput(replayed)
-    application = AgileForgeApplication(
-        workflow_domain=domain,
-        authority_compilation_input=authority_input,
-    )
-
-    result = application.compile_authority(
-        AuthorityCompileRequest(
-            project_id=PROJECT_ID,
-            idempotency_key="compile-41",
-            actor="operator",
-        )
-    )
-
-    assert result == replayed
-    assert domain.position_calls == []
-    assert authority_input.replay_queries[0].decision_fingerprint is None
-
-
-def test_semantic_authority_review_replays_or_conflicts_before_advanced_position(
-    engine: "Engine",
-) -> None:
-    """Resolve exact Authority review idempotency before current graph position."""
-    stored = DecideAuthority(
-        project_id=PROJECT_ID,
-        graph_version="agileforge.workflow.v2",
-        fact_fingerprint="facts-authority-review",
-        decision_fingerprint="decision-authority-review",
-        instance_key="authority:17",
-        idempotency_key="authority-review-41",
-        actor="operator",
-        pending_authority_id=17,
-        authority_fingerprint="sha256:authority-17",
-        review_fingerprint="sha256:review-17",
-        decision="accepted",
-        rationale="Authority is complete.",
-    )
-    persisted = TransitionResult(ok=True, applied_node_id="authority.review")
-    _store_completed_receipt(engine, stored, persisted)
-    domain = _BoundaryDomain(_vision_position())
-    application = AgileForgeApplication(
-        workflow_domain=domain,
-        authority_review_selection=AuthorityReviewSelectionService(engine=engine),
-    )
-
-    replay = application.decide_authority(
-        AuthorityReviewRequest(
-            project_id=PROJECT_ID,
-            decision="accepted",
-            rationale="Authority is complete.",
-            expected_candidate_fingerprint="sha256:authority-17",
-            idempotency_key="authority-review-41",
-            actor="operator",
-        )
-    )
-    stale_candidate = application.decide_authority(
-        AuthorityReviewRequest(
-            project_id=PROJECT_ID,
-            decision="accepted",
-            rationale="Authority is complete.",
-            expected_candidate_fingerprint="sha256:authority-replaced-after-review",
-            idempotency_key="authority-review-41",
-            actor="operator",
-        )
-    )
-    conflict = application.decide_authority(
-        AuthorityReviewRequest(
-            project_id=PROJECT_ID,
-            decision="rejected",
-            rationale="Authority needs repair.",
-            expected_candidate_fingerprint="sha256:authority-17",
-            idempotency_key="authority-review-41",
-            actor="operator",
-        )
-    )
-
-    assert replay == persisted.model_copy(update={"replayed": True})
-    assert stale_candidate.error is not None
-    assert stale_candidate.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
-    assert conflict.error is not None
-    assert conflict.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
-    assert domain.position_calls == []
-
-
 def test_semantic_vision_review_rejects_a_replaced_candidate() -> None:
     """A browser review cannot decide the replacement for the Vision it saw."""
     current_fingerprint = "sha256:vision-current"
@@ -2622,206 +2487,6 @@ def test_semantic_specification_review_replay_binds_exact_candidate(
     assert domain.position_calls == []
 
 
-def test_semantic_authority_review_rejects_a_replaced_candidate() -> None:
-    """A stale Authority review fails before the replacement is decided."""
-
-    class Selection:
-        def replay_transition(
-            self,
-            query: TransitionReplayQuery,
-        ) -> None:
-            del query
-
-        def review_identity(self, *, project_id: int) -> tuple[int, str, str]:
-            assert project_id == PROJECT_ID
-            return 43, "sha256:authority-current", "sha256:review-current"
-
-    decision = NodeDecision(
-        node_id="authority.review",
-        child_graph_id="authority",
-        request_kind="decide_authority",
-        category=NodeCategory.WAITING,
-        recommendation_kind=RecommendationKind.REQUIRED,
-        reason_code="AUTHORITY_REVIEW_REQUIRED",
-        decision_fingerprint="decision-authority-review",
-        fact_references=(
-            FactReference(
-                fact_type="authority",
-                fact_id="43",
-                fingerprint="sha256:authority-current",
-            ),
-        ),
-    )
-    domain = _CapturingTransitionDomain(_vision_position(decision))
-    application = AgileForgeApplication(
-        workflow_domain=domain,
-        authority_review_selection=Selection(),
-    )
-
-    result = application.decide_authority(
-        AuthorityReviewRequest(
-            project_id=PROJECT_ID,
-            decision="accepted",
-            rationale="Reviewed the Authority shown in the browser.",
-            expected_candidate_fingerprint="sha256:authority-replaced",
-            idempotency_key="authority-review-stale-41",
-            actor="dashboard-ui",
-        )
-    )
-
-    assert result.ok is False
-    assert result.error is not None
-    assert result.error.code is WorkflowErrorCode.STALE_POSITION
-    assert domain.requests == []
-
-
-def test_semantic_authority_feedback_replays_or_conflicts_before_advanced_position(
-    engine: "Engine",
-) -> None:
-    """Replay matching feedback before reading a now-advanced graph position."""
-    stored = RecordAuthorityFeedback(
-        project_id=PROJECT_ID,
-        graph_version="agileforge.workflow.v2",
-        fact_fingerprint="facts-authority-feedback",
-        decision_fingerprint="decision-authority-feedback",
-        instance_key="authority:17",
-        idempotency_key="authority-feedback-41",
-        actor="operator",
-        pending_authority_id=17,
-        authority_fingerprint="sha256:authority-17",
-        feedback={"text": "Narrow the identity invariant."},
-    )
-    persisted = TransitionResult(ok=True, applied_node_id="authority.feedback")
-    _store_completed_receipt(engine, stored, persisted)
-    domain = _BoundaryDomain(_vision_position())
-    application = AgileForgeApplication(
-        workflow_domain=domain,
-        authority_review_selection=AuthorityReviewSelectionService(engine=engine),
-    )
-
-    replay = application.record_authority_feedback(
-        AuthorityFeedbackRequest(
-            project_id=PROJECT_ID,
-            feedback="  Narrow the identity invariant.  ",
-            idempotency_key="authority-feedback-41",
-            actor="operator",
-        )
-    )
-    conflict = application.record_authority_feedback(
-        AuthorityFeedbackRequest(
-            project_id=PROJECT_ID,
-            feedback="Use a different invariant.",
-            idempotency_key="authority-feedback-41",
-            actor="operator",
-        )
-    )
-
-    assert replay == persisted.model_copy(update={"replayed": True})
-    assert conflict.error is not None
-    assert conflict.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
-    assert domain.position_calls == []
-
-
-def test_semantic_authority_feedback_derives_rejected_identity_from_position() -> None:
-    """Build the feedback transition from the graph's durable authority reference."""
-    decision = NodeDecision(
-        node_id="authority.feedback",
-        instance_key="authority:17",
-        child_graph_id="authority",
-        request_kind="record_authority_feedback",
-        category=NodeCategory.AVAILABLE,
-        recommendation_kind=RecommendationKind.REQUIRED,
-        reason_code="AUTHORITY_FEEDBACK_REQUIRED",
-        decision_fingerprint="decision-authority-feedback",
-        fact_references=(
-            FactReference(
-                fact_type="authority",
-                fact_id="17",
-                fingerprint="sha256:authority-17",
-            ),
-        ),
-    )
-    position = _vision_position(decision).model_copy(
-        update={"available_nodes": ("authority.feedback",)}
-    )
-
-    class CapturingDomain(_BoundaryDomain):
-        def __init__(self) -> None:
-            super().__init__(position)
-            self.requests: list[TransitionRequest] = []
-
-        def transition(self, request: TransitionRequest) -> TransitionResult:
-            self.requests.append(request)
-            return TransitionResult(ok=True)
-
-    domain = CapturingDomain()
-    application = AgileForgeApplication(workflow_domain=domain)
-    expected_authority_id = 17
-
-    result = application.record_authority_feedback(
-        AuthorityFeedbackRequest(
-            project_id=PROJECT_ID,
-            feedback="  Narrow the identity invariant.  ",
-            idempotency_key="authority-feedback-41",
-            actor="operator",
-        )
-    )
-
-    assert result.ok is True
-    request = domain.requests[0]
-    assert isinstance(request, RecordAuthorityFeedback)
-    assert request.pending_authority_id == expected_authority_id
-    assert request.authority_fingerprint == "sha256:authority-17"
-    assert request.feedback == {"text": "Narrow the identity invariant."}
-
-
-def test_semantic_authority_repair_replays_or_conflicts_before_advanced_position(
-    engine: "Engine",
-) -> None:
-    """Resolve exact Authority repair idempotency before current graph position."""
-    stored = StartNodeAttempt(
-        project_id=PROJECT_ID,
-        graph_version="agileforge.workflow.v2",
-        fact_fingerprint="facts-authority-repair",
-        decision_fingerprint="decision-authority-repair",
-        idempotency_key="authority-repair-41",
-        actor="operator",
-        target_node_id="authority.repair",
-        target_instance_key="authority:17",
-        normalized_input={"source_authority_id": 17},
-        model_id="fake/authority-repair",
-        execution_settings={"timeout_seconds": 120, "max_attempts": 2},
-        lease_seconds=300,
-    )
-    persisted = TransitionResult(ok=True, applied_node_id="authority.repair")
-    _store_completed_receipt(engine, stored, persisted)
-    domain = _BoundaryDomain(_vision_position())
-    application = AgileForgeApplication(
-        workflow_domain=domain,
-        authority_repair_input=AuthorityRepairInputService(engine=engine),
-    )
-
-    replay = application.repair_authority(
-        AuthorityRepairRequest(
-            project_id=PROJECT_ID,
-            idempotency_key="authority-repair-41",
-            actor="operator",
-        )
-    )
-    conflict = application.repair_authority(
-        AuthorityRepairRequest(
-            project_id=PROJECT_ID,
-            idempotency_key="authority-repair-41",
-            actor="different-operator",
-        )
-    )
-
-    assert replay == persisted.model_copy(update={"replayed": True})
-    assert conflict.error is not None
-    assert conflict.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
-    assert domain.position_calls == []
-
-
 def _store_completed_receipt(
     engine: "Engine",
     request: TransitionRequest,
@@ -2947,16 +2612,16 @@ def test_transition_replay_compares_structured_semantics_in_json_form(
                 graph_version="agileforge.workflow.v2",
                 fact_fingerprint="facts-story-review",
                 decision_fingerprint="decision-story-review",
-                instance_key="requirement:req-a",
+                instance_key="backlog_item:PBI-000001",
                 idempotency_key="story-review-replay",
                 actor="operator",
-                requirement_id="req-a",
+                backlog_item_id="PBI-000001",
                 story_artifact_id=9,
                 artifact_fingerprint="sha256:story-9",
                 decision="accepted",
                 rationale="Reviewed artifact.",
             ),
-            "requirement:req-a",
+            "backlog_item:PBI-000001",
         ),
         (
             "decide_sprint_plan",
@@ -3002,11 +2667,12 @@ def test_semantic_delivery_review_replays_before_advanced_position(
         "idempotency_key": stored.idempotency_key,
         "actor": "operator",
     }
-    if instance_key is not None:
-        request_values["instance_key"] = instance_key
-
     result = getattr(application, method_name)(
-        request_type.model_validate(request_values)
+        request_type.model_validate(request_values),
+        expected=ExpectedPlanningReviewBinding(
+            decision_fingerprint=cast("PositionedRequest", stored).decision_fingerprint,
+            instance_key=instance_key,
+        ),
     )
 
     assert result == persisted.model_copy(update={"replayed": True})
@@ -3034,10 +2700,10 @@ def test_semantic_delivery_review_changed_operator_input_conflicts(
         graph_version="agileforge.workflow.v2",
         fact_fingerprint="facts-story-review",
         decision_fingerprint="decision-story-review",
-        instance_key="requirement:req-a",
+        instance_key="backlog_item:PBI-000001",
         idempotency_key="story-review-conflict",
         actor="operator",
-        requirement_id="req-a",
+        backlog_item_id="PBI-000001",
         story_artifact_id=9,
         artifact_fingerprint="sha256:story-9",
         decision="accepted",
@@ -3059,7 +2725,11 @@ def test_semantic_delivery_review_changed_operator_input_conflicts(
             rationale="Reviewed artifact.",
             idempotency_key=backlog.idempotency_key,
             actor="operator",
-        )
+        ),
+        expected=ExpectedPlanningReviewBinding(
+            decision_fingerprint=backlog.decision_fingerprint,
+            instance_key=None,
+        ),
     )
     changed_rationale = application.decide_backlog(
         BacklogReviewRequest(
@@ -3068,17 +2738,24 @@ def test_semantic_delivery_review_changed_operator_input_conflicts(
             rationale="Different rationale.",
             idempotency_key=backlog.idempotency_key,
             actor="operator",
-        )
+        ),
+        expected=ExpectedPlanningReviewBinding(
+            decision_fingerprint=backlog.decision_fingerprint,
+            instance_key=None,
+        ),
     )
     changed_selector = application.decide_story(
         StoryReviewRequest(
             project_id=PROJECT_ID,
-            instance_key="requirement:req-b",
             decision="accepted",
             rationale="Reviewed artifact.",
             idempotency_key=story.idempotency_key,
             actor="operator",
-        )
+        ),
+        expected=ExpectedPlanningReviewBinding(
+            decision_fingerprint=story.decision_fingerprint,
+            instance_key="backlog_item:PBI-000002",
+        ),
     )
     removed_selector = DurableTransitionReplayService(engine=engine).replay(
         TransitionReplayQuery(
@@ -3119,7 +2796,7 @@ def test_semantic_delivery_review_changed_operator_input_conflicts(
             "generate_story",
             "planning.story.generate",
             "record_story_draft",
-            "requirement:REQ-1",
+            "backlog_item:PBI-000001",
         ),
     ],
 )
@@ -3172,7 +2849,7 @@ def test_story_replay_uses_the_caller_requested_requirement_selector() -> None:
     result = application.generate_story(
         DeliveryActionRequest(
             project_id=PROJECT_ID,
-            instance_key="requirement:REQ-B",
+            instance_key="backlog_item:PBI-000002",
             idempotency_key="story-shared-key",
             actor="operator",
         )
@@ -3180,7 +2857,7 @@ def test_story_replay_uses_the_caller_requested_requirement_selector() -> None:
 
     assert result == conflict
     assert domain.position_calls == []
-    assert delivery_input.replay_queries[0].instance_key == "requirement:REQ-B"
+    assert delivery_input.replay_queries[0].instance_key == "backlog_item:PBI-000002"
     assert application.agent_requests == []
 
 
@@ -3189,7 +2866,7 @@ def test_story_generation_rejects_omitted_selector_before_wildcard_selection() -
     decision = _delivery_decision(
         node_id="planning.story.generate",
         request_kind="record_story_draft",
-        instance_key="requirement:REQ-A",
+        instance_key="backlog_item:PBI-000001",
     )
     domain = _BoundaryDomain(_vision_position(decision))
     delivery_input = _DeliveryInput({"prepared_by": "host"})
@@ -3240,7 +2917,7 @@ def _sprint_ready_project(
     project_id = _seed_accepted_backlog(engine)
     domain = planning_domain(engine)
     _record_and_accept_roadmap(domain, project_id)
-    _artifact_id, story_id = _record_and_accept_story(domain, project_id)
+    _artifact_id, story_id = _record_and_accept_story(engine, domain, project_id)
     _apply_current_dependencies(
         engine,
         domain,
@@ -3257,7 +2934,7 @@ def test_delivery_review_selection_verifies_each_durable_artifact(
     project_id = _seed_accepted_backlog(engine)
     domain = planning_domain(engine)
     roadmap_id = _record_and_accept_roadmap(domain, project_id)
-    story_artifact_id, story_id = _record_and_accept_story(domain, project_id)
+    story_artifact_id, story_id = _record_and_accept_story(engine, domain, project_id)
     sprint_plan_id, _sprint_id, _candidate_fingerprint, _plan = (
         _record_sprint_plan_draft(
             engine,
@@ -3291,7 +2968,7 @@ def test_delivery_review_selection_verifies_each_durable_artifact(
             "story",
             story_artifact_id,
             story.content_fingerprint,
-            f"requirement:{story.requirement_id}",
+            f"backlog_item:{story.backlog_item_id}",
         ),
         ("sprint_plan", sprint_plan_id, sprint_plan.plan_fingerprint, None),
     )
@@ -3323,7 +3000,7 @@ def test_delivery_review_selection_verifies_each_durable_artifact(
 
     story_decision = NodeDecision(
         node_id="planning.story.review",
-        instance_key="requirement:wrong",
+        instance_key="backlog_item:wrong",
         child_graph_id="planning",
         request_kind="decide_story",
         category=NodeCategory.WAITING,
@@ -3365,7 +3042,6 @@ def test_explicit_sprint_capacity_locks_exact_durable_cohort(
             guidance="Prioritize durable replay.",
             selected_story_ids=(story_id,),
             max_story_points=capacity_points,
-            include_task_decomposition=False,
             team_name="Platform",
             idempotency_key="sprint-explicit",
             actor="operator",
@@ -3385,27 +3061,44 @@ def test_explicit_sprint_capacity_locks_exact_durable_cohort(
     assert envelope["locked_story_ids"] == [story_id]
     assert envelope["requested_story_ids"] == [story_id]
     assert envelope["team_name"] == "Platform"
-    assert envelope["include_task_decomposition"] is False
     assert envelope["guidance"] == "Prioritize durable replay."
     assert isinstance(envelope["candidate_set_fingerprint"], str)
 
 
 def test_completed_sprint_metrics_supply_host_capacity(engine: "Engine") -> None:
     """Use completed Story points when current durable metrics recommend capacity."""
-    _domain, project_id, _sprint_id, _story_id, future_story_id, *_rest = (
+    domain, project_id, _sprint_id, _story_id, future_story_id, *_rest = (
         _complete_execution_sprint_with_unselected_story(engine)
     )
+    completed_sprint_id = _sprint_id
+    triaged = domain.transition(
+        RecordPostSprintTriage(
+            **execution_guards(
+                domain,
+                project_id,
+                "execution.post_sprint_triage",
+                f"sprint:{completed_sprint_id}",
+            ),
+            instance_key=f"sprint:{completed_sprint_id}",
+            idempotency_key="metrics-capacity-triage",
+            sprint_id=completed_sprint_id,
+            impact="none",
+            canonical_payload={"summary": "No downstream change."},
+        )
+    )
+    assert triaged.ok is True
     with Session(engine) as session:
         snapshot = WorkflowFactRepository(session).load(project_id)
-    candidates = tuple(item for item in snapshot.stories if item.sprint_candidate)
-    previous_plan = max(
-        (
-            item
-            for item in snapshot.planning_artifacts
-            if item.artifact_type == "sprint_plan"
-        ),
-        key=lambda item: item.artifact_id,
+    backlog = next(
+        item
+        for item in snapshot.phase_artifacts
+        if item.artifact_type == "backlog" and item.status == "accepted"
     )
+    assert backlog.spec_version_id is not None
+    assert backlog.spec_hash is not None
+    assert backlog.product_goal_artifact_id is not None
+    assert backlog.product_goal_fingerprint is not None
+    candidates = tuple(item for item in snapshot.stories if item.sprint_candidate)
     decision = _delivery_decision(
         node_id="planning.sprint.plan",
         request_kind="record_sprint_plan",
@@ -3413,9 +3106,14 @@ def test_completed_sprint_metrics_supply_host_capacity(engine: "Engine") -> None
         update={
             "fact_references": (
                 FactReference(
-                    fact_type="sprint_plan",
-                    fact_id=str(previous_plan.artifact_id),
-                    fingerprint=previous_plan.artifact_fingerprint,
+                    fact_type="specification",
+                    fact_id=str(backlog.spec_version_id),
+                    fingerprint=backlog.spec_hash,
+                ),
+                FactReference(
+                    fact_type="product_goal",
+                    fact_id=str(backlog.product_goal_artifact_id),
+                    fingerprint=backlog.product_goal_fingerprint,
                 ),
                 FactReference(
                     fact_type="candidate_set",
@@ -3524,7 +3222,7 @@ def test_delivery_input_service_builds_from_durable_facts(engine: "Engine") -> N
         fact_references=tuple(
             reference
             for reference in roadmap_decision.fact_references
-            if reference.fact_type in {"authority", "backlog", "product_goal"}
+            if reference.fact_type in {"specification", "backlog", "product_goal"}
         ),
     )
 
@@ -3550,12 +3248,23 @@ def test_delivery_input_service_builds_from_durable_facts(engine: "Engine") -> N
         node_id="planning.story.generate",
     )
 
-    assert BacklogInput.model_validate(backlog_payload).prior_backlog_state != (
-        "NO_HISTORY"
+    assert isinstance(backlog_payload, dict)
+    assert isinstance(roadmap_payload, dict)
+    assert isinstance(story_payload, dict)
+    assert (
+        BacklogBuilderInput.model_validate(
+            backlog_payload["builder_input"]
+        ).prior_backlog_state
+        != "NO_HISTORY"
     )
-    assert RoadmapBuilderInput.model_validate(roadmap_payload).backlog_items
-    assert UserStoryWriterInput.model_validate(story_payload).parent_requirement == (
-        "Plan immutable work"
+    assert RoadmapBuilderInput.model_validate(
+        roadmap_payload["builder_input"]
+    ).backlog_items
+    assert (
+        UserStoryWriterInput.model_validate(
+            story_payload["writer_input"]
+        ).parent_backlog_item_id
+        == "PBI-000001"
     )
     assert (
         service.build(
@@ -3579,8 +3288,6 @@ def test_delivery_input_service_builds_from_durable_facts(engine: "Engine") -> N
 
 
 _AGENTIC_NODE_IDS = {
-    "compile_authority": "authority.compile",
-    "repair_authority": "authority.repair",
     "record_backlog_draft": "backlog.generate",
     "record_roadmap_draft": "planning.roadmap.generate",
     "record_story_draft": "planning.story.generate",
@@ -3683,86 +3390,7 @@ def test_api_project_request_uses_semantic_business_input() -> None:
     )
 
 
-def test_api_authority_decision_accepts_semantic_choice_only() -> None:
-    """Keep authority identity and review fingerprints host-owned."""
-    payload = AuthorityDecisionApiRequest(
-        idempotency_key="accept-api-41",
-        actor="dashboard-user",
-        correlation_id="corr-api-41",
-        decision="accepted",
-        rationale="Reviewed",
-    )
-
-    request = build_authority_decision_request(
-        41,
-        payload,
-        "sha256:authority-shown",
-    )
-
-    assert isinstance(request, AuthorityReviewRequest)
-    assert request.model_dump() == {
-        "project_id": 41,
-        "decision": "accepted",
-        "rationale": "Reviewed",
-        "idempotency_key": "accept-api-41",
-        "actor": "dashboard-user",
-        "correlation_id": "corr-api-41",
-    }
-    assert request.expected_candidate_fingerprint == "sha256:authority-shown"
-
-
-def test_api_authority_feedback_accepts_trimmed_text_only() -> None:
-    """Keep rejected-authority identity and payload construction host-owned."""
-    payload = AuthorityFeedbackApiRequest(
-        feedback="  Narrow the identity invariant.  ",
-        idempotency_key="feedback-api-41",
-        actor="dashboard-user",
-        correlation_id="corr-api-41",
-    )
-
-    request = build_authority_feedback_request(41, payload)
-
-    assert isinstance(request, AuthorityFeedbackRequest)
-    assert request.model_dump() == {
-        "project_id": 41,
-        "feedback": "Narrow the identity invariant.",
-        "idempotency_key": "feedback-api-41",
-        "actor": "dashboard-user",
-        "correlation_id": "corr-api-41",
-    }
-
-
-@pytest.mark.parametrize("feedback", ["", "  \t"])
-def test_authority_feedback_api_rejects_blank_text(feedback: str) -> None:
-    """Reject whitespace-only feedback before application composition."""
-    response = TestClient(api_module.app).post(
-        "/api/projects/41/authority/feedback",
-        json={
-            "feedback": feedback,
-            "idempotency_key": "feedback-api-41",
-            "actor": "dashboard-user",
-        },
-    )
-
-    assert response.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
-
-
-def test_authority_feedback_api_rejects_caller_owned_identity() -> None:
-    """Do not expose rejected-authority IDs or fingerprints to transports."""
-    response = TestClient(api_module.app).post(
-        "/api/projects/41/authority/feedback",
-        json={
-            "feedback": "Narrow the identity invariant.",
-            "idempotency_key": "feedback-api-41",
-            "actor": "dashboard-user",
-            "pending_authority_id": 17,
-        },
-    )
-
-    assert response.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
-
-
-def test_api_adapter_does_not_import_legacy_routing_authority() -> None:
+def test_api_adapter_does_not_import_legacy_routing() -> None:
     """Keep the production API free of old routing imports."""
     source = (Path(__file__).parents[2] / "api.py").read_text()
     assert "from services.workflow import WorkflowService" not in source
@@ -3816,7 +3444,7 @@ def test_retained_delivery_api_rejects_model_owned_input(
         (
             "/api/projects/41/story/generate",
             "generate_story",
-            {"instance_key": "requirement:req-7"},
+            {"instance_key": "backlog_item:PBI-000007"},
         ),
     ],
 )
@@ -3842,11 +3470,12 @@ def test_retained_delivery_api_calls_host_prepared_application_method(
 
 
 @pytest.mark.parametrize(
-    ("path", "payload"),
+    ("path", "payload", "headers"),
     [
         (
             "/api/projects/41/story/generate",
             {"idempotency_key": "story-generate-41", "actor": "operator"},
+            {},
         ),
         (
             "/api/projects/41/story/generate",
@@ -3855,6 +3484,7 @@ def test_retained_delivery_api_calls_host_prepared_application_method(
                 "idempotency_key": "story-generate-41",
                 "actor": "operator",
             },
+            {},
         ),
         (
             "/api/projects/41/story/decide",
@@ -3864,6 +3494,7 @@ def test_retained_delivery_api_calls_host_prepared_application_method(
                 "idempotency_key": "story-review-41",
                 "actor": "operator",
             },
+            {"X-AgileForge-Expected-Decision": "decision-shown"},
         ),
         (
             "/api/projects/41/story/decide",
@@ -3874,22 +3505,27 @@ def test_retained_delivery_api_calls_host_prepared_application_method(
                 "idempotency_key": "story-review-41",
                 "actor": "operator",
             },
+            {
+                "X-AgileForge-Expected-Decision": "decision-shown",
+                "X-AgileForge-Expected-Instance": "backlog_item:PBI-000007",
+            },
         ),
     ],
 )
-def test_story_api_requires_nonblank_instance_selector(
+def test_story_api_rejects_missing_or_caller_owned_selector(
     path: str,
     payload: dict[str, object],
+    headers: dict[str, str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Reject omitted or normalized-empty selectors for both Story actions."""
+    """Reject missing generated-story selectors and caller-owned review selectors."""
     monkeypatch.setattr(
         api_module,
         "_application",
         lambda: _FakeApiApplication(position=_all_request_kinds_position()),
     )
 
-    response = TestClient(api_module.app).post(path, json=payload)
+    response = TestClient(api_module.app).post(path, headers=headers, json=payload)
 
     assert response.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
 
@@ -3902,7 +3538,7 @@ def test_story_api_requires_nonblank_instance_selector(
         (
             "/api/projects/41/story/decide",
             "StoryReviewRequest",
-            {"instance_key": "requirement:req-7"},
+            {},
         ),
         ("/api/projects/41/sprint/decide", "SprintPlanReviewRequest", {}),
     ],
@@ -3919,6 +3555,7 @@ def test_delivery_review_api_uses_task_specific_semantic_request(
 
     response = TestClient(api_module.app).post(
         path,
+        headers=_planning_review_headers(path),
         json={
             "decision": "accepted",
             "rationale": "  Reviewed current artifact.  ",
@@ -3958,12 +3595,12 @@ def test_delivery_review_api_uses_task_specific_semantic_request(
         ),
         (
             "/api/projects/41/story/decide",
-            {"instance_key": "requirement:req-7"},
+            {},
             "story_artifact_id",
         ),
         (
             "/api/projects/41/story/decide",
-            {"instance_key": "requirement:req-7"},
+            {},
             "semantic_input",
         ),
         (
@@ -3991,6 +3628,7 @@ def test_delivery_review_api_rejects_caller_owned_guards(
     """Reject artifact IDs, all fingerprints, and generic semantic envelopes."""
     response = TestClient(api_module.app).post(
         path,
+        headers=_planning_review_headers(path),
         json={
             "decision": "accepted",
             "rationale": "Reviewed current artifact.",
@@ -4407,7 +4045,6 @@ def test_semantic_sprint_generation_api_is_strict(
         "user_input": "Prioritize replay safety.",
         "selected_story_ids": [7, 9],
         "max_story_points": 8,
-        "include_task_decomposition": False,
         "team_name": "Platform",
         "idempotency_key": "sprint-41",
         "actor": "operator",
@@ -4474,7 +4111,7 @@ def test_generic_positioned_api_transport_is_removed() -> None:
 def test_position_endpoint_delegates_once_and_state_endpoint_is_absent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Expose only the graph position route and make one authority query."""
+    """Expose only the graph position route and make one application query."""
     application = _FakeApiApplication()
     monkeypatch.setattr(api_module, "_application", lambda: application)
     client = TestClient(api_module.app)
@@ -4709,46 +4346,6 @@ def test_position_advertises_waiting_vision_review(
     ]
 
 
-def test_position_advertises_waiting_authority_review(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Expose the semantic Authority review while the graph waits for a decision."""
-    decision = NodeDecision(
-        node_id="authority.review",
-        instance_key="authority:17",
-        child_graph_id="authority",
-        request_kind="decide_authority",
-        category=NodeCategory.WAITING,
-        recommendation_kind=RecommendationKind.REQUIRED,
-        reason_code="AUTHORITY_REVIEW_REQUIRED",
-        decision_fingerprint="decision-authority-review",
-    )
-    position = _vision_position(decision).model_copy(
-        update={
-            "available_nodes": (),
-            "waiting_nodes": (decision.node_id,),
-        }
-    )
-    monkeypatch.setattr(
-        api_module,
-        "_application",
-        lambda: _FakeApiApplication(position=position),
-    )
-
-    response = TestClient(api_module.app).get("/api/projects/41/position")
-
-    assert response.status_code == HTTPStatus.OK
-    assert response.json()["actions"] == [
-        {
-            "node_id": "authority.review",
-            "instance_key": "authority:17",
-            "request_kind": "decide_authority",
-            "endpoint": "authority/decision",
-            "transport": "semantic",
-        }
-    ]
-
-
 def test_position_omits_ambiguous_unselectable_semantic_actions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4763,7 +4360,7 @@ def test_position_omits_ambiguous_unselectable_semantic_actions(
         _delivery_decision(
             node_id="planning.story.generate",
             request_kind="record_story_draft",
-            instance_key=f"requirement:req-{index}",
+            instance_key=f"backlog_item:PBI-{index:06d}",
         ).model_copy(update={"decision_fingerprint": f"decision-story-{index}"})
         for index in range(2)
     )
@@ -4784,8 +4381,8 @@ def test_position_omits_ambiguous_unselectable_semantic_actions(
         "record_story_draft",
     ]
     assert [item["instance_key"] for item in actions] == [
-        "requirement:req-0",
-        "requirement:req-1",
+        "backlog_item:PBI-000000",
+        "backlog_item:PBI-000001",
     ]
 
 
@@ -4836,8 +4433,8 @@ def test_structured_conflict_advertises_actions_for_returned_position(
     client = TestClient(api_module.app)
 
     response = client.post(
-        "/api/projects/41/authority/decision",
-        headers={"X-AgileForge-Expected-Candidate": "sha256:authority-shown"},
+        "/api/projects/41/backlog/decide",
+        headers={"X-AgileForge-Expected-Decision": "decision-backlog"},
         json={
             "idempotency_key": "stale-api-41",
             "actor": "dashboard-user",
@@ -4927,33 +4524,6 @@ def test_agentic_application_retry_reaches_durable_start_receipt_when_stale() ->
     assert result == prior_result
     assert len(domain.requests) == 1
     assert isinstance(domain.requests[0], StartNodeAttempt)
-
-
-def test_authority_endpoint_submits_exact_typed_request(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Submit only the semantic authority choice to the application boundary."""
-    application = _FakeApiApplication()
-    monkeypatch.setattr(api_module, "_application", lambda: application)
-    client = TestClient(api_module.app)
-
-    response = client.post(
-        "/api/projects/41/authority/decision",
-        headers={"X-AgileForge-Expected-Candidate": "sha256:authority-shown"},
-        json={
-            "idempotency_key": "accept-api-41",
-            "actor": "dashboard-user",
-            "correlation_id": "corr-api-41",
-            "decision": "accepted",
-            "rationale": "Reviewed",
-        },
-    )
-
-    assert response.status_code == HTTPStatus.OK
-    request = cast("AuthorityReviewRequest", application.requests[0])
-    assert isinstance(request, AuthorityReviewRequest)
-    assert request.actor == "dashboard-user"
-    assert request.expected_candidate_fingerprint == "sha256:authority-shown"
 
 
 def test_specification_source_endpoint_binds_semantic_file_selection(
@@ -5086,7 +4656,6 @@ def test_retired_specification_author_endpoint_is_not_registered() -> None:
         "/api/projects/41/vision/review",
         "/api/projects/41/goals/review",
         "/api/projects/41/specifications/review",
-        "/api/projects/41/authority/decision",
     ],
 )
 def test_browser_review_header_forwards_hidden_candidate_expectation(
@@ -5117,7 +4686,6 @@ def test_browser_review_header_forwards_hidden_candidate_expectation(
             VisionReviewRequest,
             ProductGoalReviewRequest,
             SpecificationReviewRequest,
-            AuthorityReviewRequest,
         ),
     )
     assert request.expected_candidate_fingerprint == "sha256:candidate-shown"
@@ -5127,7 +4695,6 @@ def test_browser_review_header_forwards_hidden_candidate_expectation(
     "path",
     [
         "/api/projects/41/specifications/review",
-        "/api/projects/41/authority/decision",
     ],
 )
 def test_exact_review_requires_transport_captured_candidate(path: str) -> None:
@@ -5152,7 +4719,6 @@ def test_browser_review_expectation_is_absent_from_public_api_schema() -> None:
         "/api/projects/{project_id}/vision/review",
         "/api/projects/{project_id}/goals/review",
         "/api/projects/{project_id}/specifications/review",
-        "/api/projects/{project_id}/authority/decision",
     ):
         operation = schema["paths"][path]["post"]
         parameters = operation.get("parameters", [])
@@ -5162,32 +4728,579 @@ def test_browser_review_expectation_is_absent_from_public_api_schema() -> None:
     review_properties = schema["components"]["schemas"]["ReviewApiRequest"][
         "properties"
     ]
-    authority_properties = schema["components"]["schemas"][
-        "AuthorityDecisionApiRequest"
-    ]["properties"]
     assert "expected_candidate_fingerprint" not in review_properties
-    assert "expected_candidate_fingerprint" not in authority_properties
 
 
-def test_authority_feedback_endpoint_submits_exact_typed_request(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Submit feedback text without exposing authority identity or graph guards."""
-    application = _FakeApiApplication()
+# Retained Task 11 planning-review binding coverage.
+def _object(value: object) -> dict[str, object]:
+    assert isinstance(value, dict)
+    return cast("dict[str, object]", value)
+
+
+def _items(value: object) -> list[object]:
+    assert isinstance(value, list)
+    return cast("list[object]", value)
+
+
+class _FakeApplication:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, object, ExpectedPlanningReviewBinding | None]] = []
+
+    def backlog_review(self, project_id: int) -> JsonObject:
+        return _review_result("backlog", project_id)
+
+    def roadmap_review(self, project_id: int) -> JsonObject:
+        return _review_result("roadmap", project_id)
+
+    def story_reviews(self, project_id: int) -> JsonObject:
+        result = _review_result("story", project_id)
+        data = result["data"]
+        assert isinstance(data, dict)
+        result["data"] = {"items": [data]}
+        return result
+
+    def sprint_plan_review(self, project_id: int) -> JsonObject:
+        return _review_result("sprint_plan", project_id)
+
+    def decide_backlog(
+        self, request: object, *, expected: ExpectedPlanningReviewBinding
+    ) -> TransitionResult:
+        return self._record("backlog", request, expected)
+
+    def decide_roadmap(
+        self, request: object, *, expected: ExpectedPlanningReviewBinding
+    ) -> TransitionResult:
+        return self._record("roadmap", request, expected)
+
+    def decide_story(
+        self, request: object, *, expected: ExpectedPlanningReviewBinding
+    ) -> TransitionResult:
+        return self._record("story", request, expected)
+
+    def decide_sprint_plan(
+        self, request: object, *, expected: ExpectedPlanningReviewBinding
+    ) -> TransitionResult:
+        return self._record("sprint_plan", request, expected)
+
+    def _record(
+        self,
+        phase: str,
+        request: object,
+        expected: ExpectedPlanningReviewBinding,
+    ) -> TransitionResult:
+        self.calls.append((phase, request, expected))
+        return TransitionResult(ok=True)
+
+
+def _review_result(phase: str, project_id: int) -> JsonObject:
+    return {
+        "ok": True,
+        "data": {
+            "binding": {
+                "decision_fingerprint": f"decision-{phase}",
+                "instance_key": "backlog_item:PBI-000001" if phase == "story" else None,
+            },
+            "review": {"phase": phase, "project_id": project_id},
+        },
+        "warnings": [],
+        "errors": [],
+    }
+
+
+@pytest.fixture
+def fake_application(monkeypatch: pytest.MonkeyPatch) -> _FakeApplication:
+    """Install one typed application fake for the exact API route tests."""
+    application = _FakeApplication()
     monkeypatch.setattr(api_module, "_application", lambda: application)
+    return application
+
+
+@pytest.mark.parametrize(
+    ("path", "phase"),
+    [
+        ("/api/projects/41/backlog/review", "backlog"),
+        ("/api/projects/41/roadmap/review", "roadmap"),
+        ("/api/projects/41/story/reviews", "story"),
+        ("/api/projects/41/sprint/plan/review", "sprint_plan"),
+    ],
+)
+def test_review_gets_return_application_selected_content(
+    fake_application: _FakeApplication,
+    path: str,
+    phase: str,
+) -> None:
+    """GET routes expose the captured binding beside exact review content."""
+    assert fake_application is not None
+    response = TestClient(api_module.app).get(path)
+    assert response.status_code == HTTPStatus.OK
+    payload = response.json()
+    assert payload["status"] == "success"
+    data = payload["data"]
+    selected = data["items"][0] if phase == "story" else data
+    assert list(selected) == ["binding", "review"]
+    assert selected["review"]["phase"] == phase
+
+
+@pytest.mark.parametrize(
+    ("path", "phase"),
+    [
+        ("/api/projects/41/backlog/decide", "backlog"),
+        ("/api/projects/41/roadmap/decide", "roadmap"),
+        ("/api/projects/41/sprint/decide", "sprint_plan"),
+    ],
+)
+def test_unique_review_posts_require_scalar_decision_header(
+    fake_application: _FakeApplication,
+    path: str,
+    phase: str,
+) -> None:
+    """Unique phase bodies remain semantic and bind only through one header."""
     client = TestClient(api_module.app)
+    body = {
+        "decision": "accepted",
+        "rationale": "Reviewed exact evidence.",
+        "idempotency_key": f"accept-{phase}",
+        "actor": "operator",
+    }
+    missing = client.post(path, json=body)
+    assert missing.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
 
     response = client.post(
-        "/api/projects/41/authority/feedback",
+        path,
+        headers={"X-AgileForge-Expected-Decision": f"decision-{phase}"},
+        json=body,
+    )
+    assert response.status_code == HTTPStatus.OK
+    recorded_phase, request, binding = fake_application.calls[-1]
+    assert recorded_phase == phase
+    assert isinstance(
+        request,
+        (BacklogReviewRequest, RoadmapReviewRequest, SprintPlanReviewRequest),
+    )
+    assert request.model_dump()["decision"] == "accepted"
+    assert binding == ExpectedPlanningReviewBinding(
+        decision_fingerprint=f"decision-{phase}",
+        instance_key=None,
+    )
+
+
+def test_story_post_requires_independent_decision_and_instance_headers(
+    fake_application: _FakeApplication,
+) -> None:
+    """Story transport reconstructs both hidden binding components from headers."""
+    client = TestClient(api_module.app)
+    path = "/api/projects/41/story/decide"
+    body = {
+        "decision": "accepted",
+        "rationale": "Reviewed Story evidence.",
+        "idempotency_key": "accept-story",
+        "actor": "operator",
+    }
+    assert client.post(path, json=body).status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+    assert (
+        client.post(
+            path,
+            headers={"X-AgileForge-Expected-Decision": "decision-story"},
+            json=body,
+        ).status_code
+        == HTTPStatus.UNPROCESSABLE_ENTITY
+    )
+    response = client.post(
+        path,
+        headers={
+            "X-AgileForge-Expected-Decision": "decision-story",
+            "X-AgileForge-Expected-Instance": "backlog_item:PBI-000001",
+        },
+        json=body,
+    )
+    assert response.status_code == HTTPStatus.OK
+    _phase, request, binding = fake_application.calls[-1]
+    assert isinstance(request, StoryReviewRequest)
+    assert "instance_key" not in request.model_dump()
+    assert binding == ExpectedPlanningReviewBinding(
+        decision_fingerprint="decision-story",
+        instance_key="backlog_item:PBI-000001",
+    )
+
+
+@pytest.mark.parametrize(
+    ("path", "headers"),
+    [
+        (
+            "/api/projects/41/backlog/decide",
+            {"X-AgileForge-Expected-Decision": "   "},
+        ),
+        (
+            "/api/projects/41/story/decide",
+            {
+                "X-AgileForge-Expected-Decision": "   ",
+                "X-AgileForge-Expected-Instance": "backlog_item:PBI-000001",
+            },
+        ),
+        (
+            "/api/projects/41/story/decide",
+            {
+                "X-AgileForge-Expected-Decision": "decision-story",
+                "X-AgileForge-Expected-Instance": "   ",
+            },
+        ),
+    ],
+)
+def test_review_binding_headers_reject_whitespace_at_transport(
+    fake_application: _FakeApplication,
+    path: str,
+    headers: dict[str, str],
+) -> None:
+    """Invalid hidden bindings return 422 without application calls or a 500."""
+    response = TestClient(api_module.app, raise_server_exceptions=False).post(
+        path,
+        headers=headers,
         json={
-            "feedback": "  Narrow the identity invariant.  ",
-            "idempotency_key": "feedback-api-41",
-            "actor": "dashboard-user",
-            "correlation_id": "corr-api-41",
+            "decision": "accepted",
+            "rationale": "Reviewed exact evidence.",
+            "idempotency_key": "reject-whitespace",
+            "actor": "operator",
         },
     )
 
-    assert response.status_code == HTTPStatus.OK
-    request = cast("AuthorityFeedbackRequest", application.requests[0])
-    assert isinstance(request, AuthorityFeedbackRequest)
-    assert request.feedback == "Narrow the identity invariant."
+    assert response.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+    assert not fake_application.calls
+
+
+def test_story_body_rejects_machine_identity(
+    fake_application: _FakeApplication,
+) -> None:
+    """Artifact, fingerprint, and instance fields cannot enter semantic JSON."""
+    response = TestClient(api_module.app).post(
+        "/api/projects/41/story/decide",
+        headers={
+            "X-AgileForge-Expected-Decision": "decision-story",
+            "X-AgileForge-Expected-Instance": "backlog_item:PBI-000001",
+        },
+        json={
+            "decision": "accepted",
+            "rationale": "Reviewed.",
+            "idempotency_key": "accept-story",
+            "actor": "operator",
+            "instance_key": "backlog_item:PBI-000001",
+        },
+    )
+    assert response.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+    assert not fake_application.calls
+
+
+def test_openapi_has_no_removed_compatibility_routes_or_body_fields() -> None:
+    """The hard break publishes only direct-Spec review routes and semantic bodies."""
+    schema = api_module.app.openapi()
+    paths = schema["paths"]
+    assert all("auth" + "ority" not in path.lower() for path in paths)
+    assert "/api/projects/{project_id}/story/reviews" in paths
+    story_schema = schema["components"]["schemas"]["StoryReviewApiRequest"]
+    properties = story_schema["properties"]
+    for forbidden in ("instance_key", "artifact_id", "fingerprint"):
+        assert forbidden not in properties
+
+
+class _Domain:
+    def __init__(self, position: WorkflowPosition) -> None:
+        self.current = position
+        self.position_calls = 0
+        self.transitions: list[object] = []
+
+    def position(self, project_id: int) -> WorkflowPosition:
+        assert project_id == self.current.project_id
+        self.position_calls += 1
+        return self.current
+
+    def transition(self, request: TransitionRequest) -> TransitionResult:
+        self.transitions.append(request)
+        return TransitionResult(ok=True, position=self.current)
+
+    def load_persisted_attempt_input(
+        self,
+        *,
+        project_id: int,
+        attempt_id: int,
+        attempt_fingerprint: str,
+    ) -> JsonObject:
+        raise AssertionError(
+            (project_id, attempt_id, attempt_fingerprint),
+        )
+
+
+class _Selection:
+    def __init__(self, replay: TransitionResult | None = None) -> None:
+        self.replay = replay
+        self.replay_calls = 0
+
+    def replay_transition(self, query: object) -> TransitionResult | None:
+        del query
+        self.replay_calls += 1
+        return self.replay
+
+    def review_identity(self, **_kwargs: object) -> tuple[int, str]:
+        return 7, "sha256:" + "a" * 64
+
+
+class _Reads:
+    def backlog_review(
+        self, *, project_id: int, backlog_artifact_id: int
+    ) -> JsonObject:
+        return _selected_projection(project_id, backlog_artifact_id, "backlog")
+
+    def story_review(self, *, project_id: int, story_artifact_id: int) -> JsonObject:
+        return _selected_projection(project_id, story_artifact_id, "story")
+
+
+def _selected_projection(project_id: int, artifact_id: int, phase: str) -> JsonObject:
+    return {
+        "ok": True,
+        "data": {
+            "phase": phase,
+            "project": project_id,
+            "artifact": artifact_id,
+        },
+        "warnings": [],
+        "errors": [],
+    }
+
+
+def _position(
+    node_id: str, request_kind: str, instance_key: str | None
+) -> WorkflowPosition:
+    decision = NodeDecision(
+        node_id=node_id,
+        child_graph_id="planning",
+        request_kind=request_kind,
+        category=NodeCategory.AVAILABLE,
+        recommendation_kind=RecommendationKind.REQUIRED,
+        reason_code="REVIEW_REQUIRED",
+        instance_key=instance_key,
+        decision_fingerprint="decision-shown",
+    )
+    return WorkflowPosition(
+        project_id=41,
+        graph_version="agileforge.workflow.v1",
+        fact_fingerprint="facts-current",
+        evaluated_at=datetime(2026, 8, 21, tzinfo=UTC),
+        available_nodes=(node_id,),
+        waiting_nodes=(),
+        blocked_nodes=(),
+        invalid_nodes=(),
+        terminal=False,
+        decisions=(decision,),
+    )
+
+
+@pytest.mark.parametrize(
+    ("method", "request_type", "node_id", "request_kind", "instance_key"),
+    [
+        (
+            "decide_backlog",
+            BacklogReviewRequest,
+            "backlog.review",
+            "decide_backlog",
+            None,
+        ),
+        (
+            "decide_roadmap",
+            RoadmapReviewRequest,
+            "planning.roadmap.review",
+            "decide_roadmap",
+            None,
+        ),
+        (
+            "decide_story",
+            StoryReviewRequest,
+            "planning.story.review",
+            "decide_story",
+            "backlog_item:PBI-000001",
+        ),
+        (
+            "decide_sprint_plan",
+            SprintPlanReviewRequest,
+            "planning.sprint.review",
+            "decide_sprint_plan",
+            None,
+        ),
+    ],
+)
+def test_planning_review_binding_rejects_replacement_before_write(
+    method: str,
+    request_type: type,
+    node_id: str,
+    request_kind: str,
+    instance_key: str | None,
+) -> None:
+    """Show A then decide against B returns STALE_POSITION and writes nothing."""
+    domain = _Domain(_position(node_id, request_kind, instance_key))
+    application = AgileForgeApplication(
+        workflow_domain=domain,
+        delivery_review_selection=_Selection(),
+    )
+    command = request_type(
+        project_id=41,
+        decision="accepted",
+        rationale="Reviewed exact evidence.",
+        idempotency_key=f"accept-{request_kind}",
+        actor="operator",
+    )
+    result = getattr(application, method)(
+        command,
+        expected=ExpectedPlanningReviewBinding(
+            decision_fingerprint="decision-replaced",
+            instance_key=instance_key,
+        ),
+    )
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.code.value == "STALE_POSITION"
+    assert not domain.transitions
+
+
+def test_story_binding_checks_instance_independently() -> None:
+    """Matching decision with a different repeated instance cannot select a Story."""
+    domain = _Domain(
+        _position(
+            "planning.story.review",
+            "decide_story",
+            "backlog_item:PBI-000001",
+        )
+    )
+    application = AgileForgeApplication(
+        workflow_domain=domain,
+        delivery_review_selection=_Selection(),
+    )
+    result = application.decide_story(
+        StoryReviewRequest(
+            project_id=41,
+            decision="accepted",
+            rationale="Reviewed exact evidence.",
+            idempotency_key="accept-story",
+            actor="operator",
+        ),
+        expected=ExpectedPlanningReviewBinding(
+            decision_fingerprint="decision-shown",
+            instance_key="backlog_item:PBI-000002",
+        ),
+    )
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.code.value == "STALE_POSITION"
+    assert not domain.transitions
+
+
+def test_exact_receipt_replay_precedes_position_and_binding_checks() -> None:
+    """Authoritative idempotency replay wins even after the graph advances."""
+    replay = TransitionResult(ok=True, applied_node_id="backlog.review")
+    selection = _Selection(replay)
+    domain = _Domain(_position("backlog.review", "decide_backlog", None))
+    application = AgileForgeApplication(
+        workflow_domain=domain,
+        delivery_review_selection=selection,
+    )
+    result = application.decide_backlog(
+        BacklogReviewRequest(
+            project_id=41,
+            decision="accepted",
+            rationale="Reviewed exact evidence.",
+            idempotency_key="accept-backlog",
+            actor="operator",
+        ),
+        expected=ExpectedPlanningReviewBinding(
+            decision_fingerprint="obsolete-after-replay",
+            instance_key=None,
+        ),
+    )
+    assert result is replay
+    assert selection.replay_calls == 1
+    assert domain.position_calls == 0
+    assert not domain.transitions
+
+
+def test_application_review_read_returns_exact_selected_content_and_binding() -> None:
+    """Read one current Backlog review with its captured binding."""
+    domain = _Domain(_position("backlog.review", "decide_backlog", None))
+    application = AgileForgeApplication(
+        workflow_domain=domain,
+        read_projection=cast("Any", _Reads()),
+        delivery_review_selection=_Selection(),
+    )
+
+    result = application.backlog_review(41)
+
+    assert result == {
+        "ok": True,
+        "data": {
+            "binding": {
+                "decision_fingerprint": "decision-shown",
+                "instance_key": None,
+            },
+            "review": {"phase": "backlog", "project": 41, "artifact": 7},
+        },
+        "warnings": [],
+        "errors": [],
+    }
+
+
+def test_application_review_read_distinguishes_absence_from_conflict() -> None:
+    """Only zero current candidates receives the dashboard absence code."""
+    empty = _position("backlog.review", "decide_backlog", None).model_copy(
+        update={"decisions": ()}
+    )
+    application = AgileForgeApplication(
+        workflow_domain=_Domain(empty),
+        read_projection=cast("Any", _Reads()),
+        delivery_review_selection=_Selection(),
+    )
+
+    absent = application.backlog_review(41)
+
+    errors = _items(absent["errors"])
+    assert _object(errors[0])["code"] == "PLANNING_REVIEW_NOT_AVAILABLE"
+
+    decision = _position("backlog.review", "decide_backlog", None).decisions[0]
+    conflicting = empty.model_copy(update={"decisions": (decision, decision)})
+    conflict_application = AgileForgeApplication(
+        workflow_domain=_Domain(conflicting),
+        read_projection=cast("Any", _Reads()),
+        delivery_review_selection=_Selection(),
+    )
+    conflict = conflict_application.backlog_review(41)
+    conflict_errors = _items(conflict["errors"])
+    assert _object(conflict_errors[0])["code"] == "WORKFLOW_FACT_CONFLICT"
+
+
+def test_application_story_review_reads_are_stably_ordered() -> None:
+    """Order independently selected Story reviews by their captured identity."""
+    later = _position(
+        "planning.story.review",
+        "decide_story",
+        "backlog_item:PBI-000002",
+    ).decisions[0]
+    earlier = later.model_copy(
+        update={
+            "instance_key": "backlog_item:PBI-000001",
+            "decision_fingerprint": "decision-earlier",
+        }
+    )
+    position = _position(
+        "planning.story.review",
+        "decide_story",
+        "backlog_item:PBI-000002",
+    ).model_copy(update={"decisions": (later, earlier)})
+    application = AgileForgeApplication(
+        workflow_domain=_Domain(position),
+        read_projection=cast("Any", _Reads()),
+        delivery_review_selection=_Selection(),
+    )
+
+    result = application.story_reviews(41)
+
+    assert result["ok"] is True
+    data = _object(result["data"])
+    items = _items(data["items"])
+    assert [_object(_object(item)["binding"])["instance_key"] for item in items] == [
+        "backlog_item:PBI-000001",
+        "backlog_item:PBI-000002",
+    ]

@@ -14,11 +14,9 @@ from adapters.adk.agents.roadmap import (
     root_agent as roadmap_agent,
 )
 from services.contracts.roadmap import (
-    BacklogItem as RoadmapBacklogItem,
-)
-from services.contracts.roadmap import (
     RoadmapBuilderInput,
     RoadmapBuilderOutput,
+    validate_roadmap_backlog_coverage,
 )
 from utils.adk_runner import (
     get_agent_model_info,
@@ -38,10 +36,6 @@ logger: logging.Logger = logging.getLogger(name=__name__)
 type RoadmapInputContext = dict[str, object]
 type ValidationErrors = list[dict[str, object]]
 
-_ROADMAP_BACKLOG_ITEM_FIELDS: frozenset[str] = frozenset(
-    RoadmapBacklogItem.model_fields
-)
-
 
 @dataclass(frozen=True)
 class _FailureDetails:
@@ -51,17 +45,6 @@ class _FailureDetails:
     raw_text: str | None = None
     validation_errors: ValidationErrors | None = None
     exception: BaseException | None = None
-
-
-def _as_text(value: object) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, str):
-        return value
-    try:
-        return json.dumps(value, ensure_ascii=False)
-    except (TypeError, ValueError):
-        return str(value)
 
 
 def _normalize_prior_roadmap_state(value: object) -> str:
@@ -94,44 +77,23 @@ def _has_clarifying_questions(artifact: dict[str, Any]) -> bool:
     )
 
 
-def _project_roadmap_backlog_items(value: object) -> list[object]:
-    """Return backlog items with host refinement metadata stripped."""
-    if not isinstance(value, list):
-        return []
-    projected: list[object] = []
-    for item in value:
-        if isinstance(item, Mapping):
-            projected.append(
-                {
-                    str(key): raw_value
-                    for key, raw_value in item.items()
-                    if isinstance(key, str) and key in _ROADMAP_BACKLOG_ITEM_FIELDS
-                }
-            )
-        else:
-            projected.append(item)
-    return projected
-
-
 def build_roadmap_input_context(
     state: dict[str, Any],
     *,
     user_input: str | None,
 ) -> RoadmapInputContext:
-    """Build the serialized roadmap-agent input payload from workflow state."""
-    vision_assessment = state.get("product_vision_assessment") or {}
-    vision_stmt = vision_assessment.get("product_vision_statement") or ""
-
-    backlog_items = _project_roadmap_backlog_items(state.get("backlog_items"))
-
+    """Project one already-deep-loaded Specification and its exact Backlog."""
     input_context: RoadmapInputContext = {
-        "backlog_items": backlog_items,
-        "product_vision": vision_stmt,
-        "technical_spec": _as_text(state.get("pending_spec_content")),
-        "compiled_authority": _as_text(state.get("compiled_authority_cached")),
-        "time_increment": "Milestone-based",
+        "accepted_specification_version_id": state.get(
+            "accepted_specification_version_id"
+        ),
+        "accepted_specification_hash": state.get("accepted_specification_hash"),
+        "accepted_specification_json": state.get("accepted_specification_json"),
+        "backlog_items": state.get("backlog_items"),
+        "product_vision": state.get("product_vision"),
+        "time_increment": state.get("time_increment", "Milestone-based"),
         "prior_roadmap_state": _normalize_prior_roadmap_state(
-            state.get("roadmap_releases")
+            state.get("prior_roadmap_state")
         ),
         "user_input": user_input or "",
     }
@@ -272,7 +234,11 @@ async def run_roadmap_agent_from_state(
 
     try:
         output_model: RoadmapBuilderOutput = RoadmapBuilderOutput.model_validate(parsed)
-    except ValidationError as exc:
+        validate_roadmap_backlog_coverage(
+            output_model,
+            (item.backlog_item_id for item in payload.backlog_items),
+        )
+    except (ValidationError, ValueError) as exc:
         return _failure(
             project_id=project_id,
             input_context=input_context,
@@ -280,12 +246,18 @@ async def run_roadmap_agent_from_state(
             details=_FailureDetails(
                 message=f"Roadmap output validation failed: {exc}",
                 raw_text=raw_text,
-                validation_errors=_normalize_validation_errors(exc.errors()),
+                validation_errors=(
+                    _normalize_validation_errors(exc.errors())
+                    if isinstance(exc, ValidationError)
+                    else None
+                ),
                 exception=exc,
             ),
         )
 
-    output_artifact: dict[str, Any] = output_model.model_dump(exclude_none=True)
+    output_artifact: dict[str, Any] = output_model.model_dump(
+        mode="json", exclude_none=True
+    )
     if _has_clarifying_questions(output_artifact):
         output_artifact["is_complete"] = False
     return {

@@ -8,12 +8,11 @@ from pathlib import Path
 
 import pytest
 
-from models import product_definition, specs
+from models import product_definition
 from services.specs.profile_content import (
     SpecContentNormalizationError,
     normalize_spec_content_for_registry,
 )
-from workflow.definitions.authority import AUTHORITY_NODES
 from workflow.definitions.product_discovery import SPECIFICATION_NODES
 from workflow.definitions.root import ROOT_GRAPH
 from workflow.requests import product_discovery as product_discovery_requests
@@ -218,42 +217,6 @@ def test_active_registry_rejects_frozen_v1_and_plain_text() -> None:
         with pytest.raises(SpecContentNormalizationError) as error:
             normalize_spec_content_for_registry(raw_content)
         assert error.value.error_code == "UNSUPPORTED_SPECIFICATION_SCHEMA"
-
-
-def test_active_compiler_entrypoints_have_no_raw_content_or_file_bypass() -> None:
-    """Authority compilation must resolve only an accepted typed Specification."""
-    definitions = _top_level_definitions("services/specs/compiler_service.py")
-    retired_entrypoints = {
-        "CompileSpecAuthorityInput",
-        "PreviewSpecAuthorityInput",
-        "UpdateSpecAndCompileAuthorityInput",
-        "_detect_spec_source_format",
-        "_load_update_spec_content",
-        "compile_spec_authority",
-        "preview_spec_authority",
-        "update_spec_and_compile_authority",
-    }
-    assert retired_entrypoints.isdisjoint(definitions)
-
-    raw_input_fields = {"content", "content_ref", "spec_content"}
-    active_input = definitions.get("CompileSpecAuthorityForVersionInput")
-    assert active_input is not None
-    assert raw_input_fields.isdisjoint(_class_fields(active_input))
-
-    loader = definitions.get("_load_spec_content_for_compile")
-    if loader is not None:
-        identifiers = _function_identifiers(loader)
-        assert {"Path", "content_ref", "read_text"}.isdisjoint(identifiers)
-
-
-def test_separate_human_authority_review_model_and_node_remain() -> None:
-    """Issue #199 must not collapse Authority compilation and human review."""
-    assert hasattr(specs, "SpecAuthorityAcceptance")
-
-    nodes = {node.node_id: node for node in AUTHORITY_NODES}
-    assert nodes["authority.compile"].request_kind == "compile_authority"
-    assert nodes["authority.review"].request_kind == "decide_authority"
-    assert nodes["authority.compile"] is not nodes["authority.review"]
 
 
 def test_issue_199_documentation_cutover_is_explicit() -> None:

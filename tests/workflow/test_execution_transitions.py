@@ -13,7 +13,6 @@ from sqlalchemy import event
 from sqlmodel import Session, SQLModel, col, create_engine, select
 
 import services.agent_workbench.post_sprint_triage as triage_service
-import services.agent_workbench.sprint_phase as sprint_service
 import services.story_close_service as story_service
 import services.task_execution_service as task_service
 from models.core import (
@@ -21,7 +20,6 @@ from models.core import (
     Sprint,
     SprintStory,
     Task,
-    Team,
     UserStory,
     UserStoryDependency,
 )
@@ -40,7 +38,6 @@ from tests.workflow.execution_fixtures import (
     seed_started_execution,
     seed_started_execution_with_unselected_story,
 )
-from utils.task_metadata import TaskMetadata, serialize_task_metadata
 from workflow.clock import FixedClock
 from workflow.contracts import JsonObject, NodeDecision, WorkflowErrorCode
 from workflow.definitions.execution import execution_graph
@@ -62,7 +59,7 @@ if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
 
 EVALUATED_AT = datetime(2026, 8, 2, 12, tzinfo=UTC)
-EXPECTED_REQUEST_VARIANT_COUNT = 37
+EXPECTED_REQUEST_VARIANT_COUNT = 33
 EXECUTION_REQUESTS = (
     CompleteTask,
     CloseStory,
@@ -106,50 +103,14 @@ def _seed_active_task(engine: Engine) -> tuple[int, int, int, int]:
 
 
 def _seed_unlineaged_active_task(engine: Engine) -> tuple[int, int, int, int]:
+    project_id, sprint_id, story_id, task_id = seed_started_execution(engine)
     with Session(engine) as session:
-        project = Project(name="Task 12")
-        team = Team(name="Task 12 Team")
-        session.add(project)
-        session.add(team)
-        session.flush()
-        assert project.project_id is not None
-        assert team.team_id is not None
-        sprint = Sprint(
-            project_id=project.project_id,
-            team_id=team.team_id,
-            status=SprintStatus.ACTIVE,
-            started_at=EVALUATED_AT,
-        )
-        story = UserStory(
-            project_id=project.project_id,
-            title="Execute graph work",
-            status=StoryStatus.TO_DO,
-            is_refined=True,
-            story_points=3,
-            rank="1",
-        )
-        session.add(sprint)
-        session.add(story)
-        session.flush()
-        assert sprint.sprint_id is not None
-        assert story.story_id is not None
-        session.add(SprintStory(sprint_id=sprint.sprint_id, story_id=story.story_id))
-        task = Task(
-            story_id=story.story_id,
-            description="Implement execution graph",
-            metadata_json=serialize_task_metadata(
-                TaskMetadata(
-                    task_kind="implementation",
-                    artifact_targets=["workflow/definitions/execution.py"],
-                    checklist_items=["Focused tests pass"],
-                )
-            ),
-            status=TaskStatus.IN_PROGRESS,
-        )
-        session.add(task)
+        start = session.exec(
+            select(SprintStart).where(SprintStart.sprint_id == sprint_id)
+        ).one()
+        session.delete(start)
         session.commit()
-        assert task.task_id is not None
-        return project.project_id, sprint.sprint_id, story.story_id, task.task_id
+    return project_id, sprint_id, story_id, task_id
 
 
 def _decision(
@@ -411,6 +372,8 @@ def test_task_story_and_triage_instance_guards_are_exact() -> None:
 
 def test_execution_service_mutations_use_only_caller_owned_session() -> None:
     """Keep execution mutations inside the handler-owned transaction."""
+    import services.agent_workbench.sprint_phase as sprint_service  # noqa: PLC0415
+
     functions = (
         task_service.complete_task_in_session,
         story_service.close_story_in_session,
@@ -922,10 +885,24 @@ def test_closed_sprint_ignores_unrelated_future_rejected_dependency(
         f"sprint:{sprint_id}",
     )
     with Session(engine) as session:
+        source_story = session.get(UserStory, _story_id)
+        assert source_story is not None
         future_stories = [
             UserStory(
                 project_id=project_id,
+                source_story_artifact_id=source_story.source_story_artifact_id,
+                source_story_artifact_fingerprint=(
+                    source_story.source_story_artifact_fingerprint
+                ),
+                source_story_item_id=f"US-009{index}",
+                source_story_item_fingerprint=f"sha256:future-{index}",
+                accepted_spec_version_id=source_story.accepted_spec_version_id,
+                accepted_spec_hash=source_story.accepted_spec_hash,
+                spec_item_ids_json=source_story.spec_item_ids_json,
                 title=f"Future Story {index}",
+                story_description=source_story.story_description,
+                acceptance_criteria_json=source_story.acceptance_criteria_json,
+                persona=source_story.persona,
                 status=StoryStatus.TO_DO,
                 is_refined=False,
                 rank=f"9.{index}",

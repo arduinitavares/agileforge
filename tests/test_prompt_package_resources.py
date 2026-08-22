@@ -20,19 +20,16 @@ _RETAINED_PROMPTS = (
     "product_goal.txt",
     "roadmap.txt",
     "spec_validator.txt",
-    "specification.txt",
     "sprint.txt",
     "story.txt",
     "story_patch.txt",
     "vision.txt",
 )
 _RETAINED_LEAVES = (
-    "adapters.adk.agents.authority",
     "adapters.adk.agents.backlog",
     "adapters.adk.agents.product_goal",
     "adapters.adk.agents.roadmap",
     "adapters.adk.agents.spec_validator",
-    "adapters.adk.agents.specification",
     "adapters.adk.agents.sprint",
     "adapters.adk.agents.story",
     "adapters.adk.agents.vision",
@@ -162,6 +159,20 @@ def test_retained_prompt_loaders_use_package_resources() -> None:
     for path in Path("adapters/adk").rglob("*.py"):
         content = path.read_text(encoding="utf-8")
         assert "Path(__file__)" not in content, path
+
+
+def test_spec_validator_prompt_has_one_direct_specification_root() -> None:
+    """Package the direct Story/PBI/Specification prompt without old contracts."""
+    prompt = (
+        importlib.resources.files("adapters.adk.prompts")
+        .joinpath("spec_validator.txt")
+        .read_text(encoding="utf-8")
+    )
+    assert prompt.count("accepted_specification_json") == 1
+    assert "parent_backlog_item_id" in prompt
+    assert "parent_backlog_spec_item_ids" in prompt
+    assert "StorySpecificationReviewOutput" in prompt
+    assert "invariant" not in prompt.casefold()
 
 
 def test_built_wheel_contains_and_loads_retained_prompt_resources(

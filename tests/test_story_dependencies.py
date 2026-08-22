@@ -8,10 +8,21 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
-from models.core import Project, UserStory, UserStoryDependency
+from models.core import UserStory, UserStoryDependency
 from models.events import WorkflowEvent
-from models.workflow import StoryDependencyReview
+from models.workflow import BacklogArtifact, StoryDependencyReview
 from repositories.workflow import WorkflowFactRepository
+from services.agent_workbench.story_phase import (
+    RecordStoryDecisionInput,
+    RecordStoryDraftInput,
+    record_story_decision_in_session,
+    record_story_draft_in_session,
+)
+from services.contracts.story import (
+    CanonicalStoryItem,
+    CanonicalStoryOutput,
+    StoryItemEnvelope,
+)
 from services.story_dependencies import (
     ApplyStoryDependenciesInput,
     StoryDependencyGraphError,
@@ -20,8 +31,10 @@ from services.story_dependencies import (
     detect_dependency_cycles,
     load_story_dependency_graph,
 )
+from tests.test_create_user_story import _seed_story_parent
+from tests.workflow.test_planning_transitions import EVALUATED_AT, _roadmap_content
 from workflow.facts import StoryDependencyReviewEdgeFact
-from workflow.fingerprints import canonical_json
+from workflow.fingerprints import canonical_hash, canonical_json
 from workflow.planning_integrity import (
     canonical_dependency_edges,
     dependency_edges_payload,
@@ -31,41 +44,83 @@ from workflow.planning_integrity import (
 REVIEWED_AT = datetime(2026, 8, 2, 12, tzinfo=UTC)
 
 
-def _story_pair(session: Session) -> tuple[int, int, int]:
-    project = Project(name="Dependency Test Project")
-    session.add(project)
+def _story_set(session: Session, *, titles: tuple[str, ...]) -> tuple[int, ...]:
+    engine = session.get_bind()
+    assert isinstance(engine, Engine)
+    project_id, roadmap_id = _seed_story_parent(engine)
+    backlog = session.exec(
+        select(BacklogArtifact).where(BacklogArtifact.project_id == project_id)
+    ).one()
+    items = tuple(
+        CanonicalStoryItem(
+            story_item_id=f"US-{ordinal:04d}",
+            story_title=title,
+            statement=(
+                f"As an operator, I want {title.lower()}, so that delivery is exact."
+            ),
+            persona="operator",
+            acceptance_criteria=(f"Verify {title}.",),
+            spec_item_ids=("REQ.planning-1",),
+            invest_score="High",
+            estimated_effort="S",
+            produced_artifacts=(),
+            research_caveats=(),
+            decomposition_warning=None,
+            dependency_candidates=(),
+        )
+        for ordinal, title in enumerate(titles, start=1)
+    )
+    content = CanonicalStoryOutput(
+        story_items=tuple(
+            StoryItemEnvelope(
+                item=item,
+                item_fingerprint=canonical_hash(item.model_dump(mode="json")),
+            )
+            for item in items
+        ),
+        is_complete=True,
+    ).model_dump(mode="json")
+    artifact = record_story_draft_in_session(
+        session,
+        inputs=RecordStoryDraftInput(
+            project_id=project_id,
+            source_backlog_artifact_id=int(backlog.backlog_artifact_id or 0),
+            source_backlog_artifact_fingerprint=backlog.content_fingerprint,
+            backlog_item_id="PBI-000001",
+            roadmap_artifact_id=roadmap_id,
+            roadmap_artifact_fingerprint=canonical_hash(_roadmap_content()),
+            canonical_content=content,
+            content_fingerprint=canonical_hash(content),
+            supersedes_story_artifact_id=None,
+            actor="dependency-reviewer",
+            recorded_at=EVALUATED_AT,
+        ),
+    )
+    result = record_story_decision_in_session(
+        session,
+        inputs=RecordStoryDecisionInput(
+            artifact=artifact,
+            decision="accepted",
+            rationale="Accepted dependency Story set.",
+            reviewer="dependency-reviewer",
+            idempotency_key=f"accept-dependency-{project_id}",
+            decided_at=REVIEWED_AT,
+        ),
+    )
     session.commit()
-    session.refresh(project)
-    assert project.project_id is not None
+    return (project_id, *result.activated_story_ids)
 
-    prerequisite = UserStory(
-        title="Capture market data",
-        project_id=project.project_id,
-        rank="101",
-        source_requirement="REQ.live",
-        refinement_slot=1,
-        story_origin="refined",
-        is_refined=True,
-        story_points=2,
+
+def _story_pair(session: Session) -> tuple[int, int, int]:
+    project_id, prerequisite_id, dependent_id, _final_id = _story_set(
+        session,
+        titles=(
+            "Capture market data",
+            "Generate recommendation",
+            "Deliver recommendation",
+        ),
     )
-    dependent = UserStory(
-        title="Generate recommendation",
-        project_id=project.project_id,
-        rank="102",
-        source_requirement="REQ.live",
-        refinement_slot=2,
-        story_origin="refined",
-        is_refined=True,
-        story_points=3,
-    )
-    session.add(prerequisite)
-    session.add(dependent)
-    session.commit()
-    session.refresh(prerequisite)
-    session.refresh(dependent)
-    assert prerequisite.story_id is not None
-    assert dependent.story_id is not None
-    return project.project_id, dependent.story_id, prerequisite.story_id
+    return project_id, dependent_id, prerequisite_id
 
 
 def _make_story(
@@ -75,19 +130,13 @@ def _make_story(
     title: str,
     slot: int,
 ) -> int:
-    story = UserStory(
-        title=title,
-        project_id=project_id,
-        rank=f"10{slot}",
-        source_requirement="REQ.live",
-        refinement_slot=slot,
-        story_origin="refined",
-        is_refined=True,
-        story_points=1,
-    )
-    session.add(story)
-    session.commit()
-    session.refresh(story)
+    story = session.exec(
+        select(UserStory).where(
+            UserStory.project_id == project_id,
+            UserStory.source_story_item_id == f"US-{slot:04d}",
+        )
+    ).one()
+    assert story.title == title
     assert story.story_id is not None
     return story.story_id
 
@@ -251,6 +300,39 @@ def test_caller_session_writer_rejects_duplicate_edges_before_write(
     assert session.exec(select(WorkflowEvent)).all() == []
 
 
+def test_dependency_review_rejects_cross_specification_story_roots(
+    session: Session,
+) -> None:
+    """Fail closed before persisting an edge across mixed accepted Spec roots."""
+    project_id, dependent_story_id, prerequisite_story_id = _story_pair(session)
+    prerequisite = session.get(UserStory, prerequisite_story_id)
+    assert prerequisite is not None
+    prerequisite.accepted_spec_version_id += 1
+    prerequisite.accepted_spec_hash = "sha256:" + ("f" * 64)
+    edge = StoryDependencyReviewEdgeFact(
+        dependent_story_id=dependent_story_id,
+        prerequisite_story_id=prerequisite_story_id,
+        reason="This mixed root must never persist.",
+    )
+
+    with session.no_autoflush, pytest.raises(StoryDependencyGraphError) as raised:
+        _apply_dependency_review(
+            session,
+            project_id=project_id,
+            selected_story_ids=tuple(
+                sorted((dependent_story_id, prerequisite_story_id))
+            ),
+            reviewed_edges=(edge,),
+        )
+
+    assert [issue.code for issue in raised.value.issues] == [
+        "STORY_DEPENDENCY_CROSS_SPECIFICATION"
+    ]
+    session.rollback()
+    assert session.exec(select(UserStoryDependency)).all() == []
+    assert session.exec(select(StoryDependencyReview)).all() == []
+
+
 def test_dependency_table_accepts_proposed_edge(session: Session) -> None:
     """Persist a proposed dependency edge with review metadata."""
     project_id, dependent_story_id, prerequisite_story_id = _story_pair(session)
@@ -399,17 +481,13 @@ def test_detect_cycle_returns_cycle_path() -> None:
 
 def test_inspect_payload_separates_active_and_proposed_edges(session: Session) -> None:
     """Expose active and proposed dependency edges in separate inspect buckets."""
-    project = Project(name="Dependency Inspect Project")
-    session.add(project)
-    session.commit()
-    session.refresh(project)
-    assert project.project_id is not None
-    story_a = _make_story(session, project_id=project.project_id, title="A", slot=1)
-    story_b = _make_story(session, project_id=project.project_id, title="B", slot=2)
-    story_c = _make_story(session, project_id=project.project_id, title="C", slot=3)
+    project_id, story_a, story_b, story_c = _story_set(
+        session,
+        titles=("A", "B", "C"),
+    )
     session.add(
         UserStoryDependency(
-            project_id=project.project_id,
+            project_id=project_id,
             dependent_story_id=story_b,
             prerequisite_story_id=story_a,
             status="active",
@@ -419,7 +497,7 @@ def test_inspect_payload_separates_active_and_proposed_edges(session: Session) -
     )
     session.add(
         UserStoryDependency(
-            project_id=project.project_id,
+            project_id=project_id,
             dependent_story_id=story_c,
             prerequisite_story_id=story_b,
             status="proposed",
@@ -429,7 +507,7 @@ def test_inspect_payload_separates_active_and_proposed_edges(session: Session) -
     )
     session.commit()
 
-    payload = dependency_inspect_payload(session, project_id=project.project_id)
+    payload = dependency_inspect_payload(session, project_id=project_id)
 
     assert payload["active_edge_count"] == 1
     assert payload["proposed_edge_count"] == 1

@@ -11,18 +11,16 @@ from models.product_definition import (
     ProductGoalArtifactDecision,
     ProductGoalOutcome,
 )
-from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance, SpecRegistry
 from models.workflow import (
     BacklogArtifact,
     BacklogArtifactDecision,
     VisionArtifact,
     WorkflowTransitionReceipt,
 )
-from services.agent_workbench.backlog_phase import (
-    record_backlog_decision_in_session,
-    record_backlog_draft_in_session,
+from services.specs.accepted_specification import (
+    AcceptedSpecificationIntegrityError,
+    load_current_accepted_specification,
 )
-from services.specs.authority_selection import pending_authority_fingerprint
 from workflow.contracts import (
     NodeDecision,
     TransitionResult,
@@ -51,40 +49,25 @@ def _conflict(message: str) -> TransitionResult:
     )
 
 
-def _accepted_authority(
+def _accepted_specification(
     session: Session,
     *,
     project_id: int,
-    authority_id: int,
-    authority_fingerprint: str,
-) -> CompiledSpecAuthority | None:
-    authority = session.exec(
-        select(CompiledSpecAuthority)
-        .join(
-            SpecRegistry,
-            col(CompiledSpecAuthority.spec_version_id)
-            == col(SpecRegistry.spec_version_id),
+    spec_version_id: int,
+    spec_hash: str,
+) -> bool:
+    try:
+        specification = load_current_accepted_specification(
+            session,
+            project_id=project_id,
         )
-        .where(
-            col(SpecRegistry.project_id) == project_id,
-            col(SpecRegistry.status) == "approved",
-            col(CompiledSpecAuthority.authority_id) == authority_id,
-        )
-    ).one_or_none()
-    if (
-        authority is None
-        or pending_authority_fingerprint(authority) != authority_fingerprint
-    ):
-        return None
-    acceptance = session.exec(
-        select(SpecAuthorityAcceptance).where(
-            col(SpecAuthorityAcceptance.project_id) == project_id,
-            col(SpecAuthorityAcceptance.pending_authority_id) == authority_id,
-            col(SpecAuthorityAcceptance.authority_fingerprint) == authority_fingerprint,
-            col(SpecAuthorityAcceptance.status) == "accepted",
-        )
-    ).one_or_none()
-    return authority if acceptance is not None else None
+    except AcceptedSpecificationIntegrityError:
+        return False
+    return (
+        specification is not None
+        and specification.spec_version_id == spec_version_id
+        and specification.spec_hash == spec_hash
+    )
 
 
 def _matches_reference(
@@ -213,12 +196,12 @@ def execute_record_backlog_draft(
     decision: NodeDecision,
     evaluated_at: datetime,
 ) -> TransitionResult:
-    """Record host-validated Backlog content for exact graph authority facts."""
-    authority = _accepted_authority(
+    """Validate exact direct-Specification Backlog guards before persistence."""
+    specification_matches = _accepted_specification(
         session,
         project_id=request.project_id,
-        authority_id=request.authority_id,
-        authority_fingerprint=request.authority_fingerprint,
+        spec_version_id=request.spec_version_id,
+        spec_hash=request.spec_hash,
     )
     goal = _accepted_goal(
         session,
@@ -228,13 +211,13 @@ def execute_record_backlog_draft(
     )
     expected_parent = _expected_parent(decision, "backlog")
     if (
-        authority is None
+        not specification_matches
         or goal is None
         or not _matches_reference(
             decision,
-            fact_type="authority",
-            fact_id=request.authority_id,
-            fingerprint=request.authority_fingerprint,
+            fact_type="specification",
+            fact_id=request.spec_version_id,
+            fingerprint=request.spec_hash,
         )
         or not _matches_reference(
             decision,
@@ -245,12 +228,16 @@ def execute_record_backlog_draft(
         or request.supersedes_backlog_artifact_id != expected_parent
     ):
         return _conflict("RecordBacklogDraft does not target exact graph facts.")
+    from services.agent_workbench.backlog_phase import (  # noqa: PLC0415
+        record_backlog_draft_in_session,
+    )
+
     try:
         row = record_backlog_draft_in_session(
             session,
             project_id=request.project_id,
-            authority_id=request.authority_id,
-            authority_fingerprint=request.authority_fingerprint,
+            spec_version_id=request.spec_version_id,
+            spec_hash=request.spec_hash,
             product_goal_artifact_id=request.product_goal_artifact_id,
             product_goal_fingerprint=request.product_goal_fingerprint,
             canonical_content=request.canonical_content,
@@ -269,7 +256,7 @@ def execute_record_backlog_draft(
         {
             "backlog_artifact_id": row.backlog_artifact_id,
             "content_fingerprint": row.content_fingerprint,
-            "authority_id": row.authority_id,
+            "spec_version_id": row.spec_version_id,
             "product_goal_artifact_id": row.product_goal_artifact_id,
         },
     )
@@ -300,6 +287,10 @@ def execute_decide_backlog(
     ):
         return _conflict("DecideBacklog does not target the waiting artifact.")
     try:
+        from services.agent_workbench.backlog_phase import (  # noqa: PLC0415
+            record_backlog_decision_in_session,
+        )
+
         row = record_backlog_decision_in_session(
             session,
             artifact=artifact,

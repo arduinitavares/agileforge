@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, col, select
 
 from models.workflow import (
@@ -19,27 +20,6 @@ from models.workflow import (
     WorkflowTransitionReceipt,
 )
 from repositories.workflow import WorkflowFactRepository
-from services.agent_workbench.roadmap_phase import (
-    RecordRoadmapDecisionInput,
-    RecordRoadmapDraftInput,
-    record_roadmap_decision_in_session,
-    record_roadmap_draft_in_session,
-)
-from services.agent_workbench.sprint_phase import (
-    RecordSprintPlanDecisionInput,
-    RecordSprintPlanInput,
-    SprintStartInput,
-    record_sprint_plan_decision_in_session,
-    record_sprint_plan_in_session,
-    start_sprint_in_session,
-)
-from services.agent_workbench.story_phase import (
-    RecordStoryDecisionInput,
-    RecordStoryDraftInput,
-    record_story_decision_in_session,
-    record_story_draft_in_session,
-    repair_story_readiness_in_session,
-)
 from services.story_dependencies import (
     ApplyStoryDependenciesInput,
     StoryDependencyGraphError,
@@ -57,12 +37,7 @@ from workflow.definitions.planning import (
     readiness_fingerprint,
     story_dependency_source_fingerprint,
 )
-from workflow.execution_integrity import (
-    ExecutionIntegrityError,
-    current_dependency_review,
-    selected_story_dependency_snapshot,
-)
-from workflow.planning_integrity import current_task_content_fingerprint
+from workflow.definitions.product_discovery import accepted_current_spec
 from workflow.requests.planning import (
     ApplyStoryDependencies,
     DecideRoadmap,
@@ -135,6 +110,10 @@ def _conflict(message: str) -> TransitionResult:
     )
 
 
+def _workflow_error(code: WorkflowErrorCode, message: str) -> TransitionResult:
+    return TransitionResult(ok=False, error=WorkflowError(code=code, message=message))
+
+
 def _matches_reference(
     decision: NodeDecision,
     *,
@@ -159,11 +138,11 @@ def _expected_parent(decision: NodeDecision, fact_type: str) -> int | None:
     return max(ids) if ids else None
 
 
-def _current_sprint_plan(
+def _sprint_plan_fact(
     snapshot: WorkflowFactSnapshot,
     artifact_id: int,
-) -> tuple[PlanningArtifactFact, str, str] | None:
-    plan = next(
+) -> PlanningArtifactFact | None:
+    return next(
         (
             item
             for item in snapshot.planning_artifacts
@@ -171,26 +150,6 @@ def _current_sprint_plan(
         ),
         None,
     )
-    if plan is None or plan.sprint_id is None:
-        return None
-    stories = tuple(
-        sorted(
-            (item for item in snapshot.stories if item.sprint_candidate),
-            key=lambda item: item.story_id,
-        )
-    )
-    candidates = candidate_set_fingerprint(stories, snapshot.story_dependencies)
-    tasks = current_task_content_fingerprint(
-        snapshot.tasks,
-        sprint_id=plan.sprint_id,
-        story_ids=plan.story_ids,
-    )
-    if (
-        plan.candidate_set_fingerprint != candidates
-        or plan.task_content_fingerprint != tasks
-    ):
-        return None
-    return plan, candidates, tasks
 
 
 def _review_request_matches(
@@ -215,7 +174,7 @@ def _review_request_matches(
     if isinstance(persisted, DecideStory) and isinstance(request, DecideStory):
         return (
             common
-            and persisted.requirement_id == request.requirement_id
+            and persisted.backlog_item_id == request.backlog_item_id
             and persisted.story_artifact_id == request.story_artifact_id
             and persisted.artifact_fingerprint == request.artifact_fingerprint
         )
@@ -305,6 +264,11 @@ def execute_record_roadmap_draft(
         != _expected_parent(decision, "roadmap")
     ):
         return _conflict("RecordRoadmapDraft does not target exact graph facts.")
+    from services.agent_workbench.roadmap_phase import (  # noqa: PLC0415
+        RecordRoadmapDraftInput,
+        record_roadmap_draft_in_session,
+    )
+
     try:
         row = record_roadmap_draft_in_session(
             session,
@@ -351,6 +315,11 @@ def execute_decide_roadmap(
         )
     ):
         return _conflict("DecideRoadmap does not target the waiting artifact.")
+    from services.agent_workbench.roadmap_phase import (  # noqa: PLC0415
+        RecordRoadmapDecisionInput,
+        record_roadmap_decision_in_session,
+    )
+
     try:
         row = record_roadmap_decision_in_session(
             session,
@@ -382,26 +351,32 @@ def execute_record_story_draft(
     evaluated_at: datetime,
 ) -> TransitionResult:
     snapshot = WorkflowFactRepository(session).load(request.project_id)
-    requirement = next(
+    backlog_item = next(
         (
             item
-            for item in snapshot.backlog_requirements
-            if item.requirement_id == request.requirement_id
+            for item in snapshot.backlog_items
+            if item.backlog_item_id == request.backlog_item_id
+            and item.backlog_artifact_id == request.source_backlog_artifact_id
+            and item.backlog_artifact_fingerprint
+            == request.source_backlog_artifact_fingerprint
             and _matches_reference(
                 decision,
-                fact_type="backlog_requirement",
-                fact_id=item.requirement_id,
-                fingerprint=item.backlog_artifact_fingerprint,
+                fact_type="backlog_item",
+                fact_id=item.backlog_item_id,
+                fingerprint=item.item_fingerprint,
             )
         ),
         None,
     )
     roadmap = session.get(RoadmapArtifact, request.roadmap_artifact_id)
     if (
-        requirement is None
+        backlog_item is None
         or roadmap is None
         or roadmap.project_id != request.project_id
         or roadmap.content_fingerprint != request.roadmap_artifact_fingerprint
+        or roadmap.backlog_artifact_id != request.source_backlog_artifact_id
+        or roadmap.backlog_artifact_fingerprint
+        != request.source_backlog_artifact_fingerprint
         or not _matches_reference(
             decision,
             fact_type="roadmap",
@@ -411,14 +386,21 @@ def execute_record_story_draft(
         or request.supersedes_story_artifact_id != _expected_parent(decision, "story")
     ):
         return _conflict("RecordStoryDraft does not target exact graph facts.")
+    from services.agent_workbench.story_phase import (  # noqa: PLC0415
+        RecordStoryDraftInput,
+        record_story_draft_in_session,
+    )
+
     try:
         row = record_story_draft_in_session(
             session,
             inputs=RecordStoryDraftInput(
                 project_id=request.project_id,
-                requirement_id=request.requirement_id,
-                requirement_text=requirement.requirement,
-                requirement_rank=requirement.rank,
+                source_backlog_artifact_id=request.source_backlog_artifact_id,
+                source_backlog_artifact_fingerprint=(
+                    request.source_backlog_artifact_fingerprint
+                ),
+                backlog_item_id=request.backlog_item_id,
                 roadmap_artifact_id=request.roadmap_artifact_id,
                 roadmap_artifact_fingerprint=(request.roadmap_artifact_fingerprint),
                 canonical_content=request.canonical_content,
@@ -436,9 +418,9 @@ def execute_record_story_draft(
         decision,
         {
             "story_artifact_id": row.story_artifact_id,
-            "story_ids": tuple(json.loads(row.story_ids_json)),
+            "story_item_ids": tuple(json.loads(row.story_item_ids_json)),
             "content_fingerprint": row.content_fingerprint,
-            "requirement_id": row.requirement_id,
+            "backlog_item_id": row.backlog_item_id,
         },
     )
 
@@ -453,7 +435,7 @@ def execute_decide_story(
     if (
         artifact is None
         or artifact.project_id != request.project_id
-        or artifact.requirement_id != request.requirement_id
+        or artifact.backlog_item_id != request.backlog_item_id
         or artifact.content_fingerprint != request.artifact_fingerprint
         or not _matches_reference(
             decision,
@@ -463,8 +445,14 @@ def execute_decide_story(
         )
     ):
         return _conflict("DecideStory does not target the waiting artifact.")
+    from services.agent_workbench.story_phase import (  # noqa: PLC0415
+        RecordStoryDecisionInput,
+        prove_story_decision_winner_in_session,
+        record_story_decision_in_session,
+    )
+
     try:
-        row = record_story_decision_in_session(
+        result = record_story_decision_in_session(
             session,
             inputs=RecordStoryDecisionInput(
                 artifact=artifact,
@@ -475,16 +463,51 @@ def execute_decide_story(
                 decided_at=evaluated_at,
             ),
         )
+    except IntegrityError as error:
+        if not _is_story_decision_uniqueness_race(error):
+            raise
+        session.rollback()
+        if not prove_story_decision_winner_in_session(
+            session,
+            project_id=request.project_id,
+            story_artifact_id=request.story_artifact_id,
+            artifact_fingerprint=request.artifact_fingerprint,
+        ):
+            raise
+        return _conflict(
+            "The Story artifact was decided by another workflow transition."
+        )
     except ValueError as error:
         return _conflict(str(error))
     return _success(
         decision,
         {
-            "story_artifact_decision_id": row.story_artifact_decision_id,
+            "story_artifact_decision_id": (result.decision.story_artifact_decision_id),
             "story_artifact_id": request.story_artifact_id,
             "decision": request.decision,
+            "activated_story_ids": result.activated_story_ids,
         },
     )
+
+
+def _is_story_decision_uniqueness_race(error: IntegrityError) -> bool:
+    """Classify only the two named Story decision/materialization constraints."""
+    constraint_names = {
+        "uq_story_artifact_decision",
+        "uq_user_story_artifact_item",
+    }
+    original = error.orig
+    diagnostic = getattr(original, "diag", None)
+    constraint_name = getattr(diagnostic, "constraint_name", None)
+    if constraint_name is not None:
+        return constraint_name in constraint_names
+    return str(original) in {
+        "UNIQUE constraint failed: story_artifact_decisions.project_id, "
+        "story_artifact_decisions.story_artifact_id",
+        "UNIQUE constraint failed: user_stories.project_id, "
+        "user_stories.source_story_artifact_id, "
+        "user_stories.source_story_item_id",
+    }
 
 
 def execute_apply_story_dependencies(
@@ -558,6 +581,10 @@ def execute_repair_story_readiness(
         )
     ):
         return _conflict("RepairStoryReadiness does not target exact Story facts.")
+    from services.agent_workbench.story_phase import (  # noqa: PLC0415
+        repair_story_readiness_in_session,
+    )
+
     try:
         repaired = repair_story_readiness_in_session(
             session,
@@ -573,50 +600,62 @@ def execute_repair_story_readiness(
     return _success(decision, {"story_ids": repaired})
 
 
-def execute_record_sprint_plan(
+def execute_record_sprint_plan(  # noqa: PLR0911
     session: Session,
     request: RecordSprintPlan,
     decision: NodeDecision,
     evaluated_at: datetime,
 ) -> TransitionResult:
-    stories, dependencies = _candidate_set_in_session(
-        session,
-        project_id=request.project_id,
-    )
-    current = candidate_set_fingerprint(stories, dependencies)
-    candidate_ids = {item.story_id for item in stories}
+    snapshot = WorkflowFactRepository(session).load(request.project_id)
+    specification = accepted_current_spec(snapshot)
     if (
-        request.candidate_set_fingerprint != current
-        or any(item not in candidate_ids for item in request.selected_story_ids)
+        specification is None
+        or request.spec_version_id != specification.spec_version_id
+        or request.spec_hash != specification.spec_hash
         or not _matches_reference(
             decision,
-            fact_type="candidate_set",
-            fact_id=request.project_id,
-            fingerprint=current,
+            fact_type="specification",
+            fact_id=request.spec_version_id,
+            fingerprint=request.spec_hash,
         )
-        or request.supersedes_sprint_plan_artifact_id
-        != _expected_parent(decision, "sprint_plan")
     ):
-        return _conflict("RecordSprintPlan does not target exact candidate facts.")
+        return _workflow_error(
+            WorkflowErrorCode.STALE_SPECIFICATION,
+            "Sprint planning requires the current accepted Specification.",
+        )
+    from services.agent_workbench.sprint_phase import (  # noqa: PLC0415
+        RecordSprintPlanInput,
+        record_sprint_plan_in_session,
+    )
+
     try:
         row = record_sprint_plan_in_session(
             session,
             inputs=RecordSprintPlanInput(
                 project_id=request.project_id,
+                spec_version_id=request.spec_version_id,
+                spec_hash=request.spec_hash,
                 team_name=request.team_name,
-                selected_story_ids=request.selected_story_ids,
-                canonical_task_plan=request.canonical_task_plan,
-                plan_fingerprint=request.plan_fingerprint,
-                candidate_set_fingerprint=request.candidate_set_fingerprint,
-                supersedes_sprint_plan_artifact_id=(
-                    request.supersedes_sprint_plan_artifact_id
-                ),
-                include_task_decomposition=request.include_task_decomposition,
+                planner_output=request.planner_output,
                 actor=request.actor,
                 recorded_at=evaluated_at,
             ),
         )
-    except (ValueError, StoryDependencyGraphError) as error:
+    except StoryDependencyGraphError as error:
+        return _conflict(str(error))
+    except ValueError as error:
+        from services.agent_workbench.sprint_phase import (  # noqa: PLC0415
+            SprintPlanStreamCollisionError,
+            StaleSpecificationError,
+        )
+
+        if isinstance(error, StaleSpecificationError):
+            return _workflow_error(WorkflowErrorCode.STALE_SPECIFICATION, str(error))
+        if isinstance(error, SprintPlanStreamCollisionError):
+            return _workflow_error(
+                WorkflowErrorCode.SPRINT_PLAN_STREAM_ID_COLLISION,
+                str(error),
+            )
         return _conflict(str(error))
     if row.sprint_plan_artifact_id is None:
         return _conflict("Sprint plan artifact did not receive a durable identity.")
@@ -624,7 +663,7 @@ def execute_record_sprint_plan(
         decision,
         {
             "sprint_plan_artifact_id": row.sprint_plan_artifact_id,
-            "sprint_id": row.sprint_id,
+            "sprint_plan_stream_id": row.sprint_plan_stream_id,
             "plan_fingerprint": row.plan_fingerprint,
             "candidate_set_fingerprint": row.candidate_set_fingerprint,
         },
@@ -639,44 +678,46 @@ def execute_decide_sprint_plan(
 ) -> TransitionResult:
     artifact = session.get(SprintPlanArtifact, request.sprint_plan_artifact_id)
     snapshot = WorkflowFactRepository(session).load(request.project_id)
-    current_plan = _current_sprint_plan(snapshot, request.sprint_plan_artifact_id)
+    current_plan = _sprint_plan_fact(snapshot, request.sprint_plan_artifact_id)
+    specification = accepted_current_spec(snapshot)
+    stories = tuple(item for item in snapshot.stories if item.sprint_candidate)
+    current_candidate = candidate_set_fingerprint(stories, snapshot.story_dependencies)
     if (
         artifact is None
         or current_plan is None
+        or current_plan.status != "pending_review"
         or artifact.project_id != request.project_id
         or artifact.plan_fingerprint != request.plan_fingerprint
+        or specification is None
+        or artifact.spec_version_id != specification.spec_version_id
+        or artifact.spec_hash != specification.spec_hash
+        or artifact.candidate_set_fingerprint != current_candidate
         or not _matches_reference(
             decision,
             fact_type="sprint_plan",
             fact_id=request.sprint_plan_artifact_id,
             fingerprint=request.plan_fingerprint,
         )
-        or not _matches_reference(
-            decision,
-            fact_type="candidate_set",
-            fact_id=request.project_id,
-            fingerprint=current_plan[1],
-        )
-        or not _matches_reference(
-            decision,
-            fact_type="sprint_plan_tasks",
-            fact_id=artifact.sprint_id,
-            fingerprint=current_plan[2],
-        )
     ):
         return _conflict("DecideSprintPlan does not target the waiting artifact.")
+    from services.agent_workbench.sprint_phase import (  # noqa: PLC0415
+        RecordSprintPlanDecisionInput,
+        record_sprint_plan_decision_in_session,
+    )
+
     try:
-        row = record_sprint_plan_decision_in_session(
-            session,
-            inputs=RecordSprintPlanDecisionInput(
-                artifact=artifact,
-                decision=request.decision,
-                rationale=request.rationale,
-                reviewer=request.actor,
-                idempotency_key=request.idempotency_key,
-                decided_at=evaluated_at,
-            ),
-        )
+        with session.begin_nested():
+            row = record_sprint_plan_decision_in_session(
+                session,
+                inputs=RecordSprintPlanDecisionInput(
+                    artifact=artifact,
+                    decision=request.decision,
+                    rationale=request.rationale,
+                    reviewer=request.actor,
+                    idempotency_key=request.idempotency_key,
+                    decided_at=evaluated_at,
+                ),
+            )
     except ValueError as error:
         return _conflict(str(error))
     return _success(
@@ -685,6 +726,7 @@ def execute_decide_sprint_plan(
             "sprint_plan_artifact_decision_id": (row.sprint_plan_artifact_decision_id),
             "sprint_plan_artifact_id": request.sprint_plan_artifact_id,
             "decision": request.decision,
+            "activated_sprint_id": row.activated_sprint_id,
         },
     )
 
@@ -695,89 +737,45 @@ def execute_start_sprint(
     decision: NodeDecision,
     evaluated_at: datetime,
 ) -> TransitionResult:
-    artifact = session.get(SprintPlanArtifact, request.sprint_plan_artifact_id)
-    accepted = session.exec(
-        select(SprintPlanArtifactDecision).where(
-            col(SprintPlanArtifactDecision.project_id) == request.project_id,
-            col(SprintPlanArtifactDecision.sprint_plan_artifact_id)
-            == request.sprint_plan_artifact_id,
-            col(SprintPlanArtifactDecision.decision) == "accepted",
-        )
-    ).one_or_none()
-    stories, dependencies = _candidate_set_in_session(
-        session,
-        project_id=request.project_id,
+    task_references = tuple(
+        item
+        for item in decision.fact_references
+        if item.fact_type == "sprint_plan_tasks"
     )
-    current = candidate_set_fingerprint(stories, dependencies)
-    snapshot = WorkflowFactRepository(session).load(request.project_id)
-    current_plan = _current_sprint_plan(snapshot, request.sprint_plan_artifact_id)
-    try:
-        candidate_dependency_review = current_dependency_review(snapshot)
-    except ExecutionIntegrityError:
-        candidate_dependency_review = None
-    if (
-        artifact is None
-        or accepted is None
-        or current_plan is None
-        or candidate_dependency_review is None
-        or artifact.sprint_id != request.sprint_id
-        or artifact.plan_fingerprint != request.plan_fingerprint
-        or artifact.candidate_set_fingerprint != request.candidate_set_fingerprint
-        or current != request.candidate_set_fingerprint
-        or not _matches_reference(
-            decision,
-            fact_type="sprint_plan",
-            fact_id=request.sprint_plan_artifact_id,
-            fingerprint=request.plan_fingerprint,
-        )
-        or not _matches_reference(
-            decision,
-            fact_type="candidate_set",
-            fact_id=request.project_id,
-            fingerprint=request.candidate_set_fingerprint,
-        )
-        or not _matches_reference(
-            decision,
-            fact_type="sprint_plan_tasks",
-            fact_id=request.sprint_id,
-            fingerprint=current_plan[2],
-        )
-    ):
+    if len(task_references) != 1 or not task_references[0].fact_id.isdigit():
         return _conflict("StartSprint does not target exact current plan facts.")
-    accepted_id = accepted.sprint_plan_artifact_decision_id
-    if accepted_id is None:
-        return _conflict("Accepted Sprint plan decision has no durable identity.")
-    plan_fact, _candidate_fingerprint, task_fingerprint = current_plan
+    from services.agent_workbench.sprint_phase import (  # noqa: PLC0415
+        SprintStartInput,
+        start_sprint_in_session,
+    )
+
     try:
-        dependency_snapshot = selected_story_dependency_snapshot(
-            snapshot,
-            plan_fact.story_ids,
-        )
-    except ExecutionIntegrityError as error:
-        return _conflict(str(error))
-    try:
-        sprint = start_sprint_in_session(
-            session,
-            SprintStartInput(
-                project_id=request.project_id,
-                sprint_id=request.sprint_id,
-                sprint_plan_artifact_id=request.sprint_plan_artifact_id,
-                sprint_plan_artifact_decision_id=accepted_id,
-                plan_fingerprint=request.plan_fingerprint,
-                candidate_set_fingerprint=request.candidate_set_fingerprint,
-                selected_story_ids=plan_fact.story_ids,
-                task_content_fingerprint=task_fingerprint,
-                dependency_snapshot=dependency_snapshot,
-                decision_fingerprint=decision.decision_fingerprint,
-                started_by=request.actor,
-                started_at=evaluated_at,
-            ),
-        )
+        with session.begin_nested():
+            sprint = start_sprint_in_session(
+                session,
+                SprintStartInput(
+                    project_id=request.project_id,
+                    expected_sprint_id=int(task_references[0].fact_id),
+                    expected_task_content_fingerprint=(task_references[0].fingerprint),
+                    decision_fingerprint=decision.decision_fingerprint,
+                    started_by=request.actor,
+                    started_at=evaluated_at,
+                ),
+            )
     except ValueError as error:
+        from services.agent_workbench.sprint_phase import (  # noqa: PLC0415
+            ActiveSprintExistsError,
+            StaleSpecificationError,
+        )
+
+        if isinstance(error, StaleSpecificationError):
+            return _workflow_error(WorkflowErrorCode.STALE_SPECIFICATION, str(error))
+        if isinstance(error, ActiveSprintExistsError):
+            return _workflow_error(WorkflowErrorCode.ACTIVE_SPRINT_EXISTS, str(error))
         return _conflict(str(error))
     return _success(
         decision,
-        {"sprint_id": request.sprint_id, "status": sprint.status.value},
+        {"sprint_id": sprint.sprint_id, "status": sprint.status.value},
     )
 
 
@@ -845,6 +843,5 @@ def execute_planning_request(
 __all__ = [
     "PlanningRequest",
     "execute_planning_request",
-    "record_roadmap_draft_in_session",
     "validate_planning_review",
 ]

@@ -5,23 +5,27 @@ from __future__ import annotations
 from importlib import import_module
 
 _EXPORT_MODULES: dict[str, str] = {
-    "check_spec_authority_status": "services.specs.compiler_service",
-    "compile_spec_authority_for_version": "services.specs.compiler_service",
-    "compute_story_input_hash": "services.specs.story_validation_service",
-    "ensure_accepted_spec_authority": "services.specs.compiler_service",
-    "get_compiled_authority_by_version": "services.specs.compiler_service",
-    "load_compiled_artifact": "services.specs.compiler_service",
-    "validate_story_with_spec_authority": "services.specs.story_validation_service",
+    "AcceptedSpecification": "services.specs.accepted_specification",
+    "AcceptedSpecificationIntegrityError": "services.specs.accepted_specification",
+    "compute_story_validation_input_fingerprint": (
+        "services.specs.story_validation_service"
+    ),
+    "load_accepted_specification": "services.specs.accepted_specification",
+    "load_current_accepted_specification": "services.specs.accepted_specification",
+    "require_current_accepted_specification": "services.specs.accepted_specification",
+    "require_story_ready_for_sprint": "services.specs.story_validation_service",
+    "validate_story_with_specification": "services.specs.story_validation_service",
 }
 
 __all__: list[str] = [
-    "check_spec_authority_status",
-    "compile_spec_authority_for_version",
-    "compute_story_input_hash",
-    "ensure_accepted_spec_authority",
-    "get_compiled_authority_by_version",
-    "load_compiled_artifact",
-    "validate_story_with_spec_authority",
+    "AcceptedSpecification",
+    "AcceptedSpecificationIntegrityError",
+    "compute_story_validation_input_fingerprint",
+    "load_accepted_specification",
+    "load_current_accepted_specification",
+    "require_current_accepted_specification",
+    "require_story_ready_for_sprint",
+    "validate_story_with_specification",
 ]
 
 

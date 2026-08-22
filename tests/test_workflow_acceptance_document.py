@@ -41,7 +41,6 @@ def test_acceptance_checklist_names_each_retained_stage() -> None:
         "Vision",
         "Product Goal",
         "Specification candidate",
-        "Authority",
         "Backlog",
         "Roadmap",
         "Stories",

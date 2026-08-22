@@ -10,6 +10,9 @@ from models.core import UserStory, UserStoryDependency
 from models.enums import WorkflowEventType
 from models.events import WorkflowEvent
 from models.workflow import StoryDependencyReview
+from services.agent_workbench.story_phase import (
+    load_story_correction_target_in_session,
+)
 from workflow.facts import StoryDependencyReviewEdgeFact
 from workflow.fingerprints import canonical_json
 from workflow.planning_integrity import (
@@ -78,6 +81,7 @@ def load_story_dependency_graph(
     for edge in edge_rows:
         edge_issue = _edge_issue(
             edge,
+            session=session,
             stories_by_id=stories_by_id,
             project_id=project_id,
         )
@@ -228,7 +232,7 @@ class ApplyStoryDependenciesInput:
     reviewed_at: datetime
 
 
-def apply_story_dependencies_in_session(
+def apply_story_dependencies_in_session(  # noqa: C901
     session: Session,
     *,
     inputs: ApplyStoryDependenciesInput,
@@ -257,7 +261,7 @@ def apply_story_dependencies_in_session(
         story.story_id: story for story in stories if story.story_id is not None
     }
     if set(stories_by_id) != selected or any(
-        story.project_id != project_id or story.is_superseded or not story.is_refined
+        story.project_id != project_id or story.is_superseded
         for story in stories_by_id.values()
     ):
         message = "Dependency review does not target exact active Project stories."
@@ -270,9 +274,40 @@ def apply_story_dependencies_in_session(
                 )
             ]
         )
+    specification_roots = {
+        (story.accepted_spec_version_id, story.accepted_spec_hash)
+        for story in stories_by_id.values()
+    }
+    if len(specification_roots) != 1:
+        message = "Dependency review cannot cross accepted Specification roots."
+        raise StoryDependencyGraphError(
+            [
+                DependencyGraphIssue(
+                    code="STORY_DEPENDENCY_CROSS_SPECIFICATION",
+                    message=message,
+                    story_ids=sorted(selected),
+                )
+            ]
+        )
+    try:
+        for story_id in sorted(selected):
+            load_story_correction_target_in_session(
+                session,
+                project_id=project_id,
+                story_id=story_id,
+            )
+    except ValueError as error:
+        raise StoryDependencyGraphError(
+            [
+                DependencyGraphIssue(
+                    code="STORY_DEPENDENCY_STORY_SET_INVALID",
+                    message=str(error),
+                    story_ids=sorted(selected),
+                )
+            ]
+        ) from error
     pairs = tuple(
-        (edge.dependent_story_id, edge.prerequisite_story_id)
-        for edge in reviewed_edges
+        (edge.dependent_story_id, edge.prerequisite_story_id) for edge in reviewed_edges
     )
     if any(left not in selected or right not in selected for left, right in pairs):
         message = "Dependency review edge leaves the selected Story set."
@@ -394,9 +429,10 @@ def _load_edge_rows_by_key(
     }
 
 
-def _edge_issue(
+def _edge_issue(  # noqa: PLR0911
     edge: UserStoryDependency,
     *,
+    session: Session,
     stories_by_id: dict[int, UserStory],
     project_id: int,
 ) -> DependencyGraphIssue | None:
@@ -455,6 +491,38 @@ def _edge_issue(
             code="STORY_DEPENDENCY_SUPERSEDED_STORY",
             message="Dependency edge references superseded story row(s).",
             story_ids=superseded_story_ids,
+            edge_status=edge.status,
+            dependency_id=edge.dependency_id,
+            dependent_story_id=edge.dependent_story_id,
+            prerequisite_story_id=edge.prerequisite_story_id,
+        )
+
+    if (
+        dependent.accepted_spec_version_id != prerequisite.accepted_spec_version_id
+        or dependent.accepted_spec_hash != prerequisite.accepted_spec_hash
+    ):
+        return DependencyGraphIssue(
+            code="STORY_DEPENDENCY_CROSS_SPECIFICATION",
+            message="Dependency edge crosses accepted Specification roots.",
+            story_ids=[edge.dependent_story_id, edge.prerequisite_story_id],
+            edge_status=edge.status,
+            dependency_id=edge.dependency_id,
+            dependent_story_id=edge.dependent_story_id,
+            prerequisite_story_id=edge.prerequisite_story_id,
+        )
+
+    try:
+        for story_id in (edge.dependent_story_id, edge.prerequisite_story_id):
+            load_story_correction_target_in_session(
+                session,
+                project_id=project_id,
+                story_id=story_id,
+            )
+    except ValueError:
+        return DependencyGraphIssue(
+            code="STORY_DEPENDENCY_STORY_SET_INVALID",
+            message="Dependency edge references a noncanonical Story projection.",
+            story_ids=[edge.dependent_story_id, edge.prerequisite_story_id],
             edge_status=edge.status,
             dependency_id=edge.dependency_id,
             dependent_story_id=edge.dependent_story_id,

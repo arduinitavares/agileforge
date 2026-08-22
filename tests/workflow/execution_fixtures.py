@@ -20,7 +20,6 @@ from tests.workflow.test_planning_transitions import (
     _record_sprint_plan_draft,
     _seed_accepted_backlog,
 )
-from workflow.fingerprints import canonical_hash
 from workflow.requests import DecideSprintPlan, StartSprint
 
 if TYPE_CHECKING:
@@ -29,13 +28,13 @@ if TYPE_CHECKING:
     from workflow.contracts import JsonObject
     from workflow.domain import WorkflowDomain
 
-type _SprintPlanBinding = tuple[int, int, str, JsonObject]
+type _SprintPlanBinding = tuple[int, str, JsonObject, str]
 
 
 def _required_identity(value: int | None, label: str) -> int:
     if value is None:
         message = f"{label} has no durable identity."
-        raise AssertionError(message)
+        raise TypeError(message)
     return value
 
 
@@ -45,15 +44,15 @@ def _accept_and_start_sprint(
     project_id: int,
     plan_binding: _SprintPlanBinding,
     idempotency_suffix: str,
-) -> None:
-    plan_id, sprint_id, candidate_fingerprint, plan = plan_binding
+) -> int:
+    plan_id, _candidate_fingerprint, _plan, plan_fingerprint = plan_binding
     position = domain.position(project_id)
     accepted = domain.transition(
         DecideSprintPlan(
             **_planning_guards(position, "planning.sprint.review"),
             idempotency_key=f"task-12-accept-sprint-plan{idempotency_suffix}",
             sprint_plan_artifact_id=plan_id,
-            plan_fingerprint=canonical_hash(plan),
+            plan_fingerprint=plan_fingerprint,
             decision="accepted",
             rationale="Accepted for execution integrity tests.",
         )
@@ -61,20 +60,21 @@ def _accept_and_start_sprint(
     if not accepted.ok:
         message = "Sprint plan acceptance fixture failed."
         raise AssertionError(message)
+    sprint_id = accepted.output["activated_sprint_id"]
+    if not isinstance(sprint_id, int):
+        message = "Sprint plan acceptance did not activate one Sprint."
+        raise TypeError(message)
     position = domain.position(project_id)
     started = domain.transition(
         StartSprint(
             **_planning_guards(position, "planning.sprint.start"),
             idempotency_key=f"task-12-start-sprint{idempotency_suffix}",
-            sprint_plan_artifact_id=plan_id,
-            sprint_id=sprint_id,
-            plan_fingerprint=canonical_hash(plan),
-            candidate_set_fingerprint=candidate_fingerprint,
         )
     )
     if not started.ok:
         message = "Sprint start fixture failed."
         raise AssertionError(message)
+    return sprint_id
 
 
 def seed_started_execution(
@@ -86,7 +86,7 @@ def seed_started_execution(
     project_id = _seed_accepted_backlog(engine)
     domain = _planning_domain(engine)
     _record_and_accept_roadmap(domain, project_id)
-    _story_artifact_id, story_id = _record_and_accept_story(domain, project_id)
+    _story_artifact_id, story_id = _record_and_accept_story(engine, domain, project_id)
     plan_binding = _record_sprint_plan_draft(
         engine,
         domain,
@@ -95,13 +95,12 @@ def seed_started_execution(
         team_name="Task 12 normalized execution team",
         idempotency_key="task-12-record-sprint-plan",
     )
-    _accept_and_start_sprint(
+    sprint_id = _accept_and_start_sprint(
         domain,
         project_id=project_id,
         plan_binding=plan_binding,
         idempotency_suffix="",
     )
-    _plan_id, sprint_id, _candidate_fingerprint, _plan = plan_binding
     with Session(engine) as session:
         task = session.exec(select(Task).where(Task.story_id == story_id)).one()
         task.status = task_status
@@ -124,14 +123,17 @@ def seed_started_execution_with_unselected_story(
     domain = _planning_domain(engine)
     _record_and_accept_roadmap(domain, project_id, requirements=requirements)
     _story_artifact_id, selected_story_id = _record_and_accept_story(
+        engine,
         domain,
         project_id,
         requirement=selected_requirement,
     )
     _future_artifact_id, future_story_id = _record_and_accept_story(
+        engine,
         domain,
         project_id,
         requirement=future_requirement,
+        spec_item_id="REQ.planning-2",
         idempotency_suffix="-future",
     )
     with Session(engine) as session:
@@ -158,13 +160,12 @@ def seed_started_execution_with_unselected_story(
         team_name="Task 12 selected-scope execution team",
         idempotency_key="task-12-record-selected-scope-sprint-plan",
     )
-    _accept_and_start_sprint(
+    sprint_id = _accept_and_start_sprint(
         domain,
         project_id=project_id,
         plan_binding=plan_binding,
         idempotency_suffix="-selected-scope",
     )
-    _plan_id, sprint_id, _candidate_fingerprint, _plan = plan_binding
     with Session(engine) as session:
         task = session.exec(
             select(Task).where(Task.story_id == selected_story_id)

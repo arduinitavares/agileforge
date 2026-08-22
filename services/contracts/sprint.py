@@ -1,498 +1,202 @@
-"""Input and output schemas for the Sprint Planner agent."""
+"""Direct-Specification Sprint and task contracts."""
 
-import re
-from typing import Annotated, Literal
+from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field
+from typing import TYPE_CHECKING, Annotated, Literal, Self
 
-from utils.task_metadata import StructuredTaskSpec
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from services.contracts.specification_references import (
+    AcceptedSpecificationReference,
+    canonical_spec_item_ids,
+    require_nonblank_text,
+    validate_accepted_specification_root,
+    validate_canonical_spec_item_ids,
+    validate_story_item_id,
+)
 
-class SaveSprintPlanInput(BaseModel):
-    """Input schema for the temporary legacy Sprint-plan write entry point."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    project_id: int = Field(description="Project ID for the sprint.")
-    team_id: int | None = Field(
-        default=None,
-        description="Team ID owning the sprint. Required if team_name is not provided.",
-    )
-    team_name: str | None = Field(
-        default=None,
-        description="Team name to lookup or create. Used if team_id is not provided.",
-    )
-
-
-def _normalize_comparison_text(value: str) -> str:
-    return re.sub(r"[^a-z0-9]", "", value.lower().strip())
-
-
-_BROAD_STORY_COMPLETION_PHRASES = {
-    _normalize_comparison_text("complete the story"),
-    _normalize_comparison_text("finish the story"),
-    _normalize_comparison_text("implement the story"),
-    _normalize_comparison_text("satisfy all acceptance criteria"),
-    _normalize_comparison_text("satisfy acceptance criteria"),
-    _normalize_comparison_text("all acceptance criteria met"),
-    _normalize_comparison_text("story complete"),
-    _normalize_comparison_text("story is complete"),
-}
-_FILE_EXTENSION_PATTERN = re.compile(r"\.[a-zA-Z0-9]+$")
-_PATH_PATTERN = re.compile(r"[/\\]")
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
 
 class SprintPlannerStory(BaseModel):
-    """A candidate user story for sprint planning.
+    """One exact accepted Story projected for a Sprint planning request."""
 
-    NOTE: No strict config or validation constraints here.
-    ADK automatic function-calling cannot parse ge/le/min_length
-    on input schemas. Constraints belong on output schemas only.
-    """
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
-    story_id: Annotated[int, Field(description="User story ID from the database.")]
-    story_title: Annotated[
-        str,
-        Field(description="Short user story title (at least 3 chars)."),
-    ]
-    priority: Annotated[
-        int,
-        Field(description="Priority rank (1 is highest, must be >= 1)."),
-    ]
-    story_points: Annotated[
-        int | None,
-        Field(
-            default=None,
-            description="Optional story points estimate (>= 1 when provided).",
-        ),
-    ]
-    parent_group: Annotated[
-        int | None,
-        Field(
-            default=None,
-            description="Optional readiness group derived from sprint input.",
-        ),
-    ]
-    group_slot: Annotated[
-        int | None,
-        Field(
-            default=None,
-            description=(
-                "Optional position within the readiness group derived from sprint "
-                "input."
-            ),
-        ),
-    ]
-    story_description: Annotated[
-        str,
-        Field(description="Detailed user story description."),
-    ]
-    acceptance_criteria_items: Annotated[
-        list[str],
-        Field(default_factory=list, description="List of acceptance criteria items."),
-    ]
-    persona: Annotated[
-        str | None,
-        Field(default=None, description="Target persona for the story."),
-    ]
-    source_requirement: Annotated[
-        str | None,
-        Field(default=None, description="Original source requirement or reference."),
-    ]
-    prerequisite_story_ids: Annotated[
-        list[int],
-        Field(
-            default_factory=list,
-            description="Active prerequisite story IDs that must precede this story.",
-        ),
-    ]
-    blocked_by_story_ids: Annotated[
-        list[int],
-        Field(
-            default_factory=list,
-            description="Prerequisite story IDs that are still unresolved candidates.",
-        ),
-    ]
-    dependency_status: Annotated[
-        Literal["ready", "blocked"],
-        Field(
-            default="ready",
-            description="Dependency readiness for this story in sprint planning.",
-        ),
-    ]
-    evaluated_invariant_ids: Annotated[
-        list[str],
-        Field(
-            default_factory=list,
-            description=(
-                "Invariant IDs already evaluated for this story and allowed for task "
-                "binding."
-            ),
-        ),
-    ]
-    story_compliance_boundary_summaries: Annotated[
-        list[str],
-        Field(
-            default_factory=list,
-            description=(
-                "Summaries of compliance boundaries or architectural constraints "
-                "applicable to this story."
-            ),
-        ),
-    ]
+    story_id: Annotated[int, Field(gt=0)]
+    story_item_id: str
+    story_title: Annotated[str, Field(min_length=1)]
+    statement: Annotated[str, Field(min_length=1)]
+    persona: Annotated[str, Field(min_length=1, max_length=100)]
+    acceptance_criteria: tuple[str, ...] = Field(min_length=1)
+    spec_item_ids: tuple[str, ...]
+    story_points: Annotated[int | None, Field(ge=1)] = None
+    rank: str | None = None
+
+    @field_validator("story_item_id")
+    @classmethod
+    def validate_host_story_item_id(cls, value: str) -> str:
+        """Reject impossible host Story IDs before building a Sprint input."""
+        return validate_story_item_id(value)
+
+    @field_validator("story_title", "statement", "persona")
+    @classmethod
+    def validate_nonblank_content(cls, value: str) -> str:
+        """Reject blank canonical Story projections without rewriting valid bytes."""
+        return require_nonblank_text(value, field_name="Sprint Story content")
+
+    @field_validator("acceptance_criteria")
+    @classmethod
+    def validate_criteria(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        """Reject blank criteria while preserving exact valid bytes and ordering."""
+        if any(not criterion.strip() for criterion in value):
+            message = "acceptance criterion must not be empty or whitespace-only"
+            raise ValueError(message)
+        return value
+
+    @field_validator("spec_item_ids")
+    @classmethod
+    def validate_canonical_evidence(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        """Require structural canonical evidence before the root loads its payload."""
+        return validate_canonical_spec_item_ids(value)
+
+    @model_validator(mode="after")
+    def validate_derived_persona(self) -> Self:
+        """Require the projected persona to equal the single shared parser output."""
+        from services.contracts.story import parse_story_persona  # noqa: PLC0415
+
+        if self.persona != parse_story_persona(self.statement):
+            message = "Sprint Story persona must equal the parsed statement persona"
+            raise ValueError(message)
+        return self
 
 
-class SprintPlannerInput(BaseModel):
-    """Schema for Sprint Planner input.
+class StructuredTaskSpec(BaseModel):
+    """Provider task content with stable Specification evidence IDs only."""
 
-    NOTE: No ge/le/min_length constraints here.
-    ADK automatic function-calling cannot parse Annotated constraints
-    on input schemas. Validation constraints belong on output schemas.
-    """
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
-    model_config = ConfigDict(extra="forbid")
+    description: Annotated[str, Field(min_length=1)]
+    relevant_spec_item_ids: tuple[str, ...]
+    task_kind: Literal["implementation", "test", "documentation", "research"]
+    artifact_targets: tuple[Annotated[str, Field(min_length=1)], ...]
+    workstream_tags: tuple[Annotated[str, Field(min_length=1)], ...]
+    checklist_items: tuple[Annotated[str, Field(min_length=1)], ...] = Field(
+        min_length=1
+    )
 
-    available_stories: Annotated[
-        list[SprintPlannerStory],
-        Field(description="Prioritized list of available stories for this sprint."),
-    ]
-    capacity_points: Annotated[
-        int,
-        Field(description="Story points capacity cap for this sprint."),
-    ]
-    capacity_source: Annotated[
-        Literal["user_override", "project_metrics"],
-        Field(description="Source of the capacity limit."),
-    ]
-    capacity_basis: Annotated[
-        str,
-        Field(
-            description="Explanation of the capacity points recommendation or basis."
-        ),
-    ]
-    user_context: Annotated[
-        str | None,
-        Field(
-            default=None,
-            description="Optional user context or focus for the sprint.",
-        ),
-    ]
-    include_task_decomposition: Annotated[
-        bool,
-        Field(
-            default=True,
-            description="Whether to generate task decomposition per story.",
-        ),
-    ]
+    @field_validator("description")
+    @classmethod
+    def validate_nonblank_description(cls, value: str) -> str:
+        """Reject blank task descriptions without altering valid provider content."""
+        return require_nonblank_text(value, field_name="Task description")
+
+    @field_validator("relevant_spec_item_ids")
+    @classmethod
+    def canonicalize_provider_evidence(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        """Reject duplicate evidence and persist provider permutations canonically."""
+        if not value:
+            message = "relevant Specification item IDs must not be empty"
+            raise ValueError(message)
+        if len(set(value)) != len(value):
+            message = "duplicate Specification item ID in task evidence"
+            raise ValueError(message)
+        return tuple(sorted(value))
 
 
 class SprintPlannerSelectedStory(BaseModel):
-    """A selected story with justification and tasks."""
+    """One selected immutable Story and its proposed task decomposition."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
-    story_id: Annotated[
-        int, Field(description="User story ID selected for the sprint.")
-    ]
-    story_title: Annotated[str, Field(min_length=3, description="Story title.")]
-    tasks: Annotated[
-        list[StructuredTaskSpec],
-        Field(
-            default_factory=list,
-            description="Optional structured task list for the story.",
-        ),
-    ]
-    reason_for_selection: Annotated[
-        str,
-        Field(min_length=3, description="Reason this story supports the sprint goal."),
-    ]
+    story_id: Annotated[int, Field(gt=0)]
+    story_item_id: str
+    tasks: tuple[StructuredTaskSpec, ...] = Field(min_length=1)
+    reason_for_selection: Annotated[str, Field(min_length=1)]
 
+    @field_validator("story_item_id")
+    @classmethod
+    def validate_selected_story_item_id(cls, value: str) -> str:
+        """Reject impossible host Story IDs in the immutable selected projection."""
+        return validate_story_item_id(value)
 
-class SprintPlannerDeselectedStory(BaseModel):
-    """A story not selected for the sprint."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    story_id: Annotated[int, Field(description="User story ID not selected.")]
-    reason: Annotated[
-        str,
-        Field(min_length=3, description="Reason this story was not selected."),
-    ]
-
-
-class SprintPlannerCapacityAnalysis(BaseModel):
-    """Capacity analysis summary for sprint planning."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    capacity_points: Annotated[
-        int,
-        Field(ge=0, description="Story point capacity cap for this sprint."),
-    ]
-    capacity_source: Annotated[
-        Literal["user_override", "project_metrics"],
-        Field(description="Source of the capacity limit."),
-    ]
-    capacity_basis: Annotated[
-        str,
-        Field(min_length=3, description="Explanation of the capacity points basis."),
-    ]
-    selected_count: Annotated[
-        int,
-        Field(ge=0, description="Number of stories selected."),
-    ]
-    story_points_used: Annotated[
-        int,
-        Field(ge=0, description="Total selected story points."),
-    ]
-    remaining_capacity_points: Annotated[
-        int,
-        Field(
-            ge=0,
-            description="Capacity points remaining after the selected scope.",
-        ),
-    ]
-    commitment_note: Annotated[
-        str,
-        Field(
-            min_length=3,
-            description="Commitment check asking if scope is achievable.",
-        ),
-    ]
-    reasoning: Annotated[
-        str,
-        Field(
-            min_length=3,
-            description="Explanation for why the sprint scope is feasible.",
-        ),
-    ]
+    @field_validator("reason_for_selection")
+    @classmethod
+    def validate_nonblank_reason(cls, value: str) -> str:
+        """Reject blank selection rationale without changing valid provider bytes."""
+        return require_nonblank_text(value, field_name="Sprint selection reason")
 
 
 class SprintPlannerOutput(BaseModel):
-    """Schema for Sprint Planner output."""
+    """Provider Sprint output without Authority or invariant compatibility fields."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
-    sprint_goal: Annotated[
-        str,
-        Field(min_length=3, description="Single sprint objective statement."),
-    ]
-    sprint_number: Annotated[
-        int, Field(ge=1, description="Sprint number for this Project.")
-    ]
-    selected_stories: Annotated[
-        list[SprintPlannerSelectedStory],
-        Field(description="Stories selected for the sprint backlog."),
-    ]
-    deselected_stories: Annotated[
-        list[SprintPlannerDeselectedStory],
-        Field(description="Stories not selected and why."),
-    ]
-    capacity_analysis: Annotated[
-        SprintPlannerCapacityAnalysis,
-        Field(description="Capacity reasoning and commitment check."),
-    ]
+    sprint_goal: Annotated[str, Field(min_length=1)]
+    selected_stories: tuple[SprintPlannerSelectedStory, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_unique_story_ids(self) -> Self:
+        """Require one complete Task proposal for each selected Story identity."""
+        identities = tuple(item.story_id for item in self.selected_stories)
+        if len(set(identities)) != len(identities):
+            message = "Sprint selected Story IDs must be unique."
+            raise ValueError(message)
+        return self
 
 
-def validate_task_invariant_bindings(
-    output: "SprintPlannerOutput",
+class SprintPlannerInput(BaseModel):
+    """One exact Specification is supplied once at the Sprint invocation root."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    accepted_specification_version_id: Annotated[int, Field(gt=0)]
+    accepted_specification_hash: Annotated[str, Field(pattern=r"^sha256:[0-9a-f]{64}$")]
+    accepted_specification_json: Annotated[str, Field(min_length=1)]
+    available_stories: tuple[SprintPlannerStory, ...]
+    capacity_points: Annotated[int, Field(ge=0)]
+    capacity_source: Literal["user_override", "project_metrics"]
+    capacity_basis: Annotated[str, Field(min_length=1)]
+    user_context: str | None = None
+
+    @model_validator(mode="after")
+    def validate_specification_root_and_story_evidence(self) -> Self:
+        """Prove root bytes/hash and known normative Story evidence once."""
+        payload = validate_accepted_specification_root(
+            spec_hash=self.accepted_specification_hash,
+            canonical_specification_json=self.accepted_specification_json,
+        )
+        specification = AcceptedSpecificationReference(
+            spec_version_id=self.accepted_specification_version_id,
+            spec_hash=self.accepted_specification_hash,
+            canonical_specification_json=self.accepted_specification_json,
+            payload=payload,
+        )
+        for story in self.available_stories:
+            canonical_spec_item_ids(specification, story.spec_item_ids)
+        return self
+
+
+def validate_task_spec_references(
+    specification: AcceptedSpecificationReference,
+    task: StructuredTaskSpec,
     *,
-    allowed_invariant_ids_by_story: dict[int, list[str]],
-) -> list[str]:
-    """Validate that each task only binds invariants allowed for its parent story."""
-    errors: list[str] = []
-    for story in output.selected_stories:
-        allowed_ids = set(allowed_invariant_ids_by_story.get(story.story_id, []))
-        for task in story.tasks:
-            invalid_ids = [
-                invariant_id
-                for invariant_id in task.relevant_invariant_ids
-                if invariant_id not in allowed_ids
-            ]
-            if invalid_ids:
-                errors.append(
-                    "Story "
-                    f"{story.story_id} task '{task.description}' referenced invalid "
-                    "invariant IDs: " + ", ".join(invalid_ids)
-                )
-    return errors
-
-
-def _required_task_field_errors(
-    story_id: int,
-    task: StructuredTaskSpec,
-) -> list[str]:
-    """Return deterministic errors for missing or prohibited task fields."""
-    desc = task.description.strip()
-    errors: list[str] = []
-    if not desc:
-        errors.append(f"Story {story_id}: Found task with empty description.")
-    if task.task_kind == "other":
-        errors.append(
-            f"Story {story_id} task '{desc}': 'task_kind' cannot be 'other'. "
-            "Please categorize properly."
-        )
-    if not task.artifact_targets:
-        errors.append(
-            f"Story {story_id} task '{desc}': Must specify at least one "
-            "artifact_target."
-        )
-    if not task.workstream_tags:
-        errors.append(
-            f"Story {story_id} task '{desc}': Must specify at least one workstream_tag."
-        )
-    if not task.checklist_items:
-        errors.append(
-            f"Story {story_id} task '{desc}': Must specify at least one checklist item."
-        )
-    return errors
-
-
-def _task_target_errors(story_id: int, task: StructuredTaskSpec) -> list[str]:
-    """Return errors for artifact targets that expose exact file paths."""
-    desc = task.description.strip()
-    return [
-        (
-            f"Story {story_id} task '{desc}': artifact_target '{target}' looks "
-            "like an exact file path. Use component/module names instead."
-        )
-        for target in task.artifact_targets
-        if _FILE_EXTENSION_PATTERN.search(target) or _PATH_PATTERN.search(target)
-    ]
-
-
-def _task_duplicate_errors(
-    story_id: int,
-    task: StructuredTaskSpec,
-    normalized_descriptions: set[str],
-) -> tuple[list[str], frozenset[str], frozenset[str]]:
-    """Return duplicate errors and normalized task signature sets."""
-    desc = task.description.strip()
-    errors: list[str] = []
-    normalized_description = _normalize_comparison_text(desc)
-    if normalized_description:
-        if normalized_description in normalized_descriptions:
-            errors.append(
-                f"Story {story_id}: Duplicate or identical task description "
-                f"found: '{desc}'."
-            )
-        normalized_descriptions.add(normalized_description)
-
-    targets = [_normalize_comparison_text(value) for value in task.artifact_targets]
-    if len(targets) != len(set(targets)):
-        errors.append(
-            f"Story {story_id} task '{desc}': Contains duplicate artifact_targets."
-        )
-    tags = [_normalize_comparison_text(value) for value in task.workstream_tags]
-    if len(tags) != len(set(tags)):
-        errors.append(
-            f"Story {story_id} task '{desc}': Contains duplicate workstream_tags."
-        )
-    return errors, frozenset(tags), frozenset(targets)
-
-
-def _task_checklist_errors(
-    story_id: int,
-    task: StructuredTaskSpec,
-    normalized_story_acceptance_items: set[str],
-) -> list[str]:
-    """Return task-local checklist quality errors."""
-    desc = task.description.strip()
-    errors: list[str] = []
-    for checklist_item in task.checklist_items:
-        checklist_text = checklist_item.strip()
-        checklist_norm = _normalize_comparison_text(checklist_text)
-        if not checklist_norm:
-            errors.append(
-                f"Story {story_id} task '{desc}': checklist item must not be empty."
-            )
-            continue
-        if checklist_norm in normalized_story_acceptance_items:
-            errors.append(
-                f"Story {story_id} task '{desc}': checklist item "
-                f"'{checklist_text}' duplicates story acceptance criteria."
-            )
-        elif checklist_norm in _BROAD_STORY_COMPLETION_PHRASES:
-            errors.append(
-                f"Story {story_id} task '{desc}': checklist item "
-                f"'{checklist_text}' is too story-level; use task-local completion "
-                "criteria instead."
-            )
-    return errors
-
-
-def validate_task_decomposition_quality(
-    output: "SprintPlannerOutput",
-    *,
-    include_task_decomposition: bool,
-    has_acceptance_criteria_by_story: dict[int, bool] | None = None,
-    acceptance_criteria_items_by_story: dict[int, list[str]] | None = None,
-) -> list[str]:
-    """Validate deterministic quality gates for sprint task decomposition."""
-    errors: list[str] = []
-    has_acceptance_criteria_by_story = has_acceptance_criteria_by_story or {}
-    acceptance_criteria_items_by_story = acceptance_criteria_items_by_story or {}
-
-    for story in output.selected_stories:
-        if include_task_decomposition and not story.tasks:
-            errors.append(f"Story {story.story_id}: Missing task decomposition.")
-            continue
-
-        normalized_descriptions = set()
-        story_acceptance_items = acceptance_criteria_items_by_story.get(
-            story.story_id, []
-        )
-        normalized_story_acceptance_items = {
-            _normalize_comparison_text(item)
-            for item in story_acceptance_items
-            if isinstance(item, str) and item.strip()
-        }
-        has_story_acceptance_criteria = bool(normalized_story_acceptance_items) or bool(
-            has_acceptance_criteria_by_story.get(story.story_id, False)
-        )
-        task_signatures: list[tuple[frozenset[str], frozenset[str]]] = []
-
-        for task in story.tasks:
-            errors.extend(_required_task_field_errors(story.story_id, task))
-            errors.extend(_task_target_errors(story.story_id, task))
-            duplicate_errors, tags, targets = _task_duplicate_errors(
-                story.story_id,
-                task,
-                normalized_descriptions,
-            )
-            errors.extend(duplicate_errors)
-            errors.extend(
-                _task_checklist_errors(
-                    story.story_id,
-                    task,
-                    normalized_story_acceptance_items,
-                )
-            )
-            task_signatures.append((tags, targets))
-
-        distinct_signatures = set(task_signatures)
-
-        if (
-            has_story_acceptance_criteria
-            and len(story.tasks) > 1
-            and len(distinct_signatures) == 1
-        ):
-            errors.append(
-                f"Story {story.story_id}: Tasks are under-decomposed. All "
-                f"{len(story.tasks)} tasks carry the exact same workstreams and "
-                "artifact targets."
-            )
-
-    return errors
+    parent_story_spec_item_ids: Iterable[str],
+) -> tuple[str, ...]:
+    """Require a task's evidence to be a qualifying subset of its parent Story."""
+    return canonical_spec_item_ids(
+        specification,
+        task.relevant_spec_item_ids,
+        parent_spec_item_ids=parent_story_spec_item_ids,
+    )
 
 
 __all__ = [
-    "SprintPlannerCapacityAnalysis",
-    "SprintPlannerDeselectedStory",
     "SprintPlannerInput",
     "SprintPlannerOutput",
     "SprintPlannerSelectedStory",
     "SprintPlannerStory",
-    "validate_task_decomposition_quality",
-    "validate_task_invariant_bindings",
+    "StructuredTaskSpec",
+    "validate_task_spec_references",
 ]

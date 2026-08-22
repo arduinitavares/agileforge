@@ -170,10 +170,6 @@ def test_recipe_catalog_excludes_legacy_vision_and_adapts_interview_output() -> 
     """Expose both explicit Vision recipes and their output adapter."""
     registry = build_agentic_recipe_registry(
         nodes=AgenticRecipeNodes(
-            authority_compile=root_agent,
-            authority_repair=root_agent,
-            authority_compile_validation_repair=root_agent,
-            authority_repair_validation_repair=root_agent,
             vision_interview=root_agent,
             vision_repair=repair_agent,
             product_goal=root_agent,
@@ -204,9 +200,7 @@ def test_recipe_catalog_excludes_legacy_vision_and_adapts_interview_output() -> 
         context,
     )
 
-    assert registry.node_ids[:4] == (
-        "authority.compile",
-        "authority.repair",
+    assert registry.node_ids[:2] == (
         "vision.bootstrap",
         "vision.interview",
     )

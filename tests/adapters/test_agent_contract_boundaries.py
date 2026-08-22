@@ -68,7 +68,7 @@ def test_service_contracts_have_only_service_owned_dependencies() -> None:
 
 
 def test_leaf_agents_do_not_own_persistence_or_routing() -> None:
-    """Keep retained ADK leaves independent from SQLModel and graph authority."""
+    """Keep retained ADK leaves independent from SQLModel and graph routing."""
     assert AGENT_ROOT.is_dir()
 
     imported = imported_modules_under(AGENT_ROOT)
@@ -76,30 +76,38 @@ def test_leaf_agents_do_not_own_persistence_or_routing() -> None:
     assert not _matching_prefixes(imported, LEAF_FORBIDDEN_PREFIXES)
 
 
+def test_spec_validator_leaf_uses_direct_specification_review_contract() -> None:
+    """Bind the retained paid leaf to the closed direct-Spec output only."""
+    source = (AGENT_ROOT / "spec_validator.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    imported_names = {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+        and node.module == "services.contracts.specification_validation"
+        for alias in node.names
+    }
+    assert imported_names == {"StorySpecificationReviewOutput"}
+    assert "SpecValidationResult" not in source
+
+
 def test_retained_modules_import_without_deleted_root_composition() -> None:
     """Import current owners without loading the deleted root composition."""
     for module_name in (
         "services.contracts",
-        "services.contracts.authority",
         "services.contracts.backlog",
         "services.contracts.roadmap",
-        "services.contracts.specification",
-        "services.contracts.specification_normalizer",
         "services.contracts.specification_validation",
         "services.contracts.sprint",
         "services.contracts.story",
         "services.contracts.vision",
         "adapters.adk.agents",
-        "adapters.adk.agents.authority",
         "adapters.adk.agents.backlog",
         "adapters.adk.agents.roadmap",
         "adapters.adk.agents.spec_validator",
-        "adapters.adk.agents.specification",
         "adapters.adk.agents.sprint",
         "adapters.adk.agents.story",
         "adapters.adk.agents.vision",
-        "adapters.adk.prompts.specification",
-        "services.story_linkage",
     ):
         importlib.import_module(module_name)
 

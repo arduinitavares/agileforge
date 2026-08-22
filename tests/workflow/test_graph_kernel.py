@@ -196,12 +196,26 @@ def test_join_waits_for_every_required_branch() -> None:
     """Block an all-of join until every required branch is complete."""
     first = StoryFact(
         story_id=1,
+        source_story_artifact_id=101,
+        source_story_artifact_fingerprint="sha256:story-artifact-1",
+        source_story_item_id="US-000001",
+        source_story_item_fingerprint="sha256:story-item-1",
+        accepted_spec_version_id=1,
+        accepted_spec_hash="sha256:" + "a" * 64,
+        spec_item_ids=("REQ.001",),
         status="completed",
         sprint_candidate=False,
         readiness_blockers=(),
     )
     second = StoryFact(
         story_id=2,
+        source_story_artifact_id=102,
+        source_story_artifact_fingerprint="sha256:story-artifact-2",
+        source_story_item_id="US-000002",
+        source_story_item_fingerprint="sha256:story-item-2",
+        accepted_spec_version_id=1,
+        accepted_spec_hash="sha256:" + "a" * 64,
+        spec_item_ids=("REQ.002",),
         status="planned",
         sprint_candidate=False,
         readiness_blockers=(),
@@ -362,7 +376,6 @@ def test_root_definition_has_named_children_in_lifecycle_order() -> None:
         "vision",
         "product_goal",
         "specification",
-        "authority",
         "backlog",
         "planning",
         "execution",
@@ -371,7 +384,6 @@ def test_root_definition_has_named_children_in_lifecycle_order() -> None:
         vision,
         product_goal,
         specification,
-        authority,
         backlog,
         planning,
         execution,
@@ -392,12 +404,6 @@ def test_root_definition_has_named_children_in_lifecycle_order() -> None:
         "specification.source.register",
         "specification.structure",
         "specification.review",
-    )
-    assert tuple(node.node_id for node in authority.nodes) == (
-        "authority.compile",
-        "authority.review",
-        "authority.feedback",
-        "authority.repair",
     )
     assert tuple(node.node_id for node in backlog.nodes) == (
         "backlog.generate",

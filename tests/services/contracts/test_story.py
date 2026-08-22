@@ -1,491 +1,222 @@
-"""TDD tests for User Story Writer schemas."""
+"""Tests for closed provider and host Story contracts."""
+# ruff: noqa: D103
 
-from __future__ import annotations
-
-import json
-from typing import Any, cast
+from itertools import permutations
 
 import pytest
 from pydantic import ValidationError
 
+from services.contracts.specification_references import AcceptedSpecificationReference
 from services.contracts.story import (
-    StoryDependencyCandidate,
-    StoryQualityFinding,
-    UserStoryItem,
-    UserStoryWriterInput,
-    UserStoryWriterOutput,
+    CanonicalStoryItem,
+    CanonicalStoryOutput,
+    StoryItemEnvelope,
+    UserStoryAgentItem,
+    canonicalize_story_items,
+    parse_story_persona,
+)
+from utils.agileforge_spec_profile_v2 import (
+    RequirementLevel,
+    SpecificationItem,
+    SpecificationPayload,
+    SpecItemType,
+    VerificationMethod,
+    canonical_spec_hash,
+    canonical_spec_json,
 )
 
-# ---------------------------------------------------------------------------
-# UserStoryItem
-# ---------------------------------------------------------------------------
 
-
-class TestUserStoryItem:
-    """Tests for the UserStoryItem schema."""
-
-    def test_valid_high_score_item(self) -> None:
-        """Verify valid high score item."""
-        item = UserStoryItem(
-            story_title="Login via email",
-            statement=(
-                "As a registered member, I want to log in with my email, "
-                "so that I can access my dashboard."
+def _reference() -> AcceptedSpecificationReference:
+    payload = SpecificationPayload(
+        artifact_id="SPEC.story-contract",
+        title="Story contract",
+        summary="Host controls item identity",
+        problem_statement="Story evidence is stable.",
+        items=(
+            SpecificationItem(
+                id="REQ.alpha",
+                type=SpecItemType.REQ,
+                title="Alpha",
+                statement="The system must support alpha.",
+                level=RequirementLevel.MUST,
+                verification=VerificationMethod.UNIT_TEST,
+                acceptance=("Alpha passes.",),
             ),
-            acceptance_criteria=[
-                "Verify that the login form accepts email and password.",
-                "Verify that invalid credentials show an error message.",
-                "Ensure that response time is under 500ms.",
-            ],
-            invest_score="High",
-            estimated_effort="S",
-            produced_artifacts=["dashboard"],
-        )
-        assert item.invest_score == "High"
-        assert item.decomposition_warning is None
-        assert item.research_caveats == []
-
-    def test_research_caveats_do_not_force_low_invest_score(self) -> None:
-        """Research caveats are advisory, not decomposition warnings."""
-        item = UserStoryItem(
-            story_title="Compare candidate models",
-            statement=(
-                "As a researcher, I want to compare candidate models, "
-                "so that I can choose a validated baseline."
+            SpecificationItem(
+                id="DATA.beta",
+                type=SpecItemType.DATA,
+                title="Beta",
+                statement="The system must retain beta.",
+                level=RequirementLevel.SHOULD,
+                verification=VerificationMethod.UNIT_TEST,
+                acceptance=("Beta persists.",),
             ),
-            acceptance_criteria=["Verify that model comparison metrics are recorded."],
-            invest_score="High",
-            estimated_effort="M",
-            produced_artifacts=["model_comparison_report"],
-            research_caveats=[
-                "Final model choice depends on holdout-window performance."
-            ],
+        ),
+    )
+    return AcceptedSpecificationReference(
+        spec_version_id=5,
+        spec_hash=canonical_spec_hash(payload),
+        canonical_specification_json=canonical_spec_json(payload),
+        payload=payload,
+    )
+
+
+def _story(*, criterion: str = "Verify the result.") -> UserStoryAgentItem:
+    return UserStoryAgentItem(
+        story_title="Calculate values",
+        statement=" **As an Étudiant**, I want to calculate values, so that I learn.",
+        acceptance_criteria=(criterion, "- Preserve\nUnicode ✓"),
+        spec_item_ids=("REQ.alpha", "DATA.beta"),
+        invest_score="High",
+        estimated_effort="S",
+        produced_artifacts=("calculator",),
+        research_caveats=(),
+        decomposition_warning=None,
+        dependency_candidates=(),
+    )
+
+
+def test_story_canonicalization_preserves_provider_order_and_criteria_bytes() -> None:
+    items = canonicalize_story_items(
+        _reference(),
+        parent_backlog_spec_item_ids=("DATA.beta", "REQ.alpha"),
+        agent_items=(_story(), _story(criterion="Verify the second result.")),
+    )
+
+    assert [envelope.item.story_item_id for envelope in items] == ["US-0001", "US-0002"]
+    assert items[0].item.persona == "Étudiant"
+    assert items[0].item.acceptance_criteria == (
+        "Verify the result.",
+        "- Preserve\nUnicode ✓",
+    )
+
+
+def test_story_evidence_set_is_canonicalized_before_fingerprinting() -> None:
+    fingerprints: set[str] = set()
+    for spec_item_ids in permutations(("REQ.alpha", "DATA.beta")):
+        item = _story().model_copy(update={"spec_item_ids": spec_item_ids})
+        canonical = canonicalize_story_items(
+            _reference(),
+            parent_backlog_spec_item_ids=("DATA.beta", "REQ.alpha"),
+            agent_items=(item,),
+        )[0]
+        fingerprints.add(canonical.item_fingerprint)
+        assert canonical.item.spec_item_ids == ("DATA.beta", "REQ.alpha")
+
+    assert len(fingerprints) == 1
+
+
+def test_story_persona_parser_and_acceptance_criteria_fail_closed() -> None:
+    assert (
+        parse_story_persona(" **As the product owner**, I want a roadmap")
+        == "product owner"
+    )
+
+    with pytest.raises(ValidationError, match="acceptance criterion"):
+        _story(criterion=" \t\u2003")
+
+    invalid_statement = _story().model_dump()
+    invalid_statement["statement"] = "I want a roadmap without a persona."
+    with pytest.raises(ValidationError, match="statement must start"):
+        UserStoryAgentItem.model_validate(invalid_statement)
+
+    with pytest.raises(ValueError, match="one through eight"):
+        canonicalize_story_items(
+            _reference(),
+            parent_backlog_spec_item_ids=("DATA.beta", "REQ.alpha"),
+            agent_items=(),
         )
 
-        assert item.invest_score == "High"
-        assert item.decomposition_warning is None
-        assert item.research_caveats == [
-            "Final model choice depends on holdout-window performance."
-        ]
-
-    def test_accepts_dependency_candidate(self) -> None:
-        """Verify user story items can propose dependency candidates."""
-        item = UserStoryItem(
-            story_title="Generate recommendation",
-            statement=(
-                "As a manager, I want a generated recommendation, "
-                "so that I can choose a squad before lock."
-            ),
-            acceptance_criteria=["Verify recommendation uses captured market data."],
-            invest_score="High",
-            estimated_effort="M",
-            dependency_candidates=[
-                StoryDependencyCandidate(
-                    prerequisite_ref="Capture market data",
-                    reason="Recommendation needs market data before generation.",
-                    confidence="explicit",
-                )
-            ],
+    with pytest.raises(ValueError, match="one through eight"):
+        canonicalize_story_items(
+            _reference(),
+            parent_backlog_spec_item_ids=("DATA.beta", "REQ.alpha"),
+            agent_items=tuple(_story() for _ in range(9)),
         )
 
-        assert item.dependency_candidates[0].prerequisite_ref == "Capture market data"
-        assert item.dependency_candidates[0].confidence == "explicit"
 
-    def test_rejects_invalid_dependency_candidate_confidence(self) -> None:
-        """Verify dependency candidate confidence is closed-set."""
-        with pytest.raises(ValidationError):
-            UserStoryItem(
-                story_title="Generate recommendation",
-                statement=(
-                    "As a manager, I want a generated recommendation, "
-                    "so that I can choose a squad before lock."
-                ),
-                acceptance_criteria=[
-                    "Verify recommendation uses captured market data."
-                ],
-                invest_score="High",
-                estimated_effort="M",
-                dependency_candidates=cast(
-                    "Any",
-                    [
-                        {
-                            "prerequisite_ref": "Capture market data",
-                            "reason": "Recommendation needs market data first.",
-                            "confidence": "maybe",
-                        }
-                    ],
-                ),
-            )
+def test_story_fingerprint_changes_when_immutable_content_changes() -> None:
+    first = canonicalize_story_items(
+        _reference(),
+        parent_backlog_spec_item_ids=("DATA.beta", "REQ.alpha"),
+        agent_items=(_story(),),
+    )[0]
+    second = canonicalize_story_items(
+        _reference(),
+        parent_backlog_spec_item_ids=("DATA.beta", "REQ.alpha"),
+        agent_items=(_story(criterion="Verify a changed result."),),
+    )[0]
 
-    def test_valid_medium_score_item(self) -> None:
-        """Verify valid medium score item."""
-        item = UserStoryItem(
-            story_title="Export CSV report",
-            statement=(
-                "As a manager, I want to export a CSV report, "
-                "so that I can analyze data offline."
-            ),
-            acceptance_criteria=["Verify that the CSV downloads correctly."],
-            invest_score="Medium",
-            estimated_effort="M",
-            produced_artifacts=["csv_report"],
-        )
-        assert item.invest_score == "Medium"
-        assert item.decomposition_warning is None
+    assert first.item_fingerprint != second.item_fingerprint
 
-    def test_valid_low_score_with_warning(self) -> None:
-        """Verify valid low score with warning."""
-        item = UserStoryItem(
-            story_title="Batch data migration",
-            statement=(
-                "As a data engineer, I want to migrate legacy records, "
-                "so that the new system has historical data."
-            ),
-            acceptance_criteria=["Verify that all records are transferred."],
-            invest_score="Low",
-            estimated_effort="XL",
-            produced_artifacts=["legacy_data"],
-            decomposition_warning="Hard dependency on legacy API availability.",
-        )
-        assert item.invest_score == "Low"
-        assert item.decomposition_warning is not None
-        assert "Hard dependency" in item.decomposition_warning
 
-    def test_rejects_invalid_statement_missing_as_a(self) -> None:
-        """Verify rejects invalid statement missing as a."""
-        with pytest.raises(
-            ValidationError, match="Statement must precisely start with"
-        ):
-            UserStoryItem(
-                story_title="Bad story",
-                statement="The user wants to log in so that they can access the app.",
-                acceptance_criteria=["Verify login works."],
-                invest_score="High",
-                estimated_effort="S",
-                produced_artifacts=[],
-            )
+def test_host_story_item_rejects_invalid_ids_content_and_persona() -> None:
+    envelope = canonicalize_story_items(
+        _reference(),
+        parent_backlog_spec_item_ids=("DATA.beta", "REQ.alpha"),
+        agent_items=(_story(),),
+    )[0]
+    payload = envelope.item.model_dump(mode="json")
 
-    def test_rejects_invalid_statement_missing_i_want(self) -> None:
-        """Verify rejects invalid statement missing i want."""
-        with pytest.raises(ValidationError, match="I want"):
-            UserStoryItem(
-                story_title="Bad story",
-                statement="As a user, logging in, so that I can access my account.",
-                acceptance_criteria=["Verify login works."],
-                invest_score="High",
-                estimated_effort="S",
-                produced_artifacts=[],
-            )
+    assert CanonicalStoryItem.model_validate({**payload, "story_item_id": "US-0008"})
 
-    def test_rejects_invalid_statement_missing_so_that(self) -> None:
-        """Verify rejects invalid statement missing so that."""
-        with pytest.raises(ValidationError, match="so that"):
-            UserStoryItem(
-                story_title="Bad story",
-                statement="As a user, I want to log in.",
-                acceptance_criteria=["Verify login works."],
-                invest_score="High",
-                estimated_effort="S",
-                produced_artifacts=[],
-            )
-
-    def test_coerces_high_score_with_warning_to_low(self) -> None:
-        """Verify coerces high score with warning to low."""
-        item = UserStoryItem(
-            story_title="Some story title",
-            statement="As a user, I want feature X, so that I get benefit Y.",
-            acceptance_criteria=["Verify X works."],
-            invest_score="High",
-            estimated_effort="S",
-            produced_artifacts=[],
-            decomposition_warning="Dependent on open design decisions being confirmed.",
-        )
-        assert item.invest_score == "Low"
-        assert item.decomposition_warning == (
-            "Dependent on open design decisions being confirmed."
+    with pytest.raises(ValidationError, match="Story item ID"):
+        CanonicalStoryItem.model_validate({**payload, "story_item_id": "US-0000"})
+    with pytest.raises(ValidationError, match="Story item ID"):
+        CanonicalStoryItem.model_validate({**payload, "story_item_id": "US-0009"})
+    with pytest.raises(ValidationError, match="must not be blank"):
+        CanonicalStoryItem.model_validate({**payload, "story_title": " \u2003"})
+    with pytest.raises(ValidationError, match="persona"):
+        CanonicalStoryItem.model_validate({**payload, "persona": "Different"})
+    with pytest.raises(ValidationError, match="Specification item IDs"):
+        CanonicalStoryItem.model_validate(
+            {**payload, "spec_item_ids": ("REQ.alpha", "DATA.beta")}
         )
 
-    def test_coerces_medium_score_with_warning_to_low(self) -> None:
-        """Verify coerces medium score with warning to low."""
-        item = UserStoryItem(
-            story_title="Some story title",
-            statement="As a user, I want feature X, so that I get benefit Y.",
-            acceptance_criteria=["Verify X works."],
-            invest_score="Medium",
-            estimated_effort="S",
-            produced_artifacts=[],
-            decomposition_warning="Pending confirmation of integration boundaries.",
-        )
-        assert item.invest_score == "Low"
-        assert item.decomposition_warning == (
-            "Pending confirmation of integration boundaries."
-        )
-
-    def test_accepts_high_score_with_known_placeholder_warning(self) -> None:
-        """Verify accepts high score with known placeholder warning."""
-        item = UserStoryItem(
-            story_title="Some story title",
-            statement="As a user, I want feature X, so that I get benefit Y.",
-            acceptance_criteria=["Verify X works."],
-            invest_score="High",
-            estimated_effort="S",
-            produced_artifacts=[],
-            decomposition_warning="Only include this key if score is Low",
-        )
-        assert item.decomposition_warning is None
-
-    def test_rejects_low_score_without_warning(self) -> None:
-        """Verify rejects low score without warning."""
-        with pytest.raises(
-            ValidationError, match="required when invest_score is 'Low'"
-        ):
-            UserStoryItem(
-                story_title="Some story title",
-                statement="As a user, I want feature X, so that I get benefit Y.",
-                acceptance_criteria=["Verify X works."],
-                invest_score="Low",
-                estimated_effort="S",
-                produced_artifacts=[],
-            )
-
-    def test_rejects_empty_acceptance_criteria(self) -> None:
-        """Verify rejects empty acceptance criteria."""
-        with pytest.raises(ValidationError):
-            UserStoryItem(
-                story_title="Some story title",
-                statement="As a user, I want feature X, so that I get benefit Y.",
-                acceptance_criteria=[],
-                invest_score="High",
-                estimated_effort="S",
-                produced_artifacts=[],
-            )
-
-    def test_json_round_trip(self) -> None:
-        """Verify json round trip."""
-        item = UserStoryItem(
-            story_title="Upload CSV file",
-            statement=(
-                "As a data analyst, I want to upload a CSV file, "
-                "so that I can visualize data."
-            ),
-            acceptance_criteria=[
-                "Verify that CSV files up to 10MB are accepted.",
-                "Ensure that upload completes within 3 seconds.",
-            ],
-            invest_score="Medium",
-            estimated_effort="S",
-            produced_artifacts=[],
-        )
-        dumped = item.model_dump_json()
-        loaded = UserStoryItem.model_validate_json(dumped)
-        assert loaded.story_title == item.story_title
-        assert loaded.acceptance_criteria == item.acceptance_criteria
-        assert loaded.decomposition_warning is None
-
-    def test_rejects_extra_fields(self) -> None:
-        """Verify rejects extra fields."""
-        with pytest.raises(ValidationError):
-            UserStoryItem.model_validate(
-                {
-                    "story_title": "Valid title here",
-                    "statement": (
-                        "As a user, I want feature X, so that I get benefit Y."
-                    ),
-                    "acceptance_criteria": ["Verify X."],
-                    "invest_score": "High",
-                    "estimated_effort": "S",
-                    "produced_artifacts": [],
-                    "unknown_field": "bad",
-                }
-            )
-
-
-# ---------------------------------------------------------------------------
-# UserStoryWriterInput
-# ---------------------------------------------------------------------------
-
-
-class TestUserStoryWriterInput:
-    """Tests for the input schema."""
-
-    def test_valid_input(self) -> None:
-        """Verify valid input."""
-        inp = UserStoryWriterInput(
-            parent_requirement="Offline Dataset Ingestion",
-            requirement_context="Must support CSV and Parquet formats.",
-            technical_spec="Max file size 500MB. Processing within 60s.",
-            compiled_authority="ISO 27001 compliance required.",
-        )
-        assert inp.parent_requirement == "Offline Dataset Ingestion"
-
-    def test_accepts_extra_fields_for_adk_compat(self) -> None:
-        """ADK input schemas must NOT use extra='forbid'."""
-        inp = UserStoryWriterInput.model_validate(
+    with pytest.raises(ValidationError, match="fingerprint"):
+        StoryItemEnvelope.model_validate(
             {
-                "parent_requirement": "Valid requirement name",
-                "requirement_context": "context",
-                "technical_spec": "spec",
-                "compiled_authority": "auth",
-                "extra_field": "tolerated",
+                "item": {**payload, "invest_score": "Medium"},
+                "item_fingerprint": envelope.item_fingerprint,
             }
         )
-        assert inp.parent_requirement == "Valid requirement name"
 
-    def test_json_round_trip(self) -> None:
-        """Verify json round trip."""
-        payload: dict[str, Any] = {
-            "parent_requirement": "User Authentication",
-            "requirement_context": "Critical for security.",
-            "technical_spec": "OAuth2 + MFA required.",
-            "compiled_authority": "SOC2 Type II.",
+
+def test_canonical_story_output_accepts_only_the_host_persisted_envelope() -> None:
+    """Keep persisted Story content distinct from ID-free provider output."""
+    item = canonicalize_story_items(
+        _reference(),
+        parent_backlog_spec_item_ids=("DATA.beta", "REQ.alpha"),
+        agent_items=(_story(),),
+    )[0]
+
+    persisted = CanonicalStoryOutput.model_validate(
+        {
+            "story_items": [item.model_dump(mode="json")],
+            "is_complete": True,
+            "clarifying_questions": [],
         }
-        model = UserStoryWriterInput.model_validate(payload)
-        dumped = model.model_dump_json()
-        loaded = UserStoryWriterInput.model_validate_json(dumped)
-        assert loaded.parent_requirement == payload["parent_requirement"]
+    )
 
-
-# ---------------------------------------------------------------------------
-# UserStoryWriterOutput
-# ---------------------------------------------------------------------------
-
-
-class TestUserStoryWriterOutput:
-    """Tests for the output schema."""
-
-    def _make_valid_story(self, **overrides: object) -> dict[str, Any]:
-        """Build a valid UserStoryItem dictionary."""
-        base: dict[str, Any] = {
-            "story_title": "Upload CSV file",
-            "statement": (
-                "As a data engineer, I want to upload a CSV file, "
-                "so that raw data enters the system."
-            ),
-            "acceptance_criteria": ["Verify that CSV is parsed correctly."],
-            "invest_score": "High",
-            "estimated_effort": "S",
-            "produced_artifacts": ["csv_upload"],
-        }
-        base.update(overrides)
-        return base
-
-    def test_valid_complete_output(self) -> None:
-        """Verify valid complete output."""
-        out = UserStoryWriterOutput(
-            parent_requirement="Offline Dataset Ingestion",
-            user_stories=[UserStoryItem(**self._make_valid_story())],
-            is_complete=True,
+    assert persisted.story_items == (item,)
+    with pytest.raises(ValidationError, match="at least 1"):
+        CanonicalStoryOutput.model_validate(
+            {
+                "story_items": [],
+                "is_complete": True,
+            }
         )
-        assert out.is_complete is True
-        assert len(out.user_stories) == 1
-        assert out.clarifying_questions == []
-        assert out.quality_schema_version == "agileforge.story_quality.v1"
-        assert out.coverage_status == "complete"
-        assert out.remaining_scope == []
-        assert out.quality_findings == []
-
-    def test_accepts_quality_contract_fields(self) -> None:
-        """Verify Story output carries machine-readable quality metadata."""
-        finding = StoryQualityFinding(
-            code="REQUESTED_STORY_COUNT_EXCEEDS_CAP",
-            severity="blocking",
-            message="Requested decomposition exceeds one bounded attempt.",
-            affected_story_indexes=[1, 2],
-            affected_story_titles=["Upload CSV file"],
+    with pytest.raises(ValidationError, match="at most 8"):
+        CanonicalStoryOutput.model_validate(
+            {
+                "story_items": [item.model_dump(mode="json")] * 9,
+                "is_complete": True,
+            }
         )
-        out = UserStoryWriterOutput(
-            parent_requirement="Offline Dataset Ingestion",
-            user_stories=[UserStoryItem(**self._make_valid_story())],
-            is_complete=False,
-            coverage_status="partial_capacity_limited",
-            remaining_scope=["streaming ingestion", "manifest validation"],
-            quality_findings=[finding],
-            clarifying_questions=[
-                "Which remaining ingestion slice should be generated next?"
-            ],
+    with pytest.raises(ValidationError, match="story_items"):
+        CanonicalStoryOutput.model_validate(
+            {
+                "user_stories": [_story().model_dump(mode="json")],
+                "is_complete": True,
+            }
         )
-
-        assert out.coverage_status == "partial_capacity_limited"
-        assert out.remaining_scope == ["streaming ingestion", "manifest validation"]
-        assert out.quality_findings[0].code == "REQUESTED_STORY_COUNT_EXCEEDS_CAP"
-        assert out.quality_findings[0].severity == "blocking"
-
-    def test_valid_incomplete_output_with_questions(self) -> None:
-        """Verify valid incomplete output with questions."""
-        out = UserStoryWriterOutput(
-            parent_requirement="Dashboard Analytics",
-            user_stories=[
-                UserStoryItem(
-                    story_title="View sales chart",
-                    statement=(
-                        "As a manager, I want to view a sales chart, "
-                        "so that I can track revenue."
-                    ),
-                    acceptance_criteria=["Verify chart renders."],
-                    invest_score="High",
-                    estimated_effort="S",
-                    produced_artifacts=["sales_chart"],
-                ),
-            ],
-            is_complete=False,
-            clarifying_questions=["What chart types are required?"],
-        )
-        assert out.is_complete is False
-        assert len(out.clarifying_questions) == 1
-
-    def test_rejects_empty_stories(self) -> None:
-        """Verify rejects empty stories."""
-        with pytest.raises(ValidationError):
-            UserStoryWriterOutput(
-                parent_requirement="Something valid",
-                user_stories=[],
-                is_complete=True,
-            )
-
-    def test_rejects_extra_fields(self) -> None:
-        """Verify rejects extra fields."""
-        with pytest.raises(ValidationError):
-            UserStoryWriterOutput.model_validate(
-                {
-                    "parent_requirement": "Valid requirement",
-                    "user_stories": [UserStoryItem(**self._make_valid_story())],
-                    "is_complete": True,
-                    "bonus": "bad",
-                }
-            )
-
-    def test_json_round_trip(self) -> None:
-        """Verify json round trip."""
-        out = UserStoryWriterOutput(
-            parent_requirement="Authentication",
-            user_stories=[
-                UserStoryItem(
-                    story_title="Login with email",
-                    statement=(
-                        "As a member, I want to log in, so that I access my account."
-                    ),
-                    acceptance_criteria=["Verify login succeeds."],
-                    invest_score="High",
-                    estimated_effort="S",
-                    produced_artifacts=[],
-                ),
-            ],
-            is_complete=True,
-        )
-        dumped = out.model_dump_json()
-        loaded = UserStoryWriterOutput.model_validate_json(dumped)
-        assert loaded.parent_requirement == "Authentication"
-        assert len(loaded.user_stories) == 1
-        # Verify no extra text (markdown fences, commentary)
-        parsed = json.loads(dumped)
-        assert "```" not in dumped
-        assert set(parsed.keys()) == {
-            "parent_requirement",
-            "user_stories",
-            "quality_schema_version",
-            "coverage_status",
-            "remaining_scope",
-            "quality_findings",
-            "is_complete",
-            "clarifying_questions",
-        }

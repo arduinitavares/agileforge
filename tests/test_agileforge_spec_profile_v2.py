@@ -170,7 +170,7 @@ def test_payload_rejects_host_and_candidate_metadata() -> None:
 
 
 def test_normative_item_requires_level_verification_and_acceptance() -> None:
-    """Authority-eligible v1 item types keep their complete semantic contract."""
+    """Specification item types keep their complete semantic contract."""
     invalid = _payload()
     items = invalid["items"]
     assert isinstance(items, list)
@@ -303,7 +303,7 @@ def test_canonical_json_preserves_ordered_criteria_and_source_notes() -> None:
     )
 
 
-def test_markdown_review_projection_contains_all_authority_affecting_fields() -> None:
+def test_markdown_review_projection_contains_all_semantic_fields() -> None:
     """The deterministic review projection includes typed sources and references."""
     payload = SpecificationPayload.model_validate(_payload())
 

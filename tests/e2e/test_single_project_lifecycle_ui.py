@@ -46,7 +46,6 @@ _PROJECT_ID = 1
 _HTTP_OK = 200
 _HTTP_CREATED = 201
 _HTTP_CONFLICT = 409
-_HTTP_SERVICE_UNAVAILABLE = 503
 _UI_SETTLE_MS = 150
 _DESKTOP_VIEWPORT: ViewportSize = {"width": 1440, "height": 900}
 _MOBILE_VIEWPORT: ViewportSize = {"width": 390, "height": 844}
@@ -61,36 +60,34 @@ _FORBIDDEN_BODY_FIELDS = {
     "graph_version",
     "model_id",
 }
+_ABSENT_PLANNING_REVIEW_PATHS = {
+    "/backlog/review",
+    "/roadmap/review",
+    "/story/reviews",
+    "/sprint/plan/review",
+}
 
 _ACTION_ENDPOINTS = {
-    "compile_authority": "authority/compile",
-    "decide_authority": "authority/decision",
     "decide_product_goal_review": "goals/review",
     "decide_specification": "specifications/review",
     "decide_vision_review": "vision/review",
     "generate_vision_bootstrap": "vision/bootstrap",
-    "record_authority_feedback": "authority/feedback",
     "record_backlog_draft": "backlog/generate",
     "record_product_goal_interview_turn": "goals/respond",
     "register_specification_source": "specifications/source",
     "record_vision_interview_turn": "vision/respond",
-    "repair_authority": "authority/repair",
     "structure_specification": "specifications/structure",
 }
 
 _ACTION_CHILDREN = {
-    "compile_authority": "authority",
-    "decide_authority": "authority",
     "decide_product_goal_review": "product_goal",
     "decide_specification": "specification",
     "decide_vision_review": "vision",
     "generate_vision_bootstrap": "vision",
-    "record_authority_feedback": "authority",
     "record_backlog_draft": "backlog",
     "record_product_goal_interview_turn": "product_goal",
     "register_specification_source": "specification",
     "record_vision_interview_turn": "vision",
-    "repair_authority": "authority",
     "structure_specification": "specification",
 }
 
@@ -124,13 +121,6 @@ class FakeLifecycle:
     specification_structure_reason: str | None = None
     specification_structure_decision_fingerprint: str = "sha256:hidden-decision"
     specification_accepted: bool = False
-    authority_pending: JsonObject | None = None
-    authority_accepted: JsonObject | None = None
-    authority_rejected: bool = False
-    authority_feedback: str | None = None
-    authority_generation: int = 0
-    authority_compile_failed: bool = False
-    fail_next_authority_feedback: bool = False
     refresh_count: int = 0
     api_errors: list[str] = field(default_factory=list)
 
@@ -168,6 +158,17 @@ class FakeLifecycle:
         if request.method == "GET":
             if suffix == "/position":
                 return _HTTP_OK, self.position_envelope()
+            if suffix in _ABSENT_PLANNING_REVIEW_PATHS:
+                return _HTTP_CONFLICT, {
+                    "detail": {
+                        "errors": [
+                            {
+                                "code": "PLANNING_REVIEW_NOT_AVAILABLE",
+                                "message": "No planning review is current.",
+                            }
+                        ]
+                    }
+                }
             return _HTTP_OK, self._success(self._read(suffix))
         assert request.method == "POST", f"Unexpected method: {request.method}"
         return self._mutate(
@@ -193,7 +194,6 @@ class FakeLifecycle:
     def _read(self, suffix: str) -> JsonObject:
         readers: dict[str, Callable[[], JsonObject]] = {
             "": self._project_projection,
-            "/authority/review": self._authority_projection,
             "/goals/status": self._goal_projection,
             "/repository": self._repository_projection,
             "/specifications/review": self._specification_projection,
@@ -227,17 +227,7 @@ class FakeLifecycle:
                         }
                     }
                 }
-        if suffix == "/authority/feedback" and self.fail_next_authority_feedback:
-            self._assert_fields(body, {"feedback"})
-            self.fail_next_authority_feedback = False
-            return _HTTP_SERVICE_UNAVAILABLE, {
-                "detail": {"message": "Feedback storage was interrupted."}
-            }
         handlers: dict[str, Callable[[JsonObject], None]] = {
-            "/authority/compile": self._compile_authority,
-            "/authority/decision": self._review_authority,
-            "/authority/feedback": self._record_authority_feedback,
-            "/authority/repair": self._repair_authority,
             "/goals/respond": self._record_goal_turn,
             "/goals/review": self._review_goal,
             "/repository": self._attach_repository,
@@ -256,11 +246,6 @@ class FakeLifecycle:
 
     def _review_fingerprint(self, suffix: str) -> str | None:
         candidates = {
-            "/authority/decision": (
-                None
-                if self.authority_pending is None
-                else self.authority_pending.get("authority_fingerprint")
-            ),
             "/goals/review": (
                 None
                 if self.goal_candidate is None
@@ -425,61 +410,6 @@ class FakeLifecycle:
         assert isinstance(body["rationale"], str)
         self.specification_accepted = True
 
-    def _compile_authority(self, body: JsonObject) -> None:
-        self._assert_fields(body, set())
-        self.authority_generation += 1
-        self.authority_pending = {
-            "authority_id": 91,
-            "authority_fingerprint": (
-                f"sha256:hidden-authority-{self.authority_generation}"
-            ),
-            "compiler_version": "hidden-compiler",
-            "invariants": [
-                {
-                    "id": "INV-01",
-                    "type": "REQUIRED_FIELD",
-                    "parameters": {"field_name": "project_id"},
-                },
-                {
-                    "id": "INV-02",
-                    "type": "PROVENANCE_REQUIRED",
-                    "parameters": {"artifact": "review_evidence"},
-                },
-            ],
-            "findings": [
-                {
-                    "severity": "review",
-                    "message": "Confirm pilot team ownership before delivery begins.",
-                }
-            ],
-        }
-        self.authority_rejected = False
-        self.authority_feedback = None
-
-    def _review_authority(self, body: JsonObject) -> None:
-        self._assert_fields(body, {"decision", "rationale"})
-        assert isinstance(body["rationale"], str)
-        if body["decision"] == "accepted":
-            self.authority_accepted = self.authority_pending
-            self.authority_pending = None
-            self.authority_rejected = False
-            return
-        assert body["decision"] == "rejected"
-        self.authority_rejected = True
-
-    def _record_authority_feedback(self, body: JsonObject) -> None:
-        self._assert_fields(body, {"feedback"})
-        feedback = body["feedback"]
-        assert isinstance(feedback, str)
-        assert feedback
-        assert self.authority_rejected is True
-        self.authority_feedback = feedback
-
-    def _repair_authority(self, body: JsonObject) -> None:
-        self._assert_fields(body, set())
-        assert self.authority_feedback is not None
-        self._compile_authority(body)
-
     def _attach_repository(self, body: JsonObject) -> None:
         self._assert_fields(body, {"path"})
         path = body["path"]
@@ -601,19 +531,6 @@ class FakeLifecycle:
             "stale_reason": None,
         }
 
-    def _authority_projection(self) -> JsonObject:
-        findings = (
-            []
-            if self.authority_pending is None
-            else self.authority_pending.get("findings", [])
-        )
-        assert isinstance(findings, list)
-        return {
-            "accepted_authority": self.authority_accepted,
-            "pending_authority": self.authority_pending,
-            "findings": findings,
-        }
-
     def _repository_projection(self) -> JsonObject:
         return {"repository": self.repository}
 
@@ -632,24 +549,10 @@ class FakeLifecycle:
                 "register_specification_source",
             ),
             (
-                self.specification_feedback is not None
-                or self.specification is None,
+                self.specification_feedback is not None or self.specification is None,
                 "structure_specification",
             ),
             (not self.specification_accepted, "decide_specification"),
-            (
-                self.authority_pending is None and self.authority_accepted is None,
-                "compile_authority",
-            ),
-            (
-                self.authority_rejected and self.authority_feedback is None,
-                "record_authority_feedback",
-            ),
-            (
-                self.authority_rejected and self.authority_feedback is not None,
-                "repair_authority",
-            ),
-            (self.authority_pending is not None, "decide_authority"),
             (True, "record_backlog_draft"),
         )
         return next(action for active, action in phases if active)
@@ -698,21 +601,13 @@ class FakeLifecycle:
             "child_graph_id": child,
             "request_kind": request_kind,
             "category": "available",
-            "reason_code": (
-                specification_reason
-                or (
-                    "AUTHORITY_COMPILE_FAILED"
-                    if self.authority_compile_failed
-                    and request_kind == "compile_authority"
-                    else "INTERNAL_REASON_CODE"
-                )
-            ),
+            "reason_code": specification_reason or "INTERNAL_REASON_CODE",
             "decision_fingerprint": self.specification_structure_decision_fingerprint,
             "fact_references": fact_references,
         }
         blocker: JsonObject = {
             "node_id": "internal.next_stage",
-            "child_graph_id": "backlog" if child == "authority" else "authority",
+            "child_graph_id": "backlog",
             "request_kind": "record_backlog_draft",
             "category": "blocked",
             "reason_code": "INTERNAL_BLOCKER",
@@ -722,24 +617,6 @@ class FakeLifecycle:
             "decision_fingerprint": "sha256:hidden-blocker",
         }
         decisions: list[JsonValue] = [decision, blocker]
-        if self.authority_compile_failed and request_kind == "compile_authority":
-            decisions = [
-                {
-                    "node_id": "goal.fulfill",
-                    "child_graph_id": "product_goal",
-                    "request_kind": "fulfill_product_goal",
-                    "category": "available",
-                    "reason_code": "PRODUCT_GOAL_FULFILLED_AVAILABLE",
-                },
-                {
-                    "node_id": "goal.abandon",
-                    "child_graph_id": "product_goal",
-                    "request_kind": "abandon_product_goal",
-                    "category": "available",
-                    "reason_code": "PRODUCT_GOAL_ABANDONED_AVAILABLE",
-                },
-                *decisions,
-            ]
         return {
             "graph_version": "agileforge.workflow.hidden",
             "fact_fingerprint": "sha256:hidden-facts",
@@ -932,7 +809,6 @@ def _assert_human_only_surface(page: Page) -> None:
     for forbidden in (
         "INTERNAL_REASON_CODE",
         "agileforge.workflow.hidden",
-        "authority.compile",
     ):
         assert forbidden not in body_text
     assert (
@@ -1024,75 +900,6 @@ def _record_and_review_definition(page: Page) -> None:
         page.get_by_text("Every candidate has a scoped human decision.")
     ).to_be_visible()
     _accept_review(page, "specification")
-
-
-def _compile_and_review_authority(page: Page) -> None:
-    page.locator('[data-direct-action="compile_authority"]').click()
-    expect(page.get_by_text("Exact Authority review packet")).to_be_visible()
-    expect(page.get_by_text("Complete compiled Authority artifact")).to_be_visible()
-    expect(page.get_by_text('"type": "REQUIRED_FIELD"')).to_be_visible()
-    expect(page.get_by_text('"field_name": "project_id"')).to_be_visible()
-    expect(
-        page.get_by_text("Confirm pilot team ownership before delivery begins.")
-    ).to_be_visible()
-    page.locator(
-        '[data-review-scope="authority"][data-review-decision="rejected"]'
-    ).click()
-    page.locator("#human-action-rationale").fill(
-        "Clarify the ownership invariant before acceptance."
-    )
-    page.locator("#human-action-submit").click()
-    expect(page.get_by_text("Record feedback", exact=True)).to_be_visible()
-    page.locator('[data-authority-feedback="true"]').click()
-    page.locator("#human-action-rationale").fill(
-        "Require one named owner for lifecycle review."
-    )
-    page.locator("#human-action-submit").click()
-    expect(page.get_by_text("Recompile", exact=True)).to_be_visible()
-    page.locator('[data-direct-action="repair_authority"]').click()
-    expect(page.get_by_text("Exact Authority review packet")).to_be_visible()
-    _accept_review(page, "authority")
-    expect(page.get_by_text("Authority accepted")).to_be_visible()
-
-
-def _authority_ready_fake() -> FakeLifecycle:
-    fake = FakeLifecycle(repositories={})
-    fake.project = {
-        "project_id": _PROJECT_ID,
-        "name": "Authority recovery",
-        "description": "Interrupted feedback recovery.",
-        "user_stories_count": 0,
-        "sprint_count": 0,
-    }
-    fake.vision_candidate = {
-        "statement": "A durable recovery lifecycle.",
-        "fingerprint": "sha256:recovery-vision",
-    }
-    fake.vision_accepted = True
-    fake.goal_candidate = {
-        "statement": "Recover every interrupted human review.",
-        "fingerprint": "sha256:recovery-goal",
-    }
-    fake.goal_accepted = True
-    fake.specification_source = {
-        "specification_source_id": 31,
-        "source_fingerprint": "sha256:recovery-source",
-        "producer_capability": "to-spec",
-        "preparation_capability": "grill-with-docs",
-        "context": {"state": "absent", "document": None},
-    }
-    fake.specification = {
-        "title": "Recoverable Authority feedback",
-        "rendered_markdown": "# Recoverable Authority feedback",
-    }
-    fake.specification_accepted = True
-    fake._compile_authority(
-        {
-            "actor": "dashboard-ui",
-            "idempotency_key": "dashboard-seed-authority",
-        }
-    )
-    return fake
 
 
 def _assert_create_modal_keyboard_contract(page: Page) -> None:
@@ -1207,9 +1014,12 @@ def test_issue_204_structuring_reports_local_state_and_reloads_successor(
     expect(status).to_be_visible()
     expect(status).to_have_text("Structuring Specification...")
     assert page.evaluate("window.issue204Requests.length") == 1
-    assert page.evaluate(
-        "window.issue204Requests[0].headers['x-agileforge-expected-decision']"
-    ) == "sha256:hidden-decision"
+    assert (
+        page.evaluate(
+            "window.issue204Requests[0].headers['x-agileforge-expected-decision']"
+        )
+        == "sha256:hidden-decision"
+    )
 
     fake.specification_structure_reason = "SPECIFICATION_STRUCTURER_FAILED"
     fake.specification_structure_decision_fingerprint = "sha256:failed-decision"
@@ -1232,12 +1042,8 @@ def test_issue_204_structuring_reports_local_state_and_reloads_successor(
         "Specification structurer provider execution failed."
     )
     expect(status).to_contain_text("No new candidate was produced.")
-    expect(status).to_contain_text(
-        "The prior candidate and Feedback remain current."
-    )
-    expect(
-        page.get_by_text("Prior Feedback candidate", exact=False)
-    ).to_be_visible()
+    expect(status).to_contain_text("The prior candidate and Feedback remain current.")
+    expect(page.get_by_text("Prior Feedback candidate", exact=False)).to_be_visible()
     expect(button).to_be_visible()
     assert page.evaluate("window.issue204Requests.length") == 1
 
@@ -1257,9 +1063,7 @@ def test_issue_204_structuring_reports_local_state_and_reloads_successor(
         })"""
     )
 
-    expect(
-        page.get_by_text("Successor pending candidate", exact=False)
-    ).to_be_visible()
+    expect(page.get_by_text("Successor pending candidate", exact=False)).to_be_visible()
     expect(
         page.locator(
             '[data-review-scope="specification"][data-review-decision="accepted"]'
@@ -1271,77 +1075,6 @@ def test_issue_204_structuring_reports_local_state_and_reloads_successor(
             name="Retry structuring from unchanged source",
         )
     ).not_to_be_visible()
-    assert fake.api_errors == []
-    context.close()
-
-
-def test_issue_206_cards_match_accepted_definition_and_failed_authority_retry(
-    dashboard_harness: DashboardHarness,
-) -> None:
-    """Keep lifecycle cards aligned with durable panels after compile failure."""
-    fake = FakeLifecycle(
-        repositories={},
-        project={
-            "project_id": _PROJECT_ID,
-            "name": "Issue 206 lifecycle",
-            "description": "Provider-free lifecycle-card contradiction coverage.",
-        },
-        vision_candidate={"statement": "Accepted Vision"},
-        vision_accepted=True,
-        goal_candidate={"statement": "Accepted Product Goal"},
-        goal_accepted=True,
-        specification_source={
-            "specification_source_id": 31,
-            "source_fingerprint": "sha256:issue-206-source",
-        },
-        specification={"rendered_markdown": "# Accepted Specification"},
-        specification_accepted=True,
-        authority_compile_failed=True,
-    )
-    context = dashboard_harness.browser.new_context(viewport=_DESKTOP_VIEWPORT)
-    context.route("**/api/**", fake.handle)
-    page = context.new_page()
-    page.goto(
-        f"{dashboard_harness.url}/project.html?id={_PROJECT_ID}",
-        wait_until="networkidle",
-    )
-
-    cards = page.locator("#lifecycle-stage-strip li")
-
-    def card_lines(stage: str) -> list[str]:
-        return [
-            line.strip()
-            for line in cards.filter(has_text=stage).inner_text().splitlines()
-            if line.strip()
-        ]
-
-    assert card_lines("Vision") == [
-        "Vision",
-        "Complete",
-    ]
-    assert card_lines("Product Goal") == [
-        "Product Goal",
-        "Active",
-    ]
-    assert card_lines("Specification") == [
-        "Specification",
-        "Complete",
-    ]
-    assert card_lines("Authority") == [
-        "Authority",
-        "Failed",
-        "Retry available.",
-    ]
-    assert card_lines("Backlog") == [
-        "Backlog",
-        "Waiting",
-        "Finish the current human review before continuing.",
-    ]
-    expect(page.locator("#goal-panel")).to_contain_text("Active Product Goal")
-    expect(page.locator("#specification-panel")).to_contain_text("Review: Accepted")
-    expect(
-        page.locator("#authority-panel").get_by_role("button", name="Compile")
-    ).to_be_visible()
     assert fake.api_errors == []
     context.close()
 
@@ -1372,59 +1105,15 @@ def test_desktop_human_single_lifecycle(
         replace_vision_during_review=True,
     )
     _record_and_review_definition(page)
-    _compile_and_review_authority(page)
     _attach_and_refresh_repository(page, fake, repository_path)
 
     _assert_human_only_surface(page)
     _assert_no_horizontal_overflow(page)
-    page.locator("#authority-panel").scroll_into_view_if_needed()
+    page.locator("#delivery-panel").scroll_into_view_if_needed()
     _assert_no_control_overlap(page)
     screenshot = tmp_path / "desktop-1440x900.png"
     page.screenshot(path=screenshot, full_page=False, animations="disabled")
     _assert_screenshot_size(screenshot, _DESKTOP_VIEWPORT)
-    assert fake.api_errors == []
-    context.close()
-
-
-def test_interrupted_authority_feedback_recovers_without_a_dead_end(
-    dashboard_harness: DashboardHarness,
-) -> None:
-    """Resume feedback after rejection succeeded but feedback storage failed."""
-    fake = _authority_ready_fake()
-    fake.fail_next_authority_feedback = True
-    context = dashboard_harness.browser.new_context(viewport=_DESKTOP_VIEWPORT)
-    context.route("**/api/**", fake.handle)
-    page = context.new_page()
-    page.goto(
-        f"{dashboard_harness.url}/project.html?id={_PROJECT_ID}",
-        wait_until="networkidle",
-    )
-
-    expect(page.get_by_text("Exact Authority review packet")).to_be_visible()
-    page.locator(
-        '[data-review-scope="authority"][data-review-decision="feedback"]'
-    ).click()
-    page.locator("#human-action-rationale").fill(
-        "Require explicit ownership before delivery."
-    )
-    page.locator("#human-action-submit").click()
-
-    expect(page.locator("#human-action-dialog")).not_to_be_visible()
-    expect(page.locator("#project-error")).to_contain_text("feedback was not recorded")
-    expect(page.get_by_text("Record feedback", exact=True)).to_be_visible()
-    page.locator('[data-authority-feedback="true"]').click()
-    page.locator("#human-action-rationale").fill(
-        "Require explicit ownership before delivery."
-    )
-    page.locator("#human-action-submit").click()
-    expect(page.get_by_text("Recompile", exact=True)).to_be_visible()
-    page.locator('[data-direct-action="repair_authority"]').click()
-    expect(page.get_by_text("Exact Authority review packet")).to_be_visible()
-    _accept_review(page, "authority")
-    expect(page.get_by_text("Authority accepted")).to_be_visible()
-
-    _assert_human_only_surface(page)
-    _assert_no_horizontal_overflow(page)
     assert fake.api_errors == []
     context.close()
 
@@ -1473,3 +1162,72 @@ def test_mobile_dirty_repository_wraps_without_overflow(
     _assert_screenshot_size(screenshot, _MOBILE_VIEWPORT)
     assert fake.api_errors == []
     context.close()
+
+
+_PROJECT_HTML = Path("frontend/project.html")
+_PROJECT_JS = Path("frontend/project.js")
+
+
+def test_single_project_dashboard_uses_direct_specification_lifecycle() -> None:
+    """Keep the direct human lifecycle stages in their visible order."""
+    source = _PROJECT_JS.read_text(encoding="utf-8")
+
+    expected = (
+        "Vision",
+        "Product Goal",
+        "Specification",
+        "Backlog",
+        "Roadmap",
+        "Stories",
+        "Sprint",
+        "Execution",
+        "Review",
+    )
+    positions = [source.index(f"'{stage}'") for stage in expected]
+    assert positions == sorted(positions)
+
+
+def test_single_project_dashboard_loads_every_exact_planning_review() -> None:
+    """Load every dedicated planning review surface for one Project."""
+    source = _PROJECT_JS.read_text(encoding="utf-8")
+
+    for endpoint in (
+        "/backlog/review",
+        "/roadmap/review",
+        "/story/reviews",
+        "/sprint/plan/review",
+    ):
+        assert endpoint in source
+
+
+def test_review_evidence_is_rendered_before_decision_controls() -> None:
+    """Keep human evidence before planning decision controls."""
+    source = _PROJECT_JS.read_text(encoding="utf-8")
+    function = source[source.index("function planningReviewCardMarkup") :]
+
+    assert function.index("${content}") < function.index("data-planning-review=")
+    assert "escapeWorkflowText" in function
+    assert "planningReviewContentMarkup" in function
+    assert "specificationEvidenceMarkup" in source
+    assert "<pre" not in function
+    assert "visiblePlanningReview" not in source
+
+
+def test_dashboard_sends_machine_binding_outside_semantic_body() -> None:
+    """Keep review guard values in headers instead of semantic JSON."""
+    source = _PROJECT_JS.read_text(encoding="utf-8")
+
+    assert "X-AgileForge-Expected-Decision" in source
+    assert "X-AgileForge-Expected-Instance" in source
+    assert "body: JSON.stringify(semanticMutationPayload(fields))" in source
+
+
+def test_dashboard_live_surface_has_no_retired_stage_or_copy() -> None:
+    """Keep removed lifecycle terminology out of the live dashboard surface."""
+    source = (
+        _PROJECT_HTML.read_text(encoding="utf-8")
+        + _PROJECT_JS.read_text(encoding="utf-8")
+    ).casefold()
+
+    assert "auth" + "ority" not in source
+    assert "invar" + "iant" not in source

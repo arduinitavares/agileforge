@@ -5,7 +5,6 @@ from google.adk.models.lite_llm import LiteLlm
 
 from adapters.adk.prompts import load_prompt
 from services.contracts.story import (
-    UserStoryPatchOutput,
     UserStoryWriterInput,
     UserStoryWriterOutput,
 )
@@ -39,8 +38,8 @@ def create_user_story_writer_agent() -> Agent:
     return Agent(
         name="user_story_writer_tool",
         description=(
-            "Decomposes a single high-level roadmap requirement into "
-            "INVEST-compliant, Scrum user stories (Stage 2 → Chapter 5)."
+            "Decomposes one exact Backlog item into evidence-bound Scrum user "
+            "stories under the accepted Specification."
         ),
         model=model,
         input_schema=UserStoryWriterInput,
@@ -57,10 +56,13 @@ def create_user_story_patch_agent() -> Agent:
     model: LiteLlm = _create_story_writer_model()
     return Agent(
         name="user_story_patch_tool",
-        description="Refines exactly one existing Scrum user story.",
+        description=(
+            "Corrects exactly one host-selected Scrum Story under its immutable "
+            "Backlog and accepted-Specification boundaries."
+        ),
         model=model,
         input_schema=UserStoryWriterInput,
-        output_schema=UserStoryPatchOutput,
+        output_schema=UserStoryWriterOutput,
         output_key="story_output",
         instruction=USER_STORY_PATCH_INSTRUCTIONS,
         disallow_transfer_to_parent=True,

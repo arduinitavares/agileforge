@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from copy import deepcopy
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
@@ -12,10 +11,6 @@ from google.adk.events import Event
 from google.adk.workflow import START
 
 import adapters.adk.recipes as recipes_module
-from adapters.adk.prompts.specification import (
-    SPEC_AUTHORITY_COMPILER_PROMPT_HASH,
-    SPEC_AUTHORITY_COMPILER_VERSION,
-)
 from adapters.adk.recipes import (
     AGENTIC_NODE_IDS,
     AdkRecipe,
@@ -27,17 +22,20 @@ from adapters.adk.recipes import (
     build_agentic_recipe_registry,
     build_backlog_generation_workflow,
 )
-from utils.spec_schemas import SpecAuthorityCompilationSuccess
+from utils.agileforge_spec_profile_v2 import (
+    RequirementLevel,
+    SpecificationItem,
+    SpecificationPayload,
+    SpecItemType,
+    VerificationMethod,
+    canonical_spec_hash,
+    canonical_spec_json,
+)
 from workflow.definitions.root import ROOT_GRAPH
-from workflow.fingerprints import canonical_hash
 from workflow.requests import (
-    CompileAuthority,
     CompleteSpecificationStructuring,
     RecordBacklogDraft,
-    RecordRoadmapDraft,
     RecordSprintPlan,
-    RecordStoryDraft,
-    RepairAuthority,
 )
 
 if TYPE_CHECKING:
@@ -63,19 +61,6 @@ COMPLETION_CONTEXT = AttemptCompletionContext(
 )
 
 
-def _compiled_authority_payload() -> JsonObject:
-    return SpecAuthorityCompilationSuccess(
-        scope_themes=["Task 15"],
-        invariants=[],
-        eligible_feature_rules=[],
-        gaps=[],
-        assumptions=[],
-        source_map=[],
-        compiler_version=SPEC_AUTHORITY_COMPILER_VERSION,
-        prompt_hash=SPEC_AUTHORITY_COMPILER_PROMPT_HASH,
-    ).model_dump(mode="json")
-
-
 REQUEST_CASES: tuple[
     tuple[str, type[PositionedRequest], JsonObject],
     ...,
@@ -94,61 +79,6 @@ REQUEST_CASES: tuple[
             },
             "removal_justifications": {},
             "stable_id_replacements": [],
-        },
-    ),
-    (
-        "authority.compile",
-        CompileAuthority,
-        {
-            "spec_version_id": 3,
-            "expected_spec_hash": "sha256:spec",
-            "compiler_model": "fake/compiler",
-            "compiled_authority": _compiled_authority_payload(),
-        },
-    ),
-    (
-        "authority.repair",
-        RepairAuthority,
-        {
-            "source_authority_id": 5,
-            "source_authority_fingerprint": "sha256:authority",
-            "compiled_authority": _compiled_authority_payload(),
-        },
-    ),
-    (
-        "backlog.generate",
-        RecordBacklogDraft,
-        {
-            "authority_id": 5,
-            "authority_fingerprint": "sha256:authority",
-            "product_goal_artifact_id": 3,
-            "product_goal_fingerprint": "sha256:goal",
-            "canonical_content": {"backlog_items": []},
-            "content_fingerprint": "sha256:backlog",
-            "supersedes_backlog_artifact_id": None,
-        },
-    ),
-    (
-        "planning.roadmap.generate",
-        RecordRoadmapDraft,
-        {
-            "backlog_artifact_id": 7,
-            "backlog_artifact_fingerprint": "sha256:backlog",
-            "canonical_content": {"releases": []},
-            "content_fingerprint": "sha256:roadmap",
-            "supersedes_roadmap_artifact_id": None,
-        },
-    ),
-    (
-        "planning.story.generate",
-        RecordStoryDraft,
-        {
-            "requirement_id": "REQ-1",
-            "roadmap_artifact_id": 11,
-            "roadmap_artifact_fingerprint": "sha256:roadmap",
-            "canonical_content": {"stories": []},
-            "content_fingerprint": "sha256:story",
-            "supersedes_story_artifact_id": None,
         },
     ),
 )
@@ -170,16 +100,6 @@ class FakeLeafAgent(BaseAgent):
 def _agentic_nodes() -> AgenticRecipeNodes:
     """Build a complete provider-free retained-node replacement set."""
     return AgenticRecipeNodes(
-        authority_compile=FakeLeafAgent(name="fake_authority_compile", response={}),
-        authority_repair=FakeLeafAgent(name="fake_authority_repair", response={}),
-        authority_compile_validation_repair=FakeLeafAgent(
-            name="fake_authority_compile_validation_repair",
-            response={},
-        ),
-        authority_repair_validation_repair=FakeLeafAgent(
-            name="fake_authority_repair_validation_repair",
-            response={},
-        ),
         vision_interview=FakeLeafAgent(
             name="fake_vision_interview",
             response={},
@@ -236,7 +156,7 @@ def test_recipe_registry_fails_closed_for_unknown_node() -> None:
     registry = AdkRecipeRegistry(())
 
     with pytest.raises(UnknownAdkRecipeError):
-        registry.require("authority.review")
+        registry.require("retired.node")
 
 
 def test_recipe_registry_covers_each_stable_agentic_domain_node_once() -> None:
@@ -258,13 +178,7 @@ def test_recipe_registry_covers_each_stable_agentic_domain_node_once() -> None:
         assert recipe.workflow.retry_config is not None
         expected_attempts = (
             1
-            if node_id
-            in {
-                "authority.compile",
-                "authority.repair",
-                "vision.bootstrap",
-                "vision.interview",
-            }
+            if node_id in {"vision.bootstrap", "vision.interview"}
             else RECIPE_MAX_ATTEMPTS
         )
         assert recipe.workflow.retry_config.max_attempts == expected_attempts
@@ -318,28 +232,55 @@ def test_complete_registry_adapts_each_output_to_its_typed_request(
 
 
 def _sprint_attempt_input() -> JsonObject:
+    specification = SpecificationPayload(
+        artifact_id="SPEC.sprint-recipe",
+        title="Sprint recipe",
+        summary="Plan exact accepted work.",
+        problem_statement="Tasks must retain exact evidence.",
+        items=(
+            SpecificationItem(
+                id="REQ.alpha",
+                type=SpecItemType.REQ,
+                title="Alpha",
+                statement="The system must deliver alpha.",
+                level=RequirementLevel.MUST,
+                verification=VerificationMethod.UNIT_TEST,
+                acceptance=("Alpha passes.",),
+            ),
+        ),
+    )
     planner_input: JsonObject = {
+        "accepted_specification_version_id": 3,
+        "accepted_specification_hash": canonical_spec_hash(specification),
+        "accepted_specification_json": canonical_spec_json(specification),
         "available_stories": [
             {
                 "story_id": 11,
+                "story_item_id": "US-0001",
                 "story_title": "First locked Story",
-                "priority": 1,
+                "statement": "As a builder, I want alpha, so that value ships.",
+                "persona": "builder",
+                "acceptance_criteria": ["Alpha passes."],
+                "spec_item_ids": ["REQ.alpha"],
                 "story_points": 2,
-                "story_description": "Deliver the first locked Story.",
+                "rank": "101",
             },
             {
                 "story_id": 12,
+                "story_item_id": "US-0002",
                 "story_title": "Second locked Story",
-                "priority": 2,
+                "statement": "As a builder, I want beta, so that value grows.",
+                "persona": "builder",
+                "acceptance_criteria": ["Beta passes."],
+                "spec_item_ids": ["REQ.alpha"],
                 "story_points": 3,
-                "story_description": "Deliver the second locked Story.",
+                "rank": "102",
             },
         ],
         "capacity_points": 5,
         "capacity_source": "user_override",
         "capacity_basis": "5 points provided by the operator.",
         "user_context": "Keep the cohort exact.",
-        "include_task_decomposition": False,
     }
     return {
         "planner_input": planner_input,
@@ -350,42 +291,46 @@ def _sprint_attempt_input() -> JsonObject:
         "requested_story_ids": [11, 12],
         "locked_story_ids": [11, 12],
         "team_name": "Platform",
-        "include_task_decomposition": False,
         "guidance": "Keep the cohort exact.",
         "candidate_set_fingerprint": "sha256:candidates",
-        "supersedes_sprint_plan_artifact_id": 7,
     }
 
 
 def _sprint_output() -> JsonObject:
     return {
         "sprint_goal": "Deliver the exact locked cohort.",
-        "sprint_number": 2,
         "selected_stories": [
             {
                 "story_id": 11,
-                "story_title": "First locked Story",
-                "tasks": [],
+                "story_item_id": "US-0001",
+                "tasks": [
+                    {
+                        "description": "Implement alpha.",
+                        "relevant_spec_item_ids": ["REQ.alpha"],
+                        "task_kind": "implementation",
+                        "artifact_targets": [],
+                        "workstream_tags": ["backend"],
+                        "checklist_items": ["Run the alpha test."],
+                    }
+                ],
                 "reason_for_selection": "Host locked this Story.",
             },
             {
                 "story_id": 12,
-                "story_title": "Second locked Story",
-                "tasks": [],
+                "story_item_id": "US-0002",
+                "tasks": [
+                    {
+                        "description": "Test beta.",
+                        "relevant_spec_item_ids": ["REQ.alpha"],
+                        "task_kind": "test",
+                        "artifact_targets": [],
+                        "workstream_tags": ["backend"],
+                        "checklist_items": ["Run the beta test."],
+                    }
+                ],
                 "reason_for_selection": "Host locked this Story.",
             },
         ],
-        "deselected_stories": [],
-        "capacity_analysis": {
-            "capacity_points": 5,
-            "capacity_source": "user_override",
-            "capacity_basis": "5 points provided by the operator.",
-            "selected_count": 2,
-            "story_points_used": 5,
-            "remaining_capacity_points": 0,
-            "commitment_note": "The locked cohort fits.",
-            "reasoning": "The exact host-selected Stories consume five points.",
-        },
     }
 
 
@@ -405,14 +350,10 @@ def test_sprint_recipe_builds_record_request_from_host_owned_envelope() -> None:
 
     assert isinstance(request, RecordSprintPlan)
     assert request.team_name == "Platform"
-    assert request.selected_story_ids == (11, 12)
-    assert request.candidate_set_fingerprint == "sha256:candidates"
-    assert (
-        request.supersedes_sprint_plan_artifact_id
-        == _sprint_attempt_input()["supersedes_sprint_plan_artifact_id"]
-    )
-    assert request.canonical_task_plan == output
-    assert request.plan_fingerprint == canonical_hash(output)
+    assert request.planner_output.model_dump(mode="json") == output
+    assert not hasattr(request, "candidate_set_fingerprint")
+    assert not hasattr(request, "plan_fingerprint")
+    assert not hasattr(request, "sprint_plan_stream_id")
 
 
 @pytest.mark.parametrize(
@@ -421,10 +362,9 @@ def test_sprint_recipe_builds_record_request_from_host_owned_envelope() -> None:
         "added_story",
         "dropped_story",
         "reordered_stories",
-        "wrong_capacity",
         "model_candidate_fingerprint",
         "model_team_name",
-        "unexpected_tasks",
+        "missing_tasks",
     ],
 )
 def test_sprint_recipe_rejects_model_owned_or_changed_host_facts(
@@ -432,15 +372,24 @@ def test_sprint_recipe_rejects_model_owned_or_changed_host_facts(
 ) -> None:
     """Reject any model drift from the locked cohort and host planning policy."""
     envelope = _sprint_attempt_input()
-    output = deepcopy(_sprint_output())
+    output = _sprint_output()
     selected = output["selected_stories"]
     assert isinstance(selected, list)
     if mutation == "added_story":
         selected.append(
             {
                 "story_id": 13,
-                "story_title": "Added Story",
-                "tasks": [],
+                "story_item_id": "US-0003",
+                "tasks": [
+                    {
+                        "description": "Added task.",
+                        "relevant_spec_item_ids": ["REQ.alpha"],
+                        "task_kind": "implementation",
+                        "artifact_targets": [],
+                        "workstream_tags": [],
+                        "checklist_items": ["Check it."],
+                    }
+                ],
                 "reason_for_selection": "Model added this Story.",
             }
         )
@@ -448,10 +397,6 @@ def test_sprint_recipe_rejects_model_owned_or_changed_host_facts(
         selected.pop()
     elif mutation == "reordered_stories":
         selected.reverse()
-    elif mutation == "wrong_capacity":
-        analysis = output["capacity_analysis"]
-        assert isinstance(analysis, dict)
-        analysis["capacity_points"] = 6
     elif mutation == "model_candidate_fingerprint":
         output["candidate_set_fingerprint"] = "model-owned"
     elif mutation == "model_team_name":
@@ -459,16 +404,7 @@ def test_sprint_recipe_rejects_model_owned_or_changed_host_facts(
     else:
         first = selected[0]
         assert isinstance(first, dict)
-        first["tasks"] = [
-            {
-                "description": "Unexpected decomposition",
-                "task_kind": "implementation",
-                "artifact_targets": ["planning module"],
-                "workstream_tags": ["workflow"],
-                "relevant_invariant_ids": [],
-                "checklist_items": ["Run focused tests"],
-            }
-        ]
+        first["tasks"] = []
     context = replace(
         COMPLETION_CONTEXT,
         normalized_input=envelope,

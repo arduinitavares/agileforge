@@ -1,95 +1,76 @@
 {
   "project_id": 41,
-  "graph_version": "agileforge.workflow.v1",
+  "graph_version": "agileforge.workflow.v2",
   "fact_fingerprint": "facts-41",
-  "evaluated_at": "2026-08-03T12:00:00Z",
-  "available_nodes": [
-    "authority.compile",
-    "authority.repair"
+  "evaluated_at": "2026-08-21T12:00:00Z",
+  "available_nodes": ["planning.backlog.review"],
+  "waiting_nodes": [
+    "planning.roadmap.review",
+    "planning.story.review",
+    "planning.sprint.review"
   ],
-  "waiting_nodes": ["vision.interview"],
-  "blocked_nodes": ["backlog.generate"],
-  "invalid_nodes": ["planning.roadmap.generate"],
+  "blocked_nodes": ["execution.sprint.start"],
+  "invalid_nodes": [],
   "terminal": false,
   "decisions": [
     {
-      "node_id": "authority.compile",
+      "node_id": "planning.backlog.review",
       "instance_key": null,
-      "child_graph_id": "authority",
-      "request_kind": "compile_authority",
+      "child_graph_id": "planning",
+      "request_kind": "decide_backlog",
       "category": "available",
       "recommendation_kind": "required",
-      "reason_code": "AUTHORITY_COMPILE_REQUIRED",
-      "required_inputs": [
-        {"name": "spec_version_id", "value_type": "integer", "required": true},
-        {"name": "expected_spec_hash", "value_type": "string", "required": true}
-      ],
+      "reason_code": "BACKLOG_REVIEW_REQUIRED",
+      "required_inputs": [],
       "fact_references": [
+        {"fact_type": "backlog", "fact_id": "11", "fingerprint": "backlog-11"},
         {"fact_type": "spec_version", "fact_id": "17", "fingerprint": "spec-17"}
       ],
       "blockers": [],
       "valid_until": null,
-      "decision_fingerprint": "decision-compile"
-    },
-    {
-      "node_id": "authority.repair",
-      "instance_key": null,
-      "child_graph_id": "authority",
-      "request_kind": "repair_authority",
-      "category": "available",
-      "recommendation_kind": "recovery",
-      "reason_code": "AUTHORITY_REPAIR_REQUIRED",
-      "required_inputs": [
-        {"name": "source_authority_id", "value_type": "integer", "required": true}
-      ],
-      "fact_references": [
-        {"fact_type": "compiled_authority", "fact_id": "23", "fingerprint": "authority-23"}
-      ],
-      "blockers": [],
-      "valid_until": null,
-      "decision_fingerprint": "decision-repair"
-    },
-    {
-      "node_id": "vision.interview",
-      "instance_key": null,
-      "child_graph_id": "vision",
-      "request_kind": "record_vision_interview_turn",
-      "category": "waiting",
-      "recommendation_kind": "required",
-      "reason_code": "UPSTREAM_ATTEMPT_ACTIVE",
-      "required_inputs": [],
-      "fact_references": [],
-      "blockers": [],
-      "valid_until": "2026-08-03T12:05:00Z",
-      "decision_fingerprint": "decision-vision"
-    },
-    {
-      "node_id": "backlog.generate",
-      "instance_key": null,
-      "child_graph_id": "backlog",
-      "request_kind": "record_backlog_draft",
-      "category": "blocked",
-      "recommendation_kind": "required",
-      "reason_code": "VISION_REQUIRED",
-      "required_inputs": [],
-      "fact_references": [],
-      "blockers": [{"code": "VISION_REQUIRED", "message": "Accept Vision first.", "fact_references": []}],
-      "valid_until": null,
       "decision_fingerprint": "decision-backlog"
     },
     {
-      "node_id": "planning.roadmap.generate",
+      "node_id": "planning.roadmap.review",
       "instance_key": null,
       "child_graph_id": "planning",
-      "request_kind": "record_roadmap_draft",
-      "category": "invalid",
+      "request_kind": "decide_roadmap",
+      "category": "waiting",
       "recommendation_kind": "required",
-      "reason_code": "WORKFLOW_FACT_CONFLICT",
+      "reason_code": "BACKLOG_ACCEPTANCE_REQUIRED",
       "required_inputs": [],
       "fact_references": [],
       "blockers": [],
       "valid_until": null,
       "decision_fingerprint": "decision-roadmap"
+    },
+    {
+      "node_id": "planning.story.review",
+      "instance_key": "story:DATA.001",
+      "child_graph_id": "planning",
+      "request_kind": "decide_story",
+      "category": "waiting",
+      "recommendation_kind": "required",
+      "reason_code": "ROADMAP_ACCEPTANCE_REQUIRED",
+      "required_inputs": [],
+      "fact_references": [],
+      "blockers": [],
+      "valid_until": null,
+      "decision_fingerprint": "decision-story"
+    },
+    {
+      "node_id": "planning.sprint.review",
+      "instance_key": null,
+      "child_graph_id": "planning",
+      "request_kind": "decide_sprint_plan",
+      "category": "waiting",
+      "recommendation_kind": "required",
+      "reason_code": "STORY_ACCEPTANCE_REQUIRED",
+      "required_inputs": [],
+      "fact_references": [],
+      "blockers": [],
+      "valid_until": null,
+      "decision_fingerprint": "decision-sprint-plan"
     }
   ]
 }

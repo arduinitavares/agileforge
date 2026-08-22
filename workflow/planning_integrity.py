@@ -67,10 +67,9 @@ def dependency_edges_are_canonical(
     edges: tuple[StoryDependencyReviewEdgeFact, ...],
 ) -> bool:
     """Require stable order and unique directed endpoints."""
-    return (
-        not dependency_edges_have_duplicate_endpoints(edges)
-        and edges == canonical_dependency_edges(edges)
-    )
+    return not dependency_edges_have_duplicate_endpoints(
+        edges
+    ) and edges == canonical_dependency_edges(edges)
 
 
 def dependency_edges_have_cycle(
@@ -80,9 +79,7 @@ def dependency_edges_have_cycle(
     graph: dict[int, set[int]] = {}
     nodes: set[int] = set()
     for edge in edges:
-        graph.setdefault(edge.dependent_story_id, set()).add(
-            edge.prerequisite_story_id
-        )
+        graph.setdefault(edge.dependent_story_id, set()).add(edge.prerequisite_story_id)
         nodes.update((edge.dependent_story_id, edge.prerequisite_story_id))
     active: set[int] = set()
     visited: set[int] = set()
@@ -116,7 +113,15 @@ def active_dependency_review_edges(
     )
 
 
-def planned_task_content_fingerprint(plan: SprintPlannerOutput) -> str:
+def planned_task_content_fingerprint(  # noqa: PLR0913
+    plan: SprintPlannerOutput,
+    *,
+    spec_version_id: int,
+    spec_hash: str,
+    sprint_plan_stream_id: str,
+    sprint_plan_artifact_id: int,
+    sprint_plan_fingerprint: str,
+) -> str:
     """Hash every persisted task semantic field represented by a plan."""
     payload: list[JsonObject] = []
     for selected in sorted(plan.selected_stories, key=lambda item: item.story_id):
@@ -127,7 +132,14 @@ def planned_task_content_fingerprint(plan: SprintPlannerOutput) -> str:
                     "task_ordinal": ordinal,
                     "description": task.description,
                     "metadata_json": serialize_task_metadata(
-                        metadata_from_structured_task(task)
+                        metadata_from_structured_task(
+                            task,
+                            spec_version_id=spec_version_id,
+                            spec_hash=spec_hash,
+                            sprint_plan_stream_id=sprint_plan_stream_id,
+                            sprint_plan_artifact_id=sprint_plan_artifact_id,
+                            sprint_plan_fingerprint=sprint_plan_fingerprint,
+                        )
                     ),
                     "status": TaskStatus.TO_DO.value,
                 }

@@ -28,8 +28,8 @@ _REQUEST_CASES: tuple[tuple[type[BaseModel], dict[str, object]], ...] = (
     (
         DecideStory,
         {
-            "instance_key": "requirement:req-7",
-            "requirement_id": "req-7",
+            "instance_key": "backlog_item:PBI-000007",
+            "backlog_item_id": "PBI-000007",
             "story_artifact_id": 9,
             "artifact_fingerprint": "sha256:story-9",
         },

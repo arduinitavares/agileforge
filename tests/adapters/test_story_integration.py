@@ -217,5 +217,4 @@ async def test_story_agent_replay_captures_raw_output_from_input_fixture(
         )
 
     assert raw_output.strip(), "Expected a non-empty raw model response"
-    assert validated.parent_requirement == payload.parent_requirement
     assert validated.user_stories, "Expected at least one generated user story"

@@ -94,10 +94,7 @@ COMMAND_PREFIXES: dict[str, tuple[str, ...]] = {
     "begin_vision_revision": ("agileforge", "vision", "revision"),
     "close_sprint": ("agileforge", "sprint", "close"),
     "close_story": ("agileforge", "story", "close"),
-    "compile_authority": ("agileforge", "authority", "compile"),
-    "record_authority_feedback": ("agileforge", "authority", "feedback"),
     "complete_task": ("agileforge", "sprint", "task", "complete"),
-    "decide_authority": ("agileforge", "authority", "decide"),
     "decide_backlog": ("agileforge", "backlog", "decide"),
     "decide_product_goal_review": ("agileforge", "goal", "review"),
     "decide_roadmap": ("agileforge", "roadmap", "decide"),
@@ -120,7 +117,6 @@ COMMAND_PREFIXES: dict[str, tuple[str, ...]] = {
     "record_sprint_plan": ("agileforge", "sprint", "generate"),
     "record_story_draft": ("agileforge", "story", "generate"),
     "record_vision_interview_turn": ("agileforge", "vision", "respond"),
-    "repair_authority": ("agileforge", "authority", "repair"),
     "repair_story_readiness": ("agileforge", "story", "readiness", "repair"),
     "review_sprint": ("agileforge", "sprint", "review"),
     "start_sprint": ("agileforge", "sprint", "start"),
@@ -148,7 +144,6 @@ _SEMANTIC_ARGUMENTS: dict[str, tuple[str, ...]] = {
         "--known-gaps",
         "<known-gaps>",
     ),
-    "compile_authority": (),
     "complete_task": (
         "--outcome-summary",
         "<outcome-summary>",
@@ -158,12 +153,6 @@ _SEMANTIC_ARGUMENTS: dict[str, tuple[str, ...]] = {
         "<acceptance-result>",
         "--checklist-item",
         "<checklist-item>",
-    ),
-    "decide_authority": (
-        "--decision",
-        "<decision>",
-        "--rationale",
-        "<rationale>",
     ),
     "decide_backlog": (
         "--decision",
@@ -210,7 +199,6 @@ _SEMANTIC_ARGUMENTS: dict[str, tuple[str, ...]] = {
     "fulfill_product_goal": ("--rationale", "<rationale>"),
     "generate_vision_bootstrap": (),
     "record_backlog_draft": (),
-    "record_authority_feedback": ("--feedback", "<feedback>"),
     "record_post_sprint_triage": (
         "--impact",
         "<impact>",
@@ -233,7 +221,6 @@ _SEMANTIC_ARGUMENTS: dict[str, tuple[str, ...]] = {
     ),
     "record_story_draft": (),
     "record_vision_interview_turn": ("--text", "<text>"),
-    "repair_authority": (),
     "repair_story_readiness": ("--repair", "<repair>"),
     "review_sprint": (),
     "start_sprint": (),
@@ -251,7 +238,6 @@ _INSTANCE_SELECTOR_REQUEST_KINDS = _DELIVERY_REQUEST_KINDS | {
     "close_sprint",
     "complete_task",
     "close_story",
-    "decide_story",
     "record_post_sprint_triage",
     "review_sprint",
 }
@@ -327,7 +313,6 @@ def render_workflow_next(position: WorkflowPosition) -> WorkflowNextPayload:
                 decision.category is NodeCategory.WAITING
                 and decision.request_kind
                 in {
-                    "decide_authority",
                     "decide_backlog",
                     "decide_product_goal_review",
                     "decide_roadmap",

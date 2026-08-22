@@ -19,6 +19,7 @@ from workflow.contracts import (
 
 FIXTURE_PATH = Path(__file__).parents[1] / "fixtures" / "workflow_position.json"
 EXPECTED_STORY_COMMAND_COUNT = 2
+_PROJECT_ID = 41
 _PLACEHOLDERS = {
     "<input-file>": "input.json",
     "<request-file>": "request.json",
@@ -54,12 +55,14 @@ def position_fixture() -> WorkflowPosition:
 
 
 def test_workflow_next_renders_required_and_recovery_only() -> None:
-    """Advertise each available required or recovery decision exactly once."""
+    """Advertise each current direct-Spec review decision exactly once."""
     payload = render_workflow_next(position_fixture())
 
     assert [item["node_id"] for item in payload["commands"]] == [
-        "authority.compile",
-        "authority.repair",
+        "planning.backlog.review",
+        "planning.roadmap.review",
+        "planning.story.review",
+        "planning.sprint.review",
     ]
     serialized = json.dumps(payload)
     assert "--graph-version" not in serialized
@@ -119,11 +122,7 @@ def test_zero_command_position_explains_terminal_waiting_and_invalid() -> None:
         update={
             "available_nodes": (),
             "terminal": True,
-            "decisions": tuple(
-                decision
-                for decision in position_fixture().decisions
-                if decision.category.value != "available"
-            ),
+            "decisions": (),
         }
     )
 
@@ -131,8 +130,12 @@ def test_zero_command_position_explains_terminal_waiting_and_invalid() -> None:
 
     assert payload["commands"] == []
     assert payload["terminal"] is True
-    assert payload["waiting_nodes"] == ["vision.interview"]
-    assert payload["invalid_nodes"] == ["planning.roadmap.generate"]
+    assert payload["waiting_nodes"] == [
+        "planning.roadmap.review",
+        "planning.story.review",
+        "planning.sprint.review",
+    ]
+    assert payload["invalid_nodes"] == []
 
 
 def test_renderer_module_has_no_routing_or_repository_policy() -> None:
@@ -194,22 +197,24 @@ def test_rendered_commands_are_accepted_by_the_cli_parser() -> None:
 
 
 @pytest.mark.parametrize(
-    ("request_kind", "node_id", "category"),
+    ("request_kind", "node_id", "category", "exposes_selector"),
     [
         (
             "record_story_draft",
             "planning.story.generate",
             NodeCategory.AVAILABLE,
+            True,
         ),
-        ("decide_story", "planning.story.review", NodeCategory.WAITING),
+        ("decide_story", "planning.story.review", NodeCategory.WAITING, False),
     ],
 )
 def test_story_commands_preserve_punctuated_requirement_selector_token(
     request_kind: str,
     node_id: str,
     category: NodeCategory,
+    exposes_selector: bool,
 ) -> None:
-    """Keep one exact Story selector token through shell and argparse parsing."""
+    """Expose selectors only for commands whose semantic contract needs them."""
     selector = "requirement:reconcile household balances (joint) & taxes"
     decision = NodeDecision(
         node_id=node_id,
@@ -237,8 +242,12 @@ def test_story_commands_preserve_punctuated_requirement_selector_token(
         [_PLACEHOLDERS.get(argument, argument) for argument in argv]
     )
 
-    assert parsed.instance_key == selector
-    assert argv[argv.index("--instance-key") + 1] == selector
+    if exposes_selector:
+        assert parsed.instance_key == selector
+        assert argv[argv.index("--instance-key") + 1] == selector
+    else:
+        assert not hasattr(parsed, "instance_key")
+        assert "--instance-key" not in argv
 
 
 def test_lifecycle_positions_render_semantic_commands() -> None:
@@ -249,8 +258,6 @@ def test_lifecycle_positions_render_semantic_commands() -> None:
         "record_product_goal_interview_turn": "agileforge goal respond",
         "register_specification_source": "agileforge specification source register",
         "structure_specification": "agileforge specification structure",
-        "record_authority_feedback": "agileforge authority feedback",
-        "compile_authority": "agileforge authority compile",
         "fulfill_product_goal": "agileforge goal complete",
         "abandon_product_goal": "agileforge goal abandon",
     }
@@ -465,10 +472,9 @@ def test_delivery_reviews_render_fingerprint_free_semantic_commands() -> None:
     story_command = next(
         item["command"] for item in commands if item["request_kind"] == "decide_story"
     )
-    story_tokens = shlex.split(story_command)
-    assert story_tokens[story_tokens.index("--instance-key") + 1] == (
-        "requirement:req-7"
-    )
+    assert "--instance-key" not in shlex.split(story_command)
+    story = next(item for item in commands if item["request_kind"] == "decide_story")
+    assert story["instance_key"] == "requirement:req-7"
 
 
 @pytest.mark.parametrize(
@@ -860,8 +866,8 @@ def test_story_generation_renders_each_exact_requirement_selector() -> None:
         assert "--model-id" not in item["command"]
 
 
-def test_duplicate_story_review_selectors_are_ambiguous() -> None:
-    """Suppress duplicate Story review selectors but keep distinct ones."""
+def test_multiple_story_review_bindings_are_ambiguous() -> None:
+    """Do not advertise one semantic command for several hidden Story bindings."""
     decisions = tuple(
         NodeDecision(
             node_id="planning.story.review",
@@ -894,28 +900,7 @@ def test_duplicate_story_review_selectors_are_ambiguous() -> None:
 
     commands = render_workflow_next(position)["commands"]
 
-    expected_prefixes = [
-        [
-            "agileforge",
-            "story",
-            "decide",
-            "--project-id",
-            "41",
-            "--instance-key",
-            "requirement:req-2",
-        ],
-        [
-            "agileforge",
-            "story",
-            "decide",
-            "--project-id",
-            "41",
-            "--instance-key",
-            "requirement:req-3",
-        ],
-    ]
-    for item, expected_prefix in zip(commands, expected_prefixes, strict=True):
-        assert shlex.split(item["command"])[: len(expected_prefix)] == expected_prefix
+    assert commands == []
 
 
 def test_duplicate_selectorless_story_reviews_are_ambiguous() -> None:
@@ -945,8 +930,8 @@ def test_duplicate_selectorless_story_reviews_are_ambiguous() -> None:
     assert render_workflow_next(position)["commands"] == []
 
 
-def test_selectorless_story_review_is_not_executable() -> None:
-    """Suppress even one Story review decision without its required selector."""
+def test_unique_story_review_is_semantic_without_an_exposed_selector() -> None:
+    """A unique review renders, while its binding stays outside CLI arguments."""
     decision = NodeDecision(
         node_id="planning.story.review",
         child_graph_id="planning",
@@ -966,7 +951,9 @@ def test_selectorless_story_review_is_not_executable() -> None:
         }
     )
 
-    assert render_workflow_next(position)["commands"] == []
+    command = render_workflow_next(position)["commands"]
+    assert len(command) == 1
+    assert "--instance-key" not in command[0]["command"]
 
 
 def test_ambiguous_semantic_decisions_do_not_render_an_unusable_command() -> None:
@@ -1014,3 +1001,76 @@ def test_ambiguous_semantic_decisions_do_not_render_an_unusable_command() -> Non
     assert parsed.project_id == unique_position.project_id
     assert payload["commands"] == []
     assert payload["blocked_nodes"] == ["vision.interview.ambiguity"]
+
+
+def test_direct_specification_fixture_renders_later_phase_decisions() -> None:
+    """The ruled fixture exposes the direct-Specification review sequence."""
+    payload = render_workflow_next(position_fixture())
+
+    assert [item["request_kind"] for item in payload["commands"]] == [
+        "decide_backlog",
+        "decide_roadmap",
+        "decide_story",
+        "decide_sprint_plan",
+    ]
+    assert [item["command"].split()[1:3] for item in payload["commands"]] == [
+        ["backlog", "decide"],
+        ["roadmap", "decide"],
+        ["story", "decide"],
+        ["sprint", "decide"],
+    ]
+
+
+def test_human_review_commands_expose_no_machine_binding_placeholders() -> None:
+    """Human commands never disclose a captured review binding."""
+    serialized = json.dumps(render_workflow_next(position_fixture()))
+
+    for forbidden in (
+        "--instance-key",
+        "--artifact-id",
+        "--expected-decision",
+        "--fingerprint",
+        "--spec-version-id",
+        "--spec-hash",
+    ):
+        assert forbidden not in serialized
+
+
+def test_rendered_review_commands_are_accepted_by_parser() -> None:
+    """The direct-Spec review renderer and parser share exact command grammar."""
+    parser = build_parser()
+    replacements = {
+        "<decision>": "accepted",
+        "<rationale>": "reviewed",
+        "<idempotency-key>": "review-41",
+        "<actor>": "operator",
+    }
+
+    for item in render_workflow_next(position_fixture())["commands"]:
+        argv = [
+            replacements.get(token, token) for token in shlex.split(item["command"])[1:]
+        ]
+        assert parser.parse_args(argv).project_id == _PROJECT_ID
+
+
+def test_command_registry_has_no_retired_review_flow() -> None:
+    """The direct-Spec registry has no retired Authority or invariant command."""
+    serialized = json.dumps(COMMAND_PREFIXES).casefold()
+    assert "auth" + "ority" not in serialized
+    assert "invar" + "iant" not in serialized
+
+
+def test_fixture_preserves_machine_binding_only_in_position() -> None:
+    """The Story binding remains internal to position data, not the command."""
+    position = position_fixture()
+    story = next(
+        item for item in position.decisions if item.request_kind == "decide_story"
+    )
+
+    assert story.instance_key == "story:DATA.001"
+    command = next(
+        item["command"]
+        for item in render_workflow_next(position)["commands"]
+        if item["request_kind"] == "decide_story"
+    )
+    assert "story:DATA.001" not in command

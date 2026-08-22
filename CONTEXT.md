@@ -3,7 +3,7 @@
 ## Project
 
 The single durable aggregate that owns one product's Vision, Product Goals,
-Specification, Authority, planning, and execution history.
+Specification, planning, and execution history.
 
 Avoid: workflow session, graph cursor, repository row.
 
@@ -44,22 +44,47 @@ Avoid: canonical Specification, Discovery Artifact, mutable file reference.
 
 An immutable canonical `agileforge.spec.v2` proposal produced by the internal
 Specification Structuring Agent from one exact Specification Source. Human
-acceptance creates the reviewed Specification lineage used for Authority
-compilation.
+acceptance creates the reviewed Specification lineage used for delivery.
 
-Avoid: accepted authority, direct Backlog input.
+Avoid: accepted Specification, mutable draft.
 
-## Accepted Authority
+## Accepted Specification
 
-Reviewed compiled specification authority that may govern Backlog, Roadmap,
-Story, Sprint, and execution work.
+The immutable, fingerprint-bound Specification Version created by exact human
+acceptance of a Specification Candidate. It governs Backlog, Roadmap, Story,
+Sprint, and execution work; supersession changes currentness, not the historical
+fact of acceptance.
 
-Avoid: pending compiler output, unreviewed suggestion.
+Avoid: compiled Authority, pending candidate, duplicated rule snapshot.
+
+## Current Accepted Specification
+
+The sole Accepted Specification Version that has not been superseded. It
+governs new planning while older accepted versions remain pinned to historical
+or already active work.
+
+Avoid: caller-selected latest row, pending amendment, rewritten history.
+
+## Delivery Lineage
+
+The exact Product Goal and Accepted Specification ancestry inherited by a
+Backlog and all of its planning and execution descendants.
+
+Avoid: mutable global context, inferred current version, mixed Specification
+versions.
+
+## Specification Evidence
+
+A stable Accepted Specification item reference attached to a Backlog item,
+Story, Task, finding, or packet. The host proves identity and ancestry; human
+review judges whether the reference is semantically relevant.
+
+Avoid: compiled invariant, cue-word classification, ungrounded semantic claim.
 
 ## Backlog
 
 The accepted ranked requirements for the active Product Goal and current
-Authority.
+Accepted Specification.
 
 Avoid: User Story set, repository inventory, implementation status report.
 
@@ -79,7 +104,7 @@ Avoid: Backlog requirement, Task.
 ## Sprint Plan
 
 A reviewed candidate set and Task plan bound to exact Story, dependency,
-capacity, and Authority facts.
+capacity, and Accepted Specification facts.
 
 Avoid: active Sprint, ad hoc Task list.
 

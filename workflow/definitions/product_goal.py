@@ -148,8 +148,6 @@ def lifecycle_is_quiescent(snapshot: WorkflowFactSnapshot) -> bool:
         for artifact in (*snapshot.phase_artifacts, *snapshot.planning_artifacts)
     ):
         return False
-    if any(authority.status == "pending_review" for authority in snapshot.authorities):
-        return False
     reviewed_candidate_ids = {
         decision.specification_candidate_id
         for decision in snapshot.specification_decisions

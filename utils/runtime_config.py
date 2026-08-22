@@ -135,10 +135,6 @@ SPRINT_RUNNER_IDENTITY = RunnerIdentity(
     app_name="sprint_planner",
     user_id="dashboard_sprint",
 )
-SPEC_AUTHORITY_COMPILER_IDENTITY = RunnerIdentity(
-    app_name="spec_authority_compiler",
-    user_id="spec_compiler",
-)
 SPEC_VALIDATOR_IDENTITY = RunnerIdentity(
     app_name="spec_validator_agent",
     user_id="spec_validator",

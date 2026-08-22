@@ -12,8 +12,9 @@ from utils.agileforge_spec_profile_v2 import SpecificationItem, SpecificationPay
 REPO_ROOT: Path = Path(__file__).resolve().parents[1]
 FIXTURE_ROOT: Path = (
     REPO_ROOT
-    / "benchmarks"
-    / "authority-quality"
+    / "tests"
+    / "fixtures"
+    / "specification_structuring"
     / "string-calculator-negative-diagnostic"
 )
 REGISTERED_SOURCE_FIXTURE: Path = (

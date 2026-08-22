@@ -2,27 +2,38 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
-from typing import NotRequired, TypedDict, Unpack
+from datetime import UTC, datetime, timedelta
+from typing import Literal, TypedDict, Unpack
 
 import pytest
 
-from workflow.contracts import NodeCategory, NodeDecision, WorkflowPosition
+from utils.task_metadata import TaskMetadata, serialize_task_metadata
+from workflow.contracts import (
+    NodeCategory,
+    NodeDecision,
+    RecommendationKind,
+    WorkflowPosition,
+)
 from workflow.definitions.planning import (
+    _sprint_start_rule,
     candidate_set_fingerprint,
     planning_graph,
     story_dependency_source_fingerprint,
 )
 from workflow.facts import (
-    AuthorityFact,
-    BacklogRequirementFact,
+    BacklogItemFact,
     PhaseArtifactFact,
     PlanningArtifactFact,
+    PostSprintTriageFact,
     ProductGoalArtifactDecisionFact,
     ProductGoalArtifactFact,
     ProjectFact,
     ReviewDecisionFact,
+    SpecificationCandidateFact,
+    SpecificationDecisionFact,
     SpecVersionFact,
+    SprintFact,
+    SprintStartFact,
     StoryDependencyFact,
     StoryDependencyReviewFact,
     StoryFact,
@@ -31,6 +42,7 @@ from workflow.facts import (
     VisionArtifactFact,
     WorkflowFactSnapshot,
 )
+from workflow.graph import RuleCategory
 from workflow.planning_integrity import (
     active_dependency_review_edges,
     current_task_content_fingerprint,
@@ -43,9 +55,8 @@ BACKLOG_ID = 101
 BACKLOG_FINGERPRINT = "sha256:backlog"
 ROADMAP_ID = 201
 ROADMAP_FINGERPRINT = "sha256:roadmap"
-AUTHORITY_ID = 51
-AUTHORITY_FINGERPRINT = "sha256:authority"
 SPEC_VERSION_ID = 41
+SPEC_HASH = "sha256:spec"
 EXPECTED_PARALLEL_STORY_COUNT = 2
 
 
@@ -53,8 +64,6 @@ class _PhaseArtifactOptions(TypedDict):
     artifact_id: int
     fingerprint: str
     status: str
-    authority_id: NotRequired[int]
-    authority_fingerprint: NotRequired[str]
 
 
 class _StoryOptions(TypedDict, total=False):
@@ -66,35 +75,33 @@ class _StoryOptions(TypedDict, total=False):
 
 class _SnapshotOptions(TypedDict, total=False):
     backlog_status: str | None
-    requirements: tuple[BacklogRequirementFact, ...]
+    requirements: tuple[BacklogItemFact, ...]
     planning_artifacts: tuple[PlanningArtifactFact, ...]
     stories: tuple[StoryFact, ...]
     dependencies: tuple[StoryDependencyFact, ...]
     dependency_reviews: tuple[StoryDependencyReviewFact, ...] | None
     tasks: tuple[TaskFact, ...]
     decisions: tuple[ReviewDecisionFact, ...]
-    authority_id: int
-    authority_fingerprint: str
-    backlog_authority_id: int | None
-    backlog_authority_fingerprint: str | None
+    sprints: tuple[SprintFact, ...]
+    sprint_starts: tuple[SprintStartFact, ...]
+    post_sprint_triage: tuple[PostSprintTriageFact, ...]
+    spec_version_id: int
+    spec_hash: str
+    backlog_spec_version_id: int | None
+    backlog_spec_hash: str | None
 
 
 def _phase_artifact(
     artifact_type: str,
     **options: Unpack[_PhaseArtifactOptions],
 ) -> PhaseArtifactFact:
-    authority_id = options.get("authority_id", AUTHORITY_ID)
-    authority_fingerprint = options.get(
-        "authority_fingerprint",
-        AUTHORITY_FINGERPRINT,
-    )
     return PhaseArtifactFact.model_validate(
         {
             "artifact_type": artifact_type,
             "artifact_id": options["artifact_id"],
             "artifact_fingerprint": options["fingerprint"],
-            "authority_id": authority_id,
-            "authority_fingerprint": authority_fingerprint,
+            "spec_version_id": SPEC_VERSION_ID,
+            "spec_hash": SPEC_HASH,
             "product_goal_artifact_id": 1,
             "product_goal_fingerprint": "sha256:goal",
             "status": options["status"],
@@ -121,14 +128,15 @@ def _decision(
     )
 
 
-def _requirements(*ids: str) -> tuple[BacklogRequirementFact, ...]:
+def _requirements(*ids: str) -> tuple[BacklogItemFact, ...]:
     return tuple(
-        BacklogRequirementFact(
-            requirement_id=requirement_id,
+        BacklogItemFact(
+            backlog_item_id=requirement_id,
             backlog_artifact_id=BACKLOG_ID,
             backlog_artifact_fingerprint=BACKLOG_FINGERPRINT,
-            requirement=f"Requirement {requirement_id}",
-            rank=index,
+            item_fingerprint=f"sha256:item-{requirement_id}",
+            spec_item_ids=(f"SPEC-{index:03d}",),
+            priority=index,
         )
         for index, requirement_id in enumerate(ids, start=1)
     )
@@ -142,14 +150,10 @@ def _roadmap(status: str = "accepted") -> PlanningArtifactFact:
             "artifact_fingerprint": ROADMAP_FINGERPRINT,
             "source_artifact_id": BACKLOG_ID,
             "source_fingerprint": BACKLOG_FINGERPRINT,
-            "authority_id": AUTHORITY_ID,
-            "authority_fingerprint": AUTHORITY_FINGERPRINT,
             "backlog_artifact_id": BACKLOG_ID,
             "backlog_artifact_fingerprint": BACKLOG_FINGERPRINT,
             "roadmap_artifact_id": ROADMAP_ID,
             "roadmap_artifact_fingerprint": ROADMAP_FINGERPRINT,
-            "requirement_id": None,
-            "story_ids": [],
             "candidate_set_fingerprint": None,
             "supersedes_artifact_id": None,
             "status": status,
@@ -159,7 +163,7 @@ def _roadmap(status: str = "accepted") -> PlanningArtifactFact:
 
 def _story(
     story_id: int,
-    requirement_id: str,
+    _backlog_item_id: str,
     **options: Unpack[_StoryOptions],
 ) -> StoryFact:
     points = options.get("points", 3)
@@ -168,12 +172,16 @@ def _story(
     candidate = options.get("candidate", True)
     return StoryFact(
         story_id=story_id,
-        requirement_id=requirement_id,
+        source_story_artifact_id=300 + story_id,
+        source_story_artifact_fingerprint=f"sha256:story-{story_id}",
+        source_story_item_id=f"US-{story_id:06d}",
+        source_story_item_fingerprint=f"sha256:story-item-{story_id}",
+        accepted_spec_version_id=SPEC_VERSION_ID,
+        accepted_spec_hash=SPEC_HASH,
+        spec_item_ids=(f"SPEC-{story_id:03d}",),
         content_fingerprint=f"sha256:story-{story_id}",
         content_accepted=accepted,
         story_artifact_id=300 + story_id if accepted else None,
-        authority_id=AUTHORITY_ID if accepted else None,
-        authority_fingerprint=AUTHORITY_FINGERPRINT if accepted else None,
         backlog_artifact_id=BACKLOG_ID if accepted else None,
         backlog_artifact_fingerprint=BACKLOG_FINGERPRINT if accepted else None,
         roadmap_artifact_id=ROADMAP_ID if accepted else None,
@@ -199,14 +207,12 @@ def _story_artifact(
             "artifact_fingerprint": f"sha256:story-{story_id}",
             "source_artifact_id": ROADMAP_ID,
             "source_fingerprint": ROADMAP_FINGERPRINT,
-            "authority_id": AUTHORITY_ID,
-            "authority_fingerprint": AUTHORITY_FINGERPRINT,
             "backlog_artifact_id": BACKLOG_ID,
             "backlog_artifact_fingerprint": BACKLOG_FINGERPRINT,
             "roadmap_artifact_id": ROADMAP_ID,
             "roadmap_artifact_fingerprint": ROADMAP_FINGERPRINT,
-            "requirement_id": requirement_id,
-            "story_ids": [story_id],
+            "backlog_item_id": requirement_id,
+            "story_item_ids": [f"US-{story_id:06d}"],
             "candidate_set_fingerprint": None,
             "supersedes_artifact_id": None,
             "status": status,
@@ -220,13 +226,95 @@ def _task(story_id: int, *, description: str = "Implement planning") -> TaskFact
         sprint_id=601,
         story_id=story_id,
         description=description,
-        metadata_json=(
-            '{"artifact_targets":[],"checklist_items":[],'
-            '"relevant_invariant_ids":[],"task_kind":"implementation",'
-            '"version":"task_metadata.v1","workstream_tags":[]}'
+        metadata_json=serialize_task_metadata(
+            TaskMetadata(
+                spec_version_id=SPEC_VERSION_ID,
+                spec_hash="sha256:" + "a" * 64,
+                sprint_plan_stream_id="SPS-" + "b" * 32,
+                sprint_plan_artifact_id=601,
+                sprint_plan_fingerprint="sha256:" + "c" * 64,
+                relevant_spec_item_ids=("SPEC-001",),
+                task_kind="implementation",
+                artifact_targets=(),
+                workstream_tags=(),
+                checklist_items=("Implementation is complete.",),
+            )
         ),
         status="To Do",
         dependencies_satisfied=True,
+    )
+
+
+def _sprint_plan_artifact(  # noqa: PLR0913
+    *,
+    artifact_id: int,
+    stream_id: str,
+    status: str,
+    selected_story_ids: tuple[int, ...] = (1,),
+    activated_sprint_id: int | None = None,
+    candidate_fingerprint: str = "sha256:historical-candidates",
+) -> PlanningArtifactFact:
+    return PlanningArtifactFact.model_validate(
+        {
+            "artifact_type": "sprint_plan",
+            "artifact_id": artifact_id,
+            "artifact_fingerprint": f"sha256:plan-{artifact_id}",
+            "source_fingerprint": candidate_fingerprint,
+            "spec_version_id": SPEC_VERSION_ID,
+            "spec_hash": SPEC_HASH,
+            "sprint_plan_stream_id": stream_id,
+            "selected_story_ids": selected_story_ids,
+            "activated_sprint_id": activated_sprint_id,
+            "candidate_set_fingerprint": candidate_fingerprint,
+            "task_content_fingerprint": (
+                None
+                if activated_sprint_id is None
+                else f"sha256:tasks-{activated_sprint_id}"
+            ),
+            "status": status,
+        }
+    )
+
+
+def _sprint_start_fact(
+    plan: PlanningArtifactFact,
+    *,
+    plan_fingerprint: str | None = None,
+    start_id: int = 1,
+    started_at: datetime | None = None,
+) -> SprintStartFact:
+    sprint_id = plan.activated_sprint_id
+    task_fingerprint = plan.task_content_fingerprint
+    candidate_fingerprint = plan.candidate_set_fingerprint
+    assert sprint_id is not None
+    assert task_fingerprint is not None
+    assert candidate_fingerprint is not None
+    assert plan.spec_version_id is not None
+    assert plan.spec_hash is not None
+    return SprintStartFact(
+        start_id=start_id,
+        sprint_id=sprint_id,
+        spec_version_id=plan.spec_version_id,
+        spec_hash=plan.spec_hash,
+        sprint_plan_artifact_id=plan.artifact_id,
+        sprint_plan_artifact_decision_id=plan.artifact_id + 1,
+        story_dependency_review_id=plan.artifact_id + 2,
+        plan_fingerprint=(
+            plan.artifact_fingerprint if plan_fingerprint is None else plan_fingerprint
+        ),
+        candidate_set_fingerprint=candidate_fingerprint,
+        selected_story_ids=plan.selected_story_ids,
+        task_content_fingerprint=task_fingerprint,
+        dependency_source_fingerprint="sha256:dependency-source",
+        dependency_fingerprint="sha256:dependencies",
+        dependency_rows_fingerprint="sha256:dependency-rows",
+        decision_fingerprint="sha256:decision",
+        audit_event_id=plan.artifact_id + 3,
+        audit_event_fingerprint="sha256:audit",
+        started_by="operator@example.com",
+        started_at=(
+            EVALUATED_AT - timedelta(hours=1) if started_at is None else started_at
+        ),
     )
 
 
@@ -241,13 +329,13 @@ def _snapshot(
     dependency_reviews = options.get("dependency_reviews")
     tasks = options.get("tasks", ())
     decisions = options.get("decisions", ())
-    authority_id = options.get("authority_id", AUTHORITY_ID)
-    authority_fingerprint = options.get(
-        "authority_fingerprint",
-        AUTHORITY_FINGERPRINT,
-    )
-    backlog_authority_id = options.get("backlog_authority_id")
-    backlog_authority_fingerprint = options.get("backlog_authority_fingerprint")
+    sprints = options.get("sprints", ())
+    sprint_starts = options.get("sprint_starts", ())
+    post_sprint_triage = options.get("post_sprint_triage", ())
+    spec_version_id = options.get("spec_version_id", SPEC_VERSION_ID)
+    spec_hash = options.get("spec_hash", SPEC_HASH)
+    backlog_spec_version_id = options.get("backlog_spec_version_id")
+    backlog_spec_hash = options.get("backlog_spec_hash")
     backlog = (
         (
             _phase_artifact(
@@ -255,16 +343,17 @@ def _snapshot(
                 artifact_id=BACKLOG_ID,
                 fingerprint=BACKLOG_FINGERPRINT,
                 status=backlog_status,
-                authority_id=(
-                    authority_id
-                    if backlog_authority_id is None
-                    else backlog_authority_id
-                ),
-                authority_fingerprint=(
-                    authority_fingerprint
-                    if backlog_authority_fingerprint is None
-                    else backlog_authority_fingerprint
-                ),
+            ).model_copy(
+                update={
+                    "spec_version_id": (
+                        spec_version_id
+                        if backlog_spec_version_id is None
+                        else backlog_spec_version_id
+                    ),
+                    "spec_hash": (
+                        spec_hash if backlog_spec_hash is None else backlog_spec_hash
+                    ),
+                }
             ),
         )
         if backlog_status is not None
@@ -306,10 +395,13 @@ def _snapshot(
         ),
         spec_versions=(
             SpecVersionFact(
-                spec_version_id=SPEC_VERSION_ID,
-                spec_hash="sha256:spec",
+                spec_version_id=spec_version_id,
+                spec_hash=spec_hash,
                 status="approved",
-                approved_at=EVALUATED_AT,
+                source_specification_decision_id=1,
+                accepted_at=EVALUATED_AT,
+                accepted_by="operator@example.com",
+                acceptance_notes="Accepted.",
                 source_specification_candidate_id=1,
                 source_specification_candidate_fingerprint="sha256:candidate-1",
                 source_vision_artifact_id=1,
@@ -318,29 +410,42 @@ def _snapshot(
                 source_product_goal_fingerprint="sha256:goal",
             ),
         ),
-        authorities=(
-            AuthorityFact(
-                authority_id=authority_id,
-                spec_version_id=SPEC_VERSION_ID,
-                authority_fingerprint=authority_fingerprint,
-                status="accepted",
-                decided_at=EVALUATED_AT,
+        specification_candidates=(
+            SpecificationCandidateFact(
+                specification_candidate_id=1,
+                candidate_kind="initial",
+                specification_source_id=1,
+                specification_source_fingerprint="sha256:source",
+                vision_artifact_id=1,
+                vision_fingerprint="sha256:vision",
+                product_goal_artifact_id=1,
+                product_goal_fingerprint="sha256:goal",
+                base_spec_version_id=None,
+                base_spec_hash=None,
+                canonical_envelope={},
+                payload_fingerprint=spec_hash,
+                source_manifest_fingerprint="sha256:manifest",
+                producer_input_fingerprint="sha256:producer-input",
+                rendered_view_fingerprint="sha256:rendered",
+                candidate_fingerprint="sha256:candidate-1",
+                workflow_node_attempt_id=1,
+                attempt_fingerprint="sha256:attempt",
+                supersedes_specification_candidate_id=None,
+                supersedes_candidate_fingerprint=None,
+                recorded_by="operator@example.com",
+                recorded_at=EVALUATED_AT,
             ),
-            *(
-                (
-                    AuthorityFact(
-                        authority_id=backlog_authority_id,
-                        spec_version_id=SPEC_VERSION_ID - 1,
-                        authority_fingerprint=(
-                            backlog_authority_fingerprint or "sha256:old-authority"
-                        ),
-                        status="stale",
-                        decided_at=EVALUATED_AT,
-                    ),
-                )
-                if backlog_authority_id is not None
-                and backlog_authority_id != authority_id
-                else ()
+        ),
+        specification_decisions=(
+            SpecificationDecisionFact(
+                specification_decision_id=1,
+                specification_candidate_id=1,
+                candidate_fingerprint="sha256:candidate-1",
+                decision="accepted",
+                rationale="Accepted.",
+                reviewer="operator@example.com",
+                idempotency_key="specification-accepted",
+                decided_at=EVALUATED_AT,
             ),
         ),
         vision_artifacts=(
@@ -397,21 +502,19 @@ def _snapshot(
             ),
         ),
         phase_artifacts=backlog,
-        backlog_requirements=requirements,
+        backlog_items=requirements,
         planning_artifacts=planning_artifacts,
         stories=stories,
         story_dependencies=dependencies,
         story_dependency_reviews=current_dependency_reviews,
         tasks=tasks,
         review_decisions=(
-            _decision(
-                "authority",
-                artifact_id=authority_id,
-                fingerprint=authority_fingerprint,
-            ),
             *backlog_decision,
             *decisions,
         ),
+        sprints=sprints,
+        sprint_starts=sprint_starts,
+        post_sprint_triage=post_sprint_triage,
     )
 
 
@@ -451,14 +554,14 @@ def test_roadmap_requires_accepted_current_backlog(
     assert decision.reason_code == reason
 
 
-def test_backlog_accepted_under_stale_authority_cannot_expose_planning() -> None:
-    """Require the Backlog to bind the exact accepted current authority."""
+def test_backlog_accepted_under_stale_specification_cannot_expose_planning() -> None:
+    """Require the Backlog to bind the exact accepted current Specification."""
     decision = _node(
         _snapshot(
-            authority_id=AUTHORITY_ID + 1,
-            authority_fingerprint="sha256:current-authority",
-            backlog_authority_id=AUTHORITY_ID,
-            backlog_authority_fingerprint=AUTHORITY_FINGERPRINT,
+            spec_version_id=SPEC_VERSION_ID + 1,
+            spec_hash="sha256:current-spec",
+            backlog_spec_version_id=SPEC_VERSION_ID,
+            backlog_spec_hash=SPEC_HASH,
         ),
         "planning.roadmap.generate",
     )
@@ -479,8 +582,8 @@ def test_roadmap_draft_waits_for_exact_review() -> None:
     assert decision.reason_code == "ROADMAP_REVIEW_REQUIRED"
 
 
-def test_story_nodes_are_offered_once_per_uncovered_accepted_requirement() -> None:
-    """Offer one Story node for each uncovered accepted requirement."""
+def test_story_nodes_offer_generation_and_accepted_leaf_correction() -> None:
+    """Offer new PBI generation plus optional re-entry for an accepted leaf."""
     requirements = _requirements("req-a", "req-b", "req-c")
     snapshot = _snapshot(
         requirements=requirements,
@@ -500,10 +603,103 @@ def test_story_nodes_are_offered_once_per_uncovered_accepted_requirement() -> No
         if item.node_id == "planning.story.generate"
     ]
     assert [item.instance_key for item in decisions] == [
-        "requirement:req-a",
-        "requirement:req-c",
+        "backlog_item:req-a",
+        "backlog_item:req-b",
+        "backlog_item:req-c",
     ]
     assert all(item.category is NodeCategory.AVAILABLE for item in decisions)
+    correction = next(
+        item for item in decisions if item.instance_key == "backlog_item:req-b"
+    )
+    assert correction.reason_code == "STORY_CORRECTION_AVAILABLE"
+    assert correction.recommendation_kind is RecommendationKind.OPTIONAL_REENTRY
+    assert any(
+        reference.fact_type == "backlog_item" and reference.fact_id == "req-b"
+        for reference in correction.fact_references
+    )
+
+
+def test_accepted_story_under_replaced_same_backlog_roadmap_offers_successor() -> None:
+    """A current same-PBI Roadmap replacement opens normal Story generation."""
+    replacement_roadmap_id = ROADMAP_ID + 1
+    replacement_roadmap_fingerprint = "sha256:replacement-roadmap"
+    prior_roadmap = _roadmap()
+    replacement_roadmap = prior_roadmap.model_copy(
+        update={
+            "artifact_id": replacement_roadmap_id,
+            "artifact_fingerprint": replacement_roadmap_fingerprint,
+            "roadmap_artifact_id": replacement_roadmap_id,
+            "roadmap_artifact_fingerprint": replacement_roadmap_fingerprint,
+            "version_number": 2,
+            "supersedes_artifact_id": ROADMAP_ID,
+        }
+    )
+    accepted_story = _story_artifact(1, "req-a")
+    decision = _node(
+        _snapshot(
+            requirements=_requirements("req-a"),
+            planning_artifacts=(
+                prior_roadmap,
+                replacement_roadmap,
+                accepted_story,
+            ),
+            stories=(_story(1, "req-a"),),
+            decisions=(
+                _decision(
+                    "roadmap",
+                    artifact_id=replacement_roadmap_id,
+                    fingerprint=replacement_roadmap_fingerprint,
+                ),
+            ),
+        ),
+        "planning.story.generate",
+        "backlog_item:req-a",
+    )
+
+    assert decision.category is NodeCategory.AVAILABLE
+    assert decision.reason_code == "STORY_GENERATION_REQUIRED"
+    assert decision.recommendation_kind is RecommendationKind.REQUIRED
+    assert any(
+        reference.fact_type == "roadmap"
+        and reference.fact_id == str(replacement_roadmap_id)
+        and reference.fingerprint == replacement_roadmap_fingerprint
+        for reference in decision.fact_references
+    )
+    assert any(
+        reference.fact_type == "story"
+        and reference.fact_id == str(accepted_story.artifact_id)
+        and reference.fingerprint == accepted_story.artifact_fingerprint
+        for reference in decision.fact_references
+    )
+
+
+def test_accepted_story_with_drifted_current_roadmap_binding_stays_invalid() -> None:
+    """Do not mistake same-Roadmap fingerprint corruption for a replacement."""
+    accepted_story = _story_artifact(1, "req-a").model_copy(
+        update={
+            "source_fingerprint": "sha256:drifted-roadmap",
+            "roadmap_artifact_fingerprint": "sha256:drifted-roadmap",
+        }
+    )
+    decision = _node(
+        _snapshot(
+            requirements=_requirements("req-a"),
+            planning_artifacts=(_roadmap(), accepted_story),
+            stories=(_story(1, "req-a"),),
+            decisions=(
+                _decision(
+                    "roadmap",
+                    artifact_id=ROADMAP_ID,
+                    fingerprint=ROADMAP_FINGERPRINT,
+                ),
+            ),
+        ),
+        "planning.story.generate",
+        "backlog_item:req-a",
+    )
+
+    assert decision.category is NodeCategory.INVALID
+    assert decision.reason_code == "STORY_ARTIFACT_STALE"
 
 
 def test_story_nodes_can_be_available_in_parallel() -> None:
@@ -580,7 +776,7 @@ def test_pending_story_artifact_waits_for_requirement_scoped_review() -> None:
             ),
         ),
     )
-    review = _node(snapshot, "planning.story.review", "requirement:req-a")
+    review = _node(snapshot, "planning.story.review", "backlog_item:req-a")
     assert review.category is NodeCategory.WAITING
     assert review.reason_code == "STORY_REVIEW_REQUIRED"
 
@@ -597,7 +793,7 @@ def test_pending_story_artifact_waits_for_requirement_scoped_review() -> None:
         (
             "story_roadmap",
             "planning.story.review",
-            "requirement:req-a",
+            "backlog_item:req-a",
             "STORY_REVIEW_SOURCE_STALE",
         ),
         (
@@ -667,8 +863,11 @@ def test_planning_review_freshness_matrix_fails_closed(
                 "artifact_id": 501,
                 "artifact_fingerprint": "sha256:plan",
                 "source_fingerprint": original_fingerprint,
-                "story_ids": [1],
-                "sprint_id": 601,
+                "spec_version_id": SPEC_VERSION_ID,
+                "spec_hash": SPEC_HASH,
+                "sprint_plan_stream_id": "SPS-0123456789abcdef0123456789abcdef",
+                "selected_story_ids": [1],
+                "activated_sprint_id": 601,
                 "candidate_set_fingerprint": original_fingerprint,
                 "task_content_fingerprint": current_task_content_fingerprint(
                     (task,),
@@ -794,9 +993,11 @@ def test_reviewed_current_plan_is_ready_to_start() -> None:
             "artifact_id": 501,
             "artifact_fingerprint": "sha256:plan",
             "source_fingerprint": ROADMAP_FINGERPRINT,
-            "requirement_id": None,
-            "story_ids": [1],
-            "sprint_id": 601,
+            "spec_version_id": SPEC_VERSION_ID,
+            "spec_hash": SPEC_HASH,
+            "sprint_plan_stream_id": "SPS-0123456789abcdef0123456789abcdef",
+            "selected_story_ids": [1],
+            "activated_sprint_id": 601,
             "candidate_set_fingerprint": current_fingerprint,
             "task_content_fingerprint": current_task_content_fingerprint(
                 (task,),
@@ -813,10 +1014,866 @@ def test_reviewed_current_plan_is_ready_to_start() -> None:
         stories=(story,),
         tasks=(task,),
         decisions=(_decision("sprint", artifact_id=501, fingerprint="sha256:plan"),),
+        sprints=(SprintFact(sprint_id=601, status="planned", completed_at=None),),
     )
     start = _node(snapshot, "planning.sprint.start")
     assert start.category is NodeCategory.AVAILABLE
     assert start.reason_code == "SPRINT_READY_TO_START"
+
+
+def test_sequential_terminal_sprint_streams_expose_next_planning() -> None:
+    """Use lifecycle order, not artifact ID, after two completed streams."""
+    story = _story(1, "req-a")
+    older = _sprint_plan_artifact(
+        artifact_id=900,
+        stream_id="SPS-ffffffffffffffffffffffffffffffff",
+        status="accepted",
+        selected_story_ids=(90,),
+        activated_sprint_id=601,
+    )
+    newer = _sprint_plan_artifact(
+        artifact_id=100,
+        stream_id="SPS-00000000000000000000000000000000",
+        status="accepted",
+        selected_story_ids=(91,),
+        activated_sprint_id=602,
+    )
+    snapshot = _snapshot(
+        requirements=_requirements("req-a"),
+        planning_artifacts=(
+            _roadmap(),
+            _story_artifact(1, "req-a"),
+            older,
+            newer,
+        ),
+        stories=(story,),
+        sprints=(
+            SprintFact(
+                sprint_id=601,
+                status="completed",
+                completed_at=EVALUATED_AT - timedelta(days=2),
+            ),
+            SprintFact(
+                sprint_id=602,
+                status="completed",
+                completed_at=EVALUATED_AT - timedelta(days=1),
+            ),
+        ),
+        sprint_starts=(
+            _sprint_start_fact(
+                older,
+                start_id=1,
+                started_at=EVALUATED_AT - timedelta(days=3),
+            ),
+            _sprint_start_fact(
+                newer,
+                start_id=2,
+                started_at=EVALUATED_AT - timedelta(days=2),
+            ),
+        ),
+        post_sprint_triage=(
+            PostSprintTriageFact(
+                triage_id=1,
+                sprint_id=601,
+                impact="none",
+                canonical_payload={},
+                payload_fingerprint="sha256:triage-601",
+            ),
+            PostSprintTriageFact(
+                triage_id=2,
+                sprint_id=602,
+                impact="none",
+                canonical_payload={},
+                payload_fingerprint="sha256:triage-602",
+            ),
+        ),
+    )
+
+    planning = _node(snapshot, "planning.sprint.plan")
+
+    assert planning.category is NodeCategory.AVAILABLE
+    assert planning.reason_code == "NEXT_SPRINT_PLANNING_REQUIRED"
+    assert planning.fact_references[0].fact_id == "100"
+
+
+def test_started_sprint_stream_exposes_next_cycle_planning() -> None:
+    """A matching SprintStart closes correction and permits a new stream."""
+    story = _story(1, "req-a")
+    started_plan = _sprint_plan_artifact(
+        artifact_id=900,
+        stream_id="SPS-ffffffffffffffffffffffffffffffff",
+        status="accepted",
+        selected_story_ids=(90,),
+        activated_sprint_id=601,
+    )
+    snapshot = _snapshot(
+        requirements=_requirements("req-a"),
+        planning_artifacts=(
+            _roadmap(),
+            _story_artifact(1, "req-a"),
+            started_plan,
+        ),
+        stories=(story,),
+        sprints=(SprintFact(sprint_id=601, status="active", completed_at=None),),
+        sprint_starts=(_sprint_start_fact(started_plan),),
+    )
+
+    planning = _node(snapshot, "planning.sprint.plan")
+    position = _position(snapshot)
+    start_rule = _sprint_start_rule(snapshot, EVALUATED_AT)[0]
+
+    assert planning.category is NodeCategory.AVAILABLE
+    assert planning.reason_code == "NEXT_SPRINT_PLANNING_REQUIRED"
+    assert planning.fact_references[0].fact_id == "900"
+    assert "planning.sprint.start" not in position.available_nodes
+    assert all(item.node_id != "planning.sprint.start" for item in position.decisions)
+    assert start_rule.category is RuleCategory.SATISFIED
+    assert start_rule.reason_code == "SPRINT_ALREADY_STARTED"
+
+
+def test_different_active_sprint_blocks_start_with_stable_reason() -> None:
+    """Distinguish another active Sprint from an exact already-started plan."""
+    story = _story(1, "req-a")
+    task = _task(1)
+    plan = _sprint_plan_artifact(
+        artifact_id=501,
+        stream_id="SPS-11111111111111111111111111111111",
+        status="accepted",
+        activated_sprint_id=601,
+        candidate_fingerprint=candidate_set_fingerprint((story,), ()),
+    ).model_copy(
+        update={
+            "task_content_fingerprint": current_task_content_fingerprint(
+                (task,),
+                sprint_id=601,
+                story_ids=(1,),
+            )
+        }
+    )
+    snapshot = _snapshot(
+        requirements=_requirements("req-a"),
+        planning_artifacts=(_roadmap(), _story_artifact(1, "req-a"), plan),
+        stories=(story,),
+        tasks=(task,),
+        decisions=(
+            _decision("sprint", artifact_id=501, fingerprint="sha256:plan-501"),
+        ),
+        sprints=(
+            SprintFact(sprint_id=601, status="planned", completed_at=None),
+            SprintFact(sprint_id=602, status="active", completed_at=None),
+        ),
+    )
+
+    start_rule = _sprint_start_rule(snapshot, EVALUATED_AT)[0]
+
+    assert start_rule.category is RuleCategory.BLOCKED
+    assert start_rule.reason_code == "ACTIVE_SPRINT_EXISTS"
+    assert start_rule.blockers[0].message == (
+        "Another Sprint is already active for this Project. Close it before "
+        "starting this Sprint."
+    )
+
+
+@pytest.mark.parametrize("with_unrelated_active_sprint", [False, True])
+def test_superseded_specification_plan_remains_discoverable_for_stale_start(
+    with_unrelated_active_sprint: bool,
+) -> None:
+    """A planned accepted old-Spec plan fails stale before active-Sprint checks."""
+    stale_plan = _sprint_plan_artifact(
+        artifact_id=701,
+        stream_id="SPS-22222222222222222222222222222222",
+        status="accepted",
+        activated_sprint_id=801,
+    ).model_copy(
+        update={
+            "spec_version_id": SPEC_VERSION_ID,
+            "spec_hash": SPEC_HASH,
+        }
+    )
+    sprints = (SprintFact(sprint_id=801, status="planned", completed_at=None),)
+    if with_unrelated_active_sprint:
+        sprints = (
+            *sprints,
+            SprintFact(sprint_id=802, status="active", completed_at=None),
+        )
+    snapshot = _snapshot(
+        spec_version_id=SPEC_VERSION_ID + 1,
+        spec_hash="sha256:replacement-spec",
+        planning_artifacts=(stale_plan,),
+        sprints=sprints,
+    )
+
+    start_rule = _sprint_start_rule(snapshot, EVALUATED_AT)[0]
+
+    assert start_rule.category is RuleCategory.INVALID
+    assert start_rule.reason_code == "STALE_SPECIFICATION"
+
+
+@pytest.mark.parametrize(
+    ("sprint_status", "include_start", "completed_at"),
+    [
+        ("active", False, None),
+        ("completed", False, EVALUATED_AT - timedelta(hours=1)),
+        ("planned", True, None),
+    ],
+)
+def test_superseded_specification_lifecycle_corruption_precedes_stale_start(
+    sprint_status: Literal["planned", "active", "completed"],
+    include_start: bool,
+    completed_at: datetime | None,
+) -> None:
+    """Keep an old-Spec target visible until its Sprint lifecycle is validated."""
+    stale_plan = _sprint_plan_artifact(
+        artifact_id=701,
+        stream_id="SPS-22222222222222222222222222222222",
+        status="accepted",
+        activated_sprint_id=801,
+    )
+    snapshot = _snapshot(
+        spec_version_id=SPEC_VERSION_ID + 1,
+        spec_hash="sha256:replacement-spec",
+        planning_artifacts=(stale_plan,),
+        sprints=(
+            SprintFact(
+                sprint_id=801,
+                status=sprint_status,
+                completed_at=completed_at,
+            ),
+        ),
+        sprint_starts=((_sprint_start_fact(stale_plan),) if include_start else ()),
+    )
+
+    start_rule = _sprint_start_rule(snapshot, EVALUATED_AT)[0]
+
+    assert start_rule.category is RuleCategory.INVALID
+    assert start_rule.reason_code == "WORKFLOW_FACT_CONFLICT"
+
+
+def test_superseded_specification_active_started_plan_remains_satisfied() -> None:
+    """Preserve exact active old-lineage start evidence after Spec replacement."""
+    started_plan = _sprint_plan_artifact(
+        artifact_id=701,
+        stream_id="SPS-22222222222222222222222222222222",
+        status="accepted",
+        activated_sprint_id=801,
+    )
+    snapshot = _snapshot(
+        spec_version_id=SPEC_VERSION_ID + 1,
+        spec_hash="sha256:replacement-spec",
+        planning_artifacts=(started_plan,),
+        sprints=(SprintFact(sprint_id=801, status="active", completed_at=None),),
+        sprint_starts=(_sprint_start_fact(started_plan),),
+    )
+
+    start_rule = _sprint_start_rule(snapshot, EVALUATED_AT)[0]
+
+    assert start_rule.category is RuleCategory.SATISFIED
+    assert start_rule.reason_code == "SPRINT_ALREADY_STARTED"
+
+
+@pytest.mark.parametrize(
+    ("include_current_target", "older_role", "category", "reason"),
+    [
+        (True, "started", RuleCategory.BLOCKED, "ACTIVE_SPRINT_EXISTS"),
+        (True, "corrupt", RuleCategory.INVALID, "WORKFLOW_FACT_CONFLICT"),
+        (True, "unstarted", RuleCategory.INVALID, "WORKFLOW_FACT_CONFLICT"),
+        (False, "started", RuleCategory.SATISFIED, "SPRINT_ALREADY_STARTED"),
+        (False, "corrupt", RuleCategory.INVALID, "WORKFLOW_FACT_CONFLICT"),
+        (False, "unstarted", RuleCategory.INVALID, "STALE_SPECIFICATION"),
+    ],
+)
+def test_sprint_start_distinguishes_current_target_from_older_lifecycle_role(
+    include_current_target: bool,
+    older_role: Literal["started", "corrupt", "unstarted"],
+    category: RuleCategory,
+    reason: str,
+) -> None:
+    """Choose the current target while validating older lifecycle evidence."""
+    story = _story(1, "req-a")
+    task = _task(1)
+    candidate_fingerprint = candidate_set_fingerprint((story,), ())
+    current_plan = _sprint_plan_artifact(
+        artifact_id=501,
+        stream_id="SPS-11111111111111111111111111111111",
+        status="accepted",
+        activated_sprint_id=601,
+        candidate_fingerprint=candidate_fingerprint,
+    ).model_copy(
+        update={
+            "task_content_fingerprint": current_task_content_fingerprint(
+                (task,),
+                sprint_id=601,
+                story_ids=(1,),
+            )
+        }
+    )
+    older_plan = _sprint_plan_artifact(
+        artifact_id=401,
+        stream_id="SPS-00000000000000000000000000000000",
+        status="accepted",
+        activated_sprint_id=801,
+    ).model_copy(
+        update={
+            "spec_version_id": SPEC_VERSION_ID - 1,
+            "spec_hash": "sha256:older-spec",
+        }
+    )
+    older_status = "planned" if older_role == "unstarted" else "active"
+    snapshot = _snapshot(
+        requirements=_requirements("req-a"),
+        planning_artifacts=(
+            _roadmap(),
+            _story_artifact(1, "req-a"),
+            *((current_plan,) if include_current_target else ()),
+            older_plan,
+        ),
+        stories=(story,),
+        tasks=(task,),
+        sprints=(
+            *(
+                (SprintFact(sprint_id=601, status="planned", completed_at=None),)
+                if include_current_target
+                else ()
+            ),
+            SprintFact(sprint_id=801, status=older_status, completed_at=None),
+        ),
+        sprint_starts=(
+            (_sprint_start_fact(older_plan),) if older_role == "started" else ()
+        ),
+    )
+
+    start_rule = _sprint_start_rule(snapshot, EVALUATED_AT)[0]
+
+    assert start_rule.category is category
+    assert start_rule.reason_code == reason
+    if reason == "ACTIVE_SPRINT_EXISTS":
+        assert start_rule.blockers[0].message == (
+            "Another Sprint is already active for this Project. Close it before "
+            "starting this Sprint."
+        )
+
+
+def _completed_sprint_snapshot(
+    *,
+    include_start: bool,
+) -> WorkflowFactSnapshot:
+    story = _story(1, "req-a")
+    task = _task(1)
+    candidate_fingerprint = candidate_set_fingerprint((story,), ())
+    started_plan = _sprint_plan_artifact(
+        artifact_id=900,
+        stream_id="SPS-ffffffffffffffffffffffffffffffff",
+        status="accepted",
+        activated_sprint_id=601,
+        candidate_fingerprint=candidate_fingerprint,
+    ).model_copy(
+        update={
+            "task_content_fingerprint": current_task_content_fingerprint(
+                (task,),
+                sprint_id=601,
+                story_ids=(1,),
+            )
+        }
+    )
+    return _snapshot(
+        requirements=_requirements("req-a"),
+        planning_artifacts=(
+            _roadmap(),
+            _story_artifact(1, "req-a"),
+            started_plan,
+        ),
+        stories=(story,),
+        tasks=(task,),
+        sprints=(
+            SprintFact(
+                sprint_id=601,
+                status="completed",
+                completed_at=EVALUATED_AT - timedelta(hours=1),
+            ),
+        ),
+        sprint_starts=((_sprint_start_fact(started_plan),) if include_start else ()),
+        post_sprint_triage=(
+            PostSprintTriageFact(
+                triage_id=1,
+                sprint_id=601,
+                impact="none",
+                canonical_payload={},
+                payload_fingerprint="sha256:triage-601",
+            ),
+        ),
+    )
+
+
+def test_completed_started_stream_cannot_start_twice() -> None:
+    """A completed exact started stream exposes planning but consumes start."""
+    snapshot = _completed_sprint_snapshot(include_start=True)
+    planning = _node(snapshot, "planning.sprint.plan")
+    position = _position(snapshot)
+    start_rule = _sprint_start_rule(snapshot, EVALUATED_AT)[0]
+
+    assert planning.category is NodeCategory.AVAILABLE
+    assert planning.reason_code == "NEXT_SPRINT_PLANNING_REQUIRED"
+    assert "planning.sprint.start" not in position.available_nodes
+    assert all(item.node_id != "planning.sprint.start" for item in position.decisions)
+    assert start_rule.category is RuleCategory.SATISFIED
+    assert start_rule.reason_code == "SPRINT_ALREADY_STARTED"
+
+
+@pytest.mark.parametrize("sprint_state", ["missing", "active", "completed"])
+def test_nonplanned_sprint_without_exact_start_fails_closed(
+    sprint_state: Literal["missing", "active", "completed"],
+) -> None:
+    """A missing, active, or completed Sprint without exact start is corrupt."""
+    base = _completed_sprint_snapshot(include_start=False)
+    snapshot = base.model_copy(
+        update={
+            "sprints": (
+                ()
+                if sprint_state == "missing"
+                else (
+                    SprintFact(
+                        sprint_id=601,
+                        status=sprint_state,
+                        completed_at=(
+                            EVALUATED_AT - timedelta(hours=1)
+                            if sprint_state == "completed"
+                            else None
+                        ),
+                    ),
+                )
+            ),
+            "post_sprint_triage": (
+                base.post_sprint_triage if sprint_state == "completed" else ()
+            ),
+        }
+    )
+
+    planning = _node(snapshot, "planning.sprint.plan")
+    assert planning.category is NodeCategory.INVALID
+    assert planning.reason_code == "WORKFLOW_FACT_CONFLICT"
+    start = _node(snapshot, "planning.sprint.start")
+    assert start.category is NodeCategory.INVALID
+    assert start.reason_code == "WORKFLOW_FACT_CONFLICT"
+
+
+def test_corrupt_active_lifecycle_precedes_missing_candidates_across_nodes() -> None:
+    """Expose one lifecycle conflict consistently before candidate joining."""
+    base = _completed_sprint_snapshot(include_start=False)
+    snapshot = base.model_copy(
+        update={
+            "stories": (),
+            "tasks": (),
+            "sprints": (SprintFact(sprint_id=601, status="active", completed_at=None),),
+            "post_sprint_triage": (),
+        }
+    )
+
+    for node_id in (
+        "planning.sprint.plan",
+        "planning.sprint.review",
+        "planning.sprint.start",
+    ):
+        decision = _node(snapshot, node_id)
+        assert decision.category is NodeCategory.INVALID
+        assert decision.reason_code == "WORKFLOW_FACT_CONFLICT"
+
+
+@pytest.mark.parametrize("sprint_state", ["missing", "planned"])
+def test_exact_start_without_active_or_completed_sprint_fails_closed(
+    sprint_state: Literal["missing", "planned"],
+) -> None:
+    """An exact start requires its one atomically active-or-completed Sprint."""
+    snapshot = _completed_sprint_snapshot(include_start=True).model_copy(
+        update={
+            "sprints": (
+                ()
+                if sprint_state == "missing"
+                else (
+                    SprintFact(
+                        sprint_id=601,
+                        status="planned",
+                        completed_at=None,
+                    ),
+                )
+            ),
+            "post_sprint_triage": (),
+        }
+    )
+
+    planning = _node(snapshot, "planning.sprint.plan")
+    assert planning.category is NodeCategory.INVALID
+    assert planning.reason_code == "WORKFLOW_FACT_CONFLICT"
+    start = _node(snapshot, "planning.sprint.start")
+    assert start.category is NodeCategory.INVALID
+    assert start.reason_code == "WORKFLOW_FACT_CONFLICT"
+
+
+@pytest.mark.parametrize(
+    ("sprint_status", "include_start", "completed_at"),
+    [
+        ("planned", False, EVALUATED_AT - timedelta(hours=1)),
+        ("active", True, EVALUATED_AT),
+        ("completed", True, None),
+        ("completed", True, EVALUATED_AT - timedelta(hours=2)),
+    ],
+)
+def test_sprint_lifecycle_timestamp_mismatch_fails_closed(
+    sprint_status: Literal["planned", "active", "completed"],
+    include_start: bool,
+    completed_at: datetime | None,
+) -> None:
+    """Reject timestamps inconsistent with the exact Sprint lifecycle state."""
+    base = _completed_sprint_snapshot(include_start=include_start)
+    snapshot = base.model_copy(
+        update={
+            "sprints": (
+                SprintFact(
+                    sprint_id=601,
+                    status=sprint_status,
+                    completed_at=completed_at,
+                ),
+            ),
+            "post_sprint_triage": (
+                base.post_sprint_triage if sprint_status == "completed" else ()
+            ),
+        }
+    )
+
+    planning = _node(snapshot, "planning.sprint.plan")
+    assert planning.category is NodeCategory.INVALID
+    assert planning.reason_code == "WORKFLOW_FACT_CONFLICT"
+    start = _node(snapshot, "planning.sprint.start")
+    assert start.category is NodeCategory.INVALID
+    assert start.reason_code == "WORKFLOW_FACT_CONFLICT"
+
+
+@pytest.mark.parametrize(
+    ("started_at", "completed_at", "category", "reason"),
+    [
+        (
+            datetime(2026, 8, 2, 10, tzinfo=UTC).replace(tzinfo=None),
+            datetime(2026, 8, 2, 11, tzinfo=UTC),
+            NodeCategory.AVAILABLE,
+            "NEXT_SPRINT_PLANNING_REQUIRED",
+        ),
+        (
+            datetime(2026, 8, 2, 10, tzinfo=UTC),
+            datetime(2026, 8, 2, 11, tzinfo=UTC).replace(tzinfo=None),
+            NodeCategory.AVAILABLE,
+            "NEXT_SPRINT_PLANNING_REQUIRED",
+        ),
+        (
+            datetime(2026, 8, 2, 11, tzinfo=UTC).replace(tzinfo=None),
+            datetime(2026, 8, 2, 10, tzinfo=UTC),
+            NodeCategory.INVALID,
+            "WORKFLOW_FACT_CONFLICT",
+        ),
+    ],
+)
+def test_sprint_lifecycle_normalizes_mixed_timezone_facts(
+    started_at: datetime,
+    completed_at: datetime,
+    category: NodeCategory,
+    reason: str,
+) -> None:
+    """Normalize persisted UTC facts before deterministic chronology checks."""
+    base = _completed_sprint_snapshot(include_start=True)
+    raw_start = base.sprint_starts[0]
+    start = SprintStartFact.model_validate(
+        {**raw_start.model_dump(mode="python"), "started_at": started_at}
+    )
+    sprint = SprintFact(
+        sprint_id=601,
+        status="completed",
+        completed_at=completed_at,
+    )
+    assert start.started_at.tzinfo is UTC
+    assert sprint.completed_at is not None
+    assert sprint.completed_at.tzinfo is UTC
+    snapshot = base.model_copy(update={"sprints": (sprint,), "sprint_starts": (start,)})
+
+    planning = _node(snapshot, "planning.sprint.plan")
+
+    assert planning.category is category
+    assert planning.reason_code == reason
+
+
+@pytest.mark.parametrize("leaf_status", ["feedback", "rejected"])
+def test_started_accepted_plan_freezes_unaccepted_physical_leaf(
+    leaf_status: str,
+) -> None:
+    """Start A freezes its stream even when physical successor B is unaccepted."""
+    story = _story(1, "req-a")
+    candidate_fingerprint = candidate_set_fingerprint((story,), ())
+    accepted = _sprint_plan_artifact(
+        artifact_id=501,
+        stream_id="SPS-0123456789abcdef0123456789abcdef",
+        status="accepted",
+        activated_sprint_id=601,
+        candidate_fingerprint=candidate_fingerprint,
+    )
+    correction = accepted.model_copy(
+        update={
+            "artifact_id": 502,
+            "artifact_fingerprint": "sha256:plan-502",
+            "version_number": 2,
+            "supersedes_artifact_id": 501,
+            "activated_sprint_id": None,
+            "task_content_fingerprint": None,
+            "status": leaf_status,
+        }
+    )
+    snapshot = _snapshot(
+        requirements=_requirements("req-a"),
+        planning_artifacts=(
+            _roadmap(),
+            _story_artifact(1, "req-a"),
+            accepted,
+            correction,
+        ),
+        stories=(story,),
+        sprints=(SprintFact(sprint_id=601, status="active", completed_at=None),),
+        sprint_starts=(_sprint_start_fact(accepted),),
+    )
+
+    planning = _node(snapshot, "planning.sprint.plan")
+
+    assert planning.category is NodeCategory.AVAILABLE
+    assert planning.reason_code == "NEXT_SPRINT_PLANNING_REQUIRED"
+    assert planning.fact_references[0].fact_id == "501"
+
+
+@pytest.mark.parametrize("leaf_status", ["feedback", "rejected"])
+def test_mismatched_start_does_not_freeze_unaccepted_physical_leaf(
+    leaf_status: str,
+) -> None:
+    """A corrupt start that targets the stream fails closed."""
+    story = _story(1, "req-a")
+    candidate_fingerprint = candidate_set_fingerprint((story,), ())
+    accepted = _sprint_plan_artifact(
+        artifact_id=501,
+        stream_id="SPS-0123456789abcdef0123456789abcdef",
+        status="accepted",
+        activated_sprint_id=601,
+        candidate_fingerprint=candidate_fingerprint,
+    )
+    correction = accepted.model_copy(
+        update={
+            "artifact_id": 502,
+            "artifact_fingerprint": "sha256:plan-502",
+            "version_number": 2,
+            "supersedes_artifact_id": 501,
+            "activated_sprint_id": None,
+            "task_content_fingerprint": None,
+            "status": leaf_status,
+        }
+    )
+    snapshot = _snapshot(
+        requirements=_requirements("req-a"),
+        planning_artifacts=(
+            _roadmap(),
+            _story_artifact(1, "req-a"),
+            accepted,
+            correction,
+        ),
+        stories=(story,),
+        sprints=(SprintFact(sprint_id=601, status="active", completed_at=None),),
+        sprint_starts=(
+            _sprint_start_fact(accepted, plan_fingerprint="sha256:corrupt"),
+        ),
+    )
+
+    planning = _node(snapshot, "planning.sprint.plan")
+
+    assert planning.category is NodeCategory.INVALID
+    assert planning.reason_code == "WORKFLOW_FACT_CONFLICT"
+
+
+def test_extra_targeted_start_in_one_stream_fails_closed() -> None:
+    """Reject an exact accepted-plan start plus any extra targeted start row."""
+    story = _story(1, "req-a")
+    candidate_fingerprint = candidate_set_fingerprint((story,), ())
+    accepted = _sprint_plan_artifact(
+        artifact_id=501,
+        stream_id="SPS-0123456789abcdef0123456789abcdef",
+        status="accepted",
+        activated_sprint_id=601,
+        candidate_fingerprint=candidate_fingerprint,
+    )
+    correction = accepted.model_copy(
+        update={
+            "artifact_id": 502,
+            "artifact_fingerprint": "sha256:plan-502",
+            "version_number": 2,
+            "supersedes_artifact_id": 501,
+            "activated_sprint_id": None,
+            "task_content_fingerprint": None,
+            "status": "feedback",
+        }
+    )
+    exact_start = _sprint_start_fact(accepted)
+    extra_start = exact_start.model_copy(
+        update={
+            "start_id": 2,
+            "sprint_id": 602,
+            "sprint_plan_artifact_id": correction.artifact_id,
+            "plan_fingerprint": correction.artifact_fingerprint,
+        }
+    )
+    snapshot = _snapshot(
+        requirements=_requirements("req-a"),
+        planning_artifacts=(
+            _roadmap(),
+            _story_artifact(1, "req-a"),
+            accepted,
+            correction,
+        ),
+        stories=(story,),
+        sprints=(SprintFact(sprint_id=601, status="active", completed_at=None),),
+        sprint_starts=(exact_start, extra_start),
+    )
+
+    planning = _node(snapshot, "planning.sprint.plan")
+
+    assert planning.category is NodeCategory.INVALID
+    assert planning.reason_code == "WORKFLOW_FACT_CONFLICT"
+
+
+@pytest.mark.parametrize("open_status", ["feedback", "rejected"])
+def test_open_sprint_stream_wins_over_closed_history(open_status: str) -> None:
+    """Select the sole open correction stream ahead of completed history."""
+    story = _story(1, "req-a")
+    current_fingerprint = candidate_set_fingerprint((story,), ())
+    closed = _sprint_plan_artifact(
+        artifact_id=900,
+        stream_id="SPS-ffffffffffffffffffffffffffffffff",
+        status="accepted",
+        selected_story_ids=(90,),
+        activated_sprint_id=601,
+    )
+    open_plan = _sprint_plan_artifact(
+        artifact_id=100,
+        stream_id="SPS-00000000000000000000000000000000",
+        status=open_status,
+        candidate_fingerprint=current_fingerprint,
+    )
+    snapshot = _snapshot(
+        requirements=_requirements("req-a"),
+        planning_artifacts=(
+            _roadmap(),
+            _story_artifact(1, "req-a"),
+            closed,
+            open_plan,
+        ),
+        stories=(story,),
+        sprints=(
+            SprintFact(
+                sprint_id=601,
+                status="completed",
+                completed_at=EVALUATED_AT - timedelta(days=1),
+            ),
+        ),
+        sprint_starts=(
+            _sprint_start_fact(
+                closed,
+                started_at=EVALUATED_AT - timedelta(days=2),
+            ),
+        ),
+    )
+
+    planning = _node(snapshot, "planning.sprint.plan")
+
+    assert planning.category is NodeCategory.AVAILABLE
+    assert planning.reason_code == "SPRINT_PLAN_REVISION_REQUIRED"
+    assert planning.fact_references[0].fact_id == "100"
+
+
+def test_two_open_sprint_streams_fail_closed() -> None:
+    """Never guess between parallel unstarted streams for one Specification."""
+    story = _story(1, "req-a")
+    current_fingerprint = candidate_set_fingerprint((story,), ())
+    snapshot = _snapshot(
+        requirements=_requirements("req-a"),
+        planning_artifacts=(
+            _roadmap(),
+            _story_artifact(1, "req-a"),
+            _sprint_plan_artifact(
+                artifact_id=900,
+                stream_id="SPS-ffffffffffffffffffffffffffffffff",
+                status="feedback",
+                candidate_fingerprint=current_fingerprint,
+            ),
+            _sprint_plan_artifact(
+                artifact_id=100,
+                stream_id="SPS-00000000000000000000000000000000",
+                status="rejected",
+                candidate_fingerprint=current_fingerprint,
+            ),
+        ),
+        stories=(story,),
+    )
+
+    planning = _node(snapshot, "planning.sprint.plan")
+
+    assert planning.category is NodeCategory.INVALID
+    assert planning.reason_code == "WORKFLOW_FACT_CONFLICT"
+
+
+@pytest.mark.parametrize("leaf_status", ["feedback", "rejected"])
+def test_accepted_sprint_plan_starts_behind_unaccepted_leaf(
+    leaf_status: str,
+) -> None:
+    """Keep accepted plan A startable while correction B is not accepted."""
+    story = _story(1, "req-a")
+    task = _task(1)
+    candidate_fingerprint = candidate_set_fingerprint((story,), ())
+    accepted = PlanningArtifactFact.model_validate(
+        {
+            "artifact_type": "sprint_plan",
+            "artifact_id": 501,
+            "artifact_fingerprint": "sha256:plan-a",
+            "version_number": 1,
+            "source_fingerprint": candidate_fingerprint,
+            "spec_version_id": SPEC_VERSION_ID,
+            "spec_hash": SPEC_HASH,
+            "sprint_plan_stream_id": "SPS-0123456789abcdef0123456789abcdef",
+            "selected_story_ids": [1],
+            "activated_sprint_id": 601,
+            "candidate_set_fingerprint": candidate_fingerprint,
+            "task_content_fingerprint": current_task_content_fingerprint(
+                (task,), sprint_id=601, story_ids=(1,)
+            ),
+            "status": "accepted",
+        }
+    )
+    correction = accepted.model_copy(
+        update={
+            "artifact_id": 502,
+            "artifact_fingerprint": "sha256:plan-b",
+            "version_number": 2,
+            "supersedes_artifact_id": 501,
+            "activated_sprint_id": None,
+            "status": leaf_status,
+        }
+    )
+    snapshot = _snapshot(
+        requirements=_requirements("req-a"),
+        planning_artifacts=(
+            _roadmap(),
+            _story_artifact(1, "req-a"),
+            accepted,
+            correction,
+        ),
+        stories=(story,),
+        tasks=(task,),
+        sprints=(SprintFact(sprint_id=601, status="planned", completed_at=None),),
+    )
+
+    start = _node(snapshot, "planning.sprint.start")
+
+    assert start.category is NodeCategory.AVAILABLE
+    assert start.reason_code == "SPRINT_READY_TO_START"
+    assert start.fact_references[0].fact_id == "501"
 
 
 def test_story_change_makes_reviewed_sprint_plan_stale() -> None:
@@ -829,9 +1886,11 @@ def test_story_change_makes_reviewed_sprint_plan_stale() -> None:
             "artifact_id": 501,
             "artifact_fingerprint": "sha256:plan",
             "source_fingerprint": ROADMAP_FINGERPRINT,
-            "requirement_id": None,
-            "story_ids": [1],
-            "sprint_id": 601,
+            "spec_version_id": SPEC_VERSION_ID,
+            "spec_hash": SPEC_HASH,
+            "sprint_plan_stream_id": "SPS-0123456789abcdef0123456789abcdef",
+            "selected_story_ids": [1],
+            "activated_sprint_id": 601,
             "candidate_set_fingerprint": candidate_set_fingerprint((original,), ()),
             "task_content_fingerprint": current_task_content_fingerprint(
                 (task,),
@@ -849,6 +1908,7 @@ def test_story_change_makes_reviewed_sprint_plan_stale() -> None:
         stories=(changed,),
         tasks=(task,),
         decisions=(_decision("sprint", artifact_id=501, fingerprint="sha256:plan"),),
+        sprints=(SprintFact(sprint_id=601, status="planned", completed_at=None),),
     )
     start = _node(snapshot, "planning.sprint.start")
     assert start.category is NodeCategory.INVALID

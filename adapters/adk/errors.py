@@ -11,7 +11,7 @@ if TYPE_CHECKING:
 
 @dataclass
 class AttemptRevalidationError(RuntimeError):
-    """Carry a non-provider authority result out of ADK execution."""
+    """Carry a non-provider revalidation result out of ADK execution."""
 
     result: TransitionResult
 
@@ -22,18 +22,6 @@ class AttemptRevalidationInfrastructureError(RuntimeError):
     def __init__(self) -> None:
         """Use one bounded durable diagnostic for every host-side cause."""
         super().__init__("Specification attempt revalidation failed.")
-
-
-@dataclass
-class AuthorityAgenticExecutionError(RuntimeError):
-    """Typed failure for Authority compiler output rejected by the host."""
-
-    code: WorkflowErrorCode
-    message: str
-
-    def __str__(self) -> str:
-        """Render the bounded durable Authority failure message."""
-        return self.message
 
 
 @dataclass
@@ -63,7 +51,6 @@ class SpecificationAgenticExecutionError(RuntimeError):
 __all__ = [
     "AttemptRevalidationError",
     "AttemptRevalidationInfrastructureError",
-    "AuthorityAgenticExecutionError",
     "SpecificationAgenticExecutionError",
     "VisionAgenticPreflightError",
 ]

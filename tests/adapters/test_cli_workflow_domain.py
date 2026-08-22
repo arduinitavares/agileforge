@@ -1,21 +1,23 @@
 """CLI adapter tests for the WorkflowDomain cutover."""
 
 import importlib
+import io
 import shlex
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import pytest
 
 from cli import main as cli_main
+from cli.main import build_parser, main
 from cli.workflow_commands import workflow_next
+from services.application import ExpectedPlanningReviewBinding
 from tests.adapters.test_command_renderer import position_fixture
-from workflow.contracts import WorkflowPosition
+from workflow.contracts import TransitionResult, WorkflowPosition
 
 if TYPE_CHECKING:
     from services.application import (
-        AuthorityFeedbackRequest,
-        AuthorityReviewRequest,
         PostSprintTriageRequest,
         SpecificationReviewRequest,
         SpecificationSourceRegistrationRequest,
@@ -63,11 +65,6 @@ _SEMANTIC_TEXT_COMMANDS = (
         "rationale",
     ),
     (
-        "authority decide --project-id 41 --decision accepted --rationale {value} "
-        "--idempotency-key authority-review-41 --actor operator",
-        "rationale",
-    ),
-    (
         "backlog decide --project-id 41 --decision accepted --rationale {value} "
         "--idempotency-key backlog-review-41 --actor operator",
         "rationale",
@@ -78,8 +75,7 @@ _SEMANTIC_TEXT_COMMANDS = (
         "rationale",
     ),
     (
-        "story decide --project-id 41 --instance-key requirement:req-7 "
-        "--decision accepted --rationale {value} "
+        "story decide --project-id 41 --decision accepted --rationale {value} "
         "--idempotency-key story-review-41 --actor operator",
         "rationale",
     ),
@@ -166,12 +162,6 @@ _SEMANTIC_TEXT_COMMANDS = (
             "agileforge goal abandon --project-id 1"
             ' --rationale "The outcome is no longer worth pursuing."'
             " --idempotency-key goal-abandon-myfinance-1 --actor acceptance-agent"
-        ),
-        (
-            "agileforge authority feedback --project-id 1"
-            ' --feedback "Narrow the identity invariant."'
-            " --idempotency-key authority-feedback-myfinance-1"
-            " --actor acceptance-agent"
         ),
     ],
 )
@@ -372,79 +362,12 @@ def test_specification_source_register_requires_exact_preparation_attestation(
         )
 
 
-class _AuthorityFeedbackApplication:
-    def __init__(self) -> None:
-        self.requests: list[object] = []
-
-    def record_authority_feedback(self, request: object) -> object:
-        self.requests.append(request)
-        return cli_main.TransitionResult(ok=True)
-
-
-def test_authority_feedback_cli_strips_text_before_calling_application(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """Send only the human feedback text and metadata through the CLI boundary."""
-    application = _AuthorityFeedbackApplication()
-
-    exit_code = cli_main.main(
-        [
-            "authority",
-            "feedback",
-            "--project-id",
-            "41",
-            "--feedback",
-            "  Narrow the identity invariant.  ",
-            "--idempotency-key",
-            "feedback-cli-41",
-            "--actor",
-            "operator",
-        ],
-        application=application,
-    )
-
-    assert exit_code == 0
-    request = cast("AuthorityFeedbackRequest", application.requests[0])
-    assert request.feedback == "Narrow the identity invariant."
-    assert not hasattr(request, "pending_authority_id")
-    assert '"ok": true' in capsys.readouterr().out
-
-
-def test_authority_feedback_cli_returns_structured_invalid_input(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """Reject whitespace-only feedback without invoking the application."""
-    application = _AuthorityFeedbackApplication()
-    invalid_input_exit_code = 2
-
-    exit_code = cli_main.main(
-        [
-            "authority",
-            "feedback",
-            "--project-id",
-            "41",
-            "--feedback",
-            "  \t",
-            "--idempotency-key",
-            "feedback-cli-41",
-            "--actor",
-            "operator",
-        ],
-        application=application,
-    )
-
-    assert exit_code == invalid_input_exit_code
-    assert application.requests == []
-    assert '"ok": false' in capsys.readouterr().out
-
-
 class _SemanticTextApplication:
     """Capture any semantic text mutation without durable side effects."""
 
     _METHODS = frozenset(
         {
             "begin_vision_revision",
-            "decide_authority",
             "respond_to_product_goal",
             "respond_to_vision",
             "resolve_product_goal",
@@ -462,11 +385,47 @@ class _SemanticTextApplication:
         self.requests: list[object] = []
         self.reads = _SpecificationReviewReads()
 
+    def backlog_review(self, _project_id: int) -> dict[str, object]:
+        """Return one current Backlog review for planning-decision text tests."""
+        return _unique_review()
+
+    def roadmap_review(self, _project_id: int) -> dict[str, object]:
+        """Return one current Roadmap review for planning-decision text tests."""
+        response = _unique_review()
+        data = cast("dict[str, object]", response["data"])
+        data["review"] = _planning_review("roadmap")
+        return response
+
+    def story_reviews(self, _project_id: int) -> dict[str, object]:
+        """Return one current Story review for planning-decision text tests."""
+        response = _unique_review()
+        data = cast("dict[str, object]", response["data"])
+        return {
+            "ok": True,
+            "data": {
+                "items": [
+                    {
+                        "binding": data["binding"],
+                        "review": _planning_review("story"),
+                    }
+                ]
+            },
+            "warnings": [],
+            "errors": [],
+        }
+
+    def sprint_plan_review(self, _project_id: int) -> dict[str, object]:
+        """Return one current Sprint review for planning-decision text tests."""
+        response = _unique_review()
+        data = cast("dict[str, object]", response["data"])
+        data["review"] = _planning_review("sprint_plan")
+        return response
+
     def __getattr__(self, name: str) -> object:
         if name not in self._METHODS:
             raise AttributeError(name)
 
-        def capture(request: object) -> object:
+        def capture(request: object, **_keywords: object) -> object:
             self.requests.append(request)
             return cli_main.TransitionResult(ok=True)
 
@@ -487,17 +446,6 @@ class _SpecificationReviewReads:
             },
         }
 
-    def authority_review(self, *, project_id: int) -> dict[str, object]:
-        assert project_id == PROJECT_ID
-        return {
-            "ok": True,
-            "data": {
-                "pending_authority": {
-                    "authority_fingerprint": "sha256:authority-shown",
-                }
-            },
-        }
-
 
 @pytest.mark.parametrize(("command", "field"), _SEMANTIC_TEXT_COMMANDS)
 def test_semantic_text_cli_strips_before_application_call(
@@ -514,11 +462,13 @@ def test_semantic_text_cli_strips_before_application_call(
             "_confirm_specification_review",
             lambda _packet, *, decision: decision == "accepted",
         )
-    if command.startswith("authority decide"):
+    if command.startswith(
+        ("backlog decide", "roadmap decide", "story decide", "sprint decide")
+    ):
         monkeypatch.setattr(
             cli_main,
-            "_confirm_authority_review",
-            lambda _packet, *, decision: decision == "accepted",
+            "_confirm_planning_review",
+            lambda _review, *, decision: decision == "accepted",
         )
 
     exit_code = cli_main.main(
@@ -531,9 +481,6 @@ def test_semantic_text_cli_strips_before_application_call(
     if field == "rationale" and command.startswith("specification review"):
         request = cast("SpecificationReviewRequest", application.requests[0])
         assert request.expected_candidate_fingerprint == "sha256:candidate-shown"
-    if field == "rationale" and command.startswith("authority decide"):
-        request = cast("AuthorityReviewRequest", application.requests[0])
-        assert request.expected_candidate_fingerprint == "sha256:authority-shown"
     assert '"ok": true' in capsys.readouterr().out
 
 
@@ -561,40 +508,25 @@ def test_specification_review_displays_packet_before_human_confirmation(
     assert "cancelled" in captured.out
 
 
-def test_authority_review_displays_packet_before_human_confirmation(
-    capsys: pytest.CaptureFixture[str],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A CLI decision cannot silently bind to an Authority the human never saw."""
-    application = _SemanticTextApplication()
-    monkeypatch.setattr("sys.stdin.readline", lambda: "no\n")
-
-    exit_code = cli_main.main(
-        shlex.split(
-            "authority decide --project-id 41 --decision accepted "
-            "--rationale reviewed --idempotency-key review-41 --actor operator"
-        ),
-        application=application,
-    )
-
-    captured = capsys.readouterr()
-    assert exit_code == ARGUMENT_ERROR_EXIT_CODE
-    assert application.requests == []
-    assert "Exact Authority review packet" in captured.err
-    assert "sha256:authority-shown" in captured.err
-    assert "cancelled" in captured.out
-
-
 @pytest.mark.parametrize(("command", "field"), _SEMANTIC_TEXT_COMMANDS)
 def test_semantic_text_cli_rejects_whitespace_before_application_call(
     command: str,
     field: str,
     capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Reject normalized-empty human text before invoking the application."""
     del field
     application = _SemanticTextApplication()
     invalid_input_exit_code = 2
+    if command.startswith(
+        ("backlog decide", "roadmap decide", "story decide", "sprint decide")
+    ):
+        monkeypatch.setattr(
+            cli_main,
+            "_confirm_planning_review",
+            lambda _review, *, decision: decision == "accepted",
+        )
 
     exit_code = cli_main.main(
         shlex.split(command.format(value=shlex.quote("  \t"))),
@@ -681,7 +613,7 @@ def test_removed_agentic_cli_flags_fail_parser_validation(flag: str) -> None:
     [
         ("backlog", []),
         ("roadmap", []),
-        ("story", ["--instance-key", "requirement:req-7"]),
+        ("story", []),
         ("sprint", []),
     ],
 )
@@ -716,7 +648,6 @@ def test_delivery_review_commands_use_semantic_flags_without_request_file(
 @pytest.mark.parametrize("group", ["backlog", "roadmap", "story", "sprint"])
 def test_delivery_review_commands_reject_request_file(group: str) -> None:
     """Remove the generic request-file contract from all delivery reviews."""
-    extra = ["--instance-key", "requirement:req-7"] if group == "story" else []
     with pytest.raises(ValueError, match="unrecognized arguments"):
         cli_main.build_parser().parse_args(
             [
@@ -724,7 +655,6 @@ def test_delivery_review_commands_reject_request_file(group: str) -> None:
                 "decide",
                 "--project-id",
                 "41",
-                *extra,
                 "--decision",
                 "accepted",
                 "--rationale",
@@ -739,15 +669,36 @@ def test_delivery_review_commands_reject_request_file(group: str) -> None:
         )
 
 
-def test_story_review_requires_exact_instance_selector() -> None:
-    """Refuse to choose between repeated Story review decisions implicitly."""
-    with pytest.raises(ValueError, match="--instance-key"):
+def test_story_review_uses_no_caller_owned_instance_selector() -> None:
+    """The CLI body is semantic; Story identity is captured from review data."""
+    parsed = cli_main.build_parser().parse_args(
+        [
+            "story",
+            "decide",
+            "--project-id",
+            "41",
+            "--decision",
+            "accepted",
+            "--rationale",
+            "Reviewed current artifact.",
+            "--idempotency-key",
+            "story-review-41",
+            "--actor",
+            "operator",
+        ]
+    )
+
+    assert parsed.decision == "accepted"
+    assert not hasattr(parsed, "instance_key")
+    with pytest.raises(ValueError, match="unrecognized arguments"):
         cli_main.build_parser().parse_args(
             [
                 "story",
                 "decide",
                 "--project-id",
                 "41",
+                "--instance-key",
+                "story:caller-owned",
                 "--decision",
                 "accepted",
                 "--rationale",
@@ -1177,7 +1128,6 @@ def test_semantic_sprint_generation_command_parses() -> None:
             "9",
             "--max-story-points",
             str(SPRINT_CAPACITY_POINTS),
-            "--no-task-decomposition",
             "--team-name",
             "Platform",
             "--idempotency-key",
@@ -1190,7 +1140,7 @@ def test_semantic_sprint_generation_command_parses() -> None:
     assert parsed.user_input == "Prioritize durable replay."
     assert parsed.selected_story_ids == [7, 9]
     assert parsed.max_story_points == SPRINT_CAPACITY_POINTS
-    assert parsed.include_task_decomposition is False
+    assert not hasattr(parsed, "include_task_decomposition")
     assert parsed.team_name == "Platform"
     assert not hasattr(parsed, "model_id")
 
@@ -1258,8 +1208,10 @@ def test_workflow_next_reads_position_once() -> None:
 
     assert application.position_calls == [41]
     assert [item["node_id"] for item in payload["commands"]] == [
-        "authority.compile",
-        "authority.repair",
+        "planning.backlog.review",
+        "planning.roadmap.review",
+        "planning.story.review",
+        "planning.sprint.review",
     ]
 
 
@@ -1268,3 +1220,328 @@ def test_cli_adapter_has_no_repository_or_legacy_routing_imports() -> None:
     source = (Path(__file__).parents[2] / "cli" / "workflow_commands.py").read_text()
     assert "repositories" not in source
     assert "services.workflow" not in source
+
+
+# Retained Task 11 planning-review coverage.
+def _unique_review() -> dict[str, object]:
+    return {
+        "ok": True,
+        "data": {
+            "binding": {
+                "decision_fingerprint": "decision-secret",
+                "instance_key": None,
+            },
+            "review": _planning_review("backlog"),
+        },
+        "warnings": [],
+        "errors": [],
+    }
+
+
+def _evidence() -> list[dict[str, object]]:
+    return [
+        {
+            "spec_item_id": "REQ.hidden",
+            "title": "Reliable balances",
+            "statement": "Reconcile balances before delivery.",
+            "level": "MUST",
+            "acceptance_criteria": ["All accounts reconcile."],
+            "verification_method": "acceptance-test",
+        }
+    ]
+
+
+def _backlog_item() -> dict[str, object]:
+    return {
+        "backlog_item_id": "PBI-000001",
+        "priority": 1,
+        "requirement": "Household balances",
+        "value_driver": "Customer Satisfaction",
+        "justification": "Users need trusted balances.",
+        "estimated_effort": "M",
+        "technical_note": None,
+        "specification_evidence": _evidence(),
+    }
+
+
+def _planning_review(phase: str) -> dict[str, object]:
+    common: dict[str, object] = {
+        "schema_version": "agileforge.planning-artifact-review.v1",
+        "phase": phase,
+        "project_id": 41,
+        "lineage": {"specification": {"spec_hash": "sha256:hidden"}},
+        "review": {"state": "pending"},
+    }
+    if phase == "backlog":
+        candidate = {
+            "backlog_items": [_backlog_item()],
+            "is_complete": True,
+            "clarifying_questions": [],
+        }
+    elif phase == "roadmap":
+        candidate = {
+            "roadmap_summary": "Reconcile accounts first.",
+            "roadmap_releases": [
+                {
+                    "release_name": "Trusted balances",
+                    "theme": "Confidence",
+                    "focus_area": "User Value",
+                    "reasoning": "Deliver the core requirement first.",
+                    "backlog_items": [_backlog_item()],
+                }
+            ],
+            "is_complete": True,
+            "clarifying_questions": [],
+        }
+    elif phase == "story":
+        candidate = {
+            "story_items": [
+                {
+                    "story_title": "Reconcile balances",
+                    "statement": "As a household, I want trusted balances.",
+                    "persona": "household",
+                    "acceptance_criteria": ["All accounts reconcile."],
+                    "invest_score": "High",
+                    "estimated_effort": "M",
+                    "produced_artifacts": ["Balance report"],
+                    "research_caveats": [],
+                    "decomposition_warning": None,
+                    "dependency_candidates": [],
+                    "specification_evidence": _evidence(),
+                }
+            ],
+            "is_complete": True,
+            "clarifying_questions": [],
+        }
+        common["lineage"] = {"backlog_item": _backlog_item()}
+    else:
+        candidate = {
+            "team_name": "Balance team",
+            "sprint_goal": "Ship trusted balances.",
+            "selected_stories": [
+                {
+                    "title": "Reconcile balances",
+                    "statement": "As a household, I want trusted balances.",
+                    "persona": "household",
+                    "acceptance_criteria": ["All accounts reconcile."],
+                    "specification_evidence": _evidence(),
+                    "reason_for_selection": "Highest customer value.",
+                    "tasks": [
+                        {
+                            "description": "Implement reconciliation",
+                            "task_kind": "implementation",
+                            "artifact_targets": ["service"],
+                            "workstream_tags": ["balances"],
+                            "checklist_items": ["Run acceptance test"],
+                            "specification_evidence": _evidence(),
+                        }
+                    ],
+                }
+            ],
+        }
+    common["candidate"] = candidate
+    return common
+
+
+@dataclass
+class _Application:
+    writes: list[tuple[object, ExpectedPlanningReviewBinding]] = field(
+        default_factory=list
+    )
+
+    def backlog_review(self, _project_id: int) -> dict[str, object]:
+        return _unique_review()
+
+    def roadmap_review(self, _project_id: int) -> dict[str, object]:
+        result = _unique_review()
+        data = result["data"]
+        assert isinstance(data, dict)
+        cast("dict[str, object]", data)["review"] = _planning_review("roadmap")
+        return result
+
+    def sprint_plan_review(self, _project_id: int) -> dict[str, object]:
+        result = _unique_review()
+        data = result["data"]
+        assert isinstance(data, dict)
+        cast("dict[str, object]", data)["review"] = _planning_review("sprint_plan")
+        return result
+
+    def story_reviews(self, _project_id: int) -> dict[str, object]:
+        return {
+            "ok": True,
+            "data": {
+                "items": [
+                    {
+                        "binding": {
+                            "decision_fingerprint": "story-decision-secret",
+                            "instance_key": "story-instance-secret",
+                        },
+                        "review": _planning_review("story"),
+                    }
+                ]
+            },
+            "warnings": [],
+            "errors": [],
+        }
+
+    def decide_backlog(
+        self, request: object, *, expected: ExpectedPlanningReviewBinding
+    ) -> TransitionResult:
+        self.writes.append((request, expected))
+        return TransitionResult(ok=True, applied_node_id="planning.backlog.review")
+
+    def decide_story(
+        self, request: object, *, expected: ExpectedPlanningReviewBinding
+    ) -> TransitionResult:
+        self.writes.append((request, expected))
+        return TransitionResult(ok=True, applied_node_id="planning.story.review")
+
+
+def _decision_argv(phase: str) -> list[str]:
+    return [
+        phase,
+        "decide",
+        "--project-id",
+        "41",
+        "--decision",
+        "accepted",
+        "--rationale",
+        "Reviewed exact evidence.",
+        "--idempotency-key",
+        f"{phase}-review-41",
+        "--actor",
+        "operator",
+    ]
+
+
+def test_planning_review_read_commands_are_exact() -> None:
+    """Expose each retained planning-review read command with its project ID."""
+    parser = build_parser()
+
+    for argv in (
+        ["backlog", "review", "--project-id", "41"],
+        ["roadmap", "review", "--project-id", "41"],
+        ["story", "reviews", "--project-id", "41"],
+        ["sprint", "plan-review", "--project-id", "41"],
+    ):
+        assert parser.parse_args(argv).project_id == PROJECT_ID
+
+
+def test_planning_review_read_hides_machine_identity(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Render review reads as human evidence without machine-only bindings."""
+    application = _Application()
+
+    assert (
+        main(
+            ["backlog", "review", "--project-id", "41"],
+            application=application,
+        )
+        == 0
+    )
+
+    output = capsys.readouterr().out
+    assert "Household balances" in output
+    assert "Specification evidence" in output
+    assert "Level: MUST" in output
+    assert "Verification: acceptance-test" in output
+    assert "schema_version" not in output
+    assert "lineage" not in output
+    assert "{" not in output
+    assert "decision-secret" not in output
+    assert "sha256:hidden" not in output
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        (
+            ["backlog", "review", "--project-id", "41"],
+            "Requirement: Household balances",
+        ),
+        (["roadmap", "review", "--project-id", "41"], "Release: Trusted balances"),
+        (["story", "reviews", "--project-id", "41"], "Story: Reconcile balances"),
+        (
+            ["sprint", "plan-review", "--project-id", "41"],
+            "Sprint goal: Ship trusted balances.",
+        ),
+    ],
+)
+def test_planning_review_reads_use_phase_specific_human_labels(
+    argv: list[str],
+    expected: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Keep each retained review read labelled for its human planning phase."""
+    application = _Application()
+
+    assert main(argv, application=application) == 0
+
+    output = capsys.readouterr().out
+    assert expected in output
+    assert "Specification evidence" in output
+    assert "schema_version" not in output
+    assert "artifact_fingerprint" not in output
+    assert "{" not in output
+
+
+def test_backlog_decision_displays_evidence_and_keeps_binding_hidden(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Show backlog evidence while retaining the decision binding internally."""
+    application = _Application()
+    monkeypatch.setattr("sys.stdin", io.StringIO("yes\n"))
+
+    assert main(_decision_argv("backlog"), application=application) == 0
+
+    captured = capsys.readouterr()
+    assert "Household balances" in captured.err
+    assert "Reconcile balances before delivery." in captured.err
+    assert "Specification evidence" in captured.err
+    assert "schema_version" not in captured.err
+    assert "{" not in captured.err
+    assert "decision-secret" not in captured.err
+    assert "sha256:hidden" not in captured.err
+    assert len(application.writes) == 1
+    assert application.writes[0][1].decision_fingerprint == "decision-secret"
+    assert application.writes[0][1].instance_key is None
+
+
+def test_cancelled_planning_review_writes_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Abort a declined planning-review decision before it writes state."""
+    application = _Application()
+    monkeypatch.setattr("sys.stdin", io.StringIO("no\n"))
+
+    assert (
+        main(_decision_argv("backlog"), application=application)
+        == ARGUMENT_ERROR_EXIT_CODE
+    )
+    assert application.writes == []
+
+
+def test_story_decision_uses_hidden_instance_without_cli_flag(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Resolve the story instance internally rather than exposing a CLI flag."""
+    application = _Application()
+    monkeypatch.setattr("sys.stdin", io.StringIO("yes\n"))
+
+    assert main(_decision_argv("story"), application=application) == 0
+
+    captured = capsys.readouterr()
+    assert "Reconcile balances" in captured.err
+    assert "story-instance-secret" not in captured.err
+    assert application.writes[0][1].instance_key == "story-instance-secret"
+    assert "instance-key" not in build_parser().format_help()
+
+
+def test_cli_source_has_no_retired_operator_surface() -> None:
+    """Keep removed operator terminology out of the live CLI source."""
+    source = Path("cli/main.py").read_text(encoding="utf-8").casefold()
+    assert "auth" + "ority" not in source
+    assert "invar" + "iant" not in source

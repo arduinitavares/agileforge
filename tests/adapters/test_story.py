@@ -12,7 +12,6 @@ from adapters.adk.agents.story import (
     root_agent,
 )
 from services.contracts.story import (
-    UserStoryPatchOutput,
     UserStoryWriterInput,
     UserStoryWriterOutput,
 )
@@ -45,8 +44,8 @@ def test_factory_returns_new_instance() -> None:
     assert new_agent.name == "user_story_writer_tool"
 
 
-def test_user_story_patch_output_rejects_user_stories_field() -> None:
-    """Patch output must not accept full-list story artifacts."""
+def test_story_writer_output_rejects_retired_patch_envelope() -> None:
+    """Correction output uses the current one-item writer contract."""
     payload = {
         "artifact_kind": "story_patch",
         "parent_requirement": "Requirement A",
@@ -67,18 +66,18 @@ def test_user_story_patch_output_rejects_user_stories_field() -> None:
     }
 
     with pytest.raises(ValidationError):
-        UserStoryPatchOutput.model_validate(payload)
+        UserStoryWriterOutput.model_validate(payload)
 
 
-def test_user_story_patch_agent_uses_patch_output_schema() -> None:
-    """Patch agent must bind the patch schema on a fresh ADK Agent."""
+def test_user_story_patch_agent_uses_current_writer_output_schema() -> None:
+    """Correction agent binds the current writer schema without an alias."""
     patch_agent = create_user_story_patch_agent()
     full_agent = create_user_story_writer_agent()
 
     assert patch_agent is not full_agent
     assert patch_agent.name == "user_story_patch_tool"
     assert patch_agent.input_schema is UserStoryWriterInput
-    assert patch_agent.output_schema is UserStoryPatchOutput
+    assert patch_agent.output_schema is UserStoryWriterOutput
     assert full_agent.output_schema is UserStoryWriterOutput
 
 
@@ -91,10 +90,10 @@ def test_high_story_example_omits_placeholder_warning() -> None:
     )
 
 
-def test_instructions_forbid_warning_on_non_low_scores() -> None:
-    """Verify instructions forbid warning on non low scores."""
+def test_instructions_bound_decomposition_warning_to_quality_failure() -> None:
+    """Verify the warning is absent unless decomposition quality fails."""
     instructions = USER_STORY_WRITER_INSTRUCTIONS
     assert (
-        "Never include `decomposition_warning` on a story scored `High` or `Medium`."
+        "decomposition_warning, null unless the Story fails decomposition quality"
         in instructions
     )

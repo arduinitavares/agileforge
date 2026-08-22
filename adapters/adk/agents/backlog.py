@@ -10,7 +10,7 @@ from google.adk.agents import Agent
 from google.adk.models.lite_llm import LiteLlm
 
 from adapters.adk.prompts import load_prompt
-from services.contracts.backlog import InputSchema, OutputSchema
+from services.contracts.backlog import BacklogAgentOutput, BacklogBuilderInput
 from utils.model_config import (
     get_model_id,
     get_model_token_limit_args,
@@ -34,11 +34,11 @@ root_agent: Agent = Agent(
     name="backlog_primer_tool",
     description=(
         "An agent that produces an initial high-level product backlog "
-        "from a product vision and user input."
+        "from the exact accepted Specification, Vision, and Product Goal."
     ),
     model=model,
-    input_schema=InputSchema,
-    output_schema=OutputSchema,
+    input_schema=BacklogBuilderInput,
+    output_schema=BacklogAgentOutput,
     output_key="product_backlog",
     instruction=BACKLOG_INSTRUCTIONS,
     disallow_transfer_to_parent=True,

@@ -28,7 +28,10 @@ model: LiteLlm = LiteLlm(
 # Initialize Agent
 root_agent: Agent = Agent(
     name="roadmap_builder_tool",
-    description="Constructs a roadmap from the prioritized backlog and context.",
+    description=(
+        "Constructs a roadmap from exact accepted Backlog items and the accepted "
+        "Specification root."
+    ),
     model=model,
     input_schema=RoadmapBuilderInput,
     output_schema=RoadmapBuilderOutput,

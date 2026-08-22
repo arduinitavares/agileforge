@@ -36,7 +36,6 @@ def test_selected_test_and_script_modules_import_team_from_models_core() -> None
     """Verify selected test and script modules import team from models core."""
     root = Path(__file__).resolve().parents[1]
     selected_modules = [
-        Path("tests/test_export_snapshot.py"),
         Path("tests/unit/test_delete_project.py"),
     ]
 

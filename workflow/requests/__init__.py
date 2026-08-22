@@ -6,12 +6,6 @@ from workflow.requests.attempts import (
     RevalidateNodeAttempt,
     StartNodeAttempt,
 )
-from workflow.requests.authority import (
-    CompileAuthority,
-    DecideAuthority,
-    RecordAuthorityFeedback,
-    RepairAuthority,
-)
 from workflow.requests.execution import (
     CloseSprint,
     CloseStory,
@@ -57,10 +51,6 @@ from workflow.requests.vision import (
 type TransitionRequest = (
     CreateProject
     | RecordRepositoryBinding
-    | CompileAuthority
-    | DecideAuthority
-    | RecordAuthorityFeedback
-    | RepairAuthority
     | GenerateVisionBootstrap
     | RecordVisionInterviewTurn
     | DecideVisionReview
@@ -100,11 +90,9 @@ __all__ = [
     "BeginVisionRevision",
     "CloseSprint",
     "CloseStory",
-    "CompileAuthority",
     "CompleteSpecificationStructuring",
     "CompleteTask",
     "CreateProject",
-    "DecideAuthority",
     "DecideBacklog",
     "DecideProductGoalReview",
     "DecideRoadmap",
@@ -116,7 +104,6 @@ __all__ = [
     "FulfillProductGoal",
     "GenerateVisionBootstrap",
     "ObsoleteNodeAttempt",
-    "RecordAuthorityFeedback",
     "RecordBacklogDraft",
     "RecordPostSprintTriage",
     "RecordProductGoalInterviewTurn",
@@ -126,7 +113,6 @@ __all__ = [
     "RecordStoryDraft",
     "RecordVisionInterviewTurn",
     "RegisterSpecificationSource",
-    "RepairAuthority",
     "RepairStoryReadiness",
     "RepositoryBindingInput",
     "RevalidateNodeAttempt",

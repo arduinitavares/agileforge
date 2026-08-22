@@ -55,7 +55,6 @@ def test_project_model_has_only_current_identity_state() -> None:
         "vision",
         "roadmap",
         "technical_spec",
-        "compiled_authority_json",
         "spec_file_path",
         "spec_loaded_at",
     }

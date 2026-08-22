@@ -1,5 +1,17 @@
 """Transactional workflow transition handlers."""
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from datetime import datetime
+
+    from sqlmodel import Session
+
+    from workflow.contracts import NodeDecision, TransitionResult
+    from workflow.handlers.execution import ExecutionRequest
+
 from workflow.handlers.attempts import (
     AttemptStartState,
     as_utc,
@@ -10,14 +22,6 @@ from workflow.handlers.attempts import (
     record_obsolete_outcome,
     record_success_outcome,
 )
-from workflow.handlers.authority import (
-    execute_compile_authority,
-    execute_decide_authority,
-    execute_record_authority_feedback,
-    execute_repair_authority,
-    validate_decide_authority_review,
-)
-from workflow.handlers.execution import execute_execution_request
 from workflow.handlers.planning import (
     execute_planning_request,
     validate_planning_review,
@@ -49,15 +53,28 @@ from workflow.handlers.vision import (
     execute_record_vision_interview_turn,
 )
 
+
+def execute_execution_request(
+    session: Session,
+    request: ExecutionRequest,
+    decision: NodeDecision,
+    evaluated_at: datetime,
+) -> TransitionResult:
+    """Defer execution-service loading until an execution transition runs."""
+    from workflow.handlers.execution import (  # noqa: PLC0415
+        execute_execution_request as execute,
+    )
+
+    return execute(session, request, decision, evaluated_at)
+
+
 __all__ = [
     "AttemptStartState",
     "as_utc",
     "execute_abandon_product_goal",
     "execute_begin_vision_revision",
-    "execute_compile_authority",
     "execute_complete_specification_structuring",
     "execute_create_project",
-    "execute_decide_authority",
     "execute_decide_backlog",
     "execute_decide_product_goal_review",
     "execute_decide_specification",
@@ -66,20 +83,17 @@ __all__ = [
     "execute_fulfill_product_goal",
     "execute_generate_vision_bootstrap",
     "execute_planning_request",
-    "execute_record_authority_feedback",
     "execute_record_backlog_draft",
     "execute_record_product_goal_interview_turn",
     "execute_record_repository_binding",
     "execute_record_vision_interview_turn",
     "execute_register_specification_source",
-    "execute_repair_authority",
     "execute_start_node_attempt",
     "load_attempt",
     "load_attempt_outcome",
     "record_failure_outcome",
     "record_obsolete_outcome",
     "record_success_outcome",
-    "validate_decide_authority_review",
     "validate_decide_backlog_review",
     "validate_planning_review",
 ]

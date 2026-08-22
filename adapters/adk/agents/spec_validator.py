@@ -4,7 +4,7 @@ from google.adk.agents import LlmAgent
 from google.adk.models.lite_llm import LiteLlm
 
 from adapters.adk.prompts import load_prompt
-from services.contracts.specification_validation import SpecValidationResult
+from services.contracts.specification_validation import StorySpecificationReviewOutput
 from utils.model_config import (
     get_model_id,
     get_model_token_limit_args,
@@ -31,12 +31,9 @@ def build_spec_validator_agent() -> LlmAgent:
         name="SpecValidatorAgent",
         model=_spec_validator_model(),
         instruction=load_prompt("spec_validator.txt"),
-        description=(
-            "Validates story compliance with technical specifications using "
-            "structured logic checks."
-        ),
+        description="Reviews one accepted Story against its exact Specification.",
         output_key="spec_validation_result",
-        output_schema=SpecValidationResult,
+        output_schema=StorySpecificationReviewOutput,
         disallow_transfer_to_parent=True,
         disallow_transfer_to_peers=True,
     )

@@ -142,7 +142,7 @@ def test_build_ignores_malformed_unrelated_workflow_facts(
     snapshot = _goal_snapshot(review="feedback", resolved=False)
 
     def fail_full_snapshot(_self: object, _project_id: int) -> WorkflowFactSnapshot:
-        message = "Malformed specification, Authority, repository, and planning facts."
+        message = "Malformed specification, repository, and planning facts."
         raise AssertionError(message)
 
     monkeypatch.setattr(

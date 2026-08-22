@@ -16,9 +16,7 @@ from workflow.contracts import (
     RecommendationKind,
 )
 from workflow.facts import (
-    AuthorityFact,
-    AuthorityFeedbackFact,
-    BacklogRequirementFact,
+    BacklogItemFact,
     NodeAttemptFact,
     PhaseArtifactFact,
     PlanningArtifactFact,
@@ -293,7 +291,10 @@ AUTHORITATIVE_SNAPSHOT_VARIANTS: tuple[tuple[str, object], ...] = (
                 spec_version_id=9,
                 spec_hash="sha256:spec-version",
                 status="approved",
-                approved_at=EVALUATED_AT,
+                source_specification_decision_id=92,
+                accepted_at=EVALUATED_AT,
+                accepted_by="reviewer",
+                acceptance_notes="Accepted.",
                 source_specification_candidate_id=91,
                 source_specification_candidate_fingerprint="sha256:candidate",
                 source_vision_artifact_id=83,
@@ -320,49 +321,26 @@ AUTHORITATIVE_SNAPSHOT_VARIANTS: tuple[tuple[str, object], ...] = (
         ),
     ),
     (
-        "authorities",
-        (
-            AuthorityFact(
-                authority_id=10,
-                spec_version_id=9,
-                authority_fingerprint="sha256:authority",
-                status="accepted",
-                decided_at=EVALUATED_AT,
-            ),
-        ),
-    ),
-    (
-        "authority_feedback",
-        (
-            AuthorityFeedbackFact(
-                feedback_id=11,
-                source_authority_id=10,
-                source_authority_fingerprint="sha256:authority",
-                feedback_fingerprint="sha256:feedback",
-                recorded_at=EVALUATED_AT,
-            ),
-        ),
-    ),
-    (
         "phase_artifacts",
         (
             PhaseArtifactFact(
                 artifact_type="vision",
-                artifact_id="vision:11",
+                artifact_id=11,
                 artifact_fingerprint="sha256:vision",
                 status="accepted",
             ),
         ),
     ),
     (
-        "backlog_requirements",
+        "backlog_items",
         (
-            BacklogRequirementFact(
-                requirement_id="requirement-a",
+            BacklogItemFact(
+                backlog_item_id="PBI-000001",
                 backlog_artifact_id=12,
                 backlog_artifact_fingerprint="sha256:backlog",
-                requirement="Persist planning facts",
-                rank=1,
+                item_fingerprint="sha256:backlog-item",
+                spec_item_ids=("REQ.properties",),
+                priority=1,
             ),
         ),
     ),
@@ -394,6 +372,8 @@ AUTHORITATIVE_SNAPSHOT_VARIANTS: tuple[tuple[str, object], ...] = (
             SprintStartFact(
                 start_id=13,
                 sprint_id=12,
+                spec_version_id=9,
+                spec_hash="sha256:spec-version",
                 sprint_plan_artifact_id=14,
                 sprint_plan_artifact_decision_id=15,
                 story_dependency_review_id=16,
@@ -417,6 +397,13 @@ AUTHORITATIVE_SNAPSHOT_VARIANTS: tuple[tuple[str, object], ...] = (
         (
             StoryFact(
                 story_id=13,
+                source_story_artifact_id=1,
+                source_story_artifact_fingerprint="sha256:story-artifact",
+                source_story_item_id="US-0001",
+                source_story_item_fingerprint="sha256:story-item",
+                accepted_spec_version_id=9,
+                accepted_spec_hash="sha256:spec-version",
+                spec_item_ids=("REQ.properties",),
                 status="ready",
                 sprint_candidate=True,
                 readiness_blockers=(),
@@ -457,9 +444,14 @@ AUTHORITATIVE_SNAPSHOT_VARIANTS: tuple[tuple[str, object], ...] = (
                 story_id=13,
                 description="Implement Story 13",
                 metadata_json=(
-                    '{"artifact_targets":[],"checklist_items":[],'
-                    '"relevant_invariant_ids":[],"task_kind":"other",'
-                    '"version":"task_metadata.v1","workstream_tags":[]}'
+                    '{"artifact_targets":[],"checklist_items":["Verify Story 13"],'
+                    '"relevant_spec_item_ids":["REQ.properties"],'
+                    '"spec_hash":"sha256:spec-version","spec_version_id":9,'
+                    '"sprint_plan_artifact_id":1,'
+                    '"sprint_plan_fingerprint":"sha256:sprint-plan",'
+                    '"sprint_plan_stream_id":"SPS-0123456789abcdef0123456789abcdef",'
+                    '"task_kind":"other","version":"task_metadata.v2",'
+                    '"workstream_tags":[]}'
                 ),
                 status="ready",
                 dependencies_satisfied=True,

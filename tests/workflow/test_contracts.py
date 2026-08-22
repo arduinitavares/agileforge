@@ -1,5 +1,7 @@
 """Tests for immutable workflow domain contracts."""
 
+import subprocess  # nosec B404
+import sys
 from collections.abc import Mapping, MutableMapping, MutableSequence
 from datetime import UTC, datetime
 from operator import setitem
@@ -33,6 +35,67 @@ from workflow.contracts import (
     WorkflowPosition,
 )
 from workflow.requests.base import GuardedRequest, PositionedRequest
+
+_IMPORT_BOUNDARIES = (
+    "services.agent_workbench.backlog_phase",
+    "services.agent_workbench.story_phase",
+    "services.contracts.sprint",
+    "services.planning_artifact_content",
+    "services.story_dependencies",
+    "utils.task_metadata",
+    "workflow.requests.planning",
+)
+
+
+def test_story_dependencies_imports_in_a_fresh_process() -> None:
+    """Keep the existing direct service entry path free of import cycles."""
+    result = subprocess.run(  # nosec B603
+        [
+            sys.executable,
+            "-c",
+            "import services.story_dependencies; print('import-ok')",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "import-ok"
+
+
+@pytest.mark.parametrize(
+    ("first_module", "second_module"),
+    tuple(
+        (first_module, second_module)
+        for first_module in _IMPORT_BOUNDARIES
+        for second_module in _IMPORT_BOUNDARIES
+    ),
+)
+def test_planning_import_boundaries_are_order_independent_in_fresh_processes(
+    first_module: str,
+    second_module: str,
+) -> None:
+    """Keep all 49 ordered import permutations cycle-free."""
+    result = subprocess.run(  # noqa: S603  # nosec B603
+        [
+            sys.executable,
+            "-c",
+            (
+                "import importlib,sys; "
+                "importlib.import_module(sys.argv[1]); "
+                "importlib.import_module(sys.argv[2]); print('import-ok')"
+            ),
+            first_module,
+            second_module,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "import-ok"
 
 
 class ExampleRequest(PositionedRequest):
@@ -110,7 +173,6 @@ def test_contract_enums_are_closed() -> None:
         "WORKFLOW_FACT_CONFLICT",
         "ATTEMPT_OBSOLETE",
         "EXTERNAL_EXECUTION_FAILED",
-        "AUTHORITY_COMPILATION_FAILED",
         "SPRINT_CAPACITY_REQUIRED",
         "PROJECT_NOT_FOUND",
         "REPOSITORY_BINDING_INVALID",
@@ -125,6 +187,9 @@ def test_contract_enums_are_closed() -> None:
         "UNSUPPORTED_SPECIFICATION_SCHEMA",
         "SPECIFICATION_OUTPUT_INCOMPLETE",
         "SPECIFICATION_PRODUCER_FAILED",
+        "SPRINT_PLAN_STREAM_ID_COLLISION",
+        "ACTIVE_SPRINT_EXISTS",
+        "STALE_SPECIFICATION",
     }
 
 
@@ -235,7 +300,7 @@ def test_transition_result_accepts_and_dumps_ordinary_json_output() -> None:
     attempt_id = 7
     output = {
         "attempt_id": attempt_id,
-        "metadata": {"ready": True, "labels": ["authority", None]},
+        "metadata": {"ready": True, "labels": ["planning", None]},
     }
 
     result = TransitionResult(ok=True, output=output)
@@ -267,7 +332,7 @@ def test_transition_result_output_rejects_nested_mutation() -> None:
     """Keep nested transition dictionaries and lists immutable."""
     result = TransitionResult(
         ok=True,
-        output={"metadata": {"labels": ["authority", "review"]}},
+        output={"metadata": {"labels": ["planning", "review"]}},
     )
     metadata_value = result.output["metadata"]
     assert isinstance(metadata_value, Mapping)

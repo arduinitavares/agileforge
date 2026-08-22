@@ -20,28 +20,17 @@ def test_sprint_planner_instructions_pin_task_kind_contract() -> None:
 
     _require_exact_line(
         lines,
-        "        * The schema literal set is: analysis, design, "
-        "implementation, testing, documentation, refactor, other.",
+        "- task_kind is implementation, test, documentation, or research.",
     )
     _require_exact_line(
         lines,
-        "        * For normal sprint output, emit only: analysis, design, "
-        "implementation, testing, documentation, refactor.",
+        "- Each task contains description, relevant_spec_item_ids, task_kind,",
     )
     _require_exact_line(
         lines,
-        "        * Do not emit `other` or `review` for normal sprint task "
-        "decomposition.",
+        "- relevant_spec_item_ids must be non-empty exact IDs from that parent Story's",
     )
-    _require_exact_line(lines, "            * final verification -> testing")
     _require_exact_line(
         lines,
-        "            * documenting decisions -> documentation",
+        "- Keep artifact targets at component or subsystem level, not file paths.",
     )
-    _require_exact_line(lines, "            * inspection/audit -> analysis")
-    _require_substring(
-        instructions,
-        "Do not restate story acceptance criteria",
-    )
-    _require_substring(instructions, "Do not use file paths")
-    _require_substring(instructions, "auth API")

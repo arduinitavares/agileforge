@@ -45,6 +45,16 @@ from workflow.fingerprints import canonical_hash
 EVALUATED_AT = datetime(2026, 8, 2, 12, tzinfo=UTC)
 PROJECT_ID = 12
 SPRINT_ID = 21
+SPEC_VERSION_ID = 41
+SPEC_HASH = "sha256:" + "a" * 64
+
+
+def _sprint_plan_id(sprint_id: int) -> int:
+    return sprint_id * 100 + 1
+
+
+def _sprint_plan_fingerprint(sprint_id: int) -> str:
+    return canonical_hash({"sprint_plan_artifact_id": _sprint_plan_id(sprint_id)})
 
 
 def _story(
@@ -55,7 +65,13 @@ def _story(
 ) -> StoryFact:
     return StoryFact(
         story_id=story_id,
-        requirement_id=f"REQ-{story_id}",
+        source_story_artifact_id=100 + story_id,
+        source_story_artifact_fingerprint=f"sha256:story-artifact-{story_id}",
+        source_story_item_id=f"US-{story_id:06d}",
+        source_story_item_fingerprint=f"sha256:story-item-{story_id}",
+        accepted_spec_version_id=SPEC_VERSION_ID,
+        accepted_spec_hash=SPEC_HASH,
+        spec_item_ids=(f"SPEC-{story_id:03d}",),
         content_fingerprint=canonical_hash({"story_id": story_id}),
         content_accepted=True,
         story_artifact_id=100 + story_id,
@@ -81,9 +97,16 @@ def _task(
         description=f"Task {task_id}",
         metadata_json=serialize_task_metadata(
             TaskMetadata(
+                spec_version_id=SPEC_VERSION_ID,
+                spec_hash=SPEC_HASH,
+                sprint_plan_stream_id=f"SPS-{sprint_id:032x}",
+                sprint_plan_artifact_id=_sprint_plan_id(sprint_id),
+                sprint_plan_fingerprint=_sprint_plan_fingerprint(sprint_id),
+                relevant_spec_item_ids=(f"SPEC-{story_id:03d}",),
                 task_kind="implementation",
-                artifact_targets=list(artifact_targets),
-                checklist_items=["Tests pass"],
+                artifact_targets=artifact_targets,
+                workstream_tags=(),
+                checklist_items=("Tests pass",),
             )
         ),
         status=status,
@@ -212,13 +235,7 @@ def _execution_lineage(
         sprint_id=sprint_id,
         story_ids=selected_story_ids,
     )
-    plan_fingerprint = canonical_hash(
-        {
-            "sprint_id": sprint_id,
-            "story_ids": selected_story_ids,
-            "task_content_fingerprint": task_fingerprint,
-        }
-    )
+    plan_fingerprint = _sprint_plan_fingerprint(sprint_id)
     reviewed_edges = tuple(
         StoryDependencyReviewEdgeFact(
             dependent_story_id=item.dependent_story_id,
@@ -251,7 +268,7 @@ def _execution_lineage(
         ]
     )
     dependency_source = story_dependency_source_fingerprint(candidates)
-    plan_id = sprint_id * 100 + 1
+    plan_id = _sprint_plan_id(sprint_id)
     decision_id = sprint_id * 100 + 2
     dependency_review_id = sprint_id * 100 + 3
     start_id = sprint_id * 100 + 4
@@ -262,8 +279,11 @@ def _execution_lineage(
             artifact_id=plan_id,
             artifact_fingerprint=plan_fingerprint,
             source_fingerprint=candidate_fingerprint,
-            story_ids=selected_story_ids,
-            sprint_id=sprint_id,
+            spec_version_id=SPEC_VERSION_ID,
+            spec_hash=SPEC_HASH,
+            sprint_plan_stream_id=(f"SPS-{sprint_id:032x}"),
+            selected_story_ids=selected_story_ids,
+            activated_sprint_id=sprint_id,
             candidate_set_fingerprint=candidate_fingerprint,
             task_content_fingerprint=task_fingerprint,
             status="accepted",
@@ -292,6 +312,8 @@ def _execution_lineage(
         SprintStartFact(
             start_id=start_id,
             sprint_id=sprint_id,
+            spec_version_id=SPEC_VERSION_ID,
+            spec_hash=SPEC_HASH,
             sprint_plan_artifact_id=plan_id,
             sprint_plan_artifact_decision_id=decision_id,
             story_dependency_review_id=dependency_review_id,
@@ -592,10 +614,11 @@ def test_next_task_is_derived_from_durable_dependencies() -> None:
     """Select a Task only after its durable Story prerequisites finish."""
     prerequisite = _story(1, status="Done")
     dependent = _story(2)
+    prerequisite_task = _task(41, 1, status="Done")
     task = _task(42, 2)
-    snapshot = _snapshot(
+    base = _snapshot(
         stories=(dependent, prerequisite),
-        tasks=(task,),
+        tasks=(prerequisite_task, task),
         dependencies=(
             StoryDependencyFact(
                 dependency_id=9,
@@ -607,6 +630,9 @@ def test_next_task_is_derived_from_durable_dependencies() -> None:
                 reason="Prerequisite must complete first.",
             ),
         ),
+    )
+    snapshot = base.model_copy(
+        update={"task_completions": (_task_completion(base, prerequisite_task),)}
     )
     item = _decision(snapshot, "execution.task.complete", "task:42")
     assert item.category is NodeCategory.AVAILABLE
@@ -632,9 +658,13 @@ def test_eligible_in_progress_task_precedes_new_todo() -> None:
 
 def test_blocked_dependency_never_guesses_a_task() -> None:
     """Block a Task whose durable prerequisite Story is still open."""
-    snapshot = _snapshot(
+    prerequisite_task = _task(41, 1, status="Done")
+    base = _snapshot(
         stories=(_story(1), _story(2)),
-        tasks=(_task(42, 2).model_copy(update={"dependencies_satisfied": False}),),
+        tasks=(
+            prerequisite_task,
+            _task(42, 2).model_copy(update={"dependencies_satisfied": False}),
+        ),
         dependencies=(
             StoryDependencyFact(
                 dependency_id=9,
@@ -646,6 +676,9 @@ def test_blocked_dependency_never_guesses_a_task() -> None:
                 reason="Prerequisite must complete first.",
             ),
         ),
+    )
+    snapshot = base.model_copy(
+        update={"task_completions": (_task_completion(base, prerequisite_task),)}
     )
     item = _decision(snapshot, "execution.task.complete", "task:42")
     assert item.category is NodeCategory.BLOCKED
@@ -730,6 +763,7 @@ def test_completion_integrity_binds_complete_execution_contract(
     """Invalidate completion eligibility after execution-contract tampering."""
     prerequisite = _story(1, status="Done")
     story = _story(2)
+    prerequisite_task = _task(41, prerequisite.story_id, status="Done")
     task = _task(42, story.story_id, status="Done")
     dependency = StoryDependencyFact(
         dependency_id=9,
@@ -742,11 +776,14 @@ def test_completion_integrity_binds_complete_execution_contract(
     )
     base = _snapshot(
         stories=(prerequisite, story),
-        tasks=(task,),
+        tasks=(prerequisite_task, task),
         dependencies=(dependency,),
     )
+    prerequisite_completion = _task_completion(base, prerequisite_task)
     completion = _task_completion(base, task)
-    completed = base.model_copy(update={"task_completions": (completion,)})
+    completed = base.model_copy(
+        update={"task_completions": (prerequisite_completion, completion)}
+    )
     if tamper == "story_content":
         tampered = completed.model_copy(
             update={
@@ -760,6 +797,7 @@ def test_completion_integrity_binds_complete_execution_contract(
         tampered = completed.model_copy(
             update={
                 "tasks": (
+                    prerequisite_task,
                     task.model_copy(update={"description": "Tampered Task content"}),
                 )
             }
@@ -784,6 +822,7 @@ def test_completion_integrity_binds_complete_execution_contract(
         tampered = completed.model_copy(
             update={
                 "task_completions": (
+                    prerequisite_completion,
                     completion.model_copy(
                         update={"outcome_summary": "Tampered completion evidence."}
                     ),

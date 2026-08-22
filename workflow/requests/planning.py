@@ -6,6 +6,7 @@ from typing import ClassVar, Literal, Self
 
 from pydantic import Field, field_validator, model_validator
 
+from services.contracts.sprint import SprintPlannerOutput  # noqa: TC001
 from services.story_rank import parse_story_rank
 from workflow.contracts import FrozenModel, JsonObject
 from workflow.facts import StoryDependencyReviewEdgeFact
@@ -52,27 +53,29 @@ class DecideRoadmap(PositionedRequest):
     rationale: ReviewRationale
 
 
-class _RequirementPositionedRequest(PositionedRequest):
+class _BacklogItemPositionedRequest(PositionedRequest):
     _is_request_scaffold: ClassVar[bool] = True
-    requirement_id: str = Field(min_length=1)
+    backlog_item_id: str = Field(min_length=1)
 
     @model_validator(mode="after")
-    def validate_requirement_instance(self) -> Self:
-        expected = f"requirement:{self.requirement_id}"
+    def validate_backlog_item_instance(self) -> Self:
+        expected = f"backlog_item:{self.backlog_item_id}"
         if self.instance_key is not None and self.instance_key != expected:
             message = f"instance_key must be exactly {expected!r}."
             raise ValueError(message)
         return self
 
     def decision_instance_key(self) -> str:
-        return f"requirement:{self.requirement_id}"
+        return f"backlog_item:{self.backlog_item_id}"
 
 
-class RecordStoryDraft(_RequirementPositionedRequest):
-    """Record immutable Story-set content for one accepted requirement."""
+class RecordStoryDraft(_BacklogItemPositionedRequest):
+    """Record immutable Story-set content for one accepted Backlog item."""
 
     kind: Literal["record_story_draft"] = "record_story_draft"
     node_id: ClassVar[str] = "planning.story.generate"
+    source_backlog_artifact_id: int
+    source_backlog_artifact_fingerprint: str = Field(min_length=1)
     roadmap_artifact_id: int
     roadmap_artifact_fingerprint: str = Field(min_length=1)
     canonical_content: JsonObject
@@ -80,7 +83,7 @@ class RecordStoryDraft(_RequirementPositionedRequest):
     supersedes_story_artifact_id: int | None = None
 
 
-class DecideStory(_RequirementPositionedRequest):
+class DecideStory(_BacklogItemPositionedRequest):
     """Append a decision bound to one exact immutable Story artifact."""
 
     kind: Literal["decide_story"] = "decide_story"
@@ -147,21 +150,10 @@ class RecordSprintPlan(PositionedRequest):
 
     kind: Literal["record_sprint_plan"] = "record_sprint_plan"
     node_id: ClassVar[str] = "planning.sprint.plan"
+    spec_version_id: int
+    spec_hash: str = Field(min_length=1)
     team_name: str = Field(min_length=1)
-    selected_story_ids: tuple[int, ...] = Field(min_length=1)
-    canonical_task_plan: JsonObject
-    plan_fingerprint: str = Field(min_length=1)
-    candidate_set_fingerprint: str = Field(min_length=1)
-    supersedes_sprint_plan_artifact_id: int | None = None
-    include_task_decomposition: bool = True
-
-    @model_validator(mode="after")
-    def validate_selected_story_ids(self) -> Self:
-        """Require stable sorted selected Story identities."""
-        if self.selected_story_ids != tuple(sorted(set(self.selected_story_ids))):
-            message = "selected_story_ids must be sorted and unique."
-            raise ValueError(message)
-        return self
+    planner_output: SprintPlannerOutput
 
 
 class DecideSprintPlan(PositionedRequest):
@@ -180,10 +172,6 @@ class StartSprint(PositionedRequest):
 
     kind: Literal["start_sprint"] = "start_sprint"
     node_id: ClassVar[str] = "planning.sprint.start"
-    sprint_plan_artifact_id: int
-    sprint_id: int
-    plan_fingerprint: str = Field(min_length=1)
-    candidate_set_fingerprint: str = Field(min_length=1)
 
 
 __all__ = [

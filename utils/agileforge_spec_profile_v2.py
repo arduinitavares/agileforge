@@ -139,7 +139,7 @@ class ControlledTerm(_FrozenModel):
 
 
 class ExternalReference(_FrozenModel):
-    """External provenance shown to reviewers but not itself an Authority source."""
+    """External provenance shown to reviewers but not itself a trusted source."""
 
     id: Annotated[str, Field(pattern=_EXTERNAL_REFERENCE_ID_RE.pattern)]
     title: Annotated[str, Field(min_length=1)]
@@ -163,9 +163,7 @@ class SpecificationItem(_FrozenModel):
     tags: tuple[Annotated[str, Field(min_length=1)], ...] = ()
     source_notes: tuple[SourceNote, ...] = ()
 
-    _strip_text = field_validator("id", "title", "statement", mode="before")(
-        _nonempty
-    )
+    _strip_text = field_validator("id", "title", "statement", mode="before")(_nonempty)
 
     @field_validator("rationale", mode="before")
     @classmethod
@@ -405,8 +403,7 @@ def _render_terms(payload: SpecificationPayload) -> list[str]:
 def _render_item(item: SpecificationItem) -> list[str]:
     verification = item.verification.value if item.verification else None
     lines = [
-        f"### {_escape_markdown_text(item.id)} - "
-        f"{_escape_markdown_text(item.title)}",
+        f"### {_escape_markdown_text(item.id)} - {_escape_markdown_text(item.title)}",
         "",
         _line("Type", item.type.value),
         _line("Level", item.level.value if item.level else None),

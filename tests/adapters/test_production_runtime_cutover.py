@@ -8,7 +8,7 @@ from pathlib import Path
 
 
 def test_production_composition_does_not_load_retired_runtime_code() -> None:
-    """Build the v2 application without retired authority setup composition."""
+    """Build the v2 application without retired setup composition."""
     root = Path(__file__).parents[2]
     environment = dict(os.environ)
     environment.update(
@@ -62,8 +62,6 @@ print(json.dumps({"legacy": legacy, "retired_agent": retired_agent,
         "legacy": [],
         "retired_agent": [],
         "recipe_nodes": [
-            "authority.compile",
-            "authority.repair",
             "vision.bootstrap",
             "vision.interview",
             "goal.interview",

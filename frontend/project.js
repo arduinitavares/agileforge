@@ -2,7 +2,6 @@ const STAGES = [
     'Vision',
     'Product Goal',
     'Specification',
-    'Authority',
     'Backlog',
     'Roadmap',
     'Stories',
@@ -17,9 +16,7 @@ const REQUEST_STAGE = {
     begin_vision_revision: 'Vision',
     close_sprint: 'Sprint',
     close_story: 'Stories',
-    compile_authority: 'Authority',
     complete_task: 'Execution',
-    decide_authority: 'Authority',
     decide_backlog: 'Backlog',
     decide_product_goal_review: 'Product Goal',
     decide_roadmap: 'Roadmap',
@@ -28,7 +25,6 @@ const REQUEST_STAGE = {
     decide_story: 'Stories',
     fulfill_product_goal: 'Product Goal',
     generate_vision_bootstrap: 'Vision',
-    record_authority_feedback: 'Authority',
     record_backlog_draft: 'Backlog',
     record_post_sprint_triage: 'Review',
     record_product_goal_interview_turn: 'Product Goal',
@@ -37,7 +33,6 @@ const REQUEST_STAGE = {
     record_sprint_plan: 'Sprint',
     record_story_draft: 'Stories',
     record_vision_interview_turn: 'Vision',
-    repair_authority: 'Authority',
     repair_story_readiness: 'Stories',
     review_sprint: 'Review',
     start_sprint: 'Sprint',
@@ -45,7 +40,6 @@ const REQUEST_STAGE = {
 };
 
 const CHILD_STAGE = {
-    authority: 'Authority',
     backlog: 'Backlog',
     execution: 'Execution',
     product_goal: 'Product Goal',
@@ -55,18 +49,14 @@ const CHILD_STAGE = {
 const DASHBOARD_CONTROL_REQUEST_KINDS = new Set([
     'abandon_product_goal',
     'begin_vision_revision',
-    'compile_authority',
-    'decide_authority',
     'decide_product_goal_review',
     'decide_specification',
     'decide_vision_review',
     'fulfill_product_goal',
     'generate_vision_bootstrap',
-    'record_authority_feedback',
     'record_product_goal_interview_turn',
     'record_vision_interview_turn',
     'register_specification_source',
-    'repair_authority',
     'structure_specification',
 ]);
 
@@ -108,7 +98,12 @@ let lifecycleState = {
     vision: {},
     goal: {},
     specification: {},
-    authority: {},
+    planningReviews: {
+        backlog: {},
+        roadmap: {},
+        stories: {},
+        sprintPlan: {},
+    },
     repository: {},
 };
 
@@ -330,20 +325,6 @@ function lifecycleCardProjection(position, actions = [], projections = {}) {
         setCard('Specification', 'pending_human');
     } else if (specification?.current || specification?.review?.state === 'accepted') {
         setCard('Specification', 'complete');
-    }
-
-    const authority = projections?.authority ?? {};
-    const authorityDecision = byStage.get('Authority');
-    if (authority?.pending_authority) {
-        setCard('Authority', 'pending_human');
-    } else if (authority?.accepted_authority) {
-        setCard('Authority', 'complete');
-    } else if (
-        authorityDecision?.request_kind === 'compile_authority'
-        && authorityDecision?.reason_code === 'AUTHORITY_COMPILE_FAILED'
-        && isActionableDecision(authorityDecision, cardActions)
-    ) {
-        setCard('Authority', 'failed_retry');
     }
 
     return cards;
@@ -972,78 +953,6 @@ function findingMarkup(finding) {
     </li>`;
 }
 
-function authorityPacketMarkup(authority, findings) {
-    const artifact = authority?.artifact && typeof authority.artifact === 'object'
-        ? authority.artifact
-        : { invariants: Array.isArray(authority?.invariants) ? authority.invariants : [] };
-    const provenance = {
-        authority_id: authority?.authority_id ?? null,
-        spec_version_id: authority?.spec_version_id ?? null,
-        status: authority?.status ?? null,
-        compiler_version: authority?.compiler_version ?? null,
-        prompt_hash: authority?.prompt_hash ?? null,
-        compiled_at: authority?.compiled_at ?? null,
-    };
-    const allFindings = [...(Array.isArray(findings) ? findings : [])];
-    (Array.isArray(authority?.findings) ? authority.findings : []).forEach((finding) => {
-        const message = typeof finding === 'string' ? finding : finding?.message;
-        if (!allFindings.some((item) => (typeof item === 'string' ? item : item?.message) === message)) {
-            allFindings.push(finding);
-        }
-    });
-    return `<div class="grid min-w-0 gap-6">
-        <div class="min-w-0">
-            <h3 class="text-sm font-semibold">Compilation provenance</h3>
-            <pre class="mt-3 whitespace-pre-wrap break-anywhere rounded-lg border border-slate-300 bg-white p-4 font-mono text-xs leading-5">${escapeWorkflowText(JSON.stringify(provenance, null, 2))}</pre>
-        </div>
-        <div class="min-w-0">
-            <h3 class="text-sm font-semibold">Complete compiled Authority artifact</h3>
-            <pre data-authority-artifact="true" class="mt-3 whitespace-pre-wrap break-anywhere rounded-lg border border-slate-300 bg-white p-4 font-mono text-xs leading-5">${escapeWorkflowText(JSON.stringify(artifact, null, 2))}</pre>
-        </div>
-        <div class="min-w-0">
-            <h3 class="text-sm font-semibold">Findings</h3>
-            ${allFindings.length > 0
-                ? `<ul class="mt-3 space-y-2">${allFindings.map(findingMarkup).join('')}</ul>`
-                : '<p class="mt-2 text-sm text-slate-500">No review findings.</p>'}
-        </div>
-    </div>`;
-}
-
-function authorityPanelMarkup(projection, actions = []) {
-    const feedbackAction = findAction(actions, 'record_authority_feedback');
-    if (feedbackAction) {
-        return `<p class="mb-4 text-sm leading-6 text-slate-600">The Authority was rejected. Record the feedback needed for a corrected review.</p>
-            <button type="button" data-authority-feedback="true" class="${BUTTON_PRIMARY}"><span class="material-symbols-outlined" aria-hidden="true">rate_review</span><span>Record feedback</span></button>`;
-    }
-
-    const repairAction = findAction(actions, 'repair_authority');
-    if (repairAction) {
-        return `<p class="mb-4 text-sm leading-6 text-slate-600">Feedback is recorded. Recompile the Authority for review.</p>
-            <button type="button" data-direct-action="repair_authority" class="${BUTTON_PRIMARY}"><span class="material-symbols-outlined" aria-hidden="true">build</span><span>Recompile</span></button>`;
-    }
-
-    const pending = projection?.pending_authority;
-    if (pending) {
-        const reviewAction = findAction(actions, 'decide_authority');
-        return `<p class="mb-4 text-sm font-semibold">Exact Authority review packet</p>
-            ${authorityPacketMarkup(pending, projection?.findings)}
-            ${reviewControlsMarkup('authority', reviewAction)}`;
-    }
-
-    const accepted = projection?.accepted_authority;
-    if (accepted) {
-        return `<p class="mb-4 text-sm font-semibold text-emerald-700">Authority accepted</p>${authorityPacketMarkup(accepted, accepted.findings)}`;
-    }
-
-    const compileAction = findAction(actions, 'compile_authority');
-    if (compileAction) {
-        return `<p class="mb-4 text-sm leading-6 text-slate-600">Compile the accepted Specification into reviewable rules.</p>
-            <button type="button" data-direct-action="compile_authority" class="${BUTTON_PRIMARY}"><span class="material-symbols-outlined" aria-hidden="true">build</span><span>Compile</span></button>`;
-    }
-
-    return '<p class="text-sm text-slate-600">Authority follows an accepted Specification.</p>';
-}
-
 function formatInspectedAt(value) {
     if (!value) return 'Not available';
     const date = new Date(value);
@@ -1092,14 +1001,185 @@ function repositoryPanelMarkup(projection) {
     </div>`;
 }
 
-function deliveryPanelMarkup(position) {
+function reviewObject(value) {
+    return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
+}
+
+function reviewItems(value) {
+    return Array.isArray(value) ? value : null;
+}
+
+function reviewValue(value) {
+    if (value === null || value === undefined || value === '') return 'Not specified';
+    if (typeof value === 'boolean') return value ? 'Yes' : 'No';
+    return String(value);
+}
+
+function reviewListMarkup(label, values) {
+    const items = reviewItems(values);
+    if (!items) return '';
+    const content = items.length
+        ? items.map((item) => `<li>${escapeWorkflowText(reviewValue(item))}</li>`).join('')
+        : '<li>None</li>';
+    return `<div><p class="text-xs font-semibold uppercase text-slate-500">${escapeWorkflowText(label)}</p><ul class="mt-1 list-disc space-y-1 pl-5 text-sm">${content}</ul></div>`;
+}
+
+function specificationEvidenceMarkup(values) {
+    const items = reviewItems(values);
+    if (!items) return '';
+    return `<section class="space-y-3"><h4 class="text-xs font-semibold uppercase text-slate-500">Specification evidence</h4>${items.map((rawItem) => {
+        const item = reviewObject(rawItem);
+        if (!item) return '';
+        return `<div class="rounded-md border border-slate-200 bg-slate-50 p-3">
+            <p class="font-semibold">${escapeWorkflowText(reviewValue(item.title))}</p>
+            <p class="mt-1 text-sm leading-6">${escapeWorkflowText(reviewValue(item.statement))}</p>
+            <dl class="mt-2 grid gap-2 text-sm sm:grid-cols-2">
+                <div><dt class="font-semibold">Level</dt><dd>${escapeWorkflowText(reviewValue(item.level))}</dd></div>
+                <div><dt class="font-semibold">Verification</dt><dd>${escapeWorkflowText(reviewValue(item.verification_method))}</dd></div>
+            </dl>
+            <div class="mt-2">${reviewListMarkup('Acceptance criteria', item.acceptance_criteria)}</div>
+        </div>`;
+    }).join('')}</section>`;
+}
+
+function backlogItemMarkup(value) {
+    const item = reviewObject(value);
+    if (!item) return '';
+    return `<section class="space-y-3 rounded-md border border-slate-200 p-3">
+        <div><p class="text-xs font-semibold uppercase text-slate-500">Requirement</p><p class="mt-1 text-sm leading-6">${escapeWorkflowText(reviewValue(item.requirement))}</p></div>
+        <dl class="grid gap-2 text-sm sm:grid-cols-2">
+            <div><dt class="font-semibold">Priority</dt><dd>${escapeWorkflowText(reviewValue(item.priority))}</dd></div>
+            <div><dt class="font-semibold">Value driver</dt><dd>${escapeWorkflowText(reviewValue(item.value_driver))}</dd></div>
+            <div><dt class="font-semibold">Estimated effort</dt><dd>${escapeWorkflowText(reviewValue(item.estimated_effort))}</dd></div>
+        </dl>
+        <div><p class="font-semibold text-sm">Justification</p><p class="text-sm leading-6">${escapeWorkflowText(reviewValue(item.justification))}</p></div>
+        ${item.technical_note ? `<div><p class="font-semibold text-sm">Implementation note</p><p class="text-sm leading-6">${escapeWorkflowText(reviewValue(item.technical_note))}</p></div>` : ''}
+        ${specificationEvidenceMarkup(item.specification_evidence)}
+    </section>`;
+}
+
+function storyItemMarkup(value) {
+    const story = reviewObject(value);
+    if (!story) return '';
+    return `<section class="space-y-3 rounded-md border border-slate-200 p-3">
+        <div><p class="text-xs font-semibold uppercase text-slate-500">Story</p><p class="mt-1 font-semibold">${escapeWorkflowText(reviewValue(story.story_title ?? story.title))}</p></div>
+        <p class="text-sm leading-6">${escapeWorkflowText(reviewValue(story.statement))}</p>
+        <p class="text-sm"><strong>Persona:</strong> ${escapeWorkflowText(reviewValue(story.persona))}</p>
+        ${reviewListMarkup('Acceptance criteria', story.acceptance_criteria)}
+        ${specificationEvidenceMarkup(story.specification_evidence)}
+        ${story.reason_for_selection ? `<p class="text-sm"><strong>Reason for selection:</strong> ${escapeWorkflowText(reviewValue(story.reason_for_selection))}</p>` : ''}
+    </section>`;
+}
+
+function taskMarkup(value) {
+    const task = reviewObject(value);
+    if (!task) return '';
+    return `<section class="space-y-2 rounded-md border border-slate-200 bg-slate-50 p-3">
+        <p class="font-semibold">${escapeWorkflowText(reviewValue(task.description))}</p>
+        <p class="text-sm"><strong>Kind:</strong> ${escapeWorkflowText(reviewValue(task.task_kind))}</p>
+        ${reviewListMarkup('Checklist', task.checklist_items)}
+        ${specificationEvidenceMarkup(task.specification_evidence)}
+    </section>`;
+}
+
+function backlogReviewMarkup(candidate) {
+    const items = reviewItems(candidate.backlog_items);
+    if (!items) return '';
+    return `<div class="space-y-4">${items.map(backlogItemMarkup).join('')}
+        <p class="text-sm"><strong>Complete:</strong> ${escapeWorkflowText(reviewValue(candidate.is_complete))}</p>
+        ${reviewListMarkup('Clarifying questions', candidate.clarifying_questions)}
+    </div>`;
+}
+
+function roadmapReviewMarkup(candidate) {
+    const releases = reviewItems(candidate.roadmap_releases);
+    if (!releases) return '';
+    return `<div class="space-y-4">
+        <p class="text-sm leading-6"><strong>Summary:</strong> ${escapeWorkflowText(reviewValue(candidate.roadmap_summary))}</p>
+        ${releases.map((rawRelease) => {
+            const release = reviewObject(rawRelease);
+            if (!release) return '';
+            const items = reviewItems(release.backlog_items);
+            if (!items) return '';
+            return `<section class="space-y-3"><h4 class="font-semibold">Release: ${escapeWorkflowText(reviewValue(release.release_name))}</h4>
+                <p class="text-sm"><strong>Theme:</strong> ${escapeWorkflowText(reviewValue(release.theme))}</p>
+                <p class="text-sm"><strong>Focus:</strong> ${escapeWorkflowText(reviewValue(release.focus_area))}</p>
+                <p class="text-sm leading-6"><strong>Reasoning:</strong> ${escapeWorkflowText(reviewValue(release.reasoning))}</p>
+                <div class="space-y-3">${items.map(backlogItemMarkup).join('')}</div>
+            </section>`;
+        }).join('')}
+        <p class="text-sm"><strong>Complete:</strong> ${escapeWorkflowText(reviewValue(candidate.is_complete))}</p>
+        ${reviewListMarkup('Clarifying questions', candidate.clarifying_questions)}
+    </div>`;
+}
+
+function storyReviewMarkup(review, candidate) {
+    const lineage = reviewObject(review.lineage);
+    const items = reviewItems(candidate.story_items);
+    if (!lineage || !items) return '';
+    return `<div class="space-y-4"><section><h4 class="mb-2 font-semibold">Source requirement</h4>${backlogItemMarkup(lineage.backlog_item)}</section>
+        ${items.map(storyItemMarkup).join('')}
+        <p class="text-sm"><strong>Complete:</strong> ${escapeWorkflowText(reviewValue(candidate.is_complete))}</p>
+        ${reviewListMarkup('Clarifying questions', candidate.clarifying_questions)}
+    </div>`;
+}
+
+function sprintReviewMarkup(candidate) {
+    const stories = reviewItems(candidate.selected_stories);
+    if (!stories) return '';
+    return `<div class="space-y-4">
+        <p class="text-sm"><strong>Team:</strong> ${escapeWorkflowText(reviewValue(candidate.team_name))}</p>
+        <p class="text-sm"><strong>Sprint goal:</strong> ${escapeWorkflowText(reviewValue(candidate.sprint_goal))}</p>
+        ${stories.map((rawStory) => {
+            const story = reviewObject(rawStory);
+            const tasks = reviewItems(story?.tasks);
+            if (!story || !tasks) return '';
+            return `${storyItemMarkup(story)}<div class="mt-3 space-y-3"><h4 class="font-semibold">Tasks</h4>${tasks.map(taskMarkup).join('')}</div>`;
+        }).join('')}
+    </div>`;
+}
+
+function planningReviewContentMarkup(review) {
+    const candidate = reviewObject(review?.candidate);
+    if (!candidate) return '';
+    if (review.phase === 'backlog') return backlogReviewMarkup(candidate);
+    if (review.phase === 'roadmap') return roadmapReviewMarkup(candidate);
+    if (review.phase === 'story') return storyReviewMarkup(review, candidate);
+    if (review.phase === 'sprint_plan') return sprintReviewMarkup(candidate);
+    return '';
+}
+
+function planningReviewCardMarkup(label, selected, scope, index = 0) {
+    if (!selected?.review || !selected?.binding) return '';
+    const content = planningReviewContentMarkup(selected.review);
+    if (!content) return '';
+    return `<article class="rounded-lg border border-slate-300 bg-white p-4" data-planning-review-card="${escapeWorkflowText(scope)}">
+        <h3 class="text-sm font-semibold">${escapeWorkflowText(label)}</h3>
+        <div class="mt-3 space-y-4">${content}</div>
+        <div class="mt-4 flex flex-wrap gap-2">
+            <button type="button" data-planning-review="${escapeWorkflowText(scope)}" data-review-index="${index}" data-review-decision="accepted" class="${BUTTON_PRIMARY}">Accept</button>
+            <button type="button" data-planning-review="${escapeWorkflowText(scope)}" data-review-index="${index}" data-review-decision="feedback" class="${BUTTON_SECONDARY}">Request changes</button>
+            <button type="button" data-planning-review="${escapeWorkflowText(scope)}" data-review-index="${index}" data-review-decision="rejected" class="${BUTTON_DANGER}">Reject</button>
+        </div>
+    </article>`;
+}
+
+function deliveryPanelMarkup(position, reviews = {}) {
+    const storyItems = Array.isArray(reviews.stories?.items) ? reviews.stories.items : [];
+    const cards = [
+        planningReviewCardMarkup('Backlog review', reviews.backlog, 'backlog'),
+        planningReviewCardMarkup('Roadmap review', reviews.roadmap, 'roadmap'),
+        ...storyItems.map((item, index) => planningReviewCardMarkup(`Story review ${index + 1}`, item, 'story', index)),
+        planningReviewCardMarkup('Sprint plan review', reviews.sprintPlan, 'sprint', 0),
+    ].filter(Boolean);
+    if (cards.length) return `<div class="grid gap-4">${cards.join('')}</div>`;
     const decisions = Array.isArray(position?.decisions) ? position.decisions : [];
     const deliveryDecision = decisions.find((decision) => {
         const stage = decisionStage(decision);
         return ['Backlog', 'Roadmap', 'Stories', 'Sprint', 'Execution', 'Review'].includes(stage);
     });
     if (!deliveryDecision) {
-        return '<p class="text-sm text-slate-600">Delivery begins after the product definition and Authority are accepted.</p>';
+        return '<p class="text-sm text-slate-600">Delivery begins after the Specification is accepted.</p>';
     }
     return `<p class="text-sm leading-6 text-slate-700"><strong>${escapeWorkflowText(decisionStage(deliveryDecision))}:</strong> ${escapeWorkflowText(stageReason(deliveryDecision))}</p>`;
 }
@@ -1169,14 +1249,13 @@ function renderDashboard() {
         ),
     );
     setMarkup(
-        'authority-panel',
-        authorityPanelMarkup(lifecycleState.authority, lifecycleState.actions),
-    );
-    setMarkup(
         'repository-panel',
         repositoryPanelMarkup(lifecycleState.repository, lifecycleState.actions),
     );
-    setMarkup('delivery-panel', deliveryPanelMarkup(lifecycleState.position));
+    setMarkup(
+        'delivery-panel',
+        deliveryPanelMarkup(lifecycleState.position, lifecycleState.planningReviews),
+    );
 }
 
 function validationIssueMessage(issue) {
@@ -1219,10 +1298,24 @@ async function requestJson(path, options = {}) {
             responseErrorMessage(payload, 'The requested action failed.'),
         );
         error.status = response.status;
-        error.code = payload?.detail?.error?.code ?? payload?.code ?? null;
+        error.code = payload?.detail?.error?.code
+            ?? payload?.detail?.errors?.[0]?.code
+            ?? payload?.code
+            ?? null;
         throw error;
     }
     return payload;
+}
+
+async function requestPlanningReview(url, options) {
+    try {
+        return await requestJson(url, options);
+    } catch (error) {
+        if (error.status === 409 && error.code === 'PLANNING_REVIEW_NOT_AVAILABLE') {
+            return { data: {} };
+        }
+        throw error;
+    }
 }
 
 async function loadDashboard() {
@@ -1233,14 +1326,28 @@ async function loadDashboard() {
     const base = `/api/projects/${selectedProjectId}`;
     try {
         const options = { signal: controller.signal };
-        const [project, position, vision, goal, specification, authority, repository] = await Promise.all([
+        const [
+            project,
+            position,
+            vision,
+            goal,
+            specification,
+            repository,
+            backlogReview,
+            roadmapReview,
+            storyReviews,
+            sprintPlanReview,
+        ] = await Promise.all([
             requestJson(base, options),
             requestJson(`${base}/position`, options),
             requestJson(`${base}/vision/status`, options),
             requestJson(`${base}/goals/status`, options),
             requestJson(`${base}/specifications/review`, options),
-            requestJson(`${base}/authority/review?include_spec=auto`, options),
             requestJson(`${base}/repository`, options),
+            requestPlanningReview(`${base}/backlog/review`, options),
+            requestPlanningReview(`${base}/roadmap/review`, options),
+            requestPlanningReview(`${base}/story/reviews`, options),
+            requestPlanningReview(`${base}/sprint/plan/review`, options),
         ]);
         if (sequence !== dashboardLoadSequence || controller.signal.aborted) return false;
         lifecycleState = {
@@ -1250,14 +1357,32 @@ async function loadDashboard() {
             vision: vision.data ?? {},
             goal: goal.data ?? {},
             specification: specification.data ?? {},
-            authority: authority.data ?? {},
             repository: repository.data ?? {},
+            planningReviews: {
+                backlog: backlogReview.data ?? {},
+                roadmap: roadmapReview.data ?? {},
+                stories: storyReviews.data ?? { items: [] },
+                sprintPlan: sprintPlanReview.data ?? {},
+            },
         };
         setProjectError('');
         renderDashboard();
         return true;
     } catch (error) {
         if (sequence !== dashboardLoadSequence || controller.signal.aborted) return false;
+        if (error.status === 409) {
+            lifecycleState = {
+                ...lifecycleState,
+                planningReviews: {
+                    backlog: {},
+                    roadmap: {},
+                    stories: { items: [] },
+                    sprintPlan: {},
+                },
+            };
+            renderDashboard();
+            setProjectError(error.message);
+        }
         throw error;
     } finally {
         if (activeDashboardLoadController === controller) {
@@ -1274,6 +1399,9 @@ async function postAction(action, fields = {}, options = {}) {
     }
     if (options.expectedDecision) {
         headers['X-AgileForge-Expected-Decision'] = options.expectedDecision;
+    }
+    if (options.expectedInstance) {
+        headers['X-AgileForge-Expected-Instance'] = options.expectedInstance;
     }
     return requestJson(`/api/projects/${selectedProjectId}/${action.endpoint}`, {
         method: 'POST',
@@ -1302,7 +1430,6 @@ function captureAction(action) {
 
 function reviewCandidateFingerprint(state, scope) {
     return {
-        authority: state?.authority?.pending_authority?.authority_fingerprint,
         goal: state?.goal?.candidate?.fingerprint,
         specification: state?.specification?.candidate?.candidate_fingerprint,
         vision: state?.vision?.candidate?.review_fingerprint,
@@ -1311,7 +1438,6 @@ function reviewCandidateFingerprint(state, scope) {
 
 function captureReviewBinding(state, scope, decision) {
     const requestKind = {
-        authority: 'decide_authority',
         goal: 'decide_product_goal_review',
         specification: 'decide_specification',
         vision: 'decide_vision_review',
@@ -1329,16 +1455,47 @@ function captureReviewBinding(state, scope, decision) {
 }
 
 function reviewSubmission(binding, rationale) {
-    const decision = binding.scope === 'authority' && binding.decision === 'feedback'
-        ? 'rejected'
-        : binding.decision;
     return {
         action: binding.action,
         expectedCandidate: binding.expectedCandidate,
         fields: {
-            decision,
+            decision: binding.decision,
             rationale: rationale || 'Accepted in the dashboard.',
         },
+    };
+}
+
+function capturePlanningReview(scope, index, decision) {
+    const reviewState = lifecycleState.planningReviews ?? {};
+    const selected = scope === 'story'
+        ? reviewState.stories?.items?.[index]
+        : {
+            backlog: reviewState.backlog,
+            roadmap: reviewState.roadmap,
+            sprint: reviewState.sprintPlan,
+        }[scope];
+    return planningReviewBinding(selected, scope, decision);
+}
+
+function planningReviewBinding(selected, scope, decision) {
+    const binding = selected?.binding;
+    if (!binding?.decision_fingerprint) return null;
+    return {
+        kind: 'planning-review',
+        scope,
+        decision,
+        binding: { ...binding },
+        endpoint: {
+            backlog: 'backlog/decide',
+            roadmap: 'roadmap/decide',
+            story: 'story/decide',
+            sprint: 'sprint/decide',
+        }[scope],
+        title: `${decision === 'accepted' ? 'Accept' : decision === 'feedback' ? 'Request changes for' : 'Reject'} this ${scope === 'sprint' ? 'Sprint plan' : scope}`,
+        description: 'Confirm the exact evidence shown above. A changed review must be loaded again.',
+        label: 'Rationale',
+        required: decision !== 'accepted',
+        submitLabel: decision === 'accepted' ? 'Accept' : 'Submit',
     };
 }
 
@@ -1371,7 +1528,6 @@ function openHumanDialog(config) {
 
 function reviewDialogCopy(scope, decision) {
     const subject = {
-        authority: 'Authority',
         goal: 'Product Goal',
         specification: 'Specification',
         vision: 'Project Vision',
@@ -1426,29 +1582,32 @@ async function submitHumanAction() {
         await postAction(submission.action, submission.fields, {
             expectedCandidate: submission.expectedCandidate,
         });
-        if (pending.scope === 'authority' && pending.decision === 'feedback') {
-            const recovery = await readPositionActions();
-            const feedbackAction = captureAction(
-                findAction(recovery.actions, 'record_authority_feedback'),
+    } else if (pending.kind === 'planning-review') {
+        document.querySelectorAll('[data-planning-review]').forEach((button) => {
+            button.disabled = true;
+        });
+        try {
+            await postAction(
+                { endpoint: pending.endpoint },
+                {
+                    decision: pending.decision,
+                    rationale: rationale || 'Accepted in the dashboard.',
+                },
+                {
+                    expectedDecision: pending.binding.decision_fingerprint,
+                    expectedInstance: pending.binding.instance_key,
+                },
             );
-            lifecycleState.position = recovery.position;
-            lifecycleState.actions = recovery.actions;
-            renderDashboard();
+        } catch (error) {
+            closeHumanDialog();
             try {
-                await postAction(feedbackAction, { feedback: rationale });
-            } catch (error) {
-                closeHumanDialog();
-                try {
-                    await loadDashboard();
-                } catch (_loadError) {
-                    // The captured recovery action remains rendered from the position read.
-                }
-                setProjectError(`Authority was rejected, but feedback was not recorded. ${error.message}`);
-                return;
+                await loadDashboard();
+            } catch (_loadError) {
+                // Old controls remain disabled when refresh also fails.
             }
+            setProjectError(`This review changed. Review the current evidence again. ${error.message}`);
+            return;
         }
-    } else if (pending.kind === 'authority-feedback') {
-        await postAction(pending.action, { feedback: rationale });
     } else if (pending.kind === 'goal-outcome') {
         const requestKind = pending.outcome === 'fulfilled'
             ? 'fulfill_product_goal'
@@ -1706,23 +1865,17 @@ function installInteractions() {
             });
             return;
         }
-        if (button.dataset.authorityFeedback) {
-            const action = captureAction(
-                findAction(lifecycleState.actions, 'record_authority_feedback'),
+        if (button.dataset.planningReview) {
+            const binding = capturePlanningReview(
+                button.dataset.planningReview,
+                Number.parseInt(button.dataset.reviewIndex ?? '0', 10),
+                button.dataset.reviewDecision,
             );
-            if (!action) {
-                setProjectError('Authority feedback changed. Refresh and continue from the current state.');
+            if (!binding) {
+                setProjectError('This review changed. Refresh and review the current evidence.');
                 return;
             }
-            openHumanDialog({
-                kind: 'authority-feedback',
-                action,
-                title: 'Record Authority feedback',
-                description: 'Record the specific correction needed before the Authority is recompiled.',
-                label: 'Authority feedback',
-                submitLabel: 'Record feedback',
-                required: true,
-            });
+            openHumanDialog(binding);
             return;
         }
         if (button.dataset.goalOutcome) {

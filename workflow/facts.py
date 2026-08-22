@@ -12,6 +12,13 @@ from workflow.contracts import FrozenModel, JsonObject
 _DATETIME = _datetime.datetime
 
 
+def _normalize_utc(value: _DATETIME) -> _DATETIME:
+    """Treat SQLite's timezone-free persisted timestamps as UTC."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=_datetime.UTC)
+    return value.astimezone(_datetime.UTC)
+
+
 class ProjectFact(FrozenModel):
     """Durable Project identity used by the product lifecycle graph."""
 
@@ -27,7 +34,6 @@ class ReviewDecisionFact(FrozenModel):
 
     decision_id: int
     artifact_type: Literal[
-        "authority",
         "vision",
         "backlog",
         "roadmap",
@@ -225,6 +231,12 @@ class SpecificationCandidateFact(FrozenModel):
     recorded_by: str
     recorded_at: _DATETIME
 
+    @field_validator("recorded_at", mode="after")
+    @classmethod
+    def normalize_recorded_timezone(cls, value: _DATETIME) -> _DATETIME:
+        """Normalize the immutable candidate timestamp to UTC."""
+        return _normalize_utc(value)
+
 
 class SpecificationDecisionFact(FrozenModel):
     """Append-only review decision bound to one exact specification candidate."""
@@ -238,6 +250,12 @@ class SpecificationDecisionFact(FrozenModel):
     idempotency_key: str
     decided_at: _DATETIME
 
+    @field_validator("decided_at", mode="after")
+    @classmethod
+    def normalize_decided_timezone(cls, value: _DATETIME) -> _DATETIME:
+        """Normalize the immutable review timestamp to UTC."""
+        return _normalize_utc(value)
+
 
 class SpecVersionFact(FrozenModel):
     """Approved or superseded registered specification version."""
@@ -245,7 +263,10 @@ class SpecVersionFact(FrozenModel):
     spec_version_id: int
     spec_hash: str
     status: Literal["approved", "superseded"]
-    approved_at: _DATETIME | None
+    source_specification_decision_id: int
+    accepted_at: _DATETIME
+    accepted_by: str
+    acceptance_notes: str
     source_specification_candidate_id: int
     source_specification_candidate_fingerprint: str
     source_vision_artifact_id: int
@@ -254,35 +275,22 @@ class SpecVersionFact(FrozenModel):
     source_product_goal_fingerprint: str
     supersedes_spec_version_id: int | None = None
 
-
-class AuthorityFact(FrozenModel):
-    """Compiled authority associated with a specification version."""
-
-    authority_id: int
-    spec_version_id: int
-    authority_fingerprint: str
-    status: Literal["pending_review", "accepted", "rejected", "stale"]
-    decided_at: _DATETIME | None
-
-
-class AuthorityFeedbackFact(FrozenModel):
-    """Immutable feedback recorded against one compiled authority."""
-
-    feedback_id: int
-    source_authority_id: int
-    source_authority_fingerprint: str
-    feedback_fingerprint: str
-    recorded_at: _DATETIME
+    @field_validator("accepted_at", mode="after")
+    @classmethod
+    def normalize_accepted_timezone(cls, value: _DATETIME) -> _DATETIME:
+        """Normalize the accepted Specification timestamp to UTC."""
+        return _normalize_utc(value)
 
 
 class PhaseArtifactFact(FrozenModel):
-    """Current lifecycle state for a phase artifact."""
+    """Immutable Backlog artifact and exact delivery-root lineage."""
 
-    artifact_type: Literal["vision", "backlog", "roadmap", "story_set", "sprint_plan"]
-    artifact_id: int | str
+    artifact_type: Literal["vision", "backlog"]
+    artifact_id: int
     artifact_fingerprint: str
-    authority_id: int | None = None
-    authority_fingerprint: str | None = None
+    version_number: int = 1
+    spec_version_id: int | None = None
+    spec_hash: str | None = None
     product_goal_artifact_id: int | None = None
     product_goal_fingerprint: str | None = None
     supersedes_artifact_id: int | None = None
@@ -296,14 +304,15 @@ class PhaseArtifactFact(FrozenModel):
     ]
 
 
-class BacklogRequirementFact(FrozenModel):
-    """One stable requirement from the accepted current Backlog artifact."""
+class BacklogItemFact(FrozenModel):
+    """One immutable host-minted item from an exact Backlog artifact."""
 
-    requirement_id: str
+    backlog_item_id: str
     backlog_artifact_id: int
     backlog_artifact_fingerprint: str
-    requirement: str
-    rank: int
+    item_fingerprint: str
+    spec_item_ids: tuple[str, ...]
+    priority: int
 
 
 class PlanningArtifactFact(FrozenModel):
@@ -312,17 +321,20 @@ class PlanningArtifactFact(FrozenModel):
     artifact_type: Literal["roadmap", "story", "sprint_plan"]
     artifact_id: int
     artifact_fingerprint: str
+    version_number: int = 1
     source_artifact_id: int | None = None
     source_fingerprint: str
-    authority_id: int | None = None
-    authority_fingerprint: str | None = None
+    spec_version_id: int | None = None
+    spec_hash: str | None = None
+    sprint_plan_stream_id: str | None = None
     backlog_artifact_id: int | None = None
     backlog_artifact_fingerprint: str | None = None
     roadmap_artifact_id: int | None = None
     roadmap_artifact_fingerprint: str | None = None
-    requirement_id: str | None = None
-    story_ids: tuple[int, ...] = ()
-    sprint_id: int | None = None
+    backlog_item_id: str | None = None
+    story_item_ids: tuple[str, ...] = ()
+    selected_story_ids: tuple[int, ...] = ()
+    activated_sprint_id: int | None = None
     candidate_set_fingerprint: str | None = None
     task_content_fingerprint: str | None = None
     supersedes_artifact_id: int | None = None
@@ -380,12 +392,20 @@ class SprintFact(FrozenModel):
     status: Literal["planned", "active", "completed"]
     completed_at: _DATETIME | None
 
+    @field_validator("completed_at", mode="after")
+    @classmethod
+    def normalize_completed_timezone(cls, value: _DATETIME | None) -> _DATETIME | None:
+        """Normalize the optional completed Sprint timestamp to UTC."""
+        return _normalize_utc(value) if value is not None else None
+
 
 class SprintStartFact(FrozenModel):
     """Immutable accepted-plan and audit lineage for one Sprint start."""
 
     start_id: int
     sprint_id: int
+    spec_version_id: int
+    spec_hash: str
     sprint_plan_artifact_id: int
     sprint_plan_artifact_decision_id: int
     story_dependency_review_id: int
@@ -402,17 +422,27 @@ class SprintStartFact(FrozenModel):
     started_by: str
     started_at: _DATETIME
 
+    @field_validator("started_at", mode="after")
+    @classmethod
+    def normalize_started_timezone(cls, value: _DATETIME) -> _DATETIME:
+        """Normalize the immutable Sprint-start timestamp to UTC."""
+        return _normalize_utc(value)
+
 
 class StoryFact(FrozenModel):
     """Story readiness state used for sprint evaluation."""
 
     story_id: int
-    requirement_id: str | None = None
+    source_story_artifact_id: int
+    source_story_artifact_fingerprint: str
+    source_story_item_id: str
+    source_story_item_fingerprint: str
+    accepted_spec_version_id: int
+    accepted_spec_hash: str
+    spec_item_ids: tuple[str, ...]
     content_fingerprint: str | None = None
     content_accepted: bool = False
     story_artifact_id: int | None = None
-    authority_id: int | None = None
-    authority_fingerprint: str | None = None
     backlog_artifact_id: int | None = None
     backlog_artifact_fingerprint: str | None = None
     roadmap_artifact_id: int | None = None
@@ -511,10 +541,8 @@ class NodeAttemptFact(FrozenModel):
     @field_validator("lease_expires_at", mode="after")
     @classmethod
     def normalize_lease_timezone(cls, value: _DATETIME) -> _DATETIME:
-        """Treat SQLite's timezone-free persisted UTC value as UTC."""
-        if value.tzinfo is None:
-            return value.replace(tzinfo=_datetime.UTC)
-        return value.astimezone(_datetime.UTC)
+        """Normalize the lease expiry timestamp to UTC."""
+        return _normalize_utc(value)
 
 
 class WorkflowFactSnapshot(FrozenModel):
@@ -535,10 +563,8 @@ class WorkflowFactSnapshot(FrozenModel):
     specification_candidates: tuple[SpecificationCandidateFact, ...] = ()
     specification_decisions: tuple[SpecificationDecisionFact, ...] = ()
     spec_versions: tuple[SpecVersionFact, ...] = ()
-    authorities: tuple[AuthorityFact, ...] = ()
-    authority_feedback: tuple[AuthorityFeedbackFact, ...] = ()
     phase_artifacts: tuple[PhaseArtifactFact, ...] = ()
-    backlog_requirements: tuple[BacklogRequirementFact, ...] = ()
+    backlog_items: tuple[BacklogItemFact, ...] = ()
     planning_artifacts: tuple[PlanningArtifactFact, ...] = ()
     sprints: tuple[SprintFact, ...] = ()
     sprint_starts: tuple[SprintStartFact, ...] = ()

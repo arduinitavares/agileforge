@@ -573,9 +573,9 @@ def _amendment_is_available(
     spec: SpecVersionFact,
 ) -> bool:
     """Permit one amendment after a later quiescent completed Sprint."""
-    if not lifecycle_is_quiescent(snapshot) or spec.approved_at is None:
+    if not lifecycle_is_quiescent(snapshot):
         return False
-    baseline = max(spec.approved_at, candidate.recorded_at)
+    baseline = max(spec.accepted_at, candidate.recorded_at)
     return any(
         sprint.status == "completed"
         and sprint.completed_at is not None

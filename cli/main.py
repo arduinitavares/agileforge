@@ -1,5 +1,7 @@
 """AgileForge CLI backed exclusively by the durable workflow graph."""
 
+# ruff: noqa: EM101, TRY003, TRY004
+
 from __future__ import annotations
 
 import argparse
@@ -17,15 +19,12 @@ from cli.workflow_commands import (
 )
 from services.agent_workbench.version import agileforge_version
 from services.application import (
-    AuthorityCompileRequest,
-    AuthorityFeedbackRequest,
-    AuthorityRepairRequest,
-    AuthorityReviewRequest,
     BacklogReviewRequest,
     CloseStoryRequest,
     CompleteTaskRequest,
     CreateProjectCommand,
     DeliveryActionRequest,
+    ExpectedPlanningReviewBinding,
     PostSprintTriageRequest,
     ProductGoalOutcomeRequest,
     ProductGoalResponseRequest,
@@ -76,22 +75,6 @@ class _ReadProjection(Protocol):
     def product_goal_status(self, *, project_id: int) -> JsonObject: ...
 
     def specification_review(self, *, project_id: int) -> JsonObject: ...
-
-    def authority_status(self, *, project_id: int) -> JsonObject: ...
-
-    def authority_invariants(
-        self,
-        *,
-        project_id: int,
-        spec_version_id: int | None = None,
-    ) -> JsonObject: ...
-
-    def authority_review(
-        self,
-        *,
-        project_id: int,
-        include_spec: str = "auto",
-    ) -> JsonObject: ...
 
     def artifact_history(
         self,
@@ -213,20 +196,6 @@ class _Application(Protocol):
         request: SpecificationReviewRequest,
     ) -> TransitionResult: ...
 
-    def compile_authority(
-        self,
-        request: AuthorityCompileRequest,
-    ) -> TransitionResult: ...
-
-    def decide_authority(self, request: AuthorityReviewRequest) -> TransitionResult: ...
-
-    def record_authority_feedback(
-        self,
-        request: AuthorityFeedbackRequest,
-    ) -> TransitionResult: ...
-
-    def repair_authority(self, request: AuthorityRepairRequest) -> TransitionResult: ...
-
     def generate_backlog(self, request: DeliveryActionRequest) -> TransitionResult: ...
 
     def generate_roadmap(self, request: DeliveryActionRequest) -> TransitionResult: ...
@@ -235,15 +204,40 @@ class _Application(Protocol):
 
     def generate_sprint(self, request: SprintPlanningRequest) -> TransitionResult: ...
 
-    def decide_backlog(self, request: BacklogReviewRequest) -> TransitionResult: ...
+    def backlog_review(self, project_id: int) -> JsonObject: ...
 
-    def decide_roadmap(self, request: RoadmapReviewRequest) -> TransitionResult: ...
+    def roadmap_review(self, project_id: int) -> JsonObject: ...
 
-    def decide_story(self, request: StoryReviewRequest) -> TransitionResult: ...
+    def story_reviews(self, project_id: int) -> JsonObject: ...
+
+    def sprint_plan_review(self, project_id: int) -> JsonObject: ...
+
+    def decide_backlog(
+        self,
+        request: BacklogReviewRequest,
+        *,
+        expected: ExpectedPlanningReviewBinding,
+    ) -> TransitionResult: ...
+
+    def decide_roadmap(
+        self,
+        request: RoadmapReviewRequest,
+        *,
+        expected: ExpectedPlanningReviewBinding,
+    ) -> TransitionResult: ...
+
+    def decide_story(
+        self,
+        request: StoryReviewRequest,
+        *,
+        expected: ExpectedPlanningReviewBinding,
+    ) -> TransitionResult: ...
 
     def decide_sprint_plan(
         self,
         request: SprintPlanReviewRequest,
+        *,
+        expected: ExpectedPlanningReviewBinding,
     ) -> TransitionResult: ...
 
     def apply_story_dependencies(
@@ -346,26 +340,6 @@ def _parse_checklist_item(value: str) -> tuple[str, str]:
     return key, result
 
 
-def _install_authority_reads(
-    authority_sub: argparse._SubParsersAction,
-) -> None:
-    status = authority_sub.add_parser("status")
-    status.add_argument("--project-id", type=int, required=True)
-    status.set_defaults(command_handler=_authority_status)
-    invariants = authority_sub.add_parser("invariants")
-    invariants.add_argument("--project-id", type=int, required=True)
-    invariants.add_argument("--spec-version-id", type=int)
-    invariants.set_defaults(command_handler=_authority_invariants)
-    review = authority_sub.add_parser("review")
-    review.add_argument("--project-id", type=int, required=True)
-    review.add_argument(
-        "--include-spec",
-        choices=("auto", "full", "summary"),
-        default="auto",
-    )
-    review.set_defaults(command_handler=_authority_review)
-
-
 def _install_artifact_history_reads(
     branches: dict[tuple[str, ...], argparse._SubParsersAction],
 ) -> None:
@@ -460,7 +434,6 @@ def _install_read_commands(
     parsers: dict[tuple[str, ...], argparse.ArgumentParser],
 ) -> None:
     for group in (
-        "authority",
         "vision",
         "goal",
         "repository",
@@ -477,7 +450,6 @@ def _install_read_commands(
         )
         parsers[(group,)] = group_parser
         branches[(group,)] = group_sub
-    _install_authority_reads(branches[("authority",)])
     for group, handler in (
         ("vision", _vision_status),
         ("goal", _goal_status),
@@ -488,6 +460,15 @@ def _install_read_commands(
         status_read.add_argument("--project-id", type=int, required=True)
         status_read.set_defaults(command_handler=handler)
     _install_artifact_history_reads(branches)
+    for group, action, handler in (
+        ("backlog", "review", _backlog_review),
+        ("roadmap", "review", _roadmap_review),
+        ("story", "reviews", _story_reviews),
+        ("sprint", "plan-review", _sprint_plan_review),
+    ):
+        review = branches[(group,)].add_parser(action)
+        review.add_argument("--project-id", type=int, required=True)
+        review.set_defaults(command_handler=handler)
     _install_story_reads(
         branches[("story",)],
         branches=branches,
@@ -684,20 +665,6 @@ def _install_lifecycle_mutations(
 
     _install_specification_mutations(branches[("specification",)])
 
-    _semantic_leaf(branches[("authority",)], "compile", _authority_compile)
-    authority_decide = _semantic_leaf(
-        branches[("authority",)], "decide", _authority_decide
-    )
-    authority_decide.add_argument(
-        "--decision", choices=("accepted", "rejected"), required=True
-    )
-    authority_decide.add_argument("--rationale", required=True)
-    authority_feedback = _semantic_leaf(
-        branches[("authority",)], "feedback", _authority_feedback
-    )
-    authority_feedback.add_argument("--feedback", required=True)
-    _semantic_leaf(branches[("authority",)], "repair", _authority_repair)
-
     for group, handler in (
         ("backlog", _backlog_generate),
         ("roadmap", _roadmap_generate),
@@ -719,7 +686,6 @@ def _install_lifecycle_mutations(
         )
         review.add_argument("--rationale", required=True)
     story_review = _semantic_leaf(branches[("story",)], "decide", _story_decide)
-    story_review.add_argument("--instance-key", required=True)
     story_review.add_argument(
         "--decision",
         choices=("accepted", "rejected", "feedback"),
@@ -738,12 +704,6 @@ def _install_lifecycle_mutations(
     sprint_generate.add_argument("--input", dest="user_input")
     sprint_generate.add_argument("--selected-story-ids", nargs="+", type=int)
     sprint_generate.add_argument("--max-story-points", type=int)
-    sprint_generate.add_argument(
-        "--no-task-decomposition",
-        action="store_false",
-        dest="include_task_decomposition",
-        default=True,
-    )
     sprint_generate.add_argument("--team-name", required=True)
 
 
@@ -847,46 +807,20 @@ def _confirm_specification_review(
     return answer.strip().casefold() in {"y", "yes"}
 
 
-def _confirm_authority_review(
-    packet: JsonObject,
-    *,
-    decision: str,
-) -> bool:
-    """Display the captured Authority packet before human confirmation."""
-    rendered = json.dumps(packet, indent=2, sort_keys=True, ensure_ascii=False)
-    sys.stderr.write(f"Exact Authority review packet:\n{rendered}\n")
-    sys.stderr.write(f"Confirm {decision} for this exact candidate? [y/N] ")
-    sys.stderr.flush()
-    try:
-        answer = sys.stdin.readline()
-    except OSError:
-        return False
-    return answer.strip().casefold() in {"y", "yes"}
+def _backlog_review(args: argparse.Namespace, application: _Application) -> int:
+    return _emit_human_planning_review(application.backlog_review(args.project_id))
 
 
-def _authority_status(args: argparse.Namespace, application: _Application) -> int:
-    return _emit_read(application.reads.authority_status(project_id=args.project_id))
+def _roadmap_review(args: argparse.Namespace, application: _Application) -> int:
+    return _emit_human_planning_review(application.roadmap_review(args.project_id))
 
 
-def _authority_invariants(
-    args: argparse.Namespace,
-    application: _Application,
-) -> int:
-    return _emit_read(
-        application.reads.authority_invariants(
-            project_id=args.project_id,
-            spec_version_id=args.spec_version_id,
-        )
-    )
+def _story_reviews(args: argparse.Namespace, application: _Application) -> int:
+    return _emit_human_planning_review(application.story_reviews(args.project_id))
 
 
-def _authority_review(args: argparse.Namespace, application: _Application) -> int:
-    return _emit_read(
-        application.reads.authority_review(
-            project_id=args.project_id,
-            include_spec=args.include_spec,
-        )
-    )
+def _sprint_plan_review(args: argparse.Namespace, application: _Application) -> int:
+    return _emit_human_planning_review(application.sprint_plan_review(args.project_id))
 
 
 def _artifact_history(args: argparse.Namespace, application: _Application) -> int:
@@ -1198,84 +1132,6 @@ def _specification_review(
     )
 
 
-def _authority_compile(args: argparse.Namespace, application: _Application) -> int:
-    return _emit_result(
-        application.compile_authority(
-            AuthorityCompileRequest(
-                project_id=args.project_id,
-                idempotency_key=args.idempotency_key,
-                actor=args.actor,
-                correlation_id=args.correlation_id,
-            )
-        )
-    )
-
-
-def _authority_decide(args: argparse.Namespace, application: _Application) -> int:
-    decision = cast("Literal['accepted', 'rejected']", args.decision)
-    packet = application.reads.authority_review(project_id=args.project_id)
-    data = packet.get("data")
-    pending_authority = (
-        data.get("pending_authority") if isinstance(data, dict) else None
-    )
-    expected_candidate_fingerprint = (
-        pending_authority.get("authority_fingerprint")
-        if isinstance(pending_authority, dict)
-        else None
-    )
-    if not isinstance(expected_candidate_fingerprint, str) or not (
-        expected_candidate_fingerprint.strip()
-    ):
-        message = (
-            "Authority review requires the exact current review packet. "
-            "Run authority review and retry."
-        )
-        raise ValueError(message)
-    if not _confirm_authority_review(packet, decision=decision):
-        message = "Authority review cancelled before any decision was recorded."
-        raise ValueError(message)
-    return _emit_result(
-        application.decide_authority(
-            AuthorityReviewRequest(
-                project_id=args.project_id,
-                decision=decision,
-                rationale=args.rationale,
-                expected_candidate_fingerprint=expected_candidate_fingerprint,
-                idempotency_key=args.idempotency_key,
-                actor=args.actor,
-                correlation_id=args.correlation_id,
-            )
-        )
-    )
-
-
-def _authority_feedback(args: argparse.Namespace, application: _Application) -> int:
-    return _emit_result(
-        application.record_authority_feedback(
-            AuthorityFeedbackRequest(
-                project_id=args.project_id,
-                feedback=args.feedback,
-                idempotency_key=args.idempotency_key,
-                actor=args.actor,
-                correlation_id=args.correlation_id,
-            )
-        )
-    )
-
-
-def _authority_repair(args: argparse.Namespace, application: _Application) -> int:
-    return _emit_result(
-        application.repair_authority(
-            AuthorityRepairRequest(
-                project_id=args.project_id,
-                idempotency_key=args.idempotency_key,
-                actor=args.actor,
-                correlation_id=args.correlation_id,
-            )
-        )
-    )
-
-
 def _delivery_action_request(args: argparse.Namespace) -> DeliveryActionRequest:
     return DeliveryActionRequest(
         project_id=args.project_id,
@@ -1306,7 +1162,6 @@ def _sprint_generate(args: argparse.Namespace, application: _Application) -> int
                 guidance=args.user_input,
                 selected_story_ids=tuple(args.selected_story_ids or ()),
                 max_story_points=args.max_story_points,
-                include_task_decomposition=args.include_task_decomposition,
                 team_name=args.team_name,
                 idempotency_key=args.idempotency_key,
                 actor=args.actor,
@@ -1316,8 +1171,309 @@ def _sprint_generate(args: argparse.Namespace, application: _Application) -> int
     )
 
 
+def _review_object(value: object, label: str) -> dict[str, object]:
+    if not isinstance(value, dict):
+        message = f"{label} is unavailable."
+        raise ValueError(message)
+    return cast("dict[str, object]", value)
+
+
+def _review_items(value: object, label: str) -> list[object]:
+    if not isinstance(value, list):
+        message = f"{label} is unavailable."
+        raise ValueError(message)
+    return cast("list[object]", value)
+
+
+def _review_text(value: object) -> str:
+    if value is None:
+        return "Not specified"
+    if isinstance(value, bool):
+        return "Yes" if value else "No"
+    if isinstance(value, str | int):
+        return str(value)
+    raise ValueError("Planning review text is invalid.")
+
+
+def _list_lines(label: str, value: object, *, indent: str = "") -> list[str]:
+    items = _review_items(value, label)
+    lines = [f"{indent}{label}:"]
+    lines.extend(f"{indent}- {_review_text(item)}" for item in items)
+    if not items:
+        lines.append(f"{indent}- None")
+    return lines
+
+
+def _specification_lines(value: object, *, indent: str = "") -> list[str]:
+    lines = [f"{indent}Specification evidence:"]
+    for raw_item in _review_items(value, "Specification evidence"):
+        item = _review_object(raw_item, "Specification evidence item")
+        lines.extend(
+            [
+                f"{indent}- Title: {_review_text(item.get('title'))}",
+                f"{indent}  Statement: {_review_text(item.get('statement'))}",
+                f"{indent}  Level: {_review_text(item.get('level'))}",
+                f"{indent}  Acceptance criteria:",
+                *(
+                    f"{indent}  - {_review_text(criterion)}"
+                    for criterion in _review_items(
+                        item.get("acceptance_criteria"),
+                        "Specification acceptance criteria",
+                    )
+                ),
+                (
+                    f"{indent}  Verification: "
+                    f"{_review_text(item.get('verification_method'))}"
+                ),
+            ]
+        )
+    return lines
+
+
+def _backlog_item_lines(value: object, *, indent: str = "") -> list[str]:
+    item = _review_object(value, "Backlog item")
+    lines = [
+        f"{indent}Requirement: {_review_text(item.get('requirement'))}",
+        f"{indent}Priority: {_review_text(item.get('priority'))}",
+        f"{indent}Value driver: {_review_text(item.get('value_driver'))}",
+        f"{indent}Justification: {_review_text(item.get('justification'))}",
+        f"{indent}Estimated effort: {_review_text(item.get('estimated_effort'))}",
+    ]
+    if item.get("technical_note") is not None:
+        lines.append(
+            f"{indent}Implementation note: {_review_text(item['technical_note'])}"
+        )
+    lines.extend(
+        _specification_lines(item.get("specification_evidence"), indent=indent)
+    )
+    return lines
+
+
+def _backlog_review_lines(candidate: dict[str, object]) -> list[str]:
+    lines = ["Backlog review"]
+    for item in _review_items(candidate.get("backlog_items"), "Backlog items"):
+        lines.extend(["", *_backlog_item_lines(item)])
+    lines.extend(
+        [
+            "",
+            f"Complete: {_review_text(candidate.get('is_complete'))}",
+            *_list_lines("Clarifying questions", candidate.get("clarifying_questions")),
+        ]
+    )
+    return lines
+
+
+def _roadmap_review_lines(candidate: dict[str, object]) -> list[str]:
+    lines = [
+        "Roadmap review",
+        f"Summary: {_review_text(candidate.get('roadmap_summary'))}",
+    ]
+    for raw_release in _review_items(
+        candidate.get("roadmap_releases"), "Roadmap releases"
+    ):
+        release = _review_object(raw_release, "Roadmap release")
+        lines.extend(
+            [
+                "",
+                f"Release: {_review_text(release.get('release_name'))}",
+                f"Theme: {_review_text(release.get('theme'))}",
+                f"Focus: {_review_text(release.get('focus_area'))}",
+                f"Reasoning: {_review_text(release.get('reasoning'))}",
+                "Included requirements:",
+            ]
+        )
+        for item in _review_items(
+            release.get("backlog_items"), "Roadmap Backlog items"
+        ):
+            lines.extend(_backlog_item_lines(item, indent="  "))
+    lines.extend(
+        [
+            "",
+            f"Complete: {_review_text(candidate.get('is_complete'))}",
+            *_list_lines("Clarifying questions", candidate.get("clarifying_questions")),
+        ]
+    )
+    return lines
+
+
+def _story_item_lines(value: object, *, indent: str = "") -> list[str]:
+    story = _review_object(value, "Story item")
+    lines = [
+        (
+            f"{indent}Story: "
+            f"{_review_text(story.get('story_title') or story.get('title'))}"
+        ),
+        f"{indent}Statement: {_review_text(story.get('statement'))}",
+        f"{indent}Persona: {_review_text(story.get('persona'))}",
+        *_list_lines(
+            "Acceptance criteria", story.get("acceptance_criteria"), indent=indent
+        ),
+        *_specification_lines(story.get("specification_evidence"), indent=indent),
+    ]
+    if story.get("reason_for_selection") is not None:
+        lines.append(
+            f"{indent}Reason for selection: "
+            f"{_review_text(story['reason_for_selection'])}"
+        )
+    return lines
+
+
+def _story_review_lines(
+    review: dict[str, object], candidate: dict[str, object]
+) -> list[str]:
+    lines = ["Story review", "", "Source requirement:"]
+    lineage = _review_object(review.get("lineage"), "Story review source")
+    lines.extend(_backlog_item_lines(lineage.get("backlog_item"), indent="  "))
+    for item in _review_items(candidate.get("story_items"), "Story items"):
+        lines.extend(["", *_story_item_lines(item)])
+    lines.extend(
+        [
+            "",
+            f"Complete: {_review_text(candidate.get('is_complete'))}",
+            *_list_lines("Clarifying questions", candidate.get("clarifying_questions")),
+        ]
+    )
+    return lines
+
+
+def _sprint_review_lines(candidate: dict[str, object]) -> list[str]:
+    lines = [
+        "Sprint plan review",
+        f"Team: {_review_text(candidate.get('team_name'))}",
+        f"Sprint goal: {_review_text(candidate.get('sprint_goal'))}",
+    ]
+    for raw_story in _review_items(
+        candidate.get("selected_stories"), "Selected Stories"
+    ):
+        story = _review_object(raw_story, "Selected Story")
+        lines.extend(["", *_story_item_lines(story)])
+        lines.append("Tasks:")
+        for raw_task in _review_items(story.get("tasks"), "Planned Tasks"):
+            task = _review_object(raw_task, "Planned Task")
+            lines.extend(
+                [
+                    f"- Description: {_review_text(task.get('description'))}",
+                    f"  Kind: {_review_text(task.get('task_kind'))}",
+                    *_list_lines("Checklist", task.get("checklist_items"), indent="  "),
+                    *_specification_lines(
+                        task.get("specification_evidence"), indent="  "
+                    ),
+                ]
+            )
+    return lines
+
+
+def _render_planning_review(value: object) -> str:
+    """Render one closed planning phase in operator language only."""
+    review = _review_object(value, "Planning review")
+    candidate = _review_object(review.get("candidate"), "Planning candidate")
+    phase = review.get("phase")
+    if phase == "backlog":
+        lines = _backlog_review_lines(candidate)
+    elif phase == "roadmap":
+        lines = _roadmap_review_lines(candidate)
+    elif phase == "story":
+        lines = _story_review_lines(review, candidate)
+    elif phase == "sprint_plan":
+        lines = _sprint_review_lines(candidate)
+    else:
+        raise ValueError("Planning review phase is unsupported.")
+    return "\n".join(lines).strip() + "\n"
+
+
+def _emit_human_planning_review(result: JsonObject) -> int:
+    """Print planning evidence without its machine-only binding or identities."""
+    if result.get("ok") is not True:
+        return _emit_read(result)
+    data = _review_object(result.get("data"), "Planning review data")
+    raw_items = data.get("items")
+    if raw_items is None:
+        output = _render_planning_review(data.get("review"))
+    else:
+        sections = []
+        for ordinal, raw_item in enumerate(
+            _review_items(raw_items, "Story reviews"), start=1
+        ):
+            item = _review_object(raw_item, "Story review")
+            sections.append(
+                f"Story review {ordinal}\n{_render_planning_review(item.get('review'))}"
+            )
+        output = "\n".join(sections)
+    sys.stdout.write(output)
+    return 0
+
+
+def _review_binding(value: object) -> ExpectedPlanningReviewBinding:
+    if not isinstance(value, dict):
+        raise ValueError("Planning review has no machine binding.")
+    return ExpectedPlanningReviewBinding.model_validate(value)
+
+
+def _confirm_planning_review(review: object, *, decision: str) -> bool:
+    rendered = _render_planning_review(review)
+    sys.stderr.write(f"Exact planning review:\n{rendered}\n")
+    sys.stderr.write(f"Confirm {decision} for this exact candidate? [y/N] ")
+    sys.stderr.flush()
+    try:
+        answer = sys.stdin.readline()
+    except OSError:
+        return False
+    return answer.strip().casefold() in {"y", "yes"}
+
+
+def _unique_review(result: JsonObject) -> tuple[ExpectedPlanningReviewBinding, object]:
+    if result.get("ok") is not True or not isinstance(result.get("data"), dict):
+        raise ValueError("Exact planning review is unavailable. Reload and retry.")
+    data = cast("dict[str, object]", result["data"])
+    return _review_binding(data.get("binding")), data.get("review")
+
+
+def _story_review_choice(
+    result: JsonObject,
+) -> tuple[ExpectedPlanningReviewBinding, object]:
+    if result.get("ok") is not True or not isinstance(result.get("data"), dict):
+        raise ValueError("Exact Story reviews are unavailable. Reload and retry.")
+    data = cast("dict[str, object]", result["data"])
+    items = data.get("items")
+    if not isinstance(items, list) or not items:
+        raise ValueError("No Story review is currently pending.")
+    candidates = cast("list[object]", items)
+    for ordinal, item in enumerate(candidates, start=1):
+        review = (
+            cast("dict[str, object]", item).get("review")
+            if isinstance(item, dict)
+            else None
+        )
+        rendered = _render_planning_review(review)
+        sys.stderr.write(f"Story review {ordinal}:\n{rendered}\n")
+    if len(candidates) == 1:
+        selected = candidates[0]
+    else:
+        if not sys.stdin.isatty():
+            raise ValueError(
+                "Multiple Story reviews require an interactive numbered choice. "
+                "Machine clients must use the API review binding."
+            )
+        sys.stderr.write(f"Choose Story review [1-{len(items)}]: ")
+        sys.stderr.flush()
+        selected_text = sys.stdin.readline().strip()
+        if not selected_text.isdigit() or not 1 <= int(selected_text) <= len(items):
+            raise ValueError("Story review choice is invalid.")
+        selected = candidates[int(selected_text) - 1]
+    if not isinstance(selected, dict):
+        raise ValueError("Selected Story review is invalid.")
+    selected_mapping = cast("dict[str, object]", selected)
+    return (
+        _review_binding(selected_mapping.get("binding")),
+        selected_mapping.get("review"),
+    )
+
+
 def _backlog_decide(args: argparse.Namespace, application: _Application) -> int:
     decision = cast("Literal['accepted', 'rejected', 'feedback']", args.decision)
+    binding, review = _unique_review(application.backlog_review(args.project_id))
+    if not _confirm_planning_review(review, decision=decision):
+        raise ValueError("Backlog review cancelled before any write.")
     return _emit_result(
         application.decide_backlog(
             BacklogReviewRequest(
@@ -1327,13 +1483,17 @@ def _backlog_decide(args: argparse.Namespace, application: _Application) -> int:
                 idempotency_key=args.idempotency_key,
                 actor=args.actor,
                 correlation_id=args.correlation_id,
-            )
+            ),
+            expected=binding,
         )
     )
 
 
 def _roadmap_decide(args: argparse.Namespace, application: _Application) -> int:
     decision = cast("Literal['accepted', 'rejected', 'feedback']", args.decision)
+    binding, review = _unique_review(application.roadmap_review(args.project_id))
+    if not _confirm_planning_review(review, decision=decision):
+        raise ValueError("Roadmap review cancelled before any write.")
     return _emit_result(
         application.decide_roadmap(
             RoadmapReviewRequest(
@@ -1343,30 +1503,37 @@ def _roadmap_decide(args: argparse.Namespace, application: _Application) -> int:
                 idempotency_key=args.idempotency_key,
                 actor=args.actor,
                 correlation_id=args.correlation_id,
-            )
+            ),
+            expected=binding,
         )
     )
 
 
 def _story_decide(args: argparse.Namespace, application: _Application) -> int:
     decision = cast("Literal['accepted', 'rejected', 'feedback']", args.decision)
+    binding, review = _story_review_choice(application.story_reviews(args.project_id))
+    if not _confirm_planning_review(review, decision=decision):
+        raise ValueError("Story review cancelled before any write.")
     return _emit_result(
         application.decide_story(
             StoryReviewRequest(
                 project_id=args.project_id,
-                instance_key=args.instance_key,
                 decision=decision,
                 rationale=args.rationale,
                 idempotency_key=args.idempotency_key,
                 actor=args.actor,
                 correlation_id=args.correlation_id,
-            )
+            ),
+            expected=binding,
         )
     )
 
 
 def _sprint_decide(args: argparse.Namespace, application: _Application) -> int:
     decision = cast("Literal['accepted', 'rejected', 'feedback']", args.decision)
+    binding, review = _unique_review(application.sprint_plan_review(args.project_id))
+    if not _confirm_planning_review(review, decision=decision):
+        raise ValueError("Sprint-plan review cancelled before any write.")
     return _emit_result(
         application.decide_sprint_plan(
             SprintPlanReviewRequest(
@@ -1376,7 +1543,8 @@ def _sprint_decide(args: argparse.Namespace, application: _Application) -> int:
                 idempotency_key=args.idempotency_key,
                 actor=args.actor,
                 correlation_id=args.correlation_id,
-            )
+            ),
+            expected=binding,
         )
     )
 

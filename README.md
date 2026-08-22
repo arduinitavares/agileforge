@@ -5,7 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 AgileForge is a developer tool for agent-assisted product planning and
-execution governed by reviewed specification authority.
+execution governed by one human-accepted Specification.
 
 ## Lifecycle
 
@@ -13,8 +13,7 @@ One durable Project owns one ordered lifecycle:
 
 ```text
 Vision -> Product Goal -> Source Registration -> Specification Structuring
-       -> Specification Review
-       -> Typed Authority Compile -> Authority Review -> Backlog -> Roadmap
+       -> Specification Review -> Backlog -> Roadmap
        -> Stories -> Sprint -> Execution -> Triage
 ```
 
@@ -24,16 +23,17 @@ ADRs, and run `to-spec`. It registers that exact human-readable source with
 AgileForge. AgileForge captures its bytes, the present-or-absent Context state,
 ADRs, accepted Vision and Goal fingerprints, and repository revision before an
 internal Specification Structuring Agent creates canonical
-`agileforge.spec.v2`. A human reviews that exact candidate before Authority
-compilation, then reviews the compiled Authority through a separate gate.
+`agileforge.spec.v2`. A human reviews that exact candidate. The accepted payload
+and immutable lineage then bind every downstream planning artifact directly.
 
 Discovery is optional work such as interviews, `grill-with-docs`, research,
 repository evidence, ADRs, and prototypes. `grill-with-docs` is preparation
 attestation, not proof of an external agent's internal reasoning. Discovery may
 contribute to a Specification, but AgileForge does not persist an artifact or
 expose a Discovery workflow gate, API, CLI command, or dashboard card. Markdown
-and registered source files are never compiled into Authority. Authority
-consumes only accepted typed `agileforge.spec.v2` clauses.
+and registered source files are evidence for structuring, not downstream
+delivery contracts. Delivery consumes only the accepted typed
+`agileforge.spec.v2` payload.
 
 `WorkflowDomain.position(project_id)` derives available, waiting, blocked,
 invalid, or terminal nodes from durable Project facts. Commands submit typed
@@ -41,15 +41,14 @@ requests through `WorkflowDomain.transition(request)`. ADK recipes execute
 eligible model work; they do not own routing state.
 
 The current model-backed nodes cover Vision and Product Goal interviews,
-Specification structuring, Authority compilation and repair, Backlog, Roadmap,
-Story, and Sprint generation. Human Specification and Authority review
-decisions remain separate explicit workflow transitions.
+Specification structuring, Backlog, Roadmap, Story, and Sprint generation.
+Human Specification review remains an explicit workflow transition.
 
 ## Architecture
 
 - **Derived workflow graph**: one immutable fact snapshot drives routing and
   transition guards.
-- **Specification authority**: reviewed compiler output constrains downstream
+- **Accepted Specification**: exact reviewed v2 bytes constrain downstream
   planning and execution.
 - **Canonical Specification**: a typed v2 payload contains semantics while an
   immutable envelope binds direct Vision and Product Goal lineage, the exact
