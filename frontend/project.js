@@ -49,16 +49,51 @@ const CHILD_STAGE = {
 const DASHBOARD_CONTROL_REQUEST_KINDS = new Set([
     'abandon_product_goal',
     'begin_vision_revision',
+    'decide_backlog',
     'decide_product_goal_review',
+    'decide_roadmap',
     'decide_specification',
+    'decide_sprint_plan',
+    'decide_story',
     'decide_vision_review',
     'fulfill_product_goal',
     'generate_vision_bootstrap',
+    'record_backlog_draft',
     'record_product_goal_interview_turn',
+    'record_roadmap_draft',
+    'record_sprint_plan',
+    'record_story_draft',
     'record_vision_interview_turn',
     'register_specification_source',
     'structure_specification',
 ]);
+
+const DELIVERY_ACTION_CONFIG = {
+    record_backlog_draft: {
+        label: 'Generate Backlog',
+        busyLabel: 'Generating Backlog...',
+        icon: 'auto_awesome',
+        description: 'Generate the initial Product Backlog from the accepted Specification.',
+    },
+    record_roadmap_draft: {
+        label: 'Generate Roadmap',
+        busyLabel: 'Generating Roadmap...',
+        icon: 'alt_route',
+        description: 'Generate the delivery Roadmap from the accepted Product Backlog.',
+    },
+    record_story_draft: {
+        label: 'Generate Stories',
+        busyLabel: 'Generating Stories...',
+        icon: 'auto_stories',
+        description: 'Generate User Story drafts from the accepted Roadmap.',
+    },
+    record_sprint_plan: {
+        label: 'Generate Sprint plan',
+        busyLabel: 'Generating Sprint plan...',
+        icon: 'flag',
+        description: 'Generate the Sprint plan from the approved Stories.',
+    },
+};
 
 const LIFECYCLE_CARD_STATES = {
     active: {
@@ -170,6 +205,15 @@ function findAction(actions, requestKind) {
     ) ?? null;
 }
 
+function findDecisionAction(actions, decision) {
+    const matches = (Array.isArray(actions) ? actions : []).filter((action) => (
+        action?.request_kind === decision?.request_kind
+        && (action?.instance_key ?? null) === (decision?.instance_key ?? null)
+        && (!decision?.node_id || action?.node_id === decision.node_id)
+    ));
+    return matches.length === 1 ? matches[0] : null;
+}
+
 function decisionStage(decision) {
     return REQUEST_STAGE[decision?.request_kind]
         ?? CHILD_STAGE[decision?.child_graph_id]
@@ -187,7 +231,7 @@ function decisionRank(category) {
 
 function isActionableDecision(decision, actions) {
     return DASHBOARD_CONTROL_REQUEST_KINDS.has(decision?.request_kind)
-        && findAction(actions, decision?.request_kind) !== null;
+        && findDecisionAction(actions, decision) !== null;
 }
 
 function lifecycleCardActions(position, actions, projections) {
@@ -277,7 +321,7 @@ function lifecycleCardProjection(position, actions = [], projections = {}) {
     cardActions.forEach((action) => {
         const stage = REQUEST_STAGE[action.request_kind];
         if (stage && !byStage.has(stage)) {
-            byStage.set(stage, { category: 'available', request_kind: action.request_kind });
+            byStage.set(stage, { category: 'available', ...action });
         }
     });
 
@@ -334,7 +378,7 @@ function workflowPositionMarkup(position, actions = [], projections = {}) {
     const cards = lifecycleCardProjection(position, actions, projections);
 
     return `<ol class="grid min-w-0 grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-6">${cards.map((card) => {
-        return `<li class="min-w-0 rounded-lg border px-3 py-2 ${card.tone}">
+        return `<li class="min-w-0 rounded-lg border px-3 py-2 ${card.tone}" data-lifecycle-card="${escapeWorkflowText(card.stage)}">
             <p class="break-words text-xs font-semibold">${escapeWorkflowText(card.stage)}</p>
             <p class="mt-1 text-xs font-medium">${escapeWorkflowText(card.status)}</p>
             ${card.reason ? `<p class="mt-1 break-words text-xs leading-4 opacity-80">${escapeWorkflowText(card.reason)}</p>` : ''}
@@ -1164,7 +1208,55 @@ function planningReviewCardMarkup(label, selected, scope, index = 0) {
     </article>`;
 }
 
-function deliveryPanelMarkup(position, reviews = {}) {
+function deliveryActionBindingAttributes(action) {
+    return [
+        `data-delivery-action-node="${escapeWorkflowText(action.node_id)}"`,
+        `data-delivery-action-instance="${escapeWorkflowText(action.instance_key ?? '')}"`,
+        `data-delivery-action-has-instance="${action.instance_key === null || action.instance_key === undefined ? 'false' : 'true'}"`,
+        `data-delivery-action-endpoint="${escapeWorkflowText(action.endpoint)}"`,
+        `data-delivery-action-transport="${escapeWorkflowText(action.transport ?? '')}"`,
+    ].join(' ');
+}
+
+function deliveryGenerationActionMarkup(action, index = 0, count = 1) {
+    const config = DELIVERY_ACTION_CONFIG[action?.request_kind];
+    if (!config) return '';
+    const bindingAttributes = deliveryActionBindingAttributes(action);
+    const isStorySelection = action.request_kind === 'record_story_draft' && count > 1;
+    const ordinal = isStorySelection ? ` for backlog item ${index + 1}` : '';
+    const label = `${config.label}${ordinal}`;
+    const content = `<p class="mb-3 text-sm leading-6 text-slate-600">${escapeWorkflowText(config.description)}</p>`;
+    if (action.request_kind === 'record_sprint_plan') {
+        return `<form data-delivery-generation-action="${escapeWorkflowText(action.request_kind)}"
+            data-delivery-generation-form="${escapeWorkflowText(action.request_kind)}" ${bindingAttributes}
+            class="space-y-4 rounded-lg border border-slate-200 p-4">
+            ${content}
+            <div class="max-w-xl">
+                <label for="delivery-team-name-${index}" class="text-sm font-semibold">Team name</label>
+                <input id="delivery-team-name-${index}" name="team_name" type="text" required autocomplete="organization"
+                    class="mt-1.5 w-full rounded-lg border-slate-300 text-sm focus:border-accent focus:ring-accent" />
+                <p class="mt-1 text-xs leading-5 text-slate-500">Choose the team that will own this Sprint plan.</p>
+            </div>
+            <button type="submit" class="${BUTTON_PRIMARY}">
+                <span class="material-symbols-outlined" aria-hidden="true">${config.icon}</span>
+                <span data-delivery-action-label="true">${escapeWorkflowText(label)}</span>
+            </button>
+            <p data-delivery-action-status="true" hidden role="status" aria-live="polite" aria-atomic="true"
+                class="text-sm leading-6 text-slate-700"></p>
+        </form>`;
+    }
+    return `<div data-delivery-generation-action="${escapeWorkflowText(action.request_kind)}" ${bindingAttributes} class="mt-4">
+        ${content}
+        <button type="button" data-direct-action="${escapeWorkflowText(action.request_kind)}" class="${BUTTON_PRIMARY}">
+            <span class="material-symbols-outlined" aria-hidden="true">${config.icon}</span>
+            <span data-delivery-action-label="true">${escapeWorkflowText(label)}</span>
+        </button>
+        <p data-delivery-action-status="true" hidden role="status" aria-live="polite" aria-atomic="true"
+            class="mt-3 text-sm leading-6 text-slate-700"></p>
+    </div>`;
+}
+
+function deliveryPanelMarkup(position, reviews = {}, actions = []) {
     const storyItems = Array.isArray(reviews.stories?.items) ? reviews.stories.items : [];
     const cards = [
         planningReviewCardMarkup('Backlog review', reviews.backlog, 'backlog'),
@@ -1172,7 +1264,26 @@ function deliveryPanelMarkup(position, reviews = {}) {
         ...storyItems.map((item, index) => planningReviewCardMarkup(`Story review ${index + 1}`, item, 'story', index)),
         planningReviewCardMarkup('Sprint plan review', reviews.sprintPlan, 'sprint', 0),
     ].filter(Boolean);
-    if (cards.length) return `<div class="grid gap-4">${cards.join('')}</div>`;
+    const availableDeliveryActions = (Array.isArray(actions) ? actions : []).filter((action) =>
+        Boolean(DELIVERY_ACTION_CONFIG[action?.request_kind]),
+    );
+    const actionMarkup = availableDeliveryActions.map((action) => {
+        const siblings = availableDeliveryActions.filter(
+            (candidate) => candidate.request_kind === action.request_kind,
+        );
+        return deliveryGenerationActionMarkup(
+            action,
+            siblings.indexOf(action),
+            siblings.length,
+        );
+    });
+    if (cards.length || actionMarkup.length) {
+        return `<div class="space-y-4">
+            ${cards.length ? `<div class="grid gap-4">${cards.join('')}</div>` : ''}
+            ${actionMarkup.join('')}
+        </div>`;
+    }
+
     const decisions = Array.isArray(position?.decisions) ? position.decisions : [];
     const deliveryDecision = decisions.find((decision) => {
         const stage = decisionStage(decision);
@@ -1254,7 +1365,11 @@ function renderDashboard() {
     );
     setMarkup(
         'delivery-panel',
-        deliveryPanelMarkup(lifecycleState.position, lifecycleState.planningReviews),
+        deliveryPanelMarkup(
+            lifecycleState.position,
+            lifecycleState.planningReviews,
+            lifecycleState.actions,
+        ),
     );
 }
 
@@ -1426,6 +1541,55 @@ function closeHumanDialog() {
 function captureAction(action) {
     if (!action?.request_kind || !action?.endpoint) return null;
     return { ...action };
+}
+
+function deliveryActionContainer(control) {
+    return control?.closest?.('[data-delivery-generation-action]') ?? control;
+}
+
+function deliveryActionBindingElement(control) {
+    const container = deliveryActionContainer(control);
+    return container?.dataset?.deliveryActionNode ? container : control;
+}
+
+function deliveryActionElementMatches(element, action, requestKind) {
+    const dataset = element?.dataset ?? {};
+    const renderedRequestKind = dataset.deliveryGenerationAction
+        ?? dataset.directAction;
+    const hasInstance = dataset.deliveryActionHasInstance === 'true'
+        || (
+            dataset.deliveryActionHasInstance === undefined
+            && typeof dataset.deliveryActionInstance === 'string'
+        );
+    const renderedInstance = hasInstance ? dataset.deliveryActionInstance : null;
+    const renderedTransport = dataset.deliveryActionTransport ?? '';
+    return renderedRequestKind === requestKind
+        && dataset.deliveryActionNode === action?.node_id
+        && renderedInstance === (action?.instance_key ?? null)
+        && dataset.deliveryActionEndpoint === action?.endpoint
+        && renderedTransport === (action?.transport ?? '');
+}
+
+function captureDeliveryActionBinding(state, control, requestKind) {
+    const bindingElement = deliveryActionBindingElement(control);
+    const matches = (Array.isArray(state?.actions) ? state.actions : []).filter(
+        (action) => deliveryActionElementMatches(
+            bindingElement,
+            action,
+            requestKind,
+        ),
+    );
+    return matches.length === 1 ? captureAction(matches[0]) : null;
+}
+
+function currentDeliveryActionContainers(action, requestKind) {
+    const candidates = Array.from(document.querySelectorAll?.(
+        `[data-delivery-generation-action="${requestKind}"]`,
+    ) ?? []);
+    const exact = candidates.find(
+        (candidate) => deliveryActionElementMatches(candidate, action, requestKind),
+    );
+    return exact ? [exact] : [];
 }
 
 function reviewCandidateFingerprint(state, scope) {
@@ -1622,13 +1786,22 @@ async function submitHumanAction() {
     await loadDashboard();
 }
 
-async function runDirectAction(requestKind, button, fallbackEndpoint = null) {
+async function runDirectAction(requestKind, button, fallbackEndpoint = null, fields = {}) {
     if (button.disabled) return false;
     const isSpecificationStructuring = requestKind === 'structure_specification';
-    const setBusy = isSpecificationStructuring
-        ? setSpecificationStructuringBusy
-        : setSpecificationContinuationBusy;
+    const isDeliveryGeneration = Boolean(DELIVERY_ACTION_CONFIG[requestKind]);
+    const setBusy = (targetButton, busy) => {
+        if (isSpecificationStructuring) {
+            setSpecificationStructuringBusy(targetButton, busy);
+        } else if (isDeliveryGeneration) {
+            setDeliveryActionBusy(targetButton, busy, requestKind);
+        } else {
+            setSpecificationContinuationBusy(targetButton, busy);
+        }
+    };
     let specificationBinding = null;
+    let deliveryBinding = null;
+    let deliveryReconciled = false;
     let mutationCompleted = false;
     setBusy(button, true);
     setProjectError('');
@@ -1647,41 +1820,136 @@ async function runDirectAction(requestKind, button, fallbackEndpoint = null) {
                 { expectedDecision: binding.expectedDecision },
             );
             mutationCompleted = true;
+        } else if (isDeliveryGeneration) {
+            const binding = captureDeliveryActionBinding(
+                lifecycleState,
+                button,
+                requestKind,
+            );
+            if (!binding) {
+                throw new Error(
+                    'This delivery action changed. Refresh and choose a current action.',
+                );
+            }
+            deliveryBinding = binding;
+            const deliveryFields = { ...fields };
+            if (binding.instance_key !== null && binding.instance_key !== undefined) {
+                deliveryFields.instance_key = binding.instance_key;
+            }
+            await postAction(binding, deliveryFields);
+            mutationCompleted = true;
         } else {
             const action = findAction(lifecycleState.actions, requestKind)
                 ?? (fallbackEndpoint ? { endpoint: fallbackEndpoint } : null);
             await postAction(action);
         }
-        await loadDashboard();
+        const refreshed = await loadDashboard();
+        if (isDeliveryGeneration) {
+            deliveryReconciled = refreshed === true;
+            if (!deliveryReconciled) {
+                throw new Error(
+                    'The dashboard reload was superseded before current delivery actions were confirmed.',
+                );
+            }
+        }
     } catch (error) {
-        if (!isSpecificationStructuring) {
+        if (isSpecificationStructuring) {
+            let refreshed = false;
+            if (!mutationCompleted) {
+                try {
+                    refreshed = await loadDashboard();
+                } catch (_loadError) {
+                    // Keep the captured action visible when reconciliation also fails.
+                }
+            }
+            const currentButton = document.querySelector?.(
+                '[data-direct-action="structure_specification"]',
+            ) ?? button;
+            const localMessage = mutationCompleted
+                ? `Specification structuring completed, but the dashboard could not reload. ${error.message}`
+                : specificationStructuringFailureMessage(
+                    specificationBinding,
+                    error,
+                    refreshed,
+                );
+            setProjectError(error.message);
+            setSpecificationStructuringStatus(currentButton, localMessage);
+        } else if (isDeliveryGeneration) {
+            if (!mutationCompleted) {
+                try {
+                    deliveryReconciled = await loadDashboard() === true;
+                } catch (_loadError) {
+                    // Keep the captured action visible when reconciliation also fails.
+                }
+            }
+            const localMessage = mutationCompleted
+                ? `Delivery generation completed, but the dashboard could not reload. ${error.message}`
+                : error.message;
+            const currentControls = currentDeliveryActionContainers(
+                deliveryBinding,
+                requestKind,
+            );
+            setProjectError(localMessage);
+            (currentControls.length ? currentControls : [button]).forEach(
+                (control) => setDeliveryActionStatus(control, localMessage),
+            );
+        } else {
             setProjectError(error.message);
             return true;
         }
-        let refreshed = false;
-        if (!mutationCompleted) {
-            try {
-                refreshed = await loadDashboard();
-            } catch (_loadError) {
-                // Keep the captured action visible when reconciliation also fails.
-            }
-        }
-        const currentButton = document.querySelector?.(
-            '[data-direct-action="structure_specification"]',
-        ) ?? button;
-        const localMessage = mutationCompleted
-            ? `Specification structuring completed, but the dashboard could not reload. ${error.message}`
-            : specificationStructuringFailureMessage(
-                specificationBinding,
-                error,
-                refreshed,
-            );
-        setProjectError(error.message);
-        setSpecificationStructuringStatus(currentButton, localMessage);
     } finally {
-        setBusy(button, false);
+        if (isDeliveryGeneration && !deliveryReconciled) {
+            setDeliveryActionBusy(button, false, requestKind, true);
+        } else {
+            setBusy(button, false);
+        }
     }
     return true;
+}
+
+function setDeliveryActionStatus(control, message) {
+    const action = deliveryActionContainer(control);
+    const status = action?.querySelector?.('[data-delivery-action-status="true"]');
+    if (!status) return;
+    status.textContent = message;
+    status.hidden = !message;
+}
+
+function setDeliveryActionBusy(control, busy, requestKind, keepDisabled = false) {
+    const action = deliveryActionContainer(control);
+    const controls = action?.querySelectorAll?.(
+        'button, input, textarea, select',
+    ) ?? [control];
+    Array.from(controls).forEach((item) => {
+        if (item) item.disabled = busy || keepDisabled;
+    });
+    if (action?.dataset) {
+        if (busy) {
+            action.dataset.submitting = 'true';
+        } else {
+            delete action.dataset.submitting;
+        }
+    }
+    const config = DELIVERY_ACTION_CONFIG[requestKind];
+    const label = action?.querySelector?.('[data-delivery-action-label="true"]')
+        ?? control?.querySelector?.('[data-delivery-action-label="true"]');
+    if (busy) {
+        control?.setAttribute?.('aria-busy', 'true');
+        if (label) {
+            label.dataset.idleLabel = label.textContent;
+            label.textContent = config?.busyLabel ?? 'Generating...';
+        }
+        setDeliveryActionStatus(
+            control,
+            config?.busyLabel ?? 'Generating...',
+        );
+        return;
+    }
+    control?.removeAttribute?.('aria-busy');
+    if (label?.dataset?.idleLabel) {
+        label.textContent = label.dataset.idleLabel;
+        delete label.dataset.idleLabel;
+    }
 }
 
 function specificationStructuringFailureMessage(binding, error, refreshed) {
@@ -1808,6 +2076,30 @@ function installInteractions() {
                 setSpecificationContinuationBusy(form, false);
                 if (submit) submit.disabled = false;
             }
+            return;
+        }
+        const deliveryRequestKind = form?.dataset?.deliveryGenerationForm;
+        if (DELIVERY_ACTION_CONFIG[deliveryRequestKind]) {
+            event.preventDefault();
+            if (form.dataset.submitting === 'true') return;
+            const submit = form.querySelector('button[type="submit"]');
+            if (!submit) return;
+            const fields = {};
+            if (deliveryRequestKind === 'record_sprint_plan') {
+                const teamName = form.querySelector('[name="team_name"]');
+                const value = teamName?.value.trim() ?? '';
+                if (!value) {
+                    teamName?.reportValidity?.();
+                    return;
+                }
+                fields.team_name = value;
+            }
+            await runDirectAction(
+                deliveryRequestKind,
+                submit,
+                null,
+                fields,
+            );
             return;
         }
         const scope = form?.dataset?.interviewScope;

@@ -31,7 +31,7 @@ from utils.runtime_controls import (
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
-    from playwright.sync_api import Browser, Page, Route
+    from playwright.sync_api import Browser, BrowserContext, Page, Route
     from playwright.sync_api._generated import ViewportSize
 
 type JsonValue = (
@@ -60,32 +60,39 @@ _FORBIDDEN_BODY_FIELDS = {
     "graph_version",
     "model_id",
 }
-_ABSENT_PLANNING_REVIEW_PATHS = {
-    "/backlog/review",
-    "/roadmap/review",
-    "/story/reviews",
-    "/sprint/plan/review",
-}
-
 _ACTION_ENDPOINTS = {
+    "decide_backlog": "backlog/decide",
     "decide_product_goal_review": "goals/review",
+    "decide_roadmap": "roadmap/decide",
     "decide_specification": "specifications/review",
+    "decide_sprint_plan": "sprint/decide",
+    "decide_story": "story/decide",
     "decide_vision_review": "vision/review",
     "generate_vision_bootstrap": "vision/bootstrap",
     "record_backlog_draft": "backlog/generate",
     "record_product_goal_interview_turn": "goals/respond",
+    "record_roadmap_draft": "roadmap/generate",
+    "record_sprint_plan": "sprint/generate",
+    "record_story_draft": "story/generate",
     "register_specification_source": "specifications/source",
     "record_vision_interview_turn": "vision/respond",
     "structure_specification": "specifications/structure",
 }
 
 _ACTION_CHILDREN = {
+    "decide_backlog": "backlog",
     "decide_product_goal_review": "product_goal",
+    "decide_roadmap": "planning",
     "decide_specification": "specification",
+    "decide_sprint_plan": "planning",
+    "decide_story": "planning",
     "decide_vision_review": "vision",
     "generate_vision_bootstrap": "vision",
     "record_backlog_draft": "backlog",
     "record_product_goal_interview_turn": "product_goal",
+    "record_roadmap_draft": "planning",
+    "record_sprint_plan": "planning",
+    "record_story_draft": "planning",
     "register_specification_source": "specification",
     "record_vision_interview_turn": "vision",
     "structure_specification": "specification",
@@ -121,6 +128,23 @@ class FakeLifecycle:
     specification_structure_reason: str | None = None
     specification_structure_decision_fingerprint: str = "sha256:hidden-decision"
     specification_accepted: bool = False
+    backlog_candidate: JsonObject | None = None
+    backlog_accepted: bool = False
+    backlog_decision_fingerprint: str = "sha256:hidden-backlog-decision"
+    roadmap_candidate: JsonObject | None = None
+    roadmap_accepted: bool = False
+    roadmap_decision_fingerprint: str = "sha256:hidden-roadmap-decision"
+    story_candidate: JsonObject | None = None
+    story_accepted: bool = False
+    story_decision_fingerprint: str = "sha256:hidden-story-decision"
+    sprint_plan_candidate: JsonObject | None = None
+    sprint_plan_accepted: bool = False
+    sprint_plan_decision_fingerprint: str = "sha256:hidden-sprint-decision"
+    delivery_generation_failure: str | None = None
+    delivery_requests: list[tuple[str, JsonObject]] = field(default_factory=list)
+    planning_review_overrides: dict[str, JsonObject] = field(default_factory=dict)
+    position_override: JsonObject | None = None
+    reject_stale_delivery_actions: bool = False
     refresh_count: int = 0
     api_errors: list[str] = field(default_factory=list)
 
@@ -142,6 +166,115 @@ class FakeLifecycle:
             body=json.dumps(payload),
         )
 
+    def _planning_review_data(
+        self,
+        suffix: str,
+    ) -> JsonObject | None:
+        if suffix in self.planning_review_overrides:
+            return self.planning_review_overrides[suffix]
+        if (
+            suffix == "/backlog/review"
+            and self.backlog_candidate is not None
+            and not self.backlog_accepted
+        ):
+            return {
+                "binding": {
+                    "decision_fingerprint": (self.backlog_decision_fingerprint),
+                    "instance_key": None,
+                },
+                "review": {
+                    "phase": "backlog",
+                    "candidate": self.backlog_candidate,
+                },
+            }
+        if (
+            suffix == "/roadmap/review"
+            and self.roadmap_candidate is not None
+            and not self.roadmap_accepted
+        ):
+            return {
+                "binding": {
+                    "decision_fingerprint": (self.roadmap_decision_fingerprint),
+                    "instance_key": None,
+                },
+                "review": {
+                    "phase": "roadmap",
+                    "candidate": self.roadmap_candidate,
+                },
+            }
+        if (
+            suffix == "/story/reviews"
+            and self.story_candidate is not None
+            and not self.story_accepted
+        ):
+            return {
+                "items": [
+                    {
+                        "binding": {
+                            "decision_fingerprint": (self.story_decision_fingerprint),
+                            "instance_key": "backlog_item:req-1",
+                        },
+                        "review": {
+                            "phase": "story",
+                            "lineage": {
+                                "backlog_item": {
+                                    "requirement": ("Delivery workflow requirement"),
+                                    "priority": "high",
+                                    "value_driver": "core",
+                                    "estimated_effort": "medium",
+                                    "justification": ("Core delivery item."),
+                                }
+                            },
+                            "candidate": self.story_candidate,
+                        },
+                    }
+                ]
+            }
+        if (
+            suffix == "/sprint/plan/review"
+            and self.sprint_plan_candidate is not None
+            and not self.sprint_plan_accepted
+        ):
+            return {
+                "binding": {
+                    "decision_fingerprint": (self.sprint_plan_decision_fingerprint),
+                    "instance_key": None,
+                },
+                "review": {
+                    "phase": "sprint_plan",
+                    "candidate": self.sprint_plan_candidate,
+                },
+            }
+        return None
+
+    def _planning_review_response(
+        self,
+        suffix: str,
+    ) -> tuple[int, JsonObject] | None:
+        if suffix not in {
+            "/backlog/review",
+            "/roadmap/review",
+            "/story/reviews",
+            "/sprint/plan/review",
+        }:
+            return None
+        data = self._planning_review_data(suffix)
+        if data is not None:
+            return _HTTP_OK, self._success(data)
+        return (
+            _HTTP_CONFLICT,
+            {
+                "detail": {
+                    "errors": [
+                        {
+                            "code": "PLANNING_REVIEW_NOT_AVAILABLE",
+                            "message": "No planning review is current.",
+                        }
+                    ]
+                }
+            },
+        )
+
     def _dispatch(self, route: Route) -> tuple[int, JsonObject]:
         request = route.request
         path = urlsplit(request.url).path
@@ -158,17 +291,9 @@ class FakeLifecycle:
         if request.method == "GET":
             if suffix == "/position":
                 return _HTTP_OK, self.position_envelope()
-            if suffix in _ABSENT_PLANNING_REVIEW_PATHS:
-                return _HTTP_CONFLICT, {
-                    "detail": {
-                        "errors": [
-                            {
-                                "code": "PLANNING_REVIEW_NOT_AVAILABLE",
-                                "message": "No planning review is current.",
-                            }
-                        ]
-                    }
-                }
+            planning_response = self._planning_review_response(suffix)
+            if planning_response is not None:
+                return planning_response
             return _HTTP_OK, self._success(self._read(suffix))
         assert request.method == "POST", f"Unexpected method: {request.method}"
         return self._mutate(
@@ -209,6 +334,13 @@ class FakeLifecycle:
         body: JsonObject,
         headers: dict[str, str],
     ) -> tuple[int, JsonObject]:
+        if suffix in {
+            "/backlog/generate",
+            "/roadmap/generate",
+            "/story/generate",
+            "/sprint/generate",
+        }:
+            self.delivery_requests.append((suffix, dict(body)))
         review_fingerprint = self._review_fingerprint(suffix)
         if review_fingerprint is not None:
             expected = headers.get("x-agileforge-expected-candidate")
@@ -228,13 +360,21 @@ class FakeLifecycle:
                     }
                 }
         handlers: dict[str, Callable[[JsonObject], None]] = {
+            "/backlog/decide": self._decide_backlog,
+            "/backlog/generate": self._generate_backlog,
             "/goals/respond": self._record_goal_turn,
             "/goals/review": self._review_goal,
             "/repository": self._attach_repository,
             "/repository/refresh": self._refresh_repository,
+            "/roadmap/decide": self._decide_roadmap,
+            "/roadmap/generate": self._generate_roadmap,
             "/specifications/source": self._register_specification_source,
             "/specifications/structure": self._structure_specification,
             "/specifications/review": self._review_specification,
+            "/sprint/decide": self._decide_sprint_plan,
+            "/sprint/generate": self._generate_sprint_plan,
+            "/story/decide": self._decide_story,
+            "/story/generate": self._generate_story,
             "/vision/bootstrap": self._bootstrap_vision,
             "/vision/respond": self._record_vision_turn,
             "/vision/review": self._review_vision,
@@ -534,6 +674,127 @@ class FakeLifecycle:
     def _repository_projection(self) -> JsonObject:
         return {"repository": self.repository}
 
+    def _generate_backlog(self, body: JsonObject) -> None:
+        self._assert_fields(body, set())
+        if self.delivery_generation_failure:
+            raise ValueError(self.delivery_generation_failure)
+        self.backlog_candidate = {
+            "backlog_items": [
+                {
+                    "requirement": "Delivery generation workflow",
+                    "priority": "high",
+                    "value_driver": "core",
+                    "estimated_effort": "medium",
+                    "justification": "Required for delivery progress.",
+                }
+            ],
+            "is_complete": True,
+            "clarifying_questions": [],
+        }
+
+    def _decide_backlog(self, body: JsonObject) -> None:
+        self._assert_fields(body, {"decision", "rationale"})
+        assert body["decision"] == "accepted"
+        self.backlog_accepted = True
+
+    def _generate_roadmap(self, body: JsonObject) -> None:
+        self._assert_fields(body, set())
+        if self.delivery_generation_failure:
+            raise ValueError(self.delivery_generation_failure)
+        self.roadmap_candidate = {
+            "roadmap_summary": "Delivery Roadmap Summary",
+            "roadmap_releases": [
+                {
+                    "release_name": "Release 1",
+                    "theme": "Foundations",
+                    "focus_area": "Core Engine",
+                    "reasoning": "Initial MVP",
+                    "backlog_items": [
+                        {
+                            "requirement": "Delivery generation workflow",
+                            "priority": "high",
+                            "value_driver": "core",
+                            "estimated_effort": "medium",
+                            "justification": "Required for delivery progress.",
+                        }
+                    ],
+                }
+            ],
+            "is_complete": True,
+            "clarifying_questions": [],
+        }
+
+    def _decide_roadmap(self, body: JsonObject) -> None:
+        self._assert_fields(body, {"decision", "rationale"})
+        assert body["decision"] == "accepted"
+        self.roadmap_accepted = True
+
+    def _generate_story(self, body: JsonObject) -> None:
+        self._assert_fields(body, {"instance_key"})
+        if self.reject_stale_delivery_actions and self.position_override is not None:
+            actions = self.position_override.get("_actions")
+            assert isinstance(actions, list)
+            current_instances = {
+                action.get("instance_key")
+                for action in actions
+                if isinstance(action, dict)
+                and action.get("request_kind") == "record_story_draft"
+            }
+            if body["instance_key"] not in current_instances:
+                message = (
+                    "This delivery action changed. Reload the current Story actions."
+                )
+                raise ValueError(message)
+        if self.delivery_generation_failure:
+            raise ValueError(self.delivery_generation_failure)
+        self.story_candidate = {
+            "story_items": [
+                {
+                    "story_title": "Delivery story draft",
+                    "statement": "As an operator, I want delivery generation.",
+                    "persona": "Operator",
+                    "acceptance_criteria": ["Controls render when available."],
+                    "specification_evidence": [],
+                }
+            ],
+            "is_complete": True,
+            "clarifying_questions": [],
+        }
+
+    def _decide_story(self, body: JsonObject) -> None:
+        self._assert_fields(body, {"decision", "rationale"})
+        assert body["decision"] == "accepted"
+        self.story_accepted = True
+
+    def _generate_sprint_plan(self, body: JsonObject) -> None:
+        self._assert_fields(body, {"team_name"})
+        if self.delivery_generation_failure:
+            raise ValueError(self.delivery_generation_failure)
+        self.sprint_plan_candidate = {
+            "team_name": body["team_name"],
+            "sprint_goal": "Deliver Sprint 1 MVP",
+            "selected_stories": [
+                {
+                    "story_title": "Delivery story draft",
+                    "statement": "As an operator, I want delivery generation.",
+                    "persona": "Operator",
+                    "acceptance_criteria": ["Controls render when available."],
+                    "tasks": [
+                        {
+                            "description": "Expose dashboard actions",
+                            "task_kind": "implementation",
+                            "checklist_items": ["Add buttons"],
+                        }
+                    ],
+                }
+            ],
+        }
+
+    def _decide_sprint_plan(self, body: JsonObject) -> None:
+        self._assert_fields(body, {"decision", "rationale"})
+        assert body["decision"] == "accepted"
+        self.sprint_plan_accepted = True
+
     def _phase_action(self) -> str:
         phases = (
             (
@@ -553,6 +814,14 @@ class FakeLifecycle:
                 "structure_specification",
             ),
             (not self.specification_accepted, "decide_specification"),
+            (self.backlog_candidate is None, "record_backlog_draft"),
+            (not self.backlog_accepted, "decide_backlog"),
+            (self.roadmap_candidate is None, "record_roadmap_draft"),
+            (not self.roadmap_accepted, "decide_roadmap"),
+            (self.story_candidate is None, "record_story_draft"),
+            (not self.story_accepted, "decide_story"),
+            (self.sprint_plan_candidate is None, "record_sprint_plan"),
+            (not self.sprint_plan_accepted, "decide_sprint_plan"),
             (True, "record_backlog_draft"),
         )
         return next(action for active, action in phases if active)
@@ -564,6 +833,14 @@ class FakeLifecycle:
         node_id = {
             "register_specification_source": "specification.source.register",
             "structure_specification": "specification.structure",
+            "record_backlog_draft": "backlog.generate",
+            "decide_backlog": "backlog.review",
+            "record_roadmap_draft": "planning.roadmap.generate",
+            "decide_roadmap": "planning.roadmap.review",
+            "record_story_draft": "planning.story.generate",
+            "decide_story": "planning.story.review",
+            "record_sprint_plan": "planning.sprint.plan",
+            "decide_sprint_plan": "planning.sprint.review",
         }.get(request_kind, f"internal.{request_kind}")
         fact_references: list[JsonValue] = []
         if request_kind == "structure_specification":
@@ -596,27 +873,27 @@ class FakeLifecycle:
         specification_reason = self.specification_structure_reason
         if specification_reason is None and self.specification_feedback is not None:
             specification_reason = "SPECIFICATION_FEEDBACK_RETRY_AVAILABLE"
+        decision_category = (
+            "waiting" if request_kind.startswith("decide_") else "available"
+        )
+        decision_fingerprint = {
+            "decide_backlog": self.backlog_decision_fingerprint,
+            "decide_roadmap": self.roadmap_decision_fingerprint,
+            "decide_story": self.story_decision_fingerprint,
+            "decide_sprint_plan": self.sprint_plan_decision_fingerprint,
+        }.get(request_kind, self.specification_structure_decision_fingerprint)
+        instance_key = "backlog_item:req-1" if "story" in request_kind else None
         decision: JsonObject = {
             "node_id": node_id,
             "child_graph_id": child,
             "request_kind": request_kind,
-            "category": "available",
+            "category": decision_category,
+            "instance_key": instance_key,
             "reason_code": specification_reason or "INTERNAL_REASON_CODE",
-            "decision_fingerprint": self.specification_structure_decision_fingerprint,
+            "decision_fingerprint": decision_fingerprint,
             "fact_references": fact_references,
         }
-        blocker: JsonObject = {
-            "node_id": "internal.next_stage",
-            "child_graph_id": "backlog",
-            "request_kind": "record_backlog_draft",
-            "category": "blocked",
-            "reason_code": "INTERNAL_BLOCKER",
-            "blockers": [
-                {"message": "Finish the current human review before continuing."}
-            ],
-            "decision_fingerprint": "sha256:hidden-blocker",
-        }
-        decisions: list[JsonValue] = [decision, blocker]
+        decisions: list[JsonValue] = [decision]
         return {
             "graph_version": "agileforge.workflow.hidden",
             "fact_fingerprint": "sha256:hidden-facts",
@@ -627,7 +904,7 @@ class FakeLifecycle:
             "_actions": [
                 {
                     "node_id": decision["node_id"],
-                    "instance_key": None,
+                    "instance_key": instance_key,
                     "request_kind": request_kind,
                     "endpoint": endpoint,
                     "transport": "semantic",
@@ -637,7 +914,11 @@ class FakeLifecycle:
 
     def position_envelope(self) -> JsonObject:
         """Return position data and advertised actions in the HTTP shape."""
-        projection = self._position_projection()
+        projection = (
+            dict(self.position_override)
+            if self.position_override is not None
+            else self._position_projection()
+        )
         actions = projection.pop("_actions")
         assert isinstance(actions, list)
         return {
@@ -1231,3 +1512,369 @@ def test_dashboard_live_surface_has_no_retired_stage_or_copy() -> None:
 
     assert "auth" + "ority" not in source
     assert "invar" + "iant" not in source
+
+
+def _verify_backlog_lifecycle_flow(page: Page, fake: FakeLifecycle) -> None:
+    backlog_card = page.locator('[data-lifecycle-card="Backlog"]')
+    expect(backlog_card).to_contain_text("Ready")
+    expect(backlog_card).to_contain_text("Ready for your input.")
+
+    generate_backlog_btn = page.locator('[data-direct-action="record_backlog_draft"]')
+    expect(generate_backlog_btn).to_be_visible()
+    expect(generate_backlog_btn).to_contain_text("Generate Backlog")
+
+    fake.delivery_generation_failure = "Transient generator timeout."
+    generate_backlog_btn.click()
+    page.wait_for_timeout(_UI_SETTLE_MS)
+    expect(page.locator("#project-error")).to_contain_text(
+        "Transient generator timeout."
+    )
+    status_locator = page.locator('[data-delivery-action-status="true"]')
+    expect(status_locator).to_be_visible()
+    expect(status_locator).to_contain_text("Transient generator timeout.")
+    expect(generate_backlog_btn).to_be_enabled()
+
+    fake.delivery_generation_failure = None
+    generate_backlog_btn.click()
+    review_card = page.locator('[data-planning-review-card="backlog"]')
+    expect(review_card).to_be_visible()
+    expect(review_card).to_contain_text("Backlog review")
+    expect(review_card).to_contain_text("Delivery generation workflow")
+
+    page.locator(
+        '[data-planning-review="backlog"][data-review-decision="accepted"]'
+    ).click()
+    expect(page.locator("#human-action-dialog")).to_be_visible()
+    page.locator("#human-action-submit").click()
+    expect(page.locator("#human-action-dialog")).not_to_be_visible()
+    page.wait_for_timeout(_UI_SETTLE_MS)
+
+
+def _verify_roadmap_lifecycle_flow(page: Page) -> None:
+    roadmap_card = page.locator('[data-lifecycle-card="Roadmap"]')
+    expect(roadmap_card).to_contain_text("Ready")
+    generate_roadmap_btn = page.locator('[data-direct-action="record_roadmap_draft"]')
+    expect(generate_roadmap_btn).to_be_visible()
+    expect(generate_roadmap_btn).to_contain_text("Generate Roadmap")
+
+    generate_roadmap_btn.click()
+    review_card = page.locator('[data-planning-review-card="roadmap"]')
+    expect(review_card).to_be_visible()
+    expect(review_card).to_contain_text("Roadmap review")
+
+    page.locator(
+        '[data-planning-review="roadmap"][data-review-decision="accepted"]'
+    ).click()
+    expect(page.locator("#human-action-dialog")).to_be_visible()
+    page.locator("#human-action-submit").click()
+    expect(page.locator("#human-action-dialog")).not_to_be_visible()
+    page.wait_for_timeout(_UI_SETTLE_MS)
+
+
+def _verify_story_lifecycle_flow(page: Page) -> None:
+    stories_card = page.locator('[data-lifecycle-card="Stories"]')
+    expect(stories_card).to_contain_text("Ready")
+    generate_story_btn = page.locator('[data-direct-action="record_story_draft"]')
+    expect(generate_story_btn).to_be_visible()
+    expect(generate_story_btn).to_contain_text("Generate Stories")
+
+    generate_story_btn.click()
+    review_card = page.locator('[data-planning-review-card="story"]')
+    expect(review_card).to_be_visible()
+    expect(review_card).to_contain_text("Story review")
+
+    page.locator(
+        '[data-planning-review="story"][data-review-decision="accepted"]'
+    ).click()
+    expect(page.locator("#human-action-dialog")).to_be_visible()
+    page.locator("#human-action-submit").click()
+    expect(page.locator("#human-action-dialog")).not_to_be_visible()
+    page.wait_for_timeout(_UI_SETTLE_MS)
+
+
+def _verify_sprint_lifecycle_flow(page: Page, fake: FakeLifecycle) -> None:
+    sprint_card = page.locator('[data-lifecycle-card="Sprint"]')
+    expect(sprint_card).to_contain_text("Ready")
+    sprint_form = page.locator('[data-delivery-generation-form="record_sprint_plan"]')
+    team_name = sprint_form.locator('[name="team_name"]')
+    expect(team_name).to_be_visible()
+    expect(team_name).to_have_attribute("required", "")
+    team_name.fill("Delivery Team")
+    generate_sprint_btn = sprint_form.locator('button[type="submit"]')
+    expect(generate_sprint_btn).to_be_visible()
+    expect(generate_sprint_btn).to_contain_text("Generate Sprint plan")
+
+    generate_sprint_btn.click()
+    review_card = page.locator('[data-planning-review-card="sprint"]')
+    expect(review_card).to_be_visible()
+    expect(review_card).to_contain_text("Sprint plan review")
+    expect(review_card).to_contain_text("Delivery Team")
+    assert fake.delivery_requests[-1][1]["team_name"] == "Delivery Team"
+
+
+def test_issue_212_delivery_generation_lifecycle_flow(
+    dashboard_harness: DashboardHarness,
+    tmp_path: Path,
+) -> None:
+    """Verify delivery generation flow from Backlog through Sprint plan."""
+    repository_path = tmp_path / "delivery-repository"
+    repository = _repository_fixture(repository_path, dirty=False)
+    fake = FakeLifecycle(repositories={str(repository_path): repository})
+    context = dashboard_harness.browser.new_context(viewport=_DESKTOP_VIEWPORT)
+    context.route("**/api/**", fake.handle)
+    page = context.new_page()
+    page.goto(dashboard_harness.url, wait_until="networkidle")
+
+    _create_project(
+        page,
+        name="Delivery Lifecycle Pilot",
+        description="One product definition and delivery generation lifecycle.",
+        repository_path=None,
+    )
+    _complete_vision_and_goal(
+        page,
+        fake,
+        replace_vision_during_review=False,
+    )
+    _record_and_review_definition(page)
+
+    _verify_backlog_lifecycle_flow(page, fake)
+    _verify_roadmap_lifecycle_flow(page)
+    _verify_story_lifecycle_flow(page)
+    _verify_sprint_lifecycle_flow(page, fake)
+
+    context.close()
+
+
+def _story_generation_action(instance_key: str) -> JsonObject:
+    return {
+        "node_id": "planning.story.generate",
+        "instance_key": instance_key,
+        "request_kind": "record_story_draft",
+        "endpoint": "story/generate",
+        "transport": "semantic",
+    }
+
+
+def _sprint_generation_action() -> JsonObject:
+    return {
+        "node_id": "planning.sprint.plan",
+        "instance_key": None,
+        "request_kind": "record_sprint_plan",
+        "endpoint": "sprint/generate",
+        "transport": "semantic",
+    }
+
+
+def _delivery_position(actions: list[JsonObject]) -> JsonObject:
+    decisions: list[JsonValue] = [
+        {
+            "node_id": action["node_id"],
+            "child_graph_id": "planning",
+            "request_kind": action["request_kind"],
+            "category": "available",
+            "instance_key": action["instance_key"],
+            "reason_code": "DELIVERY_GENERATION_AVAILABLE",
+            "decision_fingerprint": f"decision-{index}",
+            "fact_references": [],
+        }
+        for index, action in enumerate(actions)
+    ]
+    return {
+        "graph_version": "agileforge.workflow.hidden",
+        "fact_fingerprint": "sha256:hidden-facts",
+        "decisions": decisions,
+        "terminal": False,
+        "actions": [],
+        "_actions": [dict(action) for action in actions],
+    }
+
+
+def _story_review(instance_key: str) -> JsonObject:
+    return {
+        "binding": {
+            "decision_fingerprint": f"decision-{instance_key}",
+            "instance_key": instance_key,
+        },
+        "review": {
+            "phase": "story",
+            "lineage": {
+                "backlog_item": {
+                    "requirement": "Keep Story actions bound to their backlog item.",
+                    "priority": "high",
+                    "value_driver": "correctness",
+                    "estimated_effort": "medium",
+                    "justification": "The operator must select the intended item.",
+                }
+            },
+            "candidate": {
+                "story_items": [
+                    {
+                        "story_title": "Exact Story review",
+                        "statement": "As an operator, I review the intended Story.",
+                        "persona": "Operator",
+                        "acceptance_criteria": ["The selector remains exact."],
+                        "specification_evidence": [],
+                    }
+                ],
+                "is_complete": True,
+                "clarifying_questions": [],
+            },
+        },
+    }
+
+
+def _delivery_ready_fake(actions: list[JsonObject]) -> FakeLifecycle:
+    fake = FakeLifecycle(repositories={})
+    fake.project = {
+        "project_id": _PROJECT_ID,
+        "name": "Delivery action contract",
+        "description": "Provider-free browser fixture.",
+        "user_stories_count": 0,
+        "sprint_count": 0,
+    }
+    fake.vision_candidate = {
+        "statement": "Expose exact delivery actions.",
+        "review_fingerprint": "sha256:hidden-vision",
+    }
+    fake.vision_accepted = True
+    fake.goal_candidate = {
+        "statement": "Keep each operator action explicit.",
+        "fingerprint": "sha256:hidden-goal",
+    }
+    fake.goal_accepted = True
+    fake.specification_source = {
+        "specification_source_id": 31,
+        "source_fingerprint": "sha256:hidden-source",
+        "producer_capability": "to-spec",
+        "preparation_capability": "grill-with-docs",
+        "context": {"state": "absent", "document": None},
+    }
+    fake.specification = {
+        "title": "Delivery action contract",
+        "rendered_markdown": "# Delivery action contract",
+    }
+    fake.specification_accepted = True
+    fake.position_override = _delivery_position(actions)
+    return fake
+
+
+def _open_project_page(
+    dashboard_harness: DashboardHarness,
+    fake: FakeLifecycle,
+) -> tuple[BrowserContext, Page]:
+    context = dashboard_harness.browser.new_context(viewport=_DESKTOP_VIEWPORT)
+    context.route("**/api/**", fake.handle)
+    page = context.new_page()
+    page.goto(
+        f"{dashboard_harness.url}/project.html?id={_PROJECT_ID}",
+        wait_until="networkidle",
+    )
+    return context, page
+
+
+def test_story_generation_rejects_stale_rendered_selector_and_retries_fresh(
+    dashboard_harness: DashboardHarness,
+) -> None:
+    """Bind each Story control to its rendered action, then reconcile stale state."""
+    first = _story_generation_action("backlog_item:PBI-000001")
+    stale = _story_generation_action("backlog_item:PBI-000002")
+    fresh = _story_generation_action("backlog_item:PBI-000003")
+    fake = _delivery_ready_fake([first, stale])
+    fake.reject_stale_delivery_actions = True
+    context, page = _open_project_page(dashboard_harness, fake)
+
+    stale_control = page.locator(
+        '[data-delivery-action-instance="backlog_item:PBI-000002"] button'
+    )
+    expect(stale_control).to_be_visible()
+    fake.position_override = _delivery_position([first, fresh])
+
+    stale_control.click()
+    page.wait_for_timeout(_UI_SETTLE_MS)
+    assert fake.delivery_requests[-1][1]["instance_key"] == stale["instance_key"]
+    assert fake.api_errors[-1] == (
+        "This delivery action changed. Reload the current Story actions."
+    )
+    expect(page.locator("#project-error")).to_contain_text(
+        "This delivery action changed."
+    )
+    expect(stale_control).not_to_be_attached()
+
+    fresh_action = page.locator(
+        '[data-delivery-action-instance="backlog_item:PBI-000003"]'
+    )
+    fresh_status = fresh_action.locator('[data-delivery-action-status="true"]')
+    expect(fresh_status).to_be_hidden()
+    expect(fresh_status).to_have_text("")
+    fresh_control = fresh_action.locator("button")
+    expect(fresh_control).to_be_visible()
+    fresh_control.click()
+    page.wait_for_timeout(_UI_SETTLE_MS)
+    assert fake.delivery_requests[-1][1]["instance_key"] == fresh["instance_key"]
+
+    context.close()
+
+
+def test_pending_story_review_keeps_another_generation_action_visible(
+    dashboard_harness: DashboardHarness,
+) -> None:
+    """Render a pending Story review without hiding another available selector."""
+    action = _story_generation_action("backlog_item:PBI-000002")
+    fake = _delivery_ready_fake([action])
+    fake.planning_review_overrides["/story/reviews"] = {
+        "items": [_story_review("backlog_item:PBI-000001")]
+    }
+    context, page = _open_project_page(dashboard_harness, fake)
+
+    expect(page.locator('[data-planning-review-card="story"]')).to_be_visible()
+    expect(
+        page.locator('[data-delivery-action-instance="backlog_item:PBI-000002"]')
+    ).to_be_visible()
+
+    context.close()
+
+
+def test_sprint_generation_requires_team_and_blocks_duplicate_submission(
+    dashboard_harness: DashboardHarness,
+) -> None:
+    """Collect operator-owned Sprint input and keep one mutation in flight."""
+    fake = _delivery_ready_fake([_sprint_generation_action()])
+    context, page = _open_project_page(dashboard_harness, fake)
+    form = page.locator('[data-delivery-generation-form="record_sprint_plan"]')
+    team_name = form.locator('[name="team_name"]')
+    expect(team_name).to_be_visible()
+    expect(team_name).to_have_attribute("required", "")
+
+    team_name.fill("Product Team")
+    busy_state = form.evaluate(
+        """form => {
+            form.requestSubmit();
+            form.requestSubmit();
+            const button = form.querySelector('button[type="submit"]');
+            const status = form.querySelector('[data-delivery-action-status="true"]');
+            return {
+                submitting: form.dataset.submitting,
+                disabled: button.disabled,
+                busy: button.getAttribute('aria-busy'),
+                status: status.textContent,
+            };
+        }"""
+    )
+    assert busy_state == {
+        "submitting": "true",
+        "disabled": True,
+        "busy": "true",
+        "status": "Generating Sprint plan...",
+    }
+
+    review_card = page.locator('[data-planning-review-card="sprint"]')
+    expect(review_card).to_be_visible()
+    expect(review_card).to_contain_text("Product Team")
+    sprint_requests = [
+        body for suffix, body in fake.delivery_requests if suffix == "/sprint/generate"
+    ]
+    assert len(sprint_requests) == 1
+    assert sprint_requests[0]["team_name"] == "Product Team"
+
+    context.close()
