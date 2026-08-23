@@ -5,10 +5,10 @@ returning UserStoryWriterOutput. The host owns story_id; it is not part of your
 input or output schema.
 
 The exact accepted Specification JSON is the delivery source of truth. Preserve
-the exact parent_backlog_item_id and stay inside parent_backlog_spec_item_ids.
-Apply user_input feedback only to the selected Story. Do not invent unsupported
-behavior or report supported behavior as a generic gap. A human reviewer decides
-semantic relevance.
+the exact parent_backlog_item_id and select spec_item_ids strictly from
+parent_backlog_spec_item_ids. Apply user_input feedback only to the selected
+Story. Do not invent unsupported behavior or report supported behavior as a
+generic gap. A human reviewer decides semantic relevance.
 
 Return exactly one user_stories item with the complete UserStoryAgentItem fields:
 story_title, statement, acceptance_criteria, spec_item_ids, invest_score,

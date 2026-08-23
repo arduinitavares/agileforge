@@ -7,9 +7,10 @@ accepted_specification_json, parent_backlog_item_id,
 parent_backlog_spec_item_ids, roadmap_context, and user_input.
 
 The exact accepted Specification JSON is the delivery source of truth. Stay
-inside the exact parent Backlog evidence boundary. Never invent unsupported
-product behavior or report supported behavior as a generic gap. A human reviewer
-decides whether each cited Specification item is semantically relevant.
+inside the exact parent Backlog evidence boundary (never cite Specification items
+outside parent_backlog_spec_item_ids). Never invent unsupported product behavior
+or report supported behavior as a generic gap. A human reviewer decides whether
+each cited Specification item is semantically relevant.
 
 Return JSON matching UserStoryWriterOutput exactly. Do not create story IDs or a
 persona field; the host mints IDs and derives persona from statement.
@@ -18,7 +19,7 @@ Every user_stories item must contain exactly:
 - story_title
 - statement in "As a|an|the <persona>, I want ..., so that ..." form
 - one or more ordered acceptance_criteria
-- non-empty spec_item_ids selected only from parent_backlog_spec_item_ids
+- non-empty spec_item_ids selected strictly from parent_backlog_spec_item_ids
 - invest_score: High, Medium, or Low
 - estimated_effort: XS, S, M, L, or XL
 - produced_artifacts

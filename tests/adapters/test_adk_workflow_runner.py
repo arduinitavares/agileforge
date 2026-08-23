@@ -1239,11 +1239,16 @@ async def test_production_story_recipe_repairs_out_of_parent_spec_reference(
 
     canonical = CanonicalStoryOutput.model_validate(result.payload)
     assert len(model.request_texts) == EXPECTED_RECOVERY_ATTEMPT_COUNT
+    repair_request_payload = json.loads(model.request_texts[1])
     assert "SYSTEM_FEEDBACK" not in model.request_texts[0]
     assert "SYSTEM_FEEDBACK" in model.request_texts[1]
     assert (
         "Specification item ID outside the parent boundary: REQ.002"
-        in model.request_texts[1]
+        in repair_request_payload["user_input"]
+    )
+    assert (
+        'ALLOWED_PARENT_SPEC_ITEM_IDS: ["DATA.001", "REQ.001"]'
+        in repair_request_payload["user_input"]
     )
     assert all(GOLD_SPECIFICATION_HASH in request for request in model.request_texts)
     assert canonical.story_items[0].item.spec_item_ids == ("DATA.001", "REQ.001")
@@ -1545,12 +1550,16 @@ async def test_story_correction_recipe_repairs_out_of_parent_reference(
     source_content = CanonicalStoryOutput.model_validate(source.payload)
     corrected_items = corrected_content.story_items
     assert regular_leaf.calls == ["provider"]
-    assert len(correction_model.request_texts) == EXPECTED_RECOVERY_ATTEMPT_COUNT
+    repair_request_payload = json.loads(correction_model.request_texts[1])
     assert "SYSTEM_FEEDBACK" not in correction_model.request_texts[0]
     assert "SYSTEM_FEEDBACK" in correction_model.request_texts[1]
     assert (
         "Specification item ID outside the parent boundary: REQ.002"
-        in correction_model.request_texts[1]
+        in repair_request_payload["user_input"]
+    )
+    assert (
+        'ALLOWED_PARENT_SPEC_ITEM_IDS: ["DATA.001", "REQ.001"]'
+        in repair_request_payload["user_input"]
     )
     assert [entry.item.story_item_id for entry in corrected_items] == [
         "US-0001",
@@ -1784,6 +1793,356 @@ def test_story_runner_double_reference_failure_has_zero_partial_persistence(
             "Specification item ID outside the parent boundary"
             in outcomes[0].failure_message
         )
+        assert session.exec(select(StoryArtifact)).all() == []
+        assert session.exec(select(StoryArtifactDecision)).all() == []
+        assert session.exec(select(UserStory)).all() == []
+
+
+def _attempt_16_sanitized_responses(
+    *,
+    valid_spec_id: str = "REQ.planning-1",
+    numeric_spelling_spec_id: str = "REQ.planning-2",
+    unbounded_spec_id: str = "REQ.planning-3",
+) -> tuple[JsonObject, JsonObject]:
+    """Return sanitized 3-Story response payloads captured during Attempt 16."""
+    response_1: JsonObject = {
+        "user_stories": [
+            {
+                "story_title": "Expose the public Python calculator operation",
+                "statement": (
+                    "As a software developer, I want to call the calculator through "
+                    "the public `string_calculator.add` operation, so that I can "
+                    "calculate supported Number Lists without depending on internal "
+                    "implementation details."
+                ),
+                "acceptance_criteria": [
+                    (
+                        "`from string_calculator import add` succeeds and exposes an "
+                        "operation accepting one string argument and returning an "
+                        "integer for successful supported input, as required by "
+                        "REQ.python-public-add."
+                    ),
+                    (
+                        "Calling `add(\"\")` returns integer `0`, as required by "
+                        "REQ.empty-input-zero."
+                    ),
+                    (
+                        "The public operation is provided as the direct calculation "
+                        "seam, consistent with DECISION.one-public-calculation-seam."
+                    ),
+                    (
+                        "The project targets Python 3.13 or newer, as required by "
+                        "CONSTRAINT.python-runtime."
+                    ),
+                ],
+                "spec_item_ids": [valid_spec_id],
+                "invest_score": "High",
+                "estimated_effort": "S",
+                "produced_artifacts": [
+                    "Public Python package interface exposing "
+                    "`add(numbers: str) -> int`"
+                ],
+                "research_caveats": [],
+                "decomposition_warning": None,
+                "dependency_candidates": [],
+            },
+            {
+                "story_title": "Accept the supported Number List language",
+                "statement": (
+                    "As a software developer, I want the calculator to accept the "
+                    "defined Integer Token and Delimiter syntax, so that supported "
+                    "comma-separated and line-feed-separated inputs can be processed "
+                    "consistently."
+                ),
+                "acceptance_criteria": [
+                    (
+                        "An empty string is accepted as a Number List, consistent "
+                        "with REQ.number-list-language."
+                    ),
+                    (
+                        "ASCII decimal digits with an optional leading minus sign are "
+                        "recognized as Integer Tokens, while whitespace and a leading "
+                        "plus sign are not part of an Integer Token, as required by "
+                        "REQ.integer-token-language."
+                    ),
+                    (
+                        "One or more valid Integer Tokens separated by exactly one "
+                        "comma or one actual line-feed are accepted, and comma and "
+                        "actual line-feed Delimiters may be mixed, as required by "
+                        "REQ.number-list-language."
+                    ),
+                    (
+                        "A valid Number List is not rejected because it exceeds an "
+                        "arbitrary product-level token-count limit, as required by "
+                        "REQ.number-list-language and "
+                        "CONSTRAINT.standard-library-preference."
+                    ),
+                    (
+                        "The implementation remains within the bounded "
+                        "calculator scope and does not add later or unrelated "
+                        "capabilities, as constrained by NON_GOAL.later-capabilities."
+                    ),
+                ],
+                "spec_item_ids": [valid_spec_id],
+                "invest_score": "High",
+                "estimated_effort": "M",
+                "produced_artifacts": ["Supported Number List parsing behavior"],
+                "research_caveats": [],
+                "decomposition_warning": None,
+                "dependency_candidates": [],
+            },
+            {
+                "story_title": "Sum supported non-negative Number Lists",
+                "statement": (
+                    "As a software developer, I want supported non-negative Number "
+                    "Lists to be summed according to their numeric values, so that I "
+                    "can obtain predictable arithmetic results from the calculator."
+                ),
+                "acceptance_criteria": [
+                    (
+                        "A single non-negative Integer Token returns its "
+                        "numeric value, as required by REQ.sum-nonnegative-values."
+                    ),
+                    (
+                        "Comma-separated, actual-line-feed-separated, and "
+                        "mixed-delimiter non-negative Number Lists return the "
+                        "arithmetic sum of all parsed Integer Tokens, as required by "
+                        "REQ.sum-nonnegative-values."
+                    ),
+                    (
+                        "Leading zeros do not change an Integer Token's "
+                        "numeric meaning, as required by REQ.numeric-spelling."
+                    ),
+                    (
+                        "Negative-zero spellings are treated as numeric zero and "
+                        "contribute zero rather than changing the result, as required "
+                        "by REQ.numeric-spelling."
+                    ),
+                    (
+                        "The operation supports the complete bounded Number List "
+                        "language without imposing an arbitrary product-level "
+                        "token-count ceiling, as required by REQ.number-list-language."
+                    ),
+                ],
+                "spec_item_ids": [valid_spec_id, numeric_spelling_spec_id],
+                "invest_score": "High",
+                "estimated_effort": "M",
+                "produced_artifacts": [
+                    "Public calculation behavior for supported "
+                    "non-negative Number Lists"
+                ],
+                "research_caveats": [],
+                "decomposition_warning": None,
+                "dependency_candidates": [],
+            },
+        ],
+        "is_complete": True,
+        "clarifying_questions": [],
+    }
+
+    response_2: JsonObject = {
+        "user_stories": [
+            {
+                "story_title": "Accept supported Number Lists",
+                "statement": (
+                    "As a software developer, I want the calculator to recognize "
+                    "the supported Number List language, so that valid integer lists "
+                    "can be processed consistently."
+                ),
+                "acceptance_criteria": [
+                    "An empty string is accepted as a Number List.",
+                    (
+                        "Valid Integer Tokens consist of ASCII decimal digits with an "
+                        "optional leading minus sign, without whitespace or a leading "
+                        "plus sign."
+                    ),
+                    "Valid Integer Tokens separated by exactly one comma are accepted.",
+                    (
+                        "Valid Integer Tokens separated by exactly one actual "
+                        "line-feed are accepted."
+                    ),
+                    (
+                        "Comma and actual line-feed Delimiters may coexist in one "
+                        "Number List."
+                    ),
+                    (
+                        "No arbitrary product-level maximum number of Integer "
+                        "Tokens is imposed."
+                    ),
+                    (
+                        "Custom or later calculator capabilities are not promised "
+                        "as part of this release."
+                    ),
+                ],
+                "spec_item_ids": [valid_spec_id],
+                "invest_score": "High",
+                "estimated_effort": "M",
+                "produced_artifacts": ["Supported Number List parsing behavior"],
+                "research_caveats": [],
+                "decomposition_warning": None,
+                "dependency_candidates": [],
+            },
+            {
+                "story_title": "Calculate sums for supported input",
+                "statement": (
+                    "As a software developer, I want the calculator to return the "
+                    "arithmetic sum of a supported Number List, so that I can obtain a "
+                    "predictable result from valid input."
+                ),
+                "acceptance_criteria": [
+                    (
+                        "The public operation returns integer zero for an empty "
+                        "Number List."
+                    ),
+                    "One non-negative Integer Token returns its value.",
+                    "Comma-separated non-negative values return their arithmetic sum.",
+                    (
+                        "Actual-line-feed-separated non-negative values return their "
+                        "arithmetic sum."
+                    ),
+                    (
+                        "Mixed comma- and actual-line-feed-separated non-negative "
+                        "values return their arithmetic sum."
+                    ),
+                    (
+                        "A valid Number List is accepted without an arbitrary "
+                        "product-level maximum token count."
+                    ),
+                ],
+                "spec_item_ids": [valid_spec_id, unbounded_spec_id],
+                "invest_score": "High",
+                "estimated_effort": "S",
+                "produced_artifacts": [
+                    "Supported non-negative Number List summation behavior"
+                ],
+                "research_caveats": [],
+                "decomposition_warning": None,
+                "dependency_candidates": [],
+            },
+            {
+                "story_title": "Expose the public Python calculator operation",
+                "statement": (
+                    "As a software developer, I want a small public Python operation "
+                    "for supported calculator input, so that I can use the calculator "
+                    "without depending on internal implementation details."
+                ),
+                "acceptance_criteria": [
+                    "`from string_calculator import add` succeeds.",
+                    (
+                        "The public `add` operation has the signature "
+                        "`add(numbers: str) -> int`."
+                    ),
+                    (
+                        "The operation accepts one string argument and returns an "
+                        "integer for successful supported input."
+                    ),
+                    "The implementation targets Python 3.13 or newer.",
+                    (
+                        "The implementation prefers the Python standard library unless "
+                        "a concrete unmet requirement justifies a runtime dependency."
+                    ),
+                ],
+                "spec_item_ids": [valid_spec_id],
+                "invest_score": "High",
+                "estimated_effort": "S",
+                "produced_artifacts": [
+                    "Public `string_calculator.add` Python interface"
+                ],
+                "research_caveats": [],
+                "decomposition_warning": None,
+                "dependency_candidates": [],
+            },
+        ],
+        "is_complete": True,
+        "clarifying_questions": [],
+    }
+
+    return response_1, response_2
+
+
+def test_story_runner_attempt_16_reproduction_fails_closed_without_partial_persistence(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reproduce Attempt 16 with 3-Story responses and fail-closed persistence.
+
+    Demonstrates that two responses with out-of-parent citations trigger bounded
+    repair with the complete exact allow-list, terminate after 2 attempts, and
+    fail closed with zero partial persistence.
+    """
+    response_1, response_2 = _attempt_16_sanitized_responses()
+    model = SequenceStoryLlm(
+        model="provider-free-attempt-16",
+        response_texts=[json.dumps(response_1), json.dumps(response_2)],
+    )
+    monkeypatch.setattr(
+        story_agents,
+        "_create_story_writer_model",
+        lambda: model,
+    )
+    writer = story_agents.create_user_story_writer_agent()
+    system = _story_runner_system(
+        engine,
+        leaf=writer,
+        requirements=(
+            "Plan immutable work",
+            "numeric spelling",
+            "unbounded token count",
+        ),
+    )
+
+    result = system.runner.run(
+        _story_decision(system.domain, system.project_id),
+        system.payload,
+    )
+
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.code is WorkflowErrorCode.EXTERNAL_EXECUTION_FAILED
+    assert len(model.request_texts) == EXPECTED_RECOVERY_ATTEMPT_COUNT
+    assert "SYSTEM_FEEDBACK" not in model.request_texts[0]
+
+    repair_payload = json.loads(model.request_texts[1])
+    assert repair_payload.get("user_input") is not None
+    repair_user_input = repair_payload["user_input"]
+    assert (
+        "SYSTEM_FEEDBACK: Your previous User Story response failed schema or "
+        "reference validation." in repair_user_input
+    )
+    assert (
+        "ERROR: Specification item ID outside the parent boundary: "
+        "REQ.planning-2" in repair_user_input
+    )
+    assert (
+        'VALIDATION_ERRORS: ["Specification item ID outside the parent boundary: '
+        'REQ.planning-2"]' in repair_user_input
+    )
+    assert 'ALLOWED_PARENT_SPEC_ITEM_IDS: ["REQ.planning-1"]' in repair_user_input
+    assert (
+        "Every user story spec_item_ids list must contain non-empty IDs selected "
+        "strictly from ALLOWED_PARENT_SPEC_ITEM_IDS." in repair_user_input
+    )
+    assert (
+        "Return JSON only. Match UserStoryWriterOutput exactly. Required fields "
+        "are user_stories, is_complete, and clarifying_questions. "
+        "Do not add wrapper fields." in repair_user_input
+    )
+
+    with Session(engine) as session:
+        attempts = _node_attempts(session, "planning.story.generate")
+        outcomes = _node_outcomes(session, "planning.story.generate")
+        assert len(attempts) == 1
+        assert len(outcomes) == 1
+        assert outcomes[0].status == "failure"
+        assert outcomes[0].failure_message is not None
+        assert (
+            "Story schema repair failed after two provider responses."
+            in outcomes[0].failure_message
+        )
+        assert "INITIAL_VALIDATION_ERRORS" in outcomes[0].failure_message
+        assert "REQ.planning-2" in outcomes[0].failure_message
+        assert "REPAIR_VALIDATION_ERRORS" in outcomes[0].failure_message
+        assert "REQ.planning-3" in outcomes[0].failure_message
         assert session.exec(select(StoryArtifact)).all() == []
         assert session.exec(select(StoryArtifactDecision)).all() == []
         assert session.exec(select(UserStory)).all() == []

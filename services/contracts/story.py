@@ -60,7 +60,12 @@ class UserStoryAgentItem(BaseModel):
     story_title: Annotated[str, Field(min_length=1)]
     statement: Annotated[str, Field(min_length=1)]
     acceptance_criteria: tuple[str, ...] = Field(min_length=1)
-    spec_item_ids: tuple[str, ...]
+    spec_item_ids: tuple[str, ...] = Field(
+        description=(
+            "Non-empty Specification item IDs selected strictly from "
+            "parent_backlog_spec_item_ids."
+        ),
+    )
     invest_score: Literal["High", "Medium", "Low"]
     estimated_effort: Literal["XS", "S", "M", "L", "XL"]
     produced_artifacts: tuple[str, ...]
@@ -191,7 +196,12 @@ class UserStoryWriterInput(BaseModel):
     accepted_specification_hash: Annotated[str, Field(pattern=r"^sha256:[0-9a-f]{64}$")]
     accepted_specification_json: Annotated[str, Field(min_length=1)]
     parent_backlog_item_id: str
-    parent_backlog_spec_item_ids: tuple[str, ...]
+    parent_backlog_spec_item_ids: tuple[str, ...] = Field(
+        description=(
+            "Exact allow-list of Specification item IDs that generated User "
+            "Stories may cite."
+        ),
+    )
     roadmap_context: str = ""
     user_input: str | None = None
 

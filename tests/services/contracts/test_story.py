@@ -1,6 +1,7 @@
 """Tests for closed provider and host Story contracts."""
 # ruff: noqa: D103
 
+import json
 from itertools import permutations
 
 import pytest
@@ -12,9 +13,11 @@ from services.contracts.story import (
     CanonicalStoryOutput,
     StoryItemEnvelope,
     UserStoryAgentItem,
+    UserStoryWriterInput,
     canonicalize_story_items,
     parse_story_persona,
 )
+from services.story_schema_repair import with_story_schema_repair_feedback
 from utils.agileforge_spec_profile_v2 import (
     RequirementLevel,
     SpecificationItem,
@@ -220,3 +223,70 @@ def test_canonical_story_output_accepts_only_the_host_persisted_envelope() -> No
                 "is_complete": True,
             }
         )
+
+
+def test_with_story_schema_repair_feedback_preserves_large_parent_boundary_and_rules(
+) -> None:
+    """Preserve the complete allow-list and rules even under large parent boundaries."""
+    expected_item_count = 60
+    items = tuple(
+        SpecificationItem(
+            id=f"REQ.{i:04d}",
+            type=SpecItemType.REQ,
+            title=f"Req {i}",
+            statement=f"The system must support requirement {i}.",
+            level=RequirementLevel.MUST,
+            verification=VerificationMethod.UNIT_TEST,
+            acceptance=(f"Requirement {i} passes.",),
+        )
+        for i in range(1, expected_item_count + 1)
+    )
+    payload_model = SpecificationPayload(
+        artifact_id="SPEC.large-boundary",
+        title="Large Boundary Specification",
+        summary="60 requirement items",
+        problem_statement="Testing large parent boundary repair feedback.",
+        items=items,
+    )
+    spec_json = canonical_spec_json(payload_model)
+    spec_hash = canonical_spec_hash(payload_model)
+    parent_ids = tuple(f"REQ.{i:04d}" for i in range(1, expected_item_count + 1))
+
+    payload = UserStoryWriterInput(
+        accepted_specification_version_id=1,
+        accepted_specification_hash=spec_hash,
+        accepted_specification_json=spec_json,
+        parent_backlog_item_id="PBI-000001",
+        parent_backlog_spec_item_ids=parent_ids,
+    )
+
+    val_errors = [
+        f"Specification item ID outside the parent boundary: REQ.UNKNOWN_{i}"
+        for i in range(30)
+    ]
+    repaired = with_story_schema_repair_feedback(
+        payload,
+        error="; ".join(val_errors),
+        validation_errors=val_errors,
+        targeted=False,
+    )
+
+    assert repaired.user_input is not None
+    assert repaired.user_input.endswith("Do not add wrapper fields.")
+    assert (
+        "Every user story spec_item_ids list must contain non-empty IDs selected "
+        "strictly from ALLOWED_PARENT_SPEC_ITEM_IDS."
+        in repaired.user_input
+    )
+    assert (
+        "Return JSON only. Match UserStoryWriterOutput exactly. Required fields "
+        "are user_stories, is_complete, and clarifying_questions. "
+        "Do not add wrapper fields."
+        in repaired.user_input
+    )
+    prefix = "ALLOWED_PARENT_SPEC_ITEM_IDS: "
+    start_idx = repaired.user_input.index(prefix) + len(prefix)
+    end_idx = repaired.user_input.index("\n", start_idx)
+    parsed_ids = json.loads(repaired.user_input[start_idx:end_idx])
+    assert parsed_ids == list(parent_ids)
+    assert len(parsed_ids) == expected_item_count
