@@ -205,6 +205,7 @@ def test_story_pending_exposes_valid_unaccepted_story_leaf(
         {
             "backlog_item_id": "PBI-000001",
             "backlog_artifact_id": 101,
+            "requirement": "",
             "spec_item_ids": ["REQ.001"],
             "priority": 1,
             "status": status,
@@ -302,6 +303,7 @@ def test_story_pending_selects_only_the_current_accepted_backlog_root(
         {
             "backlog_item_id": "PBI-000001",
             "backlog_artifact_id": 102,
+            "requirement": "",
             "spec_item_ids": ["REQ.CURRENT"],
             "priority": 2,
             "status": "accepted",
@@ -311,6 +313,109 @@ def test_story_pending_selects_only_the_current_accepted_backlog_root(
     ]
     assert data["count"] == 1
     assert data["pending_count"] == 0
+
+
+def test_story_pending_projects_requirement_summary_from_accepted_backlog_artifact(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The story_pending projection includes requirement text from Backlog."""
+    from tests.workflow.test_direct_specification_lineage import (  # noqa: PLC0415
+        _chain_backlog,
+    )
+
+    project_id, backlog_id, backlog_fingerprint, _spec_version_id = (
+        _seed_task_7_backlog(engine)
+    )
+
+    snapshot = _story_pending_snapshot(
+        phase_artifacts=(
+            _chain_backlog(backlog_id, "accepted", None).model_copy(
+                update={"artifact_fingerprint": backlog_fingerprint}
+            ),
+        ),
+        backlog_items=(
+            BacklogItemFact(
+                backlog_item_id="PBI-000001",
+                backlog_artifact_id=backlog_id,
+                backlog_artifact_fingerprint=backlog_fingerprint,
+                item_fingerprint="sha256:item-1",
+                spec_item_ids=("REQ.001",),
+                priority=1,
+            ),
+        ),
+        planning_artifacts=(),
+    )
+    projection = DurableReadProjectionService(engine=engine)
+    monkeypatch.setattr(projection, "_snapshot", lambda _project_id: snapshot)
+
+    result = projection.story_pending(project_id=project_id)
+
+    assert result["ok"] is True
+    data = result["data"]
+    assert isinstance(data, dict)
+    items = data["items"]
+    assert isinstance(items, list)
+    assert len(items) == 1
+    first_item = items[0]
+    assert isinstance(first_item, dict)
+    assert first_item["backlog_item_id"] == "PBI-000001"
+    assert first_item["requirement"] == "Persist exact delivery lineage"
+
+
+def test_story_pending_fails_closed_on_invalid_backlog_canonical_content(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fail closed with structured projection error when Backlog content is invalid."""
+    from tests.workflow.test_direct_specification_lineage import (  # noqa: PLC0415
+        _chain_backlog,
+    )
+
+    project_id, backlog_id, backlog_fingerprint, _spec_version_id = (
+        _seed_task_7_backlog(engine)
+    )
+
+    with Session(engine) as session:
+        artifact = session.get(BacklogArtifact, backlog_id)
+        assert artifact is not None
+        artifact.canonical_content_json = "{invalid json"
+        session.add(artifact)
+        session.commit()
+
+    snapshot = _story_pending_snapshot(
+        phase_artifacts=(
+            _chain_backlog(backlog_id, "accepted", None).model_copy(
+                update={"artifact_fingerprint": backlog_fingerprint}
+            ),
+        ),
+        backlog_items=(
+            BacklogItemFact(
+                backlog_item_id="PBI-000001",
+                backlog_artifact_id=backlog_id,
+                backlog_artifact_fingerprint=backlog_fingerprint,
+                item_fingerprint="sha256:item-1",
+                spec_item_ids=("REQ.001",),
+                priority=1,
+            ),
+        ),
+        planning_artifacts=(),
+    )
+    projection = DurableReadProjectionService(engine=engine)
+    monkeypatch.setattr(projection, "_snapshot", lambda _project_id: snapshot)
+
+    result = projection.story_pending(project_id=project_id)
+
+    assert result["ok"] is False
+    errors = result["errors"]
+    assert isinstance(errors, list)
+    error = errors[0]
+    assert isinstance(error, dict)
+    assert error["code"] == "PROJECT_FACTS_UNAVAILABLE"
+    details = error["details"]
+    assert isinstance(details, dict)
+    assert details["reason"] == "BACKLOG_CONTENT_INVALID"
+    assert error["message"] == "Stored Backlog artifact canonical content is invalid."
 
 
 def test_story_pending_fails_closed_on_conflicting_current_backlog_lineage(

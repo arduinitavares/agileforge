@@ -318,3 +318,375 @@ test('Sprint generation asks the operator for a team', () => {
     assert.ok(markup.includes('required'));
     assert.ok(!markup.includes('value="Platform"'));
 });
+
+test('story generation controls render exact PBI IDs and requirement summaries, not array ordinals', () => {
+    const context = loadFrontend();
+    const actions = [
+        {
+            node_id: 'planning.story.generate',
+            instance_key: 'backlog_item:PBI-000002',
+            request_kind: 'record_story_draft',
+            endpoint: 'story/generate',
+            transport: 'semantic',
+        },
+        {
+            node_id: 'planning.story.generate',
+            instance_key: 'backlog_item:PBI-000004',
+            request_kind: 'record_story_draft',
+            endpoint: 'story/generate',
+            transport: 'semantic',
+        },
+        {
+            node_id: 'planning.story.generate',
+            instance_key: 'backlog_item:PBI-000005',
+            request_kind: 'record_story_draft',
+            endpoint: 'story/generate',
+            transport: 'semantic',
+        },
+        {
+            node_id: 'planning.story.generate',
+            instance_key: 'backlog_item:PBI-000006',
+            request_kind: 'record_story_draft',
+            endpoint: 'story/generate',
+            transport: 'semantic',
+        },
+    ];
+    const position = {
+        decisions: actions.map((a) => ({
+            node_id: a.node_id,
+            instance_key: a.instance_key,
+            request_kind: a.request_kind,
+            category: 'available',
+            reason_code: 'STORY_GENERATION_REQUIRED',
+            recommendation_kind: 'required',
+        })),
+    };
+    const reviews = {
+        stories: {
+            items: [storyReview('backlog_item:PBI-000003')],
+        },
+    };
+    const appState = {
+        storyPending: {
+            items: [
+                { backlog_item_id: 'PBI-000002', requirement: 'Support accepted Number List language.' },
+                { backlog_item_id: 'PBI-000003', requirement: 'Reject negative numeric values.' },
+                { backlog_item_id: 'PBI-000004', requirement: 'Provide the installed CLI.' },
+                { backlog_item_id: 'PBI-000005', requirement: 'Verify through public behavior.' },
+                { backlog_item_id: 'PBI-000006', requirement: 'Provide human-reviewable release evidence.' },
+            ],
+        },
+    };
+
+    const markup = context.deliveryPanelMarkup(position, reviews, actions, appState);
+
+    // Exact PBI IDs and summaries are present
+    assert.ok(markup.includes('Generate Stories for PBI-000002: Support accepted Number List language.'));
+    assert.ok(markup.includes('Generate Stories for PBI-000004: Provide the installed CLI.'));
+    assert.ok(markup.includes('Generate Stories for PBI-000005: Verify through public behavior.'));
+    assert.ok(markup.includes('Generate Stories for PBI-000006: Provide human-reviewable release evidence.'));
+
+    // Array ordinals are NEVER used as domain identity
+    assert.ok(!markup.includes('backlog item 1'));
+    assert.ok(!markup.includes('backlog item 2'));
+    assert.ok(!markup.includes('backlog item 3'));
+    assert.ok(!markup.includes('backlog item 4'));
+
+    // Pending story review card is identified by exact PBI ID, not array index
+    assert.ok(markup.includes('Story review for PBI-000003'));
+    assert.ok(!markup.includes('Story review 1'));
+});
+
+test('single story generation control renders exact PBI ID and requirement', () => {
+    const context = loadFrontend();
+    const action = {
+        node_id: 'planning.story.generate',
+        instance_key: 'backlog_item:PBI-000002',
+        request_kind: 'record_story_draft',
+        endpoint: 'story/generate',
+        transport: 'semantic',
+    };
+    const position = {
+        decisions: [{
+            node_id: action.node_id,
+            instance_key: action.instance_key,
+            request_kind: action.request_kind,
+            category: 'available',
+            reason_code: 'STORY_GENERATION_REQUIRED',
+            recommendation_kind: 'required',
+        }],
+    };
+    const appState = {
+        storyPending: {
+            items: [
+                { backlog_item_id: 'PBI-000002', requirement: 'Support accepted Number List language.' },
+            ],
+        },
+    };
+
+    const markup = context.deliveryPanelMarkup(position, {}, [action], appState);
+
+    assert.ok(markup.includes('Generate Stories for PBI-000002: Support accepted Number List language.'));
+    assert.ok(!markup.includes('Generate Stories</span>'));
+});
+
+test('initial, revision, and correction story actions render distinct intent', () => {
+    const context = loadFrontend();
+    const appState = {
+        storyPending: {
+            items: [
+                { backlog_item_id: 'PBI-000001', requirement: 'Provide arithmetic sum.' },
+                { backlog_item_id: 'PBI-000002', requirement: 'Support number language.' },
+                { backlog_item_id: 'PBI-000003', requirement: 'Reject negatives.' },
+            ],
+        },
+    };
+
+    // Initial generation
+    const initialAction = {
+        node_id: 'planning.story.generate',
+        instance_key: 'backlog_item:PBI-000002',
+        request_kind: 'record_story_draft',
+        endpoint: 'story/generate',
+    };
+    const initialMarkup = context.deliveryPanelMarkup(
+        {
+            decisions: [{
+                node_id: initialAction.node_id,
+                instance_key: initialAction.instance_key,
+                reason_code: 'STORY_GENERATION_REQUIRED',
+                recommendation_kind: 'required',
+            }],
+        },
+        {},
+        [initialAction],
+        appState,
+    );
+    assert.ok(initialMarkup.includes('Generate Stories for PBI-000002: Support number language.'));
+
+    // Revision after feedback/rejection
+    const revisionAction = {
+        node_id: 'planning.story.generate',
+        instance_key: 'backlog_item:PBI-000003',
+        request_kind: 'record_story_draft',
+        endpoint: 'story/generate',
+    };
+    const revisionMarkup = context.deliveryPanelMarkup(
+        {
+            decisions: [{
+                node_id: revisionAction.node_id,
+                instance_key: revisionAction.instance_key,
+                reason_code: 'STORY_REVISION_REQUIRED',
+                recommendation_kind: 'recovery',
+            }],
+        },
+        {},
+        [revisionAction],
+        appState,
+    );
+    assert.ok(revisionMarkup.includes('Revise Stories for PBI-000003: Reject negatives.'));
+
+    // Correction of accepted story
+    const correctionAction = {
+        node_id: 'planning.story.generate',
+        instance_key: 'backlog_item:PBI-000001',
+        request_kind: 'record_story_draft',
+        endpoint: 'story/generate',
+    };
+    const correctionMarkup = context.deliveryPanelMarkup(
+        {
+            decisions: [{
+                node_id: correctionAction.node_id,
+                instance_key: correctionAction.instance_key,
+                reason_code: 'STORY_CORRECTION_AVAILABLE',
+                recommendation_kind: 'optional_reentry',
+            }],
+        },
+        {},
+        [correctionAction],
+        appState,
+    );
+    assert.ok(correctionMarkup.includes('Correct Stories for PBI-000001: Provide arithmetic sum.'));
+});
+
+test('busy state and status preserve exact PBI identity and intent', () => {
+    const context = loadFrontend();
+    const action = {
+        node_id: 'planning.story.generate',
+        instance_key: 'backlog_item:PBI-000002',
+        request_kind: 'record_story_draft',
+        endpoint: 'story/generate',
+    };
+    const button = directActionButton(action);
+    button._label.textContent = 'Generate Stories for PBI-000002: Support number language.';
+
+    context.setDeliveryActionBusy(button, true, 'record_story_draft');
+
+    assert.equal(button.ariaBusy, 'true');
+    assert.equal(button.disabled, true);
+    assert.equal(button._label.textContent, 'Generating Stories for PBI-000002...');
+    assert.equal(button._status.textContent, 'Generating Stories for PBI-000002...');
+
+    // Reset busy restores original label
+    context.setDeliveryActionBusy(button, false, 'record_story_draft');
+    assert.equal(button.ariaBusy, null);
+    assert.equal(button.disabled, false);
+    assert.equal(button._label.textContent, 'Generate Stories for PBI-000002: Support number language.');
+});
+
+test('story review confirmation modal identifies exact PBI ID and requirement', () => {
+    const context = loadFrontend();
+    const item = storyReview('backlog_item:PBI-000003');
+    item.review.lineage.backlog_item.requirement = 'Reject any Number List containing a negative.';
+
+    vm.runInContext(`lifecycleState = {
+        planningReviews: {
+            stories: {
+                items: [${JSON.stringify(item)}],
+            },
+        },
+    };`, context);
+
+    const acceptBinding = context.capturePlanningReview('story', 0, 'accepted');
+    assert.equal(acceptBinding.title, 'Accept Story review for PBI-000003: Reject any Number List containing a negative.');
+
+    const changesBinding = context.capturePlanningReview('story', 0, 'feedback');
+    assert.equal(changesBinding.title, 'Request changes for Story review for PBI-000003: Reject any Number List containing a negative.');
+
+    const rejectBinding = context.capturePlanningReview('story', 0, 'rejected');
+    assert.equal(rejectBinding.title, 'Reject Story review for PBI-000003: Reject any Number List containing a negative.');
+});
+
+test('story generation control is disabled when requirement summary is missing', () => {
+    const context = loadFrontend();
+    const action = {
+        node_id: 'planning.story.generate',
+        instance_key: 'backlog_item:PBI-000002',
+        request_kind: 'record_story_draft',
+        endpoint: 'story/generate',
+        transport: 'semantic',
+    };
+    const position = {
+        decisions: [{
+            node_id: action.node_id,
+            instance_key: action.instance_key,
+            request_kind: action.request_kind,
+            category: 'available',
+            reason_code: 'STORY_GENERATION_REQUIRED',
+            recommendation_kind: 'required',
+        }],
+    };
+    // No storyPending items provided
+    const markup = context.deliveryPanelMarkup(position, {}, [action], { storyPending: { items: [] } });
+
+    assert.ok(markup.includes('disabled'));
+    assert.ok(markup.includes('title="Requirement summary unavailable"'));
+});
+
+test('delivery generation details provide exact title, description, and intent for confirmation dialog', () => {
+    const context = loadFrontend();
+    const appState = {
+        storyPending: {
+            items: [
+                { backlog_item_id: 'PBI-000001', requirement: 'Provide arithmetic sum.' },
+                { backlog_item_id: 'PBI-000002', requirement: 'Support number language.' },
+                { backlog_item_id: 'PBI-000003', requirement: 'Reject negatives.' },
+            ],
+        },
+    };
+
+    // Initial generation
+    const genAction = {
+        node_id: 'planning.story.generate',
+        instance_key: 'backlog_item:PBI-000002',
+        request_kind: 'record_story_draft',
+        endpoint: 'story/generate',
+    };
+    const genDetails = context.deliveryGenerationActionDetails(
+        genAction,
+        { decisions: [{ node_id: genAction.node_id, instance_key: genAction.instance_key, reason_code: 'STORY_GENERATION_REQUIRED' }] },
+        {},
+        appState,
+    );
+    assert.equal(genDetails.intentVerb, 'Generate');
+    assert.equal(genDetails.intentLabel, 'generation');
+    assert.equal(genDetails.pbiId, 'PBI-000002');
+    assert.equal(genDetails.requirement, 'Support number language.');
+
+    // Revision
+    const revAction = {
+        node_id: 'planning.story.generate',
+        instance_key: 'backlog_item:PBI-000003',
+        request_kind: 'record_story_draft',
+        endpoint: 'story/generate',
+    };
+    const revDetails = context.deliveryGenerationActionDetails(
+        revAction,
+        { decisions: [{ node_id: revAction.node_id, instance_key: revAction.instance_key, reason_code: 'STORY_REVISION_REQUIRED' }] },
+        {},
+        appState,
+    );
+    assert.equal(revDetails.intentVerb, 'Revise');
+    assert.equal(revDetails.intentLabel, 'revision');
+    assert.equal(revDetails.pbiId, 'PBI-000003');
+    assert.equal(revDetails.requirement, 'Reject negatives.');
+
+    // Correction
+    const corrAction = {
+        node_id: 'planning.story.generate',
+        instance_key: 'backlog_item:PBI-000001',
+        request_kind: 'record_story_draft',
+        endpoint: 'story/generate',
+    };
+    const corrDetails = context.deliveryGenerationActionDetails(
+        corrAction,
+        { decisions: [{ node_id: corrAction.node_id, instance_key: corrAction.instance_key, reason_code: 'STORY_CORRECTION_AVAILABLE' }] },
+        {},
+        appState,
+    );
+    assert.equal(corrDetails.intentVerb, 'Correct');
+    assert.equal(corrDetails.intentLabel, 'correction');
+    assert.equal(corrDetails.pbiId, 'PBI-000001');
+    assert.equal(corrDetails.requirement, 'Provide arithmetic sum.');
+});
+
+test('story generation control ignores candidate backlog reviews and stays disabled when storyPending is empty', () => {
+    const context = loadFrontend();
+    const action = {
+        node_id: 'planning.story.generate',
+        instance_key: 'backlog_item:PBI-000002',
+        request_kind: 'record_story_draft',
+        endpoint: 'story/generate',
+        transport: 'semantic',
+    };
+    const position = {
+        decisions: [{
+            node_id: action.node_id,
+            instance_key: action.instance_key,
+            request_kind: action.request_kind,
+            category: 'available',
+            reason_code: 'STORY_GENERATION_REQUIRED',
+            recommendation_kind: 'required',
+        }],
+    };
+    const reviews = {
+        backlog: {
+            candidate: {
+                backlog_items: [
+                    { backlog_item_id: 'PBI-000002', requirement: 'UNTRUSTED OR STALE CANDIDATE REQUIREMENT' },
+                ],
+            },
+        },
+    };
+    // storyPending is empty
+    const appState = { storyPending: { items: [] } };
+    const details = context.deliveryGenerationActionDetails(action, position, reviews, appState);
+    assert.equal(details.requirement, '');
+    assert.equal(details.pbiId, 'PBI-000002');
+    assert.equal(details.label, 'Generate Stories for PBI-000002');
+
+    const markup = context.deliveryPanelMarkup(position, reviews, [action], appState);
+    assert.ok(markup.includes('disabled'));
+    assert.ok(markup.includes('title="Requirement summary unavailable"'));
+    assert.ok(!markup.includes('UNTRUSTED OR STALE CANDIDATE REQUIREMENT'));
+});

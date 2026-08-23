@@ -31,7 +31,7 @@ from utils.runtime_controls import (
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
-    from playwright.sync_api import Browser, BrowserContext, Page, Route
+    from playwright.sync_api import Browser, BrowserContext, Locator, Page, Route
     from playwright.sync_api._generated import ViewportSize
 
 type JsonValue = (
@@ -143,7 +143,10 @@ class FakeLifecycle:
     delivery_generation_failure: str | None = None
     delivery_requests: list[tuple[str, JsonObject]] = field(default_factory=list)
     planning_review_overrides: dict[str, JsonObject] = field(default_factory=dict)
+    story_pending_override: JsonObject | None = None
     position_override: JsonObject | None = None
+    on_story_decide: Callable[[JsonObject], None] | None = None
+    story_decisions: list[JsonObject] = field(default_factory=list)
     reject_stale_delivery_actions: bool = False
     refresh_count: int = 0
     api_errors: list[str] = field(default_factory=list)
@@ -212,12 +215,13 @@ class FakeLifecycle:
                     {
                         "binding": {
                             "decision_fingerprint": (self.story_decision_fingerprint),
-                            "instance_key": "backlog_item:req-1",
+                            "instance_key": "backlog_item:PBI-000001",
                         },
                         "review": {
                             "phase": "story",
                             "lineage": {
                                 "backlog_item": {
+                                    "backlog_item_id": "PBI-000001",
                                     "requirement": ("Delivery workflow requirement"),
                                     "priority": "high",
                                     "value_driver": "core",
@@ -322,6 +326,7 @@ class FakeLifecycle:
             "/goals/status": self._goal_projection,
             "/repository": self._repository_projection,
             "/specifications/review": self._specification_projection,
+            "/story/pending": self._story_pending_projection,
             "/vision/status": self._vision_projection,
         }
         reader = readers.get(suffix)
@@ -674,6 +679,33 @@ class FakeLifecycle:
     def _repository_projection(self) -> JsonObject:
         return {"repository": self.repository}
 
+    def _story_pending_projection(self) -> JsonObject:
+        if self.story_pending_override is not None:
+            return self.story_pending_override
+        raw_items = (
+            self.backlog_candidate.get("backlog_items")
+            if isinstance(self.backlog_candidate, dict)
+            else None
+        )
+        items: list[JsonValue] = (
+            [
+                {
+                    "backlog_item_id": item.get("backlog_item_id", ""),
+                    "requirement": item.get("requirement", ""),
+                    "status": "pending",
+                }
+                for item in raw_items
+                if isinstance(item, dict)
+            ]
+            if isinstance(raw_items, list)
+            else []
+        )
+        return {
+            "items": items,
+            "count": len(items),
+            "pending_count": len(items),
+        }
+
     def _generate_backlog(self, body: JsonObject) -> None:
         self._assert_fields(body, set())
         if self.delivery_generation_failure:
@@ -681,6 +713,7 @@ class FakeLifecycle:
         self.backlog_candidate = {
             "backlog_items": [
                 {
+                    "backlog_item_id": "PBI-000001",
                     "requirement": "Delivery generation workflow",
                     "priority": "high",
                     "value_driver": "core",
@@ -763,8 +796,19 @@ class FakeLifecycle:
 
     def _decide_story(self, body: JsonObject) -> None:
         self._assert_fields(body, {"decision", "rationale"})
-        assert body["decision"] == "accepted"
-        self.story_accepted = True
+        decision = body["decision"]
+        assert decision in {"accepted", "feedback", "rejected"}
+        if decision == "accepted":
+            self.story_accepted = True
+        elif decision == "feedback":
+            self.story_feedback = cast("str", body.get("rationale"))
+        elif decision == "rejected":
+            self.story_rejected = True
+        self.story_decisions.append(dict(body))
+        if self.on_story_decide is not None:
+            self.on_story_decide(body)
+        else:
+            self.planning_review_overrides.pop("/story/reviews", None)
 
     def _generate_sprint_plan(self, body: JsonObject) -> None:
         self._assert_fields(body, {"team_name"})
@@ -882,7 +926,7 @@ class FakeLifecycle:
             "decide_story": self.story_decision_fingerprint,
             "decide_sprint_plan": self.sprint_plan_decision_fingerprint,
         }.get(request_kind, self.specification_structure_decision_fingerprint)
-        instance_key = "backlog_item:req-1" if "story" in request_kind else None
+        instance_key = "backlog_item:PBI-000001" if "story" in request_kind else None
         decision: JsonObject = {
             "node_id": node_id,
             "child_graph_id": child,
@@ -1579,6 +1623,11 @@ def _verify_story_lifecycle_flow(page: Page) -> None:
     expect(generate_story_btn).to_contain_text("Generate Stories")
 
     generate_story_btn.click()
+    expect(page.locator("#human-action-dialog")).to_be_visible()
+    page.locator("#human-action-submit").click()
+    expect(page.locator("#human-action-dialog")).not_to_be_visible()
+    page.wait_for_timeout(_UI_SETTLE_MS)
+
     review_card = page.locator('[data-planning-review-card="story"]')
     expect(review_card).to_be_visible()
     expect(review_card).to_contain_text("Story review")
@@ -1755,6 +1804,26 @@ def _delivery_ready_fake(actions: list[JsonObject]) -> FakeLifecycle:
         "rendered_markdown": "# Delivery action contract",
     }
     fake.specification_accepted = True
+    fake.backlog_candidate = {
+        "backlog_items": [
+            {
+                "backlog_item_id": "PBI-000001",
+                "requirement": "Persist exact delivery lineage.",
+            },
+            {
+                "backlog_item_id": "PBI-000002",
+                "requirement": "Keep Story actions bound to their backlog item.",
+            },
+            {
+                "backlog_item_id": "PBI-000003",
+                "requirement": "Verify fresh retry after stale action rejection.",
+            },
+            {
+                "backlog_item_id": "PBI-000004",
+                "requirement": "Provide CLI calculation interface.",
+            },
+        ]
+    }
     fake.position_override = _delivery_position(actions)
     return fake
 
@@ -1791,6 +1860,9 @@ def test_story_generation_rejects_stale_rendered_selector_and_retries_fresh(
     fake.position_override = _delivery_position([first, fresh])
 
     stale_control.click()
+    expect(page.locator("#human-action-dialog")).to_be_visible()
+    page.locator("#human-action-submit").click()
+    expect(page.locator("#human-action-dialog")).not_to_be_visible()
     page.wait_for_timeout(_UI_SETTLE_MS)
     assert fake.delivery_requests[-1][1]["instance_key"] == stale["instance_key"]
     assert fake.api_errors[-1] == (
@@ -1810,8 +1882,358 @@ def test_story_generation_rejects_stale_rendered_selector_and_retries_fresh(
     fresh_control = fresh_action.locator("button")
     expect(fresh_control).to_be_visible()
     fresh_control.click()
+    expect(page.locator("#human-action-dialog")).to_be_visible()
+    page.locator("#human-action-submit").click()
+    expect(page.locator("#human-action-dialog")).not_to_be_visible()
     page.wait_for_timeout(_UI_SETTLE_MS)
     assert fake.delivery_requests[-1][1]["instance_key"] == fresh["instance_key"]
+
+    context.close()
+
+
+def _non_contiguous_story_position(
+    action_pbi2: JsonObject,
+    action_pbi4: JsonObject,
+) -> JsonObject:
+    return {
+        "graph_version": "agileforge.workflow.hidden",
+        "fact_fingerprint": "sha256:hidden-facts",
+        "decisions": [
+            {
+                "node_id": action_pbi2["node_id"],
+                "child_graph_id": "planning",
+                "request_kind": action_pbi2["request_kind"],
+                "category": "available",
+                "instance_key": action_pbi2["instance_key"],
+                "reason_code": "STORY_GENERATION_REQUIRED",
+                "recommendation_kind": "required",
+                "decision_fingerprint": "decision-pbi2",
+                "fact_references": [],
+            },
+            {
+                "node_id": action_pbi4["node_id"],
+                "child_graph_id": "planning",
+                "request_kind": action_pbi4["request_kind"],
+                "category": "available",
+                "instance_key": action_pbi4["instance_key"],
+                "reason_code": "STORY_CORRECTION_AVAILABLE",
+                "recommendation_kind": "optional_reentry",
+                "decision_fingerprint": "decision-pbi4",
+                "fact_references": [],
+            },
+        ],
+        "terminal": False,
+        "actions": [],
+        "_actions": [dict(action_pbi2), dict(action_pbi4)],
+    }
+
+
+def _non_contiguous_story_pending() -> JsonObject:
+    return {
+        "items": [
+            {
+                "backlog_item_id": "PBI-000001",
+                "requirement": "Persist exact delivery lineage.",
+                "status": "accepted",
+            },
+            {
+                "backlog_item_id": "PBI-000002",
+                "requirement": "Support accepted Number List language.",
+                "status": "pending",
+            },
+            {
+                "backlog_item_id": "PBI-000003",
+                "requirement": "Reject negative numeric values.",
+                "status": "pending_review",
+            },
+            {
+                "backlog_item_id": "PBI-000004",
+                "requirement": "Provide the installed CLI.",
+                "status": "pending",
+            },
+        ],
+        "count": 4,
+        "pending_count": 3,
+    }
+
+
+def _verify_dialog_content(
+    page: Page,
+    *,
+    title: str,
+    description: str,
+    submit_label: str,
+) -> Locator:
+    dialog = page.locator("#human-action-dialog")
+    expect(dialog).to_be_visible()
+    expect(page.locator("#human-action-title")).to_have_text(title)
+    expect(page.locator("#human-action-description")).to_have_text(description)
+    expect(page.locator("#human-action-submit")).to_have_text(submit_label)
+    return dialog
+
+
+def test_story_generation_non_contiguous_labels_intent_confirmation_and_reconciliation(
+    dashboard_harness: DashboardHarness,
+) -> None:
+    """Verify non-contiguous labels and immediate accept reconciliation."""
+    action_pbi2 = _story_generation_action("backlog_item:PBI-000002")
+    action_pbi4 = _story_generation_action("backlog_item:PBI-000004")
+    actions = [action_pbi2, action_pbi4]
+
+    fake = _delivery_ready_fake(actions)
+    fake.position_override = _non_contiguous_story_position(action_pbi2, action_pbi4)
+    fake.story_pending_override = _non_contiguous_story_pending()
+    fake.planning_review_overrides["/story/reviews"] = {
+        "items": [_story_review("backlog_item:PBI-000003")]
+    }
+
+    context, page = _open_project_page(dashboard_harness, fake)
+
+    # 1. Verify Non-contiguous labels and review card header
+    review_card = page.locator('[data-planning-review-card="story"]')
+    expect(review_card).to_be_visible()
+    expect(review_card).to_contain_text("Story review for PBI-000003")
+
+    pbi2_btn = page.locator(
+        '[data-delivery-action-instance="backlog_item:PBI-000002"] button'
+    )
+    expect(pbi2_btn).to_be_visible()
+    expect(pbi2_btn).to_contain_text(
+        "Generate Stories for PBI-000002: Support accepted Number List language."
+    )
+
+    pbi4_btn = page.locator(
+        '[data-delivery-action-instance="backlog_item:PBI-000004"] button'
+    )
+    expect(pbi4_btn).to_be_visible()
+    expect(pbi4_btn).to_contain_text(
+        "Correct Stories for PBI-000004: Provide the installed CLI."
+    )
+
+    # Ensure no array ordinals appear in delivery panel
+    delivery_panel = page.locator("#delivery-panel")
+    expect(delivery_panel).not_to_contain_text("backlog item 1")
+    expect(delivery_panel).not_to_contain_text("backlog item 2")
+
+    # 2. Verify Confirmation Modal Cancel flow (PBI-000002)
+    pbi2_btn.click()
+    dialog = _verify_dialog_content(
+        page,
+        title="Generate Stories for PBI-000002",
+        description=(
+            "Confirm Story generation for PBI-000002: "
+            "Support accepted Number List language."
+        ),
+        submit_label="Generate Stories",
+    )
+    page.locator("#human-action-cancel").click()
+    expect(dialog).not_to_be_visible()
+    assert len(fake.delivery_requests) == 0
+
+    # 3. Verify Confirmation Modal Submit flow for Correction (PBI-000004)
+    pbi4_btn.click()
+    dialog = _verify_dialog_content(
+        page,
+        title="Correct Stories for PBI-000004",
+        description=(
+            "Confirm Story correction for PBI-000004: Provide the installed CLI."
+        ),
+        submit_label="Correct Stories",
+    )
+    page.locator("#human-action-submit").click()
+    expect(dialog).not_to_be_visible()
+    page.wait_for_timeout(_UI_SETTLE_MS)
+    assert len(fake.delivery_requests) == 1
+    assert fake.delivery_requests[0][0] == "/story/generate"
+    assert fake.delivery_requests[0][1]["instance_key"] == "backlog_item:PBI-000004"
+
+    # 4. Verify Immediate Post-Decision Reconciliation (Accepting review for PBI-000003)
+    accept_review_btn = page.locator(
+        '[data-planning-review="story"][data-review-decision="accepted"]'
+    )
+    accept_review_btn.click()
+    expect(dialog).to_be_visible()
+    expect(page.locator("#human-action-title")).to_contain_text(
+        "Accept Story review for PBI-000003"
+    )
+    page.locator("#human-action-submit").click()
+    expect(dialog).not_to_be_visible()
+    page.wait_for_timeout(_UI_SETTLE_MS)
+
+    # Immediately reconciled: review card gone, PBI-000002 button remains exact
+    expect(review_card).not_to_be_attached()
+    expect(pbi2_btn).to_be_visible()
+    expect(pbi2_btn).to_contain_text(
+        "Generate Stories for PBI-000002: Support accepted Number List language."
+    )
+    assert len(fake.story_decisions) == 1
+    assert fake.story_decisions[0]["decision"] == "accepted"
+
+    context.close()
+
+
+def test_story_generation_feedback_decision_reconciles_to_revision_intent(
+    dashboard_harness: DashboardHarness,
+) -> None:
+    """Verify request-changes decision reconciles immediately to revision intent."""
+    action_pbi2 = _story_generation_action("backlog_item:PBI-000002")
+    action_pbi4 = _story_generation_action("backlog_item:PBI-000004")
+    action_pbi3_rev = _story_generation_action("backlog_item:PBI-000003")
+    actions = [action_pbi2, action_pbi4]
+
+    fake = _delivery_ready_fake(actions)
+    fake.position_override = _non_contiguous_story_position(action_pbi2, action_pbi4)
+    fake.story_pending_override = _non_contiguous_story_pending()
+    fake.planning_review_overrides["/story/reviews"] = {
+        "items": [_story_review("backlog_item:PBI-000003")]
+    }
+
+    def on_decide(_body: JsonObject) -> None:
+        fake.planning_review_overrides.pop("/story/reviews", None)
+        fake.position_override = {
+            "graph_version": "agileforge.workflow.hidden",
+            "fact_fingerprint": "sha256:hidden-facts",
+            "decisions": [
+                {
+                    "node_id": action_pbi2["node_id"],
+                    "child_graph_id": "planning",
+                    "request_kind": action_pbi2["request_kind"],
+                    "category": "available",
+                    "instance_key": action_pbi2["instance_key"],
+                    "reason_code": "STORY_GENERATION_REQUIRED",
+                    "recommendation_kind": "required",
+                    "decision_fingerprint": "decision-pbi2",
+                    "fact_references": [],
+                },
+                {
+                    "node_id": action_pbi3_rev["node_id"],
+                    "child_graph_id": "planning",
+                    "request_kind": action_pbi3_rev["request_kind"],
+                    "category": "available",
+                    "instance_key": action_pbi3_rev["instance_key"],
+                    "reason_code": "STORY_REVISION_REQUIRED",
+                    "recommendation_kind": "required",
+                    "decision_fingerprint": "decision-pbi3-rev",
+                    "fact_references": [],
+                },
+            ],
+            "terminal": False,
+            "actions": [],
+            "_actions": [dict(action_pbi2), dict(action_pbi3_rev)],
+        }
+
+    fake.on_story_decide = on_decide
+
+    context, page = _open_project_page(dashboard_harness, fake)
+
+    review_card = page.locator('[data-planning-review-card="story"]')
+    expect(review_card).to_be_visible()
+
+    # Click Request changes (feedback)
+    feedback_btn = page.locator(
+        '[data-planning-review="story"][data-review-decision="feedback"]'
+    )
+    feedback_btn.click()
+    dialog = page.locator("#human-action-dialog")
+    expect(dialog).to_be_visible()
+    expect(page.locator("#human-action-title")).to_contain_text(
+        "Request changes for Story review for PBI-000003"
+    )
+    rationale_input = page.locator("#human-action-rationale")
+    expect(rationale_input).to_be_visible()
+    rationale_input.fill("Add boundary tests for negative zero.")
+
+    page.locator("#human-action-submit").click()
+    expect(dialog).not_to_be_visible()
+    page.wait_for_timeout(_UI_SETTLE_MS)
+
+    # Immediately reconciled: review card gone, PBI-000003 is Revision
+    expect(review_card).not_to_be_attached()
+    assert len(fake.story_decisions) == 1
+    assert fake.story_decisions[0]["decision"] == "feedback"
+    assert (
+        fake.story_decisions[0]["rationale"] == "Add boundary tests for negative zero."
+    )
+
+    pbi3_rev_btn = page.locator(
+        '[data-delivery-action-instance="backlog_item:PBI-000003"] button'
+    )
+    expect(pbi3_rev_btn).to_be_visible()
+    expect(pbi3_rev_btn).to_contain_text(
+        "Revise Stories for PBI-000003: Reject negative numeric values."
+    )
+
+    # Clicking Revise opens modal with revision intent
+    pbi3_rev_btn.click()
+    _verify_dialog_content(
+        page,
+        title="Revise Stories for PBI-000003",
+        description=(
+            "Confirm Story revision for PBI-000003: Reject negative numeric values."
+        ),
+        submit_label="Revise Stories",
+    )
+    page.locator("#human-action-cancel").click()
+    expect(dialog).not_to_be_visible()
+    assert len(fake.delivery_requests) == 0
+
+    context.close()
+
+
+def test_story_generation_reject_decision_reconciles_immediately(
+    dashboard_harness: DashboardHarness,
+) -> None:
+    """Verify reject decision reconciles immediately without manual refresh."""
+    action_pbi2 = _story_generation_action("backlog_item:PBI-000002")
+    action_pbi4 = _story_generation_action("backlog_item:PBI-000004")
+    actions = [action_pbi2, action_pbi4]
+
+    fake = _delivery_ready_fake(actions)
+    fake.position_override = _non_contiguous_story_position(action_pbi2, action_pbi4)
+    fake.story_pending_override = _non_contiguous_story_pending()
+    fake.planning_review_overrides["/story/reviews"] = {
+        "items": [_story_review("backlog_item:PBI-000003")]
+    }
+
+    context, page = _open_project_page(dashboard_harness, fake)
+
+    review_card = page.locator('[data-planning-review-card="story"]')
+    expect(review_card).to_be_visible()
+
+    # Click Reject
+    reject_btn = page.locator(
+        '[data-planning-review="story"][data-review-decision="rejected"]'
+    )
+    reject_btn.click()
+    dialog = page.locator("#human-action-dialog")
+    expect(dialog).to_be_visible()
+    expect(page.locator("#human-action-title")).to_contain_text(
+        "Reject Story review for PBI-000003"
+    )
+    rationale_input = page.locator("#human-action-rationale")
+    expect(rationale_input).to_be_visible()
+    rationale_input.fill("Output does not conform to parent requirement.")
+
+    page.locator("#human-action-submit").click()
+    expect(dialog).not_to_be_visible()
+    page.wait_for_timeout(_UI_SETTLE_MS)
+
+    # Immediately reconciled without manual refresh: review card gone
+    expect(review_card).not_to_be_attached()
+    assert len(fake.story_decisions) == 1
+    assert fake.story_decisions[0]["decision"] == "rejected"
+    assert (
+        fake.story_decisions[0]["rationale"]
+        == "Output does not conform to parent requirement."
+    )
+
+    pbi2_btn = page.locator(
+        '[data-delivery-action-instance="backlog_item:PBI-000002"] button'
+    )
+    expect(pbi2_btn).to_be_visible()
+    expect(pbi2_btn).to_contain_text(
+        "Generate Stories for PBI-000002: Support accepted Number List language."
+    )
 
     context.close()
 

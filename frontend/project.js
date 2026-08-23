@@ -1218,14 +1218,78 @@ function deliveryActionBindingAttributes(action) {
     ].join(' ');
 }
 
-function deliveryGenerationActionMarkup(action, index = 0, count = 1) {
+function deliveryGenerationActionDetails(action, position = {}, reviews = {}, context = {}) {
     const config = DELIVERY_ACTION_CONFIG[action?.request_kind];
-    if (!config) return '';
+    if (!config) return null;
+    if (action.request_kind !== 'record_story_draft') {
+        return {
+            label: config.label,
+            busyLabel: config.busyLabel,
+            description: config.description,
+            icon: config.icon,
+        };
+    }
+    const instanceKey = action.instance_key ?? '';
+    const pbiId = instanceKey.startsWith('backlog_item:')
+        ? instanceKey.slice('backlog_item:'.length)
+        : (instanceKey || null);
+
+    const decisions = Array.isArray(position?.decisions) ? position.decisions : [];
+    const decision = decisions.find(
+        (d) => d.node_id === action.node_id && d.instance_key === action.instance_key,
+    );
+    const reasonCode = decision?.reason_code ?? '';
+    const isRevision = reasonCode === 'STORY_REVISION_REQUIRED' || decision?.recommendation_kind === 'recovery';
+    const isCorrection = reasonCode === 'STORY_CORRECTION_AVAILABLE' || decision?.recommendation_kind === 'optional_reentry';
+
+    let intentVerb = 'Generate';
+    let busyVerb = 'Generating';
+    let description = config.description;
+    if (isRevision) {
+        intentVerb = 'Revise';
+        busyVerb = 'Revising';
+        description = 'Revise User Story drafts for this requirement based on review feedback.';
+    } else if (isCorrection) {
+        intentVerb = 'Correct';
+        busyVerb = 'Correcting';
+        description = 'Generate replacement User Story drafts for this accepted requirement.';
+    }
+
+    let requirement = '';
+    if (pbiId) {
+        const pendingItems = Array.isArray(context?.storyPending?.items)
+            ? context.storyPending.items
+            : (Array.isArray(lifecycleState?.storyPending?.items)
+                ? lifecycleState.storyPending.items
+                : []);
+        const pending = pendingItems.find((item) => item?.backlog_item_id === pbiId);
+        if (pending?.requirement) {
+            requirement = pending.requirement;
+        }
+    }
+
+    const summarySuffix = requirement ? `: ${requirement}` : '';
+    const label = pbiId ? `${intentVerb} Stories for ${pbiId}${summarySuffix}` : `${intentVerb} Stories`;
+    const busyLabel = pbiId ? `${busyVerb} Stories for ${pbiId}...` : `${busyVerb} Stories...`;
+
+    return {
+        label,
+        busyLabel,
+        description,
+        icon: config.icon,
+        pbiId,
+        requirement,
+        intent: isRevision ? 'revision' : isCorrection ? 'correction' : 'generation',
+        intentVerb,
+        intentLabel: isRevision ? 'revision' : isCorrection ? 'correction' : 'generation',
+    };
+}
+
+function deliveryGenerationActionMarkup(action, position = {}, reviews = {}, index = 0, context = {}) {
+    const details = deliveryGenerationActionDetails(action, position, reviews, context);
+    if (!details) return '';
     const bindingAttributes = deliveryActionBindingAttributes(action);
-    const isStorySelection = action.request_kind === 'record_story_draft' && count > 1;
-    const ordinal = isStorySelection ? ` for backlog item ${index + 1}` : '';
-    const label = `${config.label}${ordinal}`;
-    const content = `<p class="mb-3 text-sm leading-6 text-slate-600">${escapeWorkflowText(config.description)}</p>`;
+    const content = `<p class="mb-3 text-sm leading-6 text-slate-600">${escapeWorkflowText(details.description)}</p>`;
     if (action.request_kind === 'record_sprint_plan') {
         return `<form data-delivery-generation-action="${escapeWorkflowText(action.request_kind)}"
             data-delivery-generation-form="${escapeWorkflowText(action.request_kind)}" ${bindingAttributes}
@@ -1238,45 +1302,46 @@ function deliveryGenerationActionMarkup(action, index = 0, count = 1) {
                 <p class="mt-1 text-xs leading-5 text-slate-500">Choose the team that will own this Sprint plan.</p>
             </div>
             <button type="submit" class="${BUTTON_PRIMARY}">
-                <span class="material-symbols-outlined" aria-hidden="true">${config.icon}</span>
-                <span data-delivery-action-label="true">${escapeWorkflowText(label)}</span>
+                <span class="material-symbols-outlined" aria-hidden="true">${details.icon}</span>
+                <span data-delivery-action-label="true">${escapeWorkflowText(details.label)}</span>
             </button>
             <p data-delivery-action-status="true" hidden role="status" aria-live="polite" aria-atomic="true"
                 class="text-sm leading-6 text-slate-700"></p>
         </form>`;
     }
+    const isMissingRequirement = action.request_kind === 'record_story_draft' && !details.requirement;
+    const disabledAttr = isMissingRequirement ? ' disabled title="Requirement summary unavailable"' : '';
     return `<div data-delivery-generation-action="${escapeWorkflowText(action.request_kind)}" ${bindingAttributes} class="mt-4">
         ${content}
-        <button type="button" data-direct-action="${escapeWorkflowText(action.request_kind)}" class="${BUTTON_PRIMARY}">
-            <span class="material-symbols-outlined" aria-hidden="true">${config.icon}</span>
-            <span data-delivery-action-label="true">${escapeWorkflowText(label)}</span>
+        <button type="button" data-direct-action="${escapeWorkflowText(action.request_kind)}"${disabledAttr} class="${BUTTON_PRIMARY}">
+            <span class="material-symbols-outlined" aria-hidden="true">${details.icon}</span>
+            <span data-delivery-action-label="true">${escapeWorkflowText(details.label)}</span>
         </button>
         <p data-delivery-action-status="true" hidden role="status" aria-live="polite" aria-atomic="true"
             class="mt-3 text-sm leading-6 text-slate-700"></p>
     </div>`;
 }
 
-function deliveryPanelMarkup(position, reviews = {}, actions = []) {
+function deliveryPanelMarkup(position, reviews = {}, actions = [], context = {}) {
     const storyItems = Array.isArray(reviews.stories?.items) ? reviews.stories.items : [];
     const cards = [
         planningReviewCardMarkup('Backlog review', reviews.backlog, 'backlog'),
         planningReviewCardMarkup('Roadmap review', reviews.roadmap, 'roadmap'),
-        ...storyItems.map((item, index) => planningReviewCardMarkup(`Story review ${index + 1}`, item, 'story', index)),
+        ...storyItems.map((item, index) => {
+            const pbiId = item?.binding?.instance_key?.startsWith('backlog_item:')
+                ? item.binding.instance_key.slice('backlog_item:'.length)
+                : (item?.binding?.instance_key || null);
+            const cardTitle = pbiId ? `Story review for ${pbiId}` : `Story review ${index + 1}`;
+            return planningReviewCardMarkup(cardTitle, item, 'story', index);
+        }),
         planningReviewCardMarkup('Sprint plan review', reviews.sprintPlan, 'sprint', 0),
     ].filter(Boolean);
     const availableDeliveryActions = (Array.isArray(actions) ? actions : []).filter((action) =>
         Boolean(DELIVERY_ACTION_CONFIG[action?.request_kind]),
     );
-    const actionMarkup = availableDeliveryActions.map((action) => {
-        const siblings = availableDeliveryActions.filter(
-            (candidate) => candidate.request_kind === action.request_kind,
-        );
-        return deliveryGenerationActionMarkup(
-            action,
-            siblings.indexOf(action),
-            siblings.length,
-        );
-    });
+    const actionMarkup = availableDeliveryActions.map((action, index) =>
+        deliveryGenerationActionMarkup(action, position, reviews, index, context),
+    );
     if (cards.length || actionMarkup.length) {
         return `<div class="space-y-4">
             ${cards.length ? `<div class="grid gap-4">${cards.join('')}</div>` : ''}
@@ -1369,6 +1434,7 @@ function renderDashboard() {
             lifecycleState.position,
             lifecycleState.planningReviews,
             lifecycleState.actions,
+            lifecycleState,
         ),
     );
 }
@@ -1452,6 +1518,7 @@ async function loadDashboard() {
             roadmapReview,
             storyReviews,
             sprintPlanReview,
+            storyPending,
         ] = await Promise.all([
             requestJson(base, options),
             requestJson(`${base}/position`, options),
@@ -1463,6 +1530,7 @@ async function loadDashboard() {
             requestPlanningReview(`${base}/roadmap/review`, options),
             requestPlanningReview(`${base}/story/reviews`, options),
             requestPlanningReview(`${base}/sprint/plan/review`, options),
+            requestJson(`${base}/story/pending`, options),
         ]);
         if (sequence !== dashboardLoadSequence || controller.signal.aborted) return false;
         lifecycleState = {
@@ -1479,6 +1547,7 @@ async function loadDashboard() {
                 stories: storyReviews.data ?? { items: [] },
                 sprintPlan: sprintPlanReview.data ?? {},
             },
+            storyPending: storyPending.data ?? {},
         };
         setProjectError('');
         renderDashboard();
@@ -1644,6 +1713,21 @@ function capturePlanningReview(scope, index, decision) {
 function planningReviewBinding(selected, scope, decision) {
     const binding = selected?.binding;
     if (!binding?.decision_fingerprint) return null;
+    let titleScope = scope === 'sprint' ? 'Sprint plan' : scope;
+    let titleSuffix = '';
+    if (scope === 'story') {
+        const instanceKey = binding.instance_key ?? '';
+        const pbiId = instanceKey.startsWith('backlog_item:')
+            ? instanceKey.slice('backlog_item:'.length)
+            : (instanceKey || null);
+        const req = selected?.review?.lineage?.backlog_item?.requirement;
+        if (pbiId) {
+            titleScope = `Story review for ${pbiId}`;
+            if (req) titleSuffix = `: ${req}`;
+        }
+    }
+    const verb = decision === 'accepted' ? 'Accept' : decision === 'feedback' ? 'Request changes for' : 'Reject';
+    const titlePrefix = scope === 'story' && binding.instance_key ? `${verb} ` : `${verb} this `;
     return {
         kind: 'planning-review',
         scope,
@@ -1655,7 +1739,7 @@ function planningReviewBinding(selected, scope, decision) {
             story: 'story/decide',
             sprint: 'sprint/decide',
         }[scope],
-        title: `${decision === 'accepted' ? 'Accept' : decision === 'feedback' ? 'Request changes for' : 'Reject'} this ${scope === 'sprint' ? 'Sprint plan' : scope}`,
+        title: `${titlePrefix}${titleScope}${titleSuffix}`,
         description: 'Confirm the exact evidence shown above. A changed review must be loaded again.',
         label: 'Rationale',
         required: decision !== 'accepted',
@@ -1673,21 +1757,23 @@ function openHumanDialog(config) {
     const rationaleLabel = document.getElementById('human-action-rationale-label');
     const pathGroup = document.getElementById('human-action-path-group');
     const path = document.getElementById('human-action-path');
+    const isPath = config.field === 'path';
+    const hideRationale = isPath || config.field === 'none' || config.hideRationale === true;
     if (rationaleGroup && rationale && rationaleLabel) {
-        rationaleGroup.classList.toggle('hidden', config.field === 'path');
-        rationale.required = config.field !== 'path' && config.required !== false;
+        rationaleGroup.classList.toggle('hidden', hideRationale);
+        rationale.required = !hideRationale && config.required !== false;
         rationale.value = '';
         rationaleLabel.textContent = config.label ?? 'Rationale';
     }
     if (pathGroup && path) {
-        pathGroup.classList.toggle('hidden', config.field !== 'path');
-        path.required = config.field === 'path';
+        pathGroup.classList.toggle('hidden', !isPath);
+        path.required = isPath;
         path.value = config.initialPath ?? '';
     }
     setText('human-action-submit', config.submitLabel ?? 'Confirm');
     setDialogError('');
     document.getElementById('human-action-dialog')?.showModal();
-    window.setTimeout(() => (config.field === 'path' ? path : rationale)?.focus(), 0);
+    window.setTimeout(() => (isPath ? path : hideRationale ? document.getElementById('human-action-submit') : rationale)?.focus(), 0);
 }
 
 function reviewDialogCopy(scope, decision) {
@@ -1772,6 +1858,15 @@ async function submitHumanAction() {
             setProjectError(`This review changed. Review the current evidence again. ${error.message}`);
             return;
         }
+    } else if (pending.kind === 'delivery-generation') {
+        closeHumanDialog();
+        await runDirectAction(
+            pending.requestKind,
+            pending.button,
+            null,
+            pending.fields ?? {},
+        );
+        return;
     } else if (pending.kind === 'goal-outcome') {
         const requestKind = pending.outcome === 'fulfilled'
             ? 'fulfill_product_goal'
@@ -1935,13 +2030,28 @@ function setDeliveryActionBusy(control, busy, requestKind, keepDisabled = false)
         ?? control?.querySelector?.('[data-delivery-action-label="true"]');
     if (busy) {
         control?.setAttribute?.('aria-busy', 'true');
+        let busyText = config?.busyLabel ?? 'Generating...';
+        if (requestKind === 'record_story_draft') {
+            const instance = action?.dataset?.deliveryActionInstance
+                ?? control?.dataset?.deliveryActionInstance;
+            const pbiId = instance?.startsWith('backlog_item:')
+                ? instance.slice('backlog_item:'.length)
+                : (instance || null);
+            if (pbiId) {
+                const idleText = label?.textContent ?? '';
+                const isRevision = idleText.startsWith('Revise');
+                const isCorrection = idleText.startsWith('Correct');
+                const verb = isRevision ? 'Revising' : isCorrection ? 'Correcting' : 'Generating';
+                busyText = `${verb} Stories for ${pbiId}...`;
+            }
+        }
         if (label) {
             label.dataset.idleLabel = label.textContent;
-            label.textContent = config?.busyLabel ?? 'Generating...';
+            label.textContent = busyText;
         }
         setDeliveryActionStatus(
             control,
-            config?.busyLabel ?? 'Generating...',
+            busyText,
         );
         return;
     }
@@ -2198,6 +2308,40 @@ function installInteractions() {
         }
         if (button.dataset.repositoryAction === 'refresh') {
             runDirectAction('refresh_repository_binding', button, 'repository/refresh');
+            return;
+        }
+        if (button.dataset.directAction === 'record_story_draft') {
+            const binding = captureDeliveryActionBinding(
+                lifecycleState,
+                button,
+                'record_story_draft',
+            );
+            if (!binding) {
+                setProjectError('This delivery action changed. Refresh and choose a current action.');
+                return;
+            }
+            const details = deliveryGenerationActionDetails(
+                binding,
+                lifecycleState.position,
+                lifecycleState.planningReviews,
+                lifecycleState,
+            );
+            if (!details || !details.requirement) {
+                setProjectError('Requirement summary unavailable for this Story action. Refresh the project state.');
+                return;
+            }
+            openHumanDialog({
+                kind: 'delivery-generation',
+                requestKind: 'record_story_draft',
+                button,
+                binding,
+                title: `${details.intentVerb} Stories for ${details.pbiId}`,
+                description: `Confirm Story ${details.intentLabel.toLowerCase()} for ${details.pbiId}: ${details.requirement}`,
+                submitLabel: `${details.intentVerb} Stories`,
+                field: 'none',
+                required: false,
+                hideRationale: true,
+            });
             return;
         }
         if (button.dataset.directAction) {

@@ -32,6 +32,7 @@ from models.workflow import (
     WorkflowNodeAttemptOutcome,
 )
 from repositories.workflow import WorkflowFactLoadError, WorkflowFactRepository
+from services.contracts.backlog import BacklogOutput
 from services.contracts.specification_source import (
     SpecificationSourceBundle,
     SpecificationSourceDocument,
@@ -42,6 +43,7 @@ from services.phases.sprint_metrics import build_durable_sprint_metrics
 from services.planning_artifact_content import (
     load_bound_sprint_plan_envelope,
     load_stored_backlog_planning_content,
+    load_stored_planning_artifact_content,
     load_stored_roadmap_planning_content,
 )
 from services.planning_lineage import (
@@ -81,7 +83,7 @@ if TYPE_CHECKING:
 
     from sqlalchemy.engine import Engine
 
-    from services.contracts.backlog import BacklogItem, BacklogOutput
+    from services.contracts.backlog import BacklogItem
     from services.contracts.roadmap import RoadmapBuilderOutput
     from services.contracts.story import CanonicalStoryOutput
     from workflow.facts import (
@@ -2162,6 +2164,25 @@ class DurableReadProjectionService:
             }
         )
 
+    def _backlog_item_requirements(
+        self,
+        backlog_artifact_id: int,
+        *,
+        expected_fingerprint: str,
+    ) -> dict[str, str]:
+        with Session(self._engine) as session:
+            backlog_artifact = session.get(BacklogArtifact, backlog_artifact_id)
+            if backlog_artifact is None:
+                return {}
+            _parsed, content = load_stored_planning_artifact_content(
+                backlog_artifact.canonical_content_json,
+                expected_fingerprint=expected_fingerprint,
+                content_type=BacklogOutput,
+            )
+            return {
+                item.backlog_item_id: item.requirement for item in content.backlog_items
+            }
+
     def story_pending(self, *, project_id: int) -> JsonObject:
         """List accepted Backlog requirements and their durable Story coverage."""
         snapshot_or_error = self._snapshot(project_id)
@@ -2199,6 +2220,18 @@ class DurableReadProjectionService:
                 project_id=project_id,
                 reason=error.code.value,
             )
+        try:
+            requirement_text_by_id = self._backlog_item_requirements(
+                backlog.artifact_id,
+                expected_fingerprint=backlog.artifact_fingerprint,
+            )
+        except (TypeError, ValidationError, ValueError):
+            return _error(
+                "PROJECT_FACTS_UNAVAILABLE",
+                "Stored Backlog artifact canonical content is invalid.",
+                project_id=project_id,
+                reason="BACKLOG_CONTENT_INVALID",
+            )
         items: list[JsonValue] = []
         pending_count = 0
         for requirement in snapshot.backlog_items:
@@ -2218,6 +2251,9 @@ class DurableReadProjectionService:
                 {
                     "backlog_item_id": requirement.backlog_item_id,
                     "backlog_artifact_id": requirement.backlog_artifact_id,
+                    "requirement": requirement_text_by_id.get(
+                        requirement.backlog_item_id, ""
+                    ),
                     "spec_item_ids": list(requirement.spec_item_ids),
                     "priority": requirement.priority,
                     "status": status,
