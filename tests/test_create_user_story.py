@@ -121,10 +121,14 @@ def _story_content(
     return output.model_dump(mode="json")
 
 
-def _seed_story_parent(engine: Engine) -> tuple[int, int]:
-    project_id = _seed_accepted_backlog(engine)
+def _seed_story_parent(
+    engine: Engine,
+    *,
+    requirements: tuple[str, ...] = ("Plan immutable work",),
+) -> tuple[int, int]:
+    project_id = _seed_accepted_backlog(engine, requirements=requirements)
     backlog = _accepted_backlog(engine, project_id)
-    content = _roadmap_content()
+    content = _roadmap_content(*requirements)
     with Session(engine) as session:
         roadmap = record_roadmap_draft_in_session(
             session,

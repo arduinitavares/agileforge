@@ -767,9 +767,10 @@ def _story_runner_system(
     *,
     leaf: BaseAgent | AdkWorkflow,
     execution_settings: JsonObject | None = None,
+    requirements: tuple[str, ...] = ("Plan immutable work",),
 ) -> _StoryRunnerSystem:
     settings = EXECUTION_SETTINGS if execution_settings is None else execution_settings
-    project_id, roadmap_id = _seed_story_parent(engine)
+    project_id, roadmap_id = _seed_story_parent(engine, requirements=requirements)
     registry = _story_registry(leaf, execution_settings=settings)
     domain = WorkflowDomain(
         engine=engine,
@@ -1207,6 +1208,49 @@ async def test_production_story_recipe_repairs_one_schema_failure(
 
 
 @pytest.mark.asyncio
+async def test_production_story_recipe_repairs_out_of_parent_spec_reference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Repair out-of-parent specification citations through the production recipe."""
+    responses = [
+        json.dumps(_story_provider_output(spec_item_ids=("DATA.001", "REQ.002"))),
+        json.dumps(_story_provider_output(spec_item_ids=("DATA.001", "REQ.001"))),
+    ]
+    model = SequenceStoryLlm(
+        model="provider-free-story-out-of-parent",
+        response_texts=responses,
+    )
+    monkeypatch.setattr(
+        story_agents,
+        "_create_story_writer_model",
+        lambda: model,
+    )
+    writer = story_agents.create_user_story_writer_agent()
+    registry = _story_registry(
+        writer,
+        correction_leaf=_unused_leaf("unused_story_correction_repair"),
+    )
+
+    result = await _run_provider_free_workflow(
+        registry.require("planning.story.generate").workflow,
+        _gold_story_recipe_payload(),
+        session_id="story-out-of-parent-boundary-repair",
+    )
+
+    canonical = CanonicalStoryOutput.model_validate(result.payload)
+    assert len(model.request_texts) == EXPECTED_RECOVERY_ATTEMPT_COUNT
+    assert "SYSTEM_FEEDBACK" not in model.request_texts[0]
+    assert "SYSTEM_FEEDBACK" in model.request_texts[1]
+    assert (
+        "Specification item ID outside the parent boundary: REQ.002"
+        in model.request_texts[1]
+    )
+    assert all(GOLD_SPECIFICATION_HASH in request for request in model.request_texts)
+    assert canonical.story_items[0].item.spec_item_ids == ("DATA.001", "REQ.001")
+    assert canonical.story_items[0].item.decomposition_warning is None
+
+
+@pytest.mark.asyncio
 async def test_story_correction_recipe_repairs_then_merges_and_remints_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1343,6 +1387,180 @@ async def test_story_correction_recipe_repairs_then_merges_and_remints_once(
     assert corrected_items[0] == source_content.story_items[0]
     assert corrected_items[2] == source_content.story_items[2]
     assert corrected_items[1].item.story_title == "Corrected middle"
+    assert (
+        corrected_items[1].item_fingerprint
+        != source_content.story_items[1].item_fingerprint
+    )
+    request = registry.require("planning.story.generate").output_adapter(
+        corrected,
+        AttemptCompletionContext(
+            project_id=17,
+            graph_version="agileforge.workflow.v2",
+            fact_fingerprint="sha256:facts",
+            decision_fingerprint="sha256:decision",
+            instance_key="backlog_item:PBI-000001",
+            attempt_id=1,
+            attempt_fingerprint="sha256:attempt",
+            idempotency_key="story-correction",
+            actor="operator@example.com",
+            correlation_id=None,
+            normalized_input=correction_payload,
+        ),
+    )
+    assert isinstance(request, RecordStoryDraft)
+    assert request.canonical_content == corrected.payload
+
+
+@pytest.mark.asyncio
+async def test_story_correction_recipe_repairs_out_of_parent_reference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Repair out-of-parent citation on patch response then merge valid item."""
+    _backlog, _roadmap, story_input, _sprint = _gold_agent_inputs()
+
+    def item(
+        title: str,
+        statement: str,
+        spec_item_ids: tuple[str, ...] = ("DATA.001", "REQ.001"),
+    ) -> JsonObject:
+        return {
+            "story_title": title,
+            "statement": statement,
+            "acceptance_criteria": [f"Verify {title}."],
+            "spec_item_ids": list(spec_item_ids),
+            "invest_score": "High",
+            "estimated_effort": "S",
+            "produced_artifacts": [],
+            "research_caveats": [],
+            "decomposition_warning": None,
+            "dependency_candidates": [],
+        }
+
+    source_items = [
+        item("First", "As a calculator user, I want first, so that it works."),
+        item("Middle", "As a calculator user, I want middle, so that it works."),
+        item("Last", "As a calculator user, I want last, so that it works."),
+    ]
+    regular_leaf = CountingLeafAgent(
+        name="regular_story_leaf",
+        response={
+            "user_stories": source_items,
+            "is_complete": True,
+            "clarifying_questions": [],
+        },
+        calls=[],
+    )
+    invalid_out_of_parent_item = item(
+        "Corrected middle",
+        "As a calculator user, I want corrected middle, so that it works.",
+        spec_item_ids=("DATA.001", "REQ.002"),
+    )
+    valid_corrected_item = item(
+        "Corrected middle",
+        "As a calculator user, I want corrected middle, so that it works.",
+        spec_item_ids=("DATA.001", "REQ.001"),
+    )
+    correction_model = SequenceStoryLlm(
+        model="provider-free-story-correction-out-of-parent",
+        response_texts=[
+            json.dumps(
+                {
+                    "user_stories": [invalid_out_of_parent_item],
+                    "is_complete": True,
+                    "clarifying_questions": [],
+                }
+            ),
+            json.dumps(
+                {
+                    "user_stories": [valid_corrected_item],
+                    "is_complete": True,
+                    "clarifying_questions": [],
+                }
+            ),
+        ],
+    )
+    monkeypatch.setattr(
+        story_agents,
+        "_create_story_writer_model",
+        lambda: correction_model,
+    )
+    correction_leaf = story_agents.create_user_story_patch_agent()
+    registry = _story_registry(
+        regular_leaf,
+        correction_leaf=correction_leaf,
+    )
+    workflow = registry.require("planning.story.generate").workflow
+    base_payload = JSON_OBJECT.validate_python(
+        {
+            "writer_input": story_input,
+            "source_backlog_artifact_id": 5,
+            "source_backlog_artifact_fingerprint": "sha256:backlog",
+            "roadmap_artifact_id": 7,
+            "roadmap_artifact_fingerprint": "sha256:roadmap",
+            "supersedes_story_artifact_id": None,
+        }
+    )
+    source = await _run_provider_free_workflow(
+        workflow,
+        base_payload,
+        session_id="story-correction-out-of-parent-source",
+    )
+    source_story_items = source.payload["story_items"]
+    assert isinstance(source_story_items, list)
+    middle = source_story_items[1]
+    assert isinstance(middle, dict)
+    middle_item = middle["item"]
+    assert isinstance(middle_item, dict)
+
+    correction_payload = JSON_OBJECT.validate_python(
+        {
+            **base_payload,
+            "writer_input": {
+                **story_input,
+                "user_input": (
+                    "Selected accepted Story:\n"
+                    + json.dumps(middle_item, ensure_ascii=False)
+                    + "\nHuman guidance:\nCorrect the middle only."
+                ),
+            },
+            "supersedes_story_artifact_id": 91,
+            "correction": {
+                "story_id": 42,
+                "guidance": "Correct the middle only.",
+                "source_story_artifact_id": 91,
+                "source_story_artifact_fingerprint": canonical_hash(source.payload),
+                "source_story_item_id": "US-0002",
+                "source_story_item_fingerprint": middle["item_fingerprint"],
+            },
+            "correction_source": source.payload,
+        }
+    )
+    corrected = await _run_provider_free_workflow(
+        workflow,
+        correction_payload,
+        session_id="story-correction-out-of-parent-target",
+    )
+
+    corrected_content = CanonicalStoryOutput.model_validate(corrected.payload)
+    source_content = CanonicalStoryOutput.model_validate(source.payload)
+    corrected_items = corrected_content.story_items
+    assert regular_leaf.calls == ["provider"]
+    assert len(correction_model.request_texts) == EXPECTED_RECOVERY_ATTEMPT_COUNT
+    assert "SYSTEM_FEEDBACK" not in correction_model.request_texts[0]
+    assert "SYSTEM_FEEDBACK" in correction_model.request_texts[1]
+    assert (
+        "Specification item ID outside the parent boundary: REQ.002"
+        in correction_model.request_texts[1]
+    )
+    assert [entry.item.story_item_id for entry in corrected_items] == [
+        "US-0001",
+        "US-0002",
+        "US-0003",
+    ]
+    assert corrected_items[0] == source_content.story_items[0]
+    assert corrected_items[2] == source_content.story_items[2]
+    assert corrected_items[1].item.story_title == "Corrected middle"
+    assert corrected_items[1].item.spec_item_ids == ("DATA.001", "REQ.001")
     assert (
         corrected_items[1].item_fingerprint
         != source_content.story_items[1].item_fingerprint
@@ -1520,6 +1738,52 @@ def test_story_runner_double_schema_failure_has_zero_partial_persistence(
         assert outcomes[0].failure_message is not None
         assert "INITIAL_VALIDATION_ERRORS" in outcomes[0].failure_message
         assert "REPAIR_VALIDATION_ERRORS" in outcomes[0].failure_message
+        assert session.exec(select(StoryArtifact)).all() == []
+        assert session.exec(select(StoryArtifactDecision)).all() == []
+        assert session.exec(select(UserStory)).all() == []
+
+
+def test_story_runner_double_reference_failure_has_zero_partial_persistence(
+    engine: Engine,
+) -> None:
+    """Stop after two out-of-parent citation responses and retain one failure only."""
+    out_of_parent = _story_provider_output(
+        spec_item_ids=("REQ.planning-1", "REQ.planning-2")
+    )
+    leaf = SequenceLeafAgent(
+        name="double_out_of_parent_story",
+        responses=[out_of_parent, out_of_parent],
+        calls=[],
+    )
+    system = _story_runner_system(
+        engine,
+        leaf=leaf,
+        execution_settings={"timeout_seconds": 5.0, "max_attempts": 3},
+        requirements=("Plan immutable work", "Plan second requirement"),
+    )
+
+    result = system.runner.run(
+        _story_decision(system.domain, system.project_id),
+        system.payload,
+    )
+
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.code is WorkflowErrorCode.EXTERNAL_EXECUTION_FAILED
+    assert leaf.calls == ["provider", "provider"]
+    with Session(engine) as session:
+        attempts = _node_attempts(session, "planning.story.generate")
+        outcomes = _node_outcomes(session, "planning.story.generate")
+        assert len(attempts) == 1
+        assert len(outcomes) == 1
+        assert outcomes[0].status == "failure"
+        assert outcomes[0].failure_message is not None
+        assert "INITIAL_VALIDATION_ERRORS" in outcomes[0].failure_message
+        assert "REPAIR_VALIDATION_ERRORS" in outcomes[0].failure_message
+        assert (
+            "Specification item ID outside the parent boundary"
+            in outcomes[0].failure_message
+        )
         assert session.exec(select(StoryArtifact)).all() == []
         assert session.exec(select(StoryArtifactDecision)).all() == []
         assert session.exec(select(UserStory)).all() == []

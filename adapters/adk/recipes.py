@@ -36,6 +36,7 @@ from services.contracts.specification_authoring import (
 )
 from services.contracts.specification_references import (
     AcceptedSpecificationReference,
+    SpecificationReferenceError,
 )
 from services.contracts.sprint import (
     SprintPlannerInput,
@@ -754,6 +755,26 @@ def _validate_story_writer_output(generated: object) -> UserStoryWriterOutput:
     return UserStoryWriterOutput.model_validate(generated)
 
 
+def _validate_story_leaf_output(
+    generated: object,
+    *,
+    specification: AcceptedSpecificationReference,
+    parent_backlog_spec_item_ids: tuple[str, ...],
+    targeted: bool,
+) -> UserStoryWriterOutput:
+    """Validate raw story output, checking schema, cardinality, and references."""
+    output = _validate_story_writer_output(generated)
+    if targeted and len(output.user_stories) != 1:
+        message = "Targeted Story correction must return exactly one replacement item."
+        raise ValueError(message)
+    canonicalize_story_items(
+        specification,
+        parent_backlog_spec_item_ids=parent_backlog_spec_item_ids,
+        agent_items=output.user_stories,
+    )
+    return output
+
+
 async def _run_story_leaf_with_schema_repair(
     *,
     context: Context,
@@ -764,15 +785,33 @@ async def _run_story_leaf_with_schema_repair(
     """Run one Story leaf with exactly one provider-owned schema repair."""
     attempt_payload = writer_input
     initial_validation_errors: object | None = None
+    specification = _specification_reference(
+        version_id=writer_input.accepted_specification_version_id,
+        spec_hash=writer_input.accepted_specification_hash,
+        canonical_json=writer_input.accepted_specification_json,
+    )
     for _attempt_index in range(1, MAX_STORY_SCHEMA_REPAIR_ATTEMPTS + 1):
         generated = await context.run_node(
             leaf,
             node_input=attempt_payload.model_dump(mode="json"),
         )
         try:
-            return _validate_story_writer_output(generated)
-        except ValidationError as error:
-            validation_errors = error.errors()
+            output = _validate_story_leaf_output(
+                generated,
+                specification=specification,
+                parent_backlog_spec_item_ids=writer_input.parent_backlog_spec_item_ids,
+                targeted=targeted,
+            )
+        except (ValidationError, SpecificationReferenceError, ValueError) as error:
+            if isinstance(error, ValidationError):
+                validation_errors: object = error.errors()
+                error_message = str(error)
+            elif isinstance(error, SpecificationReferenceError):
+                validation_errors = list(error.errors)
+                error_message = str(error)
+            else:
+                validation_errors = [str(error)]
+                error_message = str(error)
             if initial_validation_errors is not None:
                 initial = json.dumps(
                     initial_validation_errors,
@@ -793,10 +832,12 @@ async def _run_story_leaf_with_schema_repair(
             initial_validation_errors = validation_errors
             attempt_payload = with_story_schema_repair_feedback(
                 writer_input,
-                error=str(error),
+                error=error_message,
                 validation_errors=validation_errors,
                 targeted=targeted,
             )
+        else:
+            return output
     message = "Story schema repair ended without a validated response."
     raise RuntimeError(message)
 
