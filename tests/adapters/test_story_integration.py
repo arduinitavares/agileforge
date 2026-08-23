@@ -11,7 +11,7 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import pytest
 from google.adk.runners import Runner
@@ -19,18 +19,16 @@ from google.adk.sessions import InMemorySessionService
 from google.genai import types
 from pydantic import ValidationError
 
-from adapters.adk.agents.story import create_user_story_writer_agent
+from adapters.adk.agents.story import (
+    create_user_story_writer_agent,
+    preserve_story_output_schema,
+)
 from services.contracts.story import (
     UserStoryWriterInput,
     UserStoryWriterOutput,
 )
 from utils.adk_runner import extract_final_response_text, parse_json_payload
 from utils.runtime_config import STORY_RUNNER_IDENTITY
-
-if TYPE_CHECKING:
-    from google.adk.agents.callback_context import CallbackContext
-    from google.adk.models.llm_request import LlmRequest
-    from google.adk.models.llm_response import LlmResponse
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 INPUT_FIXTURE_PATH = REPO_ROOT / "input_for_test.txt"
@@ -124,20 +122,8 @@ async def test_story_agent_replay_captures_raw_output_from_input_fixture(
     payload, payload_text = _load_story_payload()
 
     agent = create_user_story_writer_agent()
-    original_output_schema = agent.output_schema
-    assert original_output_schema is UserStoryWriterOutput
-
-    async def _preserve_request_schema(
-        callback_context: CallbackContext,
-        llm_request: LlmRequest,
-    ) -> LlmResponse | None:
-        del callback_context
-        llm_request.set_output_schema(original_output_schema)
-        return None
-
-    agent.output_schema = None
-    agent.output_key = None
-    agent.before_model_callback = _preserve_request_schema
+    assert agent.output_schema is None
+    assert agent.before_model_callback is preserve_story_output_schema
 
     session_service = InMemorySessionService()
     runner = Runner(

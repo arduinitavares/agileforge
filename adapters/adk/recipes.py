@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
@@ -55,6 +56,11 @@ from services.contracts.vision import (
     VisionModelInput,
     VisionRepairInput,
 )
+from services.story_schema_repair import (
+    MAX_STORY_SCHEMA_REPAIR_ATTEMPTS,
+    MAX_STORY_SCHEMA_REPAIR_FEEDBACK_CHARS,
+    with_story_schema_repair_feedback,
+)
 from services.vision_output_validation import (
     VisionDraftValidationError,
     validate_vision_draft,
@@ -88,6 +94,7 @@ AGENTIC_NODE_IDS = (
     "planning.story.generate",
     "planning.sprint.plan",
 )
+_MAX_STORY_SCHEMA_FAILURE_DETAIL_CHARS: int = 1800
 
 
 class RecipeInput(BaseModel):
@@ -740,6 +747,60 @@ def _build_roadmap_workflow(
     )
 
 
+def _validate_story_writer_output(generated: object) -> UserStoryWriterOutput:
+    """Validate raw JSON without erasing required explicit-null field presence."""
+    if isinstance(generated, str | bytes | bytearray):
+        return UserStoryWriterOutput.model_validate_json(generated)
+    return UserStoryWriterOutput.model_validate(generated)
+
+
+async def _run_story_leaf_with_schema_repair(
+    *,
+    context: Context,
+    leaf: BaseAgent | Workflow,
+    writer_input: UserStoryWriterInput,
+    targeted: bool,
+) -> UserStoryWriterOutput:
+    """Run one Story leaf with exactly one provider-owned schema repair."""
+    attempt_payload = writer_input
+    initial_validation_errors: object | None = None
+    for _attempt_index in range(1, MAX_STORY_SCHEMA_REPAIR_ATTEMPTS + 1):
+        generated = await context.run_node(
+            leaf,
+            node_input=attempt_payload.model_dump(mode="json"),
+        )
+        try:
+            return _validate_story_writer_output(generated)
+        except ValidationError as error:
+            validation_errors = error.errors()
+            if initial_validation_errors is not None:
+                initial = json.dumps(
+                    initial_validation_errors,
+                    sort_keys=True,
+                    default=str,
+                )[:_MAX_STORY_SCHEMA_FAILURE_DETAIL_CHARS]
+                repair = json.dumps(
+                    validation_errors,
+                    sort_keys=True,
+                    default=str,
+                )[:_MAX_STORY_SCHEMA_FAILURE_DETAIL_CHARS]
+                message = (
+                    "Story schema repair failed after two provider responses. "
+                    f"INITIAL_VALIDATION_ERRORS: {initial}. "
+                    f"REPAIR_VALIDATION_ERRORS: {repair}."
+                )[:MAX_STORY_SCHEMA_REPAIR_FEEDBACK_CHARS]
+                raise ValueError(message) from error
+            initial_validation_errors = validation_errors
+            attempt_payload = with_story_schema_repair_feedback(
+                writer_input,
+                error=str(error),
+                validation_errors=validation_errors,
+                targeted=targeted,
+            )
+    message = "Story schema repair ended without a validated response."
+    raise RuntimeError(message)
+
+
 def _build_story_workflow(
     *,
     leaf_agent: BaseAgent | Workflow,
@@ -747,8 +808,8 @@ def _build_story_workflow(
     execution_settings: JsonObject,
 ) -> Workflow:
     """Pass one exact typed Story root and host-mint its immutable items."""
-    timeout_seconds, max_attempts = _execution_limits(execution_settings)
-    retry_config = RetryConfig(max_attempts=max_attempts)
+    timeout_seconds, _max_attempts = _execution_limits(execution_settings)
+    retry_config = RetryConfig(max_attempts=1)
 
     @node(
         name="execute_story_generator",
@@ -768,12 +829,13 @@ def _build_story_workflow(
             leaf = correction_leaf_agent
         else:
             leaf = leaf_agent
-        generated = await context.run_node(
-            leaf,
-            node_input=envelope.writer_input.model_dump(mode="json"),
-        )
-        output = UserStoryWriterOutput.model_validate(generated)
         writer_input = envelope.writer_input
+        output = await _run_story_leaf_with_schema_repair(
+            context=context,
+            leaf=leaf,
+            writer_input=writer_input,
+            targeted=envelope.correction is not None,
+        )
         specification = _specification_reference(
             version_id=writer_input.accepted_specification_version_id,
             spec_hash=writer_input.accepted_specification_hash,

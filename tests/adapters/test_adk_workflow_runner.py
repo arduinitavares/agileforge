@@ -17,15 +17,18 @@ from google.adk import Workflow as AdkWorkflow
 from google.adk.agents import BaseAgent, InvocationContext
 from google.adk.apps import App, ResumabilityConfig
 from google.adk.events import Event
+from google.adk.models.base_llm import BaseLlm
+from google.adk.models.llm_response import LlmResponse
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.adk.sessions import Session as AdkSession
 from google.adk.workflow import START, node
 from google.genai import types
 from openai import OpenAIError
-from pydantic import TypeAdapter
+from pydantic import Field, TypeAdapter
 from sqlmodel import Session, col, select
 
+from adapters.adk.agents import story as story_agents
 from adapters.adk.agents.backlog import root_agent as backlog_agent
 from adapters.adk.agents.roadmap import root_agent as roadmap_agent
 from adapters.adk.agents.sprint import root_agent as sprint_agent
@@ -54,7 +57,7 @@ from adapters.adk.runner import (
     AdkRunRequest,
     AdkWorkflowRunner,
 )
-from models.core import Project
+from models.core import Project, UserStory
 from models.product_definition import (
     ProductGoalArtifact,
     ProductGoalInterviewTurn,
@@ -63,10 +66,13 @@ from models.product_definition import (
 )
 from models.workflow import (
     BacklogArtifact,
+    StoryArtifact,
+    StoryArtifactDecision,
     WorkflowNodeAttempt,
     WorkflowNodeAttemptOutcome,
     WorkflowTransitionReceipt,
 )
+from services.application import DeliveryActionInputService
 from services.contracts.backlog import (
     BacklogAgentOutput,
     BacklogBuilderInput,
@@ -92,6 +98,7 @@ from services.contracts.vision import VisionDraftOutput, VisionModelInput
 from services.specs.accepted_specification import (
     require_current_accepted_specification,
 )
+from tests.test_create_user_story import _seed_story_parent
 from tests.workflow.lifecycle_fixtures import seed_accepted_specification
 from utils.agileforge_spec_profile_v2 import SpecificationPayload
 from utils.runtime_config import ADK_EXECUTION_TRACE_IDENTITY
@@ -119,6 +126,7 @@ from workflow.requests import (
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
 
+    from google.adk.models.llm_request import LlmRequest
     from sqlalchemy.engine import Engine
 
 EVALUATED_AT = datetime(2026, 8, 3, 12, tzinfo=UTC)
@@ -231,6 +239,55 @@ class CountingLeafAgent(BaseAgent):
         del ctx
         self.calls.append("provider")
         yield Event(author=self.name, output=self.response)
+
+
+class SequenceLeafAgent(BaseAgent):
+    """Provider-free leaf returning exact structured responses in order."""
+
+    responses: list[object]
+    calls: list[str]
+
+    async def _run_async_impl(
+        self,
+        ctx: InvocationContext,
+    ) -> AsyncGenerator[Event, None]:
+        del ctx
+        response = self.responses[len(self.calls)]
+        self.calls.append("provider")
+        yield Event(author=self.name, output=response)
+
+
+class SequenceStoryLlm(BaseLlm):
+    """Provider-free Story model returning exact responses in order."""
+
+    response_texts: list[str]
+    request_texts: list[str] = Field(default_factory=list)
+    requested_output_schemas: list[object] = Field(default_factory=list, exclude=True)
+
+    async def generate_content_async(
+        self,
+        llm_request: LlmRequest,
+        stream: bool = False,
+    ) -> AsyncGenerator[LlmResponse, None]:
+        """Capture one request and return the next deterministic response."""
+        del stream
+        self.request_texts.append(
+            "\n".join(
+                part.text
+                for content in llm_request.contents
+                if content.parts is not None
+                for part in content.parts
+                if part.text is not None
+            )
+        )
+        self.requested_output_schemas.append(llm_request.config.response_schema)
+        response_text = self.response_texts[len(self.request_texts) - 1]
+        yield LlmResponse(
+            content=types.Content(
+                role="model",
+                parts=[types.Part.from_text(text=response_text)],
+            )
+        )
 
 
 class BlockingLeafAgent(BaseAgent):
@@ -443,6 +500,61 @@ def _gold_agent_inputs() -> tuple[dict[str, object], ...]:
     )
 
 
+def _story_provider_output(
+    *,
+    spec_item_ids: tuple[str, ...] = ("DATA.001", "REQ.001"),
+    title: str = "Deliver the accepted operation",
+) -> JsonObject:
+    return {
+        "user_stories": [
+            {
+                "story_title": title,
+                "statement": (
+                    "As an operator, I want the accepted operation, so that I can "
+                    "obtain its specified result."
+                ),
+                "acceptance_criteria": ["Verify the accepted result."],
+                "spec_item_ids": list(spec_item_ids),
+                "invest_score": "High",
+                "estimated_effort": "S",
+                "produced_artifacts": [],
+                "research_caveats": [],
+                "decomposition_warning": None,
+                "dependency_candidates": [],
+            }
+        ],
+        "is_complete": True,
+        "clarifying_questions": [],
+    }
+
+
+def _invalid_story_provider_output(
+    *,
+    spec_item_ids: tuple[str, ...] = ("DATA.001", "REQ.001"),
+) -> JsonObject:
+    output = _story_provider_output(spec_item_ids=spec_item_ids)
+    stories = output["user_stories"]
+    assert isinstance(stories, list)
+    item = stories[0]
+    assert isinstance(item, dict)
+    item.pop("decomposition_warning")
+    return output
+
+
+def _gold_story_recipe_payload() -> JsonObject:
+    _backlog, _roadmap, story_input, _sprint = _gold_agent_inputs()
+    return JSON_OBJECT.validate_python(
+        {
+            "writer_input": story_input,
+            "source_backlog_artifact_id": 5,
+            "source_backlog_artifact_fingerprint": "sha256:backlog",
+            "roadmap_artifact_id": 7,
+            "roadmap_artifact_fingerprint": "sha256:roadmap",
+            "supersedes_story_artifact_id": None,
+        }
+    )
+
+
 def test_live_recipe_and_model_role_catalogs_equal_graph_tuple_exactly() -> None:
     """Keep recipe and model-role order equal to the eight live graph actions."""
     expected = ROOT_GRAPH.agentic_node_ids
@@ -473,7 +585,14 @@ def test_delivery_agent_schemas_accept_the_complete_gold_root_without_aliases() 
     ):
         payload = inputs[ordinal]
         assert agent.input_schema is input_contract
-        assert agent.output_schema is output_contract
+        if input_contract is UserStoryWriterInput:
+            assert output_contract is UserStoryWriterOutput
+            assert agent.output_schema is None
+            assert (
+                agent.before_model_callback is story_agents.preserve_story_output_schema
+            )
+        else:
+            assert agent.output_schema is output_contract
         parsed = input_contract.model_validate(payload)
         dumped = parsed.model_dump(mode="json")
         assert dumped["accepted_specification_json"] == canonical_json
@@ -597,6 +716,94 @@ def _backlog_recipe_input(lineage: _BacklogLineage) -> JsonObject:
 
 def _unused_leaf(name: str) -> FakeLeafAgent:
     return FakeLeafAgent(name=name, response={})
+
+
+def _story_registry(
+    story_leaf: BaseAgent | AdkWorkflow,
+    *,
+    correction_leaf: BaseAgent | AdkWorkflow | None = None,
+    execution_settings: JsonObject | None = None,
+) -> AdkRecipeRegistry:
+    settings = EXECUTION_SETTINGS if execution_settings is None else execution_settings
+    return build_agentic_recipe_registry(
+        nodes=AgenticRecipeNodes(
+            vision_interview=_unused_leaf("unused_story_vision"),
+            vision_repair=_unused_leaf("unused_story_vision_repair"),
+            product_goal=_unused_leaf("unused_story_goal"),
+            specification_structurer=_unused_leaf("unused_story_specification"),
+            backlog_generation=_unused_leaf("unused_story_backlog"),
+            roadmap_generation=_unused_leaf("unused_story_roadmap"),
+            story_generation=story_leaf,
+            story_correction=correction_leaf,
+            sprint_planning=_unused_leaf("unused_story_sprint"),
+        ),
+        execution_settings=settings,
+    )
+
+
+@dataclass(frozen=True)
+class _StoryRunnerSystem:
+    runner: AdkWorkflowRunner
+    domain: WorkflowDomain
+    project_id: int
+    roadmap_id: int
+    payload: JsonObject
+
+
+def _story_decision(domain: WorkflowDomain, project_id: int) -> NodeDecision:
+    decisions = tuple(
+        decision
+        for decision in domain.position(project_id).decisions
+        if decision.node_id == "planning.story.generate"
+        and decision.category is NodeCategory.AVAILABLE
+        and decision.instance_key == "backlog_item:PBI-000001"
+    )
+    assert len(decisions) == 1
+    return decisions[0]
+
+
+def _story_runner_system(
+    engine: Engine,
+    *,
+    leaf: BaseAgent | AdkWorkflow,
+    execution_settings: JsonObject | None = None,
+) -> _StoryRunnerSystem:
+    settings = EXECUTION_SETTINGS if execution_settings is None else execution_settings
+    project_id, roadmap_id = _seed_story_parent(engine)
+    registry = _story_registry(leaf, execution_settings=settings)
+    domain = WorkflowDomain(
+        engine=engine,
+        graph=ROOT_GRAPH,
+        clock=FixedClock(now_value=EVALUATED_AT),
+        adk_recipe_registry=registry,
+    )
+    decision = _story_decision(domain, project_id)
+    prepared = DeliveryActionInputService(engine=engine).build(
+        project_id=project_id,
+        decision=decision,
+        node_id="planning.story.generate",
+    )
+    assert isinstance(prepared, dict)
+    runner = AdkWorkflowRunner(
+        domain=domain,
+        registry=registry,
+        session_service=TrackingSessionService(),
+        config=AdkExecutionConfig(
+            project_id=project_id,
+            model_id="fake/story",
+            execution_settings=settings,
+            lease_seconds=LEASE_SECONDS,
+            actor="operator@example.com",
+            correlation_id="issue-214-story",
+        ),
+    )
+    return _StoryRunnerSystem(
+        runner=runner,
+        domain=domain,
+        project_id=project_id,
+        roadmap_id=roadmap_id,
+        payload=prepared,
+    )
 
 
 def _goal_output() -> ProductGoalInterviewOutput:
@@ -934,8 +1141,76 @@ async def test_delivery_recipe_fakes_use_production_contracts_and_canonicalizers
 
 
 @pytest.mark.asyncio
-async def test_story_correction_recipe_merges_middle_and_remints_once() -> None:
-    """Select only the patch leaf and emit one complete ordinary Story draft."""
+async def test_production_story_recipe_preserves_valid_first_explicit_null(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Accept required explicit null on the first raw structured response."""
+    model = SequenceStoryLlm(
+        model="provider-free-story-valid-first",
+        response_texts=[json.dumps(_story_provider_output())],
+    )
+    monkeypatch.setattr(
+        story_agents,
+        "_create_story_writer_model",
+        lambda: model,
+    )
+    registry = _story_registry(story_agents.create_user_story_writer_agent())
+
+    result = await _run_provider_free_workflow(
+        registry.require("planning.story.generate").workflow,
+        _gold_story_recipe_payload(),
+        session_id="story-valid-first-explicit-null",
+    )
+
+    canonical = CanonicalStoryOutput.model_validate(result.payload)
+    assert len(model.request_texts) == 1
+    assert model.requested_output_schemas[0] is not None
+    assert canonical.story_items[0].item.decomposition_warning is None
+
+
+@pytest.mark.asyncio
+async def test_production_story_recipe_repairs_one_schema_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Repair one provider-owned schema failure through the production recipe."""
+    responses = [
+        json.dumps(_invalid_story_provider_output()),
+        json.dumps(_story_provider_output()),
+    ]
+    model = SequenceStoryLlm(
+        model="provider-free-story-sequence",
+        response_texts=responses,
+    )
+    monkeypatch.setattr(
+        story_agents,
+        "_create_story_writer_model",
+        lambda: model,
+    )
+    writer = story_agents.create_user_story_writer_agent()
+    registry = _story_registry(
+        writer,
+        correction_leaf=_unused_leaf("unused_story_correction_repair"),
+    )
+
+    result = await _run_provider_free_workflow(
+        registry.require("planning.story.generate").workflow,
+        _gold_story_recipe_payload(),
+        session_id="story-schema-repair-production-boundary",
+    )
+
+    canonical = CanonicalStoryOutput.model_validate(result.payload)
+    assert len(model.request_texts) == EXPECTED_RECOVERY_ATTEMPT_COUNT
+    assert "SYSTEM_FEEDBACK" not in model.request_texts[0]
+    assert "SYSTEM_FEEDBACK" in model.request_texts[1]
+    assert all(GOLD_SPECIFICATION_HASH in request for request in model.request_texts)
+    assert canonical.story_items[0].item.decomposition_warning is None
+
+
+@pytest.mark.asyncio
+async def test_story_correction_recipe_repairs_then_merges_and_remints_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Repair the patch response, then merge one complete ordinary Story draft."""
     _backlog, _roadmap, story_input, _sprint = _gold_agent_inputs()
 
     def item(title: str, statement: str) -> JsonObject:
@@ -966,33 +1241,40 @@ async def test_story_correction_recipe_merges_middle_and_remints_once() -> None:
         },
         calls=[],
     )
-    correction_leaf = CountingLeafAgent(
-        name="correction_story_leaf",
-        response={
-            "user_stories": [
-                item(
-                    "Corrected middle",
-                    "As a calculator user, I want corrected middle, so that it works.",
-                )
-            ],
-            "is_complete": True,
-            "clarifying_questions": [],
-        },
-        calls=[],
+    corrected_item = item(
+        "Corrected middle",
+        "As a calculator user, I want corrected middle, so that it works.",
     )
-    registry = build_agentic_recipe_registry(
-        nodes=AgenticRecipeNodes(
-            vision_interview=_unused_leaf("unused_vision_correction"),
-            vision_repair=_unused_leaf("unused_vision_repair_correction"),
-            product_goal=_unused_leaf("unused_goal_correction"),
-            specification_structurer=_unused_leaf("unused_spec_correction"),
-            backlog_generation=_unused_leaf("unused_backlog_correction"),
-            roadmap_generation=_unused_leaf("unused_roadmap_correction"),
-            story_generation=regular_leaf,
-            story_correction=correction_leaf,
-            sprint_planning=_unused_leaf("unused_sprint_correction"),
-        ),
-        execution_settings=EXECUTION_SETTINGS,
+    invalid_corrected_item = dict(corrected_item)
+    invalid_corrected_item.pop("decomposition_warning")
+    correction_model = SequenceStoryLlm(
+        model="provider-free-story-correction",
+        response_texts=[
+            json.dumps(
+                {
+                    "user_stories": [invalid_corrected_item],
+                    "is_complete": True,
+                    "clarifying_questions": [],
+                }
+            ),
+            json.dumps(
+                {
+                    "user_stories": [corrected_item],
+                    "is_complete": True,
+                    "clarifying_questions": [],
+                }
+            ),
+        ],
+    )
+    monkeypatch.setattr(
+        story_agents,
+        "_create_story_writer_model",
+        lambda: correction_model,
+    )
+    correction_leaf = story_agents.create_user_story_patch_agent()
+    registry = _story_registry(
+        regular_leaf,
+        correction_leaf=correction_leaf,
     )
     workflow = registry.require("planning.story.generate").workflow
     base_payload = JSON_OBJECT.validate_python(
@@ -1049,7 +1331,10 @@ async def test_story_correction_recipe_merges_middle_and_remints_once() -> None:
     source_content = CanonicalStoryOutput.model_validate(source.payload)
     corrected_items = corrected_content.story_items
     assert regular_leaf.calls == ["provider"]
-    assert correction_leaf.calls == ["provider"]
+    assert len(correction_model.request_texts) == EXPECTED_RECOVERY_ATTEMPT_COUNT
+    assert "SYSTEM_FEEDBACK" not in correction_model.request_texts[0]
+    assert "SYSTEM_FEEDBACK" in correction_model.request_texts[1]
+    assert "Return exactly one user_stories item" in correction_model.request_texts[1]
     assert [entry.item.story_item_id for entry in corrected_items] == [
         "US-0001",
         "US-0002",
@@ -1080,6 +1365,164 @@ async def test_story_correction_recipe_merges_middle_and_remints_once() -> None:
     )
     assert isinstance(request, RecordStoryDraft)
     assert request.canonical_content == corrected.payload
+
+
+def test_story_runner_valid_first_persists_one_draft_and_replays_without_provider(
+    engine: Engine,
+) -> None:
+    """Persist one exact Story candidate while leaving human review untouched."""
+    leaf = CountingLeafAgent(
+        name="valid_first_story",
+        response=_story_provider_output(spec_item_ids=("REQ.planning-1",)),
+        calls=[],
+    )
+    system = _story_runner_system(
+        engine,
+        leaf=leaf,
+    )
+    position = system.domain.position(system.project_id)
+    decision = _story_decision(system.domain, system.project_id)
+    guards = AdkRunGuards(
+        position=position,
+        idempotency_key="issue-214-story-replay",
+        actor="operator@example.com",
+        correlation_id="issue-214-story-replay",
+    )
+
+    first = system.runner.run(decision, system.payload, guards=guards)
+    replay = system.runner.run(decision, system.payload, guards=guards)
+
+    assert first.ok is True
+    assert replay == first.model_copy(update={"replayed": True})
+    assert leaf.calls == ["provider"]
+    writer_input = system.payload["writer_input"]
+    assert isinstance(writer_input, dict)
+    with Session(engine) as session:
+        artifacts = session.exec(select(StoryArtifact)).all()
+        assert len(artifacts) == 1
+        artifact = artifacts[0]
+        assert (
+            artifact.source_backlog_artifact_id
+            == system.payload["source_backlog_artifact_id"]
+        )
+        assert (
+            artifact.source_backlog_artifact_fingerprint
+            == system.payload["source_backlog_artifact_fingerprint"]
+        )
+        assert artifact.roadmap_artifact_id == system.roadmap_id
+        assert (
+            artifact.roadmap_artifact_fingerprint
+            == system.payload["roadmap_artifact_fingerprint"]
+        )
+        assert artifact.backlog_item_id == writer_input["parent_backlog_item_id"]
+        persisted = json.loads(artifact.canonical_content_json)
+        assert persisted["story_items"][0]["item"]["decomposition_warning"] is None
+        assert session.exec(select(StoryArtifactDecision)).all() == []
+        assert session.exec(select(UserStory)).all() == []
+        attempts = _node_attempts(session, "planning.story.generate")
+        outcomes = _node_outcomes(session, "planning.story.generate")
+        assert len(attempts) == 1
+        assert len(outcomes) == 1
+        assert attempts[0].instance_key == "backlog_item:PBI-000001"
+        assert attempts[0].fact_fingerprint == position.fact_fingerprint
+        assert attempts[0].decision_fingerprint == decision.decision_fingerprint
+        assert json.loads(attempts[0].normalized_input_json) == system.payload
+        assert outcomes[0].status == "success"
+
+
+def test_story_runner_concurrent_duplicate_never_enters_provider_twice(
+    engine: Engine,
+) -> None:
+    """Bind one live Story attempt and replay a concurrent duplicate start."""
+    started = threading.Event()
+    release = threading.Event()
+    leaf = BlockingLeafAgent(
+        name="blocking_story",
+        response=_story_provider_output(spec_item_ids=("REQ.planning-1",)),
+        calls=[],
+        started=started,
+        release=release,
+    )
+    system = _story_runner_system(
+        engine,
+        leaf=leaf,
+    )
+    position = system.domain.position(system.project_id)
+    decision = _story_decision(system.domain, system.project_id)
+    guards = AdkRunGuards(
+        position=position,
+        idempotency_key="issue-214-story-concurrent",
+        actor="operator@example.com",
+        correlation_id="issue-214-story-concurrent",
+    )
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        first_future = executor.submit(
+            system.runner.run,
+            decision,
+            system.payload,
+            guards=guards,
+        )
+        assert started.wait(timeout=5)
+        try:
+            duplicate = system.runner.run(
+                decision,
+                system.payload,
+                guards=guards,
+            )
+            assert duplicate.ok is True
+            assert duplicate.replayed is True
+            assert leaf.calls == ["provider"]
+        finally:
+            release.set()
+        first = first_future.result(timeout=5)
+
+    assert first.ok is True
+    with Session(engine) as session:
+        assert len(_node_attempts(session, "planning.story.generate")) == 1
+        assert len(_node_outcomes(session, "planning.story.generate")) == 1
+        assert len(session.exec(select(StoryArtifact)).all()) == 1
+        assert session.exec(select(StoryArtifactDecision)).all() == []
+        assert session.exec(select(UserStory)).all() == []
+
+
+def test_story_runner_double_schema_failure_has_zero_partial_persistence(
+    engine: Engine,
+) -> None:
+    """Stop after two invalid responses and retain one durable failure only."""
+    invalid = _invalid_story_provider_output(spec_item_ids=("REQ.planning-1",))
+    leaf = SequenceLeafAgent(
+        name="double_invalid_story",
+        responses=[invalid, invalid],
+        calls=[],
+    )
+    system = _story_runner_system(
+        engine,
+        leaf=leaf,
+        execution_settings={"timeout_seconds": 5.0, "max_attempts": 3},
+    )
+
+    result = system.runner.run(
+        _story_decision(system.domain, system.project_id),
+        system.payload,
+    )
+
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.code is WorkflowErrorCode.EXTERNAL_EXECUTION_FAILED
+    assert leaf.calls == ["provider", "provider"]
+    with Session(engine) as session:
+        attempts = _node_attempts(session, "planning.story.generate")
+        outcomes = _node_outcomes(session, "planning.story.generate")
+        assert len(attempts) == 1
+        assert len(outcomes) == 1
+        assert outcomes[0].status == "failure"
+        assert outcomes[0].failure_message is not None
+        assert "INITIAL_VALIDATION_ERRORS" in outcomes[0].failure_message
+        assert "REPAIR_VALIDATION_ERRORS" in outcomes[0].failure_message
+        assert session.exec(select(StoryArtifact)).all() == []
+        assert session.exec(select(StoryArtifactDecision)).all() == []
+        assert session.exec(select(UserStory)).all() == []
 
 
 def _vision_preflight_runner(

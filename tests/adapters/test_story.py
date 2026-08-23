@@ -9,6 +9,7 @@ from adapters.adk.agents.story import (
     USER_STORY_WRITER_INSTRUCTIONS,
     create_user_story_patch_agent,
     create_user_story_writer_agent,
+    preserve_story_output_schema,
     root_agent,
 )
 from services.contracts.story import (
@@ -27,14 +28,15 @@ def test_agent_has_input_schema() -> None:
     assert root_agent.input_schema is UserStoryWriterInput
 
 
-def test_agent_has_output_schema() -> None:
-    """Verify agent has output schema."""
-    assert root_agent.output_schema is UserStoryWriterOutput
+def test_agent_preserves_raw_output_for_recipe_validation() -> None:
+    """Keep required-null field presence intact until strict recipe validation."""
+    assert root_agent.output_schema is None
+    assert root_agent.before_model_callback is preserve_story_output_schema
 
 
-def test_agent_has_output_key() -> None:
-    """Verify agent has output key."""
-    assert root_agent.output_key == "story_output"
+def test_agent_does_not_save_lossy_structured_output_to_state() -> None:
+    """Do not let ADK dump required-null Story output with exclude_none."""
+    assert root_agent.output_key is None
 
 
 def test_factory_returns_new_instance() -> None:
@@ -69,16 +71,18 @@ def test_story_writer_output_rejects_retired_patch_envelope() -> None:
         UserStoryWriterOutput.model_validate(payload)
 
 
-def test_user_story_patch_agent_uses_current_writer_output_schema() -> None:
-    """Correction agent binds the current writer schema without an alias."""
+def test_user_story_patch_agent_preserves_the_same_strict_recipe_boundary() -> None:
+    """Correction requests the current schema but returns raw JSON to the recipe."""
     patch_agent = create_user_story_patch_agent()
     full_agent = create_user_story_writer_agent()
 
     assert patch_agent is not full_agent
     assert patch_agent.name == "user_story_patch_tool"
     assert patch_agent.input_schema is UserStoryWriterInput
-    assert patch_agent.output_schema is UserStoryWriterOutput
-    assert full_agent.output_schema is UserStoryWriterOutput
+    assert patch_agent.output_schema is None
+    assert full_agent.output_schema is None
+    assert patch_agent.before_model_callback is preserve_story_output_schema
+    assert full_agent.before_model_callback is preserve_story_output_schema
 
 
 def test_high_story_example_omits_placeholder_warning() -> None:

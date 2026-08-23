@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -20,6 +19,10 @@ from services.contracts.story import (
     UserStoryWriterOutput,
     canonicalize_story_items,
 )
+from services.story_schema_repair import (
+    MAX_STORY_SCHEMA_REPAIR_ATTEMPTS,
+    with_story_schema_repair_feedback,
+)
 from utils.adk_runner import (
     get_agent_model_info,
     invoke_agent_to_text,
@@ -36,8 +39,6 @@ from utils.runtime_config import STORY_RUNNER_IDENTITY
 
 logger: logging.Logger = logging.getLogger(name=__name__)
 
-MAX_STORY_SCHEMA_REPAIR_ATTEMPTS: int = 2
-MAX_STORY_SCHEMA_REPAIR_FEEDBACK_CHARS: int = 4000
 _USER_STORY_WRITER_OUTPUT_KEYS: frozenset[str] = frozenset(
     {"user_stories", "is_complete"}
 )
@@ -96,44 +97,6 @@ def build_story_input_context(
         "roadmap_context": state.get("roadmap_context", ""),
         "user_input": _combined_user_input(state.get("user_input"), current_user_input),
     }
-
-
-def _schema_repair_feedback_text(
-    *,
-    error: str,
-    validation_errors: object | None = None,
-    targeted: bool,
-) -> str:
-    details = ""
-    if validation_errors is not None:
-        details = json.dumps(validation_errors, sort_keys=True, default=str)
-    cardinality = " Return exactly one user_stories item." if targeted else ""
-    feedback = (
-        "SYSTEM_FEEDBACK: Your previous User Story response failed schema or "
-        "reference validation.\n"
-        f"ERROR: {error}\n"
-        f"VALIDATION_ERRORS: {details}\n"
-        "Return JSON only. Match UserStoryWriterOutput exactly. Required fields "
-        "are user_stories, is_complete, and clarifying_questions."
-        f"{cardinality} Do not add wrapper fields."
-    )
-    return feedback[:MAX_STORY_SCHEMA_REPAIR_FEEDBACK_CHARS]
-
-
-def _payload_with_schema_repair_feedback(
-    payload: UserStoryWriterInput,
-    *,
-    error: str,
-    validation_errors: object | None = None,
-    targeted: bool,
-) -> UserStoryWriterInput:
-    feedback = _schema_repair_feedback_text(
-        error=error,
-        validation_errors=validation_errors,
-        targeted=targeted,
-    )
-    user_input = _combined_user_input(payload.user_input, feedback)
-    return payload.model_copy(update={"user_input": user_input})
 
 
 async def _invoke_story_agent(payload: UserStoryWriterInput) -> str:
@@ -289,7 +252,7 @@ async def _run_story_request(  # noqa: C901, PLR0911
         except AgentInvocationError as exc:
             validation_errors = exc.validation_errors
             if validation_errors and attempt_index < MAX_STORY_SCHEMA_REPAIR_ATTEMPTS:
-                attempt_payload = _payload_with_schema_repair_feedback(
+                attempt_payload = with_story_schema_repair_feedback(
                     attempt_payload,
                     error=str(exc),
                     validation_errors=validation_errors,
@@ -370,7 +333,7 @@ async def _run_story_request(  # noqa: C901, PLR0911
                 }
 
         if attempt_index < MAX_STORY_SCHEMA_REPAIR_ATTEMPTS:
-            attempt_payload = _payload_with_schema_repair_feedback(
+            attempt_payload = with_story_schema_repair_feedback(
                 attempt_payload,
                 error=error,
                 validation_errors=validation_errors,

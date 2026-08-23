@@ -178,7 +178,12 @@ def test_recipe_registry_covers_each_stable_agentic_domain_node_once() -> None:
         assert recipe.workflow.retry_config is not None
         expected_attempts = (
             1
-            if node_id in {"vision.bootstrap", "vision.interview"}
+            if node_id
+            in {
+                "vision.bootstrap",
+                "vision.interview",
+                "planning.story.generate",
+            }
             else RECIPE_MAX_ATTEMPTS
         )
         assert recipe.workflow.retry_config.max_attempts == expected_attempts
