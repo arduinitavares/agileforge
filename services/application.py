@@ -2446,7 +2446,7 @@ class AgileForgeApplication:
         request_payload: JsonObject,
     ) -> tuple[int | None, JsonObject | None]:
         """Claim a new transition receipt or return cached replay/conflict result."""
-        with Session(engine) as session:
+        with Session(engine, expire_on_commit=False) as session:
             if session.get_bind().dialect.name == "sqlite":
                 with contextlib.suppress(OperationalError):
                     session.connection().exec_driver_sql("BEGIN IMMEDIATE")
@@ -2492,7 +2492,7 @@ class AgileForgeApplication:
                 session.commit()
             except (IntegrityError, OperationalError):
                 session.rollback()
-                with Session(engine) as replay_session:
+                with Session(engine, expire_on_commit=False) as replay_session:
                     existing = replay_session.exec(
                         select(WorkflowTransitionReceipt).where(
                             col(WorkflowTransitionReceipt.request_kind)
@@ -2507,7 +2507,8 @@ class AgileForgeApplication:
                         and existing.result_json is not None
                         and existing.completed_at is not None
                     ):
-                        return None, _JSON_OBJECT.validate_json(existing.result_json)
+                        cached_result = existing.result_json
+                        return None, _JSON_OBJECT.validate_json(cached_result)
                     return None, {
                         "ok": False,
                         "status": "error",
@@ -2591,7 +2592,7 @@ class AgileForgeApplication:
         response: JsonObject,
     ) -> None:
         """Complete one claimed story validation receipt with its result."""
-        with Session(engine) as session:
+        with Session(engine, expire_on_commit=False) as session:
             if session.get_bind().dialect.name == "sqlite":
                 with contextlib.suppress(OperationalError):
                     session.connection().exec_driver_sql("BEGIN IMMEDIATE")
