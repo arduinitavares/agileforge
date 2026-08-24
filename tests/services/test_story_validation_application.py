@@ -147,3 +147,71 @@ def test_story_validation_api_endpoint(
     assert body["data"]["success"] is True
     assert body["data"]["ready_for_sprint"] is True
     assert body["data"]["story_id"] == story_id
+
+
+def test_story_validation_idempotent_replay(
+    engine: Engine,
+) -> None:
+    """Same idempotency key replays exact result without re-executing."""
+    story_id = _accepted_story(engine)
+    with Session(engine) as session:
+        statement = select(UserStory).where(col(UserStory.story_id) == story_id)
+        story = session.exec(statement).first()
+        assert story is not None
+        project_id = story.project_id
+
+    app = _build_application(engine)
+    request = StoryValidationRequest(
+        project_id=project_id,
+        story_id=story_id,
+        mode="structural",
+        idempotency_key="same-key-replay-1",
+        actor="test-operator",
+    )
+    with patch.object(story_validation_service, "get_engine", return_value=engine):
+        result_1 = app.validate_story(request)
+        result_2 = app.validate_story(request)
+
+    assert result_1["ok"] is True
+    assert result_2["ok"] is True
+    assert result_1 == result_2
+
+
+def test_story_validation_idempotency_conflict_on_different_payload(
+    engine: Engine,
+) -> None:
+    """Same idempotency key with different request payload fails with IDEMPOTENCY_CONFLICT."""
+    story_id = _accepted_story(engine)
+    with Session(engine) as session:
+        statement = select(UserStory).where(col(UserStory.story_id) == story_id)
+        story = session.exec(statement).first()
+        assert story is not None
+        project_id = story.project_id
+
+    app = _build_application(engine)
+    request_1 = StoryValidationRequest(
+        project_id=project_id,
+        story_id=story_id,
+        mode="structural",
+        idempotency_key="conflict-key-1",
+        actor="test-operator-1",
+    )
+    request_2 = StoryValidationRequest(
+        project_id=project_id,
+        story_id=story_id,
+        mode="structural",
+        idempotency_key="conflict-key-1",
+        actor="test-operator-2",  # different actor
+    )
+    with patch.object(story_validation_service, "get_engine", return_value=engine):
+        result_1 = app.validate_story(request_1)
+        result_2 = app.validate_story(request_2)
+
+    assert result_1["ok"] is True
+    assert result_2["ok"] is False
+    errors = result_2["errors"]
+    assert isinstance(errors, list)
+    assert len(errors) > 0
+    first_error = errors[0]
+    assert isinstance(first_error, dict)
+    assert first_error["code"] == "IDEMPOTENCY_CONFLICT"

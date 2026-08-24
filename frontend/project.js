@@ -1338,12 +1338,31 @@ function storyReadinessMarkup(stories, context = {}) {
         const requirement = pending?.requirement || '';
         const storyIdText = story.source_story_item_id || `Story #${story.story_id}`;
         const blockers = Array.isArray(story.readiness_blockers) ? story.readiness_blockers : [];
-        const isUnvalidated = blockers.includes('STORY_VALIDATION_REQUIRED') || !story.content_accepted;
-        const isBlocked = !isUnvalidated && blockers.length > 0;
+        const failures = Array.isArray(story.validation_failures) ? story.validation_failures : [];
+        const isValidationFailed = story.validation_status === 'failed' || failures.length > 0;
+        const isUnvalidated = !isValidationFailed && (story.validation_status === 'unvalidated' || blockers.includes('STORY_VALIDATION_REQUIRED') || !story.content_accepted);
+        const isValidated = story.validation_status === 'validated' || (!isValidationFailed && !isUnvalidated && blockers.length === 0);
+        const isBlocked = !isValidated && !isUnvalidated && !isValidationFailed;
 
         let badgeMarkup = '';
         let actionButtonMarkup = '';
-        if (isUnvalidated) {
+        let diagnosticsMarkup = '';
+
+        if (isValidationFailed) {
+            badgeMarkup = '<span class="inline-flex items-center rounded-full bg-red-50 px-2 py-0.5 text-xs font-semibold text-red-800 border border-red-200">Validation Failed</span>';
+            actionButtonMarkup = `<button type="button" data-story-validate-id="${story.story_id}" class="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-wait disabled:opacity-60">
+                <span class="material-symbols-outlined text-sm" aria-hidden="true">refresh</span>
+                <span data-story-validate-label="true">Revalidate</span>
+            </button>`;
+            if (failures.length > 0) {
+                const failureItems = failures.map((f) => {
+                    const code = escapeWorkflowText(f?.code || f?.rule_name || 'Structural Failure');
+                    const msg = escapeWorkflowText(f?.message || (typeof f === 'string' ? f : JSON.stringify(f)));
+                    return `<div>• <strong>${code}</strong>: ${msg}</div>`;
+                }).join('');
+                diagnosticsMarkup = `<div class="mt-1 rounded bg-red-50 p-2 text-xs text-red-700 border border-red-200 space-y-0.5" data-story-validation-diagnostics="true">${failureItems}</div>`;
+            }
+        } else if (isUnvalidated) {
             badgeMarkup = '<span class="inline-flex items-center rounded-full bg-amber-50 px-2 py-0.5 text-xs font-semibold text-amber-800 border border-amber-200">Unvalidated</span>';
             actionButtonMarkup = `<button type="button" data-story-validate-id="${story.story_id}" class="inline-flex items-center gap-1.5 rounded-lg bg-accent px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-800 disabled:cursor-wait disabled:opacity-60">
                 <span class="material-symbols-outlined text-sm" aria-hidden="true">task_alt</span>
@@ -1359,20 +1378,23 @@ function storyReadinessMarkup(stories, context = {}) {
             badgeMarkup = '<span class="inline-flex items-center rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-semibold text-emerald-800 border border-emerald-200">Validated</span>';
         }
 
-        return `<div class="py-3 first:pt-0 last:pb-0 flex flex-col sm:flex-row sm:items-center justify-between gap-3" data-story-readiness-row="${story.story_id}">
-            <div class="min-w-0 space-y-1">
-                <div class="flex items-center gap-2 flex-wrap">
-                    <span class="font-semibold text-sm text-slate-900">${escapeWorkflowText(storyIdText)}</span>
-                    ${pbiId ? `<span class="text-xs text-slate-500 font-mono">(${escapeWorkflowText(pbiId)})</span>` : ''}
-                    ${badgeMarkup}
+        return `<div class="py-3 first:pt-0 last:pb-0 flex flex-col justify-between gap-2" data-story-readiness-row="${story.story_id}">
+            <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div class="min-w-0 space-y-1">
+                    <div class="flex items-center gap-2 flex-wrap">
+                        <span class="font-semibold text-sm text-slate-900">${escapeWorkflowText(storyIdText)}</span>
+                        ${pbiId ? `<span class="text-xs text-slate-500 font-mono">(${escapeWorkflowText(pbiId)})</span>` : ''}
+                        ${badgeMarkup}
+                    </div>
+                    ${requirement ? `<p class="text-xs text-slate-600 line-clamp-1">${escapeWorkflowText(requirement)}</p>` : ''}
+                    <div class="flex items-center gap-3 text-xs text-slate-500">
+                        <span>Rank: ${escapeWorkflowText(story.rank || '-')}</span>
+                        <span>Points: ${escapeWorkflowText(story.story_points ?? '-')}</span>
+                    </div>
                 </div>
-                ${requirement ? `<p class="text-xs text-slate-600 line-clamp-1">${escapeWorkflowText(requirement)}</p>` : ''}
-                <div class="flex items-center gap-3 text-xs text-slate-500">
-                    <span>Rank: ${escapeWorkflowText(story.rank || '-')}</span>
-                    <span>Points: ${escapeWorkflowText(story.story_points ?? '-')}</span>
-                </div>
+                ${actionButtonMarkup ? `<div class="shrink-0 flex items-center">${actionButtonMarkup}</div>` : ''}
             </div>
-            ${actionButtonMarkup ? `<div class="shrink-0 flex items-center">${actionButtonMarkup}</div>` : ''}
+            ${diagnosticsMarkup}
         </div>`;
     });
 
@@ -1469,7 +1491,7 @@ function deliveryPanelMarkup(position, reviews = {}, actions = [], context = {})
         ? context.sprintCandidates.items
         : (Array.isArray(lifecycleState?.sprintCandidates?.items)
             ? lifecycleState.sprintCandidates.items
-            : stories.filter((s) => s.sprint_candidate));
+            : []);
 
     const dependencyAction = (Array.isArray(actions) ? actions : []).find(
         (action) => action?.request_kind === 'apply_story_dependencies',
@@ -1684,8 +1706,8 @@ async function loadDashboard() {
             requestPlanningReview(`${base}/story/reviews`, options),
             requestPlanningReview(`${base}/sprint/plan/review`, options),
             requestJson(`${base}/story/pending`, options),
-            requestJson(`${base}/story/dependencies`, options).catch(() => ({ data: {} })),
-            requestJson(`${base}/sprint/candidates`, options).catch(() => ({ data: {} })),
+            requestJson(`${base}/story/dependencies`, options),
+            requestJson(`${base}/sprint/candidates`, options),
         ]);
         if (sequence !== dashboardLoadSequence || controller.signal.aborted) return false;
         lifecycleState = {
@@ -2523,12 +2545,12 @@ function installInteractions() {
                         mode: 'structural',
                     })),
                 });
+                await loadDashboard();
                 if (response?.data?.success && !response.data.ready_for_sprint) {
                     const failures = response.data.structural_failures || [];
                     const diag = failures.map((f) => `${f.rule_name || f.code || 'Failure'}: ${f.message}`).join(' ');
                     setProjectError(`Story structural validation failed. ${diag}`);
                 }
-                await loadDashboard();
             } catch (error) {
                 setProjectError(error.message);
             } finally {
@@ -2551,13 +2573,23 @@ function installInteractions() {
             }
             setProjectError('');
             try {
-                const stories = Array.isArray(lifecycleState.storyDependencies?.stories)
-                    ? lifecycleState.storyDependencies.stories
-                    : [];
-                const storyIds = stories.map((s) => s.story_id);
-                const edges = Array.isArray(lifecycleState.storyDependencies?.edges)
+                const candidateStories = Array.isArray(lifecycleState.sprintCandidates?.items)
+                    ? lifecycleState.sprintCandidates.items
+                    : (Array.isArray(lifecycleState.storyDependencies?.stories)
+                        ? lifecycleState.storyDependencies.stories.filter((s) => s.sprint_candidate)
+                        : []);
+                const storyIds = candidateStories.map((s) => s.story_id);
+                const candidateSet = new Set(storyIds);
+                const rawEdges = Array.isArray(lifecycleState.storyDependencies?.edges)
                     ? lifecycleState.storyDependencies.edges
                     : [];
+                const edges = rawEdges
+                    .filter((e) => candidateSet.has(e.dependent_story_id) && candidateSet.has(e.prerequisite_story_id))
+                    .map((e) => ({
+                        dependent_story_id: e.dependent_story_id,
+                        prerequisite_story_id: e.prerequisite_story_id,
+                        reason: e.reason || 'Operator reviewed dependency',
+                    }));
                 await requestJson(`/api/projects/${selectedProjectId}/story/dependencies/apply`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },

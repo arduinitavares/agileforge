@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from functools import cache
 from importlib import import_module
 from typing import (
@@ -44,6 +45,7 @@ from models.workflow import (
     SprintPlanArtifact,
     StoryArtifact,
     StoryArtifactDecision,
+    WorkflowTransitionReceipt,
 )
 from repositories.workflow import WorkflowFactLoadError, WorkflowFactRepository
 from services.agent_workbench.story_phase import (
@@ -2427,6 +2429,46 @@ class AgileForgeApplication:
         request: StoryValidationRequest,
     ) -> JsonObject:
         """Structurally validate one accepted Story provider-free."""
+        request_payload: JsonObject = {
+            "project_id": request.project_id,
+            "story_id": request.story_id,
+            "mode": request.mode,
+            "actor": request.actor,
+            "correlation_id": request.correlation_id,
+        }
+        request_fingerprint = canonical_hash(request_payload)
+
+        # Replay completed request with matching idempotency key
+        with Session(self._workflow_domain._engine) as session:
+            receipt = session.exec(
+                select(WorkflowTransitionReceipt).where(
+                    col(WorkflowTransitionReceipt.request_kind) == "validate_story",
+                    col(WorkflowTransitionReceipt.idempotency_key)
+                    == request.idempotency_key,
+                )
+            ).one_or_none()
+            if receipt is not None:
+                if (
+                    receipt.request_fingerprint != request_fingerprint
+                    or receipt.result_json is None
+                    or receipt.completed_at is None
+                ):
+                    return {
+                        "ok": False,
+                        "status": "error",
+                        "errors": [
+                            {
+                                "code": "IDEMPOTENCY_CONFLICT",
+                                "message": (
+                                    "The idempotency key was already used for"
+                                    " different input."
+                                ),
+                            }
+                        ],
+                        "warnings": [],
+                    }
+                return _JSON_OBJECT.validate_json(receipt.result_json)
+
         project_result = self.reads.project_show(project_id=request.project_id)
         if not project_result.get("ok"):
             return project_result
@@ -2458,28 +2500,48 @@ class AgileForgeApplication:
                     }
                 ],
             }
-        result = validate_story_with_specification(
+        eval_result = validate_story_with_specification(
             ValidateStoryInput(story_id=request.story_id, mode=request.mode),
         )
-        if not result.get("success", False):
+        if not eval_result.get("success", False):
             error_code = cast(
-                "str", result.get("error_code") or "STORY_VALIDATION_FAILED"
+                "str", eval_result.get("error_code") or "STORY_VALIDATION_FAILED"
             )
             message = cast(
-                "str", result.get("message") or "Story validation failed."
+                "str", eval_result.get("message") or "Story validation failed."
             )
-            return {
+            response: JsonObject = {
                 "ok": False,
-                "data": result,
+                "data": eval_result,
                 "errors": [
                     {
                         "code": error_code,
                         "message": message,
-                        "details": result,
+                        "details": eval_result,
                     }
                 ],
             }
-        return {"ok": True, "data": result, "errors": []}
+        else:
+            response = {"ok": True, "data": eval_result, "errors": []}
+
+        # Persist idempotency receipt
+        with Session(self._workflow_domain._engine) as session:
+            if session.get_bind().dialect.name == "sqlite":
+                session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+            evaluated_at = datetime.now(tz=UTC)
+            receipt = WorkflowTransitionReceipt(
+                request_kind="validate_story",
+                idempotency_key=request.idempotency_key,
+                request_fingerprint=request_fingerprint,
+                request_json=canonical_json(request_payload),
+                result_json=canonical_json(response),
+                started_at=evaluated_at,
+                completed_at=evaluated_at,
+            )
+            session.add(receipt)
+            session.commit()
+
+        return response
 
     def start_sprint(self, request: SprintStartRequest) -> TransitionResult:
         """Start the accepted current Sprint plan without caller-owned identity."""

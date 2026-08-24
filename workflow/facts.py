@@ -454,6 +454,8 @@ class StoryFact(FrozenModel):
     sprint_ids: tuple[int, ...] = ()
     sprint_candidate: bool
     readiness_blockers: tuple[str, ...]
+    validation_status: Literal["validated", "failed", "unvalidated"] | None = None
+    validation_failures: tuple[JsonObject, ...] = ()
 
 
 class TaskFact(FrozenModel):

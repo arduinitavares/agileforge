@@ -585,6 +585,8 @@ def test_story_dependencies_inspect_includes_stories_with_backlog_item_id(
     assert isinstance(first, dict)
     assert first["story_id"] == story_id
     assert first["backlog_item_id"] == "PBI-000001"
+    assert first["validation_status"] == "validated"
+    assert first["validation_failures"] == []
 
 
 def _vision_output_fingerprint(

@@ -65,6 +65,10 @@ from services.specs.candidate_contract import (
     load_candidate_contract,
     render_candidate_review_markdown,
 )
+from services.specs.story_validation_service import (
+    StoryValidationReadinessError,
+    require_story_ready_for_sprint,
+)
 from utils.spec_schemas import ValidationEvidence
 from workflow.contracts import JsonObject, JsonValue
 from workflow.definitions.backlog import current_backlog_lineage
@@ -2158,21 +2162,20 @@ class DurableReadProjectionService:
         validation_evidence: JsonObject | None = None
         ready_for_sprint = False
         validation_failures: list[JsonValue] = []
+        validation_status = "unvalidated"
         if story.validation_evidence is not None:
             try:
                 ev = ValidationEvidence.model_validate_json(story.validation_evidence)
                 validation_evidence = ev.model_dump(mode="json")
-                ready_for_sprint = ev.ready_for_sprint
                 validation_failures = [
                     f.model_dump(mode="json") for f in ev.structural_failures
                 ]
-            except (ValidationError, ValueError):
-                pass
-        validation_status = (
-            "validated"
-            if ready_for_sprint
-            else ("failed" if story.validation_evidence is not None else "unvalidated")
-        )
+                require_story_ready_for_sprint(session, story=story)
+                ready_for_sprint = True
+                validation_status = "validated"
+            except (ValidationError, ValueError, StoryValidationReadinessError):
+                ready_for_sprint = False
+                validation_status = "failed"
         return _success(
             {
                 "story_id": story_id,

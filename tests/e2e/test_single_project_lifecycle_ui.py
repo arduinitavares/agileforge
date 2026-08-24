@@ -151,6 +151,7 @@ class FakeLifecycle:
     story_dependencies: list[JsonValue] = field(default_factory=list)
     sprint_candidates: list[JsonValue] = field(default_factory=list)
     story_validation_requests: list[JsonObject] = field(default_factory=list)
+    story_validation_failure: JsonObject | None = None
     dependency_apply_requests: list[JsonObject] = field(default_factory=list)
     reject_stale_delivery_actions: bool = False
     refresh_count: int = 0
@@ -395,8 +396,8 @@ class FakeLifecycle:
         }
         handler = handlers.get(suffix)
         assert handler is not None, f"Unexpected mutation path: {suffix}"
-        handler(body)
-        return _HTTP_OK, self._mutation_result()
+        result = handler(body)
+        return _HTTP_OK, result if result is not None else self._mutation_result()
 
     def _review_fingerprint(self, suffix: str) -> str | None:
         candidates = {
@@ -831,19 +832,64 @@ class FakeLifecycle:
         else:
             self.planning_review_overrides.pop("/story/reviews", None)
 
-    def _validate_story(self, body: JsonObject) -> None:
+    def _validate_story(self, body: JsonObject) -> JsonObject:
         self._assert_fields(body, {"story_id", "mode"})
         self.story_validation_requests.append(dict(body))
         story_id = body["story_id"]
+        if self.story_validation_failure:
+            failure = self.story_validation_failure
+            for s in self.stories:
+                if isinstance(s, dict) and s.get("story_id") == story_id:
+                    s["validation_status"] = "failed"
+                    s["validation_failures"] = [failure]
+                    s["readiness_blockers"] = ["STORY_VALIDATION_REQUIRED"]
+                    s["sprint_candidate"] = False
+            return {
+                "status": "success",
+                "data": {
+                    "success": True,
+                    "ready_for_sprint": False,
+                    "story_id": story_id,
+                    "mode": body["mode"],
+                    "structural_failures": [failure],
+                    "structural_warnings": [],
+                    "semantic_review_state": "not_requested",
+                    "semantic_findings": [],
+                    "validation_evidence": None,
+                },
+                "warnings": [],
+            }
         for s in self.stories:
             if isinstance(s, dict) and s.get("story_id") == story_id:
                 s["readiness_blockers"] = []
                 s["sprint_candidate"] = True
+                s["validation_status"] = "validated"
+                s["validation_failures"] = []
                 if s not in self.sprint_candidates:
                     self.sprint_candidates.append(s)
+        return {
+            "status": "success",
+            "data": {
+                "success": True,
+                "ready_for_sprint": True,
+                "story_id": story_id,
+                "mode": body["mode"],
+                "structural_failures": [],
+                "structural_warnings": [],
+                "semantic_review_state": "not_requested",
+                "semantic_findings": [],
+                "validation_evidence": {"ready_for_sprint": True},
+            },
+            "warnings": [],
+        }
 
     def _apply_story_dependencies(self, body: JsonObject) -> None:
         self._assert_fields(body, {"selected_story_ids", "reviewed_edges"})
+        reviewed_edges = body.get("reviewed_edges")
+        assert isinstance(reviewed_edges, list)
+        for edge in reviewed_edges:
+            assert isinstance(edge, dict)
+            assert set(edge.keys()) == {"dependent_story_id", "prerequisite_story_id", "reason"}
         self.dependency_apply_requests.append(dict(body))
 
     def _generate_sprint_plan(self, body: JsonObject) -> None:
@@ -2341,11 +2387,11 @@ def test_sprint_generation_requires_team_and_blocks_duplicate_submission(
 def test_progressive_story_readiness_partial_refinement_to_sprint_planning(
     dashboard_harness: DashboardHarness,
 ) -> None:
-    """Unlock Sprint planning from one valid Story while siblings remain unrefined."""
-    story_id = 102
-    pbi1_action = _story_generation_action("backlog_item:PBI-000001")
+    """Unlock Sprint planning with ready Story, unvalidated sibling, non-empty edge, and unrefined PBI."""
+    story1_id = 101
+    story2_id = 102
     pbi3_action = _story_generation_action("backlog_item:PBI-000003")
-    fake = _delivery_ready_fake([pbi1_action, pbi3_action])
+    fake = _delivery_ready_fake([pbi3_action])
 
     # 3 PBIs in backlog candidate and pending projection
     fake.backlog_candidate = {
@@ -2365,46 +2411,72 @@ def test_progressive_story_readiness_partial_refinement_to_sprint_planning(
         ]
     }
 
-    # PBI-000002 has an accepted story needing structural validation
-    fake.stories = [
+    # US-001 is already validated; US-002 is unvalidated with dependency on US-001
+    story1 = {
+        "story_id": story1_id,
+        "source_story_item_id": "US-001",
+        "backlog_item_id": "PBI-000001",
+        "status": "to_do",
+        "story_points": 3,
+        "rank": "0|hzzzzz:",
+        "sprint_candidate": True,
+        "content_accepted": True,
+        "readiness_blockers": [],
+        "validation_status": "validated",
+        "validation_failures": [],
+    }
+    story2 = {
+        "story_id": story2_id,
+        "source_story_item_id": "US-002",
+        "backlog_item_id": "PBI-000002",
+        "status": "to_do",
+        "story_points": 5,
+        "rank": "0|hzzzzz:1",
+        "sprint_candidate": False,
+        "content_accepted": True,
+        "readiness_blockers": ["STORY_VALIDATION_REQUIRED"],
+        "validation_status": "unvalidated",
+        "validation_failures": [],
+    }
+    fake.stories = [story1, story2]
+    fake.sprint_candidates = [story1]
+    # Projection edge includes extra fields forbidden by the HTTP API contract
+    fake.story_dependencies = [
         {
-            "story_id": story_id,
-            "source_story_item_id": "US-001",
-            "backlog_item_id": "PBI-000002",
-            "status": "to_do",
-            "story_points": 5,
-            "rank": "1",
-            "sprint_candidate": False,
-            "content_accepted": True,
-            "readiness_blockers": ["STORY_VALIDATION_REQUIRED"],
+            "dependency_id": 1,
+            "dependent_story_id": story2_id,
+            "prerequisite_story_id": story1_id,
+            "status": "proposed",
+            "source": "story_writer",
+            "confidence": "inferred",
+            "reason": "Requires US-001 foundation",
         }
     ]
 
     context, page = _open_project_page(dashboard_harness, fake)
 
-    # 1. Verify unrefined sibling PBI generation buttons are visible
-    expect(
-        page.locator('[data-delivery-action-instance="backlog_item:PBI-000001"]')
-    ).to_be_visible()
+    # 1. Verify unrefined sibling PBI generation button is visible
     expect(
         page.locator('[data-delivery-action-instance="backlog_item:PBI-000003"]')
     ).to_be_visible()
 
-    # 2. Verify Story readiness section displays US-001 with parent PBI-000002
+    # 2. Verify Story readiness section displays US-001 as Validated and US-002 as Unvalidated
     readiness_section = page.locator('[data-story-readiness-section="true"]')
     expect(readiness_section).to_be_visible()
     expect(readiness_section).to_contain_text("US-001")
-    expect(readiness_section).to_contain_text("(PBI-000002)")
+    expect(readiness_section).to_contain_text("Validated")
+    expect(readiness_section).to_contain_text("US-002")
     expect(readiness_section).to_contain_text("Unvalidated")
-    validate_button = page.locator(f'[data-story-validate-id="{story_id}"]')
+
+    validate_button = page.locator(f'[data-story-validate-id="{story2_id}"]')
     expect(validate_button).to_be_visible()
 
-    # 3. Click "Validate Story" on US-001
+    # 3. Click "Validate Story" on US-002
     validate_button.click()
     page.wait_for_timeout(200)
 
     assert len(fake.story_validation_requests) == 1
-    assert fake.story_validation_requests[0]["story_id"] == story_id
+    assert fake.story_validation_requests[0]["story_id"] == story2_id
     assert fake.story_validation_requests[0]["mode"] == "structural"
 
     # 4. After validation, simulate dependency review action in position
@@ -2415,9 +2487,7 @@ def test_progressive_story_readiness_partial_refinement_to_sprint_planning(
         "endpoint": "story/dependencies/apply",
         "transport": "semantic",
     }
-    fake.position_override = _delivery_position(
-        [pbi1_action, pbi3_action, dependency_action]
-    )
+    fake.position_override = _delivery_position([pbi3_action, dependency_action])
 
     # Reload dashboard to pick up new position
     page.locator("#refresh-project").click()
@@ -2435,37 +2505,116 @@ def test_progressive_story_readiness_partial_refinement_to_sprint_planning(
     page.wait_for_timeout(200)
 
     assert len(fake.dependency_apply_requests) == 1
-    assert fake.dependency_apply_requests[0]["selected_story_ids"] == [story_id]
-    assert fake.dependency_apply_requests[0]["reviewed_edges"] == []
+    assert fake.dependency_apply_requests[0]["selected_story_ids"] == [
+        story1_id,
+        story2_id,
+    ]
+    # Edge is sanitized to {dependent_story_id, prerequisite_story_id, reason}
+    assert fake.dependency_apply_requests[0]["reviewed_edges"] == [
+        {
+            "dependent_story_id": story2_id,
+            "prerequisite_story_id": story1_id,
+            "reason": "Requires US-001 foundation",
+        }
+    ]
 
     # 7. Simulate Sprint planning action becoming available
     sprint_plan_action = _sprint_generation_action()
-    fake.position_override = _delivery_position(
-        [pbi1_action, pbi3_action, sprint_plan_action]
-    )
+    fake.position_override = _delivery_position([pbi3_action, sprint_plan_action])
 
     # Reload dashboard
     page.locator("#refresh-project").click()
     page.wait_for_timeout(200)
 
-    # 8. Verify Sprint candidate pool displays US-001 as Ready
+    # 8. Verify Sprint candidate pool displays 2 candidates ready
     candidate_pool = page.locator('[data-candidate-pool-section="true"]')
     expect(candidate_pool).to_be_visible()
-    expect(candidate_pool).to_contain_text("1 candidate ready")
+    expect(candidate_pool).to_contain_text("2 candidates ready")
     expect(candidate_pool).to_contain_text("US-001")
-    expect(candidate_pool).to_contain_text("(PBI-000002)")
+    expect(candidate_pool).to_contain_text("US-002")
 
     # 9. Verify Sprint planning form is visible and unlocked
     sprint_form = page.locator('[data-delivery-generation-form="record_sprint_plan"]')
     expect(sprint_form).to_be_visible()
 
-    # 10. Verify unrefined sibling PBIs remain visible and operable
-    expect(
-        page.locator('[data-delivery-action-instance="backlog_item:PBI-000001"]')
-    ).to_be_visible()
+    # 10. Verify unrefined sibling PBI-000003 remains visible and operable
     expect(
         page.locator('[data-delivery-action-instance="backlog_item:PBI-000003"]')
     ).to_be_visible()
+
+    context.close()
+
+
+def test_progressive_story_readiness_structural_failure_diagnostics_persist_across_reload(
+    dashboard_harness: DashboardHarness,
+) -> None:
+    """Structural validation failure diagnostics persist in per-story row after reload."""
+    story_id = 101
+    pbi1_action = _story_generation_action("backlog_item:PBI-000001")
+    fake = _delivery_ready_fake([pbi1_action])
+
+    fake.backlog_candidate = {
+        "backlog_items": [
+            {
+                "backlog_item_id": "PBI-000001",
+                "requirement": "Specification authoring workflow",
+            },
+        ]
+    }
+
+    fake.stories = [
+        {
+            "story_id": story_id,
+            "source_story_item_id": "US-001",
+            "backlog_item_id": "PBI-000001",
+            "status": "to_do",
+            "story_points": 3,
+            "rank": "0|hzzzzz:",
+            "sprint_candidate": False,
+            "content_accepted": True,
+            "readiness_blockers": ["STORY_VALIDATION_REQUIRED"],
+            "validation_status": "unvalidated",
+            "validation_failures": [],
+        }
+    ]
+    fake.story_validation_failure = {
+        "code": "STORY_SPEC_REFERENCE_INVALID",
+        "message": "Story references invalid specification items: REQ.099",
+    }
+
+    context, page = _open_project_page(dashboard_harness, fake)
+
+    # Verify initially Unvalidated
+    readiness_section = page.locator('[data-story-readiness-section="true"]')
+    expect(readiness_section).to_be_visible()
+    expect(readiness_section).to_contain_text("Unvalidated")
+
+    validate_button = page.locator(f'[data-story-validate-id="{story_id}"]')
+    expect(validate_button).to_be_visible()
+
+    # Click Validate Story -> triggers failure and reload
+    validate_button.click()
+    page.wait_for_timeout(300)
+
+    # Verify per-story row now displays "Validation Failed" and actionable diagnostics
+    expect(readiness_section).to_contain_text("Validation Failed")
+    diagnostics = page.locator('[data-story-validation-diagnostics="true"]')
+    expect(diagnostics).to_be_visible()
+    expect(diagnostics).to_contain_text("STORY_SPEC_REFERENCE_INVALID")
+    expect(diagnostics).to_contain_text(
+        "Story references invalid specification items: REQ.099"
+    )
+
+    # Verify "Revalidate" button is now shown instead of initial "Validate Story"
+    revalidate_button = page.locator(f'[data-story-validate-id="{story_id}"]')
+    expect(revalidate_button).to_be_visible()
+    expect(revalidate_button).to_contain_text("Revalidate")
+
+    # Verify global project error message is visible
+    error_banner = page.locator("#project-error")
+    expect(error_banner).to_be_visible()
+    expect(error_banner).to_contain_text("Story structural validation failed.")
+    expect(error_banner).to_contain_text("STORY_SPEC_REFERENCE_INVALID")
 
     context.close()
 

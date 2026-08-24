@@ -775,3 +775,40 @@ test('dependency review section renders when apply_story_dependencies action is 
     assert.ok(markup.includes('data-apply-dependencies="true"'));
     assert.ok(markup.includes('Confirm dependencies'));
 });
+
+test('story readiness section renders validation failed badge and actionable diagnostics', () => {
+    const context = loadFrontend();
+    const stories = [
+        {
+            story_id: 101,
+            source_story_item_id: 'US-001',
+            backlog_item_id: 'PBI-000001',
+            status: 'accepted',
+            story_points: 3,
+            rank: '0|hzzzzz:',
+            content_accepted: true,
+            sprint_candidate: false,
+            readiness_blockers: ['STORY_VALIDATION_REQUIRED'],
+            validation_status: 'failed',
+            validation_failures: [
+                {
+                    code: 'STORY_SPEC_REFERENCE_INVALID',
+                    message: 'Story references invalid specification items: REQ.099',
+                },
+            ],
+        },
+    ];
+    const appState = {
+        storyPending: { items: [] },
+        storyDependencies: { stories },
+        sprintCandidates: { items: [] },
+    };
+
+    const readinessMarkup = context.storyReadinessMarkup(stories, appState);
+    assert.ok(readinessMarkup.includes('Validation Failed'));
+    assert.ok(readinessMarkup.includes('data-story-validation-diagnostics="true"'));
+    assert.ok(readinessMarkup.includes('STORY_SPEC_REFERENCE_INVALID'));
+    assert.ok(readinessMarkup.includes('Story references invalid specification items: REQ.099'));
+    assert.ok(readinessMarkup.includes('Revalidate'));
+    assert.ok(readinessMarkup.includes('data-story-validate-id="101"'));
+});

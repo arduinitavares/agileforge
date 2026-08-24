@@ -93,6 +93,7 @@ from utils.agileforge_spec_profile_v2 import (
     SpecificationPayload,
     canonical_spec_hash,
 )
+from utils.spec_schemas import ValidationEvidence
 from utils.task_metadata import parse_task_metadata, serialize_task_metadata
 from workflow.contracts import JsonValue
 from workflow.execution_integrity import (
@@ -3047,6 +3048,21 @@ class WorkflowFactRepository:
         blockers: tuple[str, ...],
         sprint_ids: tuple[int, ...],
     ) -> StoryFact:
+        validation_status: Literal["validated", "failed", "unvalidated"] = "unvalidated"
+        validation_failures: tuple[JsonObject, ...] = ()
+        if row.validation_evidence is not None:
+            try:
+                ev = ValidationEvidence.model_validate_json(row.validation_evidence)
+                if not blockers and ev.ready_for_sprint:
+                    validation_status = "validated"
+                else:
+                    validation_status = "failed"
+                    validation_failures = tuple(
+                        f.model_dump(mode="json") for f in ev.structural_failures
+                    )
+            except (ValidationError, ValueError):
+                validation_status = "failed"
+
         return StoryFact(
             story_id=story_id,
             source_story_artifact_id=row.source_story_artifact_id,
@@ -3082,6 +3098,8 @@ class WorkflowFactRepository:
             sprint_ids=sprint_ids,
             sprint_candidate=not blockers,
             readiness_blockers=blockers,
+            validation_status=validation_status,
+            validation_failures=validation_failures,
         )
 
     def _stories(
