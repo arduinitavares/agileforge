@@ -1823,7 +1823,7 @@ def _attempt_16_sanitized_responses(
                         "REQ.python-public-add."
                     ),
                     (
-                        "Calling `add(\"\")` returns integer `0`, as required by "
+                        'Calling `add("")` returns integer `0`, as required by '
                         "REQ.empty-input-zero."
                     ),
                     (

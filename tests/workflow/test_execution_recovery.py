@@ -111,12 +111,15 @@ def test_handler_failure_after_flush_rolls_back_business_audit_and_receipt(
         assert task.status is TaskStatus.IN_PROGRESS
         assert session.exec(select(TaskCompletionEvidence)).all() == []
         assert session.exec(select(TaskExecutionLog)).all() == []
-        assert session.exec(
-            select(WorkflowTransitionReceipt).where(
-                col(WorkflowTransitionReceipt.idempotency_key)
-                == "interrupted-completion"
-            )
-        ).all() == []
+        assert (
+            session.exec(
+                select(WorkflowTransitionReceipt).where(
+                    col(WorkflowTransitionReceipt.idempotency_key)
+                    == "interrupted-completion"
+                )
+            ).all()
+            == []
+        )
 
 
 def test_interrupted_retry_succeeds_once_and_replays_once(

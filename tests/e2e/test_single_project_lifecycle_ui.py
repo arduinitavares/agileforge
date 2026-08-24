@@ -2445,10 +2445,20 @@ def test_progressive_story_readiness_partial_refinement_to_sprint_planning(
     dashboard_harness: DashboardHarness,
 ) -> None:
     """Unlock Sprint planning with ready Story, unvalidated sibling, and edge."""
-    story1_id = 101
-    story2_id = 102
+    story1_id, story2_id = 101, 102
     pbi3_action = _story_generation_action("backlog_item:PBI-000003")
-    fake = _delivery_ready_fake([pbi3_action])
+    fake = _delivery_ready_fake(
+        [
+            pbi3_action,
+            {
+                "node_id": "planning.story_dependencies",
+                "instance_key": None,
+                "request_kind": "apply_story_dependencies",
+                "endpoint": "story/dependencies/apply",
+                "transport": "semantic",
+            },
+        ]
+    )
     _seed_progressive_stories(fake, story1_id, story2_id)
 
     context, page = _open_project_page(dashboard_harness, fake)
@@ -2464,45 +2474,20 @@ def test_progressive_story_readiness_partial_refinement_to_sprint_planning(
     expect(readiness).to_contain_text("US-002")
     expect(readiness).to_contain_text("Unvalidated")
 
-    validate_btn = page.locator(f'[data-story-validate-id="{story2_id}"]')
-    expect(validate_btn).to_be_visible()
-    validate_btn.click()
-    page.wait_for_timeout(200)
-
-    assert len(fake.story_validation_requests) == 1
-    assert fake.story_validation_requests[0]["story_id"] == story2_id
-
-    dep_action: JsonObject = {
-        "node_id": "planning.story_dependencies",
-        "instance_key": None,
-        "request_kind": "apply_story_dependencies",
-        "endpoint": "story/dependencies/apply",
-        "transport": "semantic",
-    }
-    fake.position_override = _delivery_position([pbi3_action, dep_action])
-
-    page.locator("#refresh-project").click()
-    page.wait_for_timeout(200)
-
     dep_section = page.locator('[data-dependency-review-section="true"]')
     expect(dep_section).to_be_visible()
+    expect(dep_section).to_contain_text("US-001")
+    expect(dep_section).not_to_contain_text("US-002")
+    expect(dep_section).to_contain_text("None (independent stories)")
+
     confirm_dep_btn = page.locator('[data-apply-dependencies="true"]')
     expect(confirm_dep_btn).to_be_visible()
     confirm_dep_btn.click()
     page.wait_for_timeout(200)
 
     assert len(fake.dependency_apply_requests) == 1
-    assert fake.dependency_apply_requests[0]["selected_story_ids"] == [
-        story1_id,
-        story2_id,
-    ]
-    assert fake.dependency_apply_requests[0]["reviewed_edges"] == [
-        {
-            "dependent_story_id": story2_id,
-            "prerequisite_story_id": story1_id,
-            "reason": "Requires US-001 foundation",
-        }
-    ]
+    assert fake.dependency_apply_requests[0]["selected_story_ids"] == [story1_id]
+    assert fake.dependency_apply_requests[0]["reviewed_edges"] == []
 
     sprint_plan_action = _sprint_generation_action()
     fake.position_override = _delivery_position([pbi3_action, sprint_plan_action])
@@ -2512,12 +2497,27 @@ def test_progressive_story_readiness_partial_refinement_to_sprint_planning(
 
     candidate_pool = page.locator('[data-candidate-pool-section="true"]')
     expect(candidate_pool).to_be_visible()
-    expect(candidate_pool).to_contain_text("2 candidates ready")
+    expect(candidate_pool).to_contain_text("1 candidate ready")
     expect(candidate_pool).to_contain_text("US-001")
-    expect(candidate_pool).to_contain_text("US-002")
+    expect(candidate_pool).not_to_contain_text("US-002")
 
     sprint_form = page.locator('[data-delivery-generation-form="record_sprint_plan"]')
     expect(sprint_form).to_be_visible()
+
+    validate_btn = page.locator(f'[data-story-validate-id="{story2_id}"]')
+    expect(validate_btn).to_be_visible()
+    validate_btn.click()
+    page.wait_for_timeout(200)
+
+    assert len(fake.story_validation_requests) == 1
+    assert fake.story_validation_requests[0]["story_id"] == story2_id
+
+    page.locator("#refresh-project").click()
+    page.wait_for_timeout(200)
+
+    expect(candidate_pool).to_contain_text("2 candidates ready")
+    expect(candidate_pool).to_contain_text("US-001")
+    expect(candidate_pool).to_contain_text("US-002")
 
     expect(
         page.locator('[data-delivery-action-instance="backlog_item:PBI-000003"]')

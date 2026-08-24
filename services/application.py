@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -27,6 +28,7 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlmodel import Session, col, select
 
 from adapters.adk.model_roles import AGENTIC_MODEL_ROLES
@@ -2436,22 +2438,18 @@ class AgileForgeApplication:
             )
         )
 
-    def validate_story(
+    def _claim_story_validation_receipt(
         self,
+        engine: Engine,
         request: StoryValidationRequest,
-    ) -> JsonObject:
-        """Structurally validate one accepted Story provider-free."""
-        request_payload: JsonObject = {
-            "project_id": request.project_id,
-            "story_id": request.story_id,
-            "mode": request.mode,
-            "actor": request.actor,
-            "correlation_id": request.correlation_id,
-        }
-        request_fingerprint = canonical_hash(request_payload)
-
-        # Replay completed request with matching idempotency key
-        with Session(self._engine()) as session:
+        request_fingerprint: str,
+        request_payload: JsonObject,
+    ) -> tuple[int | None, JsonObject | None]:
+        """Claim a new transition receipt or return cached replay/conflict result."""
+        with Session(engine) as session:
+            if session.get_bind().dialect.name == "sqlite":
+                with contextlib.suppress(OperationalError):
+                    session.connection().exec_driver_sql("BEGIN IMMEDIATE")
             receipt = session.exec(
                 select(WorkflowTransitionReceipt).where(
                     col(WorkflowTransitionReceipt.request_kind) == "validate_story",
@@ -2465,7 +2463,7 @@ class AgileForgeApplication:
                     or receipt.result_json is None
                     or receipt.completed_at is None
                 ):
-                    return {
+                    return None, {
                         "ok": False,
                         "status": "error",
                         "errors": [
@@ -2479,8 +2477,59 @@ class AgileForgeApplication:
                         ],
                         "warnings": [],
                     }
-                return _JSON_OBJECT.validate_json(receipt.result_json)
+                return None, _JSON_OBJECT.validate_json(receipt.result_json)
 
+            started_at = datetime.now(tz=UTC)
+            claimed = WorkflowTransitionReceipt(
+                request_kind="validate_story",
+                idempotency_key=request.idempotency_key,
+                request_fingerprint=request_fingerprint,
+                request_json=canonical_json(request_payload),
+                started_at=started_at,
+            )
+            session.add(claimed)
+            try:
+                session.commit()
+            except (IntegrityError, OperationalError):
+                session.rollback()
+                with Session(engine) as replay_session:
+                    existing = replay_session.exec(
+                        select(WorkflowTransitionReceipt).where(
+                            col(WorkflowTransitionReceipt.request_kind)
+                            == "validate_story",
+                            col(WorkflowTransitionReceipt.idempotency_key)
+                            == request.idempotency_key,
+                        )
+                    ).one_or_none()
+                    if (
+                        existing is not None
+                        and existing.request_fingerprint == request_fingerprint
+                        and existing.result_json is not None
+                        and existing.completed_at is not None
+                    ):
+                        return None, _JSON_OBJECT.validate_json(existing.result_json)
+                    return None, {
+                        "ok": False,
+                        "status": "error",
+                        "errors": [
+                            {
+                                "code": "IDEMPOTENCY_CONFLICT",
+                                "message": (
+                                    "The idempotency key was already used for"
+                                    " different input."
+                                ),
+                            }
+                        ],
+                        "warnings": [],
+                    }
+            else:
+                return claimed.workflow_transition_receipt_id, None
+
+    def _execute_story_validation(
+        self,
+        request: StoryValidationRequest,
+    ) -> JsonObject:
+        """Execute structural story validation against project and story state."""
         project_result = self.reads.project_show(project_id=request.project_id)
         if not project_result.get("ok"):
             return project_result
@@ -2515,7 +2564,6 @@ class AgileForgeApplication:
         eval_result = validate_story_with_specification(
             ValidateStoryInput(story_id=request.story_id, mode=request.mode),
         )
-        response: JsonObject
         if not eval_result.get("success", False):
             error_code = cast(
                 "str", eval_result.get("error_code") or "STORY_VALIDATION_FAILED"
@@ -2523,7 +2571,7 @@ class AgileForgeApplication:
             message = cast(
                 "str", eval_result.get("message") or "Story validation failed."
             )
-            response = {
+            return {
                 "ok": False,
                 "data": eval_result,
                 "errors": [
@@ -2534,25 +2582,53 @@ class AgileForgeApplication:
                     }
                 ],
             }
-        else:
-            response = {"ok": True, "data": eval_result, "errors": []}
+        return {"ok": True, "data": eval_result, "errors": []}
 
-        # Persist idempotency receipt
-        with Session(self._engine()) as session:
+    def _complete_story_validation_receipt(
+        self,
+        engine: Engine,
+        receipt_id: int,
+        response: JsonObject,
+    ) -> None:
+        """Complete one claimed story validation receipt with its result."""
+        with Session(engine) as session:
             if session.get_bind().dialect.name == "sqlite":
-                session.connection().exec_driver_sql("BEGIN IMMEDIATE")
-            evaluated_at = datetime.now(tz=UTC)
-            receipt = WorkflowTransitionReceipt(
-                request_kind="validate_story",
-                idempotency_key=request.idempotency_key,
-                request_fingerprint=request_fingerprint,
-                request_json=canonical_json(request_payload),
-                result_json=canonical_json(response),
-                started_at=evaluated_at,
-                completed_at=evaluated_at,
-            )
-            session.add(receipt)
-            session.commit()
+                with contextlib.suppress(OperationalError):
+                    session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+            completed_at = datetime.now(tz=UTC)
+            receipt_record = session.get(WorkflowTransitionReceipt, receipt_id)
+            if receipt_record is not None:
+                receipt_record.result_json = canonical_json(response)
+                receipt_record.completed_at = completed_at
+                session.add(receipt_record)
+                with contextlib.suppress(IntegrityError, OperationalError):
+                    session.commit()
+
+    def validate_story(
+        self,
+        request: StoryValidationRequest,
+    ) -> JsonObject:
+        """Structurally validate one accepted Story provider-free."""
+        request_payload: JsonObject = {
+            "project_id": request.project_id,
+            "story_id": request.story_id,
+            "mode": request.mode,
+            "actor": request.actor,
+            "correlation_id": request.correlation_id,
+        }
+        request_fingerprint = canonical_hash(request_payload)
+        engine = self._engine()
+
+        receipt_id, cached = self._claim_story_validation_receipt(
+            engine, request, request_fingerprint, request_payload
+        )
+        if cached is not None:
+            return cached
+
+        response = self._execute_story_validation(request)
+
+        if receipt_id is not None:
+            self._complete_story_validation_receipt(engine, receipt_id, response)
 
         return response
 

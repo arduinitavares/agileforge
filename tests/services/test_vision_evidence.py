@@ -417,9 +417,7 @@ def test_json_spec_symlink_rejects_approved_markdown_target(
 
     bundle = collector.collect(project_id)
 
-    assert "file:docs/spec/spec.json" not in {
-        item.evidence_id for item in bundle.items
-    }
+    assert "file:docs/spec/spec.json" not in {item.evidence_id for item in bundle.items}
     assert "EVIDENCE_UNREADABLE" in {warning.code for warning in bundle.warnings}
 
 
@@ -713,16 +711,19 @@ def test_total_byte_limit_truncates_late_text_without_exceeding_96_kib(
 
     bundle = collector.collect(project_id)
 
-    assert sum(
-        len(
-            (
-                item.content
-                if isinstance(item.content, str)
-                else canonical_json(item.content)
-            ).encode("utf-8")
+    assert (
+        sum(
+            len(
+                (
+                    item.content
+                    if isinstance(item.content, str)
+                    else canonical_json(item.content)
+                ).encode("utf-8")
+            )
+            for item in bundle.items
         )
-        for item in bundle.items
-    ) == MAX_EVIDENCE_TOTAL_BYTES
+        == MAX_EVIDENCE_TOTAL_BYTES
+    )
     assert bundle.items[-1].evidence_id == "file:docs/spec/spec.md"
     assert bundle.items[-1].truncated is True
     assert [warning.code for warning in bundle.warnings] == ["TEXT_EVIDENCE_TRUNCATED"]

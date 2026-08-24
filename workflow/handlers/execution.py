@@ -45,11 +45,7 @@ if TYPE_CHECKING:
     from sqlmodel import Session
 
 type ExecutionRequest = (
-    CompleteTask
-    | CloseStory
-    | ReviewSprint
-    | CloseSprint
-    | RecordPostSprintTriage
+    CompleteTask | CloseStory | ReviewSprint | CloseSprint | RecordPostSprintTriage
 )
 
 

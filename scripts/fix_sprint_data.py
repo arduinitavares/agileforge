@@ -93,9 +93,7 @@ def main() -> None:  # noqa: C901
         for st in stories:
             emit(f"Story {st.story_id}: status={st.status.value}")
 
-        sprints = s.exec(
-            select(Sprint).where(Sprint.project_id == PROJECT_ID)
-        ).all()
+        sprints = s.exec(select(Sprint).where(Sprint.project_id == PROJECT_ID)).all()
         emit(f"Sprints for Project {PROJECT_ID}: {len(sprints)}")
 
 

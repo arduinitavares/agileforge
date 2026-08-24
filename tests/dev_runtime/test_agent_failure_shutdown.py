@@ -330,8 +330,7 @@ def _assert_durable_single_failure(
         outcomes = session.exec(
             select(WorkflowNodeAttemptOutcome).where(
                 col(WorkflowNodeAttemptOutcome.project_id) == project_id,
-                col(WorkflowNodeAttemptOutcome.workflow_node_attempt_id)
-                == attempt_id,
+                col(WorkflowNodeAttemptOutcome.workflow_node_attempt_id) == attempt_id,
             )
         ).all()
         candidates = session.exec(
@@ -520,9 +519,9 @@ def test_launcher_exits_after_durable_specification_failure(
     assert replay_result["replayed"] is True
     assert replay_result["error"] == error_payload
     assert not _process_group_exists(replay.pid)
-    assert (
-        paths.logs / "issue-201-provider-calls"
-    ).read_text(encoding="utf-8").splitlines() == [str(call_pid)]
+    assert (paths.logs / "issue-201-provider-calls").read_text(
+        encoding="utf-8"
+    ).splitlines() == [str(call_pid)]
     _assert_durable_single_failure(
         engine,
         project_id=project_id,

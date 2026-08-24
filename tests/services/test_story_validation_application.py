@@ -1,6 +1,7 @@
 # tests/services/test_story_validation_application.py
 """Tests for explicit provider-free structural story validation application boundary."""
 
+import concurrent.futures
 from datetime import UTC, datetime
 from http import HTTPStatus
 from typing import cast
@@ -216,3 +217,43 @@ def test_story_validation_idempotency_conflict_on_different_payload(
     first_error = errors[0]
     assert isinstance(first_error, dict)
     assert first_error["code"] == "IDEMPOTENCY_CONFLICT"
+
+
+def test_story_validation_concurrent_identical_requests(
+    engine: Engine,
+) -> None:
+    """Concurrent identical requests handle claims safely without error."""
+    story_id = _accepted_story(engine)
+    with Session(engine) as session:
+        statement = select(UserStory).where(col(UserStory.story_id) == story_id)
+        story = session.exec(statement).first()
+        assert story is not None
+        project_id = story.project_id
+
+    app = _build_application(engine)
+    request = StoryValidationRequest(
+        project_id=project_id,
+        story_id=story_id,
+        mode="structural",
+        idempotency_key="concurrent-key-1",
+        actor="test-operator",
+    )
+    with (
+        patch.object(story_validation_service, "get_engine", return_value=engine),
+        concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor,
+    ):
+        future_1 = executor.submit(app.validate_story, request)
+        future_2 = executor.submit(app.validate_story, request)
+        result_1 = future_1.result(timeout=5)
+        result_2 = future_2.result(timeout=5)
+
+    assert result_1["ok"] is True or result_2["ok"] is True
+    for res in (result_1, result_2):
+        assert isinstance(res, dict)
+        if not res.get("ok"):
+            errors = res.get("errors")
+            assert isinstance(errors, list)
+            assert len(errors) > 0
+            first_err = errors[0]
+            assert isinstance(first_err, dict)
+            assert first_err["code"] == "IDEMPOTENCY_CONFLICT"

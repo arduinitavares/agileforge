@@ -31,7 +31,12 @@ from services.story_dependencies import (
     detect_dependency_cycles,
     load_story_dependency_graph,
 )
-from tests.test_create_user_story import _seed_story_parent
+from tests.test_create_user_story import (
+    _decide_story,
+    _record_story,
+    _seed_story_parent,
+)
+from tests.test_story_validation_service import _validate
 from tests.workflow.test_planning_transitions import EVALUATED_AT, _roadmap_content
 from workflow.facts import StoryDependencyReviewEdgeFact
 from workflow.fingerprints import canonical_hash, canonical_json
@@ -515,3 +520,50 @@ def test_inspect_payload_separates_active_and_proposed_edges(session: Session) -
     assert payload["proposed_edges"][0]["dependent_story_id"] == story_c
     assert payload["cycle_count"] == 0
     assert payload["issues"] == []
+
+
+def test_story_fact_keeps_validation_status_separate_from_dependency_blockers(
+    engine: Engine,
+) -> None:
+    """Validate that structural evidence is distinct from dependency blockers."""
+    project_id, roadmap_id = _seed_story_parent(engine)
+    with Session(engine) as session:
+        artifact = _record_story(
+            session,
+            project_id=project_id,
+            roadmap_id=roadmap_id,
+            title="Accepted validation target",
+            item_count=2,
+        )
+        result = _decide_story(session, artifact, decision="accepted", offset=2)
+        story_id_1 = result.activated_story_ids[0]
+        story_id_2 = result.activated_story_ids[1]
+        session.commit()
+
+    _validate(engine, story_id_1)
+    _validate(engine, story_id_2)
+
+    with Session(engine) as s:
+        # Add active dependency edge making story_id_2 depend on incomplete story_id_1
+        s.add(
+            UserStoryDependency(
+                project_id=project_id,
+                dependent_story_id=story_id_2,
+                prerequisite_story_id=story_id_1,
+                status="active",
+                confidence="reviewed",
+                source="manual_review",
+            )
+        )
+        s.commit()
+
+        # Load facts
+        facts = WorkflowFactRepository(s).load(project_id)
+        fact_2 = next(item for item in facts.stories if item.story_id == story_id_2)
+
+        # story_id_2 has an unsatisfied prerequisite, so sprint_candidate is False
+        assert fact_2.sprint_candidate is False
+        assert any("PREREQUISITE" in b for b in fact_2.readiness_blockers)
+        # BUT its validation_status MUST be 'validated', NOT 'failed'!
+        assert fact_2.validation_status == "validated"
+        assert fact_2.validation_failures == ()

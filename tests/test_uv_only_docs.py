@@ -55,9 +55,7 @@ def _documented_vision_commands(text: str) -> tuple[tuple[str, ...], ...]:
     )
     normalized = command_block.replace("\\\n", " ")
     return tuple(
-        tuple(shlex.split(line))
-        for line in normalized.splitlines()
-        if line.strip()
+        tuple(shlex.split(line)) for line in normalized.splitlines() if line.strip()
     )
 
 

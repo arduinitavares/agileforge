@@ -387,8 +387,7 @@ def complete_task_in_session(
         (
             item
             for item in snapshot.tasks
-            if item.sprint_id == command.sprint_id
-            and item.task_id == command.task_id
+            if item.sprint_id == command.sprint_id and item.task_id == command.task_id
         ),
         None,
     )

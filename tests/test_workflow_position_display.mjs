@@ -776,6 +776,34 @@ test('dependency review section renders when apply_story_dependencies action is 
     assert.ok(markup.includes('Confirm dependencies'));
 });
 
+test('dependency review displays only candidate stories and candidate-contained edges', () => {
+    const context = loadFrontend();
+    const action = {
+        node_id: 'planning.story_dependencies',
+        request_kind: 'apply_story_dependencies',
+        endpoint: 'story/dependencies/apply',
+        transport: 'semantic',
+    };
+    const candidates = [
+        { story_id: 101, source_story_item_id: 'US-001', sprint_candidate: true },
+    ];
+    const dependencies = {
+        stories: [
+            { story_id: 101, source_story_item_id: 'US-001', sprint_candidate: true },
+            { story_id: 102, source_story_item_id: 'US-002', sprint_candidate: false },
+        ],
+        edges: [
+            { dependent_story_id: 102, prerequisite_story_id: 101, reason: 'US-002 needs US-001' },
+        ],
+    };
+
+    const markup = context.storyDependencyReviewMarkup(action, candidates, dependencies);
+    assert.ok(markup.includes('US-001'));
+    assert.ok(!markup.includes('US-002'));
+    assert.ok(markup.includes('None (independent stories)'));
+    assert.ok(!markup.includes('102 -> 101'));
+});
+
 test('story readiness section renders validation failed badge and actionable diagnostics', () => {
     const context = loadFrontend();
     const stories = [

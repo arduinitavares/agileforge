@@ -39,9 +39,9 @@ class Issue201LauncherModel(BaseLlm):
         """Return the selected network-free terminal provider behavior."""
         del llm_request, stream
         logs = _profile_root() / "logs"
-        failure_mode = (logs / "issue-201-failure-mode").read_text(
-            encoding="utf-8"
-        ).strip()
+        failure_mode = (
+            (logs / "issue-201-failure-mode").read_text(encoding="utf-8").strip()
+        )
         with (logs / "issue-201-provider-calls").open(
             "a",
             encoding="utf-8",

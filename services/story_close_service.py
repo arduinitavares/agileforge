@@ -97,6 +97,7 @@ class StoryCloseInput:
     closed_by: str
     closed_at: datetime
 
+
 class _StoryLike(Protocol):
     @property
     def story_id(self) -> int | None: ...

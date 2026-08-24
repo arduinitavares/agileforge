@@ -1409,13 +1409,37 @@ function storyReadinessMarkup(stories, context = {}) {
     </div>`;
 }
 
-function storyDependencyReviewMarkup(action, stories, dependencies) {
+function canonicalCandidateDependencies(candidates, dependencies) {
+    const candidateList = Array.isArray(candidates)
+        ? (candidates.some((s) => 'sprint_candidate' in s)
+            ? candidates.filter((s) => s.sprint_candidate)
+            : candidates)
+        : (Array.isArray(dependencies?.stories)
+            ? dependencies.stories.filter((s) => Boolean(s?.sprint_candidate))
+            : []);
+    const candidateIds = candidateList.map((s) => s.story_id).filter((id) => id != null);
+    const candidateSet = new Set(candidateIds);
+    const rawEdges = Array.isArray(dependencies?.edges) ? dependencies.edges : [];
+    const candidateEdges = rawEdges
+        .filter((e) => candidateSet.has(e?.dependent_story_id) && candidateSet.has(e?.prerequisite_story_id))
+        .map((e) => ({
+            dependent_story_id: e.dependent_story_id,
+            prerequisite_story_id: e.prerequisite_story_id,
+            reason: e.reason || 'Operator reviewed dependency',
+        }));
+    return {
+        candidateStories: candidateList,
+        candidateIds,
+        candidateEdges,
+    };
+}
+
+function storyDependencyReviewMarkup(action, candidates, dependencies) {
     if (!action || action.request_kind !== 'apply_story_dependencies') return '';
-    const storyList = Array.isArray(stories) ? stories : [];
-    const edgeList = Array.isArray(dependencies?.edges) ? dependencies.edges : [];
-    const storySummary = storyList.map((s) => s.source_story_item_id || `Story #${s.story_id}`).join(', ') || 'Validated stories';
-    const edgeSummary = edgeList.length > 0
-        ? edgeList.map((e) => `${e.dependent_story_id} -> ${e.prerequisite_story_id}`).join(', ')
+    const { candidateStories, candidateEdges } = canonicalCandidateDependencies(candidates, dependencies);
+    const storySummary = candidateStories.map((s) => s.source_story_item_id || `Story #${s.story_id}`).join(', ') || 'None';
+    const edgeSummary = candidateEdges.length > 0
+        ? candidateEdges.map((e) => `${e.dependent_story_id} -> ${e.prerequisite_story_id}`).join(', ')
         : 'None (independent stories)';
     const bindingAttributes = deliveryActionBindingAttributes(action);
 
@@ -1498,7 +1522,7 @@ function deliveryPanelMarkup(position, reviews = {}, actions = [], context = {})
     );
 
     const readinessSection = storyReadinessMarkup(stories, context);
-    const dependencySection = storyDependencyReviewMarkup(dependencyAction, stories, dependencies);
+    const dependencySection = storyDependencyReviewMarkup(dependencyAction, candidates, dependencies);
     const candidateSection = sprintCandidatePoolMarkup(candidates);
 
     const availableDeliveryActions = (Array.isArray(actions) ? actions : []).filter((action) =>
@@ -2573,29 +2597,21 @@ function installInteractions() {
             }
             setProjectError('');
             try {
-                const candidateStories = Array.isArray(lifecycleState.sprintCandidates?.items)
+                const candidates = Array.isArray(lifecycleState.sprintCandidates?.items)
                     ? lifecycleState.sprintCandidates.items
                     : (Array.isArray(lifecycleState.storyDependencies?.stories)
                         ? lifecycleState.storyDependencies.stories.filter((s) => s.sprint_candidate)
                         : []);
-                const storyIds = candidateStories.map((s) => s.story_id);
-                const candidateSet = new Set(storyIds);
-                const rawEdges = Array.isArray(lifecycleState.storyDependencies?.edges)
-                    ? lifecycleState.storyDependencies.edges
-                    : [];
-                const edges = rawEdges
-                    .filter((e) => candidateSet.has(e.dependent_story_id) && candidateSet.has(e.prerequisite_story_id))
-                    .map((e) => ({
-                        dependent_story_id: e.dependent_story_id,
-                        prerequisite_story_id: e.prerequisite_story_id,
-                        reason: e.reason || 'Operator reviewed dependency',
-                    }));
+                const { candidateIds, candidateEdges } = canonicalCandidateDependencies(
+                    candidates,
+                    lifecycleState.storyDependencies,
+                );
                 await requestJson(`/api/projects/${selectedProjectId}/story/dependencies/apply`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(semanticMutationPayload({
-                        selected_story_ids: storyIds,
-                        reviewed_edges: edges,
+                        selected_story_ids: candidateIds,
+                        reviewed_edges: candidateEdges,
                     })),
                 });
                 await loadDashboard();
