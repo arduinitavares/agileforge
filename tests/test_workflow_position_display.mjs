@@ -952,6 +952,7 @@ test('canonicalCandidateDependencies and review markup fail closed on malformed 
     assert.ok(markup1.includes('Unavailable (canonical candidate projection missing)'));
     assert.ok(markup1.includes('disabled'));
     assert.ok(markup1.includes('aria-disabled="true"'));
+    assert.strictEqual(context.sprintCandidatePoolMarkup(malformedMissingFlag), '');
 
     // 2. Null row in candidates array
     const malformedNullRow = [null];
@@ -962,8 +963,47 @@ test('canonicalCandidateDependencies and review markup fail closed on malformed 
     assert.ok(markup2.includes('Unavailable (canonical candidate projection missing)'));
     assert.ok(markup2.includes('disabled'));
     assert.ok(markup2.includes('aria-disabled="true"'));
+    assert.strictEqual(context.sprintCandidatePoolMarkup(malformedNullRow), '');
 
-    // 3. sprintCandidatePoolMarkup safely handles null row
-    const poolMarkup = context.sprintCandidatePoolMarkup([null]);
-    assert.strictEqual(poolMarkup, '');
+    // 3. sprint_candidate: false is NOT accepted and does NOT appear Ready
+    const notCandidate = [{ story_id: 101, source_story_item_id: 'US-001', sprint_candidate: false }];
+    const result3 = context.canonicalCandidateDependencies(notCandidate, dependencies);
+    assert.strictEqual(result3.isWellFormed, false);
+    assert.strictEqual(context.sprintCandidatePoolMarkup(notCandidate), '');
+    const markup3 = context.storyDependencyReviewMarkup(action, notCandidate, dependencies);
+    assert.ok(markup3.includes('Unavailable (canonical candidate projection missing)'));
+    assert.ok(markup3.includes('disabled'));
+    assert.ok(markup3.includes('aria-disabled="true"'));
+
+    // 4. Empty candidate array fails closed and disables confirmation
+    const emptyCandidates = [];
+    const resultEmpty = context.canonicalCandidateDependencies(emptyCandidates, dependencies);
+    assert.strictEqual(resultEmpty.isWellFormed, false);
+    assert.strictEqual(context.sprintCandidatePoolMarkup(emptyCandidates), '');
+    const markupEmpty = context.storyDependencyReviewMarkup(action, emptyCandidates, dependencies);
+    assert.ok(markupEmpty.includes('Unavailable (canonical candidate projection missing)'));
+    assert.ok(markupEmpty.includes('disabled'));
+    assert.ok(markupEmpty.includes('aria-disabled="true"'));
+
+    // 5. Duplicate candidate IDs fail closed
+    const duplicateCandidates = [
+        { story_id: 101, source_story_item_id: 'US-001', sprint_candidate: true },
+        { story_id: 101, source_story_item_id: 'US-001', sprint_candidate: true },
+    ];
+    const resultDup = context.canonicalCandidateDependencies(duplicateCandidates, dependencies);
+    assert.strictEqual(resultDup.isWellFormed, false);
+    assert.strictEqual(context.sprintCandidatePoolMarkup(duplicateCandidates), '');
+
+    // 6. Non-positive, fractional, NaN, or infinite IDs fail closed
+    for (const invalidId of [-1, 0, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+        const invalidCandidates = [
+            { story_id: invalidId, source_story_item_id: 'US-001', sprint_candidate: true },
+        ];
+        assert.strictEqual(
+            context.canonicalCandidateDependencies(invalidCandidates, dependencies).isWellFormed,
+            false,
+            `Expected story_id ${invalidId} to fail closed`,
+        );
+        assert.strictEqual(context.sprintCandidatePoolMarkup(invalidCandidates), '');
+    }
 });
