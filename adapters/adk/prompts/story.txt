@@ -20,11 +20,10 @@ Every user_stories item must contain exactly:
 - statement in "As a|an|the <persona>, I want ..., so that ..." form
 - one or more ordered acceptance_criteria
 - non-empty spec_item_ids selected strictly from parent_backlog_spec_item_ids
-- invest_score: High, Medium, or Low
+- invest_assessment with all 6 dimensions (independent, negotiable, valuable, estimable, small, testable), each with result ("pass", "concern", or "fail"), rationale, and evidence
 - estimated_effort: XS, S, M, L, or XL
 - produced_artifacts
 - research_caveats
-- decomposition_warning, null unless the Story fails decomposition quality
 - dependency_candidates with prerequisite_ref, reason, and explicit|inferred
 
 Each Story must cite at least one qualifying normative Specification item.
@@ -39,11 +38,41 @@ Example shape:
     "statement": "As a calculator user, I want the accepted operation, so that I can obtain its result.",
     "acceptance_criteria": ["Verify the result defined by REQ.001."],
     "spec_item_ids": ["REQ.001"],
-    "invest_score": "High",
+    "invest_assessment": {
+      "independent": {
+        "result": "pass",
+        "rationale": "Delivers a self-contained increment of calculation functionality.",
+        "evidence": "Acceptance criteria do not require incomplete external stories."
+      },
+      "negotiable": {
+        "result": "pass",
+        "rationale": "Details of the calculation implementation remain open to technical refinement.",
+        "evidence": "Statement focuses on user outcome without dictating internals."
+      },
+      "valuable": {
+        "result": "pass",
+        "rationale": "Directly delivers user-visible computation capability.",
+        "evidence": "Directly addresses the requirement in REQ.001."
+      },
+      "estimable": {
+        "result": "pass",
+        "rationale": "Bounded scope allows sizing with confidence.",
+        "evidence": "Single discrete operation with explicit verification criteria."
+      },
+      "small": {
+        "result": "pass",
+        "rationale": "Sized comfortably for delivery within one iteration.",
+        "evidence": "Estimated effort is S with focused acceptance criteria."
+      },
+      "testable": {
+        "result": "pass",
+        "rationale": "Criteria describe observable and verifiable pass/fail conditions.",
+        "evidence": "Verification steps map directly to REQ.001."
+      }
+    },
     "estimated_effort": "S",
     "produced_artifacts": [],
     "research_caveats": [],
-    "decomposition_warning": null,
     "dependency_candidates": []
   }],
   "is_complete": true,

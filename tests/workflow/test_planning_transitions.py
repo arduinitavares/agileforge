@@ -53,6 +53,8 @@ from services.contracts.sprint import SprintPlannerOutput
 from services.contracts.story import (
     CanonicalStoryItem,
     CanonicalStoryOutput,
+    InvestDimensionAssessment,
+    StoryInvestAssessment,
     StoryItemEnvelope,
 )
 from services.specs import story_validation_service as story_validation_service_module
@@ -378,6 +380,41 @@ def _roadmap_content(
     }
 
 
+def _invest_assessment() -> StoryInvestAssessment:
+    return StoryInvestAssessment(
+        independent=InvestDimensionAssessment(
+            result="pass",
+            rationale="Delivers self-contained increment.",
+            evidence="No unbuilt dependencies.",
+        ),
+        negotiable=InvestDimensionAssessment(
+            result="pass",
+            rationale="Implementation details open to refinement.",
+            evidence="Focuses on user outcome.",
+        ),
+        valuable=InvestDimensionAssessment(
+            result="pass",
+            rationale="Directly delivers user capability.",
+            evidence="Addresses requirement.",
+        ),
+        estimable=InvestDimensionAssessment(
+            result="pass",
+            rationale="Scope is clear and bounded.",
+            evidence="Discrete criteria.",
+        ),
+        small=InvestDimensionAssessment(
+            result="pass",
+            rationale="Sized for single iteration.",
+            evidence="Effort is M.",
+        ),
+        testable=InvestDimensionAssessment(
+            result="pass",
+            rationale="Verifiable pass/fail criteria.",
+            evidence="Observable verification steps.",
+        ),
+    )
+
+
 def _story_content(
     requirement: str = "Plan immutable work",
     *,
@@ -398,11 +435,10 @@ def _story_content(
         persona="operator",
         acceptance_criteria=("Verify that planning survives restart.",),
         spec_item_ids=(resolved_spec_item_id,),
-        invest_score="High",
+        invest_assessment=_invest_assessment(),
         estimated_effort="M",
         produced_artifacts=("planning records",),
         research_caveats=(),
-        decomposition_warning=None,
         dependency_candidates=(),
     )
     output = CanonicalStoryOutput(

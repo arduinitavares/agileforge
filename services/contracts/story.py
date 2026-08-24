@@ -52,6 +52,35 @@ class StoryDependencyCandidate(BaseModel):
     confidence: Literal["explicit", "inferred"]
 
 
+class InvestDimensionAssessment(BaseModel):
+    """Assessment of one INVEST quality dimension with inspectable evidence."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    result: Literal["pass", "concern", "fail"]
+    rationale: Annotated[str, Field(min_length=1)]
+    evidence: Annotated[str, Field(min_length=1)]
+
+    @field_validator("rationale", "evidence")
+    @classmethod
+    def validate_nonblank_text(cls, value: str) -> str:
+        """Reject blank text while preserving valid content."""
+        return require_nonblank_text(value, field_name="INVEST dimension field")
+
+
+class StoryInvestAssessment(BaseModel):
+    """Complete, explainable assessment across all six INVEST dimensions."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    independent: InvestDimensionAssessment
+    negotiable: InvestDimensionAssessment
+    valuable: InvestDimensionAssessment
+    estimable: InvestDimensionAssessment
+    small: InvestDimensionAssessment
+    testable: InvestDimensionAssessment
+
+
 class UserStoryAgentItem(BaseModel):
     """ID-free provider Story output before host validation and canonicalization."""
 
@@ -66,11 +95,10 @@ class UserStoryAgentItem(BaseModel):
             "parent_backlog_spec_item_ids."
         ),
     )
-    invest_score: Literal["High", "Medium", "Low"]
+    invest_assessment: StoryInvestAssessment
     estimated_effort: Literal["XS", "S", "M", "L", "XL"]
     produced_artifacts: tuple[str, ...]
     research_caveats: tuple[str, ...]
-    decomposition_warning: str | None
     dependency_candidates: tuple[StoryDependencyCandidate, ...]
 
     @field_validator("acceptance_criteria")
@@ -102,11 +130,10 @@ class CanonicalStoryItem(BaseModel):
     persona: Annotated[str, Field(min_length=1, max_length=_MAX_PERSONA_LENGTH)]
     acceptance_criteria: tuple[str, ...] = Field(min_length=1)
     spec_item_ids: tuple[str, ...]
-    invest_score: Literal["High", "Medium", "Low"]
+    invest_assessment: StoryInvestAssessment
     estimated_effort: Literal["XS", "S", "M", "L", "XL"]
     produced_artifacts: tuple[str, ...]
     research_caveats: tuple[str, ...]
-    decomposition_warning: str | None
     dependency_candidates: tuple[StoryDependencyCandidate, ...]
 
     @field_validator("story_item_id")
@@ -255,11 +282,10 @@ def canonicalize_story_items(
                         item.spec_item_ids,
                         parent_spec_item_ids=parent_ids,
                     ),
-                    invest_score=item.invest_score,
+                    invest_assessment=item.invest_assessment,
                     estimated_effort=item.estimated_effort,
                     produced_artifacts=item.produced_artifacts,
                     research_caveats=item.research_caveats,
-                    decomposition_warning=item.decomposition_warning,
                     dependency_candidates=item.dependency_candidates,
                 )
             ),
@@ -272,7 +298,9 @@ def canonicalize_story_items(
 __all__ = [
     "CanonicalStoryItem",
     "CanonicalStoryOutput",
+    "InvestDimensionAssessment",
     "StoryDependencyCandidate",
+    "StoryInvestAssessment",
     "StoryItemEnvelope",
     "UserStoryAgentItem",
     "UserStoryWriterInput",

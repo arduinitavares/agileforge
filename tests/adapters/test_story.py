@@ -58,7 +58,38 @@ def test_story_writer_output_rejects_retired_patch_envelope() -> None:
                 "As a user, I want a refined target story, so that the work is clear."
             ),
             "acceptance_criteria": ["Verify that the target story is actionable."],
-            "invest_score": "High",
+            "invest_assessment": {
+                "independent": {
+                    "result": "pass",
+                    "rationale": "Actionable story.",
+                    "evidence": "Contained.",
+                },
+                "negotiable": {
+                    "result": "pass",
+                    "rationale": "Actionable story.",
+                    "evidence": "Contained.",
+                },
+                "valuable": {
+                    "result": "pass",
+                    "rationale": "Actionable story.",
+                    "evidence": "Contained.",
+                },
+                "estimable": {
+                    "result": "pass",
+                    "rationale": "Actionable story.",
+                    "evidence": "Contained.",
+                },
+                "small": {
+                    "result": "pass",
+                    "rationale": "Actionable story.",
+                    "evidence": "Contained.",
+                },
+                "testable": {
+                    "result": "pass",
+                    "rationale": "Actionable story.",
+                    "evidence": "Contained.",
+                },
+            },
             "estimated_effort": "S",
             "produced_artifacts": [],
         },
@@ -85,19 +116,18 @@ def test_user_story_patch_agent_preserves_the_same_strict_recipe_boundary() -> N
     assert full_agent.before_model_callback is preserve_story_output_schema
 
 
-def test_high_story_example_omits_placeholder_warning() -> None:
-    """Verify the high-story example omits placeholder warnings."""
+def test_instructions_require_explainable_invest_assessment() -> None:
+    """Verify prompt instructions define each INVEST dimension."""
     instructions = USER_STORY_WRITER_INSTRUCTIONS
-    assert (
-        '"decomposition_warning": "Only include this key if score is Low"'
-        not in instructions
-    )
-
-
-def test_instructions_bound_decomposition_warning_to_quality_failure() -> None:
-    """Verify the warning is absent unless decomposition quality fails."""
-    instructions = USER_STORY_WRITER_INSTRUCTIONS
-    assert (
-        "decomposition_warning, null unless the Story fails decomposition quality"
-        in instructions
-    )
+    assert "invest_assessment with all 6 dimensions" in instructions
+    for dim in (
+        "independent",
+        "negotiable",
+        "valuable",
+        "estimable",
+        "small",
+        "testable",
+    ):
+        assert dim in instructions
+    assert "invest_score: High, Medium, or Low" not in instructions
+    assert "decomposition_warning" not in instructions

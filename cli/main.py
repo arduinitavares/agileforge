@@ -1313,6 +1313,51 @@ def _roadmap_review_lines(candidate: dict[str, object]) -> list[str]:
     return lines
 
 
+def _invest_assessment_lines(value: object, *, indent: str = "") -> list[str]:
+    if not isinstance(value, dict):
+        return []
+    dict_val = cast("dict[str, object]", value)
+    lines = [f"{indent}INVEST assessment:"]
+    sub_indent = f"{indent}  "
+    dimensions = [
+        ("Independent", dict_val.get("independent")),
+        ("Negotiable", dict_val.get("negotiable")),
+        ("Valuable", dict_val.get("valuable")),
+        ("Estimable", dict_val.get("estimable")),
+        ("Small", dict_val.get("small")),
+        ("Testable", dict_val.get("testable")),
+    ]
+    for name, dim_raw in dimensions:
+        if isinstance(dim_raw, dict):
+            dim_dict = cast("dict[str, object]", dim_raw)
+            result = _review_text(dim_dict.get("result")).upper()
+            rationale = _review_text(dim_dict.get("rationale"))
+            evidence = _review_text(dim_dict.get("evidence"))
+            lines.append(
+                f"{sub_indent}- {name} [{result}]: {rationale} (Evidence: {evidence})"
+            )
+        else:
+            lines.append(f"{sub_indent}- {name}: {_review_text(dim_raw)}")
+    return lines
+
+
+def _dependency_candidate_lines(values: object, *, indent: str = "") -> list[str]:
+    if not isinstance(values, list) or not values:
+        return []
+    lines = [f"{indent}Proposed dependencies:"]
+    sub_indent = f"{indent}  "
+    for item in values:
+        if isinstance(item, dict):
+            item_dict = cast("dict[str, object]", item)
+            pref = _review_text(item_dict.get("prerequisite_ref"))
+            reason = _review_text(item_dict.get("reason"))
+            conf = _review_text(item_dict.get("confidence"))
+            lines.append(f"{sub_indent}- Prerequisite: {pref} ({conf}) - {reason}")
+        else:
+            lines.append(f"{sub_indent}- {_review_text(item)}")
+    return lines
+
+
 def _story_item_lines(value: object, *, indent: str = "") -> list[str]:
     story = _review_object(value, "Story item")
     lines = [
@@ -1322,11 +1367,33 @@ def _story_item_lines(value: object, *, indent: str = "") -> list[str]:
         ),
         f"{indent}Statement: {_review_text(story.get('statement'))}",
         f"{indent}Persona: {_review_text(story.get('persona'))}",
-        *_list_lines(
-            "Acceptance criteria", story.get("acceptance_criteria"), indent=indent
-        ),
-        *_specification_lines(story.get("specification_evidence"), indent=indent),
     ]
+    if story.get("estimated_effort") is not None:
+        lines.append(
+            f"{indent}Estimated effort: {_review_text(story['estimated_effort'])}"
+        )
+    lines.extend(
+        _list_lines(
+            "Acceptance criteria", story.get("acceptance_criteria"), indent=indent
+        )
+    )
+    lines.extend(
+        _specification_lines(story.get("specification_evidence"), indent=indent)
+    )
+    if story.get("invest_assessment") is not None:
+        lines.extend(
+            _invest_assessment_lines(story["invest_assessment"], indent=indent)
+        )
+    if story.get("research_caveats") is not None:
+        lines.extend(
+            _list_lines("Research caveats", story["research_caveats"], indent=indent)
+        )
+    if story.get("dependency_candidates") is not None:
+        lines.extend(
+            _dependency_candidate_lines(
+                story["dependency_candidates"], indent=indent
+            )
+        )
     if story.get("reason_for_selection") is not None:
         lines.append(
             f"{indent}Reason for selection: "

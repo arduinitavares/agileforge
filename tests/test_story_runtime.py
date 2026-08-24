@@ -83,6 +83,41 @@ def _state() -> dict[str, Any]:
     }
 
 
+def _invest_assessment() -> dict[str, Any]:
+    return {
+        "independent": {
+            "result": "pass",
+            "rationale": "Delivers self-contained increment.",
+            "evidence": "No external unbuilt dependencies.",
+        },
+        "negotiable": {
+            "result": "pass",
+            "rationale": "Implementation details open to refinement.",
+            "evidence": "Focuses on user outcome.",
+        },
+        "valuable": {
+            "result": "pass",
+            "rationale": "Directly delivers user calculation capability.",
+            "evidence": "Satisfies REQ.001 directly.",
+        },
+        "estimable": {
+            "result": "pass",
+            "rationale": "Scope is clear and bounded.",
+            "evidence": "Discrete acceptance criteria.",
+        },
+        "small": {
+            "result": "pass",
+            "rationale": "Sized for single iteration.",
+            "evidence": "Effort is S.",
+        },
+        "testable": {
+            "result": "pass",
+            "rationale": "Verifiable pass/fail criteria.",
+            "evidence": "Observable verification steps against DATA.001.",
+        },
+    }
+
+
 def _story_item(title: str = "Implement the accepted operation") -> dict[str, Any]:
     return {
         "story_title": title,
@@ -92,11 +127,10 @@ def _story_item(title: str = "Implement the accepted operation") -> dict[str, An
         ),
         "acceptance_criteria": ["Verify the result against DATA.001."],
         "spec_item_ids": ["DATA.001", "REQ.001"],
-        "invest_score": "High",
+        "invest_assessment": _invest_assessment(),
         "estimated_effort": "S",
         "produced_artifacts": [],
         "research_caveats": [],
-        "decomposition_warning": None,
         "dependency_candidates": [],
     }
 

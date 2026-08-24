@@ -318,12 +318,42 @@ def _story_content(
         "persona": "operator",
         "acceptance_criteria": ["Verify the persisted semantic boundary."],
         "spec_item_ids": list(spec_item_ids),
-        "invest_score": "High",
+        "invest_assessment": {
+            "independent": {
+                "result": "pass",
+                "rationale": "Delivers self-contained increment.",
+                "evidence": "No unbuilt dependencies.",
+            },
+            "negotiable": {
+                "result": "pass",
+                "rationale": "Implementation details open to refinement.",
+                "evidence": "Focuses on user outcome.",
+            },
+            "valuable": {
+                "result": "pass",
+                "rationale": "Directly delivers user capability.",
+                "evidence": "Addresses requirement.",
+            },
+            "estimable": {
+                "result": "pass",
+                "rationale": "Scope is clear and bounded.",
+                "evidence": "Discrete criteria.",
+            },
+            "small": {
+                "result": "pass",
+                "rationale": "Sized for single iteration.",
+                "evidence": "Effort is M.",
+            },
+            "testable": {
+                "result": "pass",
+                "rationale": "Verifiable pass/fail criteria.",
+                "evidence": "Observable verification steps.",
+            },
+        },
         "estimated_effort": "M",
         "produced_artifacts": ["workflow records"],
         "research_caveats": [],
         "dependency_candidates": [],
-        "decomposition_warning": None,
     }
     return {
         "story_items": [{"item": item, "item_fingerprint": canonical_hash(item)}],

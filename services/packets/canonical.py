@@ -141,6 +141,19 @@ _ROADMAP_RELEASE_SHAPE: dict[str, object] = {
     "backlog_item_ids": [str],
     "reasoning": str,
 }
+_INVEST_DIMENSION_SHAPE: dict[str, object] = {
+    "result": str,
+    "rationale": str,
+    "evidence": str,
+}
+_INVEST_ASSESSMENT_SHAPE: dict[str, object] = {
+    "independent": _INVEST_DIMENSION_SHAPE,
+    "negotiable": _INVEST_DIMENSION_SHAPE,
+    "valuable": _INVEST_DIMENSION_SHAPE,
+    "estimable": _INVEST_DIMENSION_SHAPE,
+    "small": _INVEST_DIMENSION_SHAPE,
+    "testable": _INVEST_DIMENSION_SHAPE,
+}
 _STORY_ITEM_SHAPE: dict[str, object] = {
     "story_item_id": str,
     "story_title": str,
@@ -148,11 +161,10 @@ _STORY_ITEM_SHAPE: dict[str, object] = {
     "persona": str,
     "acceptance_criteria": [str],
     "spec_item_ids": [str],
-    "invest_score": str,
+    "invest_assessment": _INVEST_ASSESSMENT_SHAPE,
     "estimated_effort": str,
     "produced_artifacts": [str],
     "research_caveats": [str],
-    "decomposition_warning": (str, type(None)),
     "dependency_candidates": [
         {"prerequisite_ref": str, "reason": str, "confidence": str}
     ],

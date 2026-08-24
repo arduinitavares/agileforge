@@ -21,6 +21,8 @@ from services.agent_workbench.story_phase import (
 from services.contracts.story import (
     CanonicalStoryItem,
     CanonicalStoryOutput,
+    InvestDimensionAssessment,
+    StoryInvestAssessment,
     StoryItemEnvelope,
 )
 from services.story_dependencies import (
@@ -49,6 +51,41 @@ from workflow.planning_integrity import (
 REVIEWED_AT = datetime(2026, 8, 2, 12, tzinfo=UTC)
 
 
+def _invest_assessment() -> StoryInvestAssessment:
+    return StoryInvestAssessment(
+        independent=InvestDimensionAssessment(
+            result="pass",
+            rationale="Delivers self-contained increment.",
+            evidence="No unbuilt dependencies.",
+        ),
+        negotiable=InvestDimensionAssessment(
+            result="pass",
+            rationale="Implementation details open to refinement.",
+            evidence="Focuses on user outcome.",
+        ),
+        valuable=InvestDimensionAssessment(
+            result="pass",
+            rationale="Directly delivers user capability.",
+            evidence="Addresses requirement.",
+        ),
+        estimable=InvestDimensionAssessment(
+            result="pass",
+            rationale="Scope is clear and bounded.",
+            evidence="Discrete criteria.",
+        ),
+        small=InvestDimensionAssessment(
+            result="pass",
+            rationale="Sized for single iteration.",
+            evidence="Effort is S.",
+        ),
+        testable=InvestDimensionAssessment(
+            result="pass",
+            rationale="Verifiable pass/fail criteria.",
+            evidence="Observable verification steps.",
+        ),
+    )
+
+
 def _story_set(session: Session, *, titles: tuple[str, ...]) -> tuple[int, ...]:
     engine = session.get_bind()
     assert isinstance(engine, Engine)
@@ -66,11 +103,10 @@ def _story_set(session: Session, *, titles: tuple[str, ...]) -> tuple[int, ...]:
             persona="operator",
             acceptance_criteria=(f"Verify {title}.",),
             spec_item_ids=("REQ.planning-1",),
-            invest_score="High",
+            invest_assessment=_invest_assessment(),
             estimated_effort="S",
             produced_artifacts=(),
             research_caveats=(),
-            decomposition_warning=None,
             dependency_candidates=(),
         )
         for ordinal, title in enumerate(titles, start=1)

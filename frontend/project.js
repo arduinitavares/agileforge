@@ -1105,15 +1105,80 @@ function backlogItemMarkup(value) {
     </section>`;
 }
 
+function investDimensionResultBadge(result) {
+    const norm = String(result || '').toLowerCase();
+    if (norm === 'pass') {
+        return '<span class="inline-flex items-center rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-semibold text-emerald-800">Pass</span>';
+    }
+    if (norm === 'concern') {
+        return '<span class="inline-flex items-center rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-800">Concern</span>';
+    }
+    if (norm === 'fail') {
+        return '<span class="inline-flex items-center rounded-full bg-rose-100 px-2 py-0.5 text-xs font-semibold text-rose-800">Fail</span>';
+    }
+    return `<span class="inline-flex items-center rounded-full bg-slate-100 px-2 py-0.5 text-xs font-semibold text-slate-800">${escapeWorkflowText(String(result || 'Unknown'))}</span>`;
+}
+
+function investAssessmentMarkup(value) {
+    const assessment = reviewObject(value);
+    if (!assessment) return '';
+    const dimensions = [
+        ['Independent', assessment.independent],
+        ['Negotiable', assessment.negotiable],
+        ['Valuable', assessment.valuable],
+        ['Estimable', assessment.estimable],
+        ['Small', assessment.small],
+        ['Testable', assessment.testable],
+    ];
+    return `<section class="space-y-2" data-invest-assessment="true">
+        <h4 class="text-xs font-semibold uppercase text-slate-500">INVEST assessment</h4>
+        <div class="grid gap-2 sm:grid-cols-2">
+            ${dimensions.map(([name, rawDim]) => {
+                const dim = reviewObject(rawDim);
+                if (!dim) return '';
+                return `<div class="rounded-md border border-slate-200 bg-slate-50 p-2.5 space-y-1 text-xs">
+                    <div class="flex items-center justify-between">
+                        <strong class="font-semibold text-slate-900">${escapeWorkflowText(name)}</strong>
+                        ${investDimensionResultBadge(dim.result)}
+                    </div>
+                    <p class="text-slate-700"><strong>Rationale:</strong> ${escapeWorkflowText(reviewValue(dim.rationale))}</p>
+                    <p class="text-slate-600"><strong>Evidence:</strong> ${escapeWorkflowText(reviewValue(dim.evidence))}</p>
+                </div>`;
+            }).join('')}
+        </div>
+    </section>`;
+}
+
+function dependencyCandidatesMarkup(values) {
+    const items = reviewItems(values);
+    if (!items || items.length === 0) return '';
+    return `<section class="space-y-2">
+        <h4 class="text-xs font-semibold uppercase text-slate-500">Proposed dependencies</h4>
+        <ul class="list-disc space-y-1 pl-5 text-sm">
+            ${items.map((rawItem) => {
+                const item = reviewObject(rawItem);
+                if (!item) return '';
+                return `<li><strong>Prerequisite:</strong> ${escapeWorkflowText(reviewValue(item.prerequisite_ref))} (${escapeWorkflowText(reviewValue(item.confidence))}) &mdash; ${escapeWorkflowText(reviewValue(item.reason))}</li>`;
+            }).join('')}
+        </ul>
+    </section>`;
+}
+
 function storyItemMarkup(value) {
     const story = reviewObject(value);
     if (!story) return '';
     return `<section class="space-y-3 rounded-md border border-slate-200 p-3">
         <div><p class="text-xs font-semibold uppercase text-slate-500">Story</p><p class="mt-1 font-semibold">${escapeWorkflowText(reviewValue(story.story_title ?? story.title))}</p></div>
         <p class="text-sm leading-6">${escapeWorkflowText(reviewValue(story.statement))}</p>
-        <p class="text-sm"><strong>Persona:</strong> ${escapeWorkflowText(reviewValue(story.persona))}</p>
+        <div class="flex flex-wrap gap-4 text-sm">
+            <p><strong>Persona:</strong> ${escapeWorkflowText(reviewValue(story.persona))}</p>
+            ${story.estimated_effort ? `<p><strong>Estimated effort:</strong> ${escapeWorkflowText(reviewValue(story.estimated_effort))}</p>` : ''}
+        </div>
         ${reviewListMarkup('Acceptance criteria', story.acceptance_criteria)}
         ${specificationEvidenceMarkup(story.specification_evidence)}
+        ${investAssessmentMarkup(story.invest_assessment)}
+        ${reviewListMarkup('Research caveats', story.research_caveats)}
+        ${dependencyCandidatesMarkup(story.dependency_candidates)}
         ${story.reason_for_selection ? `<p class="text-sm"><strong>Reason for selection:</strong> ${escapeWorkflowText(reviewValue(story.reason_for_selection))}</p>` : ''}
     </section>`;
 }

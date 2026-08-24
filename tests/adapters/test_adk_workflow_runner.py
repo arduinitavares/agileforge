@@ -500,6 +500,41 @@ def _gold_agent_inputs() -> tuple[dict[str, object], ...]:
     )
 
 
+def _invest_assessment_payload() -> JsonObject:
+    return {
+        "independent": {
+            "result": "pass",
+            "rationale": "Delivers self-contained increment.",
+            "evidence": "No unbuilt dependencies.",
+        },
+        "negotiable": {
+            "result": "pass",
+            "rationale": "Implementation details open to refinement.",
+            "evidence": "Focuses on user outcome.",
+        },
+        "valuable": {
+            "result": "pass",
+            "rationale": "Directly delivers user capability.",
+            "evidence": "Addresses requirement.",
+        },
+        "estimable": {
+            "result": "pass",
+            "rationale": "Scope is clear and bounded.",
+            "evidence": "Discrete criteria.",
+        },
+        "small": {
+            "result": "pass",
+            "rationale": "Sized for single iteration.",
+            "evidence": "Effort is S.",
+        },
+        "testable": {
+            "result": "pass",
+            "rationale": "Verifiable pass/fail criteria.",
+            "evidence": "Observable verification steps.",
+        },
+    }
+
+
 def _story_provider_output(
     *,
     spec_item_ids: tuple[str, ...] = ("DATA.001", "REQ.001"),
@@ -515,11 +550,10 @@ def _story_provider_output(
                 ),
                 "acceptance_criteria": ["Verify the accepted result."],
                 "spec_item_ids": list(spec_item_ids),
-                "invest_score": "High",
+                "invest_assessment": _invest_assessment_payload(),
                 "estimated_effort": "S",
                 "produced_artifacts": [],
                 "research_caveats": [],
-                "decomposition_warning": None,
                 "dependency_candidates": [],
             }
         ],
@@ -537,7 +571,7 @@ def _invalid_story_provider_output(
     assert isinstance(stories, list)
     item = stories[0]
     assert isinstance(item, dict)
-    item.pop("decomposition_warning")
+    item.pop("invest_assessment")
     return output
 
 
@@ -956,11 +990,10 @@ async def test_delivery_recipe_fakes_use_production_contracts_and_canonicalizers
                 ),
                 "acceptance_criteria": ["Verify the result against DATA.001."],
                 "spec_item_ids": ["DATA.001", "REQ.001"],
-                "invest_score": "High",
+                "invest_assessment": _invest_assessment_payload(),
                 "estimated_effort": "S",
                 "produced_artifacts": [],
                 "research_caveats": [],
-                "decomposition_warning": None,
                 "dependency_candidates": [],
             }
         ],
@@ -1166,7 +1199,7 @@ async def test_production_story_recipe_preserves_valid_first_explicit_null(
     canonical = CanonicalStoryOutput.model_validate(result.payload)
     assert len(model.request_texts) == 1
     assert model.requested_output_schemas[0] is not None
-    assert canonical.story_items[0].item.decomposition_warning is None
+    assert canonical.story_items[0].item.invest_assessment.independent.result == "pass"
 
 
 @pytest.mark.asyncio
@@ -1204,7 +1237,7 @@ async def test_production_story_recipe_repairs_one_schema_failure(
     assert "SYSTEM_FEEDBACK" not in model.request_texts[0]
     assert "SYSTEM_FEEDBACK" in model.request_texts[1]
     assert all(GOLD_SPECIFICATION_HASH in request for request in model.request_texts)
-    assert canonical.story_items[0].item.decomposition_warning is None
+    assert canonical.story_items[0].item.invest_assessment.independent.result == "pass"
 
 
 @pytest.mark.asyncio
@@ -1252,7 +1285,7 @@ async def test_production_story_recipe_repairs_out_of_parent_spec_reference(
     )
     assert all(GOLD_SPECIFICATION_HASH in request for request in model.request_texts)
     assert canonical.story_items[0].item.spec_item_ids == ("DATA.001", "REQ.001")
-    assert canonical.story_items[0].item.decomposition_warning is None
+    assert canonical.story_items[0].item.invest_assessment.independent.result == "pass"
 
 
 @pytest.mark.asyncio
@@ -1268,11 +1301,10 @@ async def test_story_correction_recipe_repairs_then_merges_and_remints_once(
             "statement": statement,
             "acceptance_criteria": [f"Verify {title}."],
             "spec_item_ids": ["DATA.001", "REQ.001"],
-            "invest_score": "High",
+            "invest_assessment": _invest_assessment_payload(),
             "estimated_effort": "S",
             "produced_artifacts": [],
             "research_caveats": [],
-            "decomposition_warning": None,
             "dependency_candidates": [],
         }
 
@@ -1295,7 +1327,7 @@ async def test_story_correction_recipe_repairs_then_merges_and_remints_once(
         "As a calculator user, I want corrected middle, so that it works.",
     )
     invalid_corrected_item = dict(corrected_item)
-    invalid_corrected_item.pop("decomposition_warning")
+    invalid_corrected_item.pop("invest_assessment")
     correction_model = SequenceStoryLlm(
         model="provider-free-story-correction",
         response_texts=[
@@ -1433,11 +1465,10 @@ async def test_story_correction_recipe_repairs_out_of_parent_reference(
             "statement": statement,
             "acceptance_criteria": [f"Verify {title}."],
             "spec_item_ids": list(spec_item_ids),
-            "invest_score": "High",
+            "invest_assessment": _invest_assessment_payload(),
             "estimated_effort": "S",
             "produced_artifacts": [],
             "research_caveats": [],
-            "decomposition_warning": None,
             "dependency_candidates": [],
         }
 
@@ -1643,7 +1674,7 @@ def test_story_runner_valid_first_persists_one_draft_and_replays_without_provide
         )
         assert artifact.backlog_item_id == writer_input["parent_backlog_item_id"]
         persisted = json.loads(artifact.canonical_content_json)
-        assert persisted["story_items"][0]["item"]["decomposition_warning"] is None
+        assert "invest_assessment" in persisted["story_items"][0]["item"]
         assert session.exec(select(StoryArtifactDecision)).all() == []
         assert session.exec(select(UserStory)).all() == []
         attempts = _node_attempts(session, "planning.story.generate")
@@ -1836,14 +1867,13 @@ def _attempt_16_sanitized_responses(
                     ),
                 ],
                 "spec_item_ids": [valid_spec_id],
-                "invest_score": "High",
+                "invest_assessment": _invest_assessment_payload(),
                 "estimated_effort": "S",
                 "produced_artifacts": [
                     "Public Python package interface exposing "
                     "`add(numbers: str) -> int`"
                 ],
                 "research_caveats": [],
-                "decomposition_warning": None,
                 "dependency_candidates": [],
             },
             {
@@ -1884,11 +1914,10 @@ def _attempt_16_sanitized_responses(
                     ),
                 ],
                 "spec_item_ids": [valid_spec_id],
-                "invest_score": "High",
+                "invest_assessment": _invest_assessment_payload(),
                 "estimated_effort": "M",
                 "produced_artifacts": ["Supported Number List parsing behavior"],
                 "research_caveats": [],
-                "decomposition_warning": None,
                 "dependency_candidates": [],
             },
             {
@@ -1925,14 +1954,13 @@ def _attempt_16_sanitized_responses(
                     ),
                 ],
                 "spec_item_ids": [valid_spec_id, numeric_spelling_spec_id],
-                "invest_score": "High",
+                "invest_assessment": _invest_assessment_payload(),
                 "estimated_effort": "M",
                 "produced_artifacts": [
                     "Public calculation behavior for supported "
                     "non-negative Number Lists"
                 ],
                 "research_caveats": [],
-                "decomposition_warning": None,
                 "dependency_candidates": [],
             },
         ],
@@ -1975,11 +2003,10 @@ def _attempt_16_sanitized_responses(
                     ),
                 ],
                 "spec_item_ids": [valid_spec_id],
-                "invest_score": "High",
+                "invest_assessment": _invest_assessment_payload(),
                 "estimated_effort": "M",
                 "produced_artifacts": ["Supported Number List parsing behavior"],
                 "research_caveats": [],
-                "decomposition_warning": None,
                 "dependency_candidates": [],
             },
             {
@@ -2010,13 +2037,12 @@ def _attempt_16_sanitized_responses(
                     ),
                 ],
                 "spec_item_ids": [valid_spec_id, unbounded_spec_id],
-                "invest_score": "High",
+                "invest_assessment": _invest_assessment_payload(),
                 "estimated_effort": "S",
                 "produced_artifacts": [
                     "Supported non-negative Number List summation behavior"
                 ],
                 "research_caveats": [],
-                "decomposition_warning": None,
                 "dependency_candidates": [],
             },
             {
@@ -2043,13 +2069,12 @@ def _attempt_16_sanitized_responses(
                     ),
                 ],
                 "spec_item_ids": [valid_spec_id],
-                "invest_score": "High",
+                "invest_assessment": _invest_assessment_payload(),
                 "estimated_effort": "S",
                 "produced_artifacts": [
                     "Public `string_calculator.add` Python interface"
                 ],
                 "research_caveats": [],
-                "decomposition_warning": None,
                 "dependency_candidates": [],
             },
         ],

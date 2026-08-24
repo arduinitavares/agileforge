@@ -18,7 +18,12 @@ from models.workflow import StoryArtifact, StoryArtifactDecision
 from repositories.workflow import WorkflowFactRepository
 from services import application, sprint_selection
 from services.contracts.backlog import BacklogItem, BacklogOutput
-from services.contracts.story import CanonicalStoryItem, StoryItemEnvelope
+from services.contracts.story import (
+    CanonicalStoryItem,
+    InvestDimensionAssessment,
+    StoryInvestAssessment,
+    StoryItemEnvelope,
+)
 from services.specs.accepted_specification import (
     AcceptedSpecification,
     AcceptedSpecificationIntegrityError,
@@ -67,6 +72,44 @@ from workflow.fingerprints import canonical_hash, canonical_json
 
 if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
+
+GOLD_HASH = "sha256:accepted"
+
+
+def _invest_assessment() -> StoryInvestAssessment:
+    return StoryInvestAssessment(
+        independent=InvestDimensionAssessment(
+            result="pass",
+            rationale="Delivers self-contained increment.",
+            evidence="No unbuilt dependencies.",
+        ),
+        negotiable=InvestDimensionAssessment(
+            result="pass",
+            rationale="Implementation details open to refinement.",
+            evidence="Focuses on user outcome.",
+        ),
+        valuable=InvestDimensionAssessment(
+            result="pass",
+            rationale="Directly delivers user capability.",
+            evidence="Addresses requirement.",
+        ),
+        estimable=InvestDimensionAssessment(
+            result="pass",
+            rationale="Scope is clear and bounded.",
+            evidence="Discrete criteria.",
+        ),
+        small=InvestDimensionAssessment(
+            result="pass",
+            rationale="Sized for single iteration.",
+            evidence="Effort is S.",
+        ),
+        testable=InvestDimensionAssessment(
+            result="pass",
+            rationale="Verifiable pass/fail criteria.",
+            evidence="Observable verification steps.",
+        ),
+    )
+
 
 EXPECTED_PARENT_GROUP = 10
 EXPECTED_GROUP_SLOT = 2
@@ -671,11 +714,10 @@ def test_sprint_projection_uses_exact_story_item_and_spec_evidence() -> None:
         persona="calculator user",
         acceptance_criteria=("Verify the result against DATA.001.",),
         spec_item_ids=("DATA.001", "REQ.001"),
-        invest_score="High",
+        invest_assessment=_invest_assessment(),
         estimated_effort="M",
         produced_artifacts=(),
         research_caveats=(),
-        decomposition_warning=None,
         dependency_candidates=(),
     )
 
@@ -713,11 +755,10 @@ def test_story_input_builds_feedback_context_from_host_canonical_prior_artifact(
         persona="reviewer",
         acceptance_criteria=("The next Story input includes the reviewed artifact.",),
         spec_item_ids=("DATA.001",),
-        invest_score="High",
+        invest_assessment=_invest_assessment(),
         estimated_effort="S",
         produced_artifacts=(),
         research_caveats=(),
-        decomposition_warning=None,
         dependency_candidates=(),
     )
     item_envelope = StoryItemEnvelope(
@@ -854,11 +895,10 @@ def test_sprint_projection_rejects_operational_story_drift_from_artifact(
         persona="calculator user",
         acceptance_criteria=("Verify the result against DATA.001.",),
         spec_item_ids=("DATA.001", "REQ.001"),
-        invest_score="High",
+        invest_assessment=_invest_assessment(),
         estimated_effort="M",
         produced_artifacts=(),
         research_caveats=(),
-        decomposition_warning=None,
         dependency_candidates=(),
     )
     item_envelope = StoryItemEnvelope(
@@ -976,11 +1016,10 @@ def test_sprint_projection_requires_exact_accepted_story_decision(
         persona="calculator user",
         acceptance_criteria=("Verify the result against DATA.001.",),
         spec_item_ids=("DATA.001", "REQ.001"),
-        invest_score="High",
+        invest_assessment=_invest_assessment(),
         estimated_effort="M",
         produced_artifacts=(),
         research_caveats=(),
-        decomposition_warning=None,
         dependency_candidates=(),
     )
     item_envelope = StoryItemEnvelope(

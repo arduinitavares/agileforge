@@ -11,6 +11,8 @@ from services.contracts.specification_references import AcceptedSpecificationRef
 from services.contracts.story import (
     CanonicalStoryItem,
     CanonicalStoryOutput,
+    InvestDimensionAssessment,
+    StoryInvestAssessment,
     StoryItemEnvelope,
     UserStoryAgentItem,
     UserStoryWriterInput,
@@ -64,17 +66,51 @@ def _reference() -> AcceptedSpecificationReference:
     )
 
 
+def _valid_invest_assessment() -> StoryInvestAssessment:
+    return StoryInvestAssessment(
+        independent=InvestDimensionAssessment(
+            result="pass",
+            rationale="Delivers complete value on its own.",
+            evidence="REQ.alpha acceptance criteria are fully contained.",
+        ),
+        negotiable=InvestDimensionAssessment(
+            result="pass",
+            rationale="Implementation approach is open to refinement.",
+            evidence="Statement specifies outcome without constraining UI design.",
+        ),
+        valuable=InvestDimensionAssessment(
+            result="pass",
+            rationale="Provides immediate calculation capability.",
+            evidence="Directly satisfies student learning workflow in REQ.alpha.",
+        ),
+        estimable=InvestDimensionAssessment(
+            result="pass",
+            rationale="Scope is bounded with clear criteria.",
+            evidence="Two discrete criteria mapping directly to specification.",
+        ),
+        small=InvestDimensionAssessment(
+            result="pass",
+            rationale="Fits comfortably in a single iteration.",
+            evidence="Estimated effort is S with no complex dependencies.",
+        ),
+        testable=InvestDimensionAssessment(
+            result="pass",
+            rationale="Acceptance criteria are deterministically verifiable.",
+            evidence="Contains observable pass/fail verification steps.",
+        ),
+    )
+
+
 def _story(*, criterion: str = "Verify the result.") -> UserStoryAgentItem:
     return UserStoryAgentItem(
         story_title="Calculate values",
         statement=" **As an Étudiant**, I want to calculate values, so that I learn.",
         acceptance_criteria=(criterion, "- Preserve\nUnicode ✓"),
         spec_item_ids=("REQ.alpha", "DATA.beta"),
-        invest_score="High",
+        invest_assessment=_valid_invest_assessment(),
         estimated_effort="S",
         produced_artifacts=("calculator",),
         research_caveats=(),
-        decomposition_warning=None,
         dependency_candidates=(),
     )
 
@@ -176,10 +212,20 @@ def test_host_story_item_rejects_invalid_ids_content_and_persona() -> None:
             {**payload, "spec_item_ids": ("REQ.alpha", "DATA.beta")}
         )
 
+    mutated_item = {
+        **payload,
+        "invest_assessment": {
+            **payload["invest_assessment"],
+            "small": {
+                **payload["invest_assessment"]["small"],
+                "result": "concern",
+            },
+        },
+    }
     with pytest.raises(ValidationError, match="fingerprint"):
         StoryItemEnvelope.model_validate(
             {
-                "item": {**payload, "invest_score": "Medium"},
+                "item": mutated_item,
                 "item_fingerprint": envelope.item_fingerprint,
             }
         )
@@ -290,3 +336,61 @@ def test_with_story_schema_repair_feedback_preserves_large_parent_boundary_and_r
     parsed_ids = json.loads(repaired.user_input[start_idx:end_idx])
     assert parsed_ids == list(parent_ids)
     assert len(parsed_ids) == expected_item_count
+
+
+def test_invest_assessment_requires_all_six_dimensions_with_evidence() -> None:
+    assessment = _valid_invest_assessment()
+    assert assessment.independent.result == "pass"
+    assert assessment.negotiable.result == "pass"
+    assert assessment.valuable.result == "pass"
+    assert assessment.estimable.result == "pass"
+    assert assessment.small.result == "pass"
+    assert assessment.testable.result == "pass"
+
+    dumped = assessment.model_dump(mode="json")
+    for dim in (
+        "independent",
+        "negotiable",
+        "valuable",
+        "estimable",
+        "small",
+        "testable",
+    ):
+        assert dim in dumped
+        assert dumped[dim]["result"] in ("pass", "concern", "fail")
+        assert len(dumped[dim]["rationale"]) > 0
+        assert len(dumped[dim]["evidence"]) > 0
+
+
+def test_invest_assessment_fails_closed_on_missing_blank_or_invalid_fields() -> None:
+    # Missing dimension
+    data = _valid_invest_assessment().model_dump(mode="json")
+    data.pop("small")
+    with pytest.raises(ValidationError):
+        StoryInvestAssessment.model_validate(data)
+
+    # Invalid result value
+    data_bad_result = _valid_invest_assessment().model_dump(mode="json")
+    data_bad_result["independent"]["result"] = "unknown"
+    with pytest.raises(ValidationError):
+        StoryInvestAssessment.model_validate(data_bad_result)
+
+    # Blank rationale
+    data_blank_rationale = _valid_invest_assessment().model_dump(mode="json")
+    data_blank_rationale["testable"]["rationale"] = "   "
+    with pytest.raises(ValidationError, match="INVEST dimension field"):
+        StoryInvestAssessment.model_validate(data_blank_rationale)
+
+    # Blank evidence
+    data_blank_evidence = _valid_invest_assessment().model_dump(mode="json")
+    data_blank_evidence["valuable"]["evidence"] = ""
+    with pytest.raises(ValidationError):
+        StoryInvestAssessment.model_validate(data_blank_evidence)
+
+
+def test_story_item_rejects_retired_aggregate_invest_score() -> None:
+    data = _story().model_dump(mode="json")
+    data.pop("invest_assessment")
+    data["invest_score"] = "High"
+    with pytest.raises(ValidationError):
+        UserStoryAgentItem.model_validate(data)

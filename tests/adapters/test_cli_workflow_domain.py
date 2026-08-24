@@ -1301,11 +1301,41 @@ def _planning_review(phase: str) -> dict[str, object]:
                     "statement": "As a household, I want trusted balances.",
                     "persona": "household",
                     "acceptance_criteria": ["All accounts reconcile."],
-                    "invest_score": "High",
+                    "invest_assessment": {
+                        "independent": {
+                            "result": "pass",
+                            "rationale": "Delivers self-contained increment.",
+                            "evidence": "No unbuilt dependencies.",
+                        },
+                        "negotiable": {
+                            "result": "pass",
+                            "rationale": "Implementation details open to refinement.",
+                            "evidence": "Focuses on user outcome.",
+                        },
+                        "valuable": {
+                            "result": "pass",
+                            "rationale": "Directly delivers user capability.",
+                            "evidence": "Addresses requirement.",
+                        },
+                        "estimable": {
+                            "result": "pass",
+                            "rationale": "Scope is clear and bounded.",
+                            "evidence": "Discrete criteria.",
+                        },
+                        "small": {
+                            "result": "pass",
+                            "rationale": "Sized for single iteration.",
+                            "evidence": "Effort is M.",
+                        },
+                        "testable": {
+                            "result": "pass",
+                            "rationale": "Verifiable pass/fail criteria.",
+                            "evidence": "Observable verification steps.",
+                        },
+                    },
                     "estimated_effort": "M",
                     "produced_artifacts": ["Balance report"],
                     "research_caveats": [],
-                    "decomposition_warning": None,
                     "dependency_candidates": [],
                     "specification_evidence": _evidence(),
                 }

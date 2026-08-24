@@ -1007,3 +1007,78 @@ test('canonicalCandidateDependencies and review markup fail closed on malformed 
         assert.strictEqual(context.sprintCandidatePoolMarkup(invalidCandidates), '');
     }
 });
+
+test('storyItemMarkup renders explainable INVEST assessment across all 6 dimensions', () => {
+    const context = loadFrontend();
+    const story = {
+        story_title: 'Calculate values',
+        statement: 'As a user, I want to calculate values, so that I learn.',
+        persona: 'user',
+        estimated_effort: 'S',
+        acceptance_criteria: ['Verify calculation passes.'],
+        specification_evidence: [],
+        invest_assessment: {
+            independent: {
+                result: 'pass',
+                rationale: 'Self-contained calculation logic.',
+                evidence: 'No dependencies on unbuilt stories.',
+            },
+            negotiable: {
+                result: 'pass',
+                rationale: 'Calculation approach can be refined.',
+                evidence: 'Focuses on outcome.',
+            },
+            valuable: {
+                result: 'pass',
+                rationale: 'Provides core calculation capability.',
+                evidence: 'Directly addresses user need.',
+            },
+            estimable: {
+                result: 'pass',
+                rationale: 'Clear scope for estimation.',
+                evidence: 'Two discrete criteria.',
+            },
+            small: {
+                result: 'concern',
+                rationale: 'Multiple operations included.',
+                evidence: 'Effort is S but covers add and subtract.',
+            },
+            testable: {
+                result: 'pass',
+                rationale: 'Deterministic criteria.',
+                evidence: 'Verify calculation passes.',
+            },
+        },
+        research_caveats: ['Requires standard floating point behavior.'],
+        dependency_candidates: [
+            {
+                prerequisite_ref: 'US-0001',
+                reason: 'Parser needed first',
+                confidence: 'explicit',
+            },
+        ],
+    };
+
+    const markup = context.storyItemMarkup(story);
+    assert.ok(markup.includes('INVEST assessment'));
+    assert.ok(markup.includes('Independent'));
+    assert.ok(markup.includes('Negotiable'));
+    assert.ok(markup.includes('Valuable'));
+    assert.ok(markup.includes('Estimable'));
+    assert.ok(markup.includes('Small'));
+    assert.ok(markup.includes('Testable'));
+    assert.ok(markup.includes('Pass'));
+    assert.ok(markup.includes('Concern'));
+    assert.ok(markup.includes('Self-contained calculation logic.'));
+    assert.ok(markup.includes('No dependencies on unbuilt stories.'));
+    assert.ok(markup.includes('Estimated effort:</strong> S'));
+    assert.ok(markup.includes('Requires standard floating point behavior.'));
+    assert.ok(markup.includes('Prerequisite:</strong> US-0001'));
+    assert.ok(markup.includes('Parser needed first'));
+});
+
+test('investAssessmentMarkup handles empty or missing assessment gracefully', () => {
+    const context = loadFrontend();
+    assert.strictEqual(context.investAssessmentMarkup(null), '');
+    assert.strictEqual(context.investAssessmentMarkup(undefined), '');
+});

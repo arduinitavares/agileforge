@@ -47,6 +47,8 @@ from services.application import (
 from services.contracts.story import (
     CanonicalStoryItem,
     CanonicalStoryOutput,
+    InvestDimensionAssessment,
+    StoryInvestAssessment,
     StoryItemEnvelope,
 )
 from services.node_attempt_replay import (
@@ -75,6 +77,41 @@ if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
 
 
+def _invest_assessment() -> StoryInvestAssessment:
+    return StoryInvestAssessment(
+        independent=InvestDimensionAssessment(
+            result="pass",
+            rationale="Delivers self-contained increment.",
+            evidence="No unbuilt dependencies.",
+        ),
+        negotiable=InvestDimensionAssessment(
+            result="pass",
+            rationale="Implementation details open to refinement.",
+            evidence="Focuses on user outcome.",
+        ),
+        valuable=InvestDimensionAssessment(
+            result="pass",
+            rationale="Directly delivers user capability.",
+            evidence="Addresses requirement.",
+        ),
+        estimable=InvestDimensionAssessment(
+            result="pass",
+            rationale="Scope is clear and bounded.",
+            evidence="Discrete criteria.",
+        ),
+        small=InvestDimensionAssessment(
+            result="pass",
+            rationale="Sized for single iteration.",
+            evidence="Effort is M.",
+        ),
+        testable=InvestDimensionAssessment(
+            result="pass",
+            rationale="Verifiable pass/fail criteria.",
+            evidence="Observable verification steps.",
+        ),
+    )
+
+
 def _story_content(
     *,
     title: str = "Persist planning facts",
@@ -98,11 +135,10 @@ def _story_content(
                 "Preserve Unicode: ação.",
             ),
             spec_item_ids=("REQ.planning-1",),
-            invest_score="High",
+            invest_assessment=_invest_assessment(),
             estimated_effort="M",
             produced_artifacts=("planning records",),
             research_caveats=(),
-            decomposition_warning=None,
             dependency_candidates=(),
         )
         for ordinal in range(1, item_count + 1)
