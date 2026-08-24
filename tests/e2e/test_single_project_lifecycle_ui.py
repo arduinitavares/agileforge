@@ -2593,4 +2593,3 @@ def test_progressive_story_readiness_failure_diagnostics_persist_on_reload(
     expect(error_banner).to_contain_text("STORY_SPEC_REFERENCE_INVALID")
 
     context.close()
-

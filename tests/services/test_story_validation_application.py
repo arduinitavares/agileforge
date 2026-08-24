@@ -128,8 +128,9 @@ def test_story_validation_api_endpoint(
     app = _build_application(engine)
     client = TestClient(api.app)
 
-    with patch("api._application", return_value=app), patch.object(
-        story_validation_service, "get_engine", return_value=engine
+    with (
+        patch("api._application", return_value=app),
+        patch.object(story_validation_service, "get_engine", return_value=engine),
     ):
         response = client.post(
             f"/api/projects/{project_id}/story/validate",
