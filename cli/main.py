@@ -45,6 +45,7 @@ from services.application import (
     StoryReadinessRepair,
     StoryReadinessRepairRequest,
     StoryReviewRequest,
+    StoryValidationRequest,
     VisionBootstrapRequest,
     VisionResponseRequest,
     VisionReviewRequest,
@@ -249,6 +250,11 @@ class _Application(Protocol):
         self,
         request: StoryReadinessRepairRequest,
     ) -> TransitionResult: ...
+
+    def validate_story(
+        self,
+        request: StoryValidationRequest,
+    ) -> JsonObject: ...
 
     def start_sprint(self, request: SprintStartRequest) -> TransitionResult: ...
 
@@ -535,6 +541,17 @@ def _install_planning_action_mutations(
         action="append",
         type=_parse_story_readiness_repair,
         required=True,
+    )
+    story_validate = _semantic_leaf(
+        branches[("story",)],
+        "validate",
+        _story_validate,
+    )
+    story_validate.add_argument("--story-id", type=int, required=True)
+    story_validate.add_argument(
+        "--mode",
+        choices=["structural"],
+        default="structural",
     )
     _semantic_leaf(branches[("sprint",)], "start", _sprint_start)
 
@@ -1576,6 +1593,24 @@ def _story_readiness_repair(
             StoryReadinessRepairRequest(
                 project_id=args.project_id,
                 repairs=tuple(args.repairs),
+                idempotency_key=args.idempotency_key,
+                actor=args.actor,
+                correlation_id=args.correlation_id,
+            )
+        )
+    )
+
+
+def _story_validate(
+    args: argparse.Namespace,
+    application: _Application,
+) -> int:
+    return _emit_read(
+        application.validate_story(
+            StoryValidationRequest(
+                project_id=args.project_id,
+                story_id=args.story_id,
+                mode=args.mode,
                 idempotency_key=args.idempotency_key,
                 actor=args.actor,
                 correlation_id=args.correlation_id,

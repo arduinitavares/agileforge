@@ -54,6 +54,7 @@ from services.application import (
     StoryReadinessRepair,
     StoryReadinessRepairRequest,
     StoryReviewRequest,
+    StoryValidationRequest,
     VisionBootstrapRequest,
     VisionResponseRequest,
     VisionReviewRequest,
@@ -244,6 +245,13 @@ class StoryDependenciesApplyApiRequest(MutationApiRequest):
             message = "reviewed_edges must remain inside selected_story_ids."
             raise ValueError(message)
         return self
+
+
+class StoryValidateApiRequest(MutationApiRequest):
+    """Transport payload to validate one accepted Story provider-free."""
+
+    story_id: PositiveStoryId
+    mode: Literal["structural"] = "structural"
 
 
 class StoryReadinessRepairApiRequest(MutationApiRequest):
@@ -1264,6 +1272,24 @@ def decide_project_sprint_plan(
                 decision_fingerprint=expected_decision,
                 instance_key=None,
             ),
+        )
+    )
+
+
+@app.post("/api/projects/{project_id}/story/validate")
+def validate_project_story(
+    project_id: int,
+    req: StoryValidateApiRequest,
+) -> dict[str, object]:
+    """Structurally validate one accepted Story provider-free."""
+    return _read_payload(
+        _application().validate_story(
+            StoryValidationRequest(
+                project_id=project_id,
+                story_id=req.story_id,
+                mode=req.mode,
+                **_metadata(req),
+            )
         )
     )
 

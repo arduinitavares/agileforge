@@ -147,6 +147,11 @@ class FakeLifecycle:
     position_override: JsonObject | None = None
     on_story_decide: Callable[[JsonObject], None] | None = None
     story_decisions: list[JsonObject] = field(default_factory=list)
+    stories: list[JsonValue] = field(default_factory=list)
+    story_dependencies: list[JsonValue] = field(default_factory=list)
+    sprint_candidates: list[JsonValue] = field(default_factory=list)
+    story_validation_requests: list[JsonObject] = field(default_factory=list)
+    dependency_apply_requests: list[JsonObject] = field(default_factory=list)
     reject_stale_delivery_actions: bool = False
     refresh_count: int = 0
     api_errors: list[str] = field(default_factory=list)
@@ -327,6 +332,8 @@ class FakeLifecycle:
             "/repository": self._repository_projection,
             "/specifications/review": self._specification_projection,
             "/story/pending": self._story_pending_projection,
+            "/story/dependencies": self._story_dependencies_projection,
+            "/sprint/candidates": self._sprint_candidates_projection,
             "/vision/status": self._vision_projection,
         }
         reader = readers.get(suffix)
@@ -379,7 +386,9 @@ class FakeLifecycle:
             "/sprint/decide": self._decide_sprint_plan,
             "/sprint/generate": self._generate_sprint_plan,
             "/story/decide": self._decide_story,
+            "/story/dependencies/apply": self._apply_story_dependencies,
             "/story/generate": self._generate_story,
+            "/story/validate": self._validate_story,
             "/vision/bootstrap": self._bootstrap_vision,
             "/vision/respond": self._record_vision_turn,
             "/vision/review": self._review_vision,
@@ -706,6 +715,18 @@ class FakeLifecycle:
             "pending_count": len(items),
         }
 
+    def _story_dependencies_projection(self) -> JsonObject:
+        return {
+            "stories": self.stories,
+            "edges": self.story_dependencies,
+        }
+
+    def _sprint_candidates_projection(self) -> JsonObject:
+        return {
+            "items": self.sprint_candidates,
+            "count": len(self.sprint_candidates),
+        }
+
     def _generate_backlog(self, body: JsonObject) -> None:
         self._assert_fields(body, set())
         if self.delivery_generation_failure:
@@ -809,6 +830,21 @@ class FakeLifecycle:
             self.on_story_decide(body)
         else:
             self.planning_review_overrides.pop("/story/reviews", None)
+
+    def _validate_story(self, body: JsonObject) -> None:
+        self._assert_fields(body, {"story_id", "mode"})
+        self.story_validation_requests.append(dict(body))
+        story_id = body["story_id"]
+        for s in self.stories:
+            if isinstance(s, dict) and s.get("story_id") == story_id:
+                s["readiness_blockers"] = []
+                s["sprint_candidate"] = True
+                if s not in self.sprint_candidates:
+                    self.sprint_candidates.append(s)
+
+    def _apply_story_dependencies(self, body: JsonObject) -> None:
+        self._assert_fields(body, {"selected_story_ids", "reviewed_edges"})
+        self.dependency_apply_requests.append(dict(body))
 
     def _generate_sprint_plan(self, body: JsonObject) -> None:
         self._assert_fields(body, {"team_name"})
@@ -2300,3 +2336,136 @@ def test_sprint_generation_requires_team_and_blocks_duplicate_submission(
     assert sprint_requests[0]["team_name"] == "Product Team"
 
     context.close()
+
+
+def test_progressive_story_readiness_partial_refinement_to_sprint_planning(
+    dashboard_harness: DashboardHarness,
+) -> None:
+    """Unlock Sprint planning from one valid Story while siblings remain unrefined."""
+    story_id = 102
+    pbi1_action = _story_generation_action("backlog_item:PBI-000001")
+    pbi3_action = _story_generation_action("backlog_item:PBI-000003")
+    fake = _delivery_ready_fake([pbi1_action, pbi3_action])
+
+    # 3 PBIs in backlog candidate and pending projection
+    fake.backlog_candidate = {
+        "backlog_items": [
+            {
+                "backlog_item_id": "PBI-000001",
+                "requirement": "Specification authoring workflow",
+            },
+            {
+                "backlog_item_id": "PBI-000002",
+                "requirement": "Progressive story validation",
+            },
+            {
+                "backlog_item_id": "PBI-000003",
+                "requirement": "Sprint execution engine",
+            },
+        ]
+    }
+
+    # PBI-000002 has an accepted story needing structural validation
+    fake.stories = [
+        {
+            "story_id": story_id,
+            "source_story_item_id": "US-001",
+            "backlog_item_id": "PBI-000002",
+            "status": "to_do",
+            "story_points": 5,
+            "rank": "1",
+            "sprint_candidate": False,
+            "content_accepted": True,
+            "readiness_blockers": ["STORY_VALIDATION_REQUIRED"],
+        }
+    ]
+
+    context, page = _open_project_page(dashboard_harness, fake)
+
+    # 1. Verify unrefined sibling PBI generation buttons are visible
+    expect(
+        page.locator('[data-delivery-action-instance="backlog_item:PBI-000001"]')
+    ).to_be_visible()
+    expect(
+        page.locator('[data-delivery-action-instance="backlog_item:PBI-000003"]')
+    ).to_be_visible()
+
+    # 2. Verify Story readiness section displays US-001 with parent PBI-000002
+    readiness_section = page.locator('[data-story-readiness-section="true"]')
+    expect(readiness_section).to_be_visible()
+    expect(readiness_section).to_contain_text("US-001")
+    expect(readiness_section).to_contain_text("(PBI-000002)")
+    expect(readiness_section).to_contain_text("Unvalidated")
+    validate_button = page.locator(f'[data-story-validate-id="{story_id}"]')
+    expect(validate_button).to_be_visible()
+
+    # 3. Click "Validate Story" on US-001
+    validate_button.click()
+    page.wait_for_timeout(200)
+
+    assert len(fake.story_validation_requests) == 1
+    assert fake.story_validation_requests[0]["story_id"] == story_id
+    assert fake.story_validation_requests[0]["mode"] == "structural"
+
+    # 4. After validation, simulate dependency review action in position
+    dependency_action: JsonObject = {
+        "node_id": "planning.story_dependencies",
+        "instance_key": None,
+        "request_kind": "apply_story_dependencies",
+        "endpoint": "story/dependencies/apply",
+        "transport": "semantic",
+    }
+    fake.position_override = _delivery_position(
+        [pbi1_action, pbi3_action, dependency_action]
+    )
+
+    # Reload dashboard to pick up new position
+    page.locator("#refresh-project").click()
+    page.wait_for_timeout(200)
+
+    # 5. Verify dependency review section is displayed
+    dep_section = page.locator('[data-dependency-review-section="true"]')
+    expect(dep_section).to_be_visible()
+    expect(dep_section).to_contain_text("Dependency review required")
+    confirm_dep_button = page.locator('[data-apply-dependencies="true"]')
+    expect(confirm_dep_button).to_be_visible()
+
+    # 6. Click "Confirm dependencies"
+    confirm_dep_button.click()
+    page.wait_for_timeout(200)
+
+    assert len(fake.dependency_apply_requests) == 1
+    assert fake.dependency_apply_requests[0]["selected_story_ids"] == [story_id]
+    assert fake.dependency_apply_requests[0]["reviewed_edges"] == []
+
+    # 7. Simulate Sprint planning action becoming available
+    sprint_plan_action = _sprint_generation_action()
+    fake.position_override = _delivery_position(
+        [pbi1_action, pbi3_action, sprint_plan_action]
+    )
+
+    # Reload dashboard
+    page.locator("#refresh-project").click()
+    page.wait_for_timeout(200)
+
+    # 8. Verify Sprint candidate pool displays US-001 as Ready
+    candidate_pool = page.locator('[data-candidate-pool-section="true"]')
+    expect(candidate_pool).to_be_visible()
+    expect(candidate_pool).to_contain_text("1 candidate ready")
+    expect(candidate_pool).to_contain_text("US-001")
+    expect(candidate_pool).to_contain_text("(PBI-000002)")
+
+    # 9. Verify Sprint planning form is visible and unlocked
+    sprint_form = page.locator('[data-delivery-generation-form="record_sprint_plan"]')
+    expect(sprint_form).to_be_visible()
+
+    # 10. Verify unrefined sibling PBIs remain visible and operable
+    expect(
+        page.locator('[data-delivery-action-instance="backlog_item:PBI-000001"]')
+    ).to_be_visible()
+    expect(
+        page.locator('[data-delivery-action-instance="backlog_item:PBI-000003"]')
+    ).to_be_visible()
+
+    context.close()
+

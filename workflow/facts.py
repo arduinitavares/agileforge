@@ -447,6 +447,7 @@ class StoryFact(FrozenModel):
     backlog_artifact_fingerprint: str | None = None
     roadmap_artifact_id: int | None = None
     roadmap_artifact_fingerprint: str | None = None
+    backlog_item_id: str | None = None
     status: str
     story_points: int | None = None
     rank: str | None = None

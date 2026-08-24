@@ -3073,6 +3073,9 @@ class WorkflowFactRepository:
             roadmap_artifact_fingerprint=(
                 artifact.roadmap_artifact_fingerprint if artifact is not None else None
             ),
+            backlog_item_id=(
+                artifact.backlog_item_id if artifact is not None else None
+            ),
             status=row.status.value,
             story_points=row.story_points,
             rank=row.rank,

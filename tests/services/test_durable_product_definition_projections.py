@@ -528,6 +528,65 @@ def test_story_show_rejects_invalid_persisted_acceptance_criteria(
     }
 
 
+def test_story_show_returns_backlog_item_id_and_validation_evidence(
+    engine: Engine,
+) -> None:
+    """Expose parent backlog_item_id, spec_item_ids, and validation readiness."""
+    story_id = _accepted_story_for_show(engine)
+    result = DurableReadProjectionService(engine=engine).story_show(story_id=story_id)
+
+    assert result["ok"] is True
+    data = _data(result)
+    assert data["story_id"] == story_id
+    assert data["backlog_item_id"] == "PBI-000001"
+    assert data["spec_item_ids"] == ["REQ.planning-1"]
+    assert data["validation_status"] == "validated"
+    assert data["ready_for_sprint"] is True
+    assert data["validation_evidence"] is not None
+
+    # Test unvalidated state
+    with Session(engine) as session:
+        story = session.get(UserStory, story_id)
+        assert story is not None
+        story.validation_evidence = None
+        session.add(story)
+        session.commit()
+
+    unvalidated_result = DurableReadProjectionService(engine=engine).story_show(
+        story_id=story_id
+    )
+    assert unvalidated_result["ok"] is True
+    unvalidated_data = _data(unvalidated_result)
+    assert unvalidated_data["validation_status"] == "unvalidated"
+    assert unvalidated_data["ready_for_sprint"] is False
+    assert unvalidated_data["validation_evidence"] is None
+
+
+def test_story_dependencies_inspect_includes_stories_with_backlog_item_id(
+    engine: Engine,
+) -> None:
+    """Expose stories and parent backlog item in dependency inspection."""
+    story_id = _accepted_story_for_show(engine)
+    with Session(engine) as session:
+        story = session.get(UserStory, story_id)
+        assert story is not None
+        project_id = story.project_id
+
+    result = DurableReadProjectionService(engine=engine).story_dependencies_inspect(
+        project_id=project_id
+    )
+
+    assert result["ok"] is True
+    data = _data(result)
+    stories = data["stories"]
+    assert isinstance(stories, list)
+    assert len(stories) >= 1
+    first = stories[0]
+    assert isinstance(first, dict)
+    assert first["story_id"] == story_id
+    assert first["backlog_item_id"] == "PBI-000001"
+
+
 def _vision_output_fingerprint(
     components: Mapping[str, object],
     statement: str,

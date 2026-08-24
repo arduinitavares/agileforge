@@ -90,7 +90,9 @@ from services.specs.accepted_specification import (
 )
 from services.specs.story_validation_service import (
     StoryValidationReadinessError,
+    ValidateStoryInput,
     require_story_ready_for_sprint,
+    validate_story_with_specification,
 )
 from services.sprint_selection import (
     SprintSelectionError,
@@ -1388,6 +1390,17 @@ class StoryReadinessRepairRequest(_PlanningMutationRequest):
         return self
 
 
+class StoryValidationRequest(FrozenModel):
+    """Explicit operator request to structurally validate one accepted Story."""
+
+    project_id: int
+    story_id: PositiveStoryId
+    mode: Literal["structural"] = "structural"
+    idempotency_key: str = Field(min_length=1)
+    actor: str = Field(min_length=1)
+    correlation_id: str | None = None
+
+
 class SprintStartRequest(_PlanningMutationRequest):
     """Transport-only request to start the graph-selected accepted Sprint plan."""
 
@@ -2408,6 +2421,65 @@ class AgileForgeApplication:
                 expected_readiness_fingerprint=readiness_guard,
             )
         )
+
+    def validate_story(
+        self,
+        request: StoryValidationRequest,
+    ) -> JsonObject:
+        """Structurally validate one accepted Story provider-free."""
+        project_result = self.reads.project_show(project_id=request.project_id)
+        if not project_result.get("ok"):
+            return project_result
+        story_result = self.reads.story_show(story_id=request.story_id)
+        if not story_result.get("ok"):
+            return story_result
+        story_data = story_result.get("data")
+        if (
+            not isinstance(story_data, dict)
+            or story_data.get("project_id") != request.project_id
+        ):
+            return {
+                "ok": False,
+                "data": {
+                    "story_id": request.story_id,
+                    "project_id": request.project_id,
+                },
+                "errors": [
+                    {
+                        "code": "STORY_NOT_FOUND",
+                        "message": (
+                            f"Story {request.story_id} was not found in project"
+                            f" {request.project_id}."
+                        ),
+                        "details": {
+                            "story_id": request.story_id,
+                            "project_id": request.project_id,
+                        },
+                    }
+                ],
+            }
+        result = validate_story_with_specification(
+            ValidateStoryInput(story_id=request.story_id, mode=request.mode),
+        )
+        if not result.get("success", False):
+            error_code = cast(
+                "str", result.get("error_code") or "STORY_VALIDATION_FAILED"
+            )
+            message = cast(
+                "str", result.get("message") or "Story validation failed."
+            )
+            return {
+                "ok": False,
+                "data": result,
+                "errors": [
+                    {
+                        "code": error_code,
+                        "message": message,
+                        "details": result,
+                    }
+                ],
+            }
+        return {"ok": True, "data": result, "errors": []}
 
     def start_sprint(self, request: SprintStartRequest) -> TransitionResult:
         """Start the accepted current Sprint plan without caller-owned identity."""

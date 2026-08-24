@@ -48,6 +48,7 @@ const CHILD_STAGE = {
 
 const DASHBOARD_CONTROL_REQUEST_KINDS = new Set([
     'abandon_product_goal',
+    'apply_story_dependencies',
     'begin_vision_revision',
     'decide_backlog',
     'decide_product_goal_review',
@@ -65,7 +66,9 @@ const DASHBOARD_CONTROL_REQUEST_KINDS = new Set([
     'record_story_draft',
     'record_vision_interview_turn',
     'register_specification_source',
+    'repair_story_readiness',
     'structure_specification',
+    'validate_story',
 ]);
 
 const DELIVERY_ACTION_CONFIG = {
@@ -1322,6 +1325,125 @@ function deliveryGenerationActionMarkup(action, position = {}, reviews = {}, ind
     </div>`;
 }
 
+function storyReadinessMarkup(stories, context = {}) {
+    if (!Array.isArray(stories) || stories.length === 0) return '';
+    const pendingItems = Array.isArray(context?.storyPending?.items)
+        ? context.storyPending.items
+        : (Array.isArray(lifecycleState?.storyPending?.items)
+            ? lifecycleState.storyPending.items
+            : []);
+    const storyRows = stories.map((story) => {
+        const pbiId = story.backlog_item_id || '';
+        const pending = pbiId ? pendingItems.find((item) => item?.backlog_item_id === pbiId) : null;
+        const requirement = pending?.requirement || '';
+        const storyIdText = story.source_story_item_id || `Story #${story.story_id}`;
+        const blockers = Array.isArray(story.readiness_blockers) ? story.readiness_blockers : [];
+        const isUnvalidated = blockers.includes('STORY_VALIDATION_REQUIRED') || !story.content_accepted;
+        const isBlocked = !isUnvalidated && blockers.length > 0;
+
+        let badgeMarkup = '';
+        let actionButtonMarkup = '';
+        if (isUnvalidated) {
+            badgeMarkup = '<span class="inline-flex items-center rounded-full bg-amber-50 px-2 py-0.5 text-xs font-semibold text-amber-800 border border-amber-200">Unvalidated</span>';
+            actionButtonMarkup = `<button type="button" data-story-validate-id="${story.story_id}" class="inline-flex items-center gap-1.5 rounded-lg bg-accent px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-800 disabled:cursor-wait disabled:opacity-60">
+                <span class="material-symbols-outlined text-sm" aria-hidden="true">task_alt</span>
+                <span data-story-validate-label="true">Validate Story</span>
+            </button>`;
+        } else if (isBlocked) {
+            badgeMarkup = `<span class="inline-flex items-center rounded-full bg-red-50 px-2 py-0.5 text-xs font-semibold text-red-800 border border-red-200">Blocked: ${escapeWorkflowText(blockers.join(', '))}</span>`;
+            actionButtonMarkup = `<button type="button" data-story-validate-id="${story.story_id}" class="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-wait disabled:opacity-60">
+                <span class="material-symbols-outlined text-sm" aria-hidden="true">refresh</span>
+                <span data-story-validate-label="true">Revalidate</span>
+            </button>`;
+        } else {
+            badgeMarkup = '<span class="inline-flex items-center rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-semibold text-emerald-800 border border-emerald-200">Validated</span>';
+        }
+
+        return `<div class="py-3 first:pt-0 last:pb-0 flex flex-col sm:flex-row sm:items-center justify-between gap-3" data-story-readiness-row="${story.story_id}">
+            <div class="min-w-0 space-y-1">
+                <div class="flex items-center gap-2 flex-wrap">
+                    <span class="font-semibold text-sm text-slate-900">${escapeWorkflowText(storyIdText)}</span>
+                    ${pbiId ? `<span class="text-xs text-slate-500 font-mono">(${escapeWorkflowText(pbiId)})</span>` : ''}
+                    ${badgeMarkup}
+                </div>
+                ${requirement ? `<p class="text-xs text-slate-600 line-clamp-1">${escapeWorkflowText(requirement)}</p>` : ''}
+                <div class="flex items-center gap-3 text-xs text-slate-500">
+                    <span>Rank: ${escapeWorkflowText(story.rank || '-')}</span>
+                    <span>Points: ${escapeWorkflowText(story.story_points ?? '-')}</span>
+                </div>
+            </div>
+            ${actionButtonMarkup ? `<div class="shrink-0 flex items-center">${actionButtonMarkup}</div>` : ''}
+        </div>`;
+    });
+
+    return `<div class="rounded-lg border border-slate-200 bg-white p-4 space-y-3" data-story-readiness-section="true">
+        <div class="flex items-center justify-between border-b border-slate-100 pb-2">
+            <h3 class="text-sm font-bold text-ink">Story readiness</h3>
+            <span class="text-xs text-slate-500">${stories.length} accepted ${stories.length === 1 ? 'story' : 'stories'}</span>
+        </div>
+        <div class="divide-y divide-slate-100">
+            ${storyRows.join('')}
+        </div>
+    </div>`;
+}
+
+function storyDependencyReviewMarkup(action, stories, dependencies) {
+    if (!action || action.request_kind !== 'apply_story_dependencies') return '';
+    const storyList = Array.isArray(stories) ? stories : [];
+    const edgeList = Array.isArray(dependencies?.edges) ? dependencies.edges : [];
+    const storySummary = storyList.map((s) => s.source_story_item_id || `Story #${s.story_id}`).join(', ') || 'Validated stories';
+    const edgeSummary = edgeList.length > 0
+        ? edgeList.map((e) => `${e.dependent_story_id} -> ${e.prerequisite_story_id}`).join(', ')
+        : 'None (independent stories)';
+    const bindingAttributes = deliveryActionBindingAttributes(action);
+
+    return `<div class="rounded-lg border border-amber-200 bg-amber-50/50 p-4 space-y-3" data-dependency-review-section="true" ${bindingAttributes}>
+        <div class="flex items-center gap-2">
+            <span class="material-symbols-outlined text-amber-700" aria-hidden="true">account_tree</span>
+            <h3 class="text-sm font-bold text-amber-900">Dependency review required</h3>
+        </div>
+        <p class="text-xs leading-5 text-amber-800">Review and confirm execution dependencies among validated candidate stories before Sprint planning.</p>
+        <div class="text-xs text-slate-700 bg-white rounded border border-slate-200 p-2.5 space-y-1">
+            <p><strong>Candidate stories:</strong> ${escapeWorkflowText(storySummary)}</p>
+            <p><strong>Dependency edges:</strong> ${escapeWorkflowText(edgeSummary)}</p>
+        </div>
+        <button type="button" data-apply-dependencies="true" class="${BUTTON_PRIMARY}">
+            <span class="material-symbols-outlined" aria-hidden="true">verified</span>
+            <span data-delivery-action-label="true">Confirm dependencies</span>
+        </button>
+        <p data-delivery-action-status="true" hidden role="status" aria-live="polite" aria-atomic="true"
+            class="text-sm leading-6 text-slate-700"></p>
+    </div>`;
+}
+
+function sprintCandidatePoolMarkup(candidates) {
+    if (!Array.isArray(candidates) || candidates.length === 0) return '';
+    return `<div class="rounded-lg border border-emerald-200 bg-emerald-50/40 p-4 space-y-2" data-candidate-pool-section="true">
+        <div class="flex items-center justify-between border-b border-emerald-100 pb-2">
+            <div class="flex items-center gap-2">
+                <span class="material-symbols-outlined text-accent" aria-hidden="true">view_list</span>
+                <h3 class="text-sm font-bold text-emerald-950">Sprint candidate pool</h3>
+            </div>
+            <span class="text-xs font-semibold text-accent">${candidates.length} ${candidates.length === 1 ? 'candidate ready' : 'candidates ready'}</span>
+        </div>
+        <div class="grid gap-2">
+            ${candidates.map((candidate) => `
+                <div class="flex items-center justify-between rounded bg-white px-3 py-2 border border-emerald-100 text-xs">
+                    <div class="flex items-center gap-2">
+                        <span class="font-semibold text-slate-900">${escapeWorkflowText(candidate.source_story_item_id || (`Story #${candidate.story_id}`))}</span>
+                        ${candidate.backlog_item_id ? `<span class="text-slate-500 font-mono">(${escapeWorkflowText(candidate.backlog_item_id)})</span>` : ''}
+                    </div>
+                    <div class="flex items-center gap-3 text-slate-600">
+                        <span>Rank: ${escapeWorkflowText(candidate.rank || '-')}</span>
+                        <span>Points: ${escapeWorkflowText(candidate.story_points ?? '-')}</span>
+                        <span class="text-emerald-700 font-medium font-mono text-[11px] bg-emerald-50 px-1.5 py-0.5 rounded">Ready</span>
+                    </div>
+                </div>
+            `).join('')}
+        </div>
+    </div>`;
+}
+
 function deliveryPanelMarkup(position, reviews = {}, actions = [], context = {}) {
     const storyItems = Array.isArray(reviews.stories?.items) ? reviews.stories.items : [];
     const cards = [
@@ -1336,16 +1458,45 @@ function deliveryPanelMarkup(position, reviews = {}, actions = [], context = {})
         }),
         planningReviewCardMarkup('Sprint plan review', reviews.sprintPlan, 'sprint', 0),
     ].filter(Boolean);
+
+    const stories = Array.isArray(context?.storyDependencies?.stories)
+        ? context.storyDependencies.stories
+        : (Array.isArray(lifecycleState?.storyDependencies?.stories)
+            ? lifecycleState.storyDependencies.stories
+            : []);
+    const dependencies = context?.storyDependencies ?? lifecycleState?.storyDependencies ?? {};
+    const candidates = Array.isArray(context?.sprintCandidates?.items)
+        ? context.sprintCandidates.items
+        : (Array.isArray(lifecycleState?.sprintCandidates?.items)
+            ? lifecycleState.sprintCandidates.items
+            : stories.filter((s) => s.sprint_candidate));
+
+    const dependencyAction = (Array.isArray(actions) ? actions : []).find(
+        (action) => action?.request_kind === 'apply_story_dependencies',
+    );
+
+    const readinessSection = storyReadinessMarkup(stories, context);
+    const dependencySection = storyDependencyReviewMarkup(dependencyAction, stories, dependencies);
+    const candidateSection = sprintCandidatePoolMarkup(candidates);
+
     const availableDeliveryActions = (Array.isArray(actions) ? actions : []).filter((action) =>
         Boolean(DELIVERY_ACTION_CONFIG[action?.request_kind]),
     );
     const actionMarkup = availableDeliveryActions.map((action, index) =>
         deliveryGenerationActionMarkup(action, position, reviews, index, context),
     );
-    if (cards.length || actionMarkup.length) {
+
+    const sections = [
+        cards.length ? `<div class="grid gap-4">${cards.join('')}</div>` : '',
+        readinessSection,
+        dependencySection,
+        candidateSection,
+        actionMarkup.length ? actionMarkup.join('') : '',
+    ].filter(Boolean);
+
+    if (sections.length) {
         return `<div class="space-y-4">
-            ${cards.length ? `<div class="grid gap-4">${cards.join('')}</div>` : ''}
-            ${actionMarkup.join('')}
+            ${sections.join('')}
         </div>`;
     }
 
@@ -1519,6 +1670,8 @@ async function loadDashboard() {
             storyReviews,
             sprintPlanReview,
             storyPending,
+            storyDependencies,
+            sprintCandidates,
         ] = await Promise.all([
             requestJson(base, options),
             requestJson(`${base}/position`, options),
@@ -1531,6 +1684,8 @@ async function loadDashboard() {
             requestPlanningReview(`${base}/story/reviews`, options),
             requestPlanningReview(`${base}/sprint/plan/review`, options),
             requestJson(`${base}/story/pending`, options),
+            requestJson(`${base}/story/dependencies`, options).catch(() => ({ data: {} })),
+            requestJson(`${base}/sprint/candidates`, options).catch(() => ({ data: {} })),
         ]);
         if (sequence !== dashboardLoadSequence || controller.signal.aborted) return false;
         lifecycleState = {
@@ -1548,6 +1703,8 @@ async function loadDashboard() {
                 sprintPlan: sprintPlanReview.data ?? {},
             },
             storyPending: storyPending.data ?? {},
+            storyDependencies: storyDependencies?.data ?? {},
+            sprintCandidates: sprintCandidates?.data ?? {},
         };
         setProjectError('');
         renderDashboard();
@@ -2247,7 +2404,7 @@ function installInteractions() {
         }
     });
 
-    document.addEventListener('click', (event) => {
+    document.addEventListener('click', async (event) => {
         const button = event.target.closest('button');
         if (!button) return;
         if (button.dataset.reviewScope) {
@@ -2346,6 +2503,81 @@ function installInteractions() {
         }
         if (button.dataset.directAction) {
             runDirectAction(button.dataset.directAction, button);
+            return;
+        }
+        if (button.dataset.storyValidateId) {
+            const storyId = Number.parseInt(button.dataset.storyValidateId, 10);
+            if (!Number.isInteger(storyId)) return;
+            const label = button.querySelector('[data-story-validate-label="true"]');
+            const idleLabel = label?.textContent ?? 'Validate Story';
+            button.disabled = true;
+            button.setAttribute('aria-busy', 'true');
+            if (label) label.textContent = 'Validating...';
+            setProjectError('');
+            try {
+                const response = await requestJson(`/api/projects/${selectedProjectId}/story/validate`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(semanticMutationPayload({
+                        story_id: storyId,
+                        mode: 'structural',
+                    })),
+                });
+                if (response?.data?.success && !response.data.ready_for_sprint) {
+                    const failures = response.data.structural_failures || [];
+                    const diag = failures.map((f) => `${f.rule_name || f.code || 'Failure'}: ${f.message}`).join(' ');
+                    setProjectError(`Story structural validation failed. ${diag}`);
+                }
+                await loadDashboard();
+            } catch (error) {
+                setProjectError(error.message);
+            } finally {
+                button.disabled = false;
+                button.removeAttribute('aria-busy');
+                if (label) label.textContent = idleLabel;
+            }
+            return;
+        }
+        if (button.dataset.applyDependencies) {
+            const label = button.querySelector('[data-delivery-action-label="true"]');
+            const idleLabel = label?.textContent ?? 'Confirm dependencies';
+            const status = button.closest('[data-dependency-review-section]')?.querySelector('[data-delivery-action-status="true"]');
+            button.disabled = true;
+            button.setAttribute('aria-busy', 'true');
+            if (label) label.textContent = 'Confirming...';
+            if (status) {
+                status.textContent = 'Applying dependency review...';
+                status.hidden = false;
+            }
+            setProjectError('');
+            try {
+                const stories = Array.isArray(lifecycleState.storyDependencies?.stories)
+                    ? lifecycleState.storyDependencies.stories
+                    : [];
+                const storyIds = stories.map((s) => s.story_id);
+                const edges = Array.isArray(lifecycleState.storyDependencies?.edges)
+                    ? lifecycleState.storyDependencies.edges
+                    : [];
+                await requestJson(`/api/projects/${selectedProjectId}/story/dependencies/apply`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(semanticMutationPayload({
+                        selected_story_ids: storyIds,
+                        reviewed_edges: edges,
+                    })),
+                });
+                await loadDashboard();
+            } catch (error) {
+                setProjectError(error.message);
+                if (status) {
+                    status.textContent = error.message;
+                    status.hidden = false;
+                }
+            } finally {
+                button.disabled = false;
+                button.removeAttribute('aria-busy');
+                if (label) label.textContent = idleLabel;
+            }
             return;
         }
         if (button.dataset.visionRevision) {

@@ -65,6 +65,7 @@ from services.specs.candidate_contract import (
     load_candidate_contract,
     render_candidate_review_markdown,
 )
+from utils.spec_schemas import ValidationEvidence
 from workflow.contracts import JsonObject, JsonValue
 from workflow.definitions.backlog import current_backlog_lineage
 from workflow.definitions.planning import candidate_set_fingerprint
@@ -2131,12 +2132,13 @@ class DurableReadProjectionService:
         """Return one durable Story record."""
         with Session(self._engine) as session:
             story = session.get(UserStory, story_id)
-        if story is None:
-            return _error(
-                "STORY_NOT_FOUND",
-                f"Story {story_id} was not found.",
-                story_id=story_id,
-            )
+            if story is None:
+                return _error(
+                    "STORY_NOT_FOUND",
+                    f"Story {story_id} was not found.",
+                    story_id=story_id,
+                )
+            artifact = session.get(StoryArtifact, story.source_story_artifact_id)
         try:
             acceptance_criteria = _canonical_acceptance_criteria(
                 story.acceptance_criteria_json
@@ -2148,6 +2150,29 @@ class DurableReadProjectionService:
                 story_id=story_id,
             )
         acceptance_criteria_value: list[JsonValue] = list(acceptance_criteria)
+        spec_item_ids: list[JsonValue] = (
+            list(_STRING_LIST.validate_json(story.spec_item_ids_json))
+            if story.spec_item_ids_json
+            else []
+        )
+        validation_evidence: JsonObject | None = None
+        ready_for_sprint = False
+        validation_failures: list[JsonValue] = []
+        if story.validation_evidence is not None:
+            try:
+                ev = ValidationEvidence.model_validate_json(story.validation_evidence)
+                validation_evidence = ev.model_dump(mode="json")
+                ready_for_sprint = ev.ready_for_sprint
+                validation_failures = [
+                    f.model_dump(mode="json") for f in ev.structural_failures
+                ]
+            except (ValidationError, ValueError):
+                pass
+        validation_status = (
+            "validated"
+            if ready_for_sprint
+            else ("failed" if story.validation_evidence is not None else "unvalidated")
+        )
         return _success(
             {
                 "story_id": story_id,
@@ -2155,11 +2180,20 @@ class DurableReadProjectionService:
                 "title": story.title,
                 "description": story.story_description,
                 "acceptance_criteria": acceptance_criteria_value,
+                "spec_item_ids": spec_item_ids,
                 "status": _enum_value(story.status),
                 "story_points": story.story_points,
                 "rank": story.rank,
                 "source_story_item_id": story.source_story_item_id,
+                "source_story_artifact_id": story.source_story_artifact_id,
+                "backlog_item_id": (
+                    artifact.backlog_item_id if artifact is not None else None
+                ),
                 "is_superseded": story.is_superseded,
+                "validation_evidence": validation_evidence,
+                "validation_status": validation_status,
+                "validation_failures": validation_failures,
+                "ready_for_sprint": ready_for_sprint,
                 "updated_at": _iso(story.updated_at),
             }
         )
@@ -2290,6 +2324,10 @@ class DurableReadProjectionService:
                 "reviews": [
                     _validated(item.model_dump(mode="json"))
                     for item in snapshot.story_dependency_reviews
+                ],
+                "stories": [
+                    _validated(item.model_dump(mode="json"))
+                    for item in snapshot.stories
                 ],
             }
         )

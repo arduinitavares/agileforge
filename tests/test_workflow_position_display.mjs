@@ -690,3 +690,88 @@ test('story generation control ignores candidate backlog reviews and stays disab
     assert.ok(markup.includes('title="Requirement summary unavailable"'));
     assert.ok(!markup.includes('UNTRUSTED OR STALE CANDIDATE REQUIREMENT'));
 });
+
+test('story readiness section renders unvalidated story with exact ID, parent PBI, rank, points, and validate button', () => {
+    const context = loadFrontend();
+    const stories = [
+        {
+            story_id: 101,
+            source_story_item_id: 'US-001',
+            backlog_item_id: 'PBI-000001',
+            story_points: 5,
+            rank: '1',
+            sprint_candidate: false,
+            content_accepted: true,
+            readiness_blockers: ['STORY_VALIDATION_REQUIRED'],
+        },
+    ];
+    const appState = {
+        storyPending: {
+            items: [
+                { backlog_item_id: 'PBI-000001', requirement: 'Implement parser core' },
+            ],
+        },
+    };
+
+    const markup = context.storyReadinessMarkup(stories, appState);
+    assert.ok(markup.includes('Story readiness'));
+    assert.ok(markup.includes('US-001'));
+    assert.ok(markup.includes('(PBI-000001)'));
+    assert.ok(markup.includes('Implement parser core'));
+    assert.ok(markup.includes('Rank: 1'));
+    assert.ok(markup.includes('Points: 5'));
+    assert.ok(markup.includes('Unvalidated'));
+    assert.ok(markup.includes('data-story-validate-id="101"'));
+    assert.ok(markup.includes('Validate Story'));
+});
+
+test('story readiness section renders validated badge and candidate pool renders candidate stories', () => {
+    const context = loadFrontend();
+    const stories = [
+        {
+            story_id: 101,
+            source_story_item_id: 'US-001',
+            backlog_item_id: 'PBI-000001',
+            story_points: 5,
+            rank: '1',
+            sprint_candidate: true,
+            content_accepted: true,
+            readiness_blockers: [],
+        },
+    ];
+    const appState = {
+        storyPending: { items: [] },
+        storyDependencies: { stories },
+        sprintCandidates: { items: stories },
+    };
+
+    const readinessMarkup = context.storyReadinessMarkup(stories, appState);
+    assert.ok(readinessMarkup.includes('Validated'));
+    assert.ok(!readinessMarkup.includes('data-story-validate-id'));
+
+    const candidateMarkup = context.sprintCandidatePoolMarkup(stories);
+    assert.ok(candidateMarkup.includes('Sprint candidate pool'));
+    assert.ok(candidateMarkup.includes('1 candidate ready'));
+    assert.ok(candidateMarkup.includes('US-001'));
+    assert.ok(candidateMarkup.includes('(PBI-000001)'));
+});
+
+test('dependency review section renders when apply_story_dependencies action is available', () => {
+    const context = loadFrontend();
+    const action = {
+        node_id: 'planning.story_dependencies',
+        request_kind: 'apply_story_dependencies',
+        endpoint: 'story/dependencies/apply',
+        transport: 'semantic',
+    };
+    const stories = [
+        { story_id: 101, source_story_item_id: 'US-001', backlog_item_id: 'PBI-000001' },
+    ];
+    const dependencies = { edges: [] };
+
+    const markup = context.storyDependencyReviewMarkup(action, stories, dependencies);
+    assert.ok(markup.includes('Dependency review required'));
+    assert.ok(markup.includes('US-001'));
+    assert.ok(markup.includes('data-apply-dependencies="true"'));
+    assert.ok(markup.includes('Confirm dependencies'));
+});
