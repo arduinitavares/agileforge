@@ -27,6 +27,8 @@ jobs:
           python-version: "3.12"
       - name: Verify lock
         run: uv lock --check
+      - name: Install Playwright Chromium
+        run: uv run --locked python -m playwright install --with-deps chromium
       - name: Run repository quality gate
         run: uv run --locked pyrepo-check --all
 
@@ -42,6 +44,8 @@ jobs:
           python-version: "3.13"
       - name: Verify lock
         run: uv lock --check
+      - name: Install Playwright Chromium
+        run: uv run --locked python -m playwright install --with-deps chromium
       - name: Run canonical full gate
         run: ./agileforge-dev check
 

@@ -19,11 +19,7 @@ class WorkflowLoader(yaml.SafeLoader):
 
 
 WorkflowLoader.yaml_implicit_resolvers = {
-    key: [
-        (tag, pattern)
-        for tag, pattern in resolvers
-        if tag != BOOLEAN_TAG
-    ]
+    key: [(tag, pattern) for tag, pattern in resolvers if tag != BOOLEAN_TAG]
     for key, resolvers in yaml.SafeLoader.yaml_implicit_resolvers.items()
 }
 WorkflowLoader.add_implicit_resolver(
@@ -67,9 +63,7 @@ def _steps(job: dict[str, object]) -> list[dict[str, object]]:
 
 def _runs(job: dict[str, object]) -> str:
     return "\n".join(
-        run
-        for step in _steps(job)
-        if isinstance((run := step.get("run")), str)
+        run for step in _steps(job) if isinstance((run := step.get("run")), str)
     )
 
 
@@ -121,6 +115,32 @@ def test_workflow_has_required_runtimes(workflow: dict[str, object]) -> None:
         assert _mapping(setup_uv["with"])["python-version"] == python_version
 
     assert _job(workflow, "frontend")["runs-on"] == "ubuntu-latest"
+
+
+@pytest.mark.parametrize(
+    ("job_name", "gate_command"),
+    [
+        ("python-312", "uv run --locked pyrepo-check --all"),
+        ("python-313", "./agileforge-dev check"),
+    ],
+)
+def test_python_jobs_install_playwright_chromium_before_gate(
+    workflow: dict[str, object],
+    job_name: str,
+    gate_command: str,
+) -> None:
+    """Provision Chromium before running browser-bearing Python gates."""
+    commands = [
+        run
+        for step in _steps(_job(workflow, job_name))
+        if isinstance((run := step.get("run")), str)
+    ]
+    install_command = (
+        "uv run --locked python -m playwright install --with-deps chromium"
+    )
+
+    assert install_command in commands
+    assert commands.index(install_command) < commands.index(gate_command)
 
 
 def test_actions_and_uv_are_exactly_pinned(workflow: dict[str, object]) -> None:
