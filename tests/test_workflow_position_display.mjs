@@ -765,13 +765,14 @@ test('dependency review section renders when apply_story_dependencies action is 
         transport: 'semantic',
     };
     const stories = [
-        { story_id: 101, source_story_item_id: 'US-001', backlog_item_id: 'PBI-000001' },
+        { story_id: 101, source_story_item_id: 'US-001', backlog_item_id: 'PBI-000001', sprint_candidate: true },
     ];
     const dependencies = { edges: [] };
 
     const markup = context.storyDependencyReviewMarkup(action, stories, dependencies);
     assert.ok(markup.includes('Dependency review required'));
     assert.ok(markup.includes('US-001'));
+    assert.ok(markup.includes('(PBI-000001)'));
     assert.ok(markup.includes('data-apply-dependencies="true"'));
     assert.ok(markup.includes('Confirm dependencies'));
 });
@@ -802,6 +803,32 @@ test('dependency review displays only candidate stories and candidate-contained 
     assert.ok(!markup.includes('US-002'));
     assert.ok(markup.includes('None (independent stories)'));
     assert.ok(!markup.includes('102 -> 101'));
+});
+
+test('dependency review displays human-readable story identifiers, PBIs, and dependency reasons', () => {
+    const context = loadFrontend();
+    const action = {
+        node_id: 'planning.story_dependencies',
+        request_kind: 'apply_story_dependencies',
+        endpoint: 'story/dependencies/apply',
+        transport: 'semantic',
+    };
+    const candidates = [
+        { story_id: 101, source_story_item_id: 'US-001', backlog_item_id: 'PBI-000001', sprint_candidate: true },
+        { story_id: 102, source_story_item_id: 'US-002', backlog_item_id: 'PBI-000002', sprint_candidate: true },
+    ];
+    const dependencies = {
+        stories: candidates,
+        edges: [
+            { dependent_story_id: 102, prerequisite_story_id: 101, reason: 'US-002 requires data model from US-001' },
+        ],
+    };
+
+    const markup = context.storyDependencyReviewMarkup(action, candidates, dependencies);
+    assert.ok(markup.includes('US-001 (PBI-000001)'));
+    assert.ok(markup.includes('US-002 (PBI-000002)'));
+    assert.ok(markup.includes('US-002 (PBI-000002) -&gt; US-001 (PBI-000001) - US-002 requires data model from US-001'));
+    assert.ok(markup.includes('Confirm dependencies'));
 });
 
 test('story readiness section renders validation failed badge and actionable diagnostics', () => {
@@ -900,4 +927,43 @@ test('canonicalCandidateDependencies returns empty when candidates is missing wi
     assert.strictEqual(result.candidateStories.length, 0);
     assert.strictEqual(result.candidateIds.length, 0);
     assert.strictEqual(result.candidateEdges.length, 0);
+    assert.strictEqual(result.isWellFormed, false);
+});
+
+test('canonicalCandidateDependencies and review markup fail closed on malformed candidates without throwing', () => {
+    const context = loadFrontend();
+    const action = {
+        node_id: 'planning.story_dependencies',
+        request_kind: 'apply_story_dependencies',
+        endpoint: 'story/dependencies/apply',
+        transport: 'semantic',
+    };
+    const dependencies = {
+        stories: [{ story_id: 101, source_story_item_id: 'US-001', sprint_candidate: true }],
+        edges: [],
+    };
+
+    // 1. Missing sprint_candidate boolean flag
+    const malformedMissingFlag = [{ story_id: 101, source_story_item_id: 'US-001' }];
+    const result1 = context.canonicalCandidateDependencies(malformedMissingFlag, dependencies);
+    assert.strictEqual(result1.isWellFormed, false);
+    assert.strictEqual(result1.candidateStories.length, 0);
+    const markup1 = context.storyDependencyReviewMarkup(action, malformedMissingFlag, dependencies);
+    assert.ok(markup1.includes('Unavailable (canonical candidate projection missing)'));
+    assert.ok(markup1.includes('disabled'));
+    assert.ok(markup1.includes('aria-disabled="true"'));
+
+    // 2. Null row in candidates array
+    const malformedNullRow = [null];
+    const result2 = context.canonicalCandidateDependencies(malformedNullRow, dependencies);
+    assert.strictEqual(result2.isWellFormed, false);
+    assert.strictEqual(result2.candidateStories.length, 0);
+    const markup2 = context.storyDependencyReviewMarkup(action, malformedNullRow, dependencies);
+    assert.ok(markup2.includes('Unavailable (canonical candidate projection missing)'));
+    assert.ok(markup2.includes('disabled'));
+    assert.ok(markup2.includes('aria-disabled="true"'));
+
+    // 3. sprintCandidatePoolMarkup safely handles null row
+    const poolMarkup = context.sprintCandidatePoolMarkup([null]);
+    assert.strictEqual(poolMarkup, '');
 });

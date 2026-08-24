@@ -6,11 +6,12 @@ from datetime import UTC, datetime
 from http import HTTPStatus
 from pathlib import Path
 from typing import Any, cast
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import Engine, create_engine
+from sqlalchemy.exc import OperationalError
 from sqlmodel import Session, SQLModel, col, select
 
 import api
@@ -311,3 +312,40 @@ def test_story_validation_forced_failure_allows_clean_retry(
     assert retry_result["ok"] is True
     data = cast("dict[str, Any]", retry_result.get("data"))
     assert data["ready_for_sprint"] is True
+
+
+def test_story_validation_lock_failure_fails_before_validation(
+    engine: Engine,
+) -> None:
+    """Lock failure on BEGIN IMMEDIATE fails before executing validation."""
+    story_id = _accepted_story(engine)
+    with Session(engine) as session:
+        statement = select(UserStory).where(col(UserStory.story_id) == story_id)
+        story = session.exec(statement).first()
+        assert story is not None
+        project_id = story.project_id
+
+    app = _build_application(engine)
+    request = StoryValidationRequest(
+        project_id=project_id,
+        story_id=story_id,
+        mode="structural",
+        idempotency_key="lock-failure-key-1",
+        actor="test-operator",
+    )
+
+    validation_mock = MagicMock()
+    with (
+        patch(
+            "sqlalchemy.engine.base.Connection.exec_driver_sql",
+            side_effect=OperationalError("database is locked", {}, Exception("locked")),
+        ),
+        patch(
+            "services.application.validate_story_with_specification_in_session",
+            validation_mock,
+        ),
+        pytest.raises(OperationalError, match="database is locked"),
+    ):
+        app.validate_story(request)
+
+    assert validation_mock.call_count == 0

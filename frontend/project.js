@@ -1409,17 +1409,40 @@ function storyReadinessMarkup(stories, context = {}) {
     </div>`;
 }
 
+function isWellFormedCandidateStory(story) {
+    return Boolean(
+        story &&
+        typeof story === 'object' &&
+        typeof story.story_id === 'number' &&
+        typeof story.sprint_candidate === 'boolean',
+    );
+}
+
 function canonicalCandidateDependencies(candidates, dependencies) {
-    const candidateList = Array.isArray(candidates)
-        ? (candidates.some((s) => 'sprint_candidate' in s)
-            ? candidates.filter((s) => s.sprint_candidate)
-            : candidates)
-        : [];
-    const candidateIds = candidateList.map((s) => s.story_id).filter((id) => id != null);
+    if (!Array.isArray(candidates)) {
+        return {
+            candidateStories: [],
+            candidateIds: [],
+            candidateEdges: [],
+            isWellFormed: false,
+        };
+    }
+    for (const s of candidates) {
+        if (!isWellFormedCandidateStory(s)) {
+            return {
+                candidateStories: [],
+                candidateIds: [],
+                candidateEdges: [],
+                isWellFormed: false,
+            };
+        }
+    }
+    const candidateList = candidates.filter((s) => s.sprint_candidate === true);
+    const candidateIds = candidateList.map((s) => s.story_id);
     const candidateSet = new Set(candidateIds);
     const rawEdges = Array.isArray(dependencies?.edges) ? dependencies.edges : [];
     const candidateEdges = rawEdges
-        .filter((e) => candidateSet.has(e?.dependent_story_id) && candidateSet.has(e?.prerequisite_story_id))
+        .filter((e) => e && typeof e === 'object' && candidateSet.has(e.dependent_story_id) && candidateSet.has(e.prerequisite_story_id))
         .map((e) => ({
             dependent_story_id: e.dependent_story_id,
             prerequisite_story_id: e.prerequisite_story_id,
@@ -1429,26 +1452,60 @@ function canonicalCandidateDependencies(candidates, dependencies) {
         candidateStories: candidateList,
         candidateIds,
         candidateEdges,
+        isWellFormed: true,
     };
+}
+
+function storyDisplayLabel(story) {
+    if (!story) return '';
+    const id = story.source_story_item_id || (story.story_id != null ? `Story #${story.story_id}` : '');
+    if (!id) return '';
+    return story.backlog_item_id ? `${id} (${story.backlog_item_id})` : id;
+}
+
+function buildStoryLookupMap(candidateStories, dependencies) {
+    const map = new Map();
+    if (Array.isArray(dependencies?.stories)) {
+        for (const s of dependencies.stories) {
+            if (s && typeof s === 'object' && s.story_id != null) {
+                map.set(s.story_id, s);
+            }
+        }
+    }
+    if (Array.isArray(candidateStories)) {
+        for (const s of candidateStories) {
+            if (s && typeof s === 'object' && s.story_id != null) {
+                map.set(s.story_id, s);
+            }
+        }
+    }
+    return map;
 }
 
 function storyDependencyReviewMarkup(action, candidates, dependencies) {
     if (!action || action.request_kind !== 'apply_story_dependencies') return '';
-    const hasCandidates = Array.isArray(candidates);
-    const { candidateStories, candidateEdges } = canonicalCandidateDependencies(
-        hasCandidates ? candidates : [],
+    const { candidateStories, candidateEdges, isWellFormed } = canonicalCandidateDependencies(
+        candidates,
         dependencies,
     );
-    const storySummary = hasCandidates
-        ? (candidateStories.map((s) => s.source_story_item_id || `Story #${s.story_id}`).join(', ') || 'None')
+    const storyMap = buildStoryLookupMap(candidateStories, dependencies);
+    const storySummary = isWellFormed
+        ? (candidateStories.map((s) => storyDisplayLabel(s)).join(', ') || 'None')
         : 'Unavailable (canonical candidate projection missing)';
-    const edgeSummary = hasCandidates
+    const edgeSummary = isWellFormed
         ? (candidateEdges.length > 0
-            ? candidateEdges.map((e) => `${e.dependent_story_id} -> ${e.prerequisite_story_id}`).join(', ')
+            ? candidateEdges.map((e) => {
+                const dep = storyMap.get(e.dependent_story_id);
+                const prereq = storyMap.get(e.prerequisite_story_id);
+                const depLabel = storyDisplayLabel(dep) || `Story #${e.dependent_story_id}`;
+                const prereqLabel = storyDisplayLabel(prereq) || `Story #${e.prerequisite_story_id}`;
+                const reason = e.reason ? ` - ${e.reason}` : '';
+                return `${depLabel} -> ${prereqLabel}${reason}`;
+            }).join('; ')
             : 'None (independent stories)')
         : 'Unavailable (canonical candidate projection missing)';
     const bindingAttributes = deliveryActionBindingAttributes(action);
-    const disabledAttr = hasCandidates ? '' : 'disabled aria-disabled="true"';
+    const disabledAttr = isWellFormed ? '' : 'disabled aria-disabled="true"';
 
     return `<div class="rounded-lg border border-amber-200 bg-amber-50/50 p-4 space-y-3" data-dependency-review-section="true" ${bindingAttributes}>
         <div class="flex items-center gap-2">
@@ -1471,20 +1528,21 @@ function storyDependencyReviewMarkup(action, candidates, dependencies) {
 
 function sprintCandidatePoolMarkup(candidates) {
     if (!Array.isArray(candidates) || candidates.length === 0) return '';
+    const validCandidates = candidates.filter((c) => c && typeof c === 'object');
+    if (validCandidates.length === 0) return '';
     return `<div class="rounded-lg border border-emerald-200 bg-emerald-50/40 p-4 space-y-2" data-candidate-pool-section="true">
         <div class="flex items-center justify-between border-b border-emerald-100 pb-2">
             <div class="flex items-center gap-2">
                 <span class="material-symbols-outlined text-accent" aria-hidden="true">view_list</span>
                 <h3 class="text-sm font-bold text-emerald-950">Sprint candidate pool</h3>
             </div>
-            <span class="text-xs font-semibold text-accent">${candidates.length} ${candidates.length === 1 ? 'candidate ready' : 'candidates ready'}</span>
+            <span class="text-xs font-semibold text-accent">${validCandidates.length} ${validCandidates.length === 1 ? 'candidate ready' : 'candidates ready'}</span>
         </div>
         <div class="grid gap-2">
-            ${candidates.map((candidate) => `
+            ${validCandidates.map((candidate) => `
                 <div class="flex items-center justify-between rounded bg-white px-3 py-2 border border-emerald-100 text-xs">
                     <div class="flex items-center gap-2">
-                        <span class="font-semibold text-slate-900">${escapeWorkflowText(candidate.source_story_item_id || (`Story #${candidate.story_id}`))}</span>
-                        ${candidate.backlog_item_id ? `<span class="text-slate-500 font-mono">(${escapeWorkflowText(candidate.backlog_item_id)})</span>` : ''}
+                        <span class="font-semibold text-slate-900">${escapeWorkflowText(candidate.source_story_item_id || (`Story #${candidate.story_id}`))}${candidate.backlog_item_id ? ` (${escapeWorkflowText(candidate.backlog_item_id)})` : ''}</span>
                     </div>
                     <div class="flex items-center gap-3 text-slate-600">
                         <span>Rank: ${escapeWorkflowText(candidate.rank || '-')}</span>
@@ -2608,10 +2666,13 @@ function installInteractions() {
                     throw new Error('Canonical candidate projection is unavailable.');
                 }
                 const candidates = lifecycleState.sprintCandidates.items;
-                const { candidateIds, candidateEdges } = canonicalCandidateDependencies(
+                const { candidateIds, candidateEdges, isWellFormed } = canonicalCandidateDependencies(
                     candidates,
                     lifecycleState.storyDependencies,
                 );
+                if (!isWellFormed) {
+                    throw new Error('Canonical candidate projection is unavailable.');
+                }
                 await requestJson(`/api/projects/${selectedProjectId}/story/dependencies/apply`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },

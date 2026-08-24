@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import contextlib
 from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -28,7 +27,6 @@ from pydantic import (
     field_validator,
     model_validator,
 )
-from sqlalchemy.exc import OperationalError
 from sqlmodel import Session, col, select
 
 from adapters.adk.model_roles import AGENTIC_MODEL_ROLES
@@ -2516,8 +2514,7 @@ class AgileForgeApplication:
 
         with Session(engine, expire_on_commit=False) as session:
             if session.get_bind().dialect.name == "sqlite":
-                with contextlib.suppress(OperationalError):
-                    session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+                session.connection().exec_driver_sql("BEGIN IMMEDIATE")
 
             existing = session.exec(
                 select(WorkflowTransitionReceipt).where(
