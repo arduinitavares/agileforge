@@ -225,7 +225,8 @@ def test_canonical_story_output_accepts_only_the_host_persisted_envelope() -> No
         )
 
 
-def test_story_schema_repair_feedback_preserves_large_parent_boundary() -> None:
+def test_with_story_schema_repair_feedback_preserves_large_parent_boundary_and_rules(
+) -> None:
     """Preserve the complete allow-list and rules even under large parent boundaries."""
     expected_item_count = 60
     items = tuple(
@@ -274,12 +275,14 @@ def test_story_schema_repair_feedback_preserves_large_parent_boundary() -> None:
     assert repaired.user_input.endswith("Do not add wrapper fields.")
     assert (
         "Every user story spec_item_ids list must contain non-empty IDs selected "
-        "strictly from ALLOWED_PARENT_SPEC_ITEM_IDS." in repaired.user_input
+        "strictly from ALLOWED_PARENT_SPEC_ITEM_IDS."
+        in repaired.user_input
     )
     assert (
         "Return JSON only. Match UserStoryWriterOutput exactly. Required fields "
         "are user_stories, is_complete, and clarifying_questions. "
-        "Do not add wrapper fields." in repaired.user_input
+        "Do not add wrapper fields."
+        in repaired.user_input
     )
     prefix = "ALLOWED_PARENT_SPEC_ITEM_IDS: "
     start_idx = repaired.user_input.index(prefix) + len(prefix)

@@ -717,6 +717,50 @@ def _validation_result(
     return result
 
 
+def _finalize_validation_in_session(
+    session: Session,
+    *,
+    parsed: ValidateStoryInput,
+    semantic: _SemanticOutcome,
+    now: Callable[[], datetime],
+) -> JsonObject:
+    """Reload and persist one final-state snapshot within an existing session."""
+    story = session.get(UserStory, parsed.story_id, populate_existing=True)
+    if story is None:
+        return _story_not_found_result(parsed.story_id)
+    with session.no_autoflush:
+        context = _evaluate_structural(session, story)
+    current_input_payload = _validation_input_payload(context)
+    if semantic.expected_input_payload is not None and (
+        context.failures
+        or current_input_payload is None
+        or canonical_json(current_input_payload)
+        != canonical_json(semantic.expected_input_payload)
+    ):
+        return _validation_source_stale_result(
+            story_id=parsed.story_id,
+            mode=parsed.mode,
+        )
+    evidence = _build_evidence(
+        context,
+        mode=parsed.mode,
+        validated_at=now(),
+        semantic_review_state=semantic.state,
+        semantic_findings=semantic.findings,
+    )
+    if evidence is not None:
+        story.validation_evidence = canonical_json(evidence.model_dump(mode="json"))
+        session.add(story)
+        session.flush()
+    return _validation_result(
+        story_id=parsed.story_id,
+        mode=parsed.mode,
+        context=context,
+        evidence=evidence,
+        semantic=semantic,
+    )
+
+
 def _finalize_validation(
     *,
     engine: Engine | Connection | None,
@@ -727,41 +771,73 @@ def _finalize_validation(
     """Reload and persist one final-state snapshot under the writer lock."""
     with Session(engine) as session:
         _begin_validation_write(session)
-        story = session.get(UserStory, parsed.story_id, populate_existing=True)
-        if story is None:
-            return _story_not_found_result(parsed.story_id)
-        with session.no_autoflush:
-            context = _evaluate_structural(session, story)
-        current_input_payload = _validation_input_payload(context)
-        if semantic.expected_input_payload is not None and (
-            context.failures
-            or current_input_payload is None
-            or canonical_json(current_input_payload)
-            != canonical_json(semantic.expected_input_payload)
-        ):
-            session.rollback()
-            return _validation_source_stale_result(
-                story_id=parsed.story_id,
-                mode=parsed.mode,
-            )
-        evidence = _build_evidence(
-            context,
-            mode=parsed.mode,
-            validated_at=now(),
-            semantic_review_state=semantic.state,
-            semantic_findings=semantic.findings,
-        )
-        if evidence is not None:
-            story.validation_evidence = canonical_json(evidence.model_dump(mode="json"))
-            session.add(story)
-        session.commit()
-        return _validation_result(
-            story_id=parsed.story_id,
-            mode=parsed.mode,
-            context=context,
-            evidence=evidence,
+        result = _finalize_validation_in_session(
+            session,
+            parsed=parsed,
             semantic=semantic,
+            now=now,
         )
+        if result.get("success", False):
+            session.commit()
+        else:
+            session.rollback()
+        return result
+
+
+def validate_story_with_specification_in_session(
+    session: Session,
+    params: ValidateStoryInput | Mapping[str, object],
+    *,
+    semantic_review: StorySemanticReview | None = None,
+    now: Callable[[], datetime] = utc_now,
+) -> JsonObject:
+    """Validate one exact accepted Story within a caller-owned session transaction."""
+    parsed = ValidateStoryInput.model_validate(params)
+    if parsed.mode == "structural":
+        return _finalize_validation_in_session(
+            session,
+            parsed=parsed,
+            semantic=_SemanticOutcome(state="not_requested"),
+            now=now,
+        )
+
+    expected_input_payload: JsonObject | None = None
+    review_input: StorySpecificationReviewInput | None = None
+    story = session.get(UserStory, parsed.story_id)
+    if story is None:
+        return _story_not_found_result(parsed.story_id)
+    with session.no_autoflush:
+        context = _evaluate_structural(session, story)
+    if not context.failures and semantic_review is not None:
+        expected_input_payload = _validation_input_payload(context)
+        review_input = _semantic_review_input(context)
+
+    review_adapter = semantic_review
+    if review_input is None or review_adapter is None:
+        semantic = _SemanticOutcome(
+            state="invalid",
+            error="STORY_SPECIFICATION_REVIEW_INVALID",
+        )
+    else:
+        try:
+            raw_text = review_adapter(review_input)
+            semantic = _SemanticOutcome(
+                state="valid",
+                findings=_parse_semantic_result(raw_text, context=context),
+                expected_input_payload=expected_input_payload,
+            )
+        except Exception:  # noqa: BLE001
+            semantic = _SemanticOutcome(
+                state="invalid",
+                error="STORY_SPECIFICATION_REVIEW_INVALID",
+                expected_input_payload=expected_input_payload,
+            )
+    return _finalize_validation_in_session(
+        session,
+        parsed=parsed,
+        semantic=semantic,
+        now=now,
+    )
 
 
 def validate_story_with_specification(

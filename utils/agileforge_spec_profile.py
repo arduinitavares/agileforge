@@ -232,7 +232,8 @@ class TechnicalSpecArtifact(BaseModel):
             for note in item.source_notes:
                 if note.external_ref_id and note.external_ref_id not in external_ids:
                     message = (
-                        f"unknown external reference endpoint: {note.external_ref_id}"
+                        "unknown external reference endpoint: "
+                        f"{note.external_ref_id}"
                     )
                     raise ValueError(message)
         return self
@@ -261,9 +262,14 @@ def rendered_markdown_hash(markdown: str) -> str:
 
 
 def _escape_markdown_text(value: str) -> str:
-    escaped: str = value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    escaped: str = (
+        value.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
     return "\n".join(
-        _MARKDOWN_LEADING_RE.sub(r"\1\\\2", line) for line in escaped.split("\n")
+        _MARKDOWN_LEADING_RE.sub(r"\1\\\2", line)
+        for line in escaped.split("\n")
     )
 
 

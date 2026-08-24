@@ -177,7 +177,8 @@ def test_relation_can_be_constructed_with_python_field_name() -> None:
 
     assert relation.from_ == "REQ.cartola.budget"
     assert (
-        relation.model_dump(mode="json", by_alias=True)["from"] == "REQ.cartola.budget"
+        relation.model_dump(mode="json", by_alias=True)["from"]
+        == "REQ.cartola.budget"
     )
 
 

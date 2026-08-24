@@ -166,7 +166,9 @@ def test_complete_bootstrap_persists_artifact_snapshot(engine: Engine) -> None:
                 "components_json": json.loads(turn.components_json),
                 "vision_statement": turn.vision_statement,
                 "is_complete": turn.is_complete,
-                "clarifying_questions_json": json.loads(turn.clarifying_questions_json),
+                "clarifying_questions_json": json.loads(
+                    turn.clarifying_questions_json
+                ),
                 "component_basis_json": json.loads(turn.component_basis_json),
                 "assumptions_json": json.loads(turn.assumptions_json),
                 "conflicts_json": json.loads(turn.conflicts_json),

@@ -1341,15 +1341,13 @@ function storyReadinessMarkup(stories, context = {}) {
         const failures = Array.isArray(story.validation_failures) ? story.validation_failures : [];
         const isValidationFailed = story.validation_status === 'failed' || failures.length > 0;
         const isUnvalidated = !isValidationFailed && (story.validation_status === 'unvalidated' || blockers.includes('STORY_VALIDATION_REQUIRED') || !story.content_accepted);
-        const isValidated = story.validation_status === 'validated' || (!isValidationFailed && !isUnvalidated && blockers.length === 0);
-        const isBlocked = !isValidated && !isUnvalidated && !isValidationFailed;
 
-        let badgeMarkup = '';
+        let validationBadge = '';
         let actionButtonMarkup = '';
         let diagnosticsMarkup = '';
 
         if (isValidationFailed) {
-            badgeMarkup = '<span class="inline-flex items-center rounded-full bg-red-50 px-2 py-0.5 text-xs font-semibold text-red-800 border border-red-200">Validation Failed</span>';
+            validationBadge = '<span class="inline-flex items-center rounded-full bg-red-50 px-2 py-0.5 text-xs font-semibold text-red-800 border border-red-200">Validation Failed</span>';
             actionButtonMarkup = `<button type="button" data-story-validate-id="${story.story_id}" class="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-wait disabled:opacity-60">
                 <span class="material-symbols-outlined text-sm" aria-hidden="true">refresh</span>
                 <span data-story-validate-label="true">Revalidate</span>
@@ -1363,20 +1361,22 @@ function storyReadinessMarkup(stories, context = {}) {
                 diagnosticsMarkup = `<div class="mt-1 rounded bg-red-50 p-2 text-xs text-red-700 border border-red-200 space-y-0.5" data-story-validation-diagnostics="true">${failureItems}</div>`;
             }
         } else if (isUnvalidated) {
-            badgeMarkup = '<span class="inline-flex items-center rounded-full bg-amber-50 px-2 py-0.5 text-xs font-semibold text-amber-800 border border-amber-200">Unvalidated</span>';
+            validationBadge = '<span class="inline-flex items-center rounded-full bg-amber-50 px-2 py-0.5 text-xs font-semibold text-amber-800 border border-amber-200">Unvalidated</span>';
             actionButtonMarkup = `<button type="button" data-story-validate-id="${story.story_id}" class="inline-flex items-center gap-1.5 rounded-lg bg-accent px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-800 disabled:cursor-wait disabled:opacity-60">
                 <span class="material-symbols-outlined text-sm" aria-hidden="true">task_alt</span>
                 <span data-story-validate-label="true">Validate Story</span>
             </button>`;
-        } else if (isBlocked) {
-            badgeMarkup = `<span class="inline-flex items-center rounded-full bg-red-50 px-2 py-0.5 text-xs font-semibold text-red-800 border border-red-200">Blocked: ${escapeWorkflowText(blockers.join(', '))}</span>`;
-            actionButtonMarkup = `<button type="button" data-story-validate-id="${story.story_id}" class="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-wait disabled:opacity-60">
-                <span class="material-symbols-outlined text-sm" aria-hidden="true">refresh</span>
-                <span data-story-validate-label="true">Revalidate</span>
-            </button>`;
         } else {
-            badgeMarkup = '<span class="inline-flex items-center rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-semibold text-emerald-800 border border-emerald-200">Validated</span>';
+            validationBadge = '<span class="inline-flex items-center rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-semibold text-emerald-800 border border-emerald-200">Validated</span>';
         }
+
+        const dependencyBlockers = blockers.filter((b) => b !== 'STORY_VALIDATION_REQUIRED');
+        let blockerBadge = '';
+        if (dependencyBlockers.length > 0) {
+            blockerBadge = `<span class="inline-flex items-center rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-900 border border-amber-300">Blocked: ${escapeWorkflowText(dependencyBlockers.join(', '))}</span>`;
+        }
+
+        const badgesMarkup = [validationBadge, blockerBadge].filter(Boolean).join(' ');
 
         return `<div class="py-3 first:pt-0 last:pb-0 flex flex-col justify-between gap-2" data-story-readiness-row="${story.story_id}">
             <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
@@ -1384,7 +1384,7 @@ function storyReadinessMarkup(stories, context = {}) {
                     <div class="flex items-center gap-2 flex-wrap">
                         <span class="font-semibold text-sm text-slate-900">${escapeWorkflowText(storyIdText)}</span>
                         ${pbiId ? `<span class="text-xs text-slate-500 font-mono">(${escapeWorkflowText(pbiId)})</span>` : ''}
-                        ${badgeMarkup}
+                        ${badgesMarkup}
                     </div>
                     ${requirement ? `<p class="text-xs text-slate-600 line-clamp-1">${escapeWorkflowText(requirement)}</p>` : ''}
                     <div class="flex items-center gap-3 text-xs text-slate-500">
@@ -1414,9 +1414,7 @@ function canonicalCandidateDependencies(candidates, dependencies) {
         ? (candidates.some((s) => 'sprint_candidate' in s)
             ? candidates.filter((s) => s.sprint_candidate)
             : candidates)
-        : (Array.isArray(dependencies?.stories)
-            ? dependencies.stories.filter((s) => Boolean(s?.sprint_candidate))
-            : []);
+        : [];
     const candidateIds = candidateList.map((s) => s.story_id).filter((id) => id != null);
     const candidateSet = new Set(candidateIds);
     const rawEdges = Array.isArray(dependencies?.edges) ? dependencies.edges : [];
@@ -1436,12 +1434,21 @@ function canonicalCandidateDependencies(candidates, dependencies) {
 
 function storyDependencyReviewMarkup(action, candidates, dependencies) {
     if (!action || action.request_kind !== 'apply_story_dependencies') return '';
-    const { candidateStories, candidateEdges } = canonicalCandidateDependencies(candidates, dependencies);
-    const storySummary = candidateStories.map((s) => s.source_story_item_id || `Story #${s.story_id}`).join(', ') || 'None';
-    const edgeSummary = candidateEdges.length > 0
-        ? candidateEdges.map((e) => `${e.dependent_story_id} -> ${e.prerequisite_story_id}`).join(', ')
-        : 'None (independent stories)';
+    const hasCandidates = Array.isArray(candidates);
+    const { candidateStories, candidateEdges } = canonicalCandidateDependencies(
+        hasCandidates ? candidates : [],
+        dependencies,
+    );
+    const storySummary = hasCandidates
+        ? (candidateStories.map((s) => s.source_story_item_id || `Story #${s.story_id}`).join(', ') || 'None')
+        : 'Unavailable (canonical candidate projection missing)';
+    const edgeSummary = hasCandidates
+        ? (candidateEdges.length > 0
+            ? candidateEdges.map((e) => `${e.dependent_story_id} -> ${e.prerequisite_story_id}`).join(', ')
+            : 'None (independent stories)')
+        : 'Unavailable (canonical candidate projection missing)';
     const bindingAttributes = deliveryActionBindingAttributes(action);
+    const disabledAttr = hasCandidates ? '' : 'disabled aria-disabled="true"';
 
     return `<div class="rounded-lg border border-amber-200 bg-amber-50/50 p-4 space-y-3" data-dependency-review-section="true" ${bindingAttributes}>
         <div class="flex items-center gap-2">
@@ -1453,7 +1460,7 @@ function storyDependencyReviewMarkup(action, candidates, dependencies) {
             <p><strong>Candidate stories:</strong> ${escapeWorkflowText(storySummary)}</p>
             <p><strong>Dependency edges:</strong> ${escapeWorkflowText(edgeSummary)}</p>
         </div>
-        <button type="button" data-apply-dependencies="true" class="${BUTTON_PRIMARY}">
+        <button type="button" data-apply-dependencies="true" ${disabledAttr} class="${BUTTON_PRIMARY}">
             <span class="material-symbols-outlined" aria-hidden="true">verified</span>
             <span data-delivery-action-label="true">Confirm dependencies</span>
         </button>
@@ -1515,7 +1522,7 @@ function deliveryPanelMarkup(position, reviews = {}, actions = [], context = {})
         ? context.sprintCandidates.items
         : (Array.isArray(lifecycleState?.sprintCandidates?.items)
             ? lifecycleState.sprintCandidates.items
-            : []);
+            : null);
 
     const dependencyAction = (Array.isArray(actions) ? actions : []).find(
         (action) => action?.request_kind === 'apply_story_dependencies',
@@ -2597,11 +2604,10 @@ function installInteractions() {
             }
             setProjectError('');
             try {
-                const candidates = Array.isArray(lifecycleState.sprintCandidates?.items)
-                    ? lifecycleState.sprintCandidates.items
-                    : (Array.isArray(lifecycleState.storyDependencies?.stories)
-                        ? lifecycleState.storyDependencies.stories.filter((s) => s.sprint_candidate)
-                        : []);
+                if (!Array.isArray(lifecycleState.sprintCandidates?.items)) {
+                    throw new Error('Canonical candidate projection is unavailable.');
+                }
+                const candidates = lifecycleState.sprintCandidates.items;
                 const { candidateIds, candidateEdges } = canonicalCandidateDependencies(
                     candidates,
                     lifecycleState.storyDependencies,

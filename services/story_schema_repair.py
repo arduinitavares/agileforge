@@ -23,12 +23,14 @@ def with_story_schema_repair_feedback(
     """Append one bounded schema diagnostic without changing the trusted root."""
     details = ""
     if validation_errors is not None:
-        details = json.dumps(validation_errors, sort_keys=True, default=str)[
-            :MAX_STORY_SCHEMA_REPAIR_DIAGNOSTIC_CHARS
-        ]
+        details = json.dumps(
+            validation_errors, sort_keys=True, default=str
+        )[:MAX_STORY_SCHEMA_REPAIR_DIAGNOSTIC_CHARS]
     error_text = error[:MAX_STORY_SCHEMA_REPAIR_DIAGNOSTIC_CHARS]
     cardinality = " Return exactly one user_stories item." if targeted else ""
-    allowed_ids = json.dumps(list(payload.parent_backlog_spec_item_ids), sort_keys=True)
+    allowed_ids = json.dumps(
+        list(payload.parent_backlog_spec_item_ids), sort_keys=True
+    )
     feedback = (
         "SYSTEM_FEEDBACK: Your previous User Story response failed schema or "
         "reference validation.\n"

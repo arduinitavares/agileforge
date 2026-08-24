@@ -191,14 +191,11 @@ def record_obsolete_outcome(
     evaluated_at: datetime,
 ) -> None:
     """Terminate a stale attempt without granting it business authority."""
-    if (
-        load_attempt_outcome(
-            session,
-            project_id=project_id,
-            attempt_id=attempt_id,
-        )
-        is not None
-    ):
+    if load_attempt_outcome(
+        session,
+        project_id=project_id,
+        attempt_id=attempt_id,
+    ) is not None:
         return
     session.add(
         WorkflowNodeAttemptOutcome(

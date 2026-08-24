@@ -24,7 +24,9 @@ engine = create_engine(DB_URL, echo=False)
 
 
 @event.listens_for(Engine, "connect")
-def set_sqlite_pragma(dbapi_connection: Connection, _connection_record: object) -> None:
+def set_sqlite_pragma(
+    dbapi_connection: Connection, _connection_record: object
+) -> None:
     """Return set sqlite pragma."""
     cursor = dbapi_connection.cursor()
     cursor.execute("PRAGMA foreign_keys=ON")
@@ -32,7 +34,6 @@ def set_sqlite_pragma(dbapi_connection: Connection, _connection_record: object) 
 
 
 SQLModel.metadata.create_all(engine)
-
 
 # Patch the engine in db_tools
 def _benchmark_engine() -> Engine:

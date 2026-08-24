@@ -4,15 +4,18 @@
 import concurrent.futures
 from datetime import UTC, datetime
 from http import HTTPStatus
-from typing import cast
+from pathlib import Path
+from typing import Any, cast
 from unittest.mock import patch
 
+import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import Engine
-from sqlmodel import Session, col, select
+from sqlalchemy import Engine, create_engine
+from sqlmodel import Session, SQLModel, col, select
 
 import api
 from models.core import Project, UserStory
+from models.workflow import WorkflowTransitionReceipt
 from services.application import (
     AgileForgeApplication,
     StoryValidationRequest,
@@ -220,9 +223,53 @@ def test_story_validation_idempotency_conflict_on_different_payload(
 
 
 def test_story_validation_concurrent_identical_requests(
+    tmp_path: Path,
+) -> None:
+    """Concurrent identical requests handle claims safely and replay result."""
+    db_file = tmp_path / "story-validation-race.db"
+    race_engine = create_engine(
+        f"sqlite:///{db_file}",
+        connect_args={"check_same_thread": False},
+    )
+    SQLModel.metadata.create_all(race_engine)
+    try:
+        story_id = _accepted_story(race_engine)
+        with Session(race_engine) as session:
+            statement = select(UserStory).where(col(UserStory.story_id) == story_id)
+            story = session.exec(statement).first()
+            assert story is not None
+            project_id = story.project_id
+
+        app = _build_application(race_engine)
+        request = StoryValidationRequest(
+            project_id=project_id,
+            story_id=story_id,
+            mode="structural",
+            idempotency_key="concurrent-key-1",
+            actor="test-operator",
+        )
+        with (
+            patch.object(
+                story_validation_service, "get_engine", return_value=race_engine
+            ),
+            concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor,
+        ):
+            future_1 = executor.submit(app.validate_story, request)
+            future_2 = executor.submit(app.validate_story, request)
+            result_1 = future_1.result(timeout=5)
+            result_2 = future_2.result(timeout=5)
+
+        assert result_1["ok"] is True
+        assert result_2["ok"] is True
+        assert result_1 == result_2
+    finally:
+        race_engine.dispose()
+
+
+def test_story_validation_forced_failure_allows_clean_retry(
     engine: Engine,
 ) -> None:
-    """Concurrent identical requests handle claims safely without error."""
+    """If validation fails, transaction rolls back cleanly and retry succeeds."""
     story_id = _accepted_story(engine)
     with Session(engine) as session:
         statement = select(UserStory).where(col(UserStory.story_id) == story_id)
@@ -235,25 +282,32 @@ def test_story_validation_concurrent_identical_requests(
         project_id=project_id,
         story_id=story_id,
         mode="structural",
-        idempotency_key="concurrent-key-1",
+        idempotency_key="retry-key-1",
         actor="test-operator",
     )
-    with (
-        patch.object(story_validation_service, "get_engine", return_value=engine),
-        concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor,
-    ):
-        future_1 = executor.submit(app.validate_story, request)
-        future_2 = executor.submit(app.validate_story, request)
-        result_1 = future_1.result(timeout=5)
-        result_2 = future_2.result(timeout=5)
 
-    assert result_1["ok"] is True or result_2["ok"] is True
-    for res in (result_1, result_2):
-        assert isinstance(res, dict)
-        if not res.get("ok"):
-            errors = res.get("errors")
-            assert isinstance(errors, list)
-            assert len(errors) > 0
-            first_err = errors[0]
-            assert isinstance(first_err, dict)
-            assert first_err["code"] == "IDEMPOTENCY_CONFLICT"
+    # 1. Force an exception during in-session validation
+    with (
+        patch(
+            "services.application.validate_story_with_specification_in_session",
+            side_effect=RuntimeError("Simulated provider-free transient failure"),
+        ),
+        pytest.raises(RuntimeError, match="Simulated provider-free transient failure"),
+    ):
+        app.validate_story(request)
+
+    # 2. Verify no incomplete receipt row was left in the database
+    with Session(engine) as session:
+        receipt = session.exec(
+            select(WorkflowTransitionReceipt).where(
+                col(WorkflowTransitionReceipt.request_kind) == "validate_story",
+                col(WorkflowTransitionReceipt.idempotency_key) == "retry-key-1",
+            )
+        ).one_or_none()
+        assert receipt is None
+
+    # 3. Retry the identical request - it succeeds cleanly without IDEMPOTENCY_CONFLICT
+    retry_result = app.validate_story(request)
+    assert retry_result["ok"] is True
+    data = cast("dict[str, Any]", retry_result.get("data"))
+    assert data["ready_for_sprint"] is True

@@ -840,3 +840,64 @@ test('story readiness section renders validation failed badge and actionable dia
     assert.ok(readinessMarkup.includes('Revalidate'));
     assert.ok(readinessMarkup.includes('data-story-validate-id="101"'));
 });
+
+test('story readiness section renders validated badge and dependency blocker badge separately', () => {
+    const context = loadFrontend();
+    const stories = [
+        {
+            story_id: 102,
+            source_story_item_id: 'US-002',
+            backlog_item_id: 'PBI-000002',
+            status: 'accepted',
+            story_points: 5,
+            rank: '0|hzzzzz:1',
+            content_accepted: true,
+            sprint_candidate: false,
+            readiness_blockers: ['PREREQUISITE_STORY_101_INCOMPLETE'],
+            validation_status: 'validated',
+            validation_failures: [],
+        },
+    ];
+    const appState = {
+        storyPending: { items: [] },
+        storyDependencies: { stories },
+        sprintCandidates: { items: [] },
+    };
+
+    const readinessMarkup = context.storyReadinessMarkup(stories, appState);
+    assert.ok(readinessMarkup.includes('Validated'));
+    assert.ok(readinessMarkup.includes('Blocked: PREREQUISITE_STORY_101_INCOMPLETE'));
+});
+
+test('dependency review disables confirm button when canonical candidate projection is missing', () => {
+    const context = loadFrontend();
+    const action = {
+        node_id: 'planning.story_dependencies',
+        request_kind: 'apply_story_dependencies',
+        endpoint: 'story/dependencies/apply',
+        transport: 'semantic',
+    };
+    const dependencies = {
+        stories: [{ story_id: 101, source_story_item_id: 'US-001', sprint_candidate: true }],
+        edges: [],
+    };
+
+    // When candidates is null (missing sprintCandidates.items)
+    const markup = context.storyDependencyReviewMarkup(action, null, dependencies);
+    assert.ok(markup.includes('Unavailable (canonical candidate projection missing)'));
+    assert.ok(markup.includes('disabled'));
+    assert.ok(markup.includes('aria-disabled="true"'));
+});
+
+test('canonicalCandidateDependencies returns empty when candidates is missing without falling back', () => {
+    const context = loadFrontend();
+    const dependencies = {
+        stories: [{ story_id: 101, source_story_item_id: 'US-001', sprint_candidate: true }],
+        edges: [],
+    };
+
+    const result = context.canonicalCandidateDependencies(null, dependencies);
+    assert.strictEqual(result.candidateStories.length, 0);
+    assert.strictEqual(result.candidateIds.length, 0);
+    assert.strictEqual(result.candidateEdges.length, 0);
+});

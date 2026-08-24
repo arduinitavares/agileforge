@@ -114,7 +114,8 @@ def generate_synthetic_cases(
         c
         for c in source_cases
         if (
-            c.get(REVIEW_OUTCOME_FIELD) is True or c.get(EXPECTED_OUTCOME_FIELD) is True
+            c.get(REVIEW_OUTCOME_FIELD) is True
+            or c.get(EXPECTED_OUTCOME_FIELD) is True
         )
     ]
 

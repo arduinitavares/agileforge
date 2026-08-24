@@ -154,7 +154,8 @@ def test_fresh_schema_persists_and_loads_vision_evidence_snapshot(
 
         assert len(loaded.vision_evidence_snapshots) == 1
         assert (
-            full_snapshot.vision_evidence_snapshots == loaded.vision_evidence_snapshots
+            full_snapshot.vision_evidence_snapshots
+            == loaded.vision_evidence_snapshots
         )
         fact = loaded.vision_evidence_snapshots[0]
         assert fact.vision_evidence_snapshot_id == _id(
@@ -164,7 +165,9 @@ def test_fresh_schema_persists_and_loads_vision_evidence_snapshot(
         assert fact.workflow_node_attempt_id == _id(attempt.workflow_node_attempt_id)
         assert dict(fact.evidence) == _evidence_bundle(
             f"Project {project_id}"
-        ).model_dump(mode="json")
+        ).model_dump(
+            mode="json"
+        )
         assert fact.warnings == ()
 
 

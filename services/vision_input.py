@@ -151,7 +151,8 @@ class VisionInputService:
         """Prepare clarification from the current draft and stored snapshot."""
         if decision.node_id != "vision.interview":
             message = (
-                "Vision clarification input requires the vision.interview decision."
+                "Vision clarification input requires the vision.interview "
+                "decision."
             )
             raise ValueError(message)
         try:
