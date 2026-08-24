@@ -1695,6 +1695,18 @@ class AgileForgeApplication:
             raise RuntimeError(message)
         return self._read_projection
 
+    def _engine(self) -> Engine:
+        """Return the backing database engine from domain or read projection."""
+        engine = getattr(self._workflow_domain, "_engine", None)
+        if engine is not None:
+            return cast("Engine", engine)
+        read_engine = getattr(self._read_projection, "_engine", None)
+        if read_engine is not None:
+            return cast("Engine", read_engine)
+        from models.db import get_engine  # noqa: PLC0415
+
+        return get_engine()
+
     def position(self, *, project_id: int) -> WorkflowPosition:
         """Return the current durable workflow position."""
         return self._workflow_domain.position(project_id)
@@ -2439,7 +2451,7 @@ class AgileForgeApplication:
         request_fingerprint = canonical_hash(request_payload)
 
         # Replay completed request with matching idempotency key
-        with Session(self._workflow_domain._engine) as session:
+        with Session(self._engine()) as session:
             receipt = session.exec(
                 select(WorkflowTransitionReceipt).where(
                     col(WorkflowTransitionReceipt.request_kind) == "validate_story",
@@ -2503,6 +2515,7 @@ class AgileForgeApplication:
         eval_result = validate_story_with_specification(
             ValidateStoryInput(story_id=request.story_id, mode=request.mode),
         )
+        response: JsonObject
         if not eval_result.get("success", False):
             error_code = cast(
                 "str", eval_result.get("error_code") or "STORY_VALIDATION_FAILED"
@@ -2510,7 +2523,7 @@ class AgileForgeApplication:
             message = cast(
                 "str", eval_result.get("message") or "Story validation failed."
             )
-            response: JsonObject = {
+            response = {
                 "ok": False,
                 "data": eval_result,
                 "errors": [
@@ -2525,7 +2538,7 @@ class AgileForgeApplication:
             response = {"ok": True, "data": eval_result, "errors": []}
 
         # Persist idempotency receipt
-        with Session(self._workflow_domain._engine) as session:
+        with Session(self._engine()) as session:
             if session.get_bind().dialect.name == "sqlite":
                 session.connection().exec_driver_sql("BEGIN IMMEDIATE")
             evaluated_at = datetime.now(tz=UTC)

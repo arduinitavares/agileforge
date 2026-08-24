@@ -95,7 +95,7 @@ from utils.agileforge_spec_profile_v2 import (
 )
 from utils.spec_schemas import ValidationEvidence
 from utils.task_metadata import parse_task_metadata, serialize_task_metadata
-from workflow.contracts import JsonValue
+from workflow.contracts import JsonObject, JsonValue
 from workflow.execution_integrity import (
     ExecutionIntegrityError,
     SprintStartAudit,

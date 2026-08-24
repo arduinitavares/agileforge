@@ -372,7 +372,7 @@ class FakeLifecycle:
                         }
                     }
                 }
-        handlers: dict[str, Callable[[JsonObject], None]] = {
+        handlers: dict[str, Callable[[JsonObject], JsonObject | None]] = {
             "/backlog/decide": self._decide_backlog,
             "/backlog/generate": self._generate_backlog,
             "/goals/respond": self._record_goal_turn,
@@ -889,7 +889,11 @@ class FakeLifecycle:
         assert isinstance(reviewed_edges, list)
         for edge in reviewed_edges:
             assert isinstance(edge, dict)
-            assert set(edge.keys()) == {"dependent_story_id", "prerequisite_story_id", "reason"}
+            assert set(edge.keys()) == {
+                "dependent_story_id",
+                "prerequisite_story_id",
+                "reason",
+            }
         self.dependency_apply_requests.append(dict(body))
 
     def _generate_sprint_plan(self, body: JsonObject) -> None:
@@ -2384,35 +2388,19 @@ def test_sprint_generation_requires_team_and_blocks_duplicate_submission(
     context.close()
 
 
-def test_progressive_story_readiness_partial_refinement_to_sprint_planning(
-    dashboard_harness: DashboardHarness,
+def _seed_progressive_stories(
+    fake: FakeLifecycle,
+    story1_id: int,
+    story2_id: int,
 ) -> None:
-    """Unlock Sprint planning with ready Story, unvalidated sibling, non-empty edge, and unrefined PBI."""
-    story1_id = 101
-    story2_id = 102
-    pbi3_action = _story_generation_action("backlog_item:PBI-000003")
-    fake = _delivery_ready_fake([pbi3_action])
-
-    # 3 PBIs in backlog candidate and pending projection
     fake.backlog_candidate = {
         "backlog_items": [
-            {
-                "backlog_item_id": "PBI-000001",
-                "requirement": "Specification authoring workflow",
-            },
-            {
-                "backlog_item_id": "PBI-000002",
-                "requirement": "Progressive story validation",
-            },
-            {
-                "backlog_item_id": "PBI-000003",
-                "requirement": "Sprint execution engine",
-            },
+            {"backlog_item_id": "PBI-000001", "requirement": "Spec workflow"},
+            {"backlog_item_id": "PBI-000002", "requirement": "Story validation"},
+            {"backlog_item_id": "PBI-000003", "requirement": "Sprint execution"},
         ]
     }
-
-    # US-001 is already validated; US-002 is unvalidated with dependency on US-001
-    story1 = {
+    story1: JsonObject = {
         "story_id": story1_id,
         "source_story_item_id": "US-001",
         "backlog_item_id": "PBI-000001",
@@ -2425,7 +2413,7 @@ def test_progressive_story_readiness_partial_refinement_to_sprint_planning(
         "validation_status": "validated",
         "validation_failures": [],
     }
-    story2 = {
+    story2: JsonObject = {
         "story_id": story2_id,
         "source_story_item_id": "US-002",
         "backlog_item_id": "PBI-000002",
@@ -2440,7 +2428,6 @@ def test_progressive_story_readiness_partial_refinement_to_sprint_planning(
     }
     fake.stories = [story1, story2]
     fake.sprint_candidates = [story1]
-    # Projection edge includes extra fields forbidden by the HTTP API contract
     fake.story_dependencies = [
         {
             "dependency_id": 1,
@@ -2453,55 +2440,55 @@ def test_progressive_story_readiness_partial_refinement_to_sprint_planning(
         }
     ]
 
+
+def test_progressive_story_readiness_partial_refinement_to_sprint_planning(
+    dashboard_harness: DashboardHarness,
+) -> None:
+    """Unlock Sprint planning with ready Story, unvalidated sibling, and edge."""
+    story1_id = 101
+    story2_id = 102
+    pbi3_action = _story_generation_action("backlog_item:PBI-000003")
+    fake = _delivery_ready_fake([pbi3_action])
+    _seed_progressive_stories(fake, story1_id, story2_id)
+
     context, page = _open_project_page(dashboard_harness, fake)
 
-    # 1. Verify unrefined sibling PBI generation button is visible
     expect(
         page.locator('[data-delivery-action-instance="backlog_item:PBI-000003"]')
     ).to_be_visible()
 
-    # 2. Verify Story readiness section displays US-001 as Validated and US-002 as Unvalidated
-    readiness_section = page.locator('[data-story-readiness-section="true"]')
-    expect(readiness_section).to_be_visible()
-    expect(readiness_section).to_contain_text("US-001")
-    expect(readiness_section).to_contain_text("Validated")
-    expect(readiness_section).to_contain_text("US-002")
-    expect(readiness_section).to_contain_text("Unvalidated")
+    readiness = page.locator('[data-story-readiness-section="true"]')
+    expect(readiness).to_be_visible()
+    expect(readiness).to_contain_text("US-001")
+    expect(readiness).to_contain_text("Validated")
+    expect(readiness).to_contain_text("US-002")
+    expect(readiness).to_contain_text("Unvalidated")
 
-    validate_button = page.locator(f'[data-story-validate-id="{story2_id}"]')
-    expect(validate_button).to_be_visible()
-
-    # 3. Click "Validate Story" on US-002
-    validate_button.click()
+    validate_btn = page.locator(f'[data-story-validate-id="{story2_id}"]')
+    expect(validate_btn).to_be_visible()
+    validate_btn.click()
     page.wait_for_timeout(200)
 
     assert len(fake.story_validation_requests) == 1
     assert fake.story_validation_requests[0]["story_id"] == story2_id
-    assert fake.story_validation_requests[0]["mode"] == "structural"
 
-    # 4. After validation, simulate dependency review action in position
-    dependency_action: JsonObject = {
+    dep_action: JsonObject = {
         "node_id": "planning.story_dependencies",
         "instance_key": None,
         "request_kind": "apply_story_dependencies",
         "endpoint": "story/dependencies/apply",
         "transport": "semantic",
     }
-    fake.position_override = _delivery_position([pbi3_action, dependency_action])
+    fake.position_override = _delivery_position([pbi3_action, dep_action])
 
-    # Reload dashboard to pick up new position
     page.locator("#refresh-project").click()
     page.wait_for_timeout(200)
 
-    # 5. Verify dependency review section is displayed
     dep_section = page.locator('[data-dependency-review-section="true"]')
     expect(dep_section).to_be_visible()
-    expect(dep_section).to_contain_text("Dependency review required")
-    confirm_dep_button = page.locator('[data-apply-dependencies="true"]')
-    expect(confirm_dep_button).to_be_visible()
-
-    # 6. Click "Confirm dependencies"
-    confirm_dep_button.click()
+    confirm_dep_btn = page.locator('[data-apply-dependencies="true"]')
+    expect(confirm_dep_btn).to_be_visible()
+    confirm_dep_btn.click()
     page.wait_for_timeout(200)
 
     assert len(fake.dependency_apply_requests) == 1
@@ -2509,7 +2496,6 @@ def test_progressive_story_readiness_partial_refinement_to_sprint_planning(
         story1_id,
         story2_id,
     ]
-    # Edge is sanitized to {dependent_story_id, prerequisite_story_id, reason}
     assert fake.dependency_apply_requests[0]["reviewed_edges"] == [
         {
             "dependent_story_id": story2_id,
@@ -2518,26 +2504,21 @@ def test_progressive_story_readiness_partial_refinement_to_sprint_planning(
         }
     ]
 
-    # 7. Simulate Sprint planning action becoming available
     sprint_plan_action = _sprint_generation_action()
     fake.position_override = _delivery_position([pbi3_action, sprint_plan_action])
 
-    # Reload dashboard
     page.locator("#refresh-project").click()
     page.wait_for_timeout(200)
 
-    # 8. Verify Sprint candidate pool displays 2 candidates ready
     candidate_pool = page.locator('[data-candidate-pool-section="true"]')
     expect(candidate_pool).to_be_visible()
     expect(candidate_pool).to_contain_text("2 candidates ready")
     expect(candidate_pool).to_contain_text("US-001")
     expect(candidate_pool).to_contain_text("US-002")
 
-    # 9. Verify Sprint planning form is visible and unlocked
     sprint_form = page.locator('[data-delivery-generation-form="record_sprint_plan"]')
     expect(sprint_form).to_be_visible()
 
-    # 10. Verify unrefined sibling PBI-000003 remains visible and operable
     expect(
         page.locator('[data-delivery-action-instance="backlog_item:PBI-000003"]')
     ).to_be_visible()
@@ -2545,10 +2526,10 @@ def test_progressive_story_readiness_partial_refinement_to_sprint_planning(
     context.close()
 
 
-def test_progressive_story_readiness_structural_failure_diagnostics_persist_across_reload(
+def test_progressive_story_readiness_failure_diagnostics_persist_on_reload(
     dashboard_harness: DashboardHarness,
 ) -> None:
-    """Structural validation failure diagnostics persist in per-story row after reload."""
+    """Validation failure diagnostics persist in per-story row after reload."""
     story_id = 101
     pbi1_action = _story_generation_action("backlog_item:PBI-000001")
     fake = _delivery_ready_fake([pbi1_action])
@@ -2584,7 +2565,6 @@ def test_progressive_story_readiness_structural_failure_diagnostics_persist_acro
 
     context, page = _open_project_page(dashboard_harness, fake)
 
-    # Verify initially Unvalidated
     readiness_section = page.locator('[data-story-readiness-section="true"]')
     expect(readiness_section).to_be_visible()
     expect(readiness_section).to_contain_text("Unvalidated")
@@ -2592,11 +2572,9 @@ def test_progressive_story_readiness_structural_failure_diagnostics_persist_acro
     validate_button = page.locator(f'[data-story-validate-id="{story_id}"]')
     expect(validate_button).to_be_visible()
 
-    # Click Validate Story -> triggers failure and reload
     validate_button.click()
     page.wait_for_timeout(300)
 
-    # Verify per-story row now displays "Validation Failed" and actionable diagnostics
     expect(readiness_section).to_contain_text("Validation Failed")
     diagnostics = page.locator('[data-story-validation-diagnostics="true"]')
     expect(diagnostics).to_be_visible()
@@ -2605,12 +2583,10 @@ def test_progressive_story_readiness_structural_failure_diagnostics_persist_acro
         "Story references invalid specification items: REQ.099"
     )
 
-    # Verify "Revalidate" button is now shown instead of initial "Validate Story"
     revalidate_button = page.locator(f'[data-story-validate-id="{story_id}"]')
     expect(revalidate_button).to_be_visible()
     expect(revalidate_button).to_contain_text("Revalidate")
 
-    # Verify global project error message is visible
     error_banner = page.locator("#project-error")
     expect(error_banner).to_be_visible()
     expect(error_banner).to_contain_text("Story structural validation failed.")

@@ -180,7 +180,7 @@ def test_story_validation_idempotent_replay(
 def test_story_validation_idempotency_conflict_on_different_payload(
     engine: Engine,
 ) -> None:
-    """Same idempotency key with different request payload fails with IDEMPOTENCY_CONFLICT."""
+    """Same idempotency key with different request fails with conflict error."""
     story_id = _accepted_story(engine)
     with Session(engine) as session:
         statement = select(UserStory).where(col(UserStory.story_id) == story_id)
