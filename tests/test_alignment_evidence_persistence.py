@@ -1,316 +1,100 @@
-# tests/test_alignment_evidence_persistence.py
-"""Tests for alignment findings persisted in ValidationEvidence."""
+"""ValidationEvidence v2 contract and canonical persistence tests."""
+# ruff: noqa: D103
 
-import hashlib
-import json
+from __future__ import annotations
+
 from datetime import UTC, datetime
-from typing import Any
 
 import pytest
-from sqlalchemy.engine import Engine
-from sqlmodel import Session
+from pydantic import ValidationError
 
-from agile_sqlmodel import (
-    CompiledSpecAuthority,
-    Product,
-    SpecAuthorityAcceptance,
-    SpecRegistry,
-    UserStory,
-)
-from models.core import Epic, Feature, Theme
-from services.specs.authority_selection import pending_authority_fingerprint
-from tools import spec_tools
-from tools.spec_tools import (
-    approve_spec_version,
-    register_spec_version,
-    validate_story_with_spec_authority,
-)
-from utils.spec_schemas import (
-    ForbiddenCapabilityParams,
-    Invariant,
-    InvariantType,
-    SourceMapEntry,
-    SpecAuthorityCompilationSuccess,
-    SpecAuthorityCompilerOutput,
-)
+from services.contracts.specification_validation import StorySpecificationFinding
+from utils.spec_schemas import StructuralValidationFailure, ValidationEvidence
+from workflow.fingerprints import canonical_json
 
 
-@pytest.fixture
-def product_with_spec(session: Session, engine: Engine) -> tuple[Product, int]:
-    """Create product with a pre-compiled spec authority."""
-    spec_tools.engine = engine
+def _evidence(**changes: object) -> ValidationEvidence:
+    values: dict[str, object] = {
+        "schema_version": "agileforge.story-validation-evidence.v2",
+        "project_id": 3,
+        "story_id": 5,
+        "source_story_artifact_id": 7,
+        "source_story_artifact_fingerprint": "sha256:" + "1" * 64,
+        "source_story_item_id": "US-0001",
+        "source_story_item_fingerprint": "sha256:" + "2" * 64,
+        "source_backlog_artifact_id": 11,
+        "source_backlog_artifact_fingerprint": "sha256:" + "3" * 64,
+        "source_backlog_item_id": "PBI-000001",
+        "spec_version_id": 13,
+        "spec_hash": "sha256:" + "4" * 64,
+        "validated_at": datetime(2026, 8, 21, 12, tzinfo=UTC),
+        "story_validation_input_fingerprint": "sha256:" + "5" * 64,
+        "validator_version": "2.0.0",
+        "mode": "structural",
+        "ready_for_sprint": True,
+        "structural_failures": (),
+        "structural_warnings": (),
+        "semantic_review_state": "not_requested",
+        "semantic_findings": (),
+        "referenced_spec_item_ids": ("DATA.001",),
+    }
+    values.update(changes)
+    return ValidationEvidence.model_validate(values)
 
-    product = Product(name="Alignment Product", vision="Test")
-    session.add(product)
-    session.commit()
-    session.refresh(product)
-    product_id = _require_id(product.product_id, "product.product_id")
 
-    spec_content = "# Spec\n\n## Invariants\n- Stories MUST NOT include web features."
-    spec_hash = hashlib.sha256(spec_content.encode()).hexdigest()
+def test_validation_evidence_v2_is_closed_frozen_and_canonical() -> None:
+    evidence = _evidence()
+    encoded = canonical_json(evidence.model_dump(mode="json"))
+    assert ValidationEvidence.model_validate_json(encoded, strict=True) == evidence
+    assert "invariant" not in encoded
+    assert "passed" not in evidence.model_fields_set
 
-    # Create spec registry entry
-    spec_version = SpecRegistry(
-        product_id=product_id,
-        content=spec_content,
-        spec_hash=spec_hash,
-        status="approved",
-        approved_by="tester",
+    with pytest.raises(ValidationError):
+        _evidence(extra_v1_field=[])
+    with pytest.raises(ValidationError):
+        evidence.story_id = 9  # type: ignore[misc]
+
+
+def test_validation_evidence_enforces_structural_and_semantic_consistency() -> None:
+    failure = StructuralValidationFailure(
+        code="STORY_STATEMENT_INVALID",
+        message="Story statement does not use the required shape.",
     )
-    session.add(spec_version)
-    session.commit()
-    session.refresh(spec_version)
-    spec_version_id = _require_id(
-        spec_version.spec_version_id,
-        "spec_version.spec_version_id",
-    )
-
-    # Create pre-compiled authority with explicit FORBIDDEN_CAPABILITY
-    invariants = [
-        Invariant(
-            id="INV-0000000000000001",
-            type=InvariantType.FORBIDDEN_CAPABILITY,
-            parameters=ForbiddenCapabilityParams(capability="web"),
-        ),
-    ]
-    success = SpecAuthorityCompilationSuccess(
-        scope_themes=["core"],
-        domain=None,
-        invariants=invariants,
-        eligible_feature_rules=[],
-        gaps=[],
-        assumptions=[],
-        source_map=[
-            SourceMapEntry(
-                invariant_id="INV-0000000000000001",
-                excerpt="Stories MUST NOT include web features.",
-                location=None,
+    with pytest.raises(ValidationError):
+        _evidence(structural_failures=(failure,), ready_for_sprint=True)
+    with pytest.raises(ValidationError):
+        _evidence(
+            mode="structural",
+            semantic_review_state="valid",
+            semantic_findings=(),
+        )
+    with pytest.raises(ValidationError):
+        _evidence(
+            mode="hybrid",
+            semantic_review_state="invalid",
+            semantic_findings=(
+                StorySpecificationFinding(
+                    code="SPEC_ITEM_OMISSION",
+                    spec_item_id="DATA.001",
+                    message="Missing coverage.",
+                ),
             ),
-        ],
-        compiler_version="3.0.0",
-        prompt_hash="0" * 64,
-    )
-    authority = CompiledSpecAuthority(
-        spec_version_id=spec_version_id,
-        compiler_version="3.0.0",
-        prompt_hash="0" * 64,
-        scope_themes='["core"]',
-        invariants='["FORBIDDEN_CAPABILITY:web"]',
-        eligible_feature_ids="[]",
-        rejected_features="[]",
-        spec_gaps="[]",
-        compiled_artifact_json=SpecAuthorityCompilerOutput(
-            root=success
-        ).model_dump_json(),
-        compiled_at=datetime.now(UTC),
-    )
-    session.add(authority)
-    session.commit()
-    session.refresh(authority)
-    session.add(
-        SpecAuthorityAcceptance(
-            product_id=product_id,
-            spec_version_id=spec_version_id,
-            status="accepted",
-            policy="test",
-            decided_by="tester",
-            compiler_version=authority.compiler_version,
-            prompt_hash=authority.prompt_hash,
-            spec_hash=spec_version.spec_hash,
-            pending_authority_id=authority.authority_id,
-            authority_fingerprint=pending_authority_fingerprint(authority),
+            ready_for_sprint=False,
         )
+
+
+def test_validation_evidence_requires_ordered_codes_and_derived_references() -> None:
+    failures = (
+        StructuralValidationFailure(
+            code="ACCEPTANCE_CRITERIA_INVALID",
+            message="Criteria invalid.",
+        ),
+        StructuralValidationFailure(
+            code="STORY_STATEMENT_INVALID",
+            message="Statement invalid.",
+        ),
     )
-    session.commit()
-
-    return product, spec_version_id
-
-
-def _require_id(value: int | None, label: str) -> int:
-    """Return a non-null integer ID or raise a clear assertion."""
-    assert value is not None, f"{label} unexpectedly None"
-    return value
-
-
-def _load_validation_evidence(story: UserStory) -> dict[str, Any]:
-    """Load persisted validation evidence with a non-null assertion."""
-    evidence_json = story.validation_evidence
-    assert evidence_json is not None, "validation_evidence unexpectedly None"
-    return json.loads(evidence_json)
-
-
-def _create_story(session: Session, product_id: int, title: str) -> UserStory:
-    theme = Theme(product_id=product_id, title="Theme", description="")
-    session.add(theme)
-    session.commit()
-    session.refresh(theme)
-
-    epic = Epic(
-        theme_id=_require_id(theme.theme_id, "theme.theme_id"),
-        title="Epic",
-        summary="",
-    )
-    session.add(epic)
-    session.commit()
-    session.refresh(epic)
-
-    feature = Feature(
-        epic_id=_require_id(epic.epic_id, "epic.epic_id"),
-        title="Feature",
-        description="",
-    )
-    session.add(feature)
-    session.commit()
-    session.refresh(feature)
-
-    story = UserStory(
-        product_id=product_id,
-        feature_id=_require_id(feature.feature_id, "feature.feature_id"),
-        title=title,
-        story_description="As a user, I want a feature.",
-        acceptance_criteria="- AC",
-    )
-    session.add(story)
-    session.commit()
-    session.refresh(story)
-    return story
-
-
-def test_alignment_failure_persisted(
-    engine: Engine,
-    session: Session,
-    product_with_spec: tuple[Product, int],
-) -> None:
-    """Alignment rejection persists alignment_failures in evidence."""
-    spec_tools.engine: Engine = engine
-    product, spec_version_id = product_with_spec
-
-    story: UserStory = _create_story(
-        session,
-        _require_id(product.product_id, "product.product_id"),
-        title="Web dashboard",
-    )
-    result: dict[str, Any] = validate_story_with_spec_authority(
-        {"story_id": story.story_id, "spec_version_id": spec_version_id},
-        tool_context=None,
-    )
-
-    assert result["success"] is True
-    assert result["passed"] is False
-
-    session.refresh(story)
-    evidence: dict[str, Any] = _load_validation_evidence(story)
-    assert evidence["alignment_failures"]
-    assert any(
-        f["code"] == "FORBIDDEN_CAPABILITY" for f in evidence["alignment_failures"]
-    )
-
-
-def test_alignment_warning_persisted(engine: Engine, session: Session) -> None:
-    """Alignment warning persists alignment_warnings in evidence."""
-    spec_tools.engine = engine
-
-    product = Product(name="Warn Product", vision="Test")
-    session.add(product)
-    session.commit()
-    session.refresh(product)
-
-    # Create an approved spec + precompiled authority with zero invariants.
-    reg: dict[str, Any] = register_spec_version(
-        {
-            "product_id": product.product_id,
-            "content": "# Spec\n\n## Notes\n- No requirements here",
-        },
-        tool_context=None,
-    )
-    spec_version_id = reg["spec_version_id"]
-    approve_spec_version(
-        {"spec_version_id": spec_version_id, "approved_by": "tester"}, tool_context=None
-    )
-
-    zero_invariant_artifact = SpecAuthorityCompilationSuccess(
-        scope_themes=["notes-only"],
-        domain=None,
-        invariants=[],
-        eligible_feature_rules=[],
-        gaps=["No invariants extracted from spec"],
-        assumptions=[],
-        source_map=[],
-        compiler_version="3.0.0",
-        prompt_hash="0" * 64,
-    )
-    authority = CompiledSpecAuthority(
-        spec_version_id=spec_version_id,
-        compiler_version="3.0.0",
-        prompt_hash="0" * 64,
-        scope_themes='["notes-only"]',
-        invariants="[]",
-        eligible_feature_ids="[]",
-        rejected_features="[]",
-        spec_gaps='["No invariants extracted from spec"]',
-        compiled_artifact_json=SpecAuthorityCompilerOutput(
-            root=zero_invariant_artifact
-        ).model_dump_json(),
-    )
-    session.add(authority)
-    session.commit()
-    session.refresh(authority)
-    accepted_spec = session.get(SpecRegistry, spec_version_id)
-    assert accepted_spec is not None
-    session.add(
-        SpecAuthorityAcceptance(
-            product_id=_require_id(product.product_id, "product.product_id"),
-            spec_version_id=spec_version_id,
-            status="accepted",
-            policy="test",
-            decided_by="tester",
-            compiler_version=authority.compiler_version,
-            prompt_hash=authority.prompt_hash,
-            spec_hash=accepted_spec.spec_hash,
-            pending_authority_id=authority.authority_id,
-            authority_fingerprint=pending_authority_fingerprint(authority),
-        )
-    )
-    session.commit()
-
-    story: UserStory = _create_story(
-        session,
-        _require_id(product.product_id, "product.product_id"),
-        title="Normal story",
-    )
-    result: dict[str, Any] = validate_story_with_spec_authority(
-        {"story_id": story.story_id, "spec_version_id": spec_version_id},
-        tool_context=None,
-    )
-
-    assert result["success"] is True
-
-    session.refresh(story)
-    evidence: dict[str, Any] = _load_validation_evidence(story)
-    assert evidence["alignment_warnings"]
-    assert any(w["code"] == "NO_INVARIANTS" for w in evidence["alignment_warnings"])
-
-
-def test_alignment_evidence_includes_spec_and_hash(
-    engine: Engine,
-    session: Session,
-    product_with_spec: tuple[Product, int],
-) -> None:
-    """Evidence includes spec_version_id and input_hash without vision access."""
-    spec_tools.engine = engine
-    product, spec_version_id = product_with_spec
-
-    story: UserStory = _create_story(
-        session,
-        _require_id(product.product_id, "product.product_id"),
-        title="Web dashboard",
-    )
-    validate_story_with_spec_authority(
-        {"story_id": story.story_id, "spec_version_id": spec_version_id},
-        tool_context=None,
-    )
-
-    session.refresh(story)
-    evidence: dict[str, Any] = _load_validation_evidence(story)
-    assert evidence["spec_version_id"] == spec_version_id
-    assert evidence["input_hash"]
+    with pytest.raises(ValidationError):
+        _evidence(structural_failures=failures, ready_for_sprint=False)
+    with pytest.raises(ValidationError):
+        _evidence(referenced_spec_item_ids=("DATA.001", "DATA.001"))

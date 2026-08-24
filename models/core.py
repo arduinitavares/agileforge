@@ -1,10 +1,12 @@
-"""Core SQLModel classes extracted from the legacy shim."""
+"""Core SQLModel classes for AgileForge projects and delivery work."""
 
 from datetime import UTC, date, datetime
-from typing import TYPE_CHECKING
+from importlib import import_module
+from types import ModuleType
+from typing import TYPE_CHECKING, ClassVar
 
 from sqlalchemy import func
-from sqlalchemy.schema import CheckConstraint, UniqueConstraint
+from sqlalchemy.schema import CheckConstraint, ForeignKeyConstraint, UniqueConstraint
 from sqlalchemy.types import Date, Text
 from sqlmodel import Field, Relationship, SQLModel
 
@@ -16,7 +18,6 @@ from models.enums import (
     TeamRole,
     TimeFrame,
 )
-from utils.task_metadata import canonical_task_metadata_json
 
 if TYPE_CHECKING:
     from models.specs import SpecRegistry
@@ -31,40 +32,33 @@ class TeamMembership(SQLModel, table=True):
     role: TeamRole = Field(default=TeamRole.DEVELOPER, nullable=False)
 
 
-class ProductTeam(SQLModel, table=True):
-    """Link table for Product <-> Team."""
+class ProjectTeam(SQLModel, table=True):
+    """Link table for Project <-> Team."""
 
-    __tablename__ = "product_teams"  # type: ignore[assignment]
-    product_id: int = Field(foreign_key="products.product_id", primary_key=True)
+    __tablename__: ClassVar[str] = "project_teams"
+    project_id: int = Field(foreign_key="projects.project_id", primary_key=True)
     team_id: int = Field(foreign_key="teams.team_id", primary_key=True)
 
 
-class Product(SQLModel, table=True):
-    """A top-level product container."""
+class Project(SQLModel, table=True):
+    """A top-level AgileForge project."""
 
-    __tablename__ = "products"  # type: ignore[assignment]
-    product_id: int | None = Field(default=None, primary_key=True)
+    __tablename__: ClassVar[str] = "projects"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["active_repository_binding_id"],
+            ["repository_bindings.repository_binding_id"],
+            name="fk_project_active_repository_binding",
+            ondelete="SET NULL",
+            use_alter=True,
+        ),
+    )
+    project_id: int | None = Field(default=None, primary_key=True)
     name: str = Field(index=True, unique=True)
     description: str | None = Field(default=None, sa_type=Text)
-    vision: str | None = Field(default=None, sa_type=Text)
-    roadmap: str | None = Field(default=None, sa_type=Text)
-
-    technical_spec: str | None = Field(
+    active_repository_binding_id: int | None = Field(
         default=None,
-        sa_type=Text,
-    )
-    compiled_authority_json: str | None = Field(
-        default=None,
-        sa_type=Text,
-        description="Latest compiled spec authority JSON artifact (cached)",
-    )
-    spec_file_path: str | None = Field(
-        default=None,
-        description="Path to original spec file or generated backup file",
-    )
-    spec_loaded_at: datetime | None = Field(
-        default=None,
-        description="When the specification was saved to this product",
+        index=True,
     )
 
     created_at: datetime = Field(
@@ -82,13 +76,13 @@ class Product(SQLModel, table=True):
     )
 
     teams: list["Team"] = Relationship(
-        back_populates="products", link_model=ProductTeam
+        back_populates="projects", link_model=ProjectTeam
     )
-    themes: list["Theme"] = Relationship(back_populates="product")
-    stories: list["UserStory"] = Relationship(back_populates="product")
-    sprints: list["Sprint"] = Relationship(back_populates="product")
-    personas: list["ProductPersona"] = Relationship(back_populates="product")
-    spec_versions: list["SpecRegistry"] = Relationship(back_populates="product")
+    themes: list["Theme"] = Relationship(back_populates="project")
+    stories: list["UserStory"] = Relationship(back_populates="project")
+    sprints: list["Sprint"] = Relationship(back_populates="project")
+    personas: list["ProjectPersona"] = Relationship(back_populates="project")
+    spec_versions: list["SpecRegistry"] = Relationship(back_populates="project")
 
 
 class Team(SQLModel, table=True):
@@ -111,8 +105,8 @@ class Team(SQLModel, table=True):
         nullable=False,
     )
 
-    products: list["Product"] = Relationship(
-        back_populates="teams", link_model=ProductTeam
+    projects: list["Project"] = Relationship(
+        back_populates="teams", link_model=ProjectTeam
     )
     members: list["TeamMember"] = Relationship(
         back_populates="teams", link_model=TeamMembership
@@ -186,10 +180,10 @@ class Sprint(SQLModel, table=True):
         nullable=False,
     )
 
-    product_id: int = Field(foreign_key="products.product_id")
+    project_id: int = Field(foreign_key="projects.project_id")
     team_id: int = Field(foreign_key="teams.team_id")
 
-    product: "Product" = Relationship(back_populates="sprints")
+    project: "Project" = Relationship(back_populates="sprints")
     team: "Team" = Relationship(back_populates="sprints")
     stories: list["UserStory"] = Relationship(
         back_populates="sprints", link_model=SprintStory
@@ -200,7 +194,7 @@ class Theme(SQLModel, table=True):
     """A high-level strategic goal."""
 
     __tablename__ = "themes"  # type: ignore[assignment]
-    __table_args__ = (UniqueConstraint("product_id", "title"),)
+    __table_args__ = (UniqueConstraint("project_id", "title"),)
 
     theme_id: int | None = Field(default=None, primary_key=True)
     title: str
@@ -220,9 +214,9 @@ class Theme(SQLModel, table=True):
         nullable=False,
     )
 
-    product_id: int = Field(foreign_key="products.product_id")
+    project_id: int = Field(foreign_key="projects.project_id")
 
-    product: "Product" = Relationship(back_populates="themes")
+    project: "Project" = Relationship(back_populates="themes")
     epics: list["Epic"] = Relationship(back_populates="theme")
 
 
@@ -277,96 +271,73 @@ class Feature(SQLModel, table=True):
     epic_id: int = Field(foreign_key="epics.epic_id")
 
     epic: "Epic" = Relationship(back_populates="features")
-    stories: list["UserStory"] = Relationship(back_populates="feature")
 
 
 class UserStory(SQLModel, table=True):
-    """A single item in the product backlog."""
+    """Operational projection of one accepted immutable Story item."""
 
     __tablename__ = "user_stories"  # type: ignore[assignment]
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id",
+            "source_story_artifact_id",
+            "source_story_item_id",
+            name="uq_user_story_artifact_item",
+        ),
+        ForeignKeyConstraint(
+            ["project_id", "accepted_spec_version_id", "accepted_spec_hash"],
+            [
+                "spec_registry.project_id",
+                "spec_registry.spec_version_id",
+                "spec_registry.spec_hash",
+            ],
+            name="fk_user_story_specification",
+        ),
+        ForeignKeyConstraint(
+            [
+                "project_id",
+                "source_story_artifact_id",
+                "source_story_artifact_fingerprint",
+            ],
+            [
+                "story_artifacts.project_id",
+                "story_artifacts.story_artifact_id",
+                "story_artifacts.content_fingerprint",
+            ],
+            name="fk_user_story_artifact",
+        ),
+    )
+
     story_id: int | None = Field(default=None, primary_key=True)
+    project_id: int = Field(foreign_key="projects.project_id", index=True)
+    source_story_artifact_id: int = Field(index=True)
+    source_story_artifact_fingerprint: str = Field(index=True)
+    source_story_item_id: str = Field(index=True)
+    source_story_item_fingerprint: str = Field(index=True)
+    accepted_spec_version_id: int = Field(index=True)
+    accepted_spec_hash: str = Field(index=True)
+    spec_item_ids_json: str = Field(sa_type=Text)
     title: str
-    story_description: str | None = Field(default=None, sa_type=Text)
-    acceptance_criteria: str | None = Field(default=None, sa_type=Text)
+    story_description: str = Field(sa_type=Text)
+    acceptance_criteria_json: str = Field(sa_type=Text)
+    persona: str = Field(max_length=100, index=True)
     status: StoryStatus = Field(default=StoryStatus.TO_DO, nullable=False)
     story_points: int | None = Field(default=None)
-    rank: str | None = Field(default=None, index=True)  # For ordering
-    source_requirement: str | None = Field(
-        default=None,
-        index=True,
-        description="Normalized parent requirement key for refinement linkage",
-    )
-    refinement_slot: int | None = Field(
-        default=None,
-        index=True,
-        description="1-based deterministic slot inside requirement decomposition",
-    )
-    story_origin: str | None = Field(
-        default=None,
-        description="Origin marker: backlog_seed or refined",
-    )
-    is_refined: bool = Field(
-        default=False,
-        nullable=False,
-        description="True once story has been refined with final AC content",
-    )
+    rank: str | None = Field(default=None, index=True)
     is_superseded: bool = Field(
         default=False,
         nullable=False,
-        description="Soft supersede marker for duplicate legacy rows",
+        description="Accepted replacement exists in the same Story chain.",
     )
-    superseded_by_story_id: int | None = Field(
-        default=None,
-        foreign_key="user_stories.story_id",
-        description="Canonical replacement story when this row is superseded",
-    )
-    archived_reason: str | None = Field(
-        default=None,
-        index=True,
-        description="Archive reason for reset-archived story rows.",
-    )
-    archived_at: datetime | None = Field(default=None)
-    archived_by: str | None = Field(
-        default=None,
-        max_length=100,
-        description="Host-boundary actor that archived this story.",
-    )
-    archive_reset_attempt_id: str | None = Field(
-        default=None,
-        index=True,
-        description="Backlog attempt id that caused active backlog reset archive.",
-    )
-    archive_previous_status: str | None = Field(
-        default=None,
-        description="Story status snapshot at reset archive time.",
-    )
-
-    persona: str | None = Field(
-        default=None,
-        max_length=100,
-        index=True,
-        description="Extracted from 'As a [persona], I want...' format",
-    )
-
     resolution: StoryResolution | None = Field(default=None)
     completion_notes: str | None = Field(default=None, sa_type=Text)
     evidence_links: str | None = Field(default=None, sa_type=Text)
     completed_at: datetime | None = Field(default=None)
-    original_acceptance_criteria: str | None = Field(default=None, sa_type=Text)
-    ac_updated_at: datetime | None = Field(default=None)
-    ac_update_reason: str | None = Field(default=None, sa_type=Text)
-
-    accepted_spec_version_id: int | None = Field(
-        default=None,
-        foreign_key="spec_registry.spec_version_id",
-        description="Spec version this story was validated/accepted against",
-    )
     validation_evidence: str | None = Field(
         default=None,
         sa_type=Text,
-        description="JSON: validation results, rules checked, invariants applied",
+        description="Canonical validation evidence for explicit readiness checks.",
     )
-
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(UTC),
         sa_column_kwargs={"server_default": func.now()},
@@ -381,11 +352,7 @@ class UserStory(SQLModel, table=True):
         nullable=False,
     )
 
-    product_id: int = Field(foreign_key="products.product_id", index=True)
-    feature_id: int | None = Field(default=None, foreign_key="features.feature_id")
-
-    product: "Product" = Relationship(back_populates="stories")
-    feature: Feature | None = Relationship(back_populates="stories")
+    project: "Project" = Relationship(back_populates="stories")
     sprints: list["Sprint"] = Relationship(
         back_populates="stories", link_model=SprintStory
     )
@@ -401,7 +368,7 @@ class UserStoryDependency(SQLModel, table=True):
     __tablename__ = "user_story_dependencies"  # type: ignore[assignment]
     __table_args__ = (
         UniqueConstraint(
-            "product_id",
+            "project_id",
             "dependent_story_id",
             "prerequisite_story_id",
             name="unique_user_story_dependency_edge",
@@ -425,7 +392,7 @@ class UserStoryDependency(SQLModel, table=True):
     )
 
     dependency_id: int | None = Field(default=None, primary_key=True)
-    product_id: int = Field(foreign_key="products.product_id", index=True)
+    project_id: int = Field(foreign_key="projects.project_id", index=True)
     dependent_story_id: int = Field(foreign_key="user_stories.story_id", index=True)
     prerequisite_story_id: int = Field(foreign_key="user_stories.story_id", index=True)
     status: str = Field(default="proposed", index=True, nullable=False)
@@ -453,10 +420,7 @@ class Task(SQLModel, table=True):
     __tablename__ = "tasks"  # type: ignore[assignment]
     task_id: int | None = Field(default=None, primary_key=True)
     description: str = Field(sa_type=Text)
-    metadata_json: str | None = Field(
-        default_factory=canonical_task_metadata_json,
-        sa_type=Text,
-    )
+    metadata_json: str = Field(sa_type=Text)
     status: TaskStatus = Field(default=TaskStatus.TO_DO, nullable=False)
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(UTC),
@@ -481,13 +445,13 @@ class Task(SQLModel, table=True):
     assignee: TeamMember | None = Relationship(back_populates="tasks")
 
 
-class ProductPersona(SQLModel, table=True):
-    """Approved personas for a product."""
+class ProjectPersona(SQLModel, table=True):
+    """Approved personas for a Project."""
 
-    __tablename__ = "product_personas"  # type: ignore[assignment]
+    __tablename__: ClassVar[str] = "project_personas"
 
     persona_id: int | None = Field(default=None, primary_key=True)
-    product_id: int = Field(foreign_key="products.product_id")
+    project_id: int = Field(foreign_key="projects.project_id")
     persona_name: str = Field(max_length=100, nullable=False)
     is_default: bool = Field(default=False)
     category: str = Field(max_length=50, default="primary_user")
@@ -498,13 +462,12 @@ class ProductPersona(SQLModel, table=True):
         nullable=False,
     )
 
-    product: "Product" = Relationship(back_populates="personas")
+    project: "Project" = Relationship(back_populates="personas")
 
     __table_args__ = (
-        UniqueConstraint("product_id", "persona_name", name="unique_product_persona"),
+        UniqueConstraint("project_id", "persona_name", name="unique_project_persona"),
     )
 
 
-# Import the compatibility shim after defining core models so direct
-# `import models.core` remains safe and legacy re-exports stay wired up.
-import agile_sqlmodel  # noqa: E402,F401  pylint: disable=wrong-import-position,unused-import
+_PRODUCT_DEFINITION_MODELS: ModuleType = import_module("models.product_definition")
+_SPEC_MODELS: ModuleType = import_module("models.specs")

@@ -5,11 +5,23 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from models.enums import StoryResolution, TaskAcceptanceResult, TaskStatus
 
 _DATETIME_TYPE = datetime
+
+
+class WorkflowPositionGuards(BaseModel):
+    """Exact graph position guards shared by API mutation payloads."""
+
+    model_config = ConfigDict(extra="forbid")
+    graph_version: str = Field(min_length=1)
+    expected_fact_fingerprint: str = Field(min_length=1)
+    expected_decision_fingerprint: str = Field(min_length=1)
+    idempotency_key: str = Field(min_length=1, max_length=200)
+    changed_by: str = Field(min_length=1, max_length=200)
+    correlation_id: str | None = Field(default=None, min_length=1)
 
 
 class _TaskExecutionDetailsRequiredError(ValueError):

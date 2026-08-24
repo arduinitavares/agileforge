@@ -15,7 +15,7 @@ from services.task_execution_service import (
 def test_get_task_execution_history_skips_logs_without_primary_key() -> None:
     """Verify get task execution history skips logs without primary key."""
     task = SimpleNamespace(task_id=7, story_id=11, status=TaskStatus.TO_DO)
-    sprint = SimpleNamespace(sprint_id=3, product_id=2)
+    sprint = SimpleNamespace(sprint_id=3, project_id=2)
     sprint_story = SimpleNamespace(sprint_id=3, story_id=11)
     malformed_log = SimpleNamespace(
         log_id=None,
@@ -49,7 +49,7 @@ def test_get_task_execution_history_skips_logs_without_primary_key() -> None:
 def test_get_task_execution_history_rejects_cross_project_sprint() -> None:
     """Verify get task execution history rejects cross project sprint."""
     task = SimpleNamespace(task_id=7, story_id=11, status=TaskStatus.TO_DO)
-    sprint = SimpleNamespace(sprint_id=3, product_id=99)
+    sprint = SimpleNamespace(sprint_id=3, project_id=99)
 
     with pytest.raises(TaskExecutionServiceError) as exc_info:
         get_task_execution_history(
@@ -74,7 +74,7 @@ def test_record_task_execution_rejects_non_executable_tasks() -> None:
         status=TaskStatus.TO_DO,
         metadata_json='{"checklist_items":[]}',
     )
-    sprint = SimpleNamespace(sprint_id=3, product_id=2)
+    sprint = SimpleNamespace(sprint_id=3, project_id=2)
     sprint_story = SimpleNamespace(sprint_id=3, story_id=11)
 
     with pytest.raises(TaskExecutionServiceError) as exc_info:
@@ -108,7 +108,7 @@ def test_record_task_execution_normalizes_artifact_refs_and_returns_history() ->
         status=TaskStatus.TO_DO,
         metadata_json='{"checklist_items":["step"]}',
     )
-    sprint = SimpleNamespace(sprint_id=3, product_id=2)
+    sprint = SimpleNamespace(sprint_id=3, project_id=2)
     sprint_story = SimpleNamespace(sprint_id=3, story_id=11)
     persisted: dict[str, object] = {}
 

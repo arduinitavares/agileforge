@@ -2,25 +2,13 @@
 """Database tools for agent persistence."""
 
 from tools.db_tools import (
-    create_or_get_product,
-    create_task,
-    create_user_story,
+    create_or_get_project,
     persist_roadmap,
-    query_product_structure,
-)
-from tools.spec_tools import (
-    link_spec_to_product,
-    read_project_specification,
-    save_project_specification,
+    query_project_structure,
 )
 
 __all__ = [
-    "create_or_get_product",
-    "create_task",
-    "create_user_story",
-    "link_spec_to_product",
+    "create_or_get_project",
     "persist_roadmap",
-    "query_product_structure",
-    "read_project_specification",
-    "save_project_specification",
+    "query_project_structure",
 ]

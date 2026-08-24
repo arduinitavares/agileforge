@@ -9,19 +9,20 @@ from typing import Self
 
 from pydantic import ValidationError
 
-from utils.agileforge_spec_profile import (
-    TechnicalSpecArtifact,
+from utils.agileforge_spec_profile_v2 import (
+    SCHEMA_VERSION,
+    SpecificationPayload,
     canonical_spec_hash,
     canonical_spec_json,
 )
 
-STRUCTURED_SPEC_FORMAT: str = "agileforge.spec.v1"
-UNSUPPORTED_SPEC_SOURCE_FORMAT: str = "SPEC_SOURCE_FORMAT_UNSUPPORTED"
-INVALID_SPEC_FILE: str = "SPEC_FILE_INVALID"
+STRUCTURED_SPEC_FORMAT: str = SCHEMA_VERSION
+UNSUPPORTED_SPECIFICATION_SCHEMA: str = "UNSUPPORTED_SPECIFICATION_SCHEMA"
+INVALID_SPECIFICATION_PAYLOAD: str = "INVALID_SPECIFICATION_PAYLOAD"
 
 
 class SpecContentNormalizationError(ValueError):
-    """Raised when spec content cannot be normalized for authority compilation."""
+    """Raised when spec content cannot be normalized for registry storage."""
 
     def __init__(self, message: str, *, error_code: str) -> None:
         """Store the normalization error message and stable error code."""
@@ -31,20 +32,20 @@ class SpecContentNormalizationError(ValueError):
     @classmethod
     def non_json(cls) -> Self:
         """Build the canonical unsupported non-JSON source error."""
-        message = "Expected agileforge.spec.v1 JSON; received non-JSON spec content."
-        return cls(message, error_code=UNSUPPORTED_SPEC_SOURCE_FORMAT)
+        message = "Expected agileforge.spec.v2 JSON; received non-JSON content."
+        return cls(message, error_code=UNSUPPORTED_SPECIFICATION_SCHEMA)
 
     @classmethod
     def non_object(cls) -> Self:
         """Build the canonical unsupported JSON value error."""
-        message = "Expected agileforge.spec.v1 JSON object."
-        return cls(message, error_code=UNSUPPORTED_SPEC_SOURCE_FORMAT)
+        message = "Expected agileforge.spec.v2 JSON object."
+        return cls(message, error_code=UNSUPPORTED_SPECIFICATION_SCHEMA)
 
     @classmethod
     def unsupported_schema_version(cls) -> Self:
         """Build the canonical unsupported schema-version error."""
-        message = "Expected schema_version='agileforge.spec.v1'."
-        return cls(message, error_code=UNSUPPORTED_SPEC_SOURCE_FORMAT)
+        message = "Expected schema_version='agileforge.spec.v2'."
+        return cls(message, error_code=UNSUPPORTED_SPECIFICATION_SCHEMA)
 
 
 @dataclass(frozen=True)
@@ -57,7 +58,7 @@ class NormalizedSpecContent:
 
 
 def normalize_spec_content_for_registry(raw_content: str) -> NormalizedSpecContent:
-    """Canonicalize agileforge.spec.v1 JSON and reject every other format."""
+    """Canonicalize agileforge.spec.v2 JSON and reject every other format."""
     try:
         parsed = json.loads(raw_content)
     except json.JSONDecodeError as exc:
@@ -69,12 +70,12 @@ def normalize_spec_content_for_registry(raw_content: str) -> NormalizedSpecConte
         raise SpecContentNormalizationError.unsupported_schema_version()
 
     try:
-        artifact = TechnicalSpecArtifact.model_validate(parsed)
+        artifact = SpecificationPayload.model_validate(parsed)
     except ValidationError as exc:
-        message = f"Invalid agileforge.spec.v1 content: {exc}"
+        message = f"Invalid agileforge.spec.v2 content: {exc}"
         raise SpecContentNormalizationError(
             message,
-            error_code=INVALID_SPEC_FILE,
+            error_code=INVALID_SPECIFICATION_PAYLOAD,
         ) from exc
     return NormalizedSpecContent(
         content=canonical_spec_json(artifact),

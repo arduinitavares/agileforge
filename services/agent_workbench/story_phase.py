@@ -1,1970 +1,898 @@
-"""Agent workbench Story phase command runner."""
+"""Immutable Story artifact persistence and accepted-item activation."""
 
 from __future__ import annotations
 
-import json
-import logging
-from datetime import UTC, datetime
-from itertools import pairwise
-from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, Protocol, cast
-from uuid import uuid4
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, cast
 
-import anyio
-from sqlalchemy.exc import SQLAlchemyError
-from sqlmodel import Session, select
+from sqlmodel import Session, col, select
 
-from models.core import Sprint, SprintStory, Task, UserStory, UserStoryDependency
-from models.db import get_engine
-from models.enums import StoryStatus, TaskStatus, WorkflowEventType
-from models.events import WorkflowEvent
-from orchestrator_agent.agent_tools.story_linkage import normalize_requirement_key
-from orchestrator_agent.agent_tools.user_story_writer_tool.tools import (
-    evaluate_dependency_candidates,
-    save_stories_tool,
-    save_story_patch_tool,
+from models.core import Sprint, SprintStory, UserStory
+from models.enums import StoryStatus
+from models.workflow import (
+    BacklogArtifact,
+    RoadmapArtifact,
+    StoryArtifact,
+    StoryArtifactDecision,
 )
-from orchestrator_agent.fsm.states import OrchestratorState
-from repositories.product import ProductRepository
-from services.agent_workbench.error_codes import ErrorCode, workbench_error
-from services.agent_workbench.execution_guard import AcceptedAuthorityExecutionGuard
-from services.agent_workbench.fingerprints import canonical_hash
-from services.interview_runtime import (
-    append_attempt,
-    append_feedback_entry,
-    mark_feedback_absorbed,
-    promote_reusable_draft,
-    reset_subject_working_set,
-    set_request_projection,
+from services.agent_workbench.backlog_phase import _require_current_root
+from services.agent_workbench.roadmap_phase import (
+    _current_accepted_backlog,
+    _roadmap_lineage_nodes,
 )
-from services.orchestrator_query_service import (
-    query_requirement_stories_and_eligibility,
+from services.contracts.specification_references import (
+    AcceptedSpecificationReference,
 )
-from services.phases.sprint_service import reset_sprint_planner_working_set
-from services.phases.story_service import (
-    STORY_IDEMPOTENCY_REUSED_MESSAGE,
-    StoryPhaseError,
-    complete_story_phase,
-    generate_story_draft,
-    get_story_history,
-    get_story_pending,
-    reconcile_requirement,
-    reopen_story_requirement,
-    repair_story_completion_scope,
-    repair_story_readiness,
-    requirement_reconciliation_payload_identity,
-    requirement_reconciliation_request_identity,
-    retry_story_draft,
-    save_story_draft,
-    save_story_patch,
+from services.contracts.story import (
+    CanonicalStoryOutput,
+    StoryItemEnvelope,
+    UserStoryAgentItem,
+    canonicalize_story_items,
 )
-from services.story_dependencies import (
-    dependency_inspect_payload,
-    load_story_dependency_graph,
+from services.planning_artifact_content import (
+    load_stored_backlog_planning_content,
+    load_stored_planning_artifact_content,
+    load_stored_roadmap_planning_content,
+    validate_canonical_planning_content,
 )
-from services.story_runtime import (
-    run_story_agent_from_state,
-    run_story_agent_request,
+from services.planning_lineage import (
+    ArtifactLineageNode,
+    PlanningLineageError,
+    accepted_ancestor_ids,
+    next_artifact_version,
+    select_current_accepted_artifact,
 )
-from services.workflow import WorkflowService
-from tools.orchestrator_tools import select_project
+from services.story_rank import parse_story_rank
+from workflow.fingerprints import canonical_hash, canonical_json
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from datetime import datetime
 
-    from google.adk.tools import ToolContext
+    from services.contracts.backlog import BacklogItem
+    from services.planning_lineage import Decision
+    from services.specs.accepted_specification import AcceptedSpecification
+    from workflow.contracts import JsonObject
 
-    from models.core import Product
-else:
-    ToolContext = Any
 
-_DEPENDENCY_REVIEW_STATES = {
-    "STORY_PERSISTENCE",
-    "SPRINT_SETUP",
-    "SPRINT_DRAFT",
-    "SPRINT_VIEW",
-}
-_DEPENDENCY_ATTEMPTS_KEY = "story_dependency_attempts"
-_DEPENDENCY_PROPOSE_IDEMPOTENCY_KEY = "story_dependency_propose_idempotency_keys"
-_DEPENDENCY_APPLY_IDEMPOTENCY_KEY = "story_dependency_apply_idempotency_keys"
-_MAX_DEPENDENCY_ATTEMPTS = 20
-_MANUAL_EDGE_PART_COUNT = 2
-_RECONCILE_TERMINAL_ACTIONS = {"archive", "defer", "rewrite-needed", "supersede"}
-_RECONCILE_ACTIONS = {"keep", *_RECONCILE_TERMINAL_ACTIONS}
-logger: logging.Logger = logging.getLogger(name=__name__)
+_STORY_POINTS = {"XS": 1, "S": 2, "M": 3, "L": 5, "XL": 8}
 
 
-class _ManualDependencyEdgeError(RuntimeError):
-    """Manual dependency edge validation error safe to expose in CLI JSON."""
+@dataclass(frozen=True)
+class RecordStoryDraftInput:
+    """Exact immutable values used to record one complete Story draft."""
 
-    def __init__(self, message: str, *, details: dict[str, Any]) -> None:
-        super().__init__(message)
-        self.details = details
+    project_id: int
+    source_backlog_artifact_id: int
+    source_backlog_artifact_fingerprint: str
+    backlog_item_id: str
+    roadmap_artifact_id: int
+    roadmap_artifact_fingerprint: str
+    canonical_content: JsonObject
+    content_fingerprint: str
+    supersedes_story_artifact_id: int | None
+    actor: str
+    recorded_at: datetime
 
 
-class _ProductRepositoryLike(Protocol):
-    def get_by_id(self, product_id: int) -> object: ...
+@dataclass(frozen=True)
+class RecordStoryDecisionInput:
+    """Exact append-only values used to decide one complete Story draft."""
 
+    artifact: StoryArtifact
+    decision: str
+    rationale: str
+    reviewer: str
+    idempotency_key: str
+    decided_at: datetime
 
-class _WorkflowServiceLike(Protocol):
-    def get_session_status(self, session_id: str) -> dict[str, Any]: ...
-    async def initialize_session(self, *, session_id: str) -> object: ...
-    def update_session_status(
-        self,
-        session_id: str,
-        partial_update: dict[str, Any],
-    ) -> None: ...
 
+@dataclass(frozen=True)
+class RecordStoryDecisionResult:
+    """Terminal decision plus the stable operational rows it activated."""
 
-def _load_requirement_stories_metadata(project_id: int) -> dict[str, Any]:
-    with Session(get_engine()) as session:
-        return query_requirement_stories_and_eligibility(session, project_id)
+    decision: StoryArtifactDecision
+    activated_story_ids: tuple[int, ...]
 
 
-class StoryPhaseRunner:
-    """Run Story phase commands through the same service boundary as the API."""
+@dataclass(frozen=True)
+class _StoryParentContext:
+    """Strict current parent rows and content for one Story chain."""
 
-    def __init__(
-        self,
-        *,
-        product_repo: ProductRepository | _ProductRepositoryLike | None = None,
-        workflow_service: WorkflowService | _WorkflowServiceLike | None = None,
-        load_stories_metadata: Callable[[int], dict[str, Any] | None] | None = None,
-    ) -> None:
-        """Initialize repositories for CLI Story commands."""
-        self._product_repo = product_repo or ProductRepository()
-        self._workflow_service = workflow_service or WorkflowService()
-        self._load_stories_metadata = (
-            load_stories_metadata or _load_requirement_stories_metadata
-        )
+    backlog: BacklogArtifact
+    backlog_item: BacklogItem
+    roadmap: RoadmapArtifact
+    specification: AcceptedSpecification
 
-    def pending(self, *, project_id: int) -> dict[str, Any]:
-        """Return roadmap requirements grouped by Story completion status."""
-        return anyio.run(self._pending, project_id)
 
-    def generate(  # noqa: PLR0913
-        self,
-        *,
-        project_id: int,
-        parent_requirement: str,
-        user_input: str | None = None,
-        force_feedback: bool = False,
-        target_story_id: int | None = None,
-        target_refinement_slot: int | None = None,
-    ) -> dict[str, Any]:
-        """Generate or refine a Story draft."""
-        return anyio.run(
-            self._generate,
-            project_id,
-            parent_requirement,
-            user_input,
-            force_feedback,
-            target_story_id,
-            target_refinement_slot,
-        )
+@dataclass(frozen=True)
+class StoryCorrectionTarget:
+    """Exact accepted operational row and immutable artifact item it projects."""
 
-    def retry(self, *, project_id: int, parent_requirement: str) -> dict[str, Any]:
-        """Retry the latest retryable Story request."""
-        return anyio.run(self._retry, project_id, parent_requirement)
+    story: UserStory
+    artifact: StoryArtifact
+    content: CanonicalStoryOutput
+    item: StoryItemEnvelope
 
-    def history(
-        self,
-        *,
-        project_id: int,
-        parent_requirement: str,
-    ) -> dict[str, Any]:
-        """Return Story draft attempt history for a roadmap requirement."""
-        return anyio.run(self._history, project_id, parent_requirement)
 
-    def save(  # noqa: PLR0913
-        self,
-        *,
-        project_id: int,
-        parent_requirement: str,
-        attempt_id: str,
-        expected_artifact_fingerprint: str,
-        expected_state: str,
-        idempotency_key: str,
-    ) -> dict[str, Any]:
-        """Persist the current complete Story draft."""
-        return anyio.run(
-            self._save,
-            project_id,
-            parent_requirement,
-            attempt_id,
-            expected_artifact_fingerprint,
-            expected_state,
-            idempotency_key,
-        )
+def _required_id(value: int | None, *, label: str) -> int:
+    if value is None:
+        message = f"{label} has no durable identity."
+        raise ValueError(message)
+    return value
 
-    def save_patch(  # noqa: PLR0913
-        self,
-        *,
-        project_id: int,
-        parent_requirement: str,
-        attempt_id: str,
-        expected_artifact_fingerprint: str,
-        expected_state: str,
-        idempotency_key: str,
-        target_story_id: int | None = None,
-        target_refinement_slot: int | None = None,
-    ) -> dict[str, Any]:
-        """Persist one targeted Story draft item."""
-        return anyio.run(
-            self._save_patch,
-            project_id,
-            parent_requirement,
-            attempt_id,
-            expected_artifact_fingerprint,
-            expected_state,
-            idempotency_key,
-            target_story_id,
-            target_refinement_slot,
-        )
 
-    def complete(  # noqa: PLR0913
-        self,
-        *,
-        project_id: int,
-        expected_state: str,
-        idempotency_key: str,
-        scope: str | None = None,
-        scope_id: str | None = None,
-        parent_requirements: list[str] | None = None,
-    ) -> dict[str, Any]:
-        """Complete the Story phase after all roadmap requirements are covered."""
-        return anyio.run(
-            self._complete,
-            project_id,
-            expected_state,
-            idempotency_key,
-            scope,
-            scope_id,
-            parent_requirements,
-        )
-
-    def reopen(
-        self,
-        *,
-        project_id: int,
-        parent_requirement: str,
-        expected_state: str,
-        idempotency_key: str,
-    ) -> dict[str, Any]:
-        """Reopen one saved Story requirement before Sprint work exists."""
-        return anyio.run(
-            self._reopen,
-            project_id,
-            parent_requirement,
-            expected_state,
-            idempotency_key,
-        )
-
-    def reconcile(  # noqa: PLR0913
-        self,
-        *,
-        project_id: int,
-        story_id: int,
-        action: str,
-        reason: str,
-        idempotency_key: str,
-        changed_by: str = "cli-agent",
-        evidence_links: list[str] | None = None,
-        superseded_by_story_id: int | None = None,
-    ) -> dict[str, Any]:
-        """Record a brownfield/open-story reconciliation decision."""
-        return anyio.run(
-            self._reconcile,
-            project_id,
-            story_id,
-            action,
-            reason,
-            idempotency_key,
-            changed_by,
-            evidence_links,
-            superseded_by_story_id,
-        )
-
-    def requirement_reconcile(  # noqa: PLR0913
-        self,
-        *,
-        project_id: int,
-        requirement: str,
-        action: str,
-        reason: str,
-        idempotency_key: str,
-        changed_by: str = "cli-agent",
-        evidence_links: list[str] | None = None,
-    ) -> dict[str, Any]:
-        """Record a roadmap requirement reconciliation decision."""
-        return anyio.run(
-            self._requirement_reconcile,
-            project_id,
-            requirement,
-            action,
-            reason,
-            idempotency_key,
-            changed_by,
-            evidence_links,
-        )
-
-    def repair_readiness(
-        self,
-        *,
-        project_id: int,
-        expected_state: str,
-        idempotency_key: str,
-    ) -> dict[str, Any]:
-        """Backfill Story planning metadata before Sprint work starts."""
-        return anyio.run(
-            self._repair_readiness,
-            project_id,
-            expected_state,
-            idempotency_key,
-        )
-
-    def repair_completion_scope(
-        self,
-        *,
-        project_id: int,
-        expected_state: str,
-        expected_scope_id: str,
-        idempotency_key: str,
-    ) -> dict[str, Any]:
-        """Clear stale Story completion scope before Sprint planning."""
-        return anyio.run(
-            self._repair_completion_scope,
-            project_id,
-            expected_state,
-            expected_scope_id,
-            idempotency_key,
-        )
-
-    def dependency_inspect(self, *, project_id: int) -> dict[str, Any]:
-        """Inspect active/proposed Story dependency edges."""
-        return anyio.run(self._dependency_inspect, project_id)
-
-    def dependency_propose(
-        self,
-        *,
-        project_id: int,
-        expected_state: str,
-        idempotency_key: str,
-        manual_edges: list[str] | None = None,
-    ) -> dict[str, Any]:
-        """Create a reviewed dependency proposal attempt."""
-        return anyio.run(
-            self._dependency_propose,
-            project_id,
-            expected_state,
-            idempotency_key,
-            manual_edges,
-        )
-
-    def dependency_apply(
-        self,
-        *,
-        project_id: int,
-        attempt_id: str,
-        expected_artifact_fingerprint: str,
-        expected_state: str,
-        idempotency_key: str,
-    ) -> dict[str, Any]:
-        """Apply an exact reviewed dependency proposal attempt."""
-        return anyio.run(
-            self._dependency_apply,
-            project_id,
-            attempt_id,
-            expected_artifact_fingerprint,
-            expected_state,
-            idempotency_key,
-        )
-
-    async def _pending(self, project_id: int) -> dict[str, Any]:
-        product = self._load_project(project_id)
-        if isinstance(product, dict):
-            return product
-
-        try:
-            stories_metadata = self._load_stories_metadata(project_id)
-        except SQLAlchemyError:
-            logger.exception(
-                "Failed to enrich story pending payload for project %s", project_id
-            )
-            stories_metadata = None
-
-        try:
-            data = await get_story_pending(
-                load_state=lambda: self._load_story_state(
-                    str(project_id), project_id, product
-                ),
-                stories_metadata=stories_metadata,
-            )
-        except StoryPhaseError as exc:
-            return _phase_error(exc)
-        except RuntimeError as exc:
-            return _workflow_error(exc)
-        return _data_envelope(data)
-
-    async def _generate(  # noqa: PLR0911, PLR0913
-        self,
-        project_id: int,
-        parent_requirement: str,
-        user_input: str | None,
-        force_feedback: bool,
-        target_story_id: int | None,
-        target_refinement_slot: int | None,
-    ) -> dict[str, Any]:
-        product = self._load_project(project_id)
-        if isinstance(product, dict):
-            return product
-        authority_error = self._accepted_authority_error(project_id)
-        if authority_error is not None:
-            return authority_error
-
-        if target_story_id is not None and target_refinement_slot is None:
-            target_refinement_slot = _resolve_target_refinement_slot(
-                project_id,
-                parent_requirement,
-                target_story_id,
-            )
-            if target_refinement_slot is None:
-                msg = (
-                    "story generate target does not belong to the requested requirement"
-                )
-                return _phase_error(StoryPhaseError(msg, status_code=409))
-            target_story_id = None
-
-        try:
-            data = await generate_story_draft(
-                project_id=project_id,
-                parent_requirement=parent_requirement,
-                user_input=user_input,
-                force_feedback=force_feedback,
-                target_story_id=target_story_id,
-                target_refinement_slot=target_refinement_slot,
-                load_state=lambda: self._load_story_state(
-                    str(project_id), project_id, product
-                ),
-                save_state=lambda state: self._save_session_state(
-                    str(project_id), state
-                ),
-                now_iso=_now_iso,
-                run_story_agent_from_state=run_story_agent_from_state,
-                dependency_preflight=evaluate_dependency_candidates,
-                append_feedback_entry=append_feedback_entry,
-                set_request_projection=set_request_projection,
-                append_attempt=append_attempt,
-                promote_reusable_draft=promote_reusable_draft,
-                mark_feedback_absorbed=mark_feedback_absorbed,
-                failure_meta=_failure_meta,
-            )
-        except StoryPhaseError as exc:
-            return _phase_error(exc)
-        except RuntimeError as exc:
-            return _workflow_error(exc)
-        if _story_runtime_failed(data):
-            return _story_runtime_error(
-                project_id=project_id,
-                parent_requirement=parent_requirement,
-                data=data,
-                state=self._workflow_service.get_session_status(str(project_id)) or {},
-            )
-        return _data_envelope(data)
-
-    async def _retry(
-        self,
-        project_id: int,
-        parent_requirement: str,
-    ) -> dict[str, Any]:
-        product = self._load_project(project_id)
-        if isinstance(product, dict):
-            return product
-
-        try:
-            data = await retry_story_draft(
-                project_id=project_id,
-                parent_requirement=parent_requirement,
-                load_state=lambda: self._load_story_state(
-                    str(project_id), project_id, product
-                ),
-                save_state=lambda state: self._save_session_state(
-                    str(project_id), state
-                ),
-                now_iso=_now_iso,
-                run_story_agent_request=run_story_agent_request,
-                append_attempt=append_attempt,
-                promote_reusable_draft=promote_reusable_draft,
-                mark_feedback_absorbed=mark_feedback_absorbed,
-                failure_meta=_failure_meta,
-            )
-        except StoryPhaseError as exc:
-            return _phase_error(exc)
-        except RuntimeError as exc:
-            return _workflow_error(exc)
-        if _story_runtime_failed(data):
-            return _story_runtime_error(
-                project_id=project_id,
-                parent_requirement=parent_requirement,
-                data=data,
-                state=self._workflow_service.get_session_status(str(project_id)) or {},
-            )
-        return _data_envelope(data)
-
-    async def _history(
-        self,
-        project_id: int,
-        parent_requirement: str,
-    ) -> dict[str, Any]:
-        product = self._load_project(project_id)
-        if isinstance(product, dict):
-            return product
-
-        try:
-            data = await get_story_history(
-                parent_requirement=parent_requirement,
-                load_state=lambda: self._load_story_state(
-                    str(project_id), project_id, product
-                ),
-            )
-        except StoryPhaseError as exc:
-            return _phase_error(exc)
-        except RuntimeError as exc:
-            return _workflow_error(exc)
-        return _data_envelope(data)
-
-    async def _save(  # noqa: PLR0913
-        self,
-        project_id: int,
-        parent_requirement: str,
-        attempt_id: str,
-        expected_artifact_fingerprint: str,
-        expected_state: str,
-        idempotency_key: str,
-    ) -> dict[str, Any]:
-        product = self._load_project(project_id)
-        if isinstance(product, dict):
-            return product
-
-        initial_fsm_state: str | None = None
-
-        async def load_state() -> dict[str, Any]:
-            nonlocal initial_fsm_state
-            state = await self._load_story_state(str(project_id), project_id, product)
-            initial_fsm_state = (
-                str(state["fsm_state"]) if state.get("fsm_state") is not None else None
-            )
-            return state
-
-        try:
-            data = await save_story_draft(
-                project_id=project_id,
-                parent_requirement=parent_requirement,
-                attempt_id=attempt_id,
-                expected_artifact_fingerprint=expected_artifact_fingerprint,
-                expected_state=expected_state,
-                idempotency_key=idempotency_key,
-                load_state=load_state,
-                save_state=lambda state: self._save_story_mutation_state(
-                    str(project_id),
-                    state,
-                    reason="story_saved",
-                    initial_fsm_state=initial_fsm_state,
-                ),
-                hydrate_context=lambda session_id, hydrated_project_id: (
-                    self._hydrate_context(session_id, hydrated_project_id, product)
-                ),
-                build_tool_context=_build_tool_context,
-                save_stories_tool=save_stories_tool,
-            )
-        except StoryPhaseError as exc:
-            return _phase_error(exc)
-        except RuntimeError as exc:
-            return _workflow_error(exc)
-        return _data_envelope(data)
-
-    async def _save_patch(  # noqa: PLR0913
-        self,
-        project_id: int,
-        parent_requirement: str,
-        attempt_id: str,
-        expected_artifact_fingerprint: str,
-        expected_state: str,
-        idempotency_key: str,
-        target_story_id: int | None,
-        target_refinement_slot: int | None,
-    ) -> dict[str, Any]:
-        product = self._load_project(project_id)
-        if isinstance(product, dict):
-            return product
-
-        initial_fsm_state: str | None = None
-
-        async def load_state() -> dict[str, Any]:
-            nonlocal initial_fsm_state
-            state = await self._load_story_state(str(project_id), project_id, product)
-            initial_fsm_state = (
-                str(state["fsm_state"]) if state.get("fsm_state") is not None else None
-            )
-            return state
-
-        try:
-            data = await save_story_patch(
-                project_id=project_id,
-                parent_requirement=parent_requirement,
-                attempt_id=attempt_id,
-                expected_artifact_fingerprint=expected_artifact_fingerprint,
-                expected_state=expected_state,
-                idempotency_key=idempotency_key,
-                target_story_id=target_story_id,
-                target_refinement_slot=target_refinement_slot,
-                load_state=load_state,
-                save_state=lambda state: self._save_story_mutation_state(
-                    str(project_id),
-                    state,
-                    reason="story_patch_saved",
-                    initial_fsm_state=initial_fsm_state,
-                ),
-                hydrate_context=lambda session_id, hydrated_project_id: (
-                    self._hydrate_context(session_id, hydrated_project_id, product)
-                ),
-                build_tool_context=_build_tool_context,
-                save_story_patch_tool=save_story_patch_tool,
-                resolve_target_refinement_slot=_resolve_target_refinement_slot,
-            )
-        except StoryPhaseError as exc:
-            return _phase_error(exc)
-        except RuntimeError as exc:
-            return _workflow_error(exc)
-        return _data_envelope(data)
-
-    async def _complete(  # noqa: PLR0913
-        self,
-        project_id: int,
-        expected_state: str,
-        idempotency_key: str,
-        scope: str | None,
-        scope_id: str | None,
-        parent_requirements: list[str] | None,
-    ) -> dict[str, Any]:
-        product = self._load_project(project_id)
-        if isinstance(product, dict):
-            return product
-
-        try:
-            data = await complete_story_phase(
-                expected_state=expected_state,
-                idempotency_key=idempotency_key,
-                scope=scope,
-                scope_id=scope_id,
-                parent_requirements=parent_requirements,
-                load_state=lambda: self._load_story_state(
-                    str(project_id), project_id, product
-                ),
-                save_state=lambda state: self._save_session_state(
-                    str(project_id), state
-                ),
-                now_iso=_now_iso,
-            )
-        except StoryPhaseError as exc:
-            return _phase_error(exc)
-        except RuntimeError as exc:
-            return _workflow_error(exc)
-        return _data_envelope(data)
-
-    async def _reopen(
-        self,
-        project_id: int,
-        parent_requirement: str,
-        expected_state: str,
-        idempotency_key: str,
-    ) -> dict[str, Any]:
-        product = self._load_project(project_id)
-        if isinstance(product, dict):
-            return product
-
-        initial_fsm_state: str | None = None
-
-        async def load_state() -> dict[str, Any]:
-            nonlocal initial_fsm_state
-            state = await self._load_story_state(str(project_id), project_id, product)
-            initial_fsm_state = (
-                str(state["fsm_state"]) if state.get("fsm_state") is not None else None
-            )
-            return state
-
-        try:
-            data = await reopen_story_requirement(
-                parent_requirement=parent_requirement,
-                expected_state=expected_state,
-                idempotency_key=idempotency_key,
-                load_state=load_state,
-                save_state=lambda state: self._save_story_mutation_state(
-                    str(project_id),
-                    state,
-                    reason="story_reopened",
-                    initial_fsm_state=initial_fsm_state,
-                ),
-                now_iso=_now_iso,
-                assert_reopen_safe=lambda normalized_requirement: _assert_reopen_safe(
-                    project_id=project_id,
-                    normalized_requirement=normalized_requirement,
-                ),
-                reset_subject_working_set=reset_subject_working_set,
-            )
-        except StoryPhaseError as exc:
-            return _phase_error(exc)
-        except RuntimeError as exc:
-            return _workflow_error(exc)
-        return _data_envelope(data)
-
-    async def _requirement_reconcile(  # noqa: PLR0913
-        self,
-        project_id: int,
-        requirement: str,
-        action: str,
-        reason: str,
-        idempotency_key: str,
-        changed_by: str,
-        evidence_links: list[str] | None,
-    ) -> dict[str, Any]:
-        product = self._load_project(project_id)
-        if isinstance(product, dict):
-            return product
-
-        try:
-            request_identity = requirement_reconciliation_request_identity(
-                requirement=requirement,
-                action=action,
-                reason=reason,
-                changed_by=changed_by,
-                evidence_links=evidence_links,
-            )
-            with Session(get_engine()) as session:
-                replay = _requirement_reconcile_replay(
-                    session,
-                    project_id=project_id,
-                    idempotency_key=idempotency_key,
-                    request_identity=request_identity,
-                )
-                if replay is not None:
-                    return _data_envelope(replay)
-
-            payload = await reconcile_requirement(
-                project_id=project_id,
-                requirement=requirement,
-                action=action,
-                reason=reason,
-                idempotency_key=idempotency_key,
-                changed_by=changed_by,
-                evidence_links=evidence_links,
-                load_state=lambda: self._load_story_state(
-                    str(project_id), project_id, product
-                ),
-                save_state=lambda state: self._save_session_state(
-                    str(project_id), state
-                ),
-                now_iso=_now_iso,
-            )
-            with Session(get_engine()) as session:
-                session.add(
-                    WorkflowEvent(
-                        event_type=WorkflowEventType.STORIES_SAVED,
-                        product_id=project_id,
-                        session_id=str(project_id),
-                        event_metadata=json.dumps(
-                            {
-                                "action": "requirement_reconcile",
-                                "idempotency_key": idempotency_key,
-                                "result": payload,
-                            }
-                        ),
-                    )
-                )
-                session.commit()
-        except StoryPhaseError as exc:
-            return _phase_error(exc)
-        except RuntimeError as exc:
-            return _workflow_error(exc)
-        return _data_envelope(payload)
-
-    async def _reconcile(  # noqa: C901, PLR0911, PLR0913
-        self,
-        project_id: int,
-        story_id: int,
-        action: str,
-        reason: str,
-        idempotency_key: str,
-        changed_by: str,
-        evidence_links: list[str] | None,
-        superseded_by_story_id: int | None,
-    ) -> dict[str, Any]:
-        product = self._load_project(project_id)
-        if isinstance(product, dict):
-            return product
-
-        normalized_action = action.strip().lower()
-        normalized_reason = reason.strip()
-        if normalized_action not in _RECONCILE_ACTIONS:
-            return _error_envelope(
-                ErrorCode.INVALID_COMMAND,
-                "Unsupported Story reconciliation action.",
-                details={
-                    "action": action,
-                    "allowed_actions": sorted(_RECONCILE_ACTIONS),
-                },
-            )
-        if not normalized_reason:
-            return _error_envelope(
-                ErrorCode.INVALID_COMMAND,
-                "Story reconciliation requires a reason.",
-            )
-
-        try:
-            with Session(get_engine()) as session:
-                replay = _reconcile_replay(
-                    session,
-                    project_id=project_id,
-                    idempotency_key=idempotency_key,
-                )
-                if replay is not None:
-                    return _data_envelope(replay)
-
-                story = session.get(UserStory, story_id)
-                if story is None or story.product_id != project_id:
-                    return _error_envelope(
-                        ErrorCode.INVALID_COMMAND,
-                        "Story reconciliation target was not found.",
-                        details={"project_id": project_id, "story_id": story_id},
-                    )
-
-                previous_status = _story_status_value(story.status)
-                terminal = normalized_action in _RECONCILE_TERMINAL_ACTIONS
-                if terminal and _story_reconciliation_target_is_terminal(story):
-                    return _error_envelope(
-                        ErrorCode.INVALID_COMMAND,
-                        "Story reconciliation cannot supersede a completed Story.",
-                        details={
-                            "project_id": project_id,
-                            "story_id": story_id,
-                            "action": normalized_action,
-                            "status": previous_status,
-                            "is_superseded": story.is_superseded,
-                            "archived_reason": story.archived_reason,
-                        },
-                        remediation=[
-                            (
-                                "Use story show/history to inspect completed "
-                                "Story evidence."
-                            ),
-                            (
-                                "Do not archive, defer, rewrite, or supersede "
-                                "completed Stories."
-                            ),
-                        ],
-                    )
-                now = datetime.now(UTC)
-                if terminal:
-                    story.is_superseded = True
-                    story.archived_reason = f"{normalized_action}: {normalized_reason}"
-                    story.archived_at = now
-                    story.archived_by = changed_by
-                    story.archive_previous_status = previous_status
-                    if normalized_action == "supersede":
-                        story.superseded_by_story_id = superseded_by_story_id
-                story.completion_notes = normalized_reason
-                if evidence_links:
-                    story.evidence_links = json.dumps(evidence_links)
-                story.updated_at = now
-                session.add(story)
-
-                payload = _reconcile_payload(
-                    story=story,
-                    action=normalized_action,
-                    reason=normalized_reason,
-                    idempotency_key=idempotency_key,
-                    changed_by=changed_by,
-                    evidence_links=evidence_links or [],
-                    superseded_by_story_id=superseded_by_story_id,
-                    terminal=terminal,
-                )
-                session.add(
-                    WorkflowEvent(
-                        event_type=WorkflowEventType.STORIES_SAVED,
-                        product_id=project_id,
-                        session_id=str(project_id),
-                        event_metadata=json.dumps(
-                            {
-                                "action": "story_reconcile",
-                                "idempotency_key": idempotency_key,
-                                "result": payload,
-                            }
-                        ),
-                    )
-                )
-                session.commit()
-        except RuntimeError as exc:
-            return _workflow_error(exc)
-        return _data_envelope(payload)
-
-    async def _repair_readiness(
-        self,
-        project_id: int,
-        expected_state: str,
-        idempotency_key: str,
-    ) -> dict[str, Any]:
-        product = self._load_project(project_id)
-        if isinstance(product, dict):
-            return product
-
-        try:
-            data = await repair_story_readiness(
-                project_id=project_id,
-                expected_state=expected_state,
-                idempotency_key=idempotency_key,
-                load_state=lambda: self._load_story_state(
-                    str(project_id), project_id, product
-                ),
-                save_state=lambda state: self._save_session_state(
-                    str(project_id), state
-                ),
-                repair_rows=_repair_story_readiness_rows,
-                assert_repair_safe=lambda repair_project_id: (
-                    _assert_repair_readiness_safe(project_id=repair_project_id)
-                ),
-            )
-        except StoryPhaseError as exc:
-            return _phase_error(exc)
-        except RuntimeError as exc:
-            return _workflow_error(exc)
-        return _data_envelope(data)
-
-    async def _repair_completion_scope(
-        self,
-        project_id: int,
-        expected_state: str,
-        expected_scope_id: str,
-        idempotency_key: str,
-    ) -> dict[str, Any]:
-        product = self._load_project(project_id)
-        if isinstance(product, dict):
-            return product
-
-        try:
-            data = await repair_story_completion_scope(
-                project_id=project_id,
-                expected_state=expected_state,
-                expected_scope_id=expected_scope_id,
-                idempotency_key=idempotency_key,
-                load_state=lambda: self._load_story_state(
-                    str(project_id), project_id, product
-                ),
-                save_state=lambda state: self._save_session_state(
-                    str(project_id), state
-                ),
-                now_iso=_now_iso,
-            )
-        except StoryPhaseError as exc:
-            return _phase_error(exc)
-        except RuntimeError as exc:
-            return _workflow_error(exc)
-        return _data_envelope(data)
-
-    async def _dependency_inspect(self, project_id: int) -> dict[str, Any]:
-        product = self._load_project(project_id)
-        if isinstance(product, dict):
-            return product
-
-        try:
-            with Session(get_engine()) as session:
-                return _data_envelope(
-                    dependency_inspect_payload(session, project_id=project_id)
-                )
-        except RuntimeError as exc:
-            return _workflow_error(exc)
-
-    async def _dependency_propose(
-        self,
-        project_id: int,
-        expected_state: str,
-        idempotency_key: str,
-        manual_edges: list[str] | None,
-    ) -> dict[str, Any]:
-        product = self._load_project(project_id)
-        if isinstance(product, dict):
-            return product
-
-        state = await self._ensure_session(str(project_id))
-        replay = _dependency_replay(
-            state,
-            registry_key=_DEPENDENCY_PROPOSE_IDEMPOTENCY_KEY,
-            idempotency_key=idempotency_key,
-        )
-        if replay is not None:
-            return _data_envelope(replay)
-        guard_error = _dependency_guard_error(
-            state=state,
-            expected_state=expected_state,
-        )
-        if guard_error is not None:
-            return guard_error
-
-        try:
-            with Session(get_engine()) as session:
-                artifact = _build_dependency_proposal_artifact(
-                    session,
-                    project_id=project_id,
-                    manual_edge_specs=manual_edges or [],
-                    expected_state=expected_state,
-                )
-                session.add(
-                    WorkflowEvent(
-                        event_type=WorkflowEventType.STORY_DEPENDENCIES_PROPOSED,
-                        product_id=project_id,
-                        session_id=str(project_id),
-                        event_metadata=json.dumps(
-                            _dependency_propose_event_metadata(
-                                artifact=artifact,
-                                idempotency_key=idempotency_key,
-                                project_id=project_id,
-                            )
-                        ),
-                    )
-                )
-                session.commit()
-        except _ManualDependencyEdgeError as exc:
-            return _error_envelope(
-                ErrorCode.INVALID_COMMAND,
-                str(exc),
-                details=exc.details,
-            )
-        except RuntimeError as exc:
-            return _workflow_error(exc)
-
-        _record_dependency_attempt(state, artifact)
-        _record_dependency_replay(
-            state,
-            registry_key=_DEPENDENCY_PROPOSE_IDEMPOTENCY_KEY,
-            idempotency_key=idempotency_key,
-            payload=artifact,
-        )
-        self._save_session_state(str(project_id), state)
-        return _data_envelope(artifact)
-
-    async def _dependency_apply(  # noqa: PLR0911
-        self,
-        project_id: int,
-        attempt_id: str,
-        expected_artifact_fingerprint: str,
-        expected_state: str,
-        idempotency_key: str,
-    ) -> dict[str, Any]:
-        product = self._load_project(project_id)
-        if isinstance(product, dict):
-            return product
-
-        state = await self._ensure_session(str(project_id))
-        replay = _dependency_replay(
-            state,
-            registry_key=_DEPENDENCY_APPLY_IDEMPOTENCY_KEY,
-            idempotency_key=idempotency_key,
-        )
-        if replay is not None:
-            return _data_envelope(replay)
-        guard_error = _dependency_guard_error(
-            state=state,
-            expected_state=expected_state,
-        )
-        if guard_error is not None:
-            return guard_error
-
-        attempt = _find_dependency_attempt(
-            state,
-            attempt_id=attempt_id,
-            expected_artifact_fingerprint=expected_artifact_fingerprint,
-        )
-        if attempt is None:
-            return _error_envelope(
-                ErrorCode.INVALID_COMMAND,
-                "Dependency apply requires an exact known attempt and fingerprint.",
-                details={
-                    "attempt_id": attempt_id,
-                    "expected_artifact_fingerprint": expected_artifact_fingerprint,
-                },
-            )
-
-        try:
-            with Session(get_engine()) as session:
-                before_graph = load_story_dependency_graph(
-                    session,
-                    project_id=project_id,
-                )
-                payload = _apply_dependency_attempt(
-                    session,
-                    project_id=project_id,
-                    attempt=attempt,
-                    attempt_id=attempt_id,
-                    artifact_fingerprint=expected_artifact_fingerprint,
-                    idempotency_key=idempotency_key,
-                    before_cycle_count=len(before_graph.cycle_paths),
-                )
-                if payload.get("success") is False:
-                    session.rollback()
-                    return _error_envelope(
-                        ErrorCode.MUTATION_FAILED,
-                        str(payload["error"]),
-                        details=payload,
-                    )
-                session.add(
-                    WorkflowEvent(
-                        event_type=WorkflowEventType.STORY_DEPENDENCIES_APPLIED,
-                        product_id=project_id,
-                        session_id=str(project_id),
-                        event_metadata=json.dumps(
-                            _dependency_apply_event_metadata(
-                                payload=payload,
-                                idempotency_key=idempotency_key,
-                                project_id=project_id,
-                            )
-                        ),
-                    )
-                )
-                session.commit()
-        except RuntimeError as exc:
-            return _workflow_error(exc)
-
-        _record_dependency_replay(
-            state,
-            registry_key=_DEPENDENCY_APPLY_IDEMPOTENCY_KEY,
-            idempotency_key=idempotency_key,
-            payload=payload,
-        )
-        _invalidate_unsaved_sprint_working_set(
-            state,
-            reason="story_dependencies_applied",
-            now_iso=_now_iso(),
-        )
-        self._save_session_state(str(project_id), state)
-        return _data_envelope(payload)
-
-    def _load_project(self, project_id: int) -> Product | dict[str, Any]:
-        product = self._product_repo.get_by_id(project_id)
-        if product is not None:
-            return cast("Product", product)
-        return _error_envelope(
-            ErrorCode.PROJECT_NOT_FOUND,
-            f"Project {project_id} not found.",
-            details={"project_id": project_id},
-            remediation=["Run agileforge project list."],
-        )
-
-    async def _ensure_session(self, session_id: str) -> dict[str, Any]:
-        state = self._workflow_service.get_session_status(session_id) or {}
-        if not state.get("fsm_state"):
-            await self._workflow_service.initialize_session(session_id=session_id)
-            state = self._workflow_service.get_session_status(session_id) or {}
-        return state
-
-    async def _load_story_state(
-        self,
-        session_id: str,
-        project_id: int,
-        product: Product,
-    ) -> dict[str, Any]:
-        """Load workflow state with active project, spec, authority, and roadmap."""
-        context = await self._hydrate_context(session_id, project_id, product)
-        return dict(context.state)
-
-    async def _hydrate_context(
-        self,
-        session_id: str,
-        project_id: int,
-        product: Product,
-    ) -> SimpleNamespace:
-        state = await self._ensure_session(session_id)
-        context = SimpleNamespace(state=dict(state), session_id=session_id)
-        result = select_project(project_id, _build_tool_context(context))
-        if not result.get("success"):
-            raise StoryPhaseError(str(result.get("error", "Project hydration failed")))
-        _hydrate_roadmap_from_product(context.state, product)
-        _assert_required_context(context.state)
-        return context
-
-    def _save_session_state(self, session_id: str, state: dict[str, Any]) -> None:
-        self._workflow_service.update_session_status(session_id, state)
-
-    def _accepted_authority_error(self, project_id: int) -> dict[str, Any] | None:
-        """Return an execution guard error for real repository-backed commands."""
-        if not isinstance(self._product_repo, ProductRepository):
-            return None
-        return AcceptedAuthorityExecutionGuard(
-            engine=get_engine()
-        ).reject_unless_current(project_id=project_id)
-
-    def _save_story_mutation_state(
-        self,
-        session_id: str,
-        state: dict[str, Any],
-        *,
-        reason: str,
-        initial_fsm_state: str | None,
-    ) -> None:
-        current_fsm_state = state.get("fsm_state")
-        current_fsm_state_entered_at = state.get("fsm_state_entered_at")
-        if current_fsm_state not in {
-            OrchestratorState.SPRINT_SETUP.value,
-            OrchestratorState.SPRINT_DRAFT.value,
-        }:
-            state["fsm_state"] = initial_fsm_state
-        _invalidate_unsaved_sprint_working_set(
-            state,
-            reason=reason,
-            now_iso=_now_iso(),
-        )
-        if current_fsm_state not in {
-            OrchestratorState.SPRINT_SETUP.value,
-            OrchestratorState.SPRINT_DRAFT.value,
-        }:
-            state["fsm_state"] = current_fsm_state
-            if current_fsm_state_entered_at is None:
-                state.pop("fsm_state_entered_at", None)
-            else:
-                state["fsm_state_entered_at"] = current_fsm_state_entered_at
-        self._save_session_state(session_id, state)
-
-
-def _invalidate_unsaved_sprint_working_set(
-    state: dict[str, Any],
+def _story_lineage_nodes(
+    session: Session,
     *,
-    reason: str,
-    now_iso: str,
-) -> None:
-    """Clear unsaved Sprint planner state after upstream Story data changes."""
-    if state.get("sprint_planner_owner_sprint_id") is not None:
-        return
-    if state.get("fsm_state") not in {
-        OrchestratorState.SPRINT_SETUP.value,
-        OrchestratorState.SPRINT_DRAFT.value,
-    }:
-        return
-
-    reset_sprint_planner_working_set(state)
-    state["fsm_state"] = OrchestratorState.SPRINT_SETUP.value
-    state["fsm_state_entered_at"] = now_iso
-    state["sprint_invalidated_reason"] = reason
-    state["sprint_invalidated_at"] = now_iso
-
-
-def _dependency_guard_error(
-    *,
-    state: dict[str, Any],
-    expected_state: str,
-) -> dict[str, Any] | None:
-    current_state = state.get("fsm_state")
-    if expected_state not in _DEPENDENCY_REVIEW_STATES:
-        return _error_envelope(
-            ErrorCode.INVALID_COMMAND,
-            "Story dependency review is only allowed in Story/Sprint review states.",
-            details={
-                "expected_state": expected_state,
-                "allowed_states": sorted(_DEPENDENCY_REVIEW_STATES),
-            },
+    project_id: int,
+) -> tuple[ArtifactLineageNode, ...]:
+    artifacts = session.exec(
+        select(StoryArtifact).where(col(StoryArtifact.project_id) == project_id)
+    ).all()
+    decisions = session.exec(
+        select(StoryArtifactDecision).where(
+            col(StoryArtifactDecision.project_id) == project_id
         )
-    if current_state != expected_state:
-        return _error_envelope(
-            ErrorCode.INVALID_COMMAND,
-            "Expected workflow state does not match current state.",
-            details={"expected_state": expected_state, "current_state": current_state},
-        )
-    return None
-
-
-def _dependency_replay(
-    state: dict[str, Any],
-    *,
-    registry_key: str,
-    idempotency_key: str,
-) -> dict[str, Any] | None:
-    registry = state.get(registry_key)
-    if not isinstance(registry, dict):
-        return None
-    payload = registry.get(idempotency_key)
-    return dict(payload) if isinstance(payload, dict) else None
-
-
-def _record_dependency_replay(
-    state: dict[str, Any],
-    *,
-    registry_key: str,
-    idempotency_key: str,
-    payload: dict[str, Any],
-) -> None:
-    registry = state.get(registry_key)
-    if not isinstance(registry, dict):
-        registry = {}
-    registry[idempotency_key] = dict(payload)
-    state[registry_key] = registry
-
-
-def _record_dependency_attempt(
-    state: dict[str, Any],
-    artifact: dict[str, Any],
-) -> None:
-    attempts = state.get(_DEPENDENCY_ATTEMPTS_KEY)
-    if not isinstance(attempts, list):
-        attempts = []
-    attempts.append(dict(artifact))
-    state[_DEPENDENCY_ATTEMPTS_KEY] = attempts[-_MAX_DEPENDENCY_ATTEMPTS:]
-
-
-def _find_dependency_attempt(
-    state: dict[str, Any],
-    *,
-    attempt_id: str,
-    expected_artifact_fingerprint: str,
-) -> dict[str, Any] | None:
-    attempts = state.get(_DEPENDENCY_ATTEMPTS_KEY)
-    if not isinstance(attempts, list):
-        return None
-    for attempt in attempts:
-        if not isinstance(attempt, dict):
-            continue
+    ).all()
+    artifacts_by_id = {
+        _required_id(row.story_artifact_id, label="Story artifact"): row
+        for row in artifacts
+    }
+    decisions_by_artifact: dict[int, Decision] = {}
+    for decision in decisions:
+        artifact = artifacts_by_id.get(decision.story_artifact_id)
         if (
-            attempt.get("attempt_id") == attempt_id
-            and attempt.get("artifact_fingerprint") == expected_artifact_fingerprint
+            artifact is None
+            or artifact.content_fingerprint != decision.artifact_fingerprint
+            or decision.story_artifact_id in decisions_by_artifact
+            or decision.decision not in {"accepted", "feedback", "rejected"}
         ):
-            return dict(attempt)
-    return None
+            message = "Stored Story decision lineage is invalid."
+            raise ValueError(message)
+        decisions_by_artifact[decision.story_artifact_id] = cast(
+            "Decision", decision.decision
+        )
+    return tuple(
+        ArtifactLineageNode(
+            artifact_id=artifact_id,
+            chain_key=(
+                row.project_id,
+                row.source_backlog_artifact_id,
+                row.backlog_item_id,
+            ),
+            version_number=row.version_number,
+            supersedes_artifact_id=row.supersedes_story_artifact_id,
+            decision=decisions_by_artifact.get(artifact_id),
+        )
+        for artifact_id, row in artifacts_by_id.items()
+    )
 
 
-def _build_dependency_proposal_artifact(
+def _story_parent_context(  # noqa: PLR0913
     session: Session,
     *,
     project_id: int,
-    manual_edge_specs: list[str],
-    expected_state: str,
-) -> dict[str, Any]:
-    attempt_id = f"story-dependencies-{uuid4()}"
-    inspect_payload = dependency_inspect_payload(session, project_id=project_id)
-    active_edges = [
-        {**edge, "selected": True} for edge in inspect_payload["active_edges"]
-    ]
-    proposed_edges = [
-        {**edge, "selected": True} for edge in inspect_payload["proposed_edges"]
-    ]
-    edge_keys = {
-        (edge["dependent_story_id"], edge["prerequisite_story_id"])
-        for edge in [*active_edges, *proposed_edges]
-    }
-    manual_edges = _manual_dependency_edges(
+    source_backlog_artifact_id: int,
+    source_backlog_artifact_fingerprint: str,
+    backlog_item_id: str,
+    roadmap_artifact_id: int,
+    roadmap_artifact_fingerprint: str,
+    require_current_roadmap: bool = True,
+) -> _StoryParentContext:
+    backlog, _parent_item_ids = _current_accepted_backlog(
         session,
         project_id=project_id,
-        manual_edge_specs=manual_edge_specs,
-        existing_edge_keys=edge_keys,
-        expected_state=expected_state,
+        backlog_artifact_id=source_backlog_artifact_id,
+        backlog_artifact_fingerprint=source_backlog_artifact_fingerprint,
     )
-    deterministic_edges = _deterministic_dependency_edges(
+    specification = _require_current_root(
         session,
         project_id=project_id,
-        existing_edge_keys=edge_keys,
+        spec_version_id=backlog.spec_version_id,
+        spec_hash=backlog.spec_hash,
+        product_goal_artifact_id=backlog.product_goal_artifact_id,
+        product_goal_fingerprint=backlog.product_goal_fingerprint,
     )
-    edges = [*active_edges, *proposed_edges, *manual_edges, *deterministic_edges]
-    artifact: dict[str, Any] = {
-        "attempt_id": attempt_id,
-        "is_complete": True,
-        "active_edge_count": len(active_edges),
-        "proposed_edge_count": (
-            len(proposed_edges) + len(manual_edges) + len(deterministic_edges)
-        ),
-        "manual_edge_count": len(manual_edges),
-        "cycle_count": inspect_payload["cycle_count"],
-        "cycle_paths": inspect_payload["cycle_paths"],
-        "edges": edges,
-    }
-    artifact["artifact_fingerprint"] = canonical_hash(
-        {"phase": "story_dependencies", "artifact": artifact}
+    _backlog_json, backlog_content = load_stored_backlog_planning_content(
+        backlog.canonical_content_json,
+        expected_fingerprint=backlog.content_fingerprint,
+        specification=specification,
     )
-    return artifact
+    backlog_items = tuple(
+        item
+        for item in backlog_content.backlog_items
+        if item.backlog_item_id == backlog_item_id
+    )
+    if len(backlog_items) != 1:
+        message = "Story source Backlog item is missing or duplicated."
+        raise ValueError(message)
 
-
-def _manual_dependency_edges(
-    session: Session,
-    *,
-    project_id: int,
-    manual_edge_specs: list[str],
-    existing_edge_keys: set[tuple[int, int]],
-    expected_state: str,
-) -> list[dict[str, Any]]:
-    """Return reviewed manual dependency edges from CLI edge specs."""
-    edges: list[dict[str, Any]] = []
-    for spec in manual_edge_specs:
-        dependent_story_id, prerequisite_story_id = _parse_manual_edge_spec(spec)
-        key = (dependent_story_id, prerequisite_story_id)
-        if key in existing_edge_keys:
-            continue
-        dependent = _load_active_dependency_story(
-            session,
-            project_id=project_id,
-            story_id=dependent_story_id,
-            edge_role="dependent",
+    roadmap = session.exec(
+        select(RoadmapArtifact).where(
+            col(RoadmapArtifact.project_id) == project_id,
+            col(RoadmapArtifact.roadmap_artifact_id) == roadmap_artifact_id,
+            col(RoadmapArtifact.content_fingerprint) == roadmap_artifact_fingerprint,
+            col(RoadmapArtifact.backlog_artifact_id) == source_backlog_artifact_id,
+            col(RoadmapArtifact.backlog_artifact_fingerprint)
+            == source_backlog_artifact_fingerprint,
         )
-        prerequisite = _load_active_dependency_story(
-            session,
-            project_id=project_id,
-            story_id=prerequisite_story_id,
-            edge_role="prerequisite",
-        )
-        if expected_state == OrchestratorState.SPRINT_VIEW.value:
-            _assert_manual_dependent_work_not_started(
-                session,
-                dependent_story=dependent,
-            )
-        existing_edge_keys.add(key)
-        edges.append(
-            {
-                "dependency_id": None,
-                "dependent_story_id": dependent_story_id,
-                "dependent_story_title": dependent.title,
-                "prerequisite_story_id": prerequisite_story_id,
-                "prerequisite_story_title": prerequisite.title,
-                "status": "proposed",
-                "source": "manual_review",
-                "confidence": "reviewed",
-                "reason": "Manual reviewed dependency edge from CLI.",
-                "selected": True,
-            }
-        )
-    return edges
-
-
-def _parse_manual_edge_spec(spec: str) -> tuple[int, int]:
-    """Parse a CLI manual edge value in dependent:prerequisite form."""
-    parts = spec.split(":", maxsplit=1)
-    if len(parts) != _MANUAL_EDGE_PART_COUNT:
-        message = (
-            "Manual dependency edge must use dependent_story_id:prerequisite_story_id."
-        )
-        raise _ManualDependencyEdgeError(
-            message,
-            details={
-                "reason_code": "MANUAL_DEPENDENCY_EDGE_FORMAT_INVALID",
-                "manual_edge": spec,
-                "expected_format": "dependent_story_id:prerequisite_story_id",
-            },
-        )
+    ).one_or_none()
+    if roadmap is None:
+        message = "Story source Roadmap does not match one exact Backlog parent."
+        raise ValueError(message)
     try:
-        dependent_story_id = int(parts[0])
-        prerequisite_story_id = int(parts[1])
-    except ValueError as exc:
-        message = "Manual dependency edge story ids must be integers."
-        raise _ManualDependencyEdgeError(
-            message,
-            details={
-                "reason_code": "MANUAL_DEPENDENCY_EDGE_STORY_ID_INVALID",
-                "manual_edge": spec,
-            },
-        ) from exc
-    if dependent_story_id == prerequisite_story_id:
-        message = "Manual dependency edge cannot point a story to itself."
-        raise _ManualDependencyEdgeError(
-            message,
-            details={
-                "reason_code": "MANUAL_DEPENDENCY_EDGE_SELF_REFERENCE",
-                "manual_edge": spec,
-                "story_id": dependent_story_id,
-            },
+        roadmap_nodes = _roadmap_lineage_nodes(session, project_id=project_id)
+        current_roadmap = select_current_accepted_artifact(
+            roadmap_nodes,
+            chain_key=(
+                project_id,
+                source_backlog_artifact_id,
+                source_backlog_artifact_fingerprint,
+            ),
         )
-    return dependent_story_id, prerequisite_story_id
+    except PlanningLineageError as error:
+        raise ValueError(str(error)) from error
+    accepted_roadmap_ids = {
+        current_roadmap.artifact_id,
+        *accepted_ancestor_ids(roadmap_nodes),
+    }
+    if (
+        require_current_roadmap and current_roadmap.artifact_id != roadmap_artifact_id
+    ) or (
+        not require_current_roadmap and roadmap_artifact_id not in accepted_roadmap_ids
+    ):
+        message = "Story requires the sole current accepted Roadmap parent."
+        raise ValueError(message)
+    _roadmap_json, roadmap_content = load_stored_roadmap_planning_content(
+        roadmap.canonical_content_json,
+        expected_fingerprint=roadmap.content_fingerprint,
+        parent_backlog_item_ids=tuple(
+            item.backlog_item_id for item in backlog_content.backlog_items
+        ),
+    )
+    occurrences = sum(
+        release.backlog_item_ids.count(backlog_item_id)
+        for release in roadmap_content.roadmap_releases
+    )
+    if occurrences != 1:
+        message = "Story source Roadmap must contain the exact Backlog item once."
+        raise ValueError(message)
+    return _StoryParentContext(
+        backlog=backlog,
+        backlog_item=backlog_items[0],
+        roadmap=roadmap,
+        specification=specification,
+    )
 
 
-def _load_active_dependency_story(
+def validate_story_planning_content(
+    canonical_content: JsonObject,
+    *,
+    content_fingerprint: str,
+    specification: AcceptedSpecification,
+    backlog_item: BacklogItem,
+) -> CanonicalStoryOutput:
+    """Validate one complete closed Story artifact against its exact parents."""
+    content = validate_canonical_planning_content(
+        canonical_content,
+        content_type=CanonicalStoryOutput,
+    )
+    if canonical_hash(canonical_content) != content_fingerprint:
+        message = "Story content fingerprint does not match canonical content."
+        raise ValueError(message)
+    if (
+        not content.is_complete
+        or not content.story_items
+        or content.clarifying_questions
+    ):
+        message = "Story output is incomplete and cannot enter review."
+        raise ValueError(message)
+    provider_items = tuple(
+        UserStoryAgentItem.model_validate(
+            envelope.item.model_dump(
+                mode="json",
+                exclude={"story_item_id", "persona"},
+            )
+        )
+        for envelope in content.story_items
+    )
+    canonical_items = canonicalize_story_items(
+        AcceptedSpecificationReference(
+            spec_version_id=specification.spec_version_id,
+            spec_hash=specification.spec_hash,
+            canonical_specification_json=specification.canonical_specification_json,
+            payload=specification.payload,
+        ),
+        parent_backlog_spec_item_ids=backlog_item.spec_item_ids,
+        agent_items=provider_items,
+    )
+    if canonical_items != content.story_items:
+        message = "Story items do not match the exact host-minted canonical sequence."
+        raise ValueError(message)
+    return content
+
+
+def load_stored_story_planning_content(
+    canonical_content_json: str,
+    *,
+    expected_fingerprint: str,
+    specification: AcceptedSpecification,
+    backlog_item: BacklogItem,
+) -> tuple[JsonObject, CanonicalStoryOutput]:
+    """Load exact immutable Story bytes against their pinned parent evidence."""
+    canonical_content, _content = load_stored_planning_artifact_content(
+        canonical_content_json,
+        expected_fingerprint=expected_fingerprint,
+        content_type=CanonicalStoryOutput,
+    )
+    content = validate_story_planning_content(
+        canonical_content,
+        content_fingerprint=expected_fingerprint,
+        specification=specification,
+        backlog_item=backlog_item,
+    )
+    return canonical_content, content
+
+
+def _load_story_content(
+    artifact: StoryArtifact,
+    *,
+    parent: _StoryParentContext,
+) -> CanonicalStoryOutput:
+    _canonical_content, content = load_stored_story_planning_content(
+        artifact.canonical_content_json,
+        expected_fingerprint=artifact.content_fingerprint,
+        specification=parent.specification,
+        backlog_item=parent.backlog_item,
+    )
+    item_ids = tuple(envelope.item.story_item_id for envelope in content.story_items)
+    if artifact.story_item_ids_json != canonical_json(list(item_ids)):
+        message = "Story artifact item IDs are not the exact canonical sequence."
+        raise ValueError(message)
+    return content
+
+
+def load_story_correction_target_in_session(
     session: Session,
     *,
     project_id: int,
     story_id: int,
-    edge_role: str,
-) -> UserStory:
-    """Load one active refined story for manual dependency review."""
+) -> StoryCorrectionTarget:
+    """Prove one active row is an exact item of the current accepted Story leaf."""
     story = session.get(UserStory, story_id)
+    if story is None or story.project_id != project_id or story.is_superseded:
+        message = "Story correction target is missing, foreign, or superseded."
+        raise ValueError(message)
+    artifact = session.exec(
+        select(StoryArtifact).where(
+            col(StoryArtifact.project_id) == project_id,
+            col(StoryArtifact.story_artifact_id) == story.source_story_artifact_id,
+            col(StoryArtifact.content_fingerprint)
+            == story.source_story_artifact_fingerprint,
+        )
+    ).one_or_none()
+    if artifact is None:
+        message = "Story correction target has no exact immutable artifact."
+        raise ValueError(message)
+    decision = session.exec(
+        select(StoryArtifactDecision).where(
+            col(StoryArtifactDecision.project_id) == project_id,
+            col(StoryArtifactDecision.story_artifact_id)
+            == story.source_story_artifact_id,
+        )
+    ).one_or_none()
     if (
-        story is None
-        or story.product_id != project_id
-        or story.is_superseded
-        or not story.is_refined
+        decision is None
+        or decision.decision != "accepted"
+        or decision.artifact_fingerprint != artifact.content_fingerprint
     ):
-        message = (
-            "Manual dependency edge references a story outside the active backlog."
-        )
-        raise _ManualDependencyEdgeError(
-            message,
-            details={
-                "reason_code": "MANUAL_DEPENDENCY_STORY_NOT_ACTIVE",
-                "story_id": story_id,
-                "edge_role": edge_role,
-            },
-        )
-    return story
-
-
-def _assert_manual_dependent_work_not_started(
-    session: Session,
-    *,
-    dependent_story: UserStory,
-) -> None:
-    """Block active-sprint repair after dependent work has started."""
-    started_tasks = session.exec(
-        select(Task)
-        .where(Task.story_id == dependent_story.story_id)
-        .where(Task.status != TaskStatus.TO_DO)
-    ).all()
-    if started_tasks:
-        message = (
-            "Manual dependency repair is unsafe after dependent story work starts."
-        )
-        raise _ManualDependencyEdgeError(
-            message,
-            details={
-                "reason_code": "MANUAL_DEPENDENCY_DEPENDENT_WORK_STARTED",
-                "dependent_story_id": dependent_story.story_id,
-                "started_task_ids": [
-                    task.task_id for task in started_tasks if task.task_id is not None
-                ],
-            },
-        )
-
-
-def _deterministic_dependency_edges(
-    session: Session,
-    *,
-    project_id: int,
-    existing_edge_keys: set[tuple[int, int]],
-) -> list[dict[str, Any]]:
-    stories = session.exec(
-        select(UserStory)
-        .where(UserStory.product_id == project_id)
-        .where(UserStory.is_refined == True)  # noqa: E712
-        .where(UserStory.is_superseded == False)  # noqa: E712
-        .order_by(
-            cast("Any", UserStory.source_requirement),
-            cast("Any", UserStory.refinement_slot),
-        )
-    ).all()
-    by_requirement: dict[str, list[UserStory]] = {}
-    for story in stories:
-        if (
-            story.story_id is None
-            or not story.source_requirement
-            or story.refinement_slot is None
-        ):
-            continue
-        by_requirement.setdefault(story.source_requirement, []).append(story)
-
-    edges: list[dict[str, Any]] = []
-    for requirement_stories in by_requirement.values():
-        ordered = sorted(
-            requirement_stories,
-            key=lambda story: (story.refinement_slot or 0, story.story_id or 0),
-        )
-        for prerequisite, dependent in pairwise(ordered):
-            if prerequisite.story_id is None or dependent.story_id is None:
-                continue
-            key = (dependent.story_id, prerequisite.story_id)
-            if key in existing_edge_keys:
-                continue
-            existing_edge_keys.add(key)
-            edges.append(
-                {
-                    "dependency_id": None,
-                    "dependent_story_id": dependent.story_id,
-                    "dependent_story_title": dependent.title,
-                    "prerequisite_story_id": prerequisite.story_id,
-                    "prerequisite_story_title": prerequisite.title,
-                    "status": "proposed",
-                    "source": "dependency_repair",
-                    "confidence": "inferred",
-                    "reason": (
-                        "Deterministic refinement order: later slot depends on "
-                        "the immediately previous slot in the same requirement."
-                    ),
-                    "selected": True,
-                }
-            )
-    return edges
-
-
-def _apply_dependency_attempt(  # noqa: PLR0913
-    session: Session,
-    *,
-    project_id: int,
-    attempt: dict[str, Any],
-    attempt_id: str,
-    artifact_fingerprint: str,
-    idempotency_key: str,
-    before_cycle_count: int,
-) -> dict[str, Any]:
-    edges = attempt.get("edges")
-    if not isinstance(edges, list):
-        return {
-            "success": False,
-            "error": "Dependency attempt has malformed edges.",
-            "attempt_id": attempt_id,
-        }
-
-    artifact_edge_keys: set[tuple[int, int]] = set()
-    activated_edges: list[dict[str, Any]] = []
-    rejected_edges: list[dict[str, Any]] = []
-    for edge in edges:
-        if not isinstance(edge, dict):
-            continue
-        pair = _edge_pair(edge)
-        if pair is None:
-            continue
-        artifact_edge_keys.add(pair)
-        if edge.get("status") == "rejected" or edge.get("selected") is False:
-            rejected_edges.append(
-                _set_dependency_edge_status(
-                    session,
-                    project_id=project_id,
-                    pair=pair,
-                    status="rejected",
-                    reason=str(edge.get("reason") or "Rejected by dependency review."),
-                )
-            )
-            continue
-        if edge.get("selected") is True:
-            activated_edges.append(
-                _set_dependency_edge_status(
-                    session,
-                    project_id=project_id,
-                    pair=pair,
-                    status="active",
-                    reason=str(edge.get("reason") or "Accepted by dependency review."),
-                )
-            )
-
-    for proposed_edge in session.exec(
-        select(UserStoryDependency)
-        .where(UserStoryDependency.product_id == project_id)
-        .where(UserStoryDependency.status == "proposed")
-    ).all():
-        pair = (proposed_edge.dependent_story_id, proposed_edge.prerequisite_story_id)
-        if pair in artifact_edge_keys:
-            continue
-        proposed_edge.status = "rejected"
-        proposed_edge.source = "manual_review"
-        proposed_edge.confidence = "reviewed"
-        proposed_edge.updated_at = datetime.now(UTC)
-        session.add(proposed_edge)
-        rejected_edges.append(_dependency_edge_summary(proposed_edge))
-
-    session.flush()
-    after_graph = load_story_dependency_graph(session, project_id=project_id)
-    after_cycle_count = len(after_graph.cycle_paths)
-    if after_cycle_count and after_cycle_count >= before_cycle_count:
-        return {
-            "success": False,
-            "error": "Dependency apply would leave an active cycle unresolved.",
-            "attempt_id": attempt_id,
-            "cycle_count_before_apply": before_cycle_count,
-            "cycle_count_after_apply": after_cycle_count,
-            "cycle_paths": after_graph.cycle_paths,
-        }
-
-    return {
-        "success": True,
-        "project_id": project_id,
-        "attempt_id": attempt_id,
-        "artifact_fingerprint": artifact_fingerprint,
-        "idempotency_key": idempotency_key,
-        "activated_edge_count": len(activated_edges),
-        "activated_edges": activated_edges,
-        "rejected_edge_count": len(rejected_edges),
-        "rejected_edges": rejected_edges,
-        "active_edge_count": sum(
-            len(items) for items in after_graph.active_edges.values()
+        message = "Story correction requires one exact accepted artifact decision."
+        raise ValueError(message)
+    parent = _story_parent_context(
+        session,
+        project_id=project_id,
+        source_backlog_artifact_id=artifact.source_backlog_artifact_id,
+        source_backlog_artifact_fingerprint=(
+            artifact.source_backlog_artifact_fingerprint
         ),
-        "cycle_count_after_apply": after_cycle_count,
-    }
-
-
-def _edge_pair(edge: dict[str, Any]) -> tuple[int, int] | None:
+        backlog_item_id=artifact.backlog_item_id,
+        roadmap_artifact_id=artifact.roadmap_artifact_id,
+        roadmap_artifact_fingerprint=artifact.roadmap_artifact_fingerprint,
+    )
+    content = _load_story_content(artifact, parent=parent)
+    chain_key = (
+        project_id,
+        artifact.source_backlog_artifact_id,
+        artifact.backlog_item_id,
+    )
     try:
-        dependent_story_id = int(edge["dependent_story_id"])
-        prerequisite_story_id = int(edge["prerequisite_story_id"])
-    except (KeyError, TypeError, ValueError):
-        return None
-    return dependent_story_id, prerequisite_story_id
-
-
-def _set_dependency_edge_status(
-    session: Session,
-    *,
-    project_id: int,
-    pair: tuple[int, int],
-    status: str,
-    reason: str,
-) -> dict[str, Any]:
-    dependent_story_id, prerequisite_story_id = pair
-    edge = session.exec(
-        select(UserStoryDependency)
-        .where(UserStoryDependency.product_id == project_id)
-        .where(UserStoryDependency.dependent_story_id == dependent_story_id)
-        .where(UserStoryDependency.prerequisite_story_id == prerequisite_story_id)
-    ).first()
-    if edge is None:
-        edge = UserStoryDependency(
-            product_id=project_id,
-            dependent_story_id=dependent_story_id,
-            prerequisite_story_id=prerequisite_story_id,
+        accepted = select_current_accepted_artifact(
+            _story_lineage_nodes(session, project_id=project_id),
+            chain_key=chain_key,
         )
-    edge.status = status
-    edge.source = "manual_review"
-    edge.confidence = "reviewed"
-    edge.reason = reason
-    edge.updated_at = datetime.now(UTC)
-    session.add(edge)
-    session.flush()
-    return _dependency_edge_summary(edge)
-
-
-def _dependency_edge_summary(edge: UserStoryDependency) -> dict[str, Any]:
-    return {
-        "dependent_story_id": edge.dependent_story_id,
-        "prerequisite_story_id": edge.prerequisite_story_id,
-        "reason": edge.reason,
-        "source": edge.source,
-        "confidence": edge.confidence,
-    }
-
-
-def _dependency_propose_event_metadata(
-    *,
-    artifact: dict[str, Any],
-    idempotency_key: str,
-    project_id: int,
-) -> dict[str, Any]:
-    edge_ids = [
-        edge["dependency_id"]
-        for edge in artifact.get("edges", [])
-        if isinstance(edge, dict) and edge.get("dependency_id") is not None
-    ]
-    return {
-        "action": "story_dependencies_proposed",
-        "idempotency_key": idempotency_key,
-        "attempt_id": artifact["attempt_id"],
-        "artifact_fingerprint": artifact["artifact_fingerprint"],
-        "project_id": project_id,
-        "proposed_edge_count": artifact["proposed_edge_count"],
-        "active_edge_count": artifact["active_edge_count"],
-        "cycle_count": artifact["cycle_count"],
-        "edge_ids": edge_ids,
-    }
-
-
-def _dependency_apply_event_metadata(
-    *,
-    payload: dict[str, Any],
-    idempotency_key: str,
-    project_id: int,
-) -> dict[str, Any]:
-    return {
-        "action": "story_dependencies_applied",
-        "idempotency_key": idempotency_key,
-        "attempt_id": payload["attempt_id"],
-        "artifact_fingerprint": payload["artifact_fingerprint"],
-        "project_id": project_id,
-        "activated_edges": payload["activated_edges"],
-        "rejected_edges": payload["rejected_edges"],
-        "active_edge_count": payload["active_edge_count"],
-        "rejected_edge_count": payload["rejected_edge_count"],
-        "cycle_count_after_apply": payload["cycle_count_after_apply"],
-    }
-
-
-def _now_iso() -> str:
-    """Return canonical UTC timestamp."""
-    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
-
-
-def _reconcile_replay(
-    session: Session,
-    *,
-    project_id: int,
-    idempotency_key: str,
-) -> dict[str, Any] | None:
-    """Return a prior reconciliation result for the same idempotency key."""
-    events = session.exec(
-        select(WorkflowEvent).where(
-            WorkflowEvent.product_id == project_id,
-            WorkflowEvent.event_type == WorkflowEventType.STORIES_SAVED,
-        )
-    ).all()
-    for event in reversed(events):
-        if not event.event_metadata:
-            continue
-        try:
-            metadata = json.loads(event.event_metadata)
-        except json.JSONDecodeError:
-            continue
-        if (
-            metadata.get("action") == "story_reconcile"
-            and metadata.get("idempotency_key") == idempotency_key
-            and isinstance(metadata.get("result"), dict)
-        ):
-            return cast("dict[str, Any]", metadata["result"])
-    return None
-
-
-def _requirement_reconcile_replay(
-    session: Session,
-    *,
-    project_id: int,
-    idempotency_key: str,
-    request_identity: dict[str, Any],
-) -> dict[str, Any] | None:
-    """Return a prior requirement reconciliation result for the same key."""
-    events = session.exec(
-        select(WorkflowEvent).where(
-            WorkflowEvent.product_id == project_id,
-            WorkflowEvent.event_type == WorkflowEventType.STORIES_SAVED,
-        )
-    ).all()
-    for event in reversed(events):
-        if not event.event_metadata:
-            continue
-        try:
-            metadata = json.loads(event.event_metadata)
-        except json.JSONDecodeError:
-            continue
-        if (
-            metadata.get("action") == "requirement_reconcile"
-            and metadata.get("idempotency_key") == idempotency_key
-            and isinstance(metadata.get("result"), dict)
-        ):
-            result = cast("dict[str, Any]", metadata["result"])
-            if requirement_reconciliation_payload_identity(result) != request_identity:
-                raise StoryPhaseError(
-                    STORY_IDEMPOTENCY_REUSED_MESSAGE,
-                    status_code=409,
-                )
-            return result
-    return None
-
-
-def _reconcile_payload(  # noqa: PLR0913
-    *,
-    story: UserStory,
-    action: str,
-    reason: str,
-    idempotency_key: str,
-    changed_by: str,
-    evidence_links: list[str],
-    superseded_by_story_id: int | None,
-    terminal: bool,
-) -> dict[str, Any]:
-    """Return the persisted reconciliation result."""
-    return {
-        "project_id": story.product_id,
-        "story_id": story.story_id,
-        "action": action,
-        "reason": reason,
-        "changed_by": changed_by,
-        "idempotency_key": idempotency_key,
-        "terminal": terminal,
-        "archived_reason": story.archived_reason,
-        "is_superseded": story.is_superseded,
-        "superseded_by_story_id": superseded_by_story_id,
-        "evidence_links": evidence_links,
-    }
-
-
-def _story_status_value(status: object) -> str:
-    """Return an enum or string status as its stored value."""
-    value = getattr(status, "value", status)
-    return str(value)
-
-
-def _story_reconciliation_target_is_terminal(story: UserStory) -> bool:
-    """Return whether a Story is already terminal for reconciliation purposes."""
-    return (
-        story.status in {StoryStatus.DONE, StoryStatus.ACCEPTED}
-        or story.is_superseded
-        or story.archived_reason is not None
+    except PlanningLineageError as error:
+        raise ValueError(str(error)) from error
+    artifact_id = _required_id(artifact.story_artifact_id, label="Story artifact")
+    if accepted.artifact_id != artifact_id:
+        message = "Story correction target is not the current accepted artifact."
+        raise ValueError(message)
+    matches = tuple(
+        envelope
+        for envelope in content.story_items
+        if envelope.item.story_item_id == story.source_story_item_id
+        and envelope.item_fingerprint == story.source_story_item_fingerprint
+    )
+    if len(matches) != 1:
+        message = "Story correction target item identity is missing or ambiguous."
+        raise ValueError(message)
+    item = matches[0]
+    ordinal = content.story_items.index(item) + 1
+    expected_rank = str((parent.backlog_item.priority * 100) + ordinal)
+    if (
+        story.accepted_spec_version_id != parent.specification.spec_version_id
+        or story.accepted_spec_hash != parent.specification.spec_hash
+        or story.spec_item_ids_json != canonical_json(list(item.item.spec_item_ids))
+        or story.title != item.item.story_title
+        or story.story_description != item.item.statement
+        or story.acceptance_criteria_json
+        != canonical_json(list(item.item.acceptance_criteria))
+        or story.persona != item.item.persona
+        or story.story_points != _STORY_POINTS[item.item.estimated_effort]
+        or story.rank != expected_rank
+    ):
+        message = "Story correction target row drifted from its immutable item."
+        raise ValueError(message)
+    return StoryCorrectionTarget(
+        story=story,
+        artifact=artifact,
+        content=content,
+        item=item,
     )
 
 
-def _assert_reopen_safe(*, project_id: int, normalized_requirement: str) -> None:
-    """Block Story reopen if active story rows already feed a Sprint."""
-    normalized_key = normalize_requirement_key(normalized_requirement)
-    with Session(get_engine()) as session:
-        story_ids = [
-            story_id
-            for story_id in session.exec(
-                select(UserStory.story_id).where(
-                    UserStory.product_id == project_id,
-                    UserStory.source_requirement == normalized_key,
-                    cast("Any", UserStory.is_superseded).is_(False),
-                )
-            ).all()
-            if story_id is not None
-        ]
-        if not story_ids:
-            return
+def record_story_draft_in_session(
+    session: Session,
+    *,
+    inputs: RecordStoryDraftInput,
+) -> StoryArtifact:
+    """Append one complete immutable Story artifact and no operational rows."""
+    parent = _story_parent_context(
+        session,
+        project_id=inputs.project_id,
+        source_backlog_artifact_id=inputs.source_backlog_artifact_id,
+        source_backlog_artifact_fingerprint=(
+            inputs.source_backlog_artifact_fingerprint
+        ),
+        backlog_item_id=inputs.backlog_item_id,
+        roadmap_artifact_id=inputs.roadmap_artifact_id,
+        roadmap_artifact_fingerprint=inputs.roadmap_artifact_fingerprint,
+    )
+    content = validate_story_planning_content(
+        inputs.canonical_content,
+        content_fingerprint=inputs.content_fingerprint,
+        specification=parent.specification,
+        backlog_item=parent.backlog_item,
+    )
+    chain_key = (
+        inputs.project_id,
+        inputs.source_backlog_artifact_id,
+        inputs.backlog_item_id,
+    )
+    duplicate = session.exec(
+        select(StoryArtifact).where(
+            col(StoryArtifact.project_id) == inputs.project_id,
+            col(StoryArtifact.source_backlog_artifact_id)
+            == inputs.source_backlog_artifact_id,
+            col(StoryArtifact.backlog_item_id) == inputs.backlog_item_id,
+            col(StoryArtifact.content_fingerprint) == inputs.content_fingerprint,
+        )
+    ).first()
+    if duplicate is not None:
+        message = "Story lineage cannot repeat identical content in one chain."
+        raise ValueError(message)
+    try:
+        version_number = next_artifact_version(
+            _story_lineage_nodes(session, project_id=inputs.project_id),
+            chain_key=chain_key,
+            supersedes_id=inputs.supersedes_story_artifact_id,
+        )
+    except PlanningLineageError as error:
+        raise ValueError(str(error)) from error
+    row = StoryArtifact(
+        project_id=inputs.project_id,
+        source_backlog_artifact_id=inputs.source_backlog_artifact_id,
+        source_backlog_artifact_fingerprint=(
+            inputs.source_backlog_artifact_fingerprint
+        ),
+        backlog_item_id=inputs.backlog_item_id,
+        roadmap_artifact_id=inputs.roadmap_artifact_id,
+        roadmap_artifact_fingerprint=inputs.roadmap_artifact_fingerprint,
+        version_number=version_number,
+        canonical_content_json=canonical_json(inputs.canonical_content),
+        content_fingerprint=inputs.content_fingerprint,
+        story_item_ids_json=canonical_json(
+            [envelope.item.story_item_id for envelope in content.story_items]
+        ),
+        supersedes_story_artifact_id=inputs.supersedes_story_artifact_id,
+        created_by=inputs.actor,
+        created_at=inputs.recorded_at,
+    )
+    session.add(row)
+    session.flush()
+    return row
 
-        sprint_link = session.exec(
-            select(SprintStory.story_id).where(
-                cast("Any", SprintStory.story_id).in_(story_ids)
+
+def _materialize_story_rows(
+    session: Session,
+    *,
+    artifact: StoryArtifact,
+    content: CanonicalStoryOutput,
+    parent: _StoryParentContext,
+    accepted_at: datetime,
+) -> tuple[int, ...]:
+    artifact_id = _required_id(artifact.story_artifact_id, label="Story artifact")
+    chain_key = (
+        artifact.project_id,
+        artifact.source_backlog_artifact_id,
+        artifact.backlog_item_id,
+    )
+    nodes = tuple(
+        node
+        for node in _story_lineage_nodes(session, project_id=artifact.project_id)
+        if node.chain_key == chain_key
+    )
+    try:
+        superseded_artifact_ids = accepted_ancestor_ids(nodes)
+    except PlanningLineageError as error:
+        raise ValueError(str(error)) from error
+    prior_rows = session.exec(
+        select(UserStory).where(
+            col(UserStory.project_id) == artifact.project_id,
+            col(UserStory.source_story_artifact_id).in_(superseded_artifact_ids),
+            col(UserStory.is_superseded).is_(False),
+        )
+    ).all()
+    for prior in prior_rows:
+        prior.is_superseded = True
+        prior.updated_at = accepted_at
+        session.add(prior)
+
+    rows: list[UserStory] = []
+    for ordinal, envelope in enumerate(content.story_items, start=1):
+        item = envelope.item
+        rank = str((parent.backlog_item.priority * 100) + ordinal)
+        parse_story_rank(rank)
+        row = UserStory(
+            project_id=artifact.project_id,
+            source_story_artifact_id=artifact_id,
+            source_story_artifact_fingerprint=artifact.content_fingerprint,
+            source_story_item_id=item.story_item_id,
+            source_story_item_fingerprint=envelope.item_fingerprint,
+            accepted_spec_version_id=parent.specification.spec_version_id,
+            accepted_spec_hash=parent.specification.spec_hash,
+            spec_item_ids_json=canonical_json(list(item.spec_item_ids)),
+            title=item.story_title,
+            story_description=item.statement,
+            acceptance_criteria_json=canonical_json(list(item.acceptance_criteria)),
+            persona=item.persona,
+            status=StoryStatus.TO_DO,
+            story_points=_STORY_POINTS[item.estimated_effort],
+            rank=rank,
+            is_superseded=False,
+            validation_evidence=None,
+            created_at=accepted_at,
+            updated_at=accepted_at,
+        )
+        session.add(row)
+        rows.append(row)
+    session.flush()
+    return tuple(_required_id(row.story_id, label="User Story") for row in rows)
+
+
+def record_story_decision_in_session(
+    session: Session,
+    *,
+    inputs: RecordStoryDecisionInput,
+) -> RecordStoryDecisionResult:
+    """Append one terminal decision and atomically activate accepted items."""
+    if inputs.decision not in {"accepted", "rejected", "feedback"}:
+        message = "Story decision is invalid."
+        raise ValueError(message)
+    artifact_id = _required_id(
+        inputs.artifact.story_artifact_id,
+        label="Story artifact",
+    )
+    artifact = session.exec(
+        select(StoryArtifact).where(
+            col(StoryArtifact.project_id) == inputs.artifact.project_id,
+            col(StoryArtifact.story_artifact_id) == artifact_id,
+            col(StoryArtifact.content_fingerprint)
+            == inputs.artifact.content_fingerprint,
+        )
+    ).one_or_none()
+    if artifact is None:
+        message = "Story decision does not match one exact artifact."
+        raise ValueError(message)
+    if (
+        session.exec(
+            select(StoryArtifactDecision).where(
+                col(StoryArtifactDecision.project_id) == artifact.project_id,
+                col(StoryArtifactDecision.story_artifact_id) == artifact_id,
             )
-        ).first()
-        if sprint_link is not None:
-            message = (
-                "Story correction is unsafe: active story already has Sprint links."
+        ).one_or_none()
+        is not None
+    ):
+        message = "Story artifact already has a terminal decision."
+        raise ValueError(message)
+    parent = _story_parent_context(
+        session,
+        project_id=artifact.project_id,
+        source_backlog_artifact_id=artifact.source_backlog_artifact_id,
+        source_backlog_artifact_fingerprint=(
+            artifact.source_backlog_artifact_fingerprint
+        ),
+        backlog_item_id=artifact.backlog_item_id,
+        roadmap_artifact_id=artifact.roadmap_artifact_id,
+        roadmap_artifact_fingerprint=artifact.roadmap_artifact_fingerprint,
+    )
+    content = _load_story_content(artifact, parent=parent)
+    chain_key = (
+        artifact.project_id,
+        artifact.source_backlog_artifact_id,
+        artifact.backlog_item_id,
+    )
+    try:
+        next_artifact_version(
+            _story_lineage_nodes(session, project_id=artifact.project_id),
+            chain_key=chain_key,
+            supersedes_id=artifact_id,
+        )
+    except PlanningLineageError as error:
+        raise ValueError(str(error)) from error
+    decision = StoryArtifactDecision(
+        project_id=artifact.project_id,
+        story_artifact_id=artifact_id,
+        artifact_fingerprint=artifact.content_fingerprint,
+        decision=inputs.decision,
+        rationale=inputs.rationale,
+        reviewer=inputs.reviewer,
+        idempotency_key=inputs.idempotency_key,
+        decided_at=inputs.decided_at,
+    )
+    session.add(decision)
+    session.flush()
+    activated_story_ids = (
+        _materialize_story_rows(
+            session,
+            artifact=artifact,
+            content=content,
+            parent=parent,
+            accepted_at=inputs.decided_at,
+        )
+        if inputs.decision == "accepted"
+        else ()
+    )
+    return RecordStoryDecisionResult(
+        decision=decision,
+        activated_story_ids=activated_story_ids,
+    )
+
+
+def prove_story_decision_winner_in_session(  # noqa: PLR0911
+    session: Session,
+    *,
+    project_id: int,
+    story_artifact_id: int,
+    artifact_fingerprint: str,
+) -> bool:
+    """Prove a committed decision winner and its complete activation projection."""
+    try:
+        artifact = session.exec(
+            select(StoryArtifact).where(
+                col(StoryArtifact.project_id) == project_id,
+                col(StoryArtifact.story_artifact_id) == story_artifact_id,
+                col(StoryArtifact.content_fingerprint) == artifact_fingerprint,
             )
-            raise StoryPhaseError(
-                message,
-                status_code=409,
+        ).one_or_none()
+        decision = session.exec(
+            select(StoryArtifactDecision).where(
+                col(StoryArtifactDecision.project_id) == project_id,
+                col(StoryArtifactDecision.story_artifact_id) == story_artifact_id,
             )
-
-
-def _repair_story_readiness_rows(request: dict[str, Any]) -> dict[str, Any]:
-    """Backfill only Story planning metadata for active refined rows."""
-    project_id = int(request["project_id"])
-    items = list(request.get("items") or [])
-    repaired_ids: list[int] = []
-    with Session(get_engine()) as session:
-        _assert_repair_readiness_safe_in_session(session, project_id=project_id)
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            story = session.exec(
-                select(UserStory).where(
-                    UserStory.product_id == project_id,
-                    UserStory.source_requirement
-                    == normalize_requirement_key(item["parent_requirement"]),
-                    UserStory.refinement_slot == int(item["slot"]),
-                    UserStory.is_refined == True,  # noqa: E712
-                    UserStory.is_superseded == False,  # noqa: E712
+        ).one_or_none()
+        if (
+            artifact is None
+            or decision is None
+            or decision.artifact_fingerprint != artifact_fingerprint
+            or decision.decision not in {"accepted", "feedback", "rejected"}
+        ):
+            return False
+        rows = _story_artifact_rows(session, artifact=artifact)
+        if decision.decision != "accepted":
+            return not rows
+        if not _story_projection_matches_artifact(
+            session,
+            artifact=artifact,
+            decision=decision,
+            expected_superseded=False,
+            require_current_roadmap=True,
+            require_fresh_activation=True,
+        ):
+            return False
+        chain_key = (
+            artifact.project_id,
+            artifact.source_backlog_artifact_id,
+            artifact.backlog_item_id,
+        )
+        nodes = tuple(
+            node
+            for node in _story_lineage_nodes(session, project_id=project_id)
+            if node.chain_key == chain_key
+        )
+        current = select_current_accepted_artifact(nodes, chain_key=chain_key)
+        if current.artifact_id != story_artifact_id:
+            return False
+        superseded_artifact_ids = accepted_ancestor_ids(nodes)
+        for ancestor_id in superseded_artifact_ids:
+            ancestor = session.get(StoryArtifact, ancestor_id)
+            ancestor_decision = session.exec(
+                select(StoryArtifactDecision).where(
+                    col(StoryArtifactDecision.project_id) == project_id,
+                    col(StoryArtifactDecision.story_artifact_id) == ancestor_id,
                 )
-            ).first()
-            if story is None:
-                message = (
-                    "Story readiness repair could not find active refined story "
-                    f"for {item.get('parent_requirement')!r} slot {item.get('slot')!r}."
+            ).one_or_none()
+            if (
+                ancestor is None
+                or ancestor_decision is None
+                or ancestor_decision.decision != "accepted"
+                or ancestor_decision.artifact_fingerprint
+                != ancestor.content_fingerprint
+                or not _story_projection_matches_artifact(
+                    session,
+                    artifact=ancestor,
+                    decision=ancestor_decision,
+                    expected_superseded=True,
+                    require_current_roadmap=False,
+                    require_fresh_activation=False,
                 )
-                raise StoryPhaseError(message, status_code=409)
-            story.story_points = int(item["story_points"])
-            story.rank = str(item["rank"])
-            session.add(story)
-            if story.story_id is not None:
-                repaired_ids.append(story.story_id)
-        session.commit()
-    return {"repaired_count": len(repaired_ids), "story_ids": repaired_ids}
+            ):
+                return False
+        return True  # noqa: TRY300
+    except (PlanningLineageError, ValueError):
+        return False
 
 
-def _assert_repair_readiness_safe(*, project_id: int) -> None:
-    """Block Story readiness repair if refined rows already feed any Sprint."""
-    with Session(get_engine()) as session:
-        _assert_repair_readiness_safe_in_session(session, project_id=project_id)
+def _story_artifact_rows(
+    session: Session,
+    *,
+    artifact: StoryArtifact,
+) -> list[UserStory]:
+    return list(
+        session.exec(
+            select(UserStory).where(
+                col(UserStory.project_id) == artifact.project_id,
+                col(UserStory.source_story_artifact_id) == artifact.story_artifact_id,
+            )
+        ).all()
+    )
+
+
+def _story_projection_matches_artifact(  # noqa: PLR0913
+    session: Session,
+    *,
+    artifact: StoryArtifact,
+    decision: StoryArtifactDecision,
+    expected_superseded: bool,
+    require_current_roadmap: bool,
+    require_fresh_activation: bool,
+) -> bool:
+    parent = _story_parent_context(
+        session,
+        project_id=artifact.project_id,
+        source_backlog_artifact_id=artifact.source_backlog_artifact_id,
+        source_backlog_artifact_fingerprint=(
+            artifact.source_backlog_artifact_fingerprint
+        ),
+        backlog_item_id=artifact.backlog_item_id,
+        roadmap_artifact_id=artifact.roadmap_artifact_id,
+        roadmap_artifact_fingerprint=artifact.roadmap_artifact_fingerprint,
+        require_current_roadmap=require_current_roadmap,
+    )
+    content = _load_story_content(artifact, parent=parent)
+    rows = _story_artifact_rows(session, artifact=artifact)
+    if len(rows) != len(content.story_items):
+        return False
+    by_item_id = {row.source_story_item_id: row for row in rows}
+    if len(by_item_id) != len(rows):
+        return False
+    return all(
+        _story_row_matches_item(
+            by_item_id.get(envelope.item.story_item_id),
+            artifact=artifact,
+            envelope=envelope,
+            parent=parent,
+            ordinal=ordinal,
+            accepted_at=decision.decided_at,
+            expected_superseded=expected_superseded,
+            require_fresh_activation=require_fresh_activation,
+        )
+        for ordinal, envelope in enumerate(content.story_items, start=1)
+    )
+
+
+def _story_row_matches_item(  # noqa: PLR0913
+    row: UserStory | None,
+    *,
+    artifact: StoryArtifact,
+    envelope: StoryItemEnvelope,
+    parent: _StoryParentContext,
+    ordinal: int,
+    accepted_at: datetime,
+    expected_superseded: bool = False,
+    require_fresh_activation: bool = True,
+) -> bool:
+    """Compare every immutable materialized field with one canonical item."""
+    if row is None:
+        return False
+    item = envelope.item
+    immutable_projection_matches = (
+        row.project_id == artifact.project_id
+        and row.source_story_artifact_id == artifact.story_artifact_id
+        and row.source_story_artifact_fingerprint == artifact.content_fingerprint
+        and row.source_story_item_id == item.story_item_id
+        and row.source_story_item_fingerprint == envelope.item_fingerprint
+        and row.accepted_spec_version_id == parent.specification.spec_version_id
+        and row.accepted_spec_hash == parent.specification.spec_hash
+        and row.spec_item_ids_json == canonical_json(list(item.spec_item_ids))
+        and row.title == item.story_title
+        and row.story_description == item.statement
+        and row.acceptance_criteria_json
+        == canonical_json(list(item.acceptance_criteria))
+        and row.persona == item.persona
+        and row.is_superseded is expected_superseded
+        and row.created_at == accepted_at
+    )
+    if not immutable_projection_matches:
+        return False
+    return not require_fresh_activation or (
+        row.story_points == _STORY_POINTS[item.estimated_effort]
+        and row.rank == str((parent.backlog_item.priority * 100) + ordinal)
+        and row.status is StoryStatus.TO_DO
+        and row.validation_evidence is None
+        and row.updated_at == accepted_at
+    )
+
+
+def repair_story_readiness_in_session(
+    session: Session,
+    *,
+    project_id: int,
+    repairs: tuple[tuple[int, int, str], ...],
+    repaired_at: datetime,
+) -> tuple[int, ...]:
+    """Repair exact Story points and rank under the caller-owned transaction."""
+    for _story_id, _story_points, rank in repairs:
+        parse_story_rank(rank)
+    _assert_repair_readiness_safe_in_session(session, project_id=project_id)
+    story_ids = tuple(item[0] for item in repairs)
+    rows = session.exec(
+        select(UserStory).where(col(UserStory.story_id).in_(story_ids))
+    ).all()
+    by_id = {item.story_id: item for item in rows if item.story_id is not None}
+    if set(by_id) != set(story_ids):
+        message = "Story readiness repair does not target exact Project stories."
+        raise ValueError(message)
+    for story_id, story_points, rank in repairs:
+        story = by_id[story_id]
+        if story.project_id != project_id or story.is_superseded:
+            message = "Story readiness repair targets an inactive Story."
+            raise ValueError(message)
+        story.story_points = story_points
+        story.rank = rank
+        story.updated_at = repaired_at
+        session.add(story)
+    session.flush()
+    return tuple(sorted(story_ids))
 
 
 def _assert_repair_readiness_safe_in_session(
@@ -1972,13 +900,12 @@ def _assert_repair_readiness_safe_in_session(
     *,
     project_id: int,
 ) -> None:
-    """Block Story readiness repair if refined rows already feed any Sprint."""
+    """Block Story readiness repair if current rows already feed any Sprint."""
     active_story_ids = [
         story_id
         for story_id in session.exec(
             select(UserStory.story_id).where(
-                UserStory.product_id == project_id,
-                UserStory.is_refined == True,  # noqa: E712
+                UserStory.project_id == project_id,
                 UserStory.is_superseded == False,  # noqa: E712
             )
         ).all()
@@ -1986,297 +913,29 @@ def _assert_repair_readiness_safe_in_session(
     ]
     if not active_story_ids:
         return
-
     sprint_link = session.exec(
         select(SprintStory.story_id)
-        .join(Sprint, cast("Any", Sprint.sprint_id) == SprintStory.sprint_id)
+        .join(Sprint, col(Sprint.sprint_id) == col(SprintStory.sprint_id))
         .where(
-            Sprint.product_id == project_id,
-            cast("Any", SprintStory.story_id).in_(active_story_ids),
+            Sprint.project_id == project_id,
+            col(SprintStory.story_id).in_(active_story_ids),
         )
     ).first()
     if sprint_link is not None:
         message = "Story readiness repair is unsafe after Sprint work exists."
-        raise StoryPhaseError(
-            message,
-            status_code=409,
-        )
+        raise ValueError(message)
 
 
-def _resolve_target_refinement_slot(
-    project_id: int,
-    parent_requirement: str,
-    story_id: int,
-) -> int | None:
-    normalized_requirement = normalize_requirement_key(parent_requirement)
-    with Session(get_engine()) as session:
-        story = session.get(UserStory, story_id)
-        if (
-            story is None
-            or story.product_id != project_id
-            or story.source_requirement != normalized_requirement
-            or story.is_superseded
-            or story.refinement_slot is None
-        ):
-            return None
-        return story.refinement_slot
-
-
-def _build_tool_context(context: object) -> ToolContext:
-    """Return a lightweight ToolContext-compatible state holder."""
-    return cast("ToolContext", context)
-
-
-def _hydrate_roadmap_from_product(state: dict[str, Any], product: Product) -> None:
-    """Backfill saved roadmap releases when workflow state lacks them."""
-    roadmap_releases = state.get("roadmap_releases")
-    if isinstance(roadmap_releases, list) and roadmap_releases:
-        return
-
-    roadmap = getattr(product, "roadmap", None)
-    if not roadmap:
-        return
-
-    parsed: Any = roadmap
-    if isinstance(roadmap, str):
-        try:
-            parsed = json.loads(roadmap)
-        except json.JSONDecodeError:
-            return
-
-    if isinstance(parsed, dict):
-        parsed = parsed.get("roadmap_releases")
-
-    if isinstance(parsed, list) and parsed:
-        state["roadmap_releases"] = [
-            release for release in parsed if isinstance(release, dict)
-        ]
-
-
-def _assert_required_context(state: dict[str, Any]) -> None:
-    """Block Story runtime if hydrated context is missing semantic inputs."""
-    missing: list[str] = []
-    if not state.get("pending_spec_content"):
-        missing.append("pending_spec_content")
-    if not state.get("compiled_authority_cached"):
-        missing.append("compiled_authority_cached")
-    roadmap_releases = state.get("roadmap_releases")
-    if not isinstance(roadmap_releases, list) or not roadmap_releases:
-        missing.append("roadmap_releases")
-    if missing:
-        raise StoryPhaseError(
-            "Setup required: Story context hydration missing " + ", ".join(missing)
-        )
-
-
-def _failure_meta(
-    story_result: dict[str, Any],
-    *,
-    fallback_summary: object = None,
-) -> dict[str, Any]:
-    """Copy normalized runtime failure metadata onto Story attempts."""
-    return {
-        "failure_artifact_id": story_result.get("failure_artifact_id"),
-        "failure_stage": story_result.get("failure_stage"),
-        "failure_summary": story_result.get("failure_summary") or fallback_summary,
-        "raw_output_preview": story_result.get("raw_output_preview"),
-        "has_full_artifact": bool(story_result.get("has_full_artifact", False)),
-    }
-
-
-def _story_runtime_failed(data: dict[str, Any]) -> bool:
-    """Return whether a Story service response recorded runtime failure."""
-    payload = data.get("data")
-    output_artifact = (
-        payload.get("output_artifact") if isinstance(payload, dict) else {}
-    )
-    if not isinstance(output_artifact, dict):
-        return False
-    return bool(
-        output_artifact.get("failure_artifact_id")
-        or output_artifact.get("error") == "STORY_GENERATION_FAILED"
-    )
-
-
-def _attempt_count(
-    state: dict[str, Any],
-    *,
-    parent_requirement: str,
-) -> int | None:
-    story_attempts = state.get("story_attempts")
-    if not isinstance(story_attempts, dict):
-        return None
-    attempts = story_attempts.get(parent_requirement)
-    if not isinstance(attempts, list):
-        return None
-    return len(attempts)
-
-
-def _latest_attempt(
-    state: dict[str, Any],
-    *,
-    parent_requirement: str,
-) -> dict[str, Any]:
-    story_attempts = state.get("story_attempts")
-    if not isinstance(story_attempts, dict):
-        return {}
-    attempts = story_attempts.get(parent_requirement)
-    if not isinstance(attempts, list) or not attempts:
-        return {}
-    latest = attempts[-1]
-    return latest if isinstance(latest, dict) else {}
-
-
-def _flatten_phase_payload(data: dict[str, Any]) -> dict[str, Any]:
-    """Flatten phase service payloads for CLI consumers."""
-    payload: dict[str, Any] = {
-        str(key): value for key, value in data.items() if key != "data"
-    }
-    inner = data.get("data")
-    if isinstance(inner, dict):
-        payload.update({str(key): value for key, value in inner.items()})
-    return payload
-
-
-def _warnings_from_feedback_quality(data: dict[str, Any]) -> list[dict[str, Any]]:
-    inner = data.get("data")
-    if not isinstance(inner, dict) or inner.get("generation_ran") is not False:
-        return []
-    feedback_quality = inner.get("feedback_quality")
-    if not isinstance(feedback_quality, dict):
-        return []
-    if feedback_quality.get("needs_revision") is not True:
-        return []
-    raw_warnings = feedback_quality.get("warnings")
-    if not isinstance(raw_warnings, list):
-        return []
-
-    missing_fields = feedback_quality.get("missing_fields")
-    missing_summary = (
-        ", ".join(str(item) for item in missing_fields if isinstance(item, str))
-        if isinstance(missing_fields, list)
-        else ""
-    )
-    remediation = [
-        (
-            "Use structured feedback with Target, Issue/Evidence, Required change, "
-            "Acceptance criteria, and Scope limit sections."
-        ),
-    ]
-    if missing_summary:
-        remediation.append(f"Missing fields: {missing_summary}.")
-    remediation.append(
-        "Use --force-feedback to bypass this check when regenerating after a "
-        "non-draft runtime failure."
-    )
-
-    warnings: list[dict[str, Any]] = []
-    for raw_warning in raw_warnings:
-        if not isinstance(raw_warning, dict):
-            continue
-        warnings.append(
-            {
-                "code": str(raw_warning.get("code") or "FEEDBACK_NEEDS_REVISION"),
-                "message": str(
-                    raw_warning.get("message") or "Feedback needs revision."
-                ),
-                "remediation": list(remediation),
-            }
-        )
-    return warnings
-
-
-def _data_envelope(data: dict[str, Any]) -> dict[str, Any]:
-    """Return application facade success envelope."""
-    return {
-        "ok": True,
-        "data": _flatten_phase_payload(data),
-        "warnings": _warnings_from_feedback_quality(data),
-        "errors": [],
-    }
-
-
-def _error_envelope(
-    code: ErrorCode,
-    message: str,
-    *,
-    details: dict[str, Any] | None = None,
-    remediation: list[str] | None = None,
-) -> dict[str, Any]:
-    """Return application facade failure envelope."""
-    return {
-        "ok": False,
-        "data": None,
-        "warnings": [],
-        "errors": [
-            workbench_error(
-                code,
-                message=message,
-                details=details or {},
-                remediation=remediation or [],
-            ).to_dict()
-        ],
-    }
-
-
-def _phase_error(exc: StoryPhaseError) -> dict[str, Any]:
-    """Map Story phase errors onto registered CLI errors."""
-    message = exc.detail
-    code = (
-        ErrorCode.AUTHORITY_NOT_ACCEPTED
-        if message.startswith("Setup required")
-        else ErrorCode.IDEMPOTENCY_KEY_REUSED
-        if message == STORY_IDEMPOTENCY_REUSED_MESSAGE
-        else ErrorCode.INVALID_COMMAND
-    )
-    return _error_envelope(code, message)
-
-
-def _workflow_error(exc: RuntimeError) -> dict[str, Any]:
-    """Map workflow persistence errors onto registered CLI errors."""
-    return _error_envelope(ErrorCode.WORKFLOW_SESSION_FAILED, str(exc))
-
-
-def _story_runtime_error(
-    *,
-    project_id: int,
-    parent_requirement: str,
-    data: dict[str, Any],
-    state: dict[str, Any],
-) -> dict[str, Any]:
-    """Map a recorded Story runtime failure onto a hard CLI failure."""
-    payload = data.get("data") if isinstance(data.get("data"), dict) else {}
-    output_artifact = (
-        payload.get("output_artifact") if isinstance(payload, dict) else {}
-    )
-    if not isinstance(output_artifact, dict):
-        output_artifact = {}
-    parent = str(data.get("parent_requirement") or parent_requirement)
-    latest_attempt = _latest_attempt(state, parent_requirement=parent)
-    message = str(
-        output_artifact.get("failure_summary")
-        or latest_attempt.get("failure_summary")
-        or output_artifact.get("message")
-        or output_artifact.get("error")
-        or "Story generation failed."
-    )
-    details = {
-        "project_id": project_id,
-        "parent_requirement": parent,
-        "story_run_success": False,
-        "failure_stage": output_artifact.get("failure_stage")
-        or latest_attempt.get("failure_stage"),
-        "failure_artifact_id": output_artifact.get("failure_artifact_id")
-        or latest_attempt.get("failure_artifact_id"),
-        "attempt_count": _attempt_count(state, parent_requirement=parent),
-        "fsm_state": data.get("fsm_state") or state.get("fsm_state"),
-    }
-    return _error_envelope(
-        ErrorCode.MUTATION_FAILED,
-        message,
-        details={key: value for key, value in details.items() if value is not None},
-        remediation=[
-            "Inspect agileforge story history --project-id <project_id> --parent-requirement <requirement>.",  # noqa: E501
-            "Fix the Story runtime/provider configuration or refine the input.",
-        ],
-    )
+__all__ = [
+    "RecordStoryDecisionInput",
+    "RecordStoryDecisionResult",
+    "RecordStoryDraftInput",
+    "StoryCorrectionTarget",
+    "load_stored_story_planning_content",
+    "load_story_correction_target_in_session",
+    "prove_story_decision_winner_in_session",
+    "record_story_decision_in_session",
+    "record_story_draft_in_session",
+    "repair_story_readiness_in_session",
+    "validate_story_planning_content",
+]

@@ -1,44 +1,14 @@
-# agile_sqlmodel.py
+"""Public SQLModel schema facade and database bootstrap entry point."""
 
-"""
-Defines the Agile project management schema using SQLModel.
-
-This script creates all 12 tables, including link models for
-many-to-many relationships, and sets up a SQLite database.
-
-This version fixes the 'utcnow' deprecation warning and the
-'func.now' runtime error.
-"""
-
-import sys
 from importlib import import_module
 from types import ModuleType
 
-# When this compatibility shim is executed as a script, models.core may import
-# it again by module name while exports are still being populated. Register the
-# current module under the canonical name up front so that path resolves to this
-# in-flight module instead of executing the file twice.
-if __name__ == "__main__":
-    sys.modules.setdefault("agile_sqlmodel", sys.modules[__name__])
-
-# Re-export model symbols from their new package locations and ensure SQLModel
-# metadata is populated when this compatibility shim is imported or executed.
-from models.authority_curation import (
-    AuthorityCurationAttempt,
-    AuthorityFeedbackAttempt,
-)
-from models.brownfield import (
-    BrownfieldScanAttempt,
-    BrownfieldSourceArtifact,
-    BrownfieldSpecApproval,
-    BrownfieldSpecDraftAttempt,
-)
 from models.core import (
     Epic,
     Feature,
-    Product,
-    ProductPersona,
-    ProductTeam,
+    Project,
+    ProjectPersona,
+    ProjectTeam,
     Sprint,
     SprintStory,
     Task,
@@ -50,7 +20,6 @@ from models.core import (
     UserStoryDependency,
 )
 from models.enums import (
-    SpecAuthorityStatus,
     SprintStatus,
     StoryResolution,
     StoryStatus,
@@ -65,28 +34,36 @@ from models.events import (
     TaskExecutionLog,
     WorkflowEvent,
 )
-from models.specs import (
-    CompiledSpecAuthority,
-    SpecAuthorityAcceptance,
-    SpecRegistry,
+from models.product_definition import (
+    ProductGoalArtifact,
+    ProductGoalArtifactDecision,
+    ProductGoalInterviewTurn,
+    ProductGoalOutcome,
+    SpecificationCandidate,
+    SpecificationDecision,
+    SpecificationSource,
+    VisionEvidenceSnapshot,
+    VisionInterviewTurn,
+    VisionRevisionIntent,
 )
+from models.repository import RepositoryBinding
+from models.specs import SpecRegistry
 
 __all__ = [
-    "AuthorityCurationAttempt",
-    "AuthorityFeedbackAttempt",
-    "BrownfieldScanAttempt",
-    "BrownfieldSourceArtifact",
-    "BrownfieldSpecApproval",
-    "BrownfieldSpecDraftAttempt",
-    "CompiledSpecAuthority",
     "Epic",
     "Feature",
-    "Product",
-    "ProductPersona",
-    "ProductTeam",
-    "SpecAuthorityAcceptance",
-    "SpecAuthorityStatus",
+    "ProductGoalArtifact",
+    "ProductGoalArtifactDecision",
+    "ProductGoalInterviewTurn",
+    "ProductGoalOutcome",
+    "Project",
+    "ProjectPersona",
+    "ProjectTeam",
+    "RepositoryBinding",
     "SpecRegistry",
+    "SpecificationCandidate",
+    "SpecificationDecision",
+    "SpecificationSource",
     "Sprint",
     "SprintStatus",
     "SprintStory",
@@ -105,12 +82,12 @@ __all__ = [
     "TimeFrame",
     "UserStory",
     "UserStoryDependency",
+    "VisionEvidenceSnapshot",
+    "VisionInterviewTurn",
+    "VisionRevisionIntent",
     "WorkflowEvent",
     "WorkflowEventType",
 ]
-
-
-# --- 1. Enums for Status Fields ---
 
 
 def _db_module() -> ModuleType:
@@ -119,7 +96,7 @@ def _db_module() -> ModuleType:
 
 
 def __getattr__(name: str):
-    """Lazily expose DB globals so importing this shim does not require DB env."""
+    """Lazily expose database globals without resolving configuration eagerly."""
     if name in {
         "DB_URL",
         "engine",
@@ -136,5 +113,4 @@ def __getattr__(name: str):
 
 
 if __name__ == "__main__":
-    # This makes the script runnable with explicit environment configuration.
     _db_module().create_db_and_tables()

@@ -32,11 +32,7 @@ def inspect_schema(db_path: str) -> None:
 
     emit()
 
-    for table_name in [
-        "compiled_spec_authority",
-        "spec_registry",
-        "spec_authority_acceptance",
-    ]:
+    for table_name in ["spec_registry"]:
         cursor.execute(f"PRAGMA table_info({table_name})")
         cols = cursor.fetchall()
         emit(f"{table_name} has {len(cols)} columns:")

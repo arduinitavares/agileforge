@@ -1,0 +1,76 @@
+{
+  "project_id": 41,
+  "graph_version": "agileforge.workflow.v2",
+  "fact_fingerprint": "facts-41",
+  "evaluated_at": "2026-08-21T12:00:00Z",
+  "available_nodes": ["planning.backlog.review"],
+  "waiting_nodes": [
+    "planning.roadmap.review",
+    "planning.story.review",
+    "planning.sprint.review"
+  ],
+  "blocked_nodes": ["execution.sprint.start"],
+  "invalid_nodes": [],
+  "terminal": false,
+  "decisions": [
+    {
+      "node_id": "planning.backlog.review",
+      "instance_key": null,
+      "child_graph_id": "planning",
+      "request_kind": "decide_backlog",
+      "category": "available",
+      "recommendation_kind": "required",
+      "reason_code": "BACKLOG_REVIEW_REQUIRED",
+      "required_inputs": [],
+      "fact_references": [
+        {"fact_type": "backlog", "fact_id": "11", "fingerprint": "backlog-11"},
+        {"fact_type": "spec_version", "fact_id": "17", "fingerprint": "spec-17"}
+      ],
+      "blockers": [],
+      "valid_until": null,
+      "decision_fingerprint": "decision-backlog"
+    },
+    {
+      "node_id": "planning.roadmap.review",
+      "instance_key": null,
+      "child_graph_id": "planning",
+      "request_kind": "decide_roadmap",
+      "category": "waiting",
+      "recommendation_kind": "required",
+      "reason_code": "BACKLOG_ACCEPTANCE_REQUIRED",
+      "required_inputs": [],
+      "fact_references": [],
+      "blockers": [],
+      "valid_until": null,
+      "decision_fingerprint": "decision-roadmap"
+    },
+    {
+      "node_id": "planning.story.review",
+      "instance_key": "story:DATA.001",
+      "child_graph_id": "planning",
+      "request_kind": "decide_story",
+      "category": "waiting",
+      "recommendation_kind": "required",
+      "reason_code": "ROADMAP_ACCEPTANCE_REQUIRED",
+      "required_inputs": [],
+      "fact_references": [],
+      "blockers": [],
+      "valid_until": null,
+      "decision_fingerprint": "decision-story"
+    },
+    {
+      "node_id": "planning.sprint.review",
+      "instance_key": null,
+      "child_graph_id": "planning",
+      "request_kind": "decide_sprint_plan",
+      "category": "waiting",
+      "recommendation_kind": "required",
+      "reason_code": "STORY_ACCEPTANCE_REQUIRED",
+      "required_inputs": [],
+      "fact_references": [],
+      "blockers": [],
+      "valid_until": null,
+      "decision_fingerprint": "decision-sprint-plan"
+    }
+  ]
+}

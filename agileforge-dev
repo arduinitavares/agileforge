@@ -1,0 +1,37 @@
+#!/bin/sh
+set -eu
+
+BOOTSTRAP=$0
+case "$BOOTSTRAP" in
+    /*) ;;
+    *) BOOTSTRAP=$PWD/$BOOTSTRAP ;;
+esac
+
+if [ -L "$BOOTSTRAP" ]; then
+    printf '%s\n' 'refusing symlinked launcher path' >&2
+    exit 1
+fi
+
+ROOT=$(CDPATH= cd -P -- "$(dirname -- "$BOOTSTRAP")" && pwd -P)
+unset \
+    PYTHONHOME \
+    PYTHONPATH \
+    PYTHONUSERBASE \
+    UV_CONFIG_FILE \
+    UV_ENV_FILE \
+    UV_FROZEN \
+    UV_ISOLATED \
+    UV_LOCKED \
+    UV_MANAGED_PYTHON \
+    UV_NO_CONFIG \
+    UV_NO_EDITABLE \
+    UV_NO_MANAGED_PYTHON \
+    UV_NO_PROJECT \
+    UV_NO_SYNC \
+    UV_PROJECT \
+    UV_PROJECT_ENVIRONMENT \
+    UV_PYTHON \
+    UV_WORKING_DIR \
+    UV_WORKING_DIRECTORY \
+    VIRTUAL_ENV
+exec uv --directory "$ROOT" run --locked agileforge-dev "$@"

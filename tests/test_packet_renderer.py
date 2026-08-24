@@ -1,165 +1,204 @@
-"""Focused unit tests for the packet renderer (prompt contract split)."""
+"""Closed direct-Spec packet renderer tests."""
 
-from typing import Any
+from __future__ import annotations
 
-from services.packet_renderer import render_human_brief, render_packet
+import copy
+from typing import TYPE_CHECKING
+
+import pytest
+from sqlmodel import Session
+
+from services.packet_renderer import PacketRenderError, render_packet
+from services.packets.canonical import build_story_packet, build_task_packet
+from services.read_projections import DurableReadProjectionService
+from tests.workflow.execution_fixtures import seed_started_execution
+
+if TYPE_CHECKING:
+    from sqlalchemy.engine import Engine
+
+    from workflow.contracts import JsonObject, JsonValue
 
 
-def _minimal_packet(  # noqa: PLR0913
-    *,
-    schema_version: object = "task_packet.v2",
-    task_label: object = "Implement feature X",
-    task_description: object = "Build the feature",
-    ac_items: object = None,
-    task_checklist_items: object = None,
-    sprint_goal: object = None,
-    story_title: object = None,
-    story_description: object = None,
-    task_kind: object = "implementation",
-    artifact_targets: object = None,
-    workstream_tags: object = None,
-    task_hard_constraints: object = None,
-    story_compliance_boundaries: object = None,
-    task_plan: object = None,
-) -> dict[str, Any]:
-    """Build the smallest valid packet dict for renderer testing."""
-    story_payload = {
-        "story_id": 7,
-        "title": story_title,
-        "story_description": story_description,
-    }
-    packet = {
-        "schema_version": schema_version,
-        "task": {
-            "task_id": 1,
-            "label": task_label,
-            "description": task_description,
-            "status": "To Do",
-            "task_kind": task_kind,
-            "artifact_targets": artifact_targets or [],
-            "workstream_tags": workstream_tags or [],
-            "checklist_items": task_checklist_items or [],
-        },
-        "context": {
-            "sprint": {
-                "sprint_id": 3,
-                "goal": sprint_goal,
-            },
-            "product": {
-                "name": "Test Product",
-            },
-        },
-        "constraints": {
-            "acceptance_criteria_items": ac_items or [],
-            "task_hard_constraints": task_hard_constraints or [],
-            "story_compliance_boundaries": story_compliance_boundaries or [],
-            "story_acceptance_criteria_items": ac_items or [],
-        },
-    }
-    if schema_version == "story_packet.v1":
-        packet["story"] = story_payload
+def _object(value: JsonValue) -> JsonObject:
+    assert isinstance(value, dict)
+    return value
+
+
+def _items(value: JsonValue) -> list[JsonValue]:
+    assert isinstance(value, list)
+    return value
+
+
+def _packets(engine: Engine) -> tuple[JsonObject, JsonObject]:
+    project_id, sprint_id, story_id, task_id = seed_started_execution(engine)
+    with Session(engine) as session:
+        return (
+            build_story_packet(
+                session,
+                project_id=project_id,
+                sprint_id=sprint_id,
+                story_id=story_id,
+            ),
+            build_task_packet(
+                session,
+                project_id=project_id,
+                sprint_id=sprint_id,
+                task_id=task_id,
+            ),
+        )
+
+
+def test_human_renderer_shows_exact_language_without_machine_identity(
+    engine: Engine,
+) -> None:
+    """Human output exposes evidence and contracts, never raw durable identity."""
+    story, task = _packets(engine)
+    story_text = render_packet(story, "human")
+    task_text = render_packet(task, "human")
+
+    assert "Specification: current" in story_text
+    assert "Backlog requirement:" in story_text
+    assert "Roadmap release:" in story_text
+    assert "Story acceptance criteria:" in story_text
+    assert "Level: MUST" in story_text
+    assert "Verification: acceptance-test" in story_text
+    assert "The Roadmap references Plan immutable work exactly once." in story_text
+    assert "Task checklist:" in task_text
+    for forbidden in (
+        "sha256:",
+        "spec_version_id",
+        "artifact_id",
+        "fingerprint",
+        "instance_key",
+        "story_id",
+        "task_id",
+    ):
+        assert forbidden not in story_text
+        assert forbidden not in task_text
+
+
+def test_agent_renderer_keeps_domain_evidence_but_not_internal_lineage(
+    engine: Engine,
+) -> None:
+    """Agent output keeps work evidence while omitting database/receipt internals."""
+    story, task = _packets(engine)
+    story_text = render_packet(story, "agent")
+    task_text = render_packet(task, "agent")
+
+    assert "<execution_packet>" in story_text
+    assert '<item id="REQ.' in story_text
+    assert 'level="MUST"' in story_text
+    assert 'verification_method="acceptance-test"' in story_text
+    assert "<criterion>The Roadmap references Plan immutable work exactly once." in (
+        story_text
+    )
+    assert "<acceptance_criteria>" in story_text
+    assert "<checklist>" in task_text
+    for forbidden in ("sha256:", "artifact_id", "fingerprint", "instance_key"):
+        assert forbidden not in story_text
+        assert forbidden not in task_text
+
+
+@pytest.mark.parametrize("flavor", ["markdown", "brief", "cursor", "xml", "bogus"])
+def test_renderer_rejects_every_noncanonical_flavor(
+    engine: Engine,
+    flavor: str,
+) -> None:
+    """Aliases and unknown flavor values cannot silently select a prompt."""
+    story, _task = _packets(engine)
+    with pytest.raises(PacketRenderError) as error:
+        render_packet(story, flavor)
+    assert error.value.code == "PACKET_FLAVOR_UNSUPPORTED"
+
+
+@pytest.mark.parametrize(
+    ("schema", "kind"),
+    [
+        ("story_packet." + "v1", "story"),
+        ("task_packet." + "v2", "task"),
+        ("story_packet.v2", "task"),
+        ("unknown", "story"),
+    ],
+)
+def test_renderer_rejects_old_unknown_or_mismatched_schema(
+    engine: Engine,
+    schema: str,
+    kind: str,
+) -> None:
+    """Schema and packet kind form one closed discriminator pair."""
+    story, _task = _packets(engine)
+    story["schema_version"] = schema
+    story["packet_kind"] = kind
+    with pytest.raises(PacketRenderError) as error:
+        render_packet(story, "human")
+    assert error.value.code == "PACKET_SCHEMA_UNSUPPORTED"
+
+
+@pytest.mark.parametrize("mutation", ["missing", "unknown", "malformed", "nonfinite"])
+def test_renderer_rejects_incomplete_unknown_malformed_or_nonfinite_packet(
+    engine: Engine,
+    mutation: str,
+) -> None:
+    """Every supported discriminator still requires the complete closed schema."""
+    story, _task = _packets(engine)
+    invalid = copy.deepcopy(story)
+    if mutation == "missing":
+        invalid.pop("work")
+    elif mutation == "unknown":
+        invalid["unexpected"] = "value"
+    elif mutation == "malformed":
+        invalid["context"] = []
     else:
-        packet["context"]["story"] = story_payload
-    if task_plan is not None:
-        packet["task_plan"] = {"tasks": task_plan}
-    return packet
+        sprint = _object(_object(invalid["context"])["sprint"])
+        sprint["goal"] = float("nan")
+
+    with pytest.raises(PacketRenderError) as error:
+        render_packet(invalid, "human")
+
+    assert error.value.code == "PACKET_CONTENT_INVALID"
 
 
-# ------------------------------------------------------------------
-# Execution Protocol
-# ------------------------------------------------------------------
+def test_flavored_read_returns_separate_view_and_empty_flavor_is_rejected(
+    engine: Engine,
+) -> None:
+    """Rendering never mutates the seven-key packet and every supplied flavor closes."""
+    project_id, sprint_id, story_id, _task_id = seed_started_execution(engine)
+    reads = DurableReadProjectionService(engine=engine)
 
-
-def test_render_packet_uses_task_checklist_for_task_packets() -> None:
-    """Verify render packet uses task checklist for task packets."""
-    packet = _minimal_packet(
-        schema_version="task_packet.v2",
-        story_title="Parent Story",
-        story_description="Bootstrap the execution session.",
-        task_checklist_items=["Confirm request shape", "Add request tests"],
-        ac_items=["Story AC should stay out of task prompts"],
+    canonical = reads.story_packet(
+        project_id=project_id,
+        sprint_id=sprint_id,
+        story_id=story_id,
     )
-    output = render_packet(packet, "cursor")
-
-    assert "Task Checklist" in output
-    assert "Verify every task checklist item before claiming completion." in output
-    assert (
-        "This prompt assumes the session was already initialized with the parent story prompt. If not, restart with Copy Story Prompt."  # noqa: E501
-        in output
+    flavored = reads.story_packet(
+        project_id=project_id,
+        sprint_id=sprint_id,
+        story_id=story_id,
+        flavor="human",
     )
-    assert "- [ ] Confirm request shape" in output
-    assert "- [ ] Add request tests" in output
-    assert "Acceptance Criteria Checklist" not in output
-    assert "Story AC should stay out of task prompts" not in output
-
-
-def test_render_packet_uses_story_acceptance_criteria_for_story_packets() -> None:
-    """Verify render packet uses story acceptance criteria for story packets."""
-    packet = _minimal_packet(
-        schema_version="story_packet.v1",
-        story_title="Parent Story",
-        story_description="Bootstrap the execution session.",
-        ac_items=["include user_id", "reject invalid payloads"],
-        task_plan=[
-            {
-                "id": 12,
-                "description": "Implement request validation",
-                "status": "To Do",
-                "task_kind": "implementation",
-                "artifact_targets": ["validator"],
-                "workstream_tags": ["backend"],
-                "checklist_items": ["Confirm request shape"],
-                "is_executable": True,
-            }
-        ],
-    )
-    output = render_packet(packet, "cursor")
-
-    assert "Story Acceptance Criteria" in output
-    assert "- [ ] include user_id" in output
-    assert "- [ ] reject invalid payloads" in output
-    assert "Task Checklist" not in output
-    assert "Task Plan Reference" in output
-    assert "Implement request validation" in output
-
-
-def test_story_packet_human_brief_uses_top_level_story_shape() -> None:
-    """Verify story packet human brief uses top level story shape."""
-    packet = _minimal_packet(
-        schema_version="story_packet.v1",
-        story_title="Top-level Story Title",
-        story_description="Top-level story description.",
-        ac_items=["include user_id"],
-        task_plan=[
-            {
-                "id": 12,
-                "description": "Implement request validation",
-                "status": "To Do",
-                "task_kind": "implementation",
-                "artifact_targets": ["validator"],
-                "workstream_tags": ["backend"],
-                "checklist_items": ["Confirm request shape"],
-                "is_executable": True,
-            }
-        ],
+    empty = reads.story_packet(
+        project_id=project_id,
+        sprint_id=sprint_id,
+        story_id=story_id,
+        flavor="",
     )
 
-    output = render_human_brief(packet)
-
-    assert "# Story: Top-level Story Title" in output
-    assert "Top-level story description." in output
-    assert "## Story Acceptance Criteria" in output
-    assert "## Task Plan Reference" in output
-    assert "Confirm request shape" not in output
-    assert "## Task Checklist" not in output
-
-
-def test_human_brief_has_no_execution_contract() -> None:
-    """Verify human brief has no execution contract."""
-    packet = _minimal_packet(
-        ac_items=["some AC"], task_checklist_items=["some checklist"]
-    )
-    output = render_human_brief(packet)
-    assert "<execution_protocol>" not in output
-    assert "<completion_report>" not in output
-    assert "## Completion Report" not in output
+    assert canonical["ok"] is True
+    assert flavored["ok"] is True
+    canonical_packet = _object(canonical["data"])
+    flavored_view = _object(flavored["data"])
+    assert list(canonical_packet) == [
+        "schema_version",
+        "packet_kind",
+        "metadata",
+        "lineage",
+        "context",
+        "evidence",
+        "work",
+    ]
+    assert flavored_view["packet"] == canonical_packet
+    assert isinstance(flavored_view["render"], str)
+    assert "render" not in canonical_packet
+    assert empty["ok"] is False
+    errors = _items(empty["errors"])
+    assert _object(errors[0])["code"] == "PACKET_FLAVOR_UNSUPPORTED"

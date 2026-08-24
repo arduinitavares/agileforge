@@ -99,43 +99,14 @@ def test_db_tools_import_boundary() -> None:
     assert core_imports == {
         "Epic",
         "Feature",
-        "Product",
-        "ProductPersona",
-        "Task",
+        "Project",
+        "ProjectPersona",
         "Theme",
-        "UserStory",
     }
     assert db_imports == {"get_engine"}
     assert agile_imports == set()
     assert agile_aliases == set()
     assert not agile_task_attr_refs
-
-
-def test_story_query_tools_import_boundary() -> None:
-    """Verify story query tools import boundary."""
-    module_path = ROOT / "tools/story_query_tools.py"
-
-    core_imports = _imported_names_from(module_path, "models.core")
-    core_bound_imports = _bound_import_names_from(module_path, "models.core")
-    db_imports = _imported_names_from(module_path, "models.db")
-    db_bound_imports = _bound_import_names_from(module_path, "models.db")
-    agile_imports = _imported_names_from(module_path, "agile_sqlmodel")
-    agile_aliases = _module_import_aliases(module_path, "agile_sqlmodel")
-    core_aliases = _module_import_aliases(module_path, "models.core")
-    db_aliases = _module_import_aliases(module_path, "models.db")
-    agile_attr_refs = _attribute_references_from_import(
-        module_path, {"agile_sqlmodel", *agile_aliases}, {"get_engine"}
-    )
-
-    assert core_imports == {"Epic", "Feature", "Product", "Theme", "UserStory"}
-    assert core_bound_imports == {"Epic", "Feature", "Product", "Theme", "UserStory"}
-    assert db_imports == {"get_engine"}
-    assert db_bound_imports == {"get_engine"}
-    assert agile_imports == set()
-    assert not core_aliases
-    assert not db_aliases
-    assert agile_aliases == set()
-    assert not agile_attr_refs
 
 
 def test_export_snapshot_import_boundary() -> None:
@@ -156,7 +127,7 @@ def test_export_snapshot_import_boundary() -> None:
     assert core_imports == {
         "Epic",
         "Feature",
-        "Product",
+        "Project",
         "Sprint",
         "SprintStory",
         "Theme",
@@ -165,7 +136,7 @@ def test_export_snapshot_import_boundary() -> None:
     assert db_imports == {"engine"}
     assert db_bound_imports == {"default_engine"}
     assert enum_imports == {"StoryStatus"}
-    assert specs_imports == {"SpecRegistry"}
+    assert specs_imports == set()
     assert agile_imports == set()
     assert agile_aliases == set()
     assert not agile_attr_refs

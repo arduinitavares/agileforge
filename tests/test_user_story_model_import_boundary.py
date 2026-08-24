@@ -6,6 +6,9 @@ import ast
 import importlib
 from pathlib import Path
 
+from sqlalchemy.schema import ForeignKeyConstraint, UniqueConstraint
+from sqlmodel import SQLModel
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -41,35 +44,12 @@ def test_task3_user_story_consumers_import_user_story_from_models_core_only() ->
 
     # Intentionally scoped to the Task 3 runtime consumers from
     # 2026-04-06-user-story-model-extraction.md. Later Phase 6 cleanup slices
-    # also moved some adjacent Product/Sprint imports onto models.core, so this
+    # also moved some adjacent Project/Sprint imports onto models.core, so this
     # contract reflects the current runtime boundary rather than the earlier
     # intermediate shim state.
     module_specs = {
-        "services.orchestrator_query_service": {
-            "models.core": {"Product", "Sprint", "SprintStory", "UserStory"},
-            "agile_sqlmodel": set(),
-        },
-        "services.orchestrator_context_service": {
-            "models.core": {
-                "Epic",
-                "Feature",
-                "Product",
-                "Sprint",
-                "Theme",
-                "UserStory",
-            },
-            "agile_sqlmodel": set(),
-        },
         "services.specs.story_validation_service": {
-            "models.core": {"Feature", "UserStory"},
-            "agile_sqlmodel": set(),
-        },
-        "tools.story_query_tools": {
-            "models.core": {"Epic", "Feature", "Product", "Theme", "UserStory"},
-            "agile_sqlmodel": set(),
-        },
-        "tools.orchestrator_tools": {
-            "models.core": {"Product", "UserStory"},
+            "models.core": {"UserStory"},
             "agile_sqlmodel": set(),
         },
     }
@@ -91,3 +71,90 @@ def test_task3_user_story_consumers_import_user_story_from_models_core_only() ->
         module = importlib.import_module(module_name)
         assert module.UserStory is core.UserStory, module_name
         assert module.UserStory.__module__ == "models.core", module_name
+
+
+def test_task3_user_story_is_exact_immutable_story_item_projection() -> None:
+    """Require replay-safe Story-item and Specification identities only."""
+    from models import core  # noqa: PLC0415
+
+    table = SQLModel.metadata.tables["user_stories"]
+    required = {
+        "source_story_artifact_id",
+        "source_story_artifact_fingerprint",
+        "source_story_item_id",
+        "source_story_item_fingerprint",
+        "accepted_spec_version_id",
+        "accepted_spec_hash",
+        "spec_item_ids_json",
+        "acceptance_criteria_json",
+    }
+    retired = {
+        "acceptance_criteria",
+        "source_requirement",
+        "refinement_slot",
+        "story_origin",
+        "is_refined",
+        "archived_reason",
+        "archived_at",
+        "archived_by",
+        "archive_reset_attempt_id",
+        "archive_previous_status",
+        "original_acceptance_criteria",
+        "ac_updated_at",
+        "ac_update_reason",
+        "superseded_by_story_id",
+    }
+    forbidden_backlog_identity = {
+        "source_backlog_artifact_id",
+        "source_backlog_artifact_fingerprint",
+        "source_backlog_item_id",
+        "backlog_item_id",
+    }
+
+    column_names = set(table.columns.keys())
+    assert required <= column_names
+    assert retired.isdisjoint(column_names)
+    assert forbidden_backlog_identity.isdisjoint(column_names)
+    assert all(not table.c[name].nullable for name in required)
+    assert core.UserStory.model_fields["story_description"].is_required()
+    assert core.UserStory.model_fields["persona"].is_required()
+
+    unique_columns = {
+        tuple(constraint.columns.keys())
+        for constraint in table.constraints
+        if isinstance(constraint, UniqueConstraint)
+    }
+    assert (
+        "project_id",
+        "source_story_artifact_id",
+        "source_story_item_id",
+    ) in unique_columns
+
+    foreign_keys = {
+        (
+            tuple(constraint.column_keys),
+            tuple(element.target_fullname for element in constraint.elements),
+        )
+        for constraint in table.constraints
+        if isinstance(constraint, ForeignKeyConstraint)
+    }
+    assert (
+        ("project_id", "accepted_spec_version_id", "accepted_spec_hash"),
+        (
+            "spec_registry.project_id",
+            "spec_registry.spec_version_id",
+            "spec_registry.spec_hash",
+        ),
+    ) in foreign_keys
+    assert (
+        (
+            "project_id",
+            "source_story_artifact_id",
+            "source_story_artifact_fingerprint",
+        ),
+        (
+            "story_artifacts.project_id",
+            "story_artifacts.story_artifact_id",
+            "story_artifacts.content_fingerprint",
+        ),
+    ) in foreign_keys

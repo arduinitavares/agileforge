@@ -9,7 +9,7 @@ class TeamRole(StrEnum):
     """Roles for a member within a team."""
 
     DEVELOPER = "Developer"
-    PRODUCT_OWNER = "Product Owner"
+    PRODUCT_OWNER = "Project Owner"
     DESIGNER = "Designer"
     QA = "QA"
     LEAD = "Lead"
@@ -77,7 +77,6 @@ class WorkflowEventType(StrEnum):
     SPRINT_STARTED = "sprint_started"
     SPRINT_COMPLETED = "sprint_completed"
     POST_SPRINT_TRIAGE_RECORDED = "post_sprint_triage_recorded"
-    FSM_STATE_DWELL = "fsm_state_dwell"
     TLX_PROMPT_TRIGGERED = "tlx_prompt_triggered"
 
 
@@ -87,12 +86,3 @@ class TimeFrame(StrEnum):
     NOW = "Now"
     NEXT = "Next"
     LATER = "Later"
-
-
-class SpecAuthorityStatus(StrEnum):
-    """Status of compiled spec authority for a product."""
-
-    CURRENT = "current"
-    STALE = "stale"
-    NOT_COMPILED = "not_compiled"
-    PENDING_REVIEW = "pending_review"

@@ -1,6 +1,6 @@
 # Technical Specification: HashbrownVision Phase 1
 
-## Product Vision
+## product vision
 
 For food manufacturing process and quality engineers responsible for fried hashbrown production lines who need to reliably detect and quantify critical visual defects when 3D inspection is unavailable and are frustrated by manual inspection and brittle ad-hoc tools, HashbrownVision Phase 1 is a Python-based offline, 2D-only machine-vision proof-of-concept pipeline that provides engineering-grade evidence that 2D color imaging alone can support reliable quality assessment and de-risk investment in a future 2D+3D inspection system. The system ingests existing conveyor-belt images, deterministically segments individual product instances, applies 2D defect detection, computes interpretable per-product metrics, and exports fully traceable, image- and instance-linked CSV outputs, while explicitly excluding real-time operation, PLC integration, dashboards, cloud services, and AI-heavy black-box components.
 
@@ -24,7 +24,7 @@ For food manufacturing process and quality engineers responsible for fried hashb
 - Generate lightweight, reproducible dataset manifests (CSV or text)
 - Ensure fully offline, deterministic ingestion
 
-### 2D Product Segmentation & Instance Extraction
+### 2D product segmentation & Instance Extraction
 
 - Deterministically segment and isolate individual product instances from conveyor-belt images containing multiple products
 - Use strictly 2D, non-AI methods (color cues, morphology, connected components, shape heuristics)
@@ -41,7 +41,7 @@ For food manufacturing process and quality engineers responsible for fried hashb
 - Maintain deterministic, explainable behavior with no AI or 3D components
 - Run fully offline in batch mode via CLI or notebooks
 
-### Quantitative Per-Product & Per-Batch Quality Metrics
+### Quantitative per-product & Per-Batch Quality Metrics
 
 - Compute interpretable per-product metrics (e.g., defect area %, foreign body count, severity scores)
 - Aggregate metrics to per-batch and per-run statistics
@@ -75,7 +75,7 @@ For food manufacturing process and quality engineers responsible for fried hashb
 ## Internal Phase 1 Milestones
 
 - **M1:** Offline Dataset Ingestion & Organization (images + manifests, no segmentation)
-- **M2:** 2D Product Segmentation & Instance Extraction (per-product instances, no detectors)
+- **M2:** 2D product segmentation & Instance Extraction (per-product instances, no detectors)
 - **M3:** Blue Foreign-Body Detection on Segmented Instances
-- **M4:** Quantitative Per-Product & Per-Batch Metrics
+- **M4:** Quantitative per-product & Per-Batch Metrics
 - **M5:** Traceable CSV Export & Data Lineage

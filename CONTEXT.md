@@ -1,87 +1,146 @@
-# AgileForge
+# AgileForge Domain Language
 
-AgileForge is a product-workflow system that keeps product intent, authority,
-backlog, roadmap, stories, and sprints aligned through explicit review gates.
+## Project
 
-## Language
+The single durable aggregate that owns one product's Vision, Product Goals,
+Specification, planning, and execution history.
 
-**Project Scope Extension**:
-A guarded workflow for adding new accepted product scope to an existing project
-after the current executable scope is exhausted.
-_Avoid_: project reset, project fork, backlog refill
+Avoid: workflow session, graph cursor, repository row.
 
-**Challenge Artifact**:
-A saved record of the questions, answers, evidence, assumptions, non-goals, and
-risks resolved before a PRD is drafted.
-_Avoid_: chat transcript, informal notes
+## Project Vision
 
-**Discovery Artifact Store**:
-AgileForge-owned project storage for challenge artifacts and PRDs; exported
-markdown may mirror these artifacts, but workflow gates read AgileForge state.
-_Avoid_: markdown-only workflow state, chat-only provenance
+The accepted enduring direction for a Project. A Vision may guide multiple
+Product Goals and can be revised through an explicit reviewed revision.
 
-**Challenge Producer**:
-The required challenge mechanism that creates a challenge artifact for scope
-discovery; AgileForge requires `grill-with-docs` before accepting new scope.
-_Avoid_: optional brainstorming helper, untracked chat
+Avoid: Product Goal, specification, feature request.
 
-**Project Glossary**:
-The stable shared language for the AgileForge project, captured in
-`CONTEXT.md` and updated when challenge sessions settle new domain terms.
-_Avoid_: challenge artifact, product spec
+## Product Goal
 
-**Spec Amendment**:
-A proposed change to the accepted product specification that must be reviewed
-and accepted before AgileForge generates new execution work from it.
-_Avoid_: new project spec, direct backlog input
+One accepted valuable future state pursued under the current Vision. A Project
+has at most one active Product Goal. The goal ends through an explicit fulfilled
+or abandoned outcome.
 
-**Spec Amendment Draft**:
-A generated draft translation of an accepted PRD into the specification shape
-that AgileForge can validate and compile.
-_Avoid_: accepted spec amendment, PRD
+Avoid: Sprint Goal, Backlog item, automatic completion.
 
-**Accepted Spec Amendment**:
-A human-reviewed spec amendment that AgileForge may pass through authority
-compilation and acceptance before creating executable work.
-_Avoid_: generated amendment draft, accepted PRD
+## Discovery
 
-**Spec Amendment Validation**:
-The structural and policy check that proves a spec amendment draft is acceptable
-for human review.
-_Avoid_: authority acceptance, PRD acceptance
+Optional investigation performed through `grill-with-docs`, repository work,
+research, interviews, or prototypes before an external agent runs `to-spec`.
+Discovery is an activity. It is not a persisted artifact, review gate, or
+lifecycle node.
 
-**PRD**:
-A product requirements document that captures clarified product intent before it
-is promoted into a spec amendment.
-_Avoid_: issue list, implementation ticket batch, authority source
+Avoid: Discovery Artifact, mandatory phase, accepted lifecycle record.
 
-**PRD Producer**:
-The required mechanism that turns a ready challenge artifact into a PRD draft;
-AgileForge requires `to-prd` for this step.
-_Avoid_: generic PRD generator, manual issue synthesis
+## Specification Source
 
-**Accepted PRD**:
-A PRD that a human has approved as product intent and that AgileForge may use to
-draft a spec amendment.
-_Avoid_: draft PRD, accepted authority
+An immutable host capture of one external `to-spec` document, the deterministic
+present-or-absent `CONTEXT.md` state, applicable ADRs, repository revision, and
+exact accepted Vision/Product Goal lineage. It gates Specification structuring
+but is not itself human-reviewed.
 
-**PRD Version**:
-An immutable revision of a PRD; accepted PRDs are changed by creating a new
-draft version that may supersede the prior accepted version.
-_Avoid_: in-place accepted PRD edit
+Avoid: canonical Specification, Discovery Artifact, mutable file reference.
 
-**Authority Gate**:
-The review boundary where an accepted specification or spec amendment is
-compiled and accepted as the source for downstream backlog, roadmap, story, and
-sprint work.
-_Avoid_: automatic backlog generation, unchecked generation
+## Specification Candidate
 
-**Accepted Authority**:
-The reviewed authority state that AgileForge may use to create or extend
-backlog, roadmap, story, and sprint work.
-_Avoid_: draft authority, generated suggestion
+An immutable canonical `agileforge.spec.v2` proposal produced by the internal
+Specification Structuring Agent from one exact Specification Source. Human
+acceptance creates the reviewed Specification lineage used for delivery.
 
-**Executable Work**:
-Backlog, roadmap, story, task, or sprint work that AgileForge is allowed to
-plan or run from accepted authority.
-_Avoid_: idea, draft, proposal
+Avoid: accepted Specification, mutable draft.
+
+## Accepted Specification
+
+The immutable, fingerprint-bound Specification Version created by exact human
+acceptance of a Specification Candidate. It governs Backlog, Roadmap, Story,
+Sprint, and execution work; supersession changes currentness, not the historical
+fact of acceptance.
+
+Avoid: compiled Authority, pending candidate, duplicated rule snapshot.
+
+## Current Accepted Specification
+
+The sole Accepted Specification Version that has not been superseded. It
+governs new planning while older accepted versions remain pinned to historical
+or already active work.
+
+Avoid: caller-selected latest row, pending amendment, rewritten history.
+
+## Delivery Lineage
+
+The exact Product Goal and Accepted Specification ancestry inherited by a
+Backlog and all of its planning and execution descendants.
+
+Avoid: mutable global context, inferred current version, mixed Specification
+versions.
+
+## Specification Evidence
+
+A stable Accepted Specification item reference attached to a Backlog item,
+Story, Task, finding, or packet. The host proves identity and ancestry; human
+review judges whether the reference is semantically relevant.
+
+Avoid: compiled invariant, cue-word classification, ungrounded semantic claim.
+
+## Backlog
+
+The accepted ranked requirements for the active Product Goal and current
+Accepted Specification.
+
+Avoid: User Story set, repository inventory, implementation status report.
+
+## Roadmap
+
+A reviewed planning artifact derived from accepted Backlog lineage.
+
+Avoid: Sprint plan, release promise, persisted graph position.
+
+## Story
+
+A reviewed vertical slice derived from accepted Roadmap and Backlog facts.
+Readiness and dependency decisions are durable facts.
+
+Avoid: Backlog requirement, Task.
+
+## Sprint Plan
+
+A reviewed candidate set and Task plan bound to exact Story, dependency,
+capacity, and Accepted Specification facts.
+
+Avoid: active Sprint, ad hoc Task list.
+
+## Workflow Fact
+
+A typed durable record whose current value can affect graph decisions.
+
+Avoid: transient routing flag, provider trace, cached phase state.
+
+## Workflow Position
+
+The available, waiting, blocked, and invalid decisions derived from the current
+Workflow Facts. Position is recalculated and is not stored as independent
+authority.
+
+Avoid: persisted graph cursor, transport-owned phase.
+
+## Node Attempt
+
+A durable lease and normalized input identity for one model-backed graph node.
+Its outcome records success, failure, or obsolescence without becoming routing
+authority.
+
+Avoid: Workflow Position, business artifact.
+
+## Repository Binding
+
+The operator-selected repository identity attached to a Project. Deterministic
+repository observations may inform Project work without creating a second
+lifecycle.
+
+Avoid: Project identity, automatic source ownership.
+
+## Idempotency Receipt
+
+A durable record that replays one exact request kind, key, and request payload.
+Changing request semantics requires a new key.
+
+Avoid: stale-guard bypass, retry of a different request.

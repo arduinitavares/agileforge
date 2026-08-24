@@ -34,9 +34,9 @@ def _module_import_aliases(module_path: Path, module_name: str) -> set[str]:
     return aliases
 
 
-def test_product_repository_import_boundary() -> None:
-    """Verify product repository import boundary."""
-    module_path = ROOT / "repositories/product.py"
+def test_project_repository_import_boundary() -> None:
+    """Verify the canonical Project repository import boundary."""
+    module_path = ROOT / "repositories/project.py"
 
     core_imports = _imported_names_from(module_path, "models.core")
     db_imports = _imported_names_from(module_path, "models.db")
@@ -46,9 +46,8 @@ def test_product_repository_import_boundary() -> None:
     agile_aliases = _module_import_aliases(module_path, "agile_sqlmodel")
 
     assert {
-        "Product",
-        "ProductPersona",
-        "ProductTeam",
+        "Project",
+        "ProjectPersona",
         "Sprint",
         "SprintStory",
         "Task",
@@ -59,27 +58,6 @@ def test_product_repository_import_boundary() -> None:
     } <= core_imports
     assert db_imports == {"get_engine"}
     assert {"StoryCompletionLog", "WorkflowEvent"} <= event_imports
-    assert {
-        "CompiledSpecAuthority",
-        "SpecAuthorityAcceptance",
-        "SpecRegistry",
-    } <= spec_imports
-    assert not agile_imports
-    assert not agile_aliases
-
-
-def test_story_repository_import_boundary() -> None:
-    """Verify story repository import boundary."""
-    module_path = ROOT / "repositories/story.py"
-
-    core_imports = _imported_names_from(module_path, "models.core")
-    db_imports = _imported_names_from(module_path, "models.db")
-    event_imports = _imported_names_from(module_path, "models.events")
-    agile_imports = _imported_names_from(module_path, "agile_sqlmodel")
-    agile_aliases = _module_import_aliases(module_path, "agile_sqlmodel")
-
-    assert {"SprintStory", "Task", "UserStory"} <= core_imports
-    assert db_imports == {"get_engine"}
-    assert {"StoryCompletionLog", "TaskExecutionLog"} <= event_imports
+    assert spec_imports == {"SpecRegistry"}
     assert not agile_imports
     assert not agile_aliases

@@ -10,13 +10,8 @@ from sqlalchemy import event
 from sqlmodel import Session, SQLModel, create_engine, select
 
 from agile_sqlmodel import (
-    BrownfieldScanAttempt,
-    BrownfieldSourceArtifact,
-    BrownfieldSpecApproval,
-    BrownfieldSpecDraftAttempt,
-    CompiledSpecAuthority,
-    Product,
-    ProductTeam,
+    Project,
+    ProjectTeam,
     SpecRegistry,
     Sprint,
     SprintStory,
@@ -26,9 +21,13 @@ from agile_sqlmodel import (
     UserStory,
 )
 from models.core import Epic, Feature, Team, Theme
+from models.product_definition import SpecificationDecision
+from models.workflow import BacklogArtifact, RoadmapArtifact, StoryArtifact
 from scripts.delete_project import delete_project, resolve_db_path
 from tests.typing_helpers import require_id
+from tests.workflow.lifecycle_fixtures import seed_accepted_specification
 from utils.runtime_config import RuntimeConfigError, clear_runtime_config_cache
+from workflow.fingerprints import canonical_hash
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -61,23 +60,25 @@ def _clear_runtime_cache() -> Iterator[None]:
     clear_runtime_config_cache()
 
 
-def test_delete_project_removes_sprints_and_story_logs(tmp_path: Path) -> None:
+def test_delete_project_removes_sprints_and_story_logs(  # noqa: PLR0915
+    tmp_path: Path,
+) -> None:
     """Ensure delete_project clears sprints and story completion logs."""
     db_path = tmp_path / "delete_project_test.db"
     engine = _create_sqlite_engine(db_path)
 
     with Session(engine) as session:
-        product = Product(name="Test Product")
+        project = Project(name="Test Project")
         team = Team(name="Test Team")
-        session.add(product)
+        session.add(project)
         session.add(team)
         session.flush()
-        product_id = require_id(product.product_id, "product_id")
+        project_id = require_id(project.project_id, "project_id")
         team_id = require_id(team.team_id, "team_id")
 
-        session.add(ProductTeam(product_id=product_id, team_id=team_id))
+        session.add(ProjectTeam(project_id=project_id, team_id=team_id))
 
-        theme = Theme(title="Theme", product_id=product_id)
+        theme = Theme(title="Theme", project_id=project_id)
         session.add(theme)
         session.flush()
         theme_id = require_id(theme.theme_id, "theme_id")
@@ -90,24 +91,122 @@ def test_delete_project_removes_sprints_and_story_logs(tmp_path: Path) -> None:
         feature = Feature(title="Feature", epic_id=epic_id)
         session.add(feature)
         session.flush()
-        feature_id = require_id(feature.feature_id, "feature_id")
+
+        def bind_current_specification_decision(
+            flush_session: Session,
+            *_args: object,
+        ) -> None:
+            decisions = [
+                row
+                for row in flush_session.new
+                if isinstance(row, SpecificationDecision)
+            ]
+            registries = [
+                row for row in flush_session.new if isinstance(row, SpecRegistry)
+            ]
+            if len(decisions) != 1 or len(registries) != 1:
+                return
+            decision = decisions[0]
+            registry = registries[0]
+            if decision.specification_decision_id is None:
+                decision.specification_decision_id = 1_000_000 + project_id
+            registry.source_specification_decision_id = (
+                decision.specification_decision_id
+            )
+
+        event.listen(session, "before_flush", bind_current_specification_decision)
+        try:
+            lineage = seed_accepted_specification(
+                session,
+                project_id=project_id,
+                content='{"title":"Accepted specification"}',
+            )
+        finally:
+            event.remove(session, "before_flush", bind_current_specification_decision)
+
+        spec_id = require_id(lineage.spec.spec_version_id, "spec_version_id")
+        backlog_fingerprint = canonical_hash({"artifact": "backlog"})
+        backlog = BacklogArtifact(
+            project_id=project_id,
+            spec_version_id=spec_id,
+            spec_hash=lineage.spec.spec_hash,
+            product_goal_artifact_id=lineage.product_goal_artifact_id,
+            product_goal_fingerprint=lineage.product_goal_fingerprint,
+            version_number=1,
+            canonical_content_json='{"items":["BACKLOG-1"]}',
+            content_fingerprint=backlog_fingerprint,
+            created_by="fixture",
+        )
+        session.add(backlog)
+        session.flush()
+        backlog_id = require_id(backlog.backlog_artifact_id, "backlog_artifact_id")
+
+        roadmap_fingerprint = canonical_hash({"artifact": "roadmap"})
+        roadmap = RoadmapArtifact(
+            project_id=project_id,
+            backlog_artifact_id=backlog_id,
+            backlog_artifact_fingerprint=backlog_fingerprint,
+            version_number=1,
+            canonical_content_json='{"items":["ROADMAP-1"]}',
+            content_fingerprint=roadmap_fingerprint,
+            created_by="fixture",
+        )
+        session.add(roadmap)
+        session.flush()
+        roadmap_id = require_id(roadmap.roadmap_artifact_id, "roadmap_artifact_id")
+
+        story_artifact_fingerprint = canonical_hash({"artifact": "story"})
+        story_artifact = StoryArtifact(
+            project_id=project_id,
+            source_backlog_artifact_id=backlog_id,
+            source_backlog_artifact_fingerprint=backlog_fingerprint,
+            backlog_item_id="BACKLOG-1",
+            roadmap_artifact_id=roadmap_id,
+            roadmap_artifact_fingerprint=roadmap_fingerprint,
+            version_number=1,
+            canonical_content_json='{"items":["STORY-1"]}',
+            content_fingerprint=story_artifact_fingerprint,
+            story_item_ids_json='["STORY-1"]',
+            created_by="fixture",
+        )
+        session.add(story_artifact)
+        session.flush()
+        story_artifact_id = require_id(
+            story_artifact.story_artifact_id,
+            "story_artifact_id",
+        )
 
         story = UserStory(
+            project_id=project_id,
+            source_story_artifact_id=story_artifact_id,
+            source_story_artifact_fingerprint=story_artifact_fingerprint,
+            source_story_item_id="STORY-1",
+            source_story_item_fingerprint=canonical_hash({"story": "STORY-1"}),
+            accepted_spec_version_id=spec_id,
+            accepted_spec_hash=lineage.spec.spec_hash,
+            spec_item_ids_json='["GOAL.fixture.accepted-specification"]',
             title="Story",
-            product_id=product_id,
-            feature_id=feature_id,
+            story_description="As a user, I want deletion coverage.",
+            acceptance_criteria_json='["Every dependent row is deleted."]',
+            persona="user",
         )
         session.add(story)
         session.flush()
         story_id = require_id(story.story_id, "story_id")
 
-        session.add(Task(description="Task", story_id=story_id))
+        session.add(
+            Task(
+                description="Task",
+                metadata_json='{"version":"task_metadata.v2"}',
+                story_id=story_id,
+            )
+        )
 
         sprint = Sprint(
             goal="Goal",
             start_date=date.today(),  # noqa: DTZ011
             end_date=date.today() + timedelta(days=7),  # noqa: DTZ011
-            product_id=product_id,
+            project_id=project_id,
             team_id=team_id,
         )
         session.add(sprint)
@@ -124,15 +223,15 @@ def test_delete_project_removes_sprints_and_story_logs(tmp_path: Path) -> None:
         )
         session.commit()
 
-    delete_project(product_id, str(db_path))
+    delete_project(project_id, str(db_path))
 
     with Session(engine) as session:
-        product_exists = session.exec(
-            select(Product).where(Product.product_id == product_id)
+        project_exists = session.exec(
+            select(Project).where(Project.project_id == project_id)
         ).first()
-        assert product_exists is None
+        assert project_exists is None
         sprint_exists = session.exec(
-            select(Sprint).where(Sprint.product_id == product_id)
+            select(Sprint).where(Sprint.project_id == project_id)
         ).first()
         assert sprint_exists is None
         assert session.exec(select(UserStory)).first() is None
@@ -141,135 +240,6 @@ def test_delete_project_removes_sprints_and_story_logs(tmp_path: Path) -> None:
         assert session.exec(select(Feature)).first() is None
         assert session.exec(select(Epic)).first() is None
         assert session.exec(select(Theme)).first() is None
-
-
-def test_delete_project_removes_compiled_spec_authority(tmp_path: Path) -> None:
-    """Ensure delete_project clears compiled spec authority records."""
-    db_path = tmp_path / "delete_project_spec.db"
-    engine = _create_sqlite_engine(db_path)
-
-    with Session(engine) as session:
-        product = Product(name="Spec Product")
-        session.add(product)
-        session.flush()
-        product_id = require_id(product.product_id, "product_id")
-
-        spec = SpecRegistry(
-            product_id=product_id,
-            spec_hash="spec-hash",
-            content="# Spec",
-            status="approved",
-        )
-        session.add(spec)
-        session.flush()
-        spec_version_id = require_id(spec.spec_version_id, "spec_version_id")
-
-        session.add(
-            CompiledSpecAuthority(
-                spec_version_id=spec_version_id,
-                compiler_version="1.0.0",
-                prompt_hash="prompt-hash",
-                scope_themes="[]",
-                invariants="[]",
-                eligible_feature_ids="[]",
-            )
-        )
-        session.commit()
-
-    delete_project(product_id, str(db_path))
-
-    with Session(engine) as session:
-        assert session.exec(select(CompiledSpecAuthority)).first() is None
-        assert session.exec(select(SpecRegistry)).first() is None
-
-
-def test_delete_project_removes_brownfield_artifacts(tmp_path: Path) -> None:
-    """Ensure delete_project clears brownfield artifact records before product."""
-    db_path = tmp_path / "delete_project_brownfield.db"
-    engine = _create_sqlite_engine(db_path)
-
-    with Session(engine) as session:
-        product = Product(name="Brownfield Product")
-        session.add(product)
-        session.flush()
-        product_id = require_id(product.product_id, "product_id")
-
-        session.add(
-            BrownfieldSourceArtifact(
-                project_id=product_id,
-                attempt_id="source-attempt-1",
-                artifact_fingerprint="source-fingerprint-1",
-                request_hash="source-request-hash-1",
-            )
-        )
-        session.add(
-            BrownfieldScanAttempt(
-                project_id=product_id,
-                attempt_id="scan-attempt-1",
-                artifact_fingerprint="scan-artifact-fingerprint-1",
-                source_fingerprint="source-fingerprint-1",
-                repo_path=str(tmp_path / "repo"),
-                request_hash="scan-request-hash-1",
-            )
-        )
-        session.add(
-            BrownfieldSpecDraftAttempt(
-                project_id=product_id,
-                attempt_id="draft-attempt-1",
-                artifact_fingerprint="draft-artifact-fingerprint-1",
-                origin="scan",
-                source_fingerprint="source-fingerprint-1",
-                scan_attempt_id="scan-attempt-1",
-                scan_fingerprint="scan-fingerprint-1",
-                request_hash="draft-request-hash-1",
-            )
-        )
-        session.add(
-            BrownfieldSpecApproval(
-                project_id=product_id,
-                approval_attempt_id="approval-attempt-1",
-                approval_fingerprint="approval-fingerprint-1",
-                draft_attempt_id="draft-attempt-1",
-                draft_fingerprint="draft-fingerprint-1",
-                scan_fingerprint="scan-fingerprint-1",
-                source_fingerprint="source-fingerprint-1",
-                spec_hash="spec-hash-1",
-            )
-        )
-        session.commit()
-
-    delete_project(product_id, str(db_path))
-
-    with Session(engine) as session:
-        assert session.exec(select(Product)).first() is None
-        assert session.exec(select(BrownfieldSpecApproval)).first() is None
-        assert session.exec(select(BrownfieldSpecDraftAttempt)).first() is None
-        assert session.exec(select(BrownfieldScanAttempt)).first() is None
-        assert session.exec(select(BrownfieldSourceArtifact)).first() is None
-
-
-def test_delete_project_tolerates_missing_brownfield_tables(tmp_path: Path) -> None:
-    """Ensure delete_project supports legacy schemas without brownfield tables."""
-    db_path = tmp_path / "delete_project_legacy.db"
-    engine = _create_sqlite_engine(db_path)
-
-    with engine.begin() as conn:
-        conn.exec_driver_sql("DROP TABLE brownfield_spec_approvals")
-        conn.exec_driver_sql("DROP TABLE brownfield_spec_draft_attempts")
-        conn.exec_driver_sql("DROP TABLE brownfield_scan_attempts")
-        conn.exec_driver_sql("DROP TABLE brownfield_source_artifacts")
-
-    with Session(engine) as session:
-        product = Product(name="Legacy Product")
-        session.add(product)
-        session.flush()
-        product_id = require_id(product.product_id, "product_id")
-        session.commit()
-
-    delete_project(product_id, str(db_path))
-
-    with Session(engine) as session:
-        assert session.exec(select(Product)).first() is None
 
 
 def test_resolve_db_path_prefers_explicit_argument(

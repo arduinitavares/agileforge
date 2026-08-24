@@ -1,206 +1,146 @@
-"""Helpers and schemas for persisted task metadata."""
+"""Strict canonical metadata for Tasks activated from accepted Sprint plans."""
 
 from __future__ import annotations
 
 import hashlib
-import json
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
+
+from services.contracts.specification_references import (
+    validate_canonical_spec_item_ids,
+)
+from workflow.fingerprints import canonical_json
 
 if TYPE_CHECKING:
-    import logging
+    from services.contracts.sprint import StructuredTaskSpec
 
-TASK_METADATA_VERSION = "task_metadata.v1"
-TASK_KIND_VALUES = (
-    "analysis",
-    "design",
-    "implementation",
-    "testing",
-    "documentation",
-    "refactor",
-    "other",
-)
-TaskKind = Literal[
-    "analysis",
-    "design",
-    "implementation",
-    "testing",
-    "documentation",
-    "refactor",
-    "other",
-]
-
-_TASK_KIND_SYNONYMS = {
-    "review": "testing",
-    "qa": "testing",
-    "validation": "testing",
-}
-
-_LIST_OF_STRINGS_ERROR = "Expected a list of strings."
-_LIST_VALUE_EMPTY_ERROR = "List values must not be empty."
-_DESCRIPTION_TYPE_ERROR = "description must be a string."
-_DESCRIPTION_EMPTY_ERROR = "description must not be empty."
+TASK_METADATA_VERSION = "task_metadata.v2"
+TaskKind = Literal["implementation", "test", "documentation", "research"]
+_SHA256_PATTERN = r"^sha256:[0-9a-f]{64}$"
+_STREAM_PATTERN = r"^SPS-[0-9a-f]{32}$"
 
 
-def _normalize_string_list(value: object) -> list[str]:
-    if value is None:
-        return []
-    if not isinstance(value, list):
-        raise TypeError(_LIST_OF_STRINGS_ERROR)
-
-    normalized: list[str] = []
-    seen: set[str] = set()
-    for item in value:
-        if not isinstance(item, str):
-            raise TypeError(_LIST_OF_STRINGS_ERROR)
-        trimmed = item.strip()
-        if not trimmed:
-            raise ValueError(_LIST_VALUE_EMPTY_ERROR)
-        if trimmed in seen:
-            continue
-        seen.add(trimmed)
-        normalized.append(trimmed)
-    return normalized
-
-
-def _canonicalize_task_kind(value: object) -> object:
-    if not isinstance(value, str):
-        return value
-    normalized = value.strip().lower()
-    return _TASK_KIND_SYNONYMS.get(normalized, normalized)
+def _require_ordered_unique_nonblank(
+    values: tuple[str, ...],
+    *,
+    field_name: str,
+    require_nonempty: bool = False,
+) -> tuple[str, ...]:
+    if require_nonempty and not values:
+        message = f"{field_name} must not be empty."
+        raise ValueError(message)
+    if any(not value or not value.strip() for value in values):
+        message = f"{field_name} values must not be empty or whitespace-only."
+        raise ValueError(message)
+    if len(set(values)) != len(values):
+        message = f"{field_name} values must be unique."
+        raise ValueError(message)
+    return values
 
 
 class TaskMetadata(BaseModel):
-    """Canonical metadata persisted with a task row."""
+    """Exact immutable plan and Specification identity persisted with a Task."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
-    version: Literal["task_metadata.v1"] = TASK_METADATA_VERSION
-    task_kind: TaskKind = "other"
-    artifact_targets: list[str] = Field(default_factory=list)
-    workstream_tags: list[str] = Field(default_factory=list)
-    relevant_invariant_ids: list[str] = Field(default_factory=list)
-    checklist_items: list[str] = Field(default_factory=list)
+    version: Literal["task_metadata.v2"] = TASK_METADATA_VERSION
+    spec_version_id: Annotated[int, Field(gt=0)]
+    spec_hash: Annotated[str, Field(pattern=_SHA256_PATTERN)]
+    sprint_plan_stream_id: Annotated[str, Field(pattern=_STREAM_PATTERN)]
+    sprint_plan_artifact_id: Annotated[int, Field(gt=0)]
+    sprint_plan_fingerprint: Annotated[str, Field(pattern=_SHA256_PATTERN)]
+    relevant_spec_item_ids: tuple[str, ...]
+    task_kind: TaskKind
+    artifact_targets: tuple[str, ...]
+    workstream_tags: tuple[str, ...]
+    checklist_items: tuple[str, ...]
 
-    @field_validator("task_kind", mode="before")
+    @field_validator("relevant_spec_item_ids")
     @classmethod
-    def _validate_task_kind(cls, value: object) -> object:
-        return _canonicalize_task_kind(value)
+    def validate_evidence(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        """Require nonempty, sorted, unique Specification evidence."""
+        return validate_canonical_spec_item_ids(value)
 
-    @field_validator(
-        "artifact_targets",
-        "workstream_tags",
-        "relevant_invariant_ids",
-        "checklist_items",
-        mode="before",
-    )
+    @field_validator("artifact_targets", "workstream_tags")
     @classmethod
-    def _validate_lists(cls, value: object) -> list[str]:
-        return _normalize_string_list(value)
+    def validate_optional_lists(
+        cls,
+        value: tuple[str, ...],
+        info: ValidationInfo,
+    ) -> tuple[str, ...]:
+        """Require optional lists to remain ordered, unique, and nonblank."""
+        return _require_ordered_unique_nonblank(
+            value,
+            field_name=info.field_name or "metadata list",
+        )
 
-
-class StructuredTaskSpec(BaseModel):
-    """Structured task emitted by the sprint planner."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    description: str = Field(min_length=1, description="Concrete task description.")
-    task_kind: TaskKind = Field(description="Primary task category.")
-    artifact_targets: list[str] = Field(default_factory=list)
-    workstream_tags: list[str] = Field(default_factory=list)
-    relevant_invariant_ids: list[str] = Field(default_factory=list)
-    checklist_items: list[str] = Field(default_factory=list)
-
-    @field_validator("description", mode="before")
+    @field_validator("checklist_items")
     @classmethod
-    def _validate_description(cls, value: object) -> str:
-        if not isinstance(value, str):
-            raise TypeError(_DESCRIPTION_TYPE_ERROR)
-        trimmed = value.strip()
-        if not trimmed:
-            raise ValueError(_DESCRIPTION_EMPTY_ERROR)
-        return trimmed
-
-    @field_validator("task_kind", mode="before")
-    @classmethod
-    def _validate_task_kind(cls, value: object) -> object:
-        return _canonicalize_task_kind(value)
-
-    @field_validator(
-        "artifact_targets",
-        "workstream_tags",
-        "relevant_invariant_ids",
-        "checklist_items",
-        mode="before",
-    )
-    @classmethod
-    def _validate_lists(cls, value: object) -> list[str]:
-        return _normalize_string_list(value)
-
-
-def canonical_task_metadata() -> TaskMetadata:
-    """Return the canonical empty metadata object."""
-    return TaskMetadata()
+    def validate_checklist(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        """Require at least one exact, unique checklist item."""
+        return _require_ordered_unique_nonblank(
+            value,
+            field_name="checklist_items",
+            require_nonempty=True,
+        )
 
 
 def serialize_task_metadata(metadata: TaskMetadata) -> str:
-    """Return canonical serialized JSON for persisted task metadata."""
-    return json.dumps(
-        metadata.model_dump(mode="json"),
-        ensure_ascii=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    )
+    """Return canonical JSON bytes for one strict v2 metadata payload."""
+    return canonical_json(metadata.model_dump(mode="json"))
 
 
-def canonical_task_metadata_json() -> str:
-    """Return the canonical empty metadata JSON payload."""
-    return serialize_task_metadata(canonical_task_metadata())
-
-
-def parse_task_metadata(
-    raw_value: str | None,
-    *,
-    logger: logging.Logger | None = None,
-    task_id: int | None = None,
-) -> TaskMetadata:
-    """Parse persisted task metadata with a safe fallback."""
+def parse_task_metadata(raw_value: str | None) -> TaskMetadata:
+    """Parse exact canonical v2 bytes or fail closed without a fallback."""
     if not raw_value:
-        if logger:
-            logger.warning(
-                "Task %s missing metadata_json; falling back to canonical defaults.",
-                task_id,
-            )
-        return canonical_task_metadata()
-
+        message = "Task metadata is required."
+        raise ValueError(message)
     try:
-        payload = json.loads(raw_value)
-        return TaskMetadata.model_validate(payload)
-    except (json.JSONDecodeError, ValidationError, TypeError, ValueError) as exc:
-        if logger:
-            logger.warning(
-                (
-                    "Task %s has invalid metadata_json; "
-                    "falling back to canonical defaults: %s"
-                ),
-                task_id,
-                exc,
-            )
-        return canonical_task_metadata()
+        metadata = TaskMetadata.model_validate_json(raw_value)
+    except (TypeError, ValueError) as exc:
+        message = "Task metadata is invalid."
+        raise ValueError(message) from exc
+    if serialize_task_metadata(metadata) != raw_value:
+        message = "Task metadata is not canonical."
+        raise ValueError(message)
+    return metadata
 
 
-def metadata_from_structured_task(task: StructuredTaskSpec) -> TaskMetadata:
-    """Project planner task output into persisted metadata."""
+def metadata_from_structured_task(  # noqa: PLR0913
+    task: StructuredTaskSpec,
+    *,
+    spec_version_id: int,
+    spec_hash: str,
+    sprint_plan_stream_id: str,
+    sprint_plan_artifact_id: int,
+    sprint_plan_fingerprint: str,
+) -> TaskMetadata:
+    """Project one accepted immutable plan Task into strict v2 metadata."""
     return TaskMetadata(
+        spec_version_id=spec_version_id,
+        spec_hash=spec_hash,
+        sprint_plan_stream_id=sprint_plan_stream_id,
+        sprint_plan_artifact_id=sprint_plan_artifact_id,
+        sprint_plan_fingerprint=sprint_plan_fingerprint,
+        relevant_spec_item_ids=task.relevant_spec_item_ids,
         task_kind=task.task_kind,
-        artifact_targets=list(task.artifact_targets),
-        workstream_tags=list(task.workstream_tags),
-        relevant_invariant_ids=list(task.relevant_invariant_ids),
-        checklist_items=list(task.checklist_items),
+        artifact_targets=task.artifact_targets,
+        workstream_tags=task.workstream_tags,
+        checklist_items=task.checklist_items,
     )
 
 
 def hash_task_metadata(metadata: TaskMetadata) -> str:
-    """Stable hash for packet source snapshots."""
+    """Return the stable packet hash shape over strict v2 bytes."""
     return hashlib.sha256(serialize_task_metadata(metadata).encode("utf-8")).hexdigest()
+
+
+__all__ = [
+    "TASK_METADATA_VERSION",
+    "TaskMetadata",
+    "hash_task_metadata",
+    "metadata_from_structured_task",
+    "parse_task_metadata",
+    "serialize_task_metadata",
+]

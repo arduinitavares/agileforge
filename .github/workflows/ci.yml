@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python-312:
+    name: Python 3.12 quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "0.10.12"
+          python-version: "3.12"
+      - name: Verify lock
+        run: uv lock --check
+      - name: Install Playwright Chromium
+        run: uv run --locked python -m playwright install --with-deps chromium
+      - name: Run repository quality gate
+        run: uv run --locked pyrepo-check --all
+
+  python-313:
+    name: Python 3.13 full gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "0.10.12"
+          python-version: "3.13"
+      - name: Verify lock
+        run: uv lock --check
+      - name: Install Playwright Chromium
+        run: uv run --locked python -m playwright install --with-deps chromium
+      - name: Run canonical full gate
+        run: ./agileforge-dev check
+
+  frontend:
+    name: Node frontend tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: "24"
+      - name: Run frontend suites
+        run: >-
+          node --test tests/test_workflow_position_display.mjs
+          tests/test_create_project_modal_required_fields.mjs
+
+  macos-smoke:
+    name: macOS launcher smoke
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "0.10.12"
+          python-version: "3.13"
+      - name: Exercise launcher lifecycle
+        run: >-
+          uv run --locked python scripts/ci_launcher_smoke.py
+          --profile ci-macos-${{ github.run_id }}-${{ github.run_attempt }}
+          --expect-sha ${{ github.sha }}

@@ -70,33 +70,17 @@ def _legacy_agile_imports(module_path: Path) -> set[str]:
 
 
 def test_api_import_boundary_for_moved_runtime_surfaces() -> None:
-    """Verify that api.py imports required runtime surfaces from models.core and models.enums."""  # noqa: E501
+    """Keep the graph API on application and request contracts, not ORM models."""
     module_path: Path = ROOT / "api.py"
 
     core_imports: set[str] = _imported_names_from(module_path, "models.core")
-    core_bound_imports: set[str] = _bound_import_names_from(module_path, "models.core")
     enum_imports: set[str] = _imported_names_from(module_path, "models.enums")
-    enum_bound_imports: set[str] = _bound_import_names_from(module_path, "models.enums")
+    application_imports = _imported_names_from(module_path, "services.application")
+    request_imports = _imported_names_from(module_path, "workflow.requests")
     legacy_agile_imports: set[str] = _legacy_agile_imports(module_path)
 
-    assert {"Product", "Sprint", "SprintStory", "Task", "UserStory"} <= core_imports
-    assert {
-        "Product",
-        "Sprint",
-        "SprintStory",
-        "Task",
-        "UserStory",
-    } <= core_bound_imports
-    assert {
-        "SprintStatus",
-        "StoryStatus",
-        "TaskStatus",
-        "WorkflowEventType",
-    } <= enum_imports
-    assert {
-        "SprintStatus",
-        "StoryStatus",
-        "TaskStatus",
-        "WorkflowEventType",
-    } <= enum_bound_imports
+    assert not core_imports
+    assert not enum_imports
+    assert {"AgileForgeApplication", "production_application"} <= application_imports
+    assert not request_imports
     assert not legacy_agile_imports

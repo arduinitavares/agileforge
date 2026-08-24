@@ -2,7 +2,6 @@
 
 import importlib
 import os
-import tempfile
 from collections.abc import Iterator
 from pathlib import Path
 from sqlite3 import Connection
@@ -19,12 +18,6 @@ _TEST_MODEL_CONFIG_PATH = (
 os.environ.setdefault("MODEL_CONFIG_PATH", str(_TEST_MODEL_CONFIG_PATH))
 os.environ.setdefault("RELAX_ZDR_FOR_TESTS", "true")
 os.environ.setdefault("AGILEFORGE_DB_URL", "sqlite:///:memory:")
-_TEST_SESSION_DB_PATH = Path(tempfile.gettempdir()) / "agileforge_test_sessions.db"
-os.environ.setdefault(
-    "AGILEFORGE_SESSION_DB_URL",
-    f"sqlite:///{_TEST_SESSION_DB_PATH.as_posix()}",
-)
-
 from models.core import Team, TeamMember  # noqa: E402
 
 model_config = importlib.import_module("utils.model_config")
@@ -39,6 +32,21 @@ _TEST_TEAM_MODELS = (Team, TeamMember)
 
 model_config.clear_config_cache()
 clear_runtime_config_cache()
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    """Require external socket access to be excluded from the default suite."""
+    invalid_nodeids = sorted(
+        item.nodeid
+        for item in items
+        if item.get_closest_marker("enable_socket") is not None
+        and item.get_closest_marker("integration") is None
+    )
+    if invalid_nodeids:
+        nodeids = ", ".join(invalid_nodeids)
+        message = f"enable_socket requires integration: {nodeids}"
+        raise pytest.UsageError(message)
 
 
 @pytest.fixture(scope="session")
@@ -80,6 +88,11 @@ def engine(test_db_url: str) -> Iterator[Engine]:  # pylint: disable=redefined-o
     yield _engine
 
     # Cleanup
+    # SQLite cannot topologically drop the intentionally cyclic immutable
+    # Specification candidate/registry lineage while FK checks are enabled.
+    # Disable enforcement only for schema teardown; every test runs with it on.
+    with _engine.connect() as connection:
+        connection.exec_driver_sql("PRAGMA foreign_keys=OFF")
     SQLModel.metadata.drop_all(_engine)
 
 
@@ -102,18 +115,10 @@ def patch_get_engine_globally(
     # These need explicit patching because they import at module load time
     modules_to_patch = [
         "api",
-        "repositories.product",
+        "repositories.project",
         "repositories.story",
-        "orchestrator_agent.agent_tools.product_vision_tool.tools",
-        "orchestrator_agent.agent_tools.product_roadmap_agent.tools",
-        "orchestrator_agent.agent_tools.sprint_planner_tool.tools",
-        "orchestrator_agent.agent_tools.user_story_writer_tool.tools",
-        "tools.story_query_tools",
-        "tools.orchestrator_tools",
         "tools.db_tools",
-        "tools.spec_tools",
-        "services.orchestrator_context_service",
-        "services.orchestrator_query_service",
+        "services.read_projections",
     ]
 
     for module_path in modules_to_patch:

@@ -1,993 +1,299 @@
-"""Agent workbench Backlog phase command runner."""
+"""Immutable Backlog artifact persistence in a caller-owned transaction."""
 
 from __future__ import annotations
 
-import json
-from datetime import UTC, datetime
-from pathlib import Path
-from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, Final, Protocol, cast
+from typing import TYPE_CHECKING, cast
 
-import anyio
-from sqlmodel import Session, select
+from sqlmodel import Session, col, select
 
-from models.core import UserStory
-from models.db import get_engine
-from orchestrator_agent.agent_tools.backlog_primer import tools as backlog_primer_tools
-from orchestrator_agent.agent_tools.backlog_primer.tools import save_backlog_tool
-from repositories.product import ProductRepository
-from services.agent_workbench.backlog_active_reset import (
-    ActiveBacklogResetError,
-    ActiveBacklogResetReusedKeyError,
-    replay_active_backlog_reset,
-    reset_active_backlog_rows,
+from models.core import Project
+from models.product_definition import (
+    ProductGoalArtifact,
+    ProductGoalArtifactDecision,
+    ProductGoalOutcome,
 )
-from services.agent_workbench.backlog_reconciliation import (
-    BacklogReconciliationError,
-    reconcile_active_backlog,
+from models.specs import SpecRegistry
+from models.workflow import BacklogArtifact, BacklogArtifactDecision
+from services.planning_artifact_content import (
+    load_stored_backlog_planning_content,
+    validate_backlog_planning_content,
 )
-from services.agent_workbench.backlog_refinement_events import (
-    BacklogRefinementApprovalError,
-    BacklogRefinementApprovalRequest,
-    record_backlog_refinement_approval,
+from services.planning_lineage import (
+    ArtifactLineageNode,
+    PlanningLineageError,
+    next_artifact_version,
 )
-from services.agent_workbench.error_codes import ErrorCode, workbench_error
-from services.agent_workbench.execution_guard import AcceptedAuthorityExecutionGuard
-from services.agent_workbench.schema_readiness import (
-    SchemaRequirement,
-    check_schema_readiness,
+from services.specs.accepted_specification import (
+    AcceptedSpecification,
+    require_current_accepted_specification,
 )
-from services.backlog_runtime import run_backlog_agent_from_state
-from services.phases.backlog_service import (
-    BacklogPhaseError,
-    generate_backlog_draft,
-    get_backlog_history,
-    import_backlog_refinement,
-    mark_backlog_refinement_approved,
-    preview_backlog_draft,
-    preview_backlog_refinement,
-    record_backlog_refinement,
-    reset_active_backlog,
-    save_backlog_draft,
-)
-from services.workflow import WorkflowService
-from tools.orchestrator_tools import select_project
+from workflow.fingerprints import canonical_json
 
 if TYPE_CHECKING:
-    from google.adk.tools import ToolContext
-    from sqlalchemy.engine import Engine
+    from datetime import datetime
 
-    from models.core import Product
-else:
-    ToolContext = Any
-
-_REFINE_RECORD_IDEMPOTENCY_REUSED_MESSAGE = (
-    "Backlog refinement idempotency key reused with different request"
-)
-_APPROVAL_IDEMPOTENCY_REUSED_MESSAGE = (
-    "Idempotency key reused with different approval inputs."
-)
-_RESET_ACTIVE_REQUIREMENTS: Final[tuple[SchemaRequirement, ...]] = (
-    SchemaRequirement(
-        "user_stories",
-        (
-            "story_id",
-            "product_id",
-            "title",
-            "status",
-            "rank",
-            "story_origin",
-            "is_refined",
-            "is_superseded",
-            "superseded_by_story_id",
-            "archived_reason",
-            "archived_at",
-            "archived_by",
-            "archive_reset_attempt_id",
-            "archive_previous_status",
-        ),
-    ),
-)
+    from services.planning_lineage import Decision
+    from workflow.contracts import JsonObject
 
 
-class _ProductRepositoryLike(Protocol):
-    def get_by_id(self, product_id: int) -> object: ...
+def _required_id(value: int | None, *, label: str) -> int:
+    if value is None:
+        message = f"{label} has no durable identity."
+        raise ValueError(message)
+    return value
 
 
-class _WorkflowServiceLike(Protocol):
-    def get_session_status(self, session_id: str) -> dict[str, Any]: ...
-    async def initialize_session(self, *, session_id: str) -> object: ...
-    def update_session_status(
-        self,
-        session_id: str,
-        partial_update: dict[str, Any],
-    ) -> None: ...
-
-
-class BacklogPhaseRunner:
-    """Run Backlog phase commands through the same service boundary as the API."""
-
-    def __init__(
-        self,
-        *,
-        product_repo: ProductRepository | _ProductRepositoryLike | None = None,
-        workflow_service: WorkflowService | _WorkflowServiceLike | None = None,
-        engine: Engine | None = None,
-    ) -> None:
-        """Initialize repositories for CLI Backlog commands."""
-        self._product_repo = product_repo or ProductRepository()
-        self._workflow_service = workflow_service or WorkflowService()
-        self._engine = engine
-
-    def generate(
-        self,
-        *,
-        project_id: int,
-        user_input: str | None = None,
-    ) -> dict[str, Any]:
-        """Generate or refine a Backlog draft."""
-        return anyio.run(self._generate, project_id, user_input)
-
-    def preview(
-        self,
-        *,
-        project_id: int,
-        user_input: str | None = None,
-    ) -> dict[str, Any]:
-        """Generate a non-persisted Backlog preview."""
-        return anyio.run(self._preview, project_id, user_input)
-
-    def refine_preview(
-        self,
-        *,
-        project_id: int,
-        source_attempt_id: str | None = None,
-        operations_file: str | None = None,
-        source_artifact: str | None = None,
-        user_input: str | None = None,
-    ) -> dict[str, Any]:
-        """Preview canonical Backlog refinement operations."""
-        return anyio.run(
-            self._refine_preview,
-            project_id,
-            source_attempt_id,
-            operations_file,
-            source_artifact,
-            user_input,
+def _require_current_root(  # noqa: PLR0913
+    session: Session,
+    *,
+    project_id: int,
+    spec_version_id: int,
+    spec_hash: str,
+    product_goal_artifact_id: int,
+    product_goal_fingerprint: str,
+) -> AcceptedSpecification:
+    """Prove the exact current Specification and its still-active source Goal."""
+    specification = require_current_accepted_specification(
+        session,
+        project_id=project_id,
+        spec_version_id=spec_version_id,
+        spec_hash=spec_hash,
+    )
+    registry = session.get(SpecRegistry, spec_version_id)
+    if registry is None or (
+        registry.project_id,
+        registry.spec_hash,
+        registry.source_product_goal_artifact_id,
+        registry.source_product_goal_fingerprint,
+    ) != (
+        project_id,
+        spec_hash,
+        product_goal_artifact_id,
+        product_goal_fingerprint,
+    ):
+        message = "Backlog does not target the accepted Specification's Product Goal."
+        raise ValueError(message)
+    goal = session.exec(
+        select(ProductGoalArtifact).where(
+            col(ProductGoalArtifact.project_id) == project_id,
+            col(ProductGoalArtifact.product_goal_artifact_id)
+            == product_goal_artifact_id,
+            col(ProductGoalArtifact.content_fingerprint) == product_goal_fingerprint,
         )
-
-    def refine_record(  # noqa: PLR0913
-        self,
-        *,
-        project_id: int,
-        source_attempt_id: str,
-        operations_file: str,
-        expected_source_fingerprint: str,
-        expected_state: str,
-        idempotency_key: str,
-        approval_id: str | None = None,
-    ) -> dict[str, Any]:
-        """Record canonical Backlog refinement operations."""
-        return anyio.run(
-            self._refine_record,
-            project_id,
-            source_attempt_id,
-            operations_file,
-            expected_source_fingerprint,
-            expected_state,
-            idempotency_key,
-            approval_id,
+    ).one_or_none()
+    goal_decision = session.exec(
+        select(ProductGoalArtifactDecision).where(
+            col(ProductGoalArtifactDecision.project_id) == project_id,
+            col(ProductGoalArtifactDecision.product_goal_artifact_id)
+            == product_goal_artifact_id,
+            col(ProductGoalArtifactDecision.artifact_fingerprint)
+            == product_goal_fingerprint,
+            col(ProductGoalArtifactDecision.decision) == "accepted",
         )
-
-    def approve(  # noqa: PLR0913
-        self,
-        *,
-        project_id: int,
-        approved_artifact_fingerprint: str,
-        idempotency_key: str,
-        source_attempt_id: str | None = None,
-        attempt_id: str | None = None,
-        operation_set_fingerprint: str | None = None,
-        approved_operation_ids: list[str] | None = None,
-    ) -> dict[str, Any]:
-        """Record host-mediated Backlog refinement approval."""
-        return anyio.run(
-            self._approve,
-            project_id,
-            source_attempt_id,
-            attempt_id,
-            operation_set_fingerprint,
-            approved_artifact_fingerprint,
-            approved_operation_ids,
-            idempotency_key,
+    ).one_or_none()
+    outcome = session.exec(
+        select(ProductGoalOutcome).where(
+            col(ProductGoalOutcome.project_id) == project_id,
+            col(ProductGoalOutcome.product_goal_artifact_id)
+            == product_goal_artifact_id,
         )
+    ).one_or_none()
+    if goal is None or goal_decision is None or outcome is not None:
+        message = "Backlog requires the exact active Product Goal."
+        raise ValueError(message)
+    return specification
 
-    def refine_import(
-        self,
-        *,
-        project_id: int,
-        source_artifact: str,
-        edited_file: str,
-        expected_source_fingerprint: str,
-        idempotency_key: str,
-    ) -> dict[str, Any]:
-        """Import deterministic Backlog refinements from edited artifacts."""
-        return anyio.run(
-            self._refine_import,
-            project_id,
-            source_artifact,
-            edited_file,
-            expected_source_fingerprint,
-            idempotency_key,
+
+def _backlog_lineage_nodes(
+    session: Session,
+    *,
+    project_id: int,
+) -> tuple[ArtifactLineageNode, ...]:
+    artifacts = session.exec(
+        select(BacklogArtifact).where(col(BacklogArtifact.project_id) == project_id)
+    ).all()
+    decisions = session.exec(
+        select(BacklogArtifactDecision).where(
+            col(BacklogArtifactDecision.project_id) == project_id
         )
-
-    def history(self, *, project_id: int) -> dict[str, Any]:
-        """Return Backlog draft attempt history."""
-        return anyio.run(self._history, project_id)
-
-    def save(
-        self,
-        *,
-        project_id: int,
-        attempt_id: str,
-        expected_artifact_fingerprint: str,
-        expected_state: str,
-        idempotency_key: str,
-    ) -> dict[str, Any]:
-        """Persist the current complete Backlog draft."""
-        return anyio.run(
-            self._save,
-            project_id,
-            attempt_id,
-            expected_artifact_fingerprint,
-            expected_state,
-            idempotency_key,
-        )
-
-    def reset_active(  # noqa: PLR0913
-        self,
-        *,
-        project_id: int,
-        attempt_id: str,
-        expected_artifact_fingerprint: str,
-        expected_state: str,
-        reset_reason: str,
-        archive_all_active_stories: bool,
-        idempotency_key: str,
-    ) -> dict[str, Any]:
-        """Soft-archive active backlog rows and install an approved refinement."""
-        return anyio.run(
-            self._reset_active,
-            project_id,
-            attempt_id,
-            expected_artifact_fingerprint,
-            expected_state,
-            reset_reason,
-            archive_all_active_stories,
-            idempotency_key,
-        )
-
-    def reconcile(
-        self,
-        *,
-        project_id: int,
-        idempotency_key: str,
-    ) -> dict[str, Any]:
-        """Repair legacy duplicate active Backlog seed rows."""
-        product = self._load_project(project_id)
-        if isinstance(product, dict):
-            return product
-        try:
-            data = reconcile_active_backlog(
-                project_id=project_id,
-                idempotency_key=idempotency_key,
-            )
-        except BacklogReconciliationError as exc:
-            return _error_envelope(
-                ErrorCode.MUTATION_FAILED,
-                exc.detail,
-                details=exc.details,
-                remediation=[
-                    "Inspect active backlog rows before retrying reconciliation.",
-                    (
-                        "If any row has progressed downstream, do not replace the "
-                        "backlog; resolve downstream state first."
-                    ),
-                ],
-            )
-        return _data_envelope(data)
-
-    async def _generate(
-        self,
-        project_id: int,
-        user_input: str | None,
-    ) -> dict[str, Any]:
-        product = self._load_project(project_id)
-        if isinstance(product, dict):
-            return product
-        authority_error = self._accepted_authority_error(project_id)
-        if authority_error is not None:
-            return authority_error
-
-        try:
-            data = await generate_backlog_draft(
-                project_id=project_id,
-                load_state=lambda: self._load_backlog_state(
-                    str(project_id),
-                    project_id,
-                    repair_stale_scope_extension=True,
-                ),
-                save_state=lambda state: self._save_session_state(
-                    str(project_id), state
-                ),
-                now_iso=_now_iso,
-                run_backlog_agent=run_backlog_agent_from_state,
-                user_input=user_input,
-            )
-        except BacklogPhaseError as exc:
-            return _phase_error(exc)
-        except RuntimeError as exc:
-            return _workflow_error(exc)
-        if data.get("backlog_run_success") is False:
-            return _backlog_runtime_error(project_id=project_id, data=data)
-        return _data_envelope(data)
-
-    async def _preview(
-        self,
-        project_id: int,
-        user_input: str | None,
-    ) -> dict[str, Any]:
-        product = self._load_project(project_id)
-        if isinstance(product, dict):
-            return product
-
-        try:
-            data = await preview_backlog_draft(
-                project_id=project_id,
-                load_state=lambda: self._load_backlog_state(
-                    str(project_id), project_id
-                ),
-                run_backlog_agent=run_backlog_agent_from_state,
-                user_input=user_input,
-            )
-        except BacklogPhaseError as exc:
-            return _phase_error(exc)
-        except RuntimeError as exc:
-            return _workflow_error(exc)
-        if data.get("backlog_run_success") is False:
-            return _backlog_runtime_error(project_id=project_id, data=data)
-        return _data_envelope(data)
-
-    async def _refine_preview(
-        self,
-        project_id: int,
-        source_attempt_id: str | None,
-        operations_file: str | None,
-        source_artifact: str | None,
-        user_input: str | None,
-    ) -> dict[str, Any]:
-        unsupported_error = _unsupported_refine_preview_arg_error(
-            source_artifact=source_artifact,
-            user_input=user_input,
-        )
-        if unsupported_error is not None:
-            return unsupported_error
-        product = self._load_project(project_id)
-        if isinstance(product, dict):
-            return product
-
-        try:
-            operations_payload = _load_operations_payload(
-                operations_file=operations_file,
-                source_attempt_id=source_attempt_id,
-            )
-            data = await preview_backlog_refinement(
-                project_id=project_id,
-                load_state=lambda: self._load_backlog_state(
-                    str(project_id), project_id
-                ),
-                operations_payload=operations_payload,
-                now_iso=_now_iso,
-            )
-        except BacklogPhaseError as exc:
-            return _phase_error(exc)
-        except RuntimeError as exc:
-            return _workflow_error(exc)
-        return _data_envelope(data)
-
-    async def _refine_record(  # noqa: PLR0913
-        self,
-        project_id: int,
-        source_attempt_id: str,
-        operations_file: str,
-        expected_source_fingerprint: str,
-        expected_state: str,
-        idempotency_key: str,
-        approval_id: str | None,
-    ) -> dict[str, Any]:
-        if isinstance(approval_id, str) and approval_id.strip():
-            return _error_envelope(
-                ErrorCode.INVALID_COMMAND,
-                (
-                    "backlog refine-record --approval-id is not supported until "
-                    "approval binding is implemented."
-                ),
-            )
-        product = self._load_project(project_id)
-        if isinstance(product, dict):
-            return product
-
-        try:
-            operations_payload = _load_operations_payload(
-                operations_file=operations_file,
-                source_attempt_id=source_attempt_id,
-            )
-            data = await record_backlog_refinement(
-                project_id=project_id,
-                load_state=lambda: self._load_backlog_state(
-                    str(project_id), project_id
-                ),
-                save_state=lambda state: self._save_session_state(
-                    str(project_id), state
-                ),
-                operations_payload=operations_payload,
-                expected_source_fingerprint=expected_source_fingerprint,
-                expected_state=expected_state,
-                idempotency_key=idempotency_key,
-                now_iso=_now_iso,
-            )
-        except BacklogPhaseError as exc:
-            if exc.detail == _REFINE_RECORD_IDEMPOTENCY_REUSED_MESSAGE:
-                return _error_envelope(ErrorCode.IDEMPOTENCY_KEY_REUSED, exc.detail)
-            return _phase_error(exc)
-        except RuntimeError as exc:
-            return _workflow_error(exc)
-        return _data_envelope(data)
-
-    async def _approve(  # noqa: PLR0913
-        self,
-        project_id: int,
-        source_attempt_id: str | None,
-        attempt_id: str | None,
-        operation_set_fingerprint: str | None,
-        approved_artifact_fingerprint: str,
-        approved_operation_ids: list[str] | None,
-        idempotency_key: str,
-    ) -> dict[str, Any]:
-        product = self._load_project(project_id)
-        if isinstance(product, dict):
-            return product
-
-        try:
-            request = BacklogRefinementApprovalRequest.model_validate(
-                {
-                    "project_id": project_id,
-                    "source_attempt_id": source_attempt_id,
-                    "attempt_id": attempt_id,
-                    "operation_set_fingerprint": operation_set_fingerprint,
-                    "approved_artifact_fingerprint": approved_artifact_fingerprint,
-                    "approved_operation_ids": approved_operation_ids or [],
-                    "approval_source": "cli",
-                    "idempotency_key": idempotency_key,
-                    "approved_by": "po",
-                }
-            )
-            engine = self._engine or get_engine()
-            with Session(engine) as session:
-                data = record_backlog_refinement_approval(
-                    session,
-                    request=request,
-                    now_iso=_now_iso,
-                )
-            if request.attempt_id is not None:
-                state = await self._load_backlog_state(str(project_id), project_id)
-                approval_result = mark_backlog_refinement_approved(
-                    state,
-                    request=request,
-                    approval=cast("dict[str, Any]", data),
-                )
-                self._save_session_state(str(project_id), state)
-                data.update(approval_result)
-        except ValueError as exc:
-            return _error_envelope(ErrorCode.INVALID_COMMAND, str(exc))
-        except BacklogRefinementApprovalError as exc:
-            if str(exc) == _APPROVAL_IDEMPOTENCY_REUSED_MESSAGE:
-                return _error_envelope(ErrorCode.IDEMPOTENCY_KEY_REUSED, str(exc))
-            return _error_envelope(ErrorCode.MUTATION_FAILED, str(exc))
-        except BacklogPhaseError as exc:
-            return _error_envelope(ErrorCode.MUTATION_FAILED, exc.detail)
-        return _data_envelope(cast("dict[str, Any]", data))
-
-    async def _refine_import(
-        self,
-        project_id: int,
-        source_artifact: str,
-        edited_file: str,
-        expected_source_fingerprint: str,
-        idempotency_key: str,
-    ) -> dict[str, Any]:
-        product = self._load_project(project_id)
-        if isinstance(product, dict):
-            return product
-        try:
-            source_payload = _load_json_object_file(
-                path=source_artifact,
-                label="source_artifact",
-            )
-            edited_payload = _load_json_object_file(
-                path=edited_file,
-                label="edited_file",
-            )
-            data = await import_backlog_refinement(
-                project_id=project_id,
-                load_state=lambda: self._load_backlog_state(
-                    str(project_id), project_id
-                ),
-                save_state=lambda state: self._save_session_state(
-                    str(project_id), state
-                ),
-                source_artifact=source_payload,
-                edited_artifact=edited_payload,
-                expected_source_fingerprint=expected_source_fingerprint,
-                idempotency_key=idempotency_key,
-                now_iso=_now_iso,
-            )
-        except (TypeError, ValueError) as exc:
-            return _error_envelope(ErrorCode.INVALID_COMMAND, str(exc))
-        except BacklogPhaseError as exc:
-            return _refine_import_phase_error(exc)
-        except RuntimeError as exc:
-            return _workflow_error(exc)
-        return _data_envelope(data)
-
-    async def _history(self, project_id: int) -> dict[str, Any]:
-        product = self._load_project(project_id)
-        if isinstance(product, dict):
-            return product
-
-        try:
-            data = await get_backlog_history(
-                load_state=lambda: self._ensure_session(str(project_id))
-            )
-        except BacklogPhaseError as exc:
-            return _phase_error(exc)
-        except RuntimeError as exc:
-            return _workflow_error(exc)
-        return _data_envelope(data)
-
-    async def _save(
-        self,
-        project_id: int,
-        attempt_id: str,
-        expected_artifact_fingerprint: str,
-        expected_state: str,
-        idempotency_key: str,
-    ) -> dict[str, Any]:
-        product = self._load_project(project_id)
-        if isinstance(product, dict):
-            return product
-
-        try:
-            data = await save_backlog_draft(
-                project_id=project_id,
-                project_name=product.name,
-                attempt_id=attempt_id,
-                expected_artifact_fingerprint=expected_artifact_fingerprint,
-                expected_state=expected_state,
-                idempotency_key=idempotency_key,
-                save_state=lambda state: self._save_session_state(
-                    str(project_id), state
-                ),
-                now_iso=_now_iso,
-                hydrate_context=lambda: self._hydrate_context(
-                    str(project_id), project_id
-                ),
-                build_tool_context=_build_tool_context,
-                save_backlog_tool=save_backlog_tool,
-            )
-        except BacklogPhaseError as exc:
-            return _phase_error(exc)
-        except RuntimeError as exc:
-            return _workflow_error(exc)
-        return _data_envelope(data)
-
-    async def _reset_active(  # noqa: PLR0911, PLR0913
-        self,
-        project_id: int,
-        attempt_id: str,
-        expected_artifact_fingerprint: str,
-        expected_state: str,
-        reset_reason: str,
-        archive_all_active_stories: bool,
-        idempotency_key: str,
-    ) -> dict[str, Any]:
-        product = self._load_project(project_id)
-        if isinstance(product, dict):
-            return product
-
-        engine = self._engine or get_engine()
-        schema_error = _reset_active_schema_error(engine)
-        if schema_error is not None:
-            return schema_error
-        try:
-            data = await reset_active_backlog(
-                project_id=project_id,
-                attempt_id=attempt_id,
-                expected_artifact_fingerprint=expected_artifact_fingerprint,
-                expected_state=expected_state,
-                reset_reason=reset_reason,
-                archive_all_active_stories=archive_all_active_stories,
-                idempotency_key=idempotency_key,
-                save_state=lambda state: self._save_session_state(
-                    str(project_id), state
-                ),
-                now_iso=_now_iso,
-                hydrate_context=lambda: self._hydrate_context(
-                    str(project_id), project_id
-                ),
-                reset_rows=lambda request: reset_active_backlog_rows(
-                    engine,
-                    request,
-                ),
-                reset_replay=lambda request: replay_active_backlog_reset(
-                    engine,
-                    request,
-                ),
-                replacement_blocked=lambda blocked_project_id: (
-                    _active_backlog_replacement_blocked(
-                        engine,
-                        project_id=blocked_project_id,
-                    )
-                ),
-            )
-        except ActiveBacklogResetReusedKeyError as exc:
-            return _error_envelope(ErrorCode.IDEMPOTENCY_KEY_REUSED, str(exc))
-        except ActiveBacklogResetError as exc:
-            return _error_envelope(ErrorCode.MUTATION_FAILED, str(exc))
-        except BacklogPhaseError as exc:
-            return _phase_error(exc)
-        except RuntimeError as exc:
-            return _workflow_error(exc)
-        return _data_envelope(data)
-
-    def _load_project(self, project_id: int) -> Product | dict[str, Any]:
-        product = self._product_repo.get_by_id(project_id)
-        if product is not None:
-            return cast("Product", product)
-        return _error_envelope(
-            ErrorCode.PROJECT_NOT_FOUND,
-            f"Project {project_id} not found.",
-            details={"project_id": project_id},
-            remediation=["Run agileforge project list."],
-        )
-
-    async def _ensure_session(self, session_id: str) -> dict[str, Any]:
-        state = self._workflow_service.get_session_status(session_id) or {}
-        if not state.get("fsm_state"):
-            await self._workflow_service.initialize_session(session_id=session_id)
-            state = self._workflow_service.get_session_status(session_id) or {}
-        return state
-
-    async def _load_backlog_state(
-        self,
-        session_id: str,
-        project_id: int,
-        *,
-        repair_stale_scope_extension: bool = False,
-    ) -> dict[str, Any]:
-        """Load workflow state with active project, spec, and authority hydrated."""
-        context = await self._hydrate_context(session_id, project_id)
-        if repair_stale_scope_extension and _repair_stale_scope_extension_accept_state(
-            context.state
+    ).all()
+    decisions_by_artifact: dict[int, Decision] = {}
+    artifacts_by_id = {
+        _required_id(row.backlog_artifact_id, label="Backlog artifact"): row
+        for row in artifacts
+    }
+    for decision in decisions:
+        artifact = artifacts_by_id.get(decision.backlog_artifact_id)
+        if (
+            artifact is None
+            or artifact.content_fingerprint != decision.artifact_fingerprint
+            or decision.backlog_artifact_id in decisions_by_artifact
+            or decision.decision not in {"accepted", "feedback", "rejected"}
         ):
-            self._save_session_state(session_id, context.state)
-        return dict(context.state)
-
-    async def _hydrate_context(
-        self,
-        session_id: str,
-        project_id: int,
-    ) -> SimpleNamespace:
-        state = await self._ensure_session(session_id)
-        context = SimpleNamespace(state=dict(state), session_id=session_id)
-        result = select_project(project_id, _build_tool_context(context))
-        if not result.get("success"):
-            raise BacklogPhaseError(
-                str(result.get("error", "Project hydration failed"))
-            )
-        _hydrate_vision_assessment_from_active_project(context.state)
-        _assert_required_context(context.state)
-        return context
-
-    def _save_session_state(self, session_id: str, state: dict[str, Any]) -> None:
-        self._workflow_service.update_session_status(session_id, state)
-
-    def _accepted_authority_error(self, project_id: int) -> dict[str, Any] | None:
-        """Return an execution guard error for real repository-backed commands."""
-        if not isinstance(self._product_repo, ProductRepository):
-            return None
-        return AcceptedAuthorityExecutionGuard(
-            engine=self._engine or get_engine()
-        ).reject_unless_current(project_id=project_id)
-
-
-def _now_iso() -> str:
-    """Return canonical UTC timestamp."""
-    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
-
-
-def _build_tool_context(context: object) -> ToolContext:
-    """Return a lightweight ToolContext-compatible state holder."""
-    return cast("ToolContext", context)
-
-
-def _active_backlog_replacement_blocked(engine: Engine, *, project_id: int) -> bool:
-    """Return whether current active backlog rows would block normal save."""
-    with Session(engine) as session:
-        active_stories = session.exec(
-            select(UserStory)
-            .where(UserStory.product_id == project_id)
-            .where(UserStory.is_superseded == False)  # noqa: E712
-        ).all()
-        return any(
-            backlog_primer_tools._blocks_backlog_replacement(session, story)
-            for story in active_stories
+            message = "Stored Backlog decision lineage is invalid."
+            raise ValueError(message)
+        decisions_by_artifact[decision.backlog_artifact_id] = cast(
+            "Decision", decision.decision
         )
-
-
-def _load_operations_payload(
-    *,
-    operations_file: str | None,
-    source_attempt_id: str | None,
-) -> dict[str, Any]:
-    """Load and normalize a Backlog refinement operations JSON file."""
-    if operations_file is None or not operations_file.strip():
-        message = "Backlog refinement operations_file is required"
-        raise BacklogPhaseError(message)
-    try:
-        payload = json.loads(Path(operations_file).read_text(encoding="utf-8"))
-    except OSError as exc:
-        message = f"Backlog refinement operations_file could not be read: {exc}"
-        raise BacklogPhaseError(message) from exc
-    except json.JSONDecodeError as exc:
-        message = f"Backlog refinement operations_file is invalid JSON: {exc}"
-        raise BacklogPhaseError(message) from exc
-    if not isinstance(payload, dict):
-        message = "Backlog refinement operations_file must contain a JSON object"
-        raise BacklogPhaseError(message)
-    if source_attempt_id is None:
-        return payload
-
-    existing_attempt_id = payload.get("source_attempt_id")
-    if existing_attempt_id in (None, ""):
-        return {**payload, "source_attempt_id": source_attempt_id}
-    if existing_attempt_id != source_attempt_id:
-        message = "Backlog refinement source_attempt_id conflicts with operations_file"
-        raise BacklogPhaseError(message)
-    return payload
-
-
-def _load_json_object_file(*, path: str, label: str) -> dict[str, Any]:
-    """Load a JSON object from a command file argument."""
-    try:
-        payload = json.loads(Path(path).read_text(encoding="utf-8"))
-    except OSError as exc:
-        message = f"Backlog refinement {label} could not be read: {exc}"
-        raise ValueError(message) from exc
-    except json.JSONDecodeError as exc:
-        message = f"Backlog refinement {label} is invalid JSON: {exc}"
-        raise ValueError(message) from exc
-    if not isinstance(payload, dict):
-        message = f"Backlog refinement {label} must contain a JSON object"
-        raise TypeError(message)
-    return payload
-
-
-def _refine_import_phase_error(exc: BacklogPhaseError) -> dict[str, Any]:
-    if exc.detail == _REFINE_RECORD_IDEMPOTENCY_REUSED_MESSAGE:
-        return _error_envelope(ErrorCode.IDEMPOTENCY_KEY_REUSED, exc.detail)
-    if "ambiguous" in exc.detail:
-        return _error_envelope(ErrorCode.MUTATION_FAILED, exc.detail)
-    return _phase_error(exc)
-
-
-def _unsupported_refine_preview_arg_error(
-    *,
-    source_artifact: str | None,
-    user_input: str | None,
-) -> dict[str, Any] | None:
-    """Return an error for Task 7/NLP inputs not supported by typed operations."""
-    if isinstance(source_artifact, str) and source_artifact.strip():
-        return _error_envelope(
-            ErrorCode.INVALID_COMMAND,
-            (
-                "backlog refine-preview --source-artifact is not supported until "
-                "deterministic import is implemented."
+    return tuple(
+        ArtifactLineageNode(
+            artifact_id=artifact_id,
+            chain_key=(
+                row.project_id,
+                row.product_goal_artifact_id,
+                row.product_goal_fingerprint,
+                row.spec_version_id,
+                row.spec_hash,
             ),
+            version_number=row.version_number,
+            supersedes_artifact_id=row.supersedes_backlog_artifact_id,
+            decision=decisions_by_artifact.get(artifact_id),
         )
-    if isinstance(user_input, str) and user_input.strip():
-        return _error_envelope(
-            ErrorCode.INVALID_COMMAND,
-            (
-                "backlog refine-preview --input is not supported for typed "
-                "refinement operations."
-            ),
-        )
-    return None
-
-
-def _hydrate_vision_assessment_from_active_project(state: dict[str, Any]) -> None:
-    """Backfill the saved Vision text into runtime context when needed."""
-    if isinstance(state.get("product_vision_assessment"), dict):
-        return
-    active_project = state.get("active_project")
-    if not isinstance(active_project, dict):
-        return
-    vision = active_project.get("vision")
-    if isinstance(vision, str) and vision.strip():
-        state["product_vision_assessment"] = {
-            "product_vision_statement": vision,
-            "is_complete": True,
-        }
-
-
-def _assert_required_context(state: dict[str, Any]) -> None:
-    """Block Backlog runtime if hydrated context is missing semantic inputs."""
-    missing: list[str] = []
-    if not state.get("pending_spec_content"):
-        missing.append("pending_spec_content")
-    if not state.get("compiled_authority_cached"):
-        missing.append("compiled_authority_cached")
-    assessment = state.get("product_vision_assessment")
-    vision = (
-        assessment.get("product_vision_statement")
-        if isinstance(assessment, dict)
-        else None
+        for artifact_id, row in artifacts_by_id.items()
     )
-    if not isinstance(vision, str) or not vision.strip():
-        missing.append("product_vision_assessment.product_vision_statement")
-    if missing:
-        raise BacklogPhaseError(
-            "Setup required: Backlog context hydration missing " + ", ".join(missing)
-        )
 
 
-def _repair_stale_scope_extension_accept_state(state: dict[str, Any]) -> bool:
-    """Repair stale post-accept state before executable Backlog generation."""
-    amended_spec_version_id = _repairable_scope_extension_amended_spec_version(state)
-    if amended_spec_version_id is None:
-        return False
-    state["fsm_state"] = "BACKLOG_INTERVIEW"
-    state["accepted_spec_version_id"] = amended_spec_version_id
-    state["latest_spec_version_id"] = amended_spec_version_id
-    return True
-
-
-def _repairable_scope_extension_amended_spec_version(
-    state: dict[str, Any],
-) -> int | None:
-    """Return amended spec id when stale scope-extension state is repairable."""
-    if state.get("fsm_state") != "VISION_INTERVIEW":
-        return None
-    if state.get("setup_status") != "passed":
-        return None
-    context = state.get("scope_extension_context")
-    if not isinstance(context, dict) or context.get("schema") != (
-        "agileforge.scope_extension.v1"
-    ):
-        return None
-    amended_spec_version_id = _concrete_int(context.get("amended_spec_version_id"))
-    setup_spec_version_id = _concrete_int(state.get("setup_spec_version_id"))
-    if (
-        amended_spec_version_id is None
-        or setup_spec_version_id != amended_spec_version_id
-    ):
-        return None
-    added_source_item_ids = context.get("added_source_item_ids")
-    if not (
-        isinstance(added_source_item_ids, list)
-        and any(
-            isinstance(item, str) and item.strip()
-            for item in added_source_item_ids
-        )
-    ):
-        return None
-    return amended_spec_version_id
-
-
-def _concrete_int(value: object) -> int | None:
-    """Return concrete int values while excluding bools."""
-    return value if isinstance(value, int) and not isinstance(value, bool) else None
-
-
-def _data_envelope(data: dict[str, Any]) -> dict[str, Any]:
-    """Return application facade success envelope."""
-    return {"ok": True, "data": data, "warnings": [], "errors": []}
-
-
-def _error_envelope(
-    code: ErrorCode,
-    message: str,
+def record_backlog_draft_in_session(  # noqa: PLR0913
+    session: Session,
     *,
-    details: dict[str, Any] | None = None,
-    remediation: list[str] | None = None,
-) -> dict[str, Any]:
-    """Return application facade failure envelope."""
-    return {
-        "ok": False,
-        "data": None,
-        "warnings": [],
-        "errors": [
-            workbench_error(
-                code,
-                message=message,
-                details=details or {},
-                remediation=remediation or [],
-            ).to_dict()
-        ],
-    }
-
-
-def _reset_active_schema_error(engine: Engine) -> dict[str, Any] | None:
-    """Return schema-not-ready when reset-active archive columns are absent."""
-    readiness = check_schema_readiness(engine, _RESET_ACTIVE_REQUIREMENTS)
-    if readiness.ok:
-        return None
-    return _error_envelope(
-        ErrorCode.SCHEMA_NOT_READY,
-        "Database schema is missing required tables or columns for reset-active.",
-        details={"missing": readiness.missing},
-        remediation=["Run the application startup or migration command first."],
+    project_id: int,
+    spec_version_id: int,
+    spec_hash: str,
+    product_goal_artifact_id: int,
+    product_goal_fingerprint: str,
+    canonical_content: JsonObject,
+    content_fingerprint: str,
+    supersedes_backlog_artifact_id: int | None,
+    artifact_id: int,
+    actor: str,
+    recorded_at: datetime,
+) -> BacklogArtifact:
+    """Validate and append one immutable Backlog artifact without committing."""
+    if session.get(Project, project_id) is None:
+        message = f"Project {project_id} not found."
+        raise ValueError(message)
+    specification = _require_current_root(
+        session,
+        project_id=project_id,
+        spec_version_id=spec_version_id,
+        spec_hash=spec_hash,
+        product_goal_artifact_id=product_goal_artifact_id,
+        product_goal_fingerprint=product_goal_fingerprint,
     )
-
-
-def _phase_error(exc: BacklogPhaseError) -> dict[str, Any]:
-    """Map Backlog phase errors onto registered CLI errors."""
-    message = exc.detail
-    code = (
-        ErrorCode.AUTHORITY_NOT_ACCEPTED
-        if message.startswith("Setup required")
-        else ErrorCode.INVALID_COMMAND
+    validate_backlog_planning_content(
+        canonical_content=canonical_content,
+        content_fingerprint=content_fingerprint,
+        specification=specification,
     )
-    return _error_envelope(code, message)
-
-
-def _workflow_error(exc: RuntimeError) -> dict[str, Any]:
-    """Map workflow persistence errors onto registered CLI errors."""
-    return _error_envelope(ErrorCode.WORKFLOW_SESSION_FAILED, str(exc))
-
-
-def _backlog_runtime_error(*, project_id: int, data: dict[str, Any]) -> dict[str, Any]:
-    """Map a recorded Backlog runtime failure onto a hard CLI failure."""
-    message = str(
-        data.get("failure_summary") or data.get("error") or "Backlog generation failed."
+    chain_key = (
+        project_id,
+        product_goal_artifact_id,
+        product_goal_fingerprint,
+        spec_version_id,
+        spec_hash,
     )
-    details = {
-        "project_id": project_id,
-        "backlog_run_success": False,
-        "failure_stage": data.get("failure_stage"),
-        "failure_artifact_id": data.get("failure_artifact_id"),
-        "attempt_count": data.get("attempt_count"),
-        "fsm_state": data.get("fsm_state"),
-    }
-    if data.get("failure_stage") == "authority_review_required":
-        return _error_envelope(
-            ErrorCode.AUTHORITY_REVIEW_REQUIRED,
-            message,
-            details={
-                key: value for key, value in details.items() if value is not None
-            },
-            remediation=[
-                "Complete authority review for the pending scope extension.",
-                "Accept the amended authority before generating extension backlog.",
-            ],
+    try:
+        version_number = next_artifact_version(
+            _backlog_lineage_nodes(session, project_id=project_id),
+            chain_key=chain_key,
+            supersedes_id=supersedes_backlog_artifact_id,
         )
-    return _error_envelope(
-        ErrorCode.MUTATION_FAILED,
-        message,
-        details={key: value for key, value in details.items() if value is not None},
-        remediation=[
-            "Inspect agileforge backlog history --project-id <project_id>.",
-            "Fix the Backlog runtime/provider configuration or refine the input.",
-        ],
+    except PlanningLineageError as error:
+        raise ValueError(str(error)) from error
+    row = BacklogArtifact(
+        backlog_artifact_id=artifact_id,
+        project_id=project_id,
+        spec_version_id=spec_version_id,
+        spec_hash=spec_hash,
+        product_goal_artifact_id=product_goal_artifact_id,
+        product_goal_fingerprint=product_goal_fingerprint,
+        version_number=version_number,
+        canonical_content_json=canonical_json(canonical_content),
+        content_fingerprint=content_fingerprint,
+        supersedes_backlog_artifact_id=supersedes_backlog_artifact_id,
+        created_by=actor,
+        created_at=recorded_at,
     )
+    session.add(row)
+    session.flush()
+    return row
+
+
+def record_backlog_decision_in_session(  # noqa: PLR0913
+    session: Session,
+    *,
+    artifact: BacklogArtifact,
+    decision: str,
+    rationale: str,
+    reviewer: str,
+    idempotency_key: str,
+    decided_at: datetime,
+) -> BacklogArtifactDecision:
+    """Append one terminal decision and mutate no artifact or operational row."""
+    if decision not in {"accepted", "rejected", "feedback"}:
+        message = "Backlog decision is invalid."
+        raise ValueError(message)
+    artifact_id = _required_id(artifact.backlog_artifact_id, label="Backlog artifact")
+    stored = session.exec(
+        select(BacklogArtifact).where(
+            col(BacklogArtifact.project_id) == artifact.project_id,
+            col(BacklogArtifact.backlog_artifact_id) == artifact_id,
+            col(BacklogArtifact.content_fingerprint) == artifact.content_fingerprint,
+        )
+    ).one_or_none()
+    if stored is None:
+        message = "Backlog decision does not match one exact artifact."
+        raise ValueError(message)
+    _canonical_content, _content = load_stored_backlog_planning_content(
+        stored.canonical_content_json,
+        expected_fingerprint=stored.content_fingerprint,
+        specification=_require_current_root(
+            session,
+            project_id=stored.project_id,
+            spec_version_id=stored.spec_version_id,
+            spec_hash=stored.spec_hash,
+            product_goal_artifact_id=stored.product_goal_artifact_id,
+            product_goal_fingerprint=stored.product_goal_fingerprint,
+        ),
+    )
+    existing = session.exec(
+        select(BacklogArtifactDecision).where(
+            col(BacklogArtifactDecision.project_id) == artifact.project_id,
+            col(BacklogArtifactDecision.backlog_artifact_id) == artifact_id,
+        )
+    ).one_or_none()
+    if existing is not None:
+        message = "Backlog artifact already has a terminal review decision."
+        raise ValueError(message)
+    nodes = _backlog_lineage_nodes(session, project_id=stored.project_id)
+    chain_key = (
+        stored.project_id,
+        stored.product_goal_artifact_id,
+        stored.product_goal_fingerprint,
+        stored.spec_version_id,
+        stored.spec_hash,
+    )
+    try:
+        next_artifact_version(
+            nodes,
+            chain_key=chain_key,
+            supersedes_id=artifact_id,
+        )
+    except PlanningLineageError as error:
+        raise ValueError(str(error)) from error
+    row = BacklogArtifactDecision(
+        project_id=stored.project_id,
+        backlog_artifact_id=artifact_id,
+        artifact_fingerprint=stored.content_fingerprint,
+        decision=decision,
+        rationale=rationale,
+        reviewer=reviewer,
+        idempotency_key=idempotency_key,
+        decided_at=decided_at,
+    )
+    session.add(row)
+    session.flush()
+    return row
+
+
+__all__ = ["record_backlog_decision_in_session", "record_backlog_draft_in_session"]

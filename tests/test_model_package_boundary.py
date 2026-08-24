@@ -53,13 +53,8 @@ def test_selected_test_modules_import_hierarchy_models_from_models_core() -> Non
     """Verify selected test modules import hierarchy models from models core."""
     root = Path(__file__).resolve().parents[1]
     selected_modules = [
-        Path("tests/test_export_snapshot.py"),
         Path("tests/unit/test_delete_project.py"),
-        Path("tests/test_export_import_labels.py"),
-        Path("tests/test_spec_validation_modes.py"),
-        Path("tests/test_alignment_evidence_persistence.py"),
         Path("tests/test_db_tools.py"),
-        Path("tests/test_story_validation_pinning.py"),
     ]
 
     for module_path in selected_modules:
@@ -105,15 +100,11 @@ def test_models_package_exports_specs_and_events_boundaries() -> None:
     from models import events, specs  # noqa: PLC0415
 
     assert specs.SpecRegistry.__module__ == "models.specs"
-    assert specs.CompiledSpecAuthority.__module__ == "models.specs"
-    assert specs.SpecAuthorityAcceptance.__module__ == "models.specs"
     assert events.TaskExecutionLog.__module__ == "models.events"
     assert events.StoryCompletionLog.__module__ == "models.events"
     assert events.WorkflowEvent.__module__ == "models.events"
 
     assert agile_sqlmodel.SpecRegistry is specs.SpecRegistry
-    assert agile_sqlmodel.CompiledSpecAuthority is specs.CompiledSpecAuthority
-    assert agile_sqlmodel.SpecAuthorityAcceptance is specs.SpecAuthorityAcceptance
     assert agile_sqlmodel.TaskExecutionLog is events.TaskExecutionLog
     assert agile_sqlmodel.StoryCompletionLog is events.StoryCompletionLog
     assert agile_sqlmodel.WorkflowEvent is events.WorkflowEvent
@@ -124,7 +115,7 @@ def test_models_package_exports_specs_and_events_boundaries() -> None:
     models_events_text = (root / "models" / "events.py").read_text(encoding="utf-8")
 
     assert "from models.events import (" in agile_sqlmodel_text
-    assert "from models.specs import (" in agile_sqlmodel_text
+    assert "from models.specs import SpecRegistry" in agile_sqlmodel_text
     assert "class SpecRegistry(SQLModel, table=True):" in models_specs_text
     assert "class WorkflowEvent(SQLModel, table=True):" in models_events_text
 
@@ -135,22 +126,11 @@ def test_specs_relationship_contract_is_preserved() -> None:
 
     from models import core, specs  # noqa: PLC0415
 
-    product_relationships = inspect(core.Product).relationships
+    project_relationships = inspect(core.Project).relationships
     spec_registry_relationships = inspect(specs.SpecRegistry).relationships
-    compiled_authority_relationships = inspect(
-        specs.CompiledSpecAuthority
-    ).relationships
 
-    assert product_relationships["spec_versions"].mapper.class_ is specs.SpecRegistry
-    assert spec_registry_relationships["product"].mapper.class_ is core.Product
-    assert (
-        spec_registry_relationships["compiled_authority"].mapper.class_
-        is specs.CompiledSpecAuthority
-    )
-    assert (
-        compiled_authority_relationships["spec_version"].mapper.class_
-        is specs.SpecRegistry
-    )
+    assert project_relationships["spec_versions"].mapper.class_ is specs.SpecRegistry
+    assert spec_registry_relationships["project"].mapper.class_ is core.Project
 
 
 def test_models_package_exports_core_persona_boundary() -> None:
@@ -158,33 +138,33 @@ def test_models_package_exports_core_persona_boundary() -> None:
     import agile_sqlmodel  # noqa: PLC0415
     from models import core  # noqa: PLC0415
 
-    assert core.ProductPersona.__module__ == "models.core"
-    assert agile_sqlmodel.ProductPersona is core.ProductPersona
+    assert core.ProjectPersona.__module__ == "models.core"
+    assert agile_sqlmodel.ProjectPersona is core.ProjectPersona
 
     root = Path(__file__).resolve().parents[1]
     agile_sqlmodel_text = (root / "agile_sqlmodel.py").read_text(encoding="utf-8")
     models_core_text = (root / "models" / "core.py").read_text(encoding="utf-8")
 
     assert "from models.core import (" in agile_sqlmodel_text
-    assert "ProductPersona," in agile_sqlmodel_text
-    assert "class ProductPersona(SQLModel, table=True):" in models_core_text
+    assert "ProjectPersona," in agile_sqlmodel_text
+    assert "class ProjectPersona(SQLModel, table=True):" in models_core_text
 
 
-def test_models_package_exports_core_product_boundary() -> None:
-    """Verify models package exports core product boundary."""
+def test_models_package_exports_core_project_boundary() -> None:
+    """Verify models package exports core project boundary."""
     import agile_sqlmodel  # noqa: PLC0415
     from models import core  # noqa: PLC0415
 
-    assert core.Product.__module__ == "models.core"
-    assert agile_sqlmodel.Product is core.Product
+    assert core.Project.__module__ == "models.core"
+    assert agile_sqlmodel.Project is core.Project
 
     root = Path(__file__).resolve().parents[1]
     agile_sqlmodel_text = (root / "agile_sqlmodel.py").read_text(encoding="utf-8")
     models_core_text = (root / "models" / "core.py").read_text(encoding="utf-8")
 
     assert "from models.core import (" in agile_sqlmodel_text
-    assert "Product," in agile_sqlmodel_text
-    assert "class Product(SQLModel, table=True):" in models_core_text
+    assert "Project," in agile_sqlmodel_text
+    assert "class Project(SQLModel, table=True):" in models_core_text
 
 
 def test_models_package_exports_core_task_boundary() -> None:
@@ -285,8 +265,8 @@ def test_core_sprint_relationship_contract_is_preserved() -> None:
 
     sprint_relationships = inspect(core.Sprint).relationships
 
-    assert "product" in sprint_relationships
-    assert sprint_relationships["product"].mapper.class_ is core.Product
+    assert "project" in sprint_relationships
+    assert sprint_relationships["project"].mapper.class_ is core.Project
     assert "team" in sprint_relationships
     assert sprint_relationships["team"].mapper.class_ is core.Team
     assert "stories" in sprint_relationships
@@ -317,42 +297,42 @@ def test_core_persona_relationship_contract_is_preserved() -> None:
     import agile_sqlmodel  # noqa: PLC0415
     from models import core  # noqa: PLC0415
 
-    product_relationships = inspect(agile_sqlmodel.Product).relationships
-    persona_relationships = inspect(core.ProductPersona).relationships
+    project_relationships = inspect(agile_sqlmodel.Project).relationships
+    persona_relationships = inspect(core.ProjectPersona).relationships
 
-    assert "personas" in product_relationships
-    assert product_relationships["personas"].mapper.class_ is core.ProductPersona
-    assert "product" in persona_relationships
-    assert persona_relationships["product"].mapper.class_ is agile_sqlmodel.Product
+    assert "personas" in project_relationships
+    assert project_relationships["personas"].mapper.class_ is core.ProjectPersona
+    assert "project" in persona_relationships
+    assert persona_relationships["project"].mapper.class_ is agile_sqlmodel.Project
 
 
-def test_core_product_relationship_contract_is_preserved() -> None:
-    """Verify core product relationship contract is preserved."""
+def test_core_project_relationship_contract_is_preserved() -> None:
+    """Verify core project relationship contract is preserved."""
     from sqlalchemy import inspect  # noqa: PLC0415
 
     import agile_sqlmodel  # noqa: PLC0415
     from models import core, specs  # noqa: PLC0415
 
-    product_relationships = inspect(core.Product).relationships
+    project_relationships = inspect(core.Project).relationships
     team_relationships = inspect(core.Team).relationships
     theme_relationships = inspect(core.Theme).relationships
-    persona_relationships = inspect(core.ProductPersona).relationships
+    persona_relationships = inspect(core.ProjectPersona).relationships
     spec_registry_relationships = inspect(specs.SpecRegistry).relationships
     sprint_relationships = inspect(core.Sprint).relationships
     story_relationships = inspect(agile_sqlmodel.UserStory).relationships
 
-    assert product_relationships["teams"].mapper.class_ is core.Team
-    assert product_relationships["themes"].mapper.class_ is core.Theme
-    assert product_relationships["stories"].mapper.class_ is agile_sqlmodel.UserStory
-    assert product_relationships["sprints"].mapper.class_ is core.Sprint
-    assert product_relationships["personas"].mapper.class_ is core.ProductPersona
-    assert product_relationships["spec_versions"].mapper.class_ is specs.SpecRegistry
-    assert team_relationships["products"].mapper.class_ is core.Product
-    assert theme_relationships["product"].mapper.class_ is core.Product
-    assert persona_relationships["product"].mapper.class_ is core.Product
-    assert spec_registry_relationships["product"].mapper.class_ is core.Product
-    assert sprint_relationships["product"].mapper.class_ is core.Product
-    assert story_relationships["product"].mapper.class_ is core.Product
+    assert project_relationships["teams"].mapper.class_ is core.Team
+    assert project_relationships["themes"].mapper.class_ is core.Theme
+    assert project_relationships["stories"].mapper.class_ is agile_sqlmodel.UserStory
+    assert project_relationships["sprints"].mapper.class_ is core.Sprint
+    assert project_relationships["personas"].mapper.class_ is core.ProjectPersona
+    assert project_relationships["spec_versions"].mapper.class_ is specs.SpecRegistry
+    assert team_relationships["projects"].mapper.class_ is core.Project
+    assert theme_relationships["project"].mapper.class_ is core.Project
+    assert persona_relationships["project"].mapper.class_ is core.Project
+    assert spec_registry_relationships["project"].mapper.class_ is core.Project
+    assert sprint_relationships["project"].mapper.class_ is core.Project
+    assert story_relationships["project"].mapper.class_ is core.Project
 
 
 def test_core_team_relationship_contract_is_preserved() -> None:
@@ -362,16 +342,16 @@ def test_core_team_relationship_contract_is_preserved() -> None:
     import agile_sqlmodel  # noqa: PLC0415
     from models import core  # noqa: PLC0415
 
-    product_relationships = inspect(agile_sqlmodel.Product).relationships
+    project_relationships = inspect(agile_sqlmodel.Project).relationships
     team_relationships = inspect(core.Team).relationships
     member_relationships = inspect(core.TeamMember).relationships
     sprint_relationships = inspect(core.Sprint).relationships
     task_relationships = inspect(agile_sqlmodel.Task).relationships
 
-    assert "teams" in product_relationships
-    assert product_relationships["teams"].mapper.class_ is core.Team
-    assert "products" in team_relationships
-    assert team_relationships["products"].mapper.class_ is agile_sqlmodel.Product
+    assert "teams" in project_relationships
+    assert project_relationships["teams"].mapper.class_ is core.Team
+    assert "projects" in team_relationships
+    assert team_relationships["projects"].mapper.class_ is agile_sqlmodel.Project
     assert "members" in team_relationships
     assert team_relationships["members"].mapper.class_ is core.TeamMember
     assert "sprints" in team_relationships
@@ -394,11 +374,11 @@ def test_models_package_exports_core_link_boundaries() -> None:
     from models import core  # noqa: PLC0415
 
     assert core.TeamMembership.__module__ == "models.core"
-    assert core.ProductTeam.__module__ == "models.core"
+    assert core.ProjectTeam.__module__ == "models.core"
     assert core.SprintStory.__module__ == "models.core"
 
     assert agile_sqlmodel.TeamMembership is core.TeamMembership
-    assert agile_sqlmodel.ProductTeam is core.ProductTeam
+    assert agile_sqlmodel.ProjectTeam is core.ProjectTeam
     assert agile_sqlmodel.SprintStory is core.SprintStory
 
     root = Path(__file__).resolve().parents[1]
@@ -407,7 +387,7 @@ def test_models_package_exports_core_link_boundaries() -> None:
 
     assert "from models.core import (" in agile_sqlmodel_text
     assert "class TeamMembership(SQLModel, table=True):" in models_core_text
-    assert "class ProductTeam(SQLModel, table=True):" in models_core_text
+    assert "class ProjectTeam(SQLModel, table=True):" in models_core_text
     assert "class SprintStory(SQLModel, table=True):" in models_core_text
 
 
@@ -444,20 +424,17 @@ def test_core_hierarchy_relationship_contract_is_preserved() -> None:
     import agile_sqlmodel  # noqa: PLC0415
     from models import core  # noqa: PLC0415
 
-    product_relationships = inspect(agile_sqlmodel.Product).relationships
-    story_relationships = inspect(agile_sqlmodel.UserStory).relationships
+    project_relationships = inspect(agile_sqlmodel.Project).relationships
     theme_relationships = inspect(core.Theme).relationships
     epic_relationships = inspect(core.Epic).relationships
     feature_relationships = inspect(core.Feature).relationships
 
-    assert product_relationships["themes"].mapper.class_ is core.Theme
-    assert theme_relationships["product"].mapper.class_ is agile_sqlmodel.Product
+    assert project_relationships["themes"].mapper.class_ is core.Theme
+    assert theme_relationships["project"].mapper.class_ is agile_sqlmodel.Project
     assert theme_relationships["epics"].mapper.class_ is core.Epic
     assert epic_relationships["theme"].mapper.class_ is core.Theme
     assert epic_relationships["features"].mapper.class_ is core.Feature
     assert feature_relationships["epic"].mapper.class_ is core.Epic
-    assert feature_relationships["stories"].mapper.class_ is agile_sqlmodel.UserStory
-    assert story_relationships["feature"].mapper.class_ is core.Feature
 
 
 def test_core_user_story_relationship_contract_is_preserved() -> None:
@@ -466,14 +443,11 @@ def test_core_user_story_relationship_contract_is_preserved() -> None:
 
     from models import core  # noqa: PLC0415
 
-    product_relationships = inspect(core.Product).relationships
-    feature_relationships = inspect(core.Feature).relationships
+    project_relationships = inspect(core.Project).relationships
     story_relationships = inspect(core.UserStory).relationships
 
-    assert product_relationships["stories"].mapper.class_ is core.UserStory
-    assert feature_relationships["stories"].mapper.class_ is core.UserStory
-    assert story_relationships["product"].mapper.class_ is core.Product
-    assert story_relationships["feature"].mapper.class_ is core.Feature
+    assert project_relationships["stories"].mapper.class_ is core.UserStory
+    assert story_relationships["project"].mapper.class_ is core.Project
     assert story_relationships["sprints"].mapper.class_ is core.Sprint
     assert story_relationships["tasks"].mapper.class_ is core.Task
 
@@ -484,7 +458,7 @@ def test_core_user_story_boundary_is_safe_in_fresh_process(
     """Verify core user story boundary is safe in fresh process."""
     root = Path(__file__).resolve().parents[1]
     command = (
-        "from models import core; "
+        "from models import core, workflow; "
         "from sqlalchemy import inspect; "
         "rels = inspect(core.UserStory).relationships; "
         "assert rels['sprints'].mapper.class_.__name__ == 'Sprint'; "
@@ -499,6 +473,26 @@ def test_core_user_story_boundary_is_safe_in_fresh_process(
         [sys.executable, "-c", command],
         cwd=root,
         env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
+def test_story_validation_evidence_schema_is_complete_in_fresh_process() -> None:
+    """Resolve the Task 9 evidence schema without relying on import order."""
+    root = Path(__file__).resolve().parents[1]
+    command = (
+        "from utils.spec_schemas import ValidationEvidence; "
+        "schema = ValidationEvidence.model_json_schema(); "
+        "assert schema['properties']['validated_at']['format'] == 'date-time'"
+    )
+
+    result = subprocess.run(  # noqa: S603  # nosec B603
+        [sys.executable, "-c", command],
+        cwd=root,
         capture_output=True,
         text=True,
         check=False,
@@ -599,7 +593,10 @@ def test_runtime_modules_import_new_model_boundaries() -> None:
 
     root = Path(__file__).resolve().parents[1]
     api_text = (root / "api.py").read_text(encoding="utf-8")
-    product_repo_text = (root / "repositories" / "product.py").read_text(
+    application_text = (root / "services" / "application.py").read_text(
+        encoding="utf-8"
+    )
+    project_repo_text = (root / "repositories" / "project.py").read_text(
         encoding="utf-8"
     )
     story_close_text = (root / "services" / "story_close_service.py").read_text(
@@ -609,8 +606,12 @@ def test_runtime_modules_import_new_model_boundaries() -> None:
         encoding="utf-8"
     )
 
-    assert "from models.db import ensure_business_db_ready, get_engine" in api_text
-    assert "from models.db import get_engine" in product_repo_text
+    assert "from models.core" not in api_text
+    assert "from models.enums" not in api_text
+    assert (
+        "from models.db import ensure_business_db_ready, get_engine" in application_text
+    )
+    assert "from models.db import get_engine" in project_repo_text
     assert "from models.enums import StoryStatus" in story_close_text
     assert "from models.enums import TaskAcceptanceResult" in task_execution_text
 
@@ -621,94 +622,25 @@ def test_runtime_modules_import_new_core_boundary() -> None:
     db_tools_text = (root / "tools" / "db_tools.py").read_text(encoding="utf-8")
 
     assert "from models.core import " in db_tools_text
-    assert "ProductPersona" in db_tools_text
-
-
-def test_runtime_modules_import_new_core_product_boundary() -> None:
-    """Verify runtime modules import new core product boundary."""
-    root = Path(__file__).resolve().parents[1]
-
-    orchestrator_query_core_imports = _imported_names_from(
-        root / "services" / "orchestrator_query_service.py",
-        "models.core",
-    )
-    orchestrator_query_agile_imports = _imported_names_from(
-        root / "services" / "orchestrator_query_service.py",
-        "agile_sqlmodel",
-    )
-    orchestrator_context_core_imports = _imported_names_from(
-        root / "services" / "orchestrator_context_service.py",
-        "models.core",
-    )
-    orchestrator_context_agile_imports = _imported_names_from(
-        root / "services" / "orchestrator_context_service.py",
-        "agile_sqlmodel",
-    )
-    compiler_core_imports = _imported_names_from(
-        root / "services" / "specs" / "compiler_service.py",
-        "models.core",
-    )
-    compiler_agile_imports = _imported_names_from(
-        root / "services" / "specs" / "compiler_service.py",
-        "agile_sqlmodel",
-    )
-    lifecycle_core_imports = _imported_names_from(
-        root / "services" / "specs" / "lifecycle_service.py",
-        "models.core",
-    )
-    lifecycle_agile_imports = _imported_names_from(
-        root / "services" / "specs" / "lifecycle_service.py",
-        "agile_sqlmodel",
-    )
-
-    assert {"Product", "SprintStory"} <= orchestrator_query_core_imports
-    assert "Product" not in orchestrator_query_agile_imports
-    assert {"Product", "Epic", "Feature", "Theme"} <= orchestrator_context_core_imports
-    assert "Product" not in orchestrator_context_agile_imports
-    assert {"Product"} <= compiler_core_imports
-    assert "Product" not in compiler_agile_imports
-    assert {"Product"} <= lifecycle_core_imports
-    assert "Product" not in lifecycle_agile_imports
+    assert "ProjectPersona" in db_tools_text
 
 
 def test_runtime_modules_import_new_core_link_boundary() -> None:
-    """Verify runtime modules import new core link boundary."""
+    """Verify the canonical repository imports Project link models."""
     root = Path(__file__).resolve().parents[1]
-    orchestrator_query_core_imports = _imported_names_from(
-        root / "services" / "orchestrator_query_service.py",
+    repository_imports = _imported_names_from(
+        root / "repositories" / "project.py",
         "models.core",
-    )
-    sprint_planner_core_imports = _imported_names_from(
-        root
-        / "orchestrator_agent"
-        / "agent_tools"
-        / "sprint_planner_tool"
-        / "tools.py",
-        "models.core",
-    )
-    benchmark_text = (root / "scripts" / "benchmark_sprint_planning.py").read_text(
-        encoding="utf-8"
     )
 
-    assert "SprintStory" in orchestrator_query_core_imports
-    assert "SprintStory" in sprint_planner_core_imports
-    assert "from models.core import ProductTeam" in benchmark_text
+    assert {"Project", "SprintStory"} <= repository_imports
 
 
 def test_runtime_modules_import_new_core_hierarchy_boundary() -> None:
     """Verify runtime modules import new core hierarchy boundary."""
     root = Path(__file__).resolve().parents[1]
-    orchestrator_context_text = (
-        root / "services" / "orchestrator_context_service.py"
-    ).read_text(encoding="utf-8")
-    story_validation_text = (
-        root / "services" / "specs" / "story_validation_service.py"
-    ).read_text(encoding="utf-8")
-    db_tools_text = (root / "tools" / "db_tools.py").read_text(encoding="utf-8")  # noqa: F841
 
-    assert "from models.core import Epic, Feature, Theme" in orchestrator_context_text
-    assert "from models.core import Feature" in story_validation_text
-    assert {"Epic", "Feature", "ProductPersona", "Theme"} <= _imported_names_from(
+    assert {"Epic", "Feature", "ProjectPersona", "Theme"} <= _imported_names_from(
         root / "tools" / "db_tools.py", "models.core"
     )
 
@@ -718,33 +650,24 @@ def test_runtime_modules_import_new_core_hierarchy_cleanup_boundary() -> None:
     root = Path(__file__).resolve().parents[1]
     expected_names = {"Epic", "Feature", "Theme"}
 
-    story_query_imports = _imported_names_from(
-        root / "tools" / "story_query_tools.py",
-        "models.core",
-    )
     export_snapshot_imports = _imported_names_from(
         root / "tools" / "export_snapshot.py",
         "models.core",
     )
-    product_repo_imports = _imported_names_from(
-        root / "repositories" / "product.py",
+    project_repo_imports = _imported_names_from(
+        root / "repositories" / "project.py",
         "models.core",
     )
 
-    assert expected_names <= story_query_imports
     assert expected_names <= export_snapshot_imports
-    assert expected_names <= product_repo_imports
+    assert expected_names <= project_repo_imports
 
 
 def test_runtime_scripts_import_hierarchy_models_from_core() -> None:
     """Verify runtime scripts import hierarchy models from core."""
     root = Path(__file__).resolve().parents[1]
     script_expectations = {
-        "scripts/verify_query_features_performance.py": {"Theme", "Epic", "Feature"},
-        "scripts/verify_backlog_optimization.py": {"Theme", "Epic", "Feature"},
-        "scripts/benchmark_product_structure.py": {"Theme", "Epic", "Feature"},
-        "scripts/fix_persona_drift.py": {"Feature"},
-        "scripts/benchmark_sprint_planning.py": {"Theme", "Epic", "Feature"},
+        "scripts/benchmark_project_structure.py": {"Theme", "Epic", "Feature"},
     }
 
     for script_relpath, expected_names in script_expectations.items():
@@ -756,38 +679,18 @@ def test_runtime_scripts_import_hierarchy_models_from_core() -> None:
         assert expected_names.isdisjoint(agile_imports), script_relpath
 
 
-def test_benchmark_project_details_imports_hierarchy_models_from_core() -> None:
-    """Verify benchmark project details imports hierarchy models from core."""
-    root = Path(__file__).resolve().parents[1]
-    script_path = root / "scripts" / "benchmark_project_details.py"
-
-    core_imports = _imported_names_from(script_path, "models.core")
-    agile_imports = _imported_names_from(script_path, "agile_sqlmodel")
-
-    assert {"Theme", "Epic", "Feature"} <= core_imports
-    assert {"Theme", "Epic", "Feature"}.isdisjoint(agile_imports)
-    assert {"Product", "UserStory", "StoryStatus"} <= agile_imports
-
-
 def test_runtime_modules_import_new_spec_and_event_boundaries() -> None:
     """Verify runtime modules import new spec and event boundaries."""
     root = Path(__file__).resolve().parents[1]
     api_text = (root / "api.py").read_text(encoding="utf-8")
-    orchestrator_context_text = (
-        root / "services" / "orchestrator_context_service.py"
-    ).read_text(encoding="utf-8")
-    compiler_service_text = (
-        root / "services" / "specs" / "compiler_service.py"
+    execution_handler_text = (
+        root / "workflow" / "handlers" / "execution.py"
     ).read_text(encoding="utf-8")
     story_validation_text = (
         root / "services" / "specs" / "story_validation_service.py"
     ).read_text(encoding="utf-8")
 
-    assert (
-        "from models.events import StoryCompletionLog, TaskExecutionLog, WorkflowEvent"
-        in api_text
-    )
-    assert "from models.specs import CompiledSpecAuthority" in api_text
-    assert "from models.specs import " in orchestrator_context_text
-    assert "from models.specs import " in compiler_service_text
-    assert "from models.specs import " in story_validation_text
+    assert "from models.events" not in api_text
+    assert "from models.specs" not in api_text
+    assert "from services.task_execution_service import (" in execution_handler_text
+    assert "from models.specs import " not in story_validation_text

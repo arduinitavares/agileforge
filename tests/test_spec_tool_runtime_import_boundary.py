@@ -5,6 +5,8 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+from tools import spec_tools
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -59,11 +61,14 @@ def test_spec_tools_import_boundary() -> None:
     agile_imports = _imported_names_from(module_path, "agile_sqlmodel")
     agile_aliases = _module_import_aliases(module_path, "agile_sqlmodel")
 
-    assert {"Feature", "UserStory"} <= core_imports
-    assert {"Feature", "UserStory"} <= core_bound_imports
-    assert db_imports == {"engine", "get_engine"}
-    assert db_bound_imports == {"engine", "get_engine"}
-    assert spec_imports == {"CompiledSpecAuthority"}
-    assert spec_bound_imports == {"CompiledSpecAuthority"}
+    assert not core_imports
+    assert not core_bound_imports
+    assert not db_imports
+    assert not db_bound_imports
+    assert not hasattr(spec_tools, "engine")
+    assert not hasattr(spec_tools, "get_engine")
+    assert not hasattr(spec_tools, "_LEGACY_DB_EXPORTS")
+    assert not spec_imports
+    assert not spec_bound_imports
     assert not agile_imports
     assert not agile_aliases

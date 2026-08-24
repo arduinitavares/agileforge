@@ -4,311 +4,152 @@
 [![Google ADK](https://img.shields.io/badge/Google-ADK-orange.svg)](https://github.com/google/adk-python)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-> **A developer tool for agent-assisted agile planning and execution, governed by Spec Authority.**
+AgileForge is a developer tool for agent-assisted product planning and
+execution governed by one human-accepted Specification.
 
-AgileForge orchestrates the full agile backbone from product vision to sprint execution. It gives agents a bounded workflow, a SQLite-backed project memory, and a read-only CLI for inspecting project context safely.
+## Lifecycle
 
-This project began as a **TCC (Trabalho de Conclusão de Curso)** research initiative exploring how AI agents can autonomously orchestrate Agile workflows with a **Spec-Driven Architecture**.
+One durable Project owns one ordered lifecycle:
 
----
-
-## ✨ Features
-
-### 🎯 Complete Agile Workflow Pipeline
-```
-Vision → Specification Authority → Initial Backlog → Roadmap → User Stories → Sprint Planning → Execution
+```text
+Vision -> Product Goal -> Source Registration -> Specification Structuring
+       -> Specification Review -> Backlog -> Roadmap
+       -> Stories -> Sprint -> Execution -> Triage
 ```
 
-### 🧠 Intelligent Agents
-| Agent | Role | Capabilities |
-|-------|------|--------------|
-| **Product Vision Tool** | Product Owner | **Strategic Initiation:** Constructs a 7-component "True North" vision statement using the "Bucket Brigade" stateless pattern. |
-| **Spec Authority Compiler** | Architect | **Feasibility Filter:** A non-conversational compiler that extracts deterministic "Definition of Done" constraints from technical specs. |
-| **Backlog Primer** | Product Owner | **Pre-Planning:** Converts Vision into a prioritized list of Gross Requirements (not User Stories) using T-Shirt sizing. |
-| **Roadmap Builder** | Product Owner | **Strategic Planning:** Maps requirements to time-based milestones, respecting technical dependencies and themes. |
-| **User Story Writer** | PO Assistant | **Requirement Refinement:** Decomposes requirements into INVEST-ready "Vertical Slices" using the "Three Cs" protocol. |
-| **Sprint Planner** | Scrum Master | **Tactical Planning:** Facilitates scope selection via a "Pull System" and auto-decomposes stories into technical tasks. |
+After a human accepts a Product Goal, an external agent may run
+`grill-with-docs`, update the lazily created `CONTEXT.md`, record applicable
+ADRs, and run `to-spec`. It registers that exact human-readable source with
+AgileForge. AgileForge captures its bytes, the present-or-absent Context state,
+ADRs, accepted Vision and Goal fingerprints, and repository revision before an
+internal Specification Structuring Agent creates canonical
+`agileforge.spec.v2`. A human reviews that exact candidate. The accepted payload
+and immutable lineage then bind every downstream planning artifact directly.
 
-### 🛠️ Key Capabilities
-- **Spec-Driven Architecture**: Single source of truth via `SpecRegistry`. All downstream artifacts (stories, roadmap) are validated against compiled authority.
-- **Bucket Brigade Architecture**: Agents are stateless processors that receive state, apply a "diff," and pass it forward. This ensures predictable behavior.
-- **Strict Scrum Compliance**: All agents leverage *Scrum For Dummies, 2nd Edition* as the authoritative source for their logic (e.g., INVEST, Vertical Slicing, Pull Systems).
-- **Draft → Review → Commit Pattern**: Artifacts are generated in a draft state and require explicit user confirmation before persistence.
-- **WorkflowEvent Metrics**: Built-in tracking for TCC evaluation (NASA-TLX, cycle time).
+Discovery is optional work such as interviews, `grill-with-docs`, research,
+repository evidence, ADRs, and prototypes. `grill-with-docs` is preparation
+attestation, not proof of an external agent's internal reasoning. Discovery may
+contribute to a Specification, but AgileForge does not persist an artifact or
+expose a Discovery workflow gate, API, CLI command, or dashboard card. Markdown
+and registered source files are evidence for structuring, not downstream
+delivery contracts. Delivery consumes only the accepted typed
+`agileforge.spec.v2` payload.
 
----
+`WorkflowDomain.position(project_id)` derives available, waiting, blocked,
+invalid, or terminal nodes from durable Project facts. Commands submit typed
+requests through `WorkflowDomain.transition(request)`. ADK recipes execute
+eligible model work; they do not own routing state.
 
-## 🏗️ Architecture
+The current model-backed nodes cover Vision and Product Goal interviews,
+Specification structuring, Backlog, Roadmap, Story, and Sprint generation.
+Human Specification review remains an explicit workflow transition.
 
-```
-┌──────────────────────────────────────────────────────────────────────────┐
-│                          Orchestrator Agent                              │
-│           (Explicit FSM, Registry & Bucket Brigade Routing)              │
-├──────────────────────────────────────────────────────────────────────────┤
-│  ┌──────────────┐   ┌──────────────┐   ┌──────────────┐  ┌────────────┐  │
-│  │ Product      │   │ Spec Auth    │   │ Backlog      │  │ Roadmap    │  │
-│  │ Vision Tool  │   │ Compiler     │   │ Primer       │  │ Builder    │  │
-│  └──────────────┘   └──────────────┘   └──────────────┘  └────────────┘  │
-│                               │                                          │
-│                        ┌──────▼──────┐                                   │
-│                        │ Spec Registry│                                  │
-│                        │ & Authority  │                                  │
-│                        └──────┬───────┘                                  │
-│                               │                                          │
-│  ┌────────────────────────────▼─────────────────────────────────────────┐│
-│  │              Tactical & Execution Tools                              ││
-│  │  (User Story Writer -> Sprint Planner -> Execution)                  ││
-│  └──────────────────────────────────────────────────────────────────────┘│
-├──────────────────────────────────────────────────────────────────────────┤
-│                          SQLite Database                                 │
-│  (Products, Specs, CompiledAuthority, Epics, Stories)                    │
-└──────────────────────────────────────────────────────────────────────────┘
-```
+## Architecture
 
-### Design Patterns
-- **Explicit FSM**: Control flow logic separated from LLM reasoning; states defined in registry.
-- **Spec Authority Pattern**: Compiler pattern for deterministic invariants.
-- **Bucket Brigade Communication**: Agents pass structured state through the orchestrator.
-- **Schema-Driven Validation**: All I/O validated by Pydantic schemas.
-- **Tool Context Caching**: Read-only tools support transparent caching with TTL.
+- **Derived workflow graph**: one immutable fact snapshot drives routing and
+  transition guards.
+- **Accepted Specification**: exact reviewed v2 bytes constrain downstream
+  planning and execution.
+- **Canonical Specification**: a typed v2 payload contains semantics while an
+  immutable envelope binds direct Vision and Product Goal lineage, the exact
+  registered `to-spec` source, source preparation attestation, structurer and
+  attempt identity, amendment base and diff, and exact
+  payload, review-view, and candidate fingerprints.
+- **Durable Project facts**: process restarts and execution-trace resets do not
+  alter workflow position.
+- **Schema validation**: Pydantic and SQLModel define transport and persistence
+  boundaries.
+- **Repository binding**: a Project may record an operator-selected repository
+  path and deterministic repository observations.
 
----
+## Quick Start
 
-## 🚀 Quick Start
+Prerequisites: Python 3.12+, [uv](https://docs.astral.sh/uv/), and an OpenRouter
+key only when running model-backed nodes.
 
-### Prerequisites
-- Python 3.12+
-- [Poetry](https://python-poetry.org/) or pip
-- OpenRouter API key (for LLM access)
-
-### Installation
-
-```bash
-# Clone the repository
+```sh
 git clone https://github.com/arduinitavares/agileforge.git
 cd agileforge
-
-# Install dependencies
-pip install -e .
-# or with Poetry
-poetry install
-
-# Set up environment variables
-cp .env.example .env
-# Then edit .env and set:
-# - OPEN_ROUTER_API_KEY
-# - AGILEFORGE_DB_URL
-# - AGILEFORGE_SESSION_DB_URL
+uv sync --frozen
+./agileforge-dev init --profile local --json
+./agileforge-dev info --profile local --json
 ```
 
-### Agent CLI
+Create one Project:
 
-The CLI is the supported agent interface for workflow inspection and guarded
-mutations. For the full contract, workflows, idempotency rules, and recovery
-guidance, see [docs/agent-cli-manual.md](docs/agent-cli-manual.md).
-For the `grill-with-docs` -> `to-prd` -> AgileForge Scope Discovery handoff,
-see [docs/scope-discovery-agent-runbook.md](docs/scope-discovery-agent-runbook.md).
-For direct spec-file project creation, create and validate an AgileForge profile
-spec at `specs/spec.json`; Markdown specs are review views, not project-create
-inputs.
-
-```bash
-uv run --frozen agileforge --help
-uv run --frozen agileforge project list
-uv run --frozen agileforge status --project-id 1
-uv run --frozen agileforge context pack --project-id 1 --phase sprint-planning
-uv run --frozen agileforge project create --name "Example" --spec-file specs/spec.json --idempotency-key create-example-001
+```sh
+./agileforge-dev cli --profile local -- project create \
+  --name "Example Project" \
+  --description "Validated delivery workflow" \
+  --repository-path "/absolute/path/to/repository" \
+  --idempotency-key project-create-1 \
+  --actor operator
 ```
 
-### Running the Application
+Read graph authority before every workflow mutation:
 
-```bash
-# Start the deterministic FastAPI interface
-uvicorn api:app --reload
-
-# Open the dashboard at http://localhost:8000/dashboard
+```sh
+./agileforge-dev cli --profile local -- workflow position --project-id 1
+./agileforge-dev cli --profile local -- workflow next --project-id 1
 ```
 
----
+Stable release: `agileforge workflow next --project-id 1`
 
-## 📖 Usage Examples
+Current checkout: `./agileforge-dev cli --profile local -- workflow next --project-id 1`
 
-### 1. Create a New Product Vision
+Current checkout UI: `./agileforge-dev ui --profile local --port auto`
 
-```
-You: I want to build a recipe discovery app for home cooks
+Provenance: `./agileforge-dev info --profile local --json`
 
-Agent: I'll help you define the product vision. Let me ask some clarifying questions:
-- What should we call this product?
-- What specific problem does it solve for home cooks?
-...
+Execute the command template returned by `workflow next`. After the external
+agent produces its source, the graph advertises `specification source register`;
+after immutable capture, it advertises `specification structure`. AgileForge
+derives and validates internal guards from the current durable position.
+Operators provide only task-specific semantic fields and transport metadata
+such as idempotency key and actor. Source registration takes
+repository-relative source and applicable ADR paths. Humans never enter raw
+workflow JSON, candidate IDs, fingerprints, or lineage identifiers for
+structuring or review. Use a new idempotency key for each distinct request.
 
-You: Let's call it MealMuse...
+The Specification v2 cutover is a hard break. Initialize a fresh profile and
+business database when moving from a checkout that used the former Discovery or
+Specification schema; AgileForge does not migrate or read those records.
 
-Agent: Great! Vision saved. Now, do you want to define the Technical Specification?
-```
+Start the checkout-local dashboard:
 
-### 2. Define Specification & Plan
-
-```
-You: Here is the technical spec for MealMuse... [Pastes Spec]
-
-Agent: Spec compiled and Authority accepted.
-I will now generate the Initial Product Backlog (Gross Requirements) before we build the Roadmap.
-
-You: Proceed.
-
-Agent: Backlog prioritized. Now building the Roadmap...
-[Generates Milestones with Themes]
+```sh
+./agileforge-dev ui --profile local --port auto
 ```
 
-### 3. Execute Sprint Work
+Provider-backed launcher children ignore the checkout `.env`. Pass an
+operator-owned regular secrets file explicitly:
 
-```
-You: Mark story 35 as done
-
-Agent: ✅ Story #35 updated: IN_PROGRESS → DONE
-"Access app on iOS and Android"
-```
-
----
-
-## 📁 Project Structure
-
-```
-agileforge/
-├── api.py                           # Deterministic FastAPI entry point
-├── agile_sqlmodel.py                # Database schema (SQLModel/SQLAlchemy)
-├── PLANNING_WORKFLOW.md             # Detailed workflow documentation
-├── SPEC_DRIVEN_ARCHITECTURE_PLAN.md # Spec Authority Architecture
-├── CLAUDE.md                        # TCC requirements and methodology
-│
-├── orchestrator_agent/
-│   ├── agent.py                     # Root agent with all tools
-│   ├── instructions.txt             # State machine routing
-│   └── agent_tools/
-│       ├── product_vision_tool/           # Vision gathering (Stage 1)
-│       ├── spec_authority_compiler_agent/ # Spec Compiler (Feasibility)
-│       ├── backlog_primer/                # Gross Requirements (Pre-Planning)
-│       ├── roadmap_builder/               # Roadmap (Stage 2)
-│       ├── user_story_writer_tool/        # Story Refinement ("Three Cs")
-│       └── sprint_planner_tool/           # Sprint Planning (Scope & Tasks)
-│
-├── tools/
-│   ├── orchestrator_tools.py        # Read-only query tools
-│   ├── db_tools.py                  # Database mutation tools
-│   └── spec_tools.py                # Spec persistence and authority tools
-│
-├── utils/
-│   ├── schemes.py                   # Shared Pydantic schemas
-│   └── helper.py                    # Instruction loading
-│
-└── tests/
-    ├── conftest.py                  # Test fixtures
-    └── test_*.py                    # Unit tests
+```sh
+export AGILEFORGE_SECRETS_FILE="$HOME/.config/agileforge/provider.env"
+./agileforge-dev info --profile local --secrets-file "$AGILEFORGE_SECRETS_FILE" --json
+./agileforge-dev cli --profile local --secrets-file "$AGILEFORGE_SECRETS_FILE" -- workflow next --project-id 1
 ```
 
----
+Credential values are not included in launcher output. The checkout launcher
+owns its profile database, trace database, model configuration, and child
+runtime environment. The redacted preflight reports `configured_models`,
+`provider_credentials`, and `child_runtime_environment`; it never reports
+credential values.
 
-## 🗄️ Database Schema
+## Development
 
-```
-products ─┬─> spec_registry ─> compiled_spec_authority
-          │
-          ├─> themes ─┬─> epics ─┬─> features
-          │           │          │
-          │           │          └─> user_stories ─┬─> sprint_stories
-          │           │                            │
-          └─> teams ──┴─> sprints ─────────────────┘
-                              │
-                              └─> workflow_events (metrics)
-```
+Use only the current checkout's `./agileforge-dev` in branches and linked
+worktrees. Record `info --json` before mutations.
 
-Key tables:
-- **products**: Top-level container
-- **spec_registry**: Versioned technical specifications
-- **compiled_spec_authority**: Deterministic invariants compiled from specs
-- **user_stories**: INVEST-ready stories with spec validation
-- **sprints**: Sprint planning with goals and dates
-
----
-
-## 🔧 Technology Stack
-
-| Category | Technology |
-|----------|------------|
-| **Agent Framework** | [Google ADK](https://github.com/google/adk-python) (Agent Development Kit) |
-| **LLM Abstraction** | LiteLLM via OpenRouter API |
-| **Model** | `openrouter/google/gemini-2.0-flash-exp` (or updated model) |
-| **ORM** | SQLModel (0.0.27+) + SQLAlchemy |
-| **Database** | SQLite (portable, zero-config) |
-| **Schema Validation** | Pydantic v2 |
-| **Session Management** | ADK DatabaseSessionService |
-
----
-
-## 📊 TCC Evaluation Metrics
-
-This system is designed for academic evaluation using:
-
-| Metric | Method | Purpose |
-|--------|--------|---------|
-| **Cognitive Load** | NASA-TLX questionnaire | Measure mental demand reduction |
-| **Artifact Quality** | Spec compliance validation | Ensure story quality |
-| **Workflow Efficiency** | Cycle time & lead time | Track planning speed |
-| **Baseline Comparison** | Solo developer with traditional tools | Validate improvement |
-
----
-
-## 🧪 Testing
-
-```bash
-# Run all tests
-pytest tests/
-
-# Run with coverage (Minimum 80%)
-pytest tests/ --cov=. --cov-report=html
+```sh
+uv run --frozen pytest -q
+uv run --frozen ruff check .
+uv run --frozen ty check
+uv run --frozen ruff format --check .
 ```
 
----
-
-## 🛣️ Roadmap
-
-### ✅ Completed (v1.1)
-- [x] Product Vision Tool (7-component gathering)
-- [x] Specification Authority System (Compiler & Validation Gates)
-- [x] Backlog Primer (Gross Requirements Generation)
-- [x] Roadmap Builder (Now/Next/Later prioritization)
-- [x] User Story Writer ("Three Cs" & INVEST validation)
-- [x] WorkflowEvent metrics capture
-
-### 🔜 Planned (v1.2)
-- [ ] Sprint Planner (Scope "Pull" & Task Decomposition)
-- [ ] Automated Spec Updates via Feedback
-- [ ] Task breakdown from stories
-- [ ] Burndown chart visualization
-
-### 🔮 Future
-- [ ] Multi-project portfolio view
-- [ ] Integration with GitHub/Jira
-
----
-
-## 📚 Documentation
-
-- [PLANNING_WORKFLOW.md](PLANNING_WORKFLOW.md) - Detailed workflow documentation
-- [SPEC_DRIVEN_ARCHITECTURE_PLAN.md](SPEC_DRIVEN_ARCHITECTURE_PLAN.md) - Spec Authority Architecture details
-- [.github/copilot-instructions.md](.github/copilot-instructions.md) - AI agent coding guidelines
-
----
-
-## 📄 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
----
-
-## 👤 Author
-
-**Alexandre Tavares**
-- GitHub: [@arduinitavares](https://github.com/arduinitavares)
+See [CONTEXT.md](CONTEXT.md) for domain language,
+[docs/agent-cli-manual.md](docs/agent-cli-manual.md) for the command contract,
+and
+[docs/testing/workflow-graph-acceptance-checklist.md](docs/testing/workflow-graph-acceptance-checklist.md)
+for operator acceptance evidence.

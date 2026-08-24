@@ -36,16 +36,7 @@ def test_selected_test_and_script_modules_import_team_from_models_core() -> None
     """Verify selected test and script modules import team from models core."""
     root = Path(__file__).resolve().parents[1]
     selected_modules = [
-        Path("tests/test_orchestrator_query_service.py"),
-        Path("tests/test_sprint_planner_tools.py"),
-        Path("tests/test_export_snapshot.py"),
-        Path("tests/test_api_sprint_flow.py"),
-        Path("tests/test_api_delete_story.py"),
         Path("tests/unit/test_delete_project.py"),
-        Path("scripts/benchmark_sprint_planning.py"),
-        Path("scripts/benchmark_list_sprints.py"),
-        Path("scripts/benchmark_delete_project_story.py"),
-        Path("scripts/verify_backlog_optimization.py"),
     ]
 
     for module_path in selected_modules:

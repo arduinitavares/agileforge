@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from functools import lru_cache
+from importlib.resources import files
 from pathlib import Path
 from typing import Any
 
@@ -12,7 +13,8 @@ import yaml
 from utils.runtime_config import get_bool_env, load_runtime_env
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-_DEFAULT_CONFIG_PATH = _REPO_ROOT / "config" / "models.yaml"
+_DEFAULT_CONFIG_RESOURCE = files("config").joinpath("models.yaml")
+_OPENROUTER_OPENAI_GPT_5_PREFIX = "openrouter/openai/gpt-5"
 
 load_runtime_env()
 
@@ -100,10 +102,10 @@ def is_zdr_routing_error(exception: BaseException) -> bool:
     )
 
 
-def _get_config_path() -> Path:
+def _get_config_path() -> Path | None:
     env_path = os.getenv("MODEL_CONFIG_PATH")
     if not env_path:
-        return _DEFAULT_CONFIG_PATH
+        return None
 
     candidate = Path(env_path)
     if not candidate.is_absolute():
@@ -114,9 +116,12 @@ def _get_config_path() -> Path:
 @lru_cache(maxsize=1)
 def _load_config() -> dict[str, Any]:
     config_path = _get_config_path()
-    if not config_path.exists():
-        raise ModelConfigNotFoundError(config_path)
-    raw = config_path.read_text(encoding="utf-8")
+    if config_path is None:
+        raw = _DEFAULT_CONFIG_RESOURCE.read_text(encoding="utf-8")
+    else:
+        if not config_path.exists():
+            raise ModelConfigNotFoundError(config_path)
+        raw = config_path.read_text(encoding="utf-8")
     data = yaml.safe_load(raw) or {}
     if not isinstance(data, dict):
         raise ModelConfigMappingError
@@ -167,6 +172,13 @@ def _get_provider_config() -> dict[str, Any]:
 def get_openrouter_extra_body() -> dict[str, Any]:
     """Return extra_body for OpenRouter requests with privacy routing."""
     return {"provider": _get_provider_config()}
+
+
+def get_model_token_limit_args(model_id: str, token_limit: int) -> dict[str, int]:
+    """Return the token-limit argument supported by the configured model family."""
+    if model_id.startswith(_OPENROUTER_OPENAI_GPT_5_PREFIX):
+        return {"max_completion_tokens": token_limit}
+    return {"max_tokens": token_limit}
 
 
 def get_story_pipeline_mode() -> str:

@@ -12,6 +12,8 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
+    from workflow.facts import WorkflowFactSnapshot
+
 OLDEST_COMPLETED_AT: datetime = datetime(1, 1, 1, tzinfo=UTC).replace(tzinfo=None)
 
 TOKEN_METRICS_UNAVAILABLE: dict[str, Any] = {
@@ -22,6 +24,78 @@ TOKEN_METRICS_UNAVAILABLE: dict[str, Any] = {
     "estimated_cost_usd": None,
     "reason": "Token usage is not yet captured in durable AgileForge records.",
 }
+
+
+def build_durable_sprint_metrics(
+    snapshot: WorkflowFactSnapshot,
+) -> dict[str, Any]:
+    """Build metrics from exact completed Sprint and Story business facts."""
+    stories_by_id = {story.story_id: story for story in snapshot.stories}
+    starts_by_sprint = {start.sprint_id: start for start in snapshot.sprint_starts}
+    completed_task_ids = {
+        completion.task_id for completion in snapshot.task_completions
+    }
+    completed_sprints: list[dict[str, Any]] = []
+    for sprint in snapshot.sprints:
+        if sprint.status != "completed":
+            continue
+        sprint_id = sprint.sprint_id
+        start = starts_by_sprint.get(sprint_id)
+        story_completions = [
+            completion
+            for completion in snapshot.story_completions
+            if completion.sprint_id == sprint_id
+        ]
+        completed_stories = [
+            stories_by_id.get(completion.story_id) for completion in story_completions
+        ]
+        unestimated_count = sum(
+            story is None or story.story_points is None for story in completed_stories
+        )
+        completed_points = sum(
+            story.story_points or 0 for story in completed_stories if story is not None
+        )
+        sprint_tasks = [task for task in snapshot.tasks if task.sprint_id == sprint_id]
+        selected_story_ids = () if start is None else start.selected_story_ids
+        planned_stories = [
+            stories_by_id.get(story_id) for story_id in selected_story_ids
+        ]
+        planned_points = sum(
+            story.story_points or 0 for story in planned_stories if story is not None
+        )
+        completed_sprints.append(
+            {
+                "sprint_id": sprint_id,
+                "goal": None,
+                "status": sprint.status,
+                "started_at": (None if start is None else start.started_at.isoformat()),
+                "completed_at": (
+                    None
+                    if sprint.completed_at is None
+                    else sprint.completed_at.isoformat()
+                ),
+                "start_date": None,
+                "end_date": None,
+                "story_count": len(selected_story_ids),
+                "completed_story_count": len(story_completions),
+                "task_count": len(sprint_tasks),
+                "completed_task_count": sum(
+                    task.task_id in completed_task_ids for task in sprint_tasks
+                ),
+                "story_points_planned": planned_points,
+                "story_points_completed": completed_points,
+                "elapsed_seconds": None,
+                "workflow_event_count": 0,
+                "workflow_event_duration_seconds": None,
+                "turn_count": None,
+                "history_fidelity": "durable_business_facts",
+                "unestimated_completed_story_count": unestimated_count,
+            }
+        )
+    return build_sprint_metrics(
+        project_id=snapshot.project.project_id,
+        completed_sprints=completed_sprints,
+    )
 
 
 def build_sprint_metrics(

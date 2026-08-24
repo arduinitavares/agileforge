@@ -1,2 +1,0 @@
-total_runs,pipeline_ran_count,alignment_rejected_count,acceptance_blocked_count,contract_passed_count,avg_total_ms,avg_compile_ms,avg_pipeline_ms,avg_validation_ms,spec_version_id_match_count,spec_version_id_mismatch_count
-24,11,5,8,3,14752.45,10431.7,9282.7,0.2,11,0

@@ -3,32 +3,33 @@
 from __future__ import annotations
 
 import html
+import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from markdown import markdown as _md
 from sqlmodel import Session, select
 
-from models.core import Epic, Feature, Product, Sprint, SprintStory, Theme, UserStory
+from models.core import Epic, Feature, Project, Sprint, SprintStory, Theme, UserStory
 from models.db import engine as default_engine
 from models.enums import StoryStatus
-from models.specs import SpecRegistry
-from services.specs.authority_selection import (
-    accepted_compiled_authority,
-    latest_accepted_authority_decision,
-    latest_compiled_authority,
+from models.product_definition import (
+    SpecificationCandidate,
+    VisionArtifact,
+    VisionArtifactDecision,
 )
-from services.specs.compiler_service import (
-    CompiledAuthorityReadFailure,
-    compiled_authority_read_failure,
-    load_compiled_artifact,
+from services.specs.accepted_specification import (
+    AcceptedSpecification,
+    AcceptedSpecificationIntegrityError,
+    load_current_accepted_specification,
 )
-from utils.spec_schemas import (
-    Invariant,
-    InvariantType,
-    SpecAuthorityCompilationSuccess,
+from services.specs.candidate_contract import (
+    SpecificationCandidateEnvelope,
+    load_candidate_contract,
+    render_candidate_review_markdown,
 )
+from workflow.fingerprints import canonical_json
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -36,43 +37,54 @@ if TYPE_CHECKING:
 
     from sqlalchemy.engine import Engine
 
+    from utils.agileforge_spec_profile_v2 import SpecificationPayload
+
 
 class _ExportSnapshotError(ValueError):
     @classmethod
-    def product_not_found(cls, product_id: int) -> _ExportSnapshotError:
-        message = f"Product {product_id} not found"
+    def project_not_found(cls, project_id: int) -> _ExportSnapshotError:
+        message = f"Project {project_id} not found"
         return cls(message)
 
     @classmethod
-    def compiled_authority_invalid(
-        cls,
-        failure: CompiledAuthorityReadFailure,
-    ) -> _ExportSnapshotError:
-        """Build a stable pre-write failure for an unusable selected row."""
-        remediation = " ".join(failure.remediation)
+    def specification_candidate_invalid(cls, reason: str) -> _ExportSnapshotError:
+        """Build a stable pre-write failure for unusable specification source."""
         return cls(
-            f"{failure.error_code}: {failure.message} "
-            f"details={failure.details}. {remediation}"
+            "SPECIFICATION_CANDIDATE_INVALID: Approved specification source is "
+            f"unavailable or invalid. details={{'reason': {reason!r}}}."
         )
 
     @classmethod
-    def authority_not_compiled(
-        cls,
-        *,
-        project_id: int,
-        spec_version_id: int,
-    ) -> _ExportSnapshotError:
-        """Build a stable failure for a dangling accepted authority id."""
-        return cls(
-            "AUTHORITY_NOT_COMPILED: Accepted compiled authority row is unavailable. "
-            f"details={{'project_id': {project_id}, "
-            f"'spec_version_id': {spec_version_id}}}."
+    def specification_candidate_missing(cls) -> _ExportSnapshotError:
+        """Build a stable failure when the exact registry source is absent."""
+        return cls.specification_candidate_invalid(
+            "registry source candidate identity does not resolve"
         )
+
+    @classmethod
+    def specification_candidate_identity(cls) -> _ExportSnapshotError:
+        """Build a stable failure for conflicting durable candidate identity."""
+        return cls.specification_candidate_invalid(
+            "registry, candidate, and canonical envelope identities differ"
+        )
+
+    @classmethod
+    def accepted_specification_invalid(
+        cls,
+        error: AcceptedSpecificationIntegrityError,
+    ) -> _ExportSnapshotError:
+        """Preserve the deep loader's stable acceptance failure code."""
+        return cls(f"{error.code}: {error}")
+
+
+_ACCEPTANCE_CRITERIA_INVALID = (
+    "Story acceptance criteria must be a canonical non-empty JSON string list."
+)
 
 
 @dataclass(frozen=True)
 class _SnapshotRenderContext:
-    product: Product
+    project: Project
     themes: list[Theme]
     epics: list[Epic]
     features: list[Feature]
@@ -80,9 +92,9 @@ class _SnapshotRenderContext:
     all_stories: list[UserStory]
     sprints: list[Sprint]
     sprint_story_map: dict[int, list[int]]
+    vision_statement: str
     spec_content: str
     spec_meta: dict[str, Any]
-    authority: SpecAuthorityCompilationSuccess | None
 
 
 def _markdown(text: str, extensions: list[str] | None = None) -> str:
@@ -91,14 +103,14 @@ def _markdown(text: str, extensions: list[str] | None = None) -> str:
 
 def export_project_snapshot_html(
     *,
-    product_id: int,
+    project_id: int,
     output_dir: Path,
     engine_override: Engine | None = None,
 ) -> Path:
     """Export a project snapshot as a single HTML file.
 
     Args:
-        product_id: Product identifier.
+        project_id: Project identifier.
         output_dir: Destination folder.
         engine_override: Optional SQLAlchemy engine for testing.
 
@@ -106,15 +118,14 @@ def export_project_snapshot_html(
         Path to the generated HTML file.
     """
     engine_to_use = engine_override or default_engine
-    output_dir.mkdir(parents=True, exist_ok=True)
 
     with Session(engine_to_use) as session:
-        product = session.get(Product, product_id)
-        if not product:
-            raise _ExportSnapshotError.product_not_found(product_id)
+        project = session.get(Project, project_id)
+        if not project:
+            raise _ExportSnapshotError.project_not_found(project_id)
 
         themes = list(
-            session.exec(select(Theme).where(Theme.product_id == product_id)).all()
+            session.exec(select(Theme).where(Theme.project_id == project_id)).all()
         )
         theme_ids = [theme.theme_id for theme in themes if theme.theme_id is not None]
         epics = list(session.exec(select(Epic)).all())
@@ -125,11 +136,11 @@ def export_project_snapshot_html(
         features = [feature for feature in features if feature.epic_id in epic_ids]
         all_stories = list(
             session.exec(
-                select(UserStory).where(UserStory.product_id == product_id)
+                select(UserStory).where(UserStory.project_id == project_id)
             ).all()
         )
         sprints = list(
-            session.exec(select(Sprint).where(Sprint.product_id == product_id)).all()
+            session.exec(select(Sprint).where(Sprint.project_id == project_id)).all()
         )
         sprint_story_map = _load_sprint_story_map(
             session, [s.sprint_id for s in sprints]
@@ -140,12 +151,25 @@ def export_project_snapshot_html(
             sprint_story_map,
         )
 
-        approved_spec = _get_latest_approved_spec(session, product_id)
-        spec_content, spec_meta = _resolve_spec_content(product, approved_spec)
-        authority = _load_compiled_authority(session, approved_spec)
+        vision_statement = _get_latest_accepted_vision(session, project_id)
+        try:
+            accepted_spec = load_current_accepted_specification(
+                session,
+                project_id=project_id,
+            )
+        except AcceptedSpecificationIntegrityError as exc:
+            if exc.code in {
+                "SPECIFICATION_CANONICAL_BYTES_INVALID",
+                "SPECIFICATION_IDENTITY_MISMATCH",
+            }:
+                raise _ExportSnapshotError.specification_candidate_invalid(
+                    str(exc)
+                ) from exc
+            raise _ExportSnapshotError.accepted_specification_invalid(exc) from exc
+        spec_content, spec_meta = _resolve_spec_content(session, accepted_spec)
 
     render_context = _SnapshotRenderContext(
-        product=product,
+        project=project,
         themes=themes,
         epics=epics,
         features=features,
@@ -153,107 +177,118 @@ def export_project_snapshot_html(
         all_stories=all_stories,
         sprints=sprints,
         sprint_story_map=sprint_story_map,
+        vision_statement=vision_statement,
         spec_content=spec_content,
         spec_meta=spec_meta,
-        authority=authority,
     )
     html_output = _render_snapshot_html(render_context)
 
-    filename = f"snapshot_product_{product.product_id}.html"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    filename = f"snapshot_project_{project.project_id}.html"
     output_path = output_dir / filename
     output_path.write_text(html_output, encoding="utf-8")
     return output_path
 
 
-def _get_latest_approved_spec(
-    session: Session,
-    product_id: int,
-) -> SpecRegistry | None:
-    specs = list(
+def _get_latest_accepted_vision(session: Session, project_id: int) -> str:
+    """Return the latest fingerprint-bound accepted Vision statement."""
+    decisions = list(
         session.exec(
-            select(SpecRegistry).where(
-                SpecRegistry.product_id == product_id,
-                SpecRegistry.status == "approved",
+            select(VisionArtifactDecision).where(
+                VisionArtifactDecision.project_id == project_id,
+                VisionArtifactDecision.decision == "accepted",
             )
         ).all()
     )
-    if not specs:
-        return None
-    return sorted(
-        specs,
-        key=lambda spec: spec.approved_at or spec.created_at,
+    ordered = sorted(
+        decisions,
+        key=lambda item: (
+            item.decided_at,
+            item.vision_artifact_decision_id or -1,
+        ),
         reverse=True,
-    )[0]
+    )
+    for decision in ordered:
+        artifact = session.get(VisionArtifact, decision.vision_artifact_id)
+        if (
+            artifact is not None
+            and artifact.project_id == project_id
+            and artifact.content_fingerprint == decision.artifact_fingerprint
+        ):
+            return artifact.statement
+    return "(No accepted Vision available)"
 
 
 def _resolve_spec_content(
-    product: Product,
-    approved_spec: SpecRegistry | None,
+    session: Session,
+    accepted_spec: AcceptedSpecification | None,
 ) -> tuple[str, dict[str, Any]]:
-    if approved_spec:
+    if accepted_spec:
+        payload, envelope = _load_specification_candidate(
+            session,
+            accepted_spec,
+        )
         meta: dict[str, Any] = {
             "status": "approved",
-            "spec_version_id": approved_spec.spec_version_id,
-            "approved_by": approved_spec.approved_by,
-            "approved_at": approved_spec.approved_at,
-            "approval_notes": approved_spec.approval_notes,
-            "content_ref": approved_spec.content_ref,
+            "spec_version_id": accepted_spec.spec_version_id,
+            "spec_hash": accepted_spec.spec_hash,
+            "specification_decision_id": accepted_spec.specification_decision_id,
+            "accepted_by": accepted_spec.accepted_by,
+            "accepted_at": accepted_spec.accepted_at,
+            "acceptance_notes": accepted_spec.acceptance_notes,
+            "candidate_fingerprint": envelope.candidate_fingerprint,
+            "payload_fingerprint": envelope.payload_fingerprint,
+            "source_manifest_fingerprint": envelope.source_manifest_fingerprint,
         }
-        return approved_spec.content, meta
+        return render_candidate_review_markdown(payload, envelope), meta
 
     meta: dict[str, Any] = {
-        "status": "draft",
+        "status": "unavailable",
         "spec_version_id": None,
-        "approved_by": None,
-        "approved_at": None,
-        "approval_notes": None,
-        "content_ref": product.spec_file_path,
+        "spec_hash": None,
+        "specification_decision_id": None,
+        "accepted_by": None,
+        "accepted_at": None,
+        "acceptance_notes": None,
+        "candidate_fingerprint": None,
+        "payload_fingerprint": None,
+        "source_manifest_fingerprint": None,
     }
-    return product.technical_spec or "(No technical spec available)", meta
+    return "(No accepted specification available)", meta
 
 
-def _load_compiled_authority(
+def _load_specification_candidate(
     session: Session,
-    approved_spec: SpecRegistry | None,
-) -> SpecAuthorityCompilationSuccess | None:
-    if not approved_spec or not approved_spec.spec_version_id:
-        return None
-
-    acceptance = latest_accepted_authority_decision(
-        session,
-        product_id=approved_spec.product_id,
-        spec_version_id=approved_spec.spec_version_id,
-    )
-    authority = (
-        accepted_compiled_authority(
-            session,
-            product_id=approved_spec.product_id,
-            spec_version_id=approved_spec.spec_version_id,
+    accepted_spec: AcceptedSpecification,
+) -> tuple[SpecificationPayload, SpecificationCandidateEnvelope]:
+    """Reload the exact candidate already proven by the shared deep loader."""
+    candidate = session.exec(
+        select(SpecificationCandidate).where(
+            SpecificationCandidate.project_id == accepted_spec.project_id,
+            SpecificationCandidate.specification_candidate_id
+            == accepted_spec.source_specification_candidate_id,
+            SpecificationCandidate.candidate_fingerprint
+            == accepted_spec.source_specification_candidate_fingerprint,
+            SpecificationCandidate.payload_fingerprint == accepted_spec.spec_hash,
         )
-        if acceptance is not None
-        else latest_compiled_authority(
-            session,
-            spec_version_id=approved_spec.spec_version_id,
+    ).one_or_none()
+    if candidate is None:
+        raise _ExportSnapshotError.specification_candidate_missing()
+    try:
+        payload, envelope = load_candidate_contract(
+            candidate.canonical_envelope_json,
+            expected_candidate_fingerprint=candidate.candidate_fingerprint,
         )
-    )
-    if authority is None and acceptance is not None:
-        raise _ExportSnapshotError.authority_not_compiled(
-            project_id=approved_spec.product_id,
-            spec_version_id=approved_spec.spec_version_id,
-        )
-    if authority is None:
-        return None
-
-    loaded = load_compiled_artifact(authority)
-    failure = compiled_authority_read_failure(
-        loaded,
-        project_id=approved_spec.product_id,
-        spec_version_id=approved_spec.spec_version_id,
-        authority_id=authority.authority_id,
-    )
-    if failure is not None:
-        raise _ExportSnapshotError.compiled_authority_invalid(failure)
-    return cast("SpecAuthorityCompilationSuccess", loaded.artifact)
+    except (TypeError, ValueError) as exc:
+        raise _ExportSnapshotError.specification_candidate_invalid(str(exc)) from exc
+    if (
+        envelope.candidate_fingerprint
+        != accepted_spec.source_specification_candidate_fingerprint
+        or envelope.payload_fingerprint != accepted_spec.spec_hash
+        or payload != accepted_spec.payload
+    ):
+        raise _ExportSnapshotError.specification_candidate_identity()
+    return payload, envelope
 
 
 def _render_snapshot_html(context: _SnapshotRenderContext) -> str:
@@ -262,20 +297,9 @@ def _render_snapshot_html(context: _SnapshotRenderContext) -> str:
         context.themes,
         context.epics,
         context.features,
-        context.all_stories,
     )
-    stories_html = _render_stories_table(
-        context.stories,
-        context.epics,
-        context.features,
-        context.themes,
-    )
-    full_backlog_html = _render_all_stories_table(
-        context.all_stories,
-        context.epics,
-        context.features,
-        context.themes,
-    )
+    stories_html = _render_stories_table(context.stories)
+    full_backlog_html = _render_all_stories_table(context.all_stories)
     sprint_html = _render_sprint_summary(
         context.sprints,
         context.stories,
@@ -286,7 +310,6 @@ def _render_snapshot_html(context: _SnapshotRenderContext) -> str:
         extensions=["fenced_code", "tables"],
     )
     spec_toc = _extract_markdown_headings(context.spec_content or "")
-    compiled_html = _render_compiled_authority(context.authority)
     styles = _render_snapshot_styles()
 
     return """
@@ -304,8 +327,8 @@ def _render_snapshot_html(context: _SnapshotRenderContext) -> str:
   <h1>Project Snapshot</h1>
   <p class="muted">Generated at {generated_at} (UTC)</p>
   <div class="card">
-    <h2>{product_name}</h2>
-    <p>{product_description}</p>
+    <h2>{project_name}</h2>
+    <p>{project_description}</p>
     <p class="muted">Read-only snapshot of current project state.</p>
   </div>
 
@@ -318,7 +341,7 @@ def _render_snapshot_html(context: _SnapshotRenderContext) -> str:
   </div>
 
   <div class="section">
-    <h2>Product Vision</h2>
+    <h2>product vision</h2>
     <div class="card">{vision_html}</div>
   </div>
 
@@ -336,12 +359,7 @@ def _render_snapshot_html(context: _SnapshotRenderContext) -> str:
   </div>
 
   <div class="section">
-    <h2>Compiled Spec Authority</h2>
-    {compiled_html}
-  </div>
-
-  <div class="section">
-    <h2>Current Sprint Refined Stories</h2>
+    <h2>Current Sprint Stories</h2>
     {stories_html}
   </div>
 
@@ -362,8 +380,8 @@ def _render_snapshot_html(context: _SnapshotRenderContext) -> str:
 """.format(
         generated_at=generated_at,
         styles=styles,
-        product_name=html.escape(context.product.name or "(Unnamed Product)"),
-        product_description=html.escape(context.product.description or ""),
+        project_name=html.escape(context.project.name or "(Unnamed Project)"),
+        project_description=html.escape(context.project.description or ""),
         story_summary=_format_story_summary(context.stories),
         all_story_summary=_format_all_story_summary(context.all_stories),
         sprint_summary=_format_sprint_summary_line(
@@ -371,13 +389,12 @@ def _render_snapshot_html(context: _SnapshotRenderContext) -> str:
             context.stories,
             context.sprint_story_map,
         ),
-        vision_html=_markdown(context.product.vision or "(No vision set)"),
+        vision_html=_markdown(context.vision_statement),
         roadmap_html=roadmap_html,
         spec_status_badge=_render_spec_status_badge(context.spec_meta),
         spec_meta_html=_render_spec_metadata(context.spec_meta),
         spec_toc_html=_render_spec_toc(spec_toc),
         spec_html=spec_html,
-        compiled_html=compiled_html,
         stories_html=stories_html,
         full_backlog_html=full_backlog_html,
         sprint_html=sprint_html,
@@ -417,6 +434,7 @@ def _render_snapshot_styles() -> str:
             ),
             "        .badge-ok { background: #dcfce7; color: #166534; }",
             "        .badge-warn { background: #fef9c3; color: #854d0e; }",
+            "        .acceptance-criteria > li { white-space: pre-wrap; }",
             "        .toc li { margin-bottom: 4px; }",
             "        .toc-level-2 { margin-left: 16px; }",
             "        .toc-level-3 { margin-left: 32px; }",
@@ -431,7 +449,7 @@ def _format_story_summary(stories: Iterable[UserStory]) -> str:
     story_list = list(stories)
     total = len(story_list)
     if total == 0:
-        return "No refined stories in the current sprint."
+        return "No stories in the current sprint."
     counts = {
         StoryStatus.TO_DO: 0,
         StoryStatus.IN_PROGRESS: 0,
@@ -451,11 +469,10 @@ def _format_all_story_summary(stories: Iterable[UserStory]) -> str:
     story_list = list(stories)
     if not story_list:
         return "No stories in product backlog."
-    refined = sum(1 for story in story_list if bool(story.is_refined))
     superseded = sum(1 for story in story_list if bool(story.is_superseded))
     return (
-        f"Total {len(story_list)} | Refined {refined} | "
-        f"Not refined {len(story_list) - refined} | Superseded {superseded}"
+        f"Total {len(story_list)} | Active {len(story_list) - superseded} | "
+        f"Superseded {superseded}"
     )
 
 
@@ -488,14 +505,12 @@ def _render_roadmap(
     themes: list[Theme],
     epics: list[Epic],
     features: list[Feature],
-    stories: list[UserStory],
 ) -> str:
     if not themes:
         return '<p class="muted">No roadmap themes available.</p>'
 
     epics_by_theme = _group_by(epics, lambda epic: epic.theme_id)
     features_by_epic = _group_by(features, lambda feature: feature.epic_id)
-    stories_by_feature = _group_by(stories, lambda story: story.feature_id)
 
     sections: list[str] = []
     for time_frame in ("Now", "Next", "Later", None):
@@ -515,11 +530,6 @@ def _render_roadmap(
                 for epic in epics_for_theme
                 for feature in features_by_epic.get(epic.epic_id, [])
             ]
-            stories_for_theme = [
-                story
-                for feature in features_for_theme
-                for story in stories_by_feature.get(feature.feature_id, [])
-            ]
             sections.append(
                 "".join(
                     [
@@ -528,8 +538,7 @@ def _render_roadmap(
                         f'<p class="muted">{html.escape(theme.description or "")}</p>',
                         (
                             f'<p class="muted">Epics: {len(epics_for_theme)} | '
-                            f"Features: {len(features_for_theme)} | "
-                            f"Stories: {len(stories_for_theme)}</p>"
+                            f"Features: {len(features_for_theme)}</p>"
                         ),
                         "</div>",
                     ]
@@ -538,93 +547,83 @@ def _render_roadmap(
     return "".join(sections)
 
 
-def _render_stories_table(
-    stories: list[UserStory],
-    epics: list[Epic],
-    features: list[Feature],
-    themes: list[Theme],
-) -> str:
+def _render_stories_table(stories: list[UserStory]) -> str:
     if not stories:
         return '<p class="muted">No stories available.</p>'
 
-    feature_to_epic = {feature.feature_id: feature.epic_id for feature in features}
-    epic_to_theme = {epic.epic_id: epic.theme_id for epic in epics}
-    theme_by_id = {theme.theme_id: theme for theme in themes}
-    feature_by_id = {feature.feature_id: feature for feature in features}
-
-    rows: list[str] = []
-    for story in stories:
-        epic_id = feature_to_epic.get(story.feature_id)
-        theme_id = epic_to_theme.get(epic_id)
-        theme = theme_by_id.get(theme_id) if theme_id in theme_by_id else None
-        feature = feature_by_id.get(story.feature_id) if story.feature_id else None
-        theme_title = theme.title if theme else ""
-        feature_title = feature.title if feature else ""
-        rows.append(
+    rows = [
+        (
             "<tr>"
             f"<td>{story.story_id}</td>"
             f"<td>{html.escape(story.title)}</td>"
             f"<td>{html.escape(story.persona or '')}</td>"
             f"<td>{html.escape(story.status.value)}</td>"
             f"<td>{story.story_points or ''}</td>"
-            f"<td>{html.escape(theme_title)}</td>"
-            f"<td>{html.escape(feature_title)}</td>"
-            f"<td>{html.escape(story.acceptance_criteria or '')}</td>"
+            f"<td>{html.escape(story.spec_item_ids_json)}</td>"
+            f"<td>{_render_acceptance_criteria(story.acceptance_criteria_json)}</td>"
             "</tr>"
         )
+        for story in stories
+    ]
 
     return (
         "<table>"
         "<thead><tr>"
         "<th>ID</th><th>Title</th><th>Persona</th><th>Status</th><th>Points</th>"
-        "<th>Theme</th><th>Feature</th><th>Acceptance Criteria</th>"
+        "<th>Specification Items</th><th>Acceptance Criteria</th>"
         "</tr></thead>"
         "<tbody>" + "".join(rows) + "</tbody></table>"
     )
 
 
-def _render_all_stories_table(
-    stories: list[UserStory],
-    epics: list[Epic],
-    features: list[Feature],
-    themes: list[Theme],
-) -> str:
+def _render_acceptance_criteria(acceptance_criteria_json: str) -> str:
+    """Render canonical Story criteria as escaped semantic list items."""
+    try:
+        criteria = json.loads(acceptance_criteria_json)
+    except json.JSONDecodeError as exc:
+        raise ValueError(_ACCEPTANCE_CRITERIA_INVALID) from exc
+    if (
+        not isinstance(criteria, list)
+        or not criteria
+        or not all(
+            isinstance(criterion, str) and criterion.strip() for criterion in criteria
+        )
+        or canonical_json(criteria) != acceptance_criteria_json
+    ):
+        raise ValueError(_ACCEPTANCE_CRITERIA_INVALID)
+    return (
+        '<ul class="acceptance-criteria">'
+        + "".join(f"<li>{html.escape(criterion)}</li>" for criterion in criteria)
+        + "</ul>"
+    )
+
+
+def _render_all_stories_table(stories: list[UserStory]) -> str:
     if not stories:
         return '<p class="muted">No stories available.</p>'
 
-    feature_to_epic = {feature.feature_id: feature.epic_id for feature in features}
-    epic_to_theme = {epic.epic_id: epic.theme_id for epic in epics}
-    theme_by_id = {theme.theme_id: theme for theme in themes}
-    feature_by_id = {feature.feature_id: feature for feature in features}
-
-    rows: list[str] = []
     ordered_stories = sorted(
         stories, key=lambda story: (story.rank or "", story.story_id or 0)
     )
-    for story in ordered_stories:
-        epic_id = feature_to_epic.get(story.feature_id)
-        theme_id = epic_to_theme.get(epic_id)
-        theme = theme_by_id.get(theme_id) if theme_id in theme_by_id else None
-        feature = feature_by_id.get(story.feature_id) if story.feature_id else None
-        rows.append(
+    rows = [
+        (
             "<tr>"
             f"<td>{story.story_id}</td>"
             f"<td>{html.escape(story.title)}</td>"
             f"<td>{html.escape(story.status.value)}</td>"
-            f"<td>{html.escape('yes' if bool(story.is_refined) else 'no')}</td>"
             f"<td>{html.escape('yes' if bool(story.is_superseded) else 'no')}</td>"
-            f"<td>{html.escape(story.story_origin or '')}</td>"
-            f"<td>{story.accepted_spec_version_id or ''}</td>"
-            f"<td>{html.escape(theme.title if theme else '')}</td>"
-            f"<td>{html.escape(feature.title if feature else '')}</td>"
+            f"<td>{story.accepted_spec_version_id}</td>"
+            f"<td>{html.escape(story.spec_item_ids_json)}</td>"
             "</tr>"
         )
+        for story in ordered_stories
+    ]
 
     return (
         "<table>"
         "<thead><tr>"
-        "<th>ID</th><th>Title</th><th>Status</th><th>Refined</th><th>Superseded</th>"
-        "<th>Origin</th><th>Spec Version</th><th>Theme</th><th>Feature</th>"
+        "<th>ID</th><th>Title</th><th>Status</th><th>Superseded</th>"
+        "<th>Spec Version</th><th>Specification Items</th>"
         "</tr></thead>"
         "<tbody>" + "".join(rows) + "</tbody></table>"
     )
@@ -667,69 +666,17 @@ def _render_sprint_summary(
     )
 
 
-def _render_compiled_authority(
-    authority: SpecAuthorityCompilationSuccess | None,
-) -> str:
-    if not authority:
-        return '<p class="muted">No compiled authority available.</p>'
-
-    invariants = "".join(
-        f"<li>{html.escape(_render_invariant_summary(inv))}</li>"
-        for inv in authority.invariants
-    )
-    scope_themes = "".join(
-        f"<li>{html.escape(theme)}</li>" for theme in authority.scope_themes
-    )
-    gaps = "".join(f"<li>{html.escape(gap)}</li>" for gap in authority.gaps)
-    raw_json = html.escape(authority.model_dump_json(indent=2))
-
-    sections: list[str] = [
-        '<div class="card">',
-        f"<p><strong>Compiler:</strong> {html.escape(authority.compiler_version)}</p>",
-        f"<p><strong>Prompt hash:</strong> {html.escape(authority.prompt_hash)}</p>",
-        "<h3>Scope Themes</h3><ul>",
-        scope_themes,
-        "</ul>",
-        "<h3>Invariants</h3><ul>",
-        invariants,
-        "</ul>",
-    ]
-
-    if gaps:
-        sections.extend(["<h3>Spec Gaps</h3><ul>", gaps, "</ul>"])
-
-    sections.extend(
-        [
-            "</div>",
-            "<h3>Compiled Authority JSON</h3>",
-            f"<pre>{raw_json}</pre>",
-        ]
-    )
-
-    return "".join(sections)
-
-
-def _render_invariant_summary(invariant: Invariant) -> str:
-    if invariant.type == InvariantType.FORBIDDEN_CAPABILITY:
-        capability = getattr(invariant.parameters, "capability", "")
-        return f"{invariant.id}: FORBIDDEN_CAPABILITY {capability}"
-    if invariant.type == InvariantType.REQUIRED_FIELD:
-        field_name = getattr(invariant.parameters, "field_name", "")
-        return f"{invariant.id}: REQUIRED_FIELD {field_name}"
-    if invariant.type == InvariantType.MAX_VALUE:
-        field_name = getattr(invariant.parameters, "field_name", "")
-        max_value = getattr(invariant.parameters, "max_value", "")
-        return f"{invariant.id}: MAX_VALUE {field_name} <= {max_value}"
-    return f"{invariant.id}: {invariant.type}"
-
-
 def _render_spec_metadata(meta: dict[str, Any]) -> str:
     items = {
         "Spec version": meta.get("spec_version_id") or "-",
-        "Approved by": meta.get("approved_by") or "-",
-        "Approved at": meta.get("approved_at") or "-",
-        "Notes": meta.get("approval_notes") or "-",
-        "Content ref": meta.get("content_ref") or "-",
+        "Spec hash": meta.get("spec_hash") or "-",
+        "Acceptance decision": meta.get("specification_decision_id") or "-",
+        "Accepted by": meta.get("accepted_by") or "-",
+        "Accepted at": meta.get("accepted_at") or "-",
+        "Notes": meta.get("acceptance_notes") or "-",
+        "Candidate fingerprint": meta.get("candidate_fingerprint") or "-",
+        "Payload fingerprint": meta.get("payload_fingerprint") or "-",
+        "Source manifest fingerprint": (meta.get("source_manifest_fingerprint") or "-"),
     }
     rows = "".join(
         f"<tr><th>{html.escape(str(label))}</th><td>{html.escape(str(value))}</td></tr>"
@@ -796,9 +743,7 @@ def _select_refined_current_sprint_stories(
     selected = [
         story
         for story in stories
-        if story.story_id in sprint_story_ids
-        and bool(story.is_refined)
-        and not bool(story.is_superseded)
+        if story.story_id in sprint_story_ids and not bool(story.is_superseded)
     ]
     return sorted(selected, key=lambda story: (story.rank or "", story.story_id or 0))
 

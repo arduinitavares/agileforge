@@ -1,0 +1,1255 @@
+# Context-Grounded Vision Bootstrap Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Make the first Project Vision action generate an evidence-grounded draft without requiring human text, while preserving explicit human review, durable provenance, replay safety, and repository-drift protection.
+
+**Architecture:** Add a deterministic, bounded host evidence collector and strict Vision generation contracts. Introduce `vision.bootstrap` as the first agentic graph node, retain `vision.interview` for ordinary-language clarification, and persist the exact successful evidence snapshot with each Vision lineage. Keep the workflow graph as the sole routing authority; provider calls remain execution-only ADK recipes and every paid input is persisted before dispatch.
+
+**Tech Stack:** Python 3.13, uv, Pydantic v2, SQLModel/SQLite, Google ADK 2.x graphs, FastAPI, Typer, vanilla JavaScript, Node test runner, pytest, Ruff, ty, Bandit.
+
+## Global Constraints
+
+- Use uv only. Do not add another package manager or direct environment mutation instructions.
+- This is a hard break for experimental databases and profiles. Add no migration, compatibility alias, fallback schema, or dual-write path.
+- The human remains the only authority for Vision acceptance, rejection, and feedback.
+- Automated tests use fakes and temporary repositories only. They must not touch the manual acceptance profile, String Calculator Lab, caRtola, ASA, MyFinance, or any other user repository.
+- `GET` and status/projection paths must never invoke a model or mutate workflow state.
+- Repository evidence is bounded to the approved seven relative paths, eight items, 32 KiB per item, and 96 KiB total.
+- Never send absolute paths, Git common directories, status-entry paths, URL credentials, query strings, fragments, environment files, source code, or arbitrary repository files to a model.
+- Persist normalized attempt input before every provider call. Persist a `VisionEvidenceSnapshot`, Vision turn, and optional Vision artifact only after strict output validation succeeds.
+- Permit at most one compact semantic-repair call. Never retry paid Vision generation in an unbounded loop.
+- Fix typing errors without suppressions.
+- Keep `config/models.yaml` unchanged: production Vision continues to use the reviewed `product_vision` role.
+- Before each task, verify `git status --short --branch` in this worktree. Preserve unrelated edits.
+- After each task, run the task tests, `uv lock --check`, and `git diff --check` before committing.
+
+## File And Interface Map
+
+- `services/contracts/vision_evidence.py`: strict evidence item, warning, and bundle contracts plus byte-limit constants.
+- `services/contracts/vision.py`: discriminated bootstrap/clarification/revision model inputs and the provenance-rich Vision draft output.
+- `services/vision_output_validation.py`: deterministic cross-reference and completion validation independent of ADK.
+- `services/vision_evidence.py`: deterministic project/repository evidence collection and freshness checks.
+- `services/vision_input.py`: replay-safe host preparation for bootstrap, clarification, and revision attempts.
+- `models/product_definition.py`: immutable Vision evidence snapshot plus expanded turn/artifact provenance.
+- `workflow/facts.py` and `repositories/workflow.py`: load exact Vision evidence and attempt-failure facts into the pure graph.
+- `workflow/definitions/vision.py`: route bootstrap, clarification, review, and accepted-Vision revision.
+- `workflow/requests/vision.py` and `workflow/handlers/vision.py`: typed requests and atomic persistence.
+- `adapters/adk/recipes.py`, `adapters/adk/agents/vision.py`, and `adapters/adk/prompts/vision.txt`: bounded generation and one semantic repair.
+- `services/application.py`, `api.py`, and `cli/main.py`: semantic application, HTTP, and CLI entry points.
+- The existing concrete Vision projection, located with `rg -n "def vision_status" services repositories`, remains the only read projection.
+- `frontend/project.js`: human bootstrap, clarification, provenance, and review controls.
+
+---
+
+### Task 1: Strict Evidence And Vision Contracts
+
+**Files:**
+- Create: `services/contracts/vision_evidence.py`
+- Modify: `services/contracts/vision.py`
+- Create: `services/vision_output_validation.py`
+- Create: `tests/services/contracts/test_vision_evidence.py`
+- Modify: `tests/services/contracts/test_vision.py`
+- Create: `tests/services/test_vision_output_validation.py`
+
+**Interfaces:**
+- Produces: `VisionEvidenceItem`, `VisionEvidenceWarning`, `VisionEvidenceBundle`, `VisionBootstrapInput`, `VisionClarificationInput`, `VisionRevisionInput`, `VisionAgentInput`, `VisionDraftOutput`, `VisionRepairInput`, and `validate_vision_draft(output, input_payload) -> None`.
+- Consumes: `workflow.contracts.JsonObject` and the existing seven-field `VisionComponents` vocabulary.
+
+- [ ] **Step 1: Write failing evidence-contract tests**
+
+Add tests proving strict extra-field rejection, canonical fingerprint validation, allowed trust/kind values, POSIX-relative paths, and the approved constants:
+
+```python
+def test_evidence_contract_exposes_approved_bounds() -> None:
+    assert MAX_EVIDENCE_ITEMS == 8
+    assert MAX_EVIDENCE_ITEM_BYTES == 32 * 1024
+    assert MAX_EVIDENCE_TOTAL_BYTES == 96 * 1024
+
+
+def test_evidence_item_rejects_absolute_path() -> None:
+    with pytest.raises(ValidationError, match="relative_path"):
+        VisionEvidenceItem(
+            evidence_id="file:README.md",
+            kind="readme",
+            relative_path="/private/repository/README.md",
+            content_fingerprint="sha256:" + "0" * 64,
+            trust="unreviewed_repository_evidence",
+            content="Example",
+            truncated=False,
+        )
+```
+
+- [ ] **Step 2: Write failing Vision semantic tests**
+
+Cover complete/incomplete drafts, duplicate IDs, unknown references, missing basis rows, human basis without human input, evidence basis without IDs, inference basis without assumptions, unresolved conflicts without questions, and forbidden extra Product Goal/delivery fields.
+
+```python
+def test_complete_draft_requires_no_open_questions() -> None:
+    output = complete_draft_output()
+    output.clarifying_questions = (
+        VisionClarifyingQuestion(
+            question_id="question:audience",
+            text="Who benefits first?",
+            affected_components=("target_user",),
+        ),
+    )
+
+    with pytest.raises(VisionDraftValidationError, match="complete"):
+        validate_vision_draft(output, bootstrap_input())
+
+
+def test_human_basis_requires_human_input_in_lineage() -> None:
+    with pytest.raises(VisionDraftValidationError, match="human"):
+        validate_vision_draft(
+            complete_draft_output_with_human_basis(),
+            bootstrap_input(),
+        )
+```
+
+- [ ] **Step 3: Run the tests and confirm failure**
+
+```bash
+uv run --frozen pytest \
+  tests/services/contracts/test_vision_evidence.py \
+  tests/services/contracts/test_vision.py \
+  tests/services/test_vision_output_validation.py -q
+```
+
+Expected: collection/import failures for the new contracts and validator.
+
+- [ ] **Step 4: Implement the strict contracts**
+
+Use `ConfigDict(extra="forbid")` on every model. Define one ADK-compatible envelope around the discriminated union:
+
+```python
+type VisionOperationInput = Annotated[
+    VisionBootstrapInput | VisionClarificationInput | VisionRevisionInput,
+    Field(discriminator="operation"),
+]
+
+
+class VisionAgentInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request: VisionOperationInput
+```
+
+Use these exact component names everywhere:
+
+```python
+type VisionComponentName = Literal[
+    "project_name",
+    "target_user",
+    "problem",
+    "product_category",
+    "key_benefit",
+    "competitors",
+    "differentiator",
+]
+```
+
+Define structured basis, assumptions, conflicts, and questions. `VisionDraftOutput` exposes only `schema_version`, `components`, `component_basis`, `draft_statement`, `assumptions`, `conflicts`, `clarifying_questions`, and `is_complete`.
+
+Use these exact evidence literals and shapes:
+
+```python
+type VisionEvidenceKind = Literal[
+    "project_metadata",
+    "repository_provenance",
+    "readme",
+    "context",
+    "package_metadata",
+    "technical_specification",
+]
+type VisionEvidenceTrust = Literal[
+    "operator_provided",
+    "observed_provenance",
+    "unreviewed_repository_evidence",
+]
+
+
+class VisionEvidenceItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    evidence_id: str
+    kind: VisionEvidenceKind
+    relative_path: str | None
+    content_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    trust: VisionEvidenceTrust
+    content: str | JsonObject
+    truncated: bool
+
+
+class VisionEvidenceWarning(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    code: str
+    source: str
+    message: str
+
+
+class VisionEvidenceBundle(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["agileforge.vision-evidence.v1"]
+    items: tuple[VisionEvidenceItem, ...] = Field(max_length=8)
+    warnings: tuple[VisionEvidenceWarning, ...]
+    evidence_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+```
+
+Strip and reject blank IDs/text. `relative_path` is `None` only for Project metadata and repository provenance. Every non-null path must equal one of `README.md`, `CONTEXT.md`, `pyproject.toml`, `specs/spec.json`, `specs/spec.md`, `docs/spec/spec.json`, or `docs/spec/spec.md`; this contract-level allowlist rejects `.git` paths as well as arbitrary repository files. Enforce kind/path consistency (`README.md` is `readme`, `CONTEXT.md` is `context`, `pyproject.toml` is `package_metadata`, and all four spec paths are `technical_specification`). Require the declared content fingerprint to equal `canonical_hash(content)` and the bundle fingerprint to equal `canonical_hash({"schema_version": schema_version, "items": items, "warnings": warnings})`.
+
+Use these exact input fields:
+
+```python
+class VisionBootstrapInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["agileforge.vision-input.v1"]
+    operation: Literal["bootstrap"]
+    project_name: str
+    project_description: str | None
+    evidence: VisionEvidenceBundle
+
+
+class VisionClarificationInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["agileforge.vision-input.v1"]
+    operation: Literal["clarification"]
+    project_name: str
+    project_description: str | None
+    vision_evidence_snapshot_id: int = Field(gt=0)
+    evidence: VisionEvidenceBundle
+    current_components: VisionComponents
+    current_statement: str
+    current_component_basis: tuple[VisionComponentBasis, ...]
+    current_assumptions: tuple[VisionAssumption, ...]
+    current_conflicts: tuple[VisionConflict, ...]
+    current_questions: tuple[VisionClarifyingQuestion, ...]
+    human_response: str
+    addressed_question_ids: tuple[str, ...]
+
+
+class VisionRevisionInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["agileforge.vision-input.v1"]
+    operation: Literal["revision"]
+    project_name: str
+    project_description: str | None
+    evidence: VisionEvidenceBundle
+    accepted_components: VisionComponents
+    accepted_statement: str
+    accepted_vision_fingerprint: str
+    revision_reason: str
+    active_product_goal_status: Literal["none"]
+    prior_review_feedback: str | None
+
+
+class VisionPreflight(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_evidence_fingerprint: str
+    observed_evidence: VisionEvidenceBundle
+
+
+class VisionAgentInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request: VisionOperationInput
+    preflight: VisionPreflight | None = None
+```
+
+Bootstrap/revision contain a new evidence bundle but no snapshot ID; the successful graph transition creates the snapshot. Clarification contains the existing snapshot identity and exact persisted bundle. `VisionPreflight` is required only for clarification: its expected fingerprint must equal `request.evidence.evidence_fingerprint`, while `observed_evidence` is the freshly recollected sanitized bundle. Bootstrap/revision reject preflight. The recipe compares expected with `observed_evidence.evidence_fingerprint` before invoking a leaf and passes only `request`, never `preflight`, to the model.
+
+Use these exact output and repair fields:
+
+```python
+type VisionBasisSource = Literal["human", "evidence", "inference"]
+
+
+class VisionComponentBasis(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    component: VisionComponentName
+    source_kinds: tuple[VisionBasisSource, ...] = Field(min_length=1)
+    evidence_ids: tuple[str, ...] = ()
+    assumption_ids: tuple[str, ...] = ()
+
+
+class VisionAssumption(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    assumption_id: str
+    text: str
+    affected_components: tuple[VisionComponentName, ...] = Field(min_length=1)
+
+
+class VisionConflict(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    conflict_id: str
+    text: str
+    status: Literal["unresolved", "resolved"]
+    affected_components: tuple[VisionComponentName, ...] = Field(min_length=1)
+    evidence_ids: tuple[str, ...] = ()
+    assumption_ids: tuple[str, ...] = ()
+    resolution: str | None = None
+
+
+class VisionClarifyingQuestion(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    question_id: str
+    text: str
+    affected_components: tuple[VisionComponentName, ...] = Field(min_length=1)
+    conflict_ids: tuple[str, ...] = ()
+
+
+class VisionDraftOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["agileforge.vision-draft.v1"]
+    components: VisionComponents
+    component_basis: tuple[VisionComponentBasis, ...]
+    draft_statement: str
+    assumptions: tuple[VisionAssumption, ...]
+    conflicts: tuple[VisionConflict, ...]
+    clarifying_questions: tuple[VisionClarifyingQuestion, ...]
+    is_complete: bool
+
+
+class VisionRepairInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["agileforge.vision-repair.v1"]
+    operation: Literal["repair"]
+    validation_findings: tuple[str, ...] = Field(min_length=1)
+    invalid_output: VisionDraftOutput
+    allowed_evidence_ids: tuple[str, ...]
+    human_input_available: bool
+```
+
+Strip/reject blank statement, IDs, question text, assumption text, conflict text, and revision/human text. Reject duplicate source kinds and duplicate references within one object. A resolved conflict requires nonblank `resolution`; an unresolved conflict requires `resolution=None`.
+
+- [ ] **Step 5: Implement deterministic semantic validation**
+
+`validate_vision_draft` collects all findings and raises one `VisionDraftValidationError(findings: tuple[str, ...])`. Enforce these exact invariants without model calls or database reads:
+
+1. Assumption, conflict, and output-question IDs are unique within their collections; evidence IDs are unique in the input bundle.
+2. Every basis/conflict evidence ID exists in the input bundle; every basis/conflict assumption ID exists in the output assumptions; every question conflict ID exists in output conflicts; every clarification `addressed_question_id` exists in `current_questions`.
+3. Every non-null component has exactly one basis row, and a null component has none.
+4. A basis containing `evidence` has at least one evidence ID; evidence IDs are empty when `evidence` is absent.
+5. A basis containing `inference` has at least one assumption ID; assumption IDs are empty when `inference` is absent.
+6. A basis containing `human` is valid only for clarification or revision input; no bootstrap result may claim human basis.
+7. `is_complete` is true exactly when all components are substantive, every conflict is resolved, and no clarifying question remains.
+8. An incomplete result contains at least one clarifying question.
+9. Every unresolved conflict ID appears in at least one output question's `conflict_ids`.
+10. A complete result may retain disclosed assumptions; assumptions alone do not force incompleteness.
+11. Product Goal, feature, requirement, Story, Task, and implementation-plan fields are rejected by strict Pydantic schemas; do not add a probabilistic text classifier.
+
+- [ ] **Step 6: Run tests and commit**
+
+```bash
+uv run --frozen pytest \
+  tests/services/contracts/test_vision_evidence.py \
+  tests/services/contracts/test_vision.py \
+  tests/services/test_vision_output_validation.py -q
+uv lock --check
+git diff --check
+```
+
+Expected: all selected tests pass.
+
+```bash
+git add services/contracts/vision.py services/contracts/vision_evidence.py \
+  services/vision_output_validation.py tests/services/contracts/test_vision.py \
+  tests/services/contracts/test_vision_evidence.py \
+  tests/services/test_vision_output_validation.py
+git commit -m "feat: define grounded vision contracts"
+```
+
+---
+
+### Task 2: Deterministic Bounded Evidence Collector
+
+**Files:**
+- Create: `services/vision_evidence.py`
+- Create: `tests/services/test_vision_evidence.py`
+- Modify: `tests/services/test_repository_probe.py`
+
+**Interfaces:**
+- Consumes: `RepositoryProbe`, `RepositoryBinding`, `TechnicalSpecArtifact`, and Task 1 evidence contracts.
+- Produces: `VisionEvidenceCollector(engine: Engine, repository_probe: RepositoryProbe)` with `collect(project_id: int) -> VisionEvidenceBundle` and `VisionEvidenceCollectionError(code: VisionEvidenceErrorCode, message: str)`.
+
+Use this closed error enum:
+
+```python
+class VisionEvidenceErrorCode(StrEnum):
+    PROJECT_NOT_FOUND = "PROJECT_NOT_FOUND"
+    REPOSITORY_BINDING_INVALID = "REPOSITORY_BINDING_INVALID"
+    REPOSITORY_PROVENANCE_STALE = "REPOSITORY_PROVENANCE_STALE"
+    REPOSITORY_CHANGED_DURING_EVIDENCE_COLLECTION = (
+        "REPOSITORY_CHANGED_DURING_EVIDENCE_COLLECTION"
+    )
+```
+
+- [ ] **Step 1: Create temporary-repository fixtures and failing collector tests**
+
+Build repositories only under pytest temporary paths. Cover project-only collection and the complete allowlist. Assert exact item order and that `.env`, `src/private.py`, and `notes.txt` are absent.
+
+```python
+def test_project_without_repository_collects_only_project_metadata(
+    collector: VisionEvidenceCollector,
+    project_id: int,
+) -> None:
+    bundle = collector.collect(project_id)
+
+    assert [item.evidence_id for item in bundle.items] == ["project:metadata"]
+    assert bundle.items[0].trust == "operator_provided"
+    assert "/Users/" not in bundle.model_dump_json()
+```
+
+- [ ] **Step 2: Add failing safety and bounds tests**
+
+Cover sanitized remotes, no status paths, symlink escape, invalid UTF-8, invalid TOML, invalid `TechnicalSpecArtifact`, both valid JSON spec locations, Markdown fallback order, oversized structured omission, UTF-8-safe text truncation, eight-item cap, 96 KiB total cap, deterministic warnings, and repeated fingerprint equality.
+
+```python
+def test_remote_credentials_query_and_fragment_are_removed(
+    collector: VisionEvidenceCollector,
+    project_id: int,
+    repository: Path,
+) -> None:
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repository),
+            "remote",
+            "set-url",
+            "origin",
+            "https://user:secret@example.test/repo.git?token=x#fragment",
+        ],
+        check=True,
+    )
+    bundle = collector.collect(project_id)
+    serialized = bundle.model_dump_json()
+
+    assert "user:secret" not in serialized
+    assert "token=x" not in serialized
+    assert "fragment" not in serialized
+    assert "https://example.test/repo.git" in serialized
+```
+
+- [ ] **Step 3: Run tests and confirm failure**
+
+```bash
+uv run --frozen pytest tests/services/test_vision_evidence.py -q
+```
+
+Expected: import failure for `VisionEvidenceCollector`.
+
+- [ ] **Step 4: Implement collection with small source helpers**
+
+Use this exact priority and collector boundary:
+
+```python
+_ALLOWED_PATHS: tuple[str, ...] = (
+    "docs/spec/spec.json",
+    "specs/spec.json",
+    "CONTEXT.md",
+    "README.md",
+    "pyproject.toml",
+    "docs/spec/spec.md",
+    "specs/spec.md",
+)
+
+
+@dataclass(frozen=True)
+class VisionEvidenceCollector:
+    engine: Engine
+    repository_probe: RepositoryProbe
+
+    def collect(self, project_id: int) -> VisionEvidenceBundle:
+        context = self._load_context(project_id)
+        items = [self._project_item(context)]
+        if context.binding is not None:
+            observed = self._verify_binding(context.binding)
+            items.extend(self._repository_items(context.binding, observed))
+        return self._bounded_bundle(items)
+```
+
+Read eligible files through descriptors and compare identity, size, and nanosecond modification time before/after each read. Resolve symlinks and reject targets outside the worktree. Re-probe after all reads and compare exact provenance fields with the pre-read probe. Parse TOML with `tomllib`; validate JSON specs with `TechnicalSpecArtifact.model_validate_json`.
+
+Load `Project` by `project_id`; if `active_repository_binding_id` is present, load that exact `RepositoryBinding` and require its `project_id` to match. Compare the fresh probe to the binding on worktree path, common Git directory, HEAD, branch, detached state, dirty state, status fingerprint, and canonical remotes. Compare the post-read probe to the pre-read probe on the same fields. Raise the typed error; do not return partial evidence after either mismatch.
+
+Use these exact model-facing content shapes:
+
+```python
+project_content = {
+    "name": project.name,
+    "description": project.description,
+}
+repository_content = {
+    "head_sha": probe.head_sha,
+    "branch_name": probe.branch_name,
+    "detached_head": probe.detached_head,
+    "dirty": probe.dirty,
+    "remotes": sanitized_remotes,
+}
+package_content = {
+    "name": project_table.get("name"),
+    "description": project_table.get("description"),
+    "keywords": project_table.get("keywords", []),
+    "scripts": project_table.get("scripts", {}),
+}
+```
+
+Drop absent optional package fields instead of serializing them as null. Sort keyword values and script keys deterministically. Repository evidence never includes worktree path, common Git directory, status fingerprint, status entries, probe timestamps, or warning paths.
+
+Sanitize network remotes with `urllib.parse`: remove user information, password, query, and fragment while preserving scheme, host, port, and repository path. Convert SCP-style `user@host:path` to `ssh://host/path`. Omit local/file remotes entirely with `REMOTE_OMITTED` rather than exposing an absolute path.
+
+- [ ] **Step 5: Implement canonical IDs, warnings, and limits**
+
+Use `project:metadata`, `repository:provenance`, and `file:<relative-path>` evidence IDs. Compute item/bundle fingerprints with `canonical_hash` over structured content excluding timestamps. Measure text content as `len(content.encode("utf-8"))` and structured content as `len(canonical_json(content).encode("utf-8"))`. Truncate text at a valid UTF-8 boundary first to 32 KiB and then, if needed, to the remaining 96 KiB bundle budget. Recompute its fingerprint and mark `truncated=True`. Never truncate structured content; omit it when it exceeds either remaining limit.
+
+Use only these stable warning codes:
+
+```text
+SYMLINK_ESCAPE
+EVIDENCE_UNREADABLE
+INVALID_UTF8
+INVALID_TOML
+INVALID_SPECIFICATION
+STRUCTURED_EVIDENCE_TOO_LARGE
+TEXT_EVIDENCE_TRUNCATED
+EVIDENCE_TOTAL_LIMIT_REACHED
+CONFLICTING_SPECIFICATIONS
+REMOTE_OMITTED
+```
+
+Warning `source` is `repository`, `bundle`, or one approved relative path. Sort warnings by `(source, code, message)`. Missing optional files do not warn. Arbitrary files are never traversed and therefore do not warn. If both JSON specs validate and their canonical hashes differ, include both and add `CONFLICTING_SPECIFICATIONS`; if they match, include both without that warning. Include one Markdown fallback, preferring `docs/spec/spec.md`, only when neither JSON spec validates. An invalid JSON candidate still emits `INVALID_SPECIFICATION` even when Markdown fallback succeeds.
+
+- [ ] **Step 6: Run tests and commit**
+
+```bash
+uv run --frozen pytest \
+  tests/services/test_vision_evidence.py \
+  tests/services/test_repository_probe.py -q
+uv lock --check
+git diff --check
+```
+
+Expected: all selected tests pass.
+
+```bash
+git add services/vision_evidence.py tests/services/test_vision_evidence.py \
+  tests/services/test_repository_probe.py
+git commit -m "feat: collect bounded vision evidence"
+```
+
+---
+
+### Task 3: Durable Vision Evidence Snapshot Foundation
+
+**Files:**
+- Modify: `models/product_definition.py`
+- Modify: `agile_sqlmodel.py`
+- Modify: `workflow/facts.py`
+- Modify: `repositories/workflow.py`
+- Modify: `repositories/project.py`
+- Modify: `tests/test_project_repository_deletion.py`
+- Create: `tests/workflow/test_vision_evidence_persistence.py`
+
+**Interfaces:**
+- Consumes: Task 1 contract JSON and existing `WorkflowNodeAttempt` identity.
+- Produces: `VisionEvidenceSnapshot`, `VisionEvidenceSnapshotFact`, strict fact loading, and FK-safe Project deletion.
+
+This task is intentionally additive. It does not change `VisionInterviewTurn`,
+`VisionArtifact`, their current facts, or any `mode` consumer. Task 4 removes
+that complete legacy contract atomically across persistence, graph, handlers,
+input preparation, and ADK registration. No compatibility field remains in the
+finished branch.
+
+- [ ] **Step 1: Write failing schema and deletion tests**
+
+Assert fresh schema creation includes `vision_evidence_snapshots`; snapshot foreign keys reject cross-Project attempt and repository-binding identities; invalid canonical evidence or warning JSON fails strict fact loading; Project deletion removes evidence snapshots before attempts and repository bindings.
+
+```python
+def test_vision_snapshot_references_same_project_attempt(session: Session) -> None:
+    snapshot = VisionEvidenceSnapshot(
+        project_id=PROJECT_ID,
+        repository_binding_id=None,
+        workflow_node_attempt_id=OTHER_PROJECT_ATTEMPT_ID,
+        evidence_json=canonical_json(EVIDENCE_BUNDLE),
+        evidence_fingerprint=EVIDENCE_FINGERPRINT,
+        warnings_json="[]",
+        created_at=NOW,
+    )
+    session.add(snapshot)
+
+    with pytest.raises(IntegrityError):
+        session.commit()
+```
+
+- [ ] **Step 2: Run tests and confirm failure**
+
+```bash
+uv run --frozen pytest \
+  tests/workflow/test_vision_evidence_persistence.py \
+  tests/test_project_repository_deletion.py -q
+```
+
+Expected: missing model/table/field failures.
+
+- [ ] **Step 3: Add the fresh-schema snapshot model**
+
+Add `VisionEvidenceSnapshot` with the approved fields and composite same-Project foreign keys to `WorkflowNodeAttempt` and optional `RepositoryBinding`. Do not modify the current Vision turn or artifact schema in this task.
+
+- [ ] **Step 4: Load strict graph facts**
+
+Add the exact snapshot fact:
+
+```python
+class VisionEvidenceSnapshotFact(FrozenModel):
+    vision_evidence_snapshot_id: int
+    repository_binding_id: int | None
+    workflow_node_attempt_id: int
+    evidence: JsonObject
+    evidence_fingerprint: str
+    warnings: tuple[JsonObject, ...]
+    created_at: _DATETIME
+```
+
+Parse persisted JSON with existing strict loader helpers. Reject missing attempt or binding identities, cross-Project references, invalid canonical JSON, or fingerprint mismatches as `WorkflowFactLoadError`. Include the snapshot tuple in `WorkflowFactSnapshot` and the narrow Vision projection without changing current turn or artifact facts.
+
+- [ ] **Step 5: Update schema exports and deletion ordering**
+
+Import the new table through `agile_sqlmodel.py`. Delete snapshots after current Vision rows but before attempts and repository bindings. Keep Project deletion atomic and add no migration code.
+
+- [ ] **Step 6: Run tests and commit**
+
+```bash
+uv run --frozen pytest \
+  tests/workflow/test_vision_evidence_persistence.py \
+  tests/test_project_repository_deletion.py -q
+uv lock --check
+git diff --check
+```
+
+Expected: all selected tests pass.
+
+```bash
+git add models/product_definition.py agile_sqlmodel.py workflow/facts.py \
+  repositories/workflow.py repositories/project.py \
+  tests/workflow/test_vision_evidence_persistence.py \
+  tests/test_project_repository_deletion.py
+git commit -m "feat: persist vision evidence snapshots"
+```
+
+---
+
+### Task 4-6 Atomic Batch, Phase 1: Vision Lineage And Graph Hard Break
+
+Tasks 4, 5, and 6 are one implementation task with one implementer, one
+review cycle, and one final commit. Do not commit or expose an intermediate
+phase. The graph must never advertise `vision.bootstrap` without its host input
+builder, registered ADK recipe, trusted output adapter, and persistence path.
+
+**Files:**
+- Modify: `models/product_definition.py`
+- Modify: `workflow/facts.py`
+- Modify: `repositories/workflow.py`
+- Modify: `workflow/requests/vision.py`
+- Modify: `workflow/requests/__init__.py`
+- Modify: `workflow/domain.py`
+- Modify: `workflow/handlers/vision.py`
+- Modify: `workflow/definitions/vision.py`
+- Modify: `workflow/definitions/root.py`
+- Create: `tests/workflow/test_vision_bootstrap_graph.py`
+- Create: `tests/workflow/test_vision_bootstrap_transitions.py`
+- Modify: `tests/workflow/test_vision_interview_graph.py`
+- Modify: `tests/workflow/test_vision_interview_transitions.py`
+- Modify: all direct Vision turn/artifact fixtures and fact tests identified by
+  the scoped `mode` consumer scan.
+
+**Interfaces:**
+- Consumes: Task 3 snapshot foundation and Task 1 output structures.
+- Produces: expanded Vision turn/artifact persistence and facts, positioned `GenerateVisionBootstrap`, revised `RecordVisionInterviewTurn`, graph node `vision.bootstrap`, and atomic `_persist_vision_generation(session, request, decision, evaluated_at) -> TransitionResult` handler.
+
+- [ ] **Step 1: Write failing graph-route tests**
+
+Prove these exact routes:
+
+```text
+no Vision lineage                              -> vision.bootstrap available
+incomplete bootstrap with open questions      -> vision.interview available
+complete bootstrap                            -> vision.review waiting
+feedback or rejection                         -> vision.interview available
+accepted Vision plus eligible revision intent -> vision.bootstrap available
+accepted Vision with active Product Goal       -> revision start unavailable
+```
+
+Assert `vision.bootstrap.required_inputs == ()`. Assert the initial graph does not expose `mode` or `user_text`.
+
+- [ ] **Step 2: Write failing transition tests**
+
+Test that bootstrap persists snapshot/turn atomically, a complete result also persists an artifact, clarification reuses the same snapshot, revision supersedes the accepted artifact, cross-Project snapshots/attempts fail, invalid basis references fail, and a failed transaction leaves no snapshot/turn/artifact.
+
+- [ ] **Step 3: Run tests and confirm failure**
+
+```bash
+uv run --frozen pytest \
+  tests/workflow/test_vision_bootstrap_graph.py \
+  tests/workflow/test_vision_bootstrap_transitions.py \
+  tests/workflow/test_vision_interview_graph.py -q
+```
+
+Expected: `vision.bootstrap` and `GenerateVisionBootstrap` are absent.
+
+- [ ] **Step 4: Replace the Vision lineage schema and strict facts**
+
+Change `VisionInterviewTurn` to `operation IN ('bootstrap', 'clarification',
+'revision')`, make `user_text` nullable, and add
+`vision_evidence_snapshot_id`, `component_basis_json`, `assumptions_json`, and
+`conflicts_json`. Add the same snapshot/basis/assumption/conflict provenance to
+`VisionArtifact`. Update strict facts, loaders, lineage validation, current
+constructors, and fixtures in this atomic batch. Remove `mode`; do not add a
+compatibility column, alias, translation layer, or migration.
+
+- [ ] **Step 5: Add typed positioned requests**
+
+Define `GenerateVisionBootstrap` with request kind `generate_vision_bootstrap`, node `vision.bootstrap`, trusted evidence bundle, operation `bootstrap | revision`, output provenance, and attempt identity. Revise `RecordVisionInterviewTurn` to require operation `clarification`, selected snapshot ID/fingerprint, host-derived addressed question IDs, ordinary `user_text`, output provenance, and attempt identity.
+
+- [ ] **Step 6: Implement one atomic persistence path**
+
+Extract `_persist_vision_generation` in `workflow/handlers/vision.py`. It must:
+
+1. Validate the positioned decision and same-Project attempt.
+2. For bootstrap/revision, validate the trusted bundle fingerprint and create `VisionEvidenceSnapshot`.
+3. For clarification, load and verify the selected existing snapshot.
+4. Validate output semantics again at the domain boundary.
+5. Append one turn linked to the prior turn and snapshot.
+6. Materialize one artifact only when `is_complete` is true.
+7. Flush and return IDs only after all related rows are valid.
+
+- [ ] **Step 7: Implement pure routing**
+
+Add `vision.bootstrap` before `vision.interview` in `VISION_INTERVIEW_NODES`. Bootstrap is the only required initial action. Clarification is available only for a current incomplete turn or a reviewed artifact with feedback/rejection. A revision intent with no revision turn returns bootstrap; the host later selects `operation=revision`.
+
+- [ ] **Step 8: Run phase tests without committing**
+
+```bash
+uv run --frozen pytest \
+  tests/workflow/test_vision_bootstrap_graph.py \
+  tests/workflow/test_vision_bootstrap_transitions.py \
+  tests/workflow/test_vision_interview_graph.py \
+  tests/workflow/test_vision_interview_transitions.py -q
+uv lock --check
+git diff --check
+```
+
+Expected: all selected tests pass. Do not commit this phase; continue directly
+through Tasks 5 and 6 in the same worktree and agent context.
+
+---
+
+### Task 4-6 Atomic Batch, Phase 2: Replay-Safe Input And Drift Recovery
+
+This is the second phase of the same atomic implementation task. It is not an
+independent branch checkpoint and must not be committed before Phase 3.
+
+**Files:**
+- Create: `services/vision_input.py`
+- Delete: `services/vision_interview_input.py`
+- Modify: `workflow/contracts.py`
+- Modify: `workflow/facts.py`
+- Modify: `repositories/workflow.py`
+- Create: `adapters/adk/errors.py`
+- Modify: `adapters/adk/runner.py`
+- Create: `tests/services/test_vision_input.py`
+- Delete: `tests/services/test_vision_interview_input.py`
+- Modify: `tests/adapters/test_adk_workflow_runner.py`
+- Modify: `docs/superpowers/specs/2026-08-10-context-grounded-vision-bootstrap-design.md`
+
+**Interfaces:**
+- Consumes: `VisionEvidenceCollector`, current Vision facts, durable replay services, and positioned decisions.
+- Produces: `VisionInputService.build_bootstrap(project_id, decision) -> JsonObject`, `VisionInputService.build_clarification(project_id, decision, user_text) -> JsonObject`, `VisionAgenticPreflightError`, and typed failure codes `REPOSITORY_PROVENANCE_STALE`, `REPOSITORY_CHANGED_DURING_EVIDENCE_COLLECTION`, and `VISION_EVIDENCE_STALE`.
+
+- [ ] **Step 1: Write failing input-selection tests**
+
+Test project-only bootstrap, repository bootstrap, revision bootstrap, clarification with host-derived question IDs, complete-candidate feedback with empty addressed-question IDs, snapshot reuse, same-key replay, and different-input idempotency conflict.
+
+```python
+def test_bootstrap_requires_no_human_response(
+    service: VisionInputService,
+    bootstrap_decision: NodeDecision,
+) -> None:
+    payload = service.build_bootstrap(
+        project_id=PROJECT_ID,
+        decision=bootstrap_decision,
+    )
+
+    request = VisionAgentInput.model_validate(payload).request
+    assert request.operation == "bootstrap"
+    assert "user_response" not in request.model_dump()
+```
+
+- [ ] **Step 2: Write failing drift and paid-call prevention tests**
+
+Cover stale binding vs fresh probe, file mutation during collection, clarification after evidence content changes with an unchanged status path set, unchanged evidence after repository refresh, changed evidence after refresh, and two concurrent requests for the same node/instance/decision. Fake provider call count remains zero for every failed preflight or competing request.
+
+- [ ] **Step 3: Run tests and confirm failure**
+
+```bash
+uv run --frozen pytest \
+  tests/services/test_vision_input.py \
+  tests/adapters/test_adk_workflow_runner.py -q
+```
+
+Expected: missing `VisionInputService` and typed preflight handling.
+
+- [ ] **Step 4: Implement host input preparation**
+
+`build_bootstrap` collects the current bundle and returns `VisionAgentInput` with operation `bootstrap` or `revision` selected from graph facts. `build_clarification` loads the exact lineage snapshot, derives addressed question IDs from the latest turn, preserves stored evidence as model input, recollects current sanitized evidence, and puts that observed bundle in the host-owned preflight envelope. The envelope validates that its expected fingerprint equals the persisted request bundle; the recipe compares expected with the observed bundle fingerprint before any model call and sends only the request union to the model.
+
+The caller supplies only ordinary response text. It never supplies mode, question IDs, snapshot IDs, fingerprints, or repository-derived values.
+
+- [ ] **Step 5: Preserve typed preflight failures durably**
+
+Add `failure_code: str | None` to `NodeAttemptFact` from `WorkflowNodeAttemptOutcome`. Define `VisionAgenticPreflightError(code: WorkflowErrorCode, message: str)` in `adapters/adk/errors.py`. The Vision recipe raises it before `context.run_node` when the expected fingerprint differs from `observed_evidence.evidence_fingerprint`. Update `AdkWorkflowRunner` to catch it before the generic execution block, record its exact `failure_code`, and return that typed `WorkflowError`.
+
+The graph treats the latest `VISION_EVIDENCE_STALE` failure for the current clarification instance as recovery evidence and advertises `vision.bootstrap`. This uses the existing append-only attempt/outcome system; do not add mutable session state. An unchanged recollected fingerprint proceeds with the existing snapshot even after repository refresh.
+
+- [ ] **Step 6: Document the durable-preflight implementation note**
+
+Add one paragraph to the design's replay/failure section: evidence-stale recovery is represented by the existing durable node-attempt failure outcome, allowing the pure graph to advertise bootstrap without mutable workflow session state.
+
+- [ ] **Step 7: Run phase tests without committing**
+
+```bash
+uv run --frozen pytest \
+  tests/services/test_vision_input.py \
+  tests/adapters/test_adk_workflow_runner.py \
+  tests/workflow/test_vision_bootstrap_graph.py -q
+uv lock --check
+git diff --check
+```
+
+Expected: all selected tests pass and fake provider call count is zero on
+preflight errors. Do not commit this phase; continue directly to Phase 3.
+
+---
+
+### Task 4-6 Atomic Batch, Phase 3: Bounded ADK Generation And Legacy Removal
+
+**Files:**
+- Modify: `services/contracts/vision.py`
+- Modify: `adapters/adk/prompts/vision.txt`
+- Create: `adapters/adk/prompts/vision_repair.txt`
+- Modify: `adapters/adk/agents/vision.py`
+- Modify: `adapters/adk/recipes.py`
+- Modify: `adapters/adk/model_roles.py`
+- Modify: `services/application.py`
+- Modify: `tests/adapters/test_vision.py`
+- Create: `tests/adapters/test_vision_recipe.py`
+- Modify: `tests/adapters/test_adk_workflow_runner.py`
+- Modify: `tests/services/contracts/test_vision.py`
+- Delete: legacy Vision input/output tests replaced by the Phase 2/3 suites.
+
+**Interfaces:**
+- Consumes: Task 1 contracts/validator and Phases 1/2 of this atomic batch.
+- Produces: one complete runnable Vision runtime with `vision.bootstrap` and `vision.interview` recipes, trusted output adapters, a maximum of one compact repair call, and no human-first Vision contract remnants.
+
+- [ ] **Step 1: Write failing recipe tests with fake ADK leaves**
+
+Cover valid bootstrap, valid clarification, incomplete output, complete output, semantic failure followed by successful repair, semantic failure followed by failed repair, schema failure with no business facts, preflight failure with zero leaf calls, and output adapters binding trusted evidence/question IDs from persisted attempt input.
+
+```python
+def test_semantic_repair_runs_once() -> None:
+    primary = FakeLeaf(outputs=[semantically_invalid_output()])
+    repair = FakeLeaf(outputs=[valid_repaired_output()])
+    recipe = build_vision_workflow(
+        primary_leaf=primary,
+        repair_leaf=repair,
+        execution_settings=TEST_EXECUTION_SETTINGS,
+    )
+
+    result = run_recipe(recipe, bootstrap_recipe_input())
+
+    assert result.payload == valid_repaired_output()
+    assert primary.call_count == 1
+    assert repair.call_count == 1
+```
+
+- [ ] **Step 2: Run tests and confirm failure**
+
+```bash
+uv run --frozen pytest \
+  tests/adapters/test_vision.py \
+  tests/adapters/test_vision_recipe.py \
+  tests/adapters/test_adk_workflow_runner.py -q
+```
+
+Expected: missing grounded schemas, recipe, and repair behavior.
+
+- [ ] **Step 3: Replace prompt, agent schemas, and old runtime contracts**
+
+The Vision prompt directs the model to propose a durable direction from supplied evidence, distinguish evidence/human/inference, expose assumptions/conflicts, ask only material questions, preserve human corrections, and produce no Product Goal or delivery scope. Repository evidence is unreviewed context, not authority.
+
+Configure the Vision agent with `VisionAgentInput` and `VisionDraftOutput`. Configure a separate repair agent with `VisionRepairInput` and `VisionDraftOutput`; use the same `product_vision` model role and existing runtime token/settings helpers.
+
+Delete `VisionInterviewInput`, `VisionInterviewOutput`,
+`VisionInterviewInputService`, the old output adapter, and their runtime exports
+and tests now. Update `services/application.py`, direct fixtures, and retained
+projection/lifecycle tests in the same atomic batch. No compatibility aliases
+or human-first fallback route may remain.
+
+- [ ] **Step 4: Build the dedicated bounded workflow**
+
+Do not use generic retry for Vision semantic repair. `build_vision_workflow` performs these exact steps:
+
+1. Validate host preflight before any leaf call.
+2. Run the primary leaf once.
+3. Parse `VisionDraftOutput` and run `validate_vision_draft`.
+4. On semantic failure only, create `VisionRepairInput` with findings, invalid structured output, allowed evidence IDs, and `human_input_available`.
+5. Run the repair leaf once.
+6. Reparse/revalidate once; propagate failure after that.
+
+Set `RetryConfig(max_attempts=1)` for paid Vision leaf nodes so ADK cannot duplicate the explicit repair policy.
+
+- [ ] **Step 5: Bind trusted input in output adapters**
+
+The `vision.bootstrap` adapter creates `GenerateVisionBootstrap`; the `vision.interview` adapter creates `RecordVisionInterviewTurn`. Both load operation, bundle/snapshot, human response, and question IDs only from `AttemptCompletionContext.normalized_input`. Model output supplies only `VisionDraftOutput` fields.
+
+- [ ] **Step 6: Run the combined focused suite**
+
+```bash
+uv run --frozen pytest \
+  tests/workflow/test_vision_evidence_persistence.py \
+  tests/workflow/test_vision_bootstrap_graph.py \
+  tests/workflow/test_vision_bootstrap_transitions.py \
+  tests/workflow/test_vision_interview_graph.py \
+  tests/workflow/test_vision_interview_transitions.py \
+  tests/services/test_vision_input.py \
+  tests/adapters/test_vision.py \
+  tests/adapters/test_vision_recipe.py \
+  tests/adapters/test_adk_workflow_runner.py -q
+uv lock --check
+git diff --check
+```
+
+Expected: all selected tests pass; repair call count never exceeds one.
+
+- [ ] **Step 7: Prove the hard break, commit once, then run the clean full gate**
+
+```bash
+rg -n "VisionInterviewInput|VisionInterviewOutput|VisionInterviewInputService" \
+  --glob '*.py' --glob '*.js' .
+rg -n "VisionInterviewTurn\.mode|\.mode == \"initial\"|mode=\"initial\"" \
+  --glob '*.py' .
+git diff --check
+```
+
+Expected: no runtime or active-test matches. Historical design/plan text is
+allowed. Inspect `git diff --name-only`, stage only the reviewed union of
+Tasks 4-6 files, and commit once:
+
+```bash
+git commit -m "feat: replace human-first vision runtime"
+uv run --frozen pyrepo-check --all
+```
+
+The full gate runs only after the commit because clean-source launcher tests
+require a clean checkout. Any failure is diagnosed and fixed in a follow-up
+TDD commit before this atomic batch is marked complete.
+
+---
+
+### Task 7: Semantic Application, API, And CLI Surfaces
+
+**Files:**
+- Modify: `services/application.py`
+- Modify: `api.py`
+- Modify: `cli/main.py`
+- Create: `tests/adapters/test_vision_bootstrap_api.py`
+- Create: `tests/adapters/test_vision_bootstrap_cli.py`
+- Modify: `tests/adapters/test_api_workflow_domain.py`
+- Modify: `tests/adapters/test_cli_workflow_domain.py`
+- Modify: `tests/adapters/test_command_renderer.py`
+
+**Interfaces:**
+- Consumes: `VisionInputService`, graph decisions, ADK recipes, and current read projection.
+- Produces: `VisionBootstrapRequest`, `AgileForgeApplication.bootstrap_vision`, `POST /api/projects/{project_id}/vision/bootstrap`, and `agileforge vision bootstrap`.
+
+- [ ] **Step 1: Write failing application/API tests**
+
+Assert bootstrap body contains transport metadata only, calls the model only on POST, replays the same key, maps typed preflight failures without a paid call, and keeps `GET /vision/status`, project show, workflow position, and workflow next pure.
+
+```python
+def test_vision_status_get_does_not_invoke_runner(client, fake_runner) -> None:
+    response = client.get(f"/api/projects/{PROJECT_ID}/vision/status")
+
+    assert response.status_code == 200
+    assert fake_runner.call_count == 0
+```
+
+- [ ] **Step 2: Write failing CLI tests**
+
+Assert exact semantic command rendering:
+
+```text
+agileforge vision bootstrap --project-id 1 --idempotency-key KEY --actor ACTOR
+```
+
+Assert no generated command exposes graph/fact/decision fingerprints, evidence/snapshot IDs, mode, or repository-derived fields. Retain `vision respond --text`, `vision review`, and `vision status`.
+
+- [ ] **Step 3: Run tests and confirm failure**
+
+```bash
+uv run --frozen pytest \
+  tests/adapters/test_vision_bootstrap_api.py \
+  tests/adapters/test_vision_bootstrap_cli.py \
+  tests/adapters/test_api_workflow_domain.py \
+  tests/adapters/test_cli_workflow_domain.py \
+  tests/adapters/test_command_renderer.py -q
+```
+
+Expected: bootstrap method, route, and command are absent.
+
+- [ ] **Step 4: Implement replay-safe orchestration**
+
+Add:
+
+```python
+class VisionBootstrapRequest(FrozenModel):
+    project_id: int
+    idempotency_key: str = Field(min_length=1)
+    actor: str = Field(min_length=1)
+    correlation_id: str | None = None
+```
+
+`bootstrap_vision` replays first, reads one position, selects exactly one `vision.bootstrap` decision, builds host input, and calls `run_agentic_action`. Refactor shared Vision dispatch helpers without changing Product Goal or other agentic nodes. Rename the injected option from `vision_interview_input` to `vision_input`; retain no old constructor key.
+
+- [ ] **Step 5: Implement HTTP and CLI entry points**
+
+Add the POST route and Typer command using existing idempotency/actor conventions. Update workflow command-template mapping so `workflow next` emits bootstrap or respond from the graph decision. CLI transport must not derive internal identity itself.
+
+- [ ] **Step 6: Run tests and commit**
+
+```bash
+uv run --frozen pytest \
+  tests/adapters/test_vision_bootstrap_api.py \
+  tests/adapters/test_vision_bootstrap_cli.py \
+  tests/adapters/test_api_workflow_domain.py \
+  tests/adapters/test_cli_workflow_domain.py \
+  tests/adapters/test_command_renderer.py -q
+uv lock --check
+git diff --check
+```
+
+Expected: all selected tests pass.
+
+```bash
+git add services/application.py api.py cli/main.py \
+  tests/adapters/test_vision_bootstrap_api.py \
+  tests/adapters/test_vision_bootstrap_cli.py \
+  tests/adapters/test_api_workflow_domain.py \
+  tests/adapters/test_cli_workflow_domain.py \
+  tests/adapters/test_command_renderer.py
+git commit -m "feat: expose vision bootstrap commands"
+```
+
+---
+
+### Task 8: Human Vision Bootstrap And Provenance UI
+
+**Files:**
+- Modify: `services/read_projections.py`
+- Modify: `frontend/project.js`
+- Modify: `adapters/adk/recipes.py`
+- Modify: `tests/adapters/test_api_workflow_domain.py`
+- Modify: `tests/adapters/test_command_renderer.py`
+- Modify: `tests/adapters/test_vision.py`
+- Modify: `tests/services/contracts/test_vision.py`
+- Modify: `tests/workflow/test_vision_interview_graph.py`
+- Modify: `tests/workflow/test_vision_interview_transitions.py`
+- Modify: `frontend/styles.css` only if existing classes cannot express the approved states
+- Modify: `tests/test_vision_projection.py`
+- Modify: `tests/test_vision_interview_ui.mjs`
+
+**Interfaces:**
+- Consumes: snapshot/turn/artifact facts and semantic HTTP routes.
+- Produces: safe Vision status projection and human controls for bootstrap, clarification, provenance inspection, and review.
+
+- [ ] **Step 1: Write failing projection tests**
+
+Assert initial status says bootstrap is available; incomplete status includes draft components, statement, basis, assumptions, conflicts, and structured questions; complete status includes the same review material. Projection omits absolute paths, raw evidence JSON, editable snapshot/evidence IDs, graph fingerprints, and attempt IDs.
+
+- [ ] **Step 2: Write failing UI behavior tests**
+
+Test initial generation, disabled/loading double-submit protection, ordinary-language response after an incomplete draft, visible provenance labels, complete review controls, and refresh purity. Remove tests for fallback questions and the initial required textarea.
+
+```javascript
+test("initial vision state offers generation without a response textarea", () => {
+  const html = visionPanelMarkup(initialVisionStatus());
+
+  assert.match(html, /Generate Vision draft/);
+  assert.doesNotMatch(html, /Your response/);
+  assert.doesNotMatch(html, /Who should benefit/);
+});
+```
+
+- [ ] **Step 3: Run tests and confirm failure**
+
+```bash
+uv run --frozen pytest tests/test_vision_projection.py -q
+node --test tests/test_vision_interview_ui.mjs
+```
+
+Expected: initial UI still renders fallback questions and lacks bootstrap.
+
+- [ ] **Step 4: Extend the safe read projection**
+
+Return display-safe provenance: component name/value, basis source kinds, assumption/conflict text, and question ID/text needed for rendering. Replace internal IDs with display ordering where browser actions do not need an ID. The browser never submits snapshot/evidence/question identity; the host derives it.
+
+- [ ] **Step 5: Implement the human flow**
+
+Render:
+
+1. Initial context summary and `Generate Vision draft` button.
+2. One stable generation loading state with button disabled.
+3. Incomplete draft plus basis/assumptions/conflicts/questions and one response textarea.
+4. Complete draft plus the same provenance and Accept/Feedback/Reject controls.
+
+Use existing icon library/classes and established dashboard layout. Do not add feature-explainer copy, nested cards, raw JSON editors, or internal workflow fields.
+
+- [ ] **Step 6: Run tests and commit**
+
+```bash
+uv run --frozen pytest tests/test_vision_projection.py -q
+node --test tests/test_vision_interview_ui.mjs
+uv lock --check
+git diff --check
+```
+
+Expected: all selected tests pass.
+
+```bash
+git add services/read_projections.py frontend/project.js frontend/styles.css \
+  tests/test_vision_projection.py tests/test_vision_interview_ui.mjs
+git commit -m "feat: add human vision bootstrap flow"
+```
+
+---
+
+### Task 9: Hard-Break Verification And Retained Lifecycle Regression
+
+**Files:**
+- Modify: `tests/workflow/test_vision_backlog_graph.py`
+- Modify: `tests/workflow/test_vision_backlog_transitions.py`
+- Modify: `tests/services/test_durable_product_definition_projections.py`
+- Modify: `docs/agent-cli-manual.md`
+- Modify only concrete runtime/test files where the absence scan finds a
+  remnant missed by the atomic Task 4-6 implementation.
+
+**Interfaces:**
+- Consumes: completed Tasks 1-8.
+- Produces: proof that the one grounded Vision path has no human-first remnants and that accepted-Vision-to-Product-Goal behavior remains intact.
+
+- [ ] **Step 1: Run hard-break absence scans**
+
+```bash
+rg -n "VisionInterviewInput|VisionInterviewOutput|vision_interview_input|VISION_INTERVIEW_REQUIRED" \
+  --glob '*.py' --glob '*.js' --glob '*.md' .
+rg -n "Do not infer Vision from repository contents|Who should benefit from this product first" \
+  adapters frontend tests
+```
+
+Expected: only deliberate historical design references remain; runtime references fail this task.
+
+- [ ] **Step 2: Add retained lifecycle tests**
+
+Prove only a human-accepted Vision unlocks Product Goal, feedback/rejection returns to clarification, accepted Vision revision remains blocked by an active Product Goal, and repository attachment is optional for bootstrap.
+
+- [ ] **Step 3: Close only concrete remnants or retained regressions**
+
+The atomic Task 4-6 batch already removes the human-first input service, old
+contracts, prompt prohibition, initial textarea/fallback questions, exposed
+`mode` graph requirements, and obsolete tests. If this task's scans find a
+remaining runtime reference, remove that exact remnant with a failing
+regression first. Do not create aliases or deprecation paths.
+
+- [ ] **Step 4: Update the branch-testing guide**
+
+Document semantic development commands only: initialize a fresh profile/database from the current branch with `./agileforge-dev init --profile vision-bootstrap-manual --json`, start with `./agileforge-dev ui --profile vision-bootstrap-manual --port auto`, inspect provenance with `./agileforge-dev info --profile vision-bootstrap-manual --json`, and invoke semantic CLI commands through `./agileforge-dev cli --profile vision-bootstrap-manual -- vision bootstrap|respond|status|review`. State that the operator performs manual acceptance and automated tests use only temporary fixtures.
+
+- [ ] **Step 5: Run focused retained regression**
+
+```bash
+uv run --frozen pytest \
+  tests/workflow/test_vision_backlog_graph.py \
+  tests/workflow/test_vision_backlog_transitions.py \
+  tests/services/test_durable_product_definition_projections.py -q
+node --test tests/test_vision_interview_ui.mjs
+uv lock --check
+git diff --check
+```
+
+Expected: all selected tests pass and runtime absence scans are clean.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add tests/workflow/test_vision_backlog_graph.py \
+  tests/workflow/test_vision_backlog_transitions.py \
+  tests/services/test_durable_product_definition_projections.py \
+  docs/agent-cli-manual.md
+git commit -m "test: verify grounded vision lifecycle retention"
+```
+
+---
+
+### Task 10: Full Verification And Manual-Test Handoff
+
+**Files:**
+- Modify only files required to fix failures caused by Tasks 1-9; no unrelated cleanup.
+
+**Interfaces:**
+- Consumes: complete implementation.
+- Produces: verified branch evidence and operator instructions. It does not produce an automated acceptance verdict.
+
+- [ ] **Step 1: Run the full uv-only gate**
+
+```bash
+uv lock --check
+uv run --frozen pyrepo-check --all
+git diff --check
+```
+
+Expected: Ruff, annotation checks, ty, Bandit, and all tests pass with no typing suppressions.
+
+- [ ] **Step 2: Run clean-source and absence checks**
+
+```bash
+git status --short
+rg -n "VisionInterviewInput|VisionInterviewOutput|vision_interview_input" \
+  --glob '*.py' --glob '*.js' .
+rg -n "pip install|poetry" docs README.md agileforge-dev
+```
+
+Expected: no runtime legacy names exist and development instructions remain uv-only. Historical design/plan text is allowed.
+
+- [ ] **Step 3: Perform fresh-context review gates**
+
+Dispatch one specification-compliance reviewer and one code-quality reviewer against the plan base through current `HEAD`. Resolve only concrete findings, rerun affected tests after each fix, then rerun the full gate.
+
+- [ ] **Step 4: Record verification without running acceptance**
+
+Capture branch name, final commit SHA, full gate summary, and exact fresh-profile launcher commands. Do not initialize, mutate, or judge the operator's Manual Test 1 profile or fixture project.
+
+- [ ] **Step 5: Commit verification corrections only when needed**
+
+When review/full-gate corrections changed tracked files, list them with `git status --short`, stage only those exact task-owned paths using the corresponding Task 1-9 `git add` command, and commit with `git commit -m "fix: close grounded vision review findings"`. When no tracked correction is needed, do not create an empty commit.

@@ -1,3 +1,0 @@
-product_id,product_name,created_at,total_stories,stories_with_spec_version_id,stories_with_validation_evidence,stories_approved_first_pass,stories_refined,sprint_count,sprint_plan_drafts,sprint_plan_saves,total_sprint_planning_duration_sec,avg_sprint_planning_duration_sec,spec_versions_count,spec_versions_approved,compiled_authorities_count,spec_accepted_count,spec_rejected_count
-1,Review-First Human-in-the-Loop Extraction Pipeline,2026-01-29 12:39:37.253161,2,1,1,0,0,0,0,0,0.0,0.0,1,1,1,1,0
-2,HashbrownVision Phase 1,2026-01-30 18:43:07.321623,5,3,3,0,0,1,2,1,5072.33,5072.33,1,1,1,1,0

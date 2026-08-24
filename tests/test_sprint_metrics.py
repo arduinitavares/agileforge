@@ -10,7 +10,17 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from services.phases import sprint_metrics
-from services.phases.sprint_metrics import build_sprint_metrics
+from services.phases.sprint_metrics import (
+    build_durable_sprint_metrics,
+    build_sprint_metrics,
+)
+from workflow.facts import (
+    ProjectFact,
+    SprintFact,
+    StoryCompletionFact,
+    StoryFact,
+    WorkflowFactSnapshot,
+)
 
 JsonDict = dict[str, object]
 
@@ -62,6 +72,56 @@ def test_no_completed_sprints_returns_insufficient_history() -> None:
     assert metrics["recommendation"]["basis"] == "insufficient_history"
     assert metrics["recommendation"]["source_sprint_ids"] == []
     assert metrics["recommendation"]["source_completed_points"] == []
+
+
+def test_durable_metrics_recommend_from_completed_story_points() -> None:
+    """Use completed Story facts, not planned plan capacity, for recommendation."""
+    completed_at = datetime(2026, 6, 12, 9, tzinfo=UTC)
+    snapshot = WorkflowFactSnapshot(
+        project=ProjectFact(
+            project_id=7,
+            name="Durable metrics",
+            description=None,
+            created_at=datetime(2026, 6, 1, 9, tzinfo=UTC),
+        ),
+        sprints=(
+            SprintFact(sprint_id=3, status="completed", completed_at=completed_at),
+        ),
+        stories=(
+            StoryFact(
+                story_id=11,
+                source_story_artifact_id=1,
+                source_story_artifact_fingerprint="sha256:story-artifact",
+                source_story_item_id="US-0001",
+                source_story_item_fingerprint="sha256:story-item",
+                accepted_spec_version_id=1,
+                accepted_spec_hash="sha256:specification",
+                spec_item_ids=("REQ.metrics",),
+                status="done",
+                story_points=5,
+                sprint_ids=(3,),
+                sprint_candidate=False,
+                readiness_blockers=(),
+            ),
+        ),
+        story_completions=(
+            StoryCompletionFact(
+                completion_id=19,
+                story_id=11,
+                sprint_id=3,
+                completion_fingerprint="sha256:completion",
+                resolution="Completed",
+                delivered="Delivered.",
+                evidence="Verified.",
+                known_gaps="None.",
+            ),
+        ),
+    )
+
+    metrics = build_durable_sprint_metrics(snapshot)
+
+    assert metrics["recommendation"]["recommended_next_sprint_points"] == 5
+    assert metrics["recommendation"]["source_completed_points"] == [5]
 
 
 def test_completed_sprints_aggregate_and_recommend_from_newest_three() -> None:
@@ -302,9 +362,11 @@ def test_non_finite_elapsed_seconds_are_invalid_and_json_safe() -> None:
     )
 
     assert metrics["status"] == "partial_history"
-    assert [
-        row["elapsed_seconds"] for row in metrics["completed_sprints"]
-    ] == [None, None, None]
+    assert [row["elapsed_seconds"] for row in metrics["completed_sprints"]] == [
+        None,
+        None,
+        None,
+    ]
     assert metrics["summary"]["total_elapsed_seconds"] is None
     assert metrics["summary"]["average_elapsed_seconds_per_sprint"] is None
     assert metrics["summary"]["points_per_hour"] is None

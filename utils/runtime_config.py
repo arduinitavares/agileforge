@@ -9,12 +9,17 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from utils.runtime_controls import (
+    LAUNCHER_CHILD_ENV,
+    LAUNCHER_CHILD_VALUE,
+    SPECIFICATION_STRUCTURER_MAX_TOKENS_DEFAULT,
+)
+
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _CONFIG_ROOT_ENV = "AGILEFORGE_CONFIG_ROOT"
 _LEGACY_DB_FILENAMES = frozenset({"agile_simple.db", "agile_sqlmodel.db"})
 _TRUE_VALUES = {"1", "true", "yes", "on"}
 _DEFAULT_API_HOST = "127.0.0.1"
-_AS_BUILT_ASSESSOR_BATCH_SIZE_MAX = 50
 
 
 def get_config_root() -> Path:
@@ -69,11 +74,11 @@ class RuntimeConfigError(RuntimeError):
         )
 
     @classmethod
-    def shared_session_database(cls) -> RuntimeConfigError:
-        """Build an error when business and session DBs point to the same file."""
+    def shared_adk_execution_trace_database(cls) -> RuntimeConfigError:
+        """Build an error when business and ADK trace DBs share one file."""
         return cls(
-            "AGILEFORGE_SESSION_DB_URL must point to a different SQLite file than "
-            "AGILEFORGE_DB_URL."
+            "AGILEFORGE_ADK_EXECUTION_TRACE_DB_URL must point to a different "
+            "SQLite file than AGILEFORGE_DB_URL."
         )
 
 
@@ -92,6 +97,11 @@ class DatabaseTarget:
             return ":memory:"
         return str(self.sqlite_path)
 
+    @property
+    def async_sqlite_url(self) -> str:
+        """Return the aiosqlite URL required by ADK 2 session storage."""
+        return self.sqlite_url.replace("sqlite:///", "sqlite+aiosqlite:///", 1)
+
 
 @dataclass(frozen=True)
 class RunnerIdentity:
@@ -101,9 +111,9 @@ class RunnerIdentity:
     user_id: str
 
 
-WORKFLOW_RUNNER_IDENTITY = RunnerIdentity(
-    app_name="agile_orchestrator",
-    user_id="local_developer",
+ADK_EXECUTION_TRACE_IDENTITY = RunnerIdentity(
+    app_name="agileforge_graph_execution",
+    user_id="workflow_adapter",
 )
 VISION_RUNNER_IDENTITY = RunnerIdentity(
     app_name="product_vision_tool",
@@ -125,14 +135,6 @@ SPRINT_RUNNER_IDENTITY = RunnerIdentity(
     app_name="sprint_planner",
     user_id="dashboard_sprint",
 )
-AS_BUILT_RUNNER_IDENTITY = RunnerIdentity(
-    app_name="as_built_assessor",
-    user_id="dashboard_as_built",
-)
-SPEC_AUTHORITY_COMPILER_IDENTITY = RunnerIdentity(
-    app_name="spec_authority_compiler",
-    user_id="spec_compiler",
-)
 SPEC_VALIDATOR_IDENTITY = RunnerIdentity(
     app_name="spec_validator_agent",
     user_id="spec_validator",
@@ -141,6 +143,8 @@ SPEC_VALIDATOR_IDENTITY = RunnerIdentity(
 
 def load_runtime_env() -> None:
     """Load the repository .env file once for all runtime consumers."""
+    if os.environ.get(LAUNCHER_CHILD_ENV) == LAUNCHER_CHILD_VALUE:
+        return
     env_path = _env_path()
     if env_path.exists():
         load_dotenv(env_path, override=False)
@@ -242,15 +246,18 @@ def get_business_db_target() -> DatabaseTarget:
 
 
 @lru_cache(maxsize=1)
-def get_session_db_target() -> DatabaseTarget:
-    """Return the configured session database target."""
-    target = resolve_database_target(None, env_name="AGILEFORGE_SESSION_DB_URL")
+def get_adk_execution_trace_db_target() -> DatabaseTarget:
+    """Return the separate ADK execution-trace database target."""
+    target = resolve_database_target(
+        None,
+        env_name="AGILEFORGE_ADK_EXECUTION_TRACE_DB_URL",
+    )
     business_target = get_business_db_target()
     if (
         target.sqlite_path is not None
         and target.sqlite_path == business_target.sqlite_path
     ):
-        raise RuntimeConfigError.shared_session_database()
+        raise RuntimeConfigError.shared_adk_execution_trace_database()
     return target
 
 
@@ -275,6 +282,18 @@ def get_vision_interviewer_max_tokens(default: int = 4096) -> int:
     return get_int_env("VISION_INTERVIEWER_MAX_TOKENS", default)
 
 
+def get_specification_structurer_max_tokens(
+    default: int = SPECIFICATION_STRUCTURER_MAX_TOKENS_DEFAULT,
+) -> int:
+    """Return the dedicated max output budget for Specification structuring."""
+    return get_int_env("SPECIFICATION_STRUCTURER_MAX_TOKENS", default)
+
+
+def get_specification_structurer_generation_config() -> dict[str, int]:
+    """Return the effective non-secret Specification generation configuration."""
+    return {"max_output_tokens": get_specification_structurer_max_tokens()}
+
+
 def get_backlog_primer_max_tokens(default: int = 8192) -> int:
     """Return the max token budget for the backlog primer."""
     return get_int_env("BACKLOG_PRIMER_MAX_TOKENS", default)
@@ -293,34 +312,6 @@ def get_story_writer_max_tokens(default: int = 16384) -> int:
 def get_sprint_planner_max_tokens(default: int = 8192) -> int:
     """Return the max token budget for the sprint planner."""
     return get_int_env("SPRINT_PLANNER_MAX_TOKENS", default)
-
-
-def get_as_built_assessor_max_tokens(default: int = 8192) -> int:
-    """Return the max token budget for the as-built assessor."""
-    return get_int_env("AS_BUILT_ASSESSOR_MAX_TOKENS", default)
-
-
-def get_as_built_assessor_timeout_seconds(default: float = 120.0) -> float:
-    """Return the bounded runtime for the as-built assessor model call."""
-    value = get_optional_env("AS_BUILT_ASSESSOR_TIMEOUT_SECONDS")
-    if value is None:
-        return default
-    return float(value)
-
-
-def get_as_built_assessor_batch_size(default: int = 10) -> int:
-    """Return the maximum authority targets per as-built assessor batch."""
-    value = get_int_env("AS_BUILT_ASSESSOR_BATCH_SIZE", default)
-    if value < 1:
-        msg = "AS_BUILT_ASSESSOR_BATCH_SIZE must be at least 1."
-        raise RuntimeConfigError(msg)
-    if value > _AS_BUILT_ASSESSOR_BATCH_SIZE_MAX:
-        msg = (
-            "AS_BUILT_ASSESSOR_BATCH_SIZE must be at most "
-            f"{_AS_BUILT_ASSESSOR_BATCH_SIZE_MAX}."
-        )
-        raise RuntimeConfigError(msg)
-    return value
 
 
 def is_spec_compiler_schema_disabled() -> bool:
@@ -355,5 +346,5 @@ def get_api_reload(default: bool = True) -> bool:
 def clear_runtime_config_cache() -> None:
     """Clear cached runtime settings for tests."""
     get_business_db_target.cache_clear()
-    get_session_db_target.cache_clear()
+    get_adk_execution_trace_db_target.cache_clear()
     get_database_echo.cache_clear()
