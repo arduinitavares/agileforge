@@ -42,10 +42,10 @@ from services.application import (
     SprintStartRequest,
     StoryDependenciesApplyRequest,
     StoryDependencyEdgeRequest,
+    StoryEligibilityReconcileRequest,
     StoryReadinessRepair,
     StoryReadinessRepairRequest,
     StoryReviewRequest,
-    StoryValidationRequest,
     VisionBootstrapRequest,
     VisionResponseRequest,
     VisionReviewRequest,
@@ -251,9 +251,9 @@ class _Application(Protocol):
         request: StoryReadinessRepairRequest,
     ) -> TransitionResult: ...
 
-    def validate_story(
+    def reconcile_story_eligibility(
         self,
-        request: StoryValidationRequest,
+        request: StoryEligibilityReconcileRequest,
     ) -> JsonObject: ...
 
     def start_sprint(self, request: SprintStartRequest) -> TransitionResult: ...
@@ -542,17 +542,17 @@ def _install_planning_action_mutations(
         type=_parse_story_readiness_repair,
         required=True,
     )
-    story_validate = _semantic_leaf(
-        branches[("story",)],
-        "validate",
-        _story_validate,
+    eligibility = branches[("story",)].add_parser("eligibility")
+    eligibility_sub = eligibility.add_subparsers(
+        dest="eligibility_action",
+        required=True,
     )
-    story_validate.add_argument("--story-id", type=int, required=True)
-    story_validate.add_argument(
-        "--mode",
-        choices=["structural"],
-        default="structural",
+    reconcile = _semantic_leaf(
+        eligibility_sub,
+        "reconcile",
+        _story_eligibility_reconcile,
     )
+    reconcile.add_argument("--story-id", dest="story_ids", action="append", type=int)
     _semantic_leaf(branches[("sprint",)], "start", _sprint_start)
 
 
@@ -1796,16 +1796,15 @@ def _story_readiness_repair(
     )
 
 
-def _story_validate(
+def _story_eligibility_reconcile(
     args: argparse.Namespace,
     application: _Application,
 ) -> int:
     return _emit_read(
-        application.validate_story(
-            StoryValidationRequest(
+        application.reconcile_story_eligibility(
+            StoryEligibilityReconcileRequest(
                 project_id=args.project_id,
-                story_id=args.story_id,
-                mode=args.mode,
+                story_ids=tuple(args.story_ids) if args.story_ids is not None else None,
                 idempotency_key=args.idempotency_key,
                 actor=args.actor,
                 correlation_id=args.correlation_id,

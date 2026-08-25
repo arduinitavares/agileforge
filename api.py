@@ -51,10 +51,10 @@ from services.application import (
     SprintStartRequest,
     StoryDependenciesApplyRequest,
     StoryDependencyEdgeRequest,
+    StoryEligibilityReconcileRequest,
     StoryReadinessRepair,
     StoryReadinessRepairRequest,
     StoryReviewRequest,
-    StoryValidationRequest,
     VisionBootstrapRequest,
     VisionResponseRequest,
     VisionReviewRequest,
@@ -247,11 +247,21 @@ class StoryDependenciesApplyApiRequest(MutationApiRequest):
         return self
 
 
-class StoryValidateApiRequest(MutationApiRequest):
-    """Transport payload to validate one accepted Story provider-free."""
+class StoryEligibilityReconcileApiRequest(MutationApiRequest):
+    """Transport payload to reconcile Story structural eligibility evidence."""
 
-    story_id: PositiveStoryId
-    mode: Literal["structural"] = "structural"
+    story_ids: list[PositiveStoryId] | None = None
+
+    @field_validator("story_ids")
+    @classmethod
+    def canonicalize_story_ids(cls, value: list[int] | None) -> list[int] | None:
+        """Reject duplicate Story IDs before application construction."""
+        if value is None:
+            return None
+        if len(set(value)) != len(value):
+            message = "story_ids must not contain duplicate Story IDs."
+            raise ValueError(message)
+        return sorted(value)
 
 
 class StoryReadinessRepairApiRequest(MutationApiRequest):
@@ -1276,18 +1286,17 @@ def decide_project_sprint_plan(
     )
 
 
-@app.post("/api/projects/{project_id}/story/validate")
-def validate_project_story(
+@app.post("/api/projects/{project_id}/story/structural-eligibility/reconcile")
+def reconcile_project_story_structural_eligibility(
     project_id: int,
-    req: StoryValidateApiRequest,
+    req: StoryEligibilityReconcileApiRequest,
 ) -> dict[str, object]:
-    """Structurally validate one accepted Story provider-free."""
+    """Reconcile provider-free structural eligibility for active Stories."""
     return _read_payload(
-        _application().validate_story(
-            StoryValidationRequest(
+        _application().reconcile_story_eligibility(
+            StoryEligibilityReconcileRequest(
                 project_id=project_id,
-                story_id=req.story_id,
-                mode=req.mode,
+                story_ids=tuple(req.story_ids) if req.story_ids is not None else None,
                 **_metadata(req),
             )
         )

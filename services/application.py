@@ -31,7 +31,7 @@ from sqlmodel import Session, col, select
 
 from adapters.adk.model_roles import AGENTIC_MODEL_ROLES
 from adapters.git.repository_probe import GitPythonRepositoryProbe
-from models.core import UserStory
+from models.core import Project, UserStory
 from models.product_definition import (
     ProductGoalArtifact,
     VisionArtifact,
@@ -93,6 +93,7 @@ from services.specs.accepted_specification import (
 from services.specs.story_validation_service import (
     StoryValidationReadinessError,
     ValidateStoryInput,
+    require_current_story_validation_evidence,
     require_story_ready_for_sprint,
     validate_story_with_specification_in_session,
 )
@@ -109,6 +110,7 @@ from services.vision_evidence import (
 from services.vision_input import VisionInputService
 from utils.model_config import get_model_id
 from utils.runtime_config import get_specification_structurer_generation_config
+from utils.spec_schemas import ValidationEvidence
 from workflow.contracts import (
     Blocker,
     FactReference,
@@ -1392,15 +1394,53 @@ class StoryReadinessRepairRequest(_PlanningMutationRequest):
         return self
 
 
-class StoryValidationRequest(FrozenModel):
-    """Explicit operator request to structurally validate one accepted Story."""
+class StoryEligibilityReconcileRequest(FrozenModel):
+    """Explicit operator request to reconcile provider-free Story eligibility."""
 
     project_id: int
-    story_id: PositiveStoryId
-    mode: Literal["structural"] = "structural"
+    story_ids: tuple[PositiveStoryId, ...] | None = None
     idempotency_key: str = Field(min_length=1)
     actor: str = Field(min_length=1)
     correlation_id: str | None = None
+
+    @field_validator("story_ids")
+    @classmethod
+    def canonicalize_story_ids(
+        cls,
+        story_ids: tuple[int, ...] | None,
+    ) -> tuple[int, ...] | None:
+        """Reject duplicate IDs and retain their stable canonical order."""
+        if story_ids is None:
+            return None
+        if len(set(story_ids)) != len(story_ids):
+            message = "story_ids must not contain duplicate Story IDs."
+            raise ValueError(message)
+        return tuple(sorted(story_ids))
+
+
+def _story_eligibility_error(*, code: str, message: str) -> JsonObject:
+    """Build one stable reconciliation error envelope."""
+    return {
+        "ok": False,
+        "data": {},
+        "errors": [{"code": code, "message": message}],
+    }
+
+
+def _story_eligibility_item(
+    story_id: int,
+    evidence: ValidationEvidence,
+) -> JsonObject:
+    """Project canonical v3 evidence without changing its persisted bytes."""
+    return {
+        "story_id": story_id,
+        "structurally_eligible": evidence.structurally_eligible,
+        "structural_failures": [
+            item.model_dump(mode="json") for item in evidence.structural_failures
+        ],
+        "validated_at": evidence.validated_at.isoformat(),
+        "evidence_fingerprint": canonical_hash(evidence.model_dump(mode="json")),
+    }
 
 
 class SprintStartRequest(_PlanningMutationRequest):
@@ -2436,76 +2476,114 @@ class AgileForgeApplication:
             )
         )
 
-    def _execute_story_validation_in_session(
+    def _reconcile_story_targets(
         self,
         session: Session,
-        request: StoryValidationRequest,
-    ) -> JsonObject:
-        """Execute structural story validation against state in session."""
-        project_result = self.reads.project_show(project_id=request.project_id)
-        if not project_result.get("ok"):
-            return project_result
-        story_result = self.reads.story_show(story_id=request.story_id)
-        if not story_result.get("ok"):
-            return story_result
-        story_data = story_result.get("data")
-        if (
-            not isinstance(story_data, dict)
-            or story_data.get("project_id") != request.project_id
-        ):
-            return {
-                "ok": False,
-                "data": {
-                    "story_id": request.story_id,
-                    "project_id": request.project_id,
-                },
-                "errors": [
-                    {
-                        "code": "STORY_NOT_FOUND",
-                        "message": (
-                            f"Story {request.story_id} was not found in project"
-                            f" {request.project_id}."
-                        ),
-                        "details": {
-                            "story_id": request.story_id,
-                            "project_id": request.project_id,
-                        },
-                    }
-                ],
-            }
-        eval_result = validate_story_with_specification_in_session(
-            session,
-            ValidateStoryInput(story_id=request.story_id, mode=request.mode),
-        )
-        if not eval_result.get("success", False):
-            error_code = cast(
-                "str", eval_result.get("error_code") or "STORY_VALIDATION_FAILED"
+        request: StoryEligibilityReconcileRequest,
+    ) -> tuple[UserStory, ...] | JsonObject:
+        """Resolve the complete valid target set before mutating any evidence."""
+        if session.get(Project, request.project_id) is None:
+            return _story_eligibility_error(
+                code="PROJECT_NOT_FOUND",
+                message=f"Project {request.project_id} was not found.",
             )
-            message = cast(
-                "str", eval_result.get("message") or "Story validation failed."
+        if request.story_ids is None:
+            return tuple(
+                session.exec(
+                    select(UserStory)
+                    .where(
+                        col(UserStory.project_id) == request.project_id,
+                        col(UserStory.is_superseded).is_(False),
+                    )
+                    .order_by(col(UserStory.story_id))
+                ).all()
             )
-            return {
-                "ok": False,
-                "data": eval_result,
-                "errors": [
-                    {
-                        "code": error_code,
-                        "message": message,
-                        "details": eval_result,
-                    }
-                ],
-            }
-        return {"ok": True, "data": eval_result, "errors": []}
+        stories: list[UserStory] = []
+        for story_id in request.story_ids:
+            story = session.get(UserStory, story_id)
+            if (
+                story is None
+                or story.project_id != request.project_id
+                or story.is_superseded
+            ):
+                return _story_eligibility_error(
+                    code="STORY_NOT_FOUND",
+                    message=(
+                        f"Story {story_id} was not found as an active Story in project"
+                        f" {request.project_id}."
+                    ),
+                )
+            stories.append(story)
+        return tuple(stories)
 
-    def validate_story(
+    def _reconcile_story_eligibility_in_session(
         self,
-        request: StoryValidationRequest,
+        session: Session,
+        request: StoryEligibilityReconcileRequest,
     ) -> JsonObject:
-        """Structurally validate one accepted Story provider-free."""
+        """Recompute only stale evidence and retain current v3 bytes exactly."""
+        targets = self._reconcile_story_targets(session, request)
+        if isinstance(targets, dict):
+            return targets
+        reconciled_story_ids: list[int] = []
+        unchanged_story_ids: list[int] = []
+        stories: list[JsonValue] = []
+        for story in targets:
+            story_id = cast("int", story.story_id)
+            try:
+                evidence = require_current_story_validation_evidence(
+                    session,
+                    story=story,
+                )
+                unchanged_story_ids.append(story_id)
+            except StoryValidationReadinessError:
+                evaluation = validate_story_with_specification_in_session(
+                    session,
+                    ValidateStoryInput(story_id=story_id, mode="structural"),
+                )
+                if evaluation.get("success") is not True:
+                    message = cast(
+                        "str",
+                        evaluation.get("message") or "Story validation failed.",
+                    )
+                    raise RuntimeError(message) from None
+                refreshed = session.get(UserStory, story_id, populate_existing=True)
+                if refreshed is None or refreshed.validation_evidence is None:
+                    message = "Story validation did not persist evidence."
+                    raise RuntimeError(message) from None
+                evidence = ValidationEvidence.model_validate_json(
+                    refreshed.validation_evidence,
+                    strict=True,
+                )
+                reconciled_story_ids.append(story_id)
+            stories.append(_story_eligibility_item(story_id, evidence))
+        story_ids = [cast("int", story.story_id) for story in targets]
+        return cast("JsonObject", {
+            "ok": True,
+            "data": {
+                "story_ids": story_ids,
+                "reconciled_story_ids": reconciled_story_ids,
+                "unchanged_story_ids": unchanged_story_ids,
+                "stories": stories,
+                "proves": [
+                    "Current provider-free structural eligibility evidence.",
+                    "Persisted structural failures for each returned Story.",
+                ],
+                "does_not_prove": ["Sprint selection.", "Dependency safety."],
+            },
+            "errors": [],
+        })
+
+    def reconcile_story_eligibility(
+        self,
+        request: StoryEligibilityReconcileRequest,
+    ) -> JsonObject:
+        """Idempotently reconcile current provider-free Story eligibility evidence."""
         request_payload: JsonObject = {
             "project_id": request.project_id,
-            "story_id": request.story_id,
-            "mode": request.mode,
+            "story_ids": (
+                list(request.story_ids) if request.story_ids is not None else None
+            ),
             "actor": request.actor,
             "correlation_id": request.correlation_id,
         }
@@ -2518,7 +2596,8 @@ class AgileForgeApplication:
 
             existing = session.exec(
                 select(WorkflowTransitionReceipt).where(
-                    col(WorkflowTransitionReceipt.request_kind) == "validate_story",
+                    col(WorkflowTransitionReceipt.request_kind)
+                    == "reconcile_story_structural_eligibility",
                     col(WorkflowTransitionReceipt.idempotency_key)
                     == request.idempotency_key,
                 )
@@ -2543,11 +2622,11 @@ class AgileForgeApplication:
                 if existing.result_json is not None:
                     return _JSON_OBJECT.validate_json(existing.result_json)
 
-            response = self._execute_story_validation_in_session(session, request)
+            response = self._reconcile_story_eligibility_in_session(session, request)
 
             started_at = datetime.now(tz=UTC)
             receipt = WorkflowTransitionReceipt(
-                request_kind="validate_story",
+                request_kind="reconcile_story_structural_eligibility",
                 idempotency_key=request.idempotency_key,
                 request_fingerprint=request_fingerprint,
                 request_json=canonical_json(request_payload),

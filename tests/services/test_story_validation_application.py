@@ -1,351 +1,266 @@
 # tests/services/test_story_validation_application.py
-"""Tests for explicit provider-free structural story validation application boundary."""
+"""Tests for explicit provider-free Story structural-eligibility reconciliation."""
 
-import concurrent.futures
+from __future__ import annotations
+
+import json
 from datetime import UTC, datetime
 from http import HTTPStatus
-from pathlib import Path
-from typing import Any, cast
-from unittest.mock import MagicMock, patch
+from typing import TYPE_CHECKING, Any, cast
+from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import Engine, create_engine
-from sqlalchemy.exc import OperationalError
-from sqlmodel import Session, SQLModel, col, select
+from sqlmodel import Session, col, select
 
 import api
-from models.core import Project, UserStory
+from models.core import UserStory
 from models.workflow import WorkflowTransitionReceipt
-from services.application import (
-    AgileForgeApplication,
-    StoryValidationRequest,
-)
+from services.application import AgileForgeApplication, StoryEligibilityReconcileRequest
 from services.read_projections import DurableReadProjectionService
-from services.specs import story_validation_service
-from tests.test_story_validation_service import _accepted_story
+from tests.test_story_validation_service import _accepted_story, _validate
+from utils.spec_schemas import ValidationEvidence
 from workflow.clock import FixedClock
 from workflow.definitions.root import project_graph
 from workflow.domain import WorkflowDomain
 
-NOW = datetime(2026, 8, 21, 12, tzinfo=UTC)
+if TYPE_CHECKING:
+    from sqlalchemy import Engine
+
+NOW = datetime(2026, 8, 25, 12, tzinfo=UTC)
 
 
 def _build_application(engine: Engine) -> AgileForgeApplication:
-    domain = WorkflowDomain(
-        engine=engine,
-        graph=project_graph(),
-        clock=FixedClock(now_value=NOW),
-    )
     return AgileForgeApplication(
-        workflow_domain=domain,
+        workflow_domain=WorkflowDomain(
+            engine=engine,
+            graph=project_graph(),
+            clock=FixedClock(now_value=NOW),
+        ),
         read_projection=DurableReadProjectionService(engine=engine),
     )
 
 
-def test_story_validation_application_facade_validates_story_structurally(
-    engine: Engine,
-) -> None:
-    """Validate accepted Story structurally provider-free and set ready_for_sprint."""
-    story_id = _accepted_story(engine)
-    with Session(engine) as session:
-        statement = select(UserStory).where(col(UserStory.story_id) == story_id)
-        story_before = session.exec(statement).first()
-        assert story_before is not None
-        assert story_before.validation_evidence is not None
-        project_id = story_before.project_id
-
-    app = _build_application(engine)
-    request = StoryValidationRequest(
+def _request(
+    project_id: int,
+    *,
+    story_ids: tuple[int, ...] | None = None,
+    key: str = "reconcile-key-1",
+    actor: str = "test-operator",
+    correlation_id: str | None = None,
+) -> StoryEligibilityReconcileRequest:
+    return StoryEligibilityReconcileRequest(
         project_id=project_id,
-        story_id=story_id,
-        mode="structural",
-        idempotency_key="test-validate-key",
-        actor="test-operator",
+        story_ids=story_ids,
+        idempotency_key=key,
+        actor=actor,
+        correlation_id=correlation_id,
     )
-    with patch.object(story_validation_service, "get_engine", return_value=engine):
-        result = app.validate_story(request)
+
+
+def _story(engine: Engine, story_id: int) -> UserStory:
+    with Session(engine) as session:
+        story = session.get(UserStory, story_id)
+        assert story is not None
+        session.expunge(story)
+        return story
+
+
+def _clear_evidence(engine: Engine, story_id: int) -> None:
+    with Session(engine) as session:
+        story = session.get(UserStory, story_id)
+        assert story is not None
+        story.validation_evidence = None
+        session.add(story)
+        session.commit()
+
+
+def _data(result: dict[str, Any]) -> dict[str, Any]:
+    data = result.get("data")
+    assert isinstance(data, dict)
+    return data
+
+
+def test_reconcile_all_active_stories_replaces_missing_evidence(engine: Engine) -> None:
+    """Missing evidence is persisted for every active accepted Story."""
+    story_id = _accepted_story(engine)
+    story = _story(engine, story_id)
+    _clear_evidence(engine, story_id)
+
+    result = _build_application(engine).reconcile_story_eligibility(
+        _request(story.project_id)
+    )
 
     assert result["ok"] is True
-    data = result["data"]
-    assert isinstance(data, dict)
-    assert data["success"] is True
-    assert data["ready_for_sprint"] is True
-    assert data["story_id"] == story_id
-    assert data["mode"] == "structural"
-    assert data["structural_failures"] == []
-
-    # Verify persisted UserStory row now contains validation evidence
-    with Session(engine) as session:
-        statement = select(UserStory).where(col(UserStory.story_id) == story_id)
-        story_after = session.exec(statement).first()
-        assert story_after is not None
-        assert story_after.validation_evidence is not None
-        assert '"structurally_eligible":true' in story_after.validation_evidence
+    data = cast("dict[str, Any]", result["data"])
+    assert data["story_ids"] == [story_id]
+    assert data["reconciled_story_ids"] == [story_id]
+    assert data["unchanged_story_ids"] == []
+    item = data["stories"][0]
+    assert item["story_id"] == story_id
+    assert item["structurally_eligible"] is True
+    assert item["structural_failures"] == []
+    assert item["validated_at"]
+    assert item["evidence_fingerprint"].startswith("sha256:")
+    assert "Sprint selection." in data["does_not_prove"]
+    assert "Dependency safety." in data["does_not_prove"]
 
 
-def test_story_validation_application_facade_rejects_mismatched_project(
+def test_reconcile_explicit_subset_is_canonical_and_rejects_duplicate_ids(
     engine: Engine,
 ) -> None:
-    """Story validation fails closed when the story belongs to a different project."""
+    """Explicit subsets use sorted unique Story IDs."""
     story_id = _accepted_story(engine)
+    story = _story(engine, story_id)
+
+    result = _build_application(engine).reconcile_story_eligibility(
+        _request(story.project_id, story_ids=(story_id,), key="subset-key")
+    )
+
+    assert result["ok"] is True
+    assert _data(result)["story_ids"] == [story_id]
+    with pytest.raises(ValueError, match="duplicate Story IDs"):
+        _request(story.project_id, story_ids=(story_id, story_id))
+
+
+def test_reconcile_replaces_legacy_v2_and_preserves_current_failed_v3_bytes(
+    engine: Engine,
+) -> None:
+    """Legacy evidence is replaced while current failed evidence is retained."""
+    story_id = _accepted_story(engine)
+    story = _story(engine, story_id)
+    _validate(engine, story_id)
     with Session(engine) as session:
-        statement = select(UserStory).where(col(UserStory.story_id) == story_id)
-        story = session.exec(statement).first()
-        assert story is not None
-        other_project = Project(name="other-project")
-        session.add(other_project)
+        row = session.get(UserStory, story_id)
+        assert row is not None
+        assert row.validation_evidence is not None
+        legacy = json.loads(row.validation_evidence)
+        legacy["schema_version"] = "agileforge.story-validation-evidence.v2"
+        row.validation_evidence = json.dumps(
+            legacy,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        row.story_description = "invalid statement"
+        session.add(row)
         session.commit()
-        session.refresh(other_project)
-        other_project_id = cast("int", other_project.project_id)
 
-    app = _build_application(engine)
-    request = StoryValidationRequest(
-        project_id=other_project_id,
-        story_id=story_id,
-        mode="structural",
-        idempotency_key="test-validate-key-2",
-        actor="test-operator",
+    first = _build_application(engine).reconcile_story_eligibility(
+        _request(story.project_id, key="legacy-key")
     )
-    with patch.object(story_validation_service, "get_engine", return_value=engine):
-        result = app.validate_story(request)
+    assert first["ok"] is True
+    first_data = _data(first)
+    assert first_data["reconciled_story_ids"] == [story_id]
+    assert first_data["stories"][0]["structurally_eligible"] is False
+    raw_after_replacement = _story(engine, story_id).validation_evidence
+    assert raw_after_replacement is not None
+    original_validated_at = ValidationEvidence.model_validate_json(
+        raw_after_replacement, strict=True
+    ).validated_at
 
-    assert result["ok"] is False
-    errors = result["errors"]
-    assert isinstance(errors, list)
-    assert len(errors) > 0
-    first_error = errors[0]
-    assert isinstance(first_error, dict)
-    assert first_error["code"] == "STORY_NOT_FOUND"
+    second = _build_application(engine).reconcile_story_eligibility(
+        _request(story.project_id, key="current-failed-key")
+    )
+    assert second["ok"] is True
+    assert _data(second)["unchanged_story_ids"] == [story_id]
+    assert _story(engine, story_id).validation_evidence == raw_after_replacement
+    assert ValidationEvidence.model_validate_json(
+        raw_after_replacement, strict=True
+    ).validated_at == original_validated_at
 
 
-def test_story_validation_api_endpoint(
+def test_reconcile_replays_exact_result_and_rejects_changed_metadata(
     engine: Engine,
 ) -> None:
-    """POST /api/projects/{id}/story/validate validates story successfully."""
+    """A matching key replays while changed metadata conflicts."""
     story_id = _accepted_story(engine)
-    with Session(engine) as session:
-        statement = select(UserStory).where(col(UserStory.story_id) == story_id)
-        story = session.exec(statement).first()
-        assert story is not None
-        project_id = story.project_id
-
+    story = _story(engine, story_id)
     app = _build_application(engine)
-    client = TestClient(api.app)
+    request = _request(story.project_id, key="replay-key", correlation_id="trace-1")
 
-    with (
-        patch("api._application", return_value=app),
-        patch.object(story_validation_service, "get_engine", return_value=engine),
-    ):
-        response = client.post(
-            f"/api/projects/{project_id}/story/validate",
-            json={
-                "story_id": story_id,
-                "mode": "structural",
-                "idempotency_key": "api-validate-1",
-                "actor": "api-operator",
-            },
-        )
+    first = app.reconcile_story_eligibility(request)
+    replay = app.reconcile_story_eligibility(request)
+    conflict = app.reconcile_story_eligibility(
+        _request(story.project_id, key="replay-key", correlation_id="trace-2")
+    )
 
-    assert response.status_code == HTTPStatus.OK
-    body = response.json()
-    assert body["status"] == "success"
-    assert body["data"]["success"] is True
-    assert body["data"]["ready_for_sprint"] is True
-    assert body["data"]["story_id"] == story_id
+    assert replay == first
+    assert conflict["ok"] is False
+    errors = cast("list[dict[str, Any]]", conflict["errors"])
+    assert errors[0]["code"] == "IDEMPOTENCY_CONFLICT"
 
 
-def test_story_validation_idempotent_replay(
+def test_reconcile_rolls_back_evidence_and_receipt_on_unexpected_failure(
     engine: Engine,
 ) -> None:
-    """Same idempotency key replays exact result without re-executing."""
+    """Unexpected evaluator failures leave no evidence or receipt behind."""
     story_id = _accepted_story(engine)
-    with Session(engine) as session:
-        statement = select(UserStory).where(col(UserStory.story_id) == story_id)
-        story = session.exec(statement).first()
-        assert story is not None
-        project_id = story.project_id
+    story = _story(engine, story_id)
+    _clear_evidence(engine, story_id)
+    request = _request(story.project_id, key="rollback-key")
 
-    app = _build_application(engine)
-    request = StoryValidationRequest(
-        project_id=project_id,
-        story_id=story_id,
-        mode="structural",
-        idempotency_key="same-key-replay-1",
-        actor="test-operator",
-    )
-    with patch.object(story_validation_service, "get_engine", return_value=engine):
-        result_1 = app.validate_story(request)
-        result_2 = app.validate_story(request)
-
-    assert result_1["ok"] is True
-    assert result_2["ok"] is True
-    assert result_1 == result_2
-
-
-def test_story_validation_idempotency_conflict_on_different_payload(
-    engine: Engine,
-) -> None:
-    """Same idempotency key with different request fails with conflict error."""
-    story_id = _accepted_story(engine)
-    with Session(engine) as session:
-        statement = select(UserStory).where(col(UserStory.story_id) == story_id)
-        story = session.exec(statement).first()
-        assert story is not None
-        project_id = story.project_id
-
-    app = _build_application(engine)
-    request_1 = StoryValidationRequest(
-        project_id=project_id,
-        story_id=story_id,
-        mode="structural",
-        idempotency_key="conflict-key-1",
-        actor="test-operator-1",
-    )
-    request_2 = StoryValidationRequest(
-        project_id=project_id,
-        story_id=story_id,
-        mode="structural",
-        idempotency_key="conflict-key-1",
-        actor="test-operator-2",  # different actor
-    )
-    with patch.object(story_validation_service, "get_engine", return_value=engine):
-        result_1 = app.validate_story(request_1)
-        result_2 = app.validate_story(request_2)
-
-    assert result_1["ok"] is True
-    assert result_2["ok"] is False
-    errors = result_2["errors"]
-    assert isinstance(errors, list)
-    assert len(errors) > 0
-    first_error = errors[0]
-    assert isinstance(first_error, dict)
-    assert first_error["code"] == "IDEMPOTENCY_CONFLICT"
-
-
-def test_story_validation_concurrent_identical_requests(
-    tmp_path: Path,
-) -> None:
-    """Concurrent identical requests handle claims safely and replay result."""
-    db_file = tmp_path / "story-validation-race.db"
-    race_engine = create_engine(
-        f"sqlite:///{db_file}",
-        connect_args={"check_same_thread": False},
-    )
-    SQLModel.metadata.create_all(race_engine)
-    try:
-        story_id = _accepted_story(race_engine)
-        with Session(race_engine) as session:
-            statement = select(UserStory).where(col(UserStory.story_id) == story_id)
-            story = session.exec(statement).first()
-            assert story is not None
-            project_id = story.project_id
-
-        app = _build_application(race_engine)
-        request = StoryValidationRequest(
-            project_id=project_id,
-            story_id=story_id,
-            mode="structural",
-            idempotency_key="concurrent-key-1",
-            actor="test-operator",
-        )
-        with (
-            patch.object(
-                story_validation_service, "get_engine", return_value=race_engine
-            ),
-            concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor,
-        ):
-            future_1 = executor.submit(app.validate_story, request)
-            future_2 = executor.submit(app.validate_story, request)
-            result_1 = future_1.result(timeout=5)
-            result_2 = future_2.result(timeout=5)
-
-        assert result_1["ok"] is True
-        assert result_2["ok"] is True
-        assert result_1 == result_2
-    finally:
-        race_engine.dispose()
-
-
-def test_story_validation_forced_failure_allows_clean_retry(
-    engine: Engine,
-) -> None:
-    """If validation fails, transaction rolls back cleanly and retry succeeds."""
-    story_id = _accepted_story(engine)
-    with Session(engine) as session:
-        statement = select(UserStory).where(col(UserStory.story_id) == story_id)
-        story = session.exec(statement).first()
-        assert story is not None
-        project_id = story.project_id
-
-    app = _build_application(engine)
-    request = StoryValidationRequest(
-        project_id=project_id,
-        story_id=story_id,
-        mode="structural",
-        idempotency_key="retry-key-1",
-        actor="test-operator",
-    )
-
-    # 1. Force an exception during in-session validation
     with (
         patch(
             "services.application.validate_story_with_specification_in_session",
-            side_effect=RuntimeError("Simulated provider-free transient failure"),
+            side_effect=RuntimeError("simulated evaluator failure"),
         ),
-        pytest.raises(RuntimeError, match="Simulated provider-free transient failure"),
+        pytest.raises(RuntimeError, match="simulated evaluator failure"),
     ):
-        app.validate_story(request)
+        _build_application(engine).reconcile_story_eligibility(request)
 
-    # 2. Verify no incomplete receipt row was left in the database
+    assert _story(engine, story_id).validation_evidence is None
     with Session(engine) as session:
         receipt = session.exec(
             select(WorkflowTransitionReceipt).where(
-                col(WorkflowTransitionReceipt.request_kind) == "validate_story",
-                col(WorkflowTransitionReceipt.idempotency_key) == "retry-key-1",
+                col(WorkflowTransitionReceipt.request_kind)
+                == "reconcile_story_structural_eligibility",
+                col(WorkflowTransitionReceipt.idempotency_key) == "rollback-key",
             )
         ).one_or_none()
-        assert receipt is None
-
-    # 3. Retry the identical request - it succeeds cleanly without IDEMPOTENCY_CONFLICT
-    retry_result = app.validate_story(request)
-    assert retry_result["ok"] is True
-    data = cast("dict[str, Any]", retry_result.get("data"))
-    assert data["ready_for_sprint"] is True
+    assert receipt is None
 
 
-def test_story_validation_lock_failure_fails_before_validation(
+def test_reconcile_api_and_cli_expose_only_the_renamed_operator_surface(
     engine: Engine,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Lock failure on BEGIN IMMEDIATE fails before executing validation."""
+    """Only the reconciliation API route and CLI command are exposed."""
+    from cli.main import main  # noqa: PLC0415
+
     story_id = _accepted_story(engine)
-    with Session(engine) as session:
-        statement = select(UserStory).where(col(UserStory.story_id) == story_id)
-        story = session.exec(statement).first()
-        assert story is not None
-        project_id = story.project_id
-
+    story = _story(engine, story_id)
     app = _build_application(engine)
-    request = StoryValidationRequest(
-        project_id=project_id,
-        story_id=story_id,
-        mode="structural",
-        idempotency_key="lock-failure-key-1",
-        actor="test-operator",
-    )
+    client = TestClient(api.app)
 
-    validation_mock = MagicMock()
-    with (
-        patch(
-            "sqlalchemy.engine.base.Connection.exec_driver_sql",
-            side_effect=OperationalError("database is locked", {}, Exception("locked")),
-        ),
-        patch(
-            "services.application.validate_story_with_specification_in_session",
-            validation_mock,
-        ),
-        pytest.raises(OperationalError, match="database is locked"),
-    ):
-        app.validate_story(request)
+    with patch("api._application", return_value=app):
+        response = client.post(
+            f"/api/projects/{story.project_id}/story/structural-eligibility/reconcile",
+            json={"idempotency_key": "api-key", "actor": "api-operator"},
+        )
+        removed = client.post(
+            f"/api/projects/{story.project_id}/story/validate",
+            json={"idempotency_key": "legacy-key", "actor": "api-operator"},
+        )
+        duplicate_ids = client.post(
+            f"/api/projects/{story.project_id}/story/structural-eligibility/reconcile",
+            json={
+                "story_ids": [story_id, story_id],
+                "idempotency_key": "duplicate-key",
+                "actor": "api-operator",
+            },
+        )
+    assert response.status_code == HTTPStatus.OK
+    assert response.json()["data"]["story_ids"] == [story_id]
+    assert removed.status_code == HTTPStatus.NOT_FOUND
+    assert duplicate_ids.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
 
-    assert validation_mock.call_count == 0
+    assert main(
+        [
+            "story", "eligibility", "reconcile", "--project-id",
+            str(story.project_id), "--story-id", str(story_id),
+            "--idempotency-key", "cli-key", "--actor", "cli-operator",
+        ],
+        application=app,
+    ) == 0
+    assert json.loads(capsys.readouterr().out)["data"]["story_ids"] == [story_id]
+    assert main(["story", "validate", "--project-id", str(story.project_id)]) == 2  # noqa: PLR2004
