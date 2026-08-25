@@ -68,7 +68,6 @@ const DASHBOARD_CONTROL_REQUEST_KINDS = new Set([
     'register_specification_source',
     'repair_story_readiness',
     'structure_specification',
-    'validate_story',
 ]);
 
 const DELIVERY_ACTION_CONFIG = {
@@ -176,6 +175,10 @@ function sprintSelectionMutationPayload(storyId, intent, expectedStateFingerprin
     });
 }
 
+function shouldUnlockStoryMutation(mutationCompleted, refreshed) {
+    return !mutationCompleted || refreshed;
+}
+
 async function postStorySelectionMutation(projectId, storyId, intent, expectedStateFingerprint) {
     const payload = sprintSelectionMutationPayload(storyId, intent, expectedStateFingerprint);
     const path = `/api/projects/${projectId}/story/sprint-selection`;
@@ -187,7 +190,9 @@ async function postStorySelectionMutation(projectId, storyId, intent, expectedSt
         });
         if (response?.ok === false) {
             const failure = response.errors?.[0];
-            throw new Error(failure?.message || 'Story Sprint-selection was rejected.');
+            const error = new Error(failure?.message || 'Story Sprint-selection was rejected.');
+            error.status = 200;
+            throw error;
         }
         return response;
     } catch (error) {
@@ -199,7 +204,9 @@ async function postStorySelectionMutation(projectId, storyId, intent, expectedSt
         });
         if (response?.ok === false) {
             const failure = response.errors?.[0];
-            throw new Error(failure?.message || 'Story Sprint-selection was rejected.');
+            const error = new Error(failure?.message || 'Story Sprint-selection was rejected.');
+            error.status = 200;
+            throw error;
         }
         return response;
     }
@@ -2928,11 +2935,13 @@ function installInteractions() {
             });
             activeStoryMutation = { storyId, intent, fingerprint };
             let refreshed = false;
+            let mutationCompleted = false;
             setProjectError('');
             try {
                 if (intent) {
                     if (label) label.textContent = 'Saving selection...';
                     await postStorySelectionMutation(selectedProjectId, storyId, intent, fingerprint);
+                    mutationCompleted = true;
                 } else {
                     if (label) label.textContent = 'Running structural checks...';
                     const response = await requestJson(`/api/projects/${selectedProjectId}/story/structural-eligibility/reconcile`, {
@@ -2944,6 +2953,7 @@ function installInteractions() {
                         const failure = response.errors?.[0];
                         throw new Error(failure?.message || 'Structural eligibility reconciliation was rejected.');
                     }
+                    mutationCompleted = true;
                 }
                 refreshed = await loadDashboard() === true;
                 if (!refreshed) {
@@ -2953,7 +2963,7 @@ function installInteractions() {
                 setProjectError(error.message);
             } finally {
                 activeStoryMutation = null;
-                if (refreshed) {
+                if (shouldUnlockStoryMutation(mutationCompleted, refreshed)) {
                     controls.forEach((control) => {
                         control.disabled = false;
                         control.removeAttribute('aria-busy');
