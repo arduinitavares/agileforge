@@ -1040,6 +1040,13 @@ test('structural and selection mutation payloads bind exact Story state and reus
     });
 });
 
+test('a successful Story mutation stays locked when its authority reload fails', () => {
+    const context = loadFrontend();
+    assert.strictEqual(context.shouldUnlockStoryMutation(true, false), false);
+    assert.strictEqual(context.shouldUnlockStoryMutation(true, true), true);
+    assert.strictEqual(context.shouldUnlockStoryMutation(false, false), true);
+});
+
 test('dependency review disables confirm button when canonical candidate projection is missing', () => {
     const context = loadFrontend();
     const action = {
