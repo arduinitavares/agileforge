@@ -38,6 +38,41 @@ function loadFrontend(fetchImpl = async () => ({ ok: true, text: async () => '{}
     return context;
 }
 
+function validInvestAssessment() {
+    return {
+        independent: {
+            result: 'pass',
+            rationale: 'Self-contained logic.',
+            evidence: 'No dependencies on unbuilt stories.',
+        },
+        negotiable: {
+            result: 'pass',
+            rationale: 'Implementation open to refinement.',
+            evidence: 'Focuses on user outcome.',
+        },
+        valuable: {
+            result: 'pass',
+            rationale: 'Direct user capability.',
+            evidence: 'Addresses requirement.',
+        },
+        estimable: {
+            result: 'pass',
+            rationale: 'Clear scope for sizing.',
+            evidence: 'Discrete criteria.',
+        },
+        small: {
+            result: 'pass',
+            rationale: 'Sized for single iteration.',
+            evidence: 'Effort is S.',
+        },
+        testable: {
+            result: 'pass',
+            rationale: 'Verifiable pass/fail criteria.',
+            evidence: 'Verification steps included.',
+        },
+    };
+}
+
 function storyReview(instanceKey) {
     return {
         binding: {
@@ -62,6 +97,7 @@ function storyReview(instanceKey) {
                     persona: 'Operator',
                     acceptance_criteria: ['The exact selector is preserved.'],
                     specification_evidence: [],
+                    invest_assessment: validInvestAssessment(),
                 }],
                 is_complete: true,
                 clarifying_questions: [],
@@ -1077,8 +1113,113 @@ test('storyItemMarkup renders explainable INVEST assessment across all 6 dimensi
     assert.ok(markup.includes('Parser needed first'));
 });
 
-test('investAssessmentMarkup handles empty or missing assessment gracefully', () => {
+test('investAssessmentMarkup renders explicit error on missing or malformed assessment', () => {
     const context = loadFrontend();
-    assert.strictEqual(context.investAssessmentMarkup(null), '');
-    assert.strictEqual(context.investAssessmentMarkup(undefined), '');
+    const missingMarkup = context.investAssessmentMarkup(null);
+    assert.ok(missingMarkup.includes('data-invest-assessment="invalid"'));
+    assert.ok(missingMarkup.includes('Quality Assessment Incomplete'));
+    assert.ok(missingMarkup.includes('Acceptance is disabled.'));
+
+    // Incomplete dimensions
+    const incomplete = validInvestAssessment();
+    delete incomplete.small;
+    const incompleteMarkup = context.investAssessmentMarkup(incomplete);
+    assert.ok(incompleteMarkup.includes('data-invest-assessment="invalid"'));
+    assert.ok(incompleteMarkup.includes('Missing / Invalid'));
+
+    // Blank rationale
+    const blankRationale = validInvestAssessment();
+    blankRationale.valuable.rationale = '   ';
+    const blankRationaleMarkup = context.investAssessmentMarkup(blankRationale);
+    assert.ok(blankRationaleMarkup.includes('data-invest-assessment="invalid"'));
+
+    // Invalid result string
+    const badResult = validInvestAssessment();
+    badResult.testable.result = 'maybe';
+    const badResultMarkup = context.investAssessmentMarkup(badResult);
+    assert.ok(badResultMarkup.includes('data-invest-assessment="invalid"'));
+
+    // Coercion test: non-string rationale, object evidence, whitespace-padded result
+    const coercedMalformed = validInvestAssessment();
+    coercedMalformed.independent = {
+        result: ' PASS ',
+        rationale: 123,
+        evidence: { source: 'REQ.1' },
+    };
+    assert.strictEqual(context.isWellFormedInvestDimension(coercedMalformed.independent), false);
+    assert.strictEqual(context.isWellFormedInvestAssessment(coercedMalformed), false);
+    const coercedMarkup = context.investAssessmentMarkup(coercedMalformed);
+    assert.ok(coercedMarkup.includes('data-invest-assessment="invalid"'));
+    assert.ok(coercedMarkup.includes('Missing / Invalid rationale'));
+    assert.ok(coercedMarkup.includes('Missing / Invalid evidence'));
+
+    // Uppercase result is rejected (strict lowercase enum required)
+    const upperCaseResult = validInvestAssessment();
+    upperCaseResult.independent.result = 'PASS';
+    assert.strictEqual(context.isWellFormedInvestDimension(upperCaseResult.independent), false);
+
+    // Extra keys on dimension are rejected
+    const extraDimKeys = validInvestAssessment();
+    extraDimKeys.independent.extra_key = 'unexpected';
+    assert.strictEqual(context.isWellFormedInvestDimension(extraDimKeys.independent), false);
+
+    // Extra keys on assessment object are rejected
+    const extraAssessmentKeys = validInvestAssessment();
+    extraAssessmentKeys.unknown_dimension = { result: 'pass', rationale: 'R', evidence: 'E' };
+    assert.strictEqual(context.isWellFormedInvestAssessment(extraAssessmentKeys), false);
+});
+
+test('planningReviewCardMarkup disables Accept and renders error banner for invalid story review', () => {
+    const context = loadFrontend();
+    const item = storyReview('backlog_item:PBI-000003');
+    // Remove invest_assessment to simulate missing quality evidence
+    delete item.review.candidate.story_items[0].invest_assessment;
+
+    const markup = context.planningReviewCardMarkup('Story review for PBI-000003', item, 'story', 0);
+    assert.ok(markup.includes('data-review-error="invalid-invest"'));
+    assert.ok(markup.includes('data-review-decision="accepted" disabled class='));
+    assert.ok(markup.includes('Acceptance disabled: required INVEST quality assessment is missing or malformed'));
+    assert.ok(markup.includes('Request changes'));
+    assert.ok(markup.includes('Reject'));
+
+    vm.runInContext(`lifecycleState = {
+        planningReviews: {
+            stories: {
+                items: [${JSON.stringify(item)}],
+            },
+        },
+    };`, context);
+
+    // planningReviewBinding must fail closed and return null for accepted decision
+    const acceptBinding = context.capturePlanningReview('story', 0, 'accepted');
+    assert.strictEqual(acceptBinding, null);
+
+    // But Request changes and Reject remain possible
+    const changesBinding = context.capturePlanningReview('story', 0, 'feedback');
+    assert.notStrictEqual(changesBinding, null);
+    const rejectBinding = context.capturePlanningReview('story', 0, 'rejected');
+    assert.notStrictEqual(rejectBinding, null);
+});
+
+test('planningReviewCardMarkup enables Accept when story review has valid INVEST assessment', () => {
+    const context = loadFrontend();
+    const item = storyReview('backlog_item:PBI-000003');
+
+    const markup = context.planningReviewCardMarkup('Story review for PBI-000003', item, 'story', 0);
+    assert.ok(!markup.includes('data-review-error="invalid-invest"'));
+    assert.ok(markup.includes('data-review-decision="accepted" class='));
+    assert.ok(!markup.includes('data-review-decision="accepted" disabled'));
+    assert.ok(markup.includes('>Accept</button>'));
+
+    vm.runInContext(`lifecycleState = {
+        planningReviews: {
+            stories: {
+                items: [${JSON.stringify(item)}],
+            },
+        },
+    };`, context);
+
+    const acceptBinding = context.capturePlanningReview('story', 0, 'accepted');
+    assert.notStrictEqual(acceptBinding, null);
+    assert.equal(acceptBinding.decision, 'accepted');
 });

@@ -20,11 +20,43 @@ Every user_stories item must contain exactly:
 - statement in "As a|an|the <persona>, I want ..., so that ..." form
 - one or more ordered acceptance_criteria
 - non-empty spec_item_ids selected strictly from parent_backlog_spec_item_ids
-- invest_assessment with all 6 dimensions (independent, negotiable, valuable, estimable, small, testable), each with result ("pass", "concern", or "fail"), rationale, and evidence
+- invest_assessment evaluating all 6 dimensions (independent, negotiable, valuable, estimable, small, testable)
 - estimated_effort: XS, S, M, L, or XL
 - produced_artifacts
 - research_caveats
 - dependency_candidates with prerequisite_ref, reason, and explicit|inferred
+
+INVEST Assessment Rubric & Operational Semantics:
+INVEST assessments are advisory model recommendations provided as evidence for human review, subject to human discretion. Every dimension requires:
+- result: "pass", "concern", or "fail"
+- rationale: concise non-blank explanation of the rating
+- evidence: concrete non-blank citation of story text, criteria, or specification grounding
+
+Dimension Definitions & Criteria:
+- independent: Delivers self-contained value without hard implementation coupling or sequential dependencies on sibling stories beyond declared prerequisites.
+  * pass: Self-contained increment; can be scheduled, built, and delivered independently.
+  * concern: Has minor shared-component overlap or ordering preference, but remains feasible.
+  * fail: Cannot be developed, tested, or demonstrated without another unreleased story completing first.
+- negotiable: Expresses user intent, outcome, and constraints without prescribing internal code design or UI minutiae.
+  * pass: Captures requirements clearly while leaving implementation mechanisms open to refinement.
+  * concern: Contains minor prescriptive technical details that restrict development flexibility.
+  * fail: Dictates exact internal code, schemas, or routines instead of user-visible behavior.
+- valuable: Delivers observable user, customer, or stakeholder value grounded in cited Specification items.
+  * pass: Direct user/business capability explicitly grounded in cited Specification items.
+  * concern: Value is indirect or foundational enablement tracing to product objectives.
+  * fail: Pure technical chore or duplicate work with no identifiable user/stakeholder value.
+- estimable: Scope, complexity, and criteria are bounded and unambiguous so effort can be sized with confidence.
+  * pass: Clear boundaries, well-understood domain, and unambiguous acceptance criteria.
+  * concern: Minor domain ambiguities or external uncertainties slightly increasing estimation variance.
+  * fail: Unbounded scope or major unknown dependencies preventing reliable sizing.
+- small: Represents a single focused vertical slice with bounded scenario scope.
+  * pass: Focused, single-scenario vertical slice with concise acceptance scope.
+  * concern: Broad vertical slice with multiple distinct user flows that may benefit from future splitting.
+  * fail: Unbounded, multi-feature composite or epic-sized scope.
+- testable: Acceptance criteria provide clear, observable verification conditions for pass/fail determination.
+  * pass: Concrete, observable criteria with deterministic verification outcomes.
+  * concern: Criteria are verifiable but abstract or use subjective phrasing.
+  * fail: Criteria are missing, contradictory, or unverifiable.
 
 Each Story must cite at least one qualifying normative Specification item.
 Acceptance criteria must be observable and supported by the cited source truth.

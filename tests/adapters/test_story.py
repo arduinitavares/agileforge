@@ -6,6 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from adapters.adk.agents.story import (
+    USER_STORY_PATCH_INSTRUCTIONS,
     USER_STORY_WRITER_INSTRUCTIONS,
     create_user_story_patch_agent,
     create_user_story_writer_agent,
@@ -116,18 +117,33 @@ def test_user_story_patch_agent_preserves_the_same_strict_recipe_boundary() -> N
     assert full_agent.before_model_callback is preserve_story_output_schema
 
 
-def test_instructions_require_explainable_invest_assessment() -> None:
-    """Verify prompt instructions define each INVEST dimension."""
-    instructions = USER_STORY_WRITER_INSTRUCTIONS
-    assert "invest_assessment with all 6 dimensions" in instructions
-    for dim in (
-        "independent",
-        "negotiable",
-        "valuable",
-        "estimable",
-        "small",
-        "testable",
+def test_instructions_require_explainable_invest_assessment_with_rubric() -> None:
+    """Verify prompt instructions define INVEST rubric and advisory semantics."""
+    for instructions in (
+        USER_STORY_WRITER_INSTRUCTIONS,
+        USER_STORY_PATCH_INSTRUCTIONS,
     ):
-        assert dim in instructions
-    assert "invest_score: High, Medium, or Low" not in instructions
-    assert "decomposition_warning" not in instructions
+        assert "INVEST Assessment Rubric & Operational Semantics" in instructions
+        assert (
+            "INVEST assessments are advisory model recommendations "
+            "provided as evidence for human review"
+        ) in instructions
+        assert "result: \"pass\", \"concern\", or \"fail\"" in instructions
+        assert "rationale: concise non-blank explanation" in instructions
+        assert "evidence: concrete non-blank citation" in instructions
+        for dim in (
+            "independent",
+            "negotiable",
+            "valuable",
+            "estimable",
+            "small",
+            "testable",
+        ):
+            assert dim in instructions
+        assert "vertical slice" in instructions
+        assert "bounded scenario scope" in instructions
+        assert "XS, S, or M" not in instructions
+        assert "XS/S/M" not in instructions
+        assert "iteration capacity" not in instructions
+        assert "invest_score: High, Medium, or Low" not in instructions
+        assert "decomposition_warning" not in instructions

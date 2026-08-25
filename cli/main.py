@@ -1313,12 +1313,73 @@ def _roadmap_review_lines(candidate: dict[str, object]) -> list[str]:
     return lines
 
 
+_INVEST_DIMENSION_NAMES: tuple[str, ...] = (
+    "independent",
+    "negotiable",
+    "valuable",
+    "estimable",
+    "small",
+    "testable",
+)
+
+
+def _is_well_formed_invest_dimension(dim: object) -> bool:
+    if not isinstance(dim, dict):
+        return False
+    dim_dict = cast("dict[str, object]", dim)
+    if set(dim_dict.keys()) != {"result", "rationale", "evidence"}:
+        return False
+    result = dim_dict.get("result")
+    rationale = dim_dict.get("rationale")
+    evidence = dim_dict.get("evidence")
+    if not isinstance(result, str) or result not in {"pass", "concern", "fail"}:
+        return False
+    if not isinstance(rationale, str) or not rationale.strip():
+        return False
+    return bool(isinstance(evidence, str) and evidence.strip())
+
+
+def _is_well_formed_invest_assessment(assessment: object) -> bool:
+    if not isinstance(assessment, dict):
+        return False
+    assessment_dict = cast("dict[str, object]", assessment)
+    if set(assessment_dict.keys()) != set(_INVEST_DIMENSION_NAMES):
+        return False
+    return all(
+        _is_well_formed_invest_dimension(assessment_dict.get(dim_name))
+        for dim_name in _INVEST_DIMENSION_NAMES
+    )
+
+
+def _is_story_review_acceptable(review: object) -> bool:
+    if not isinstance(review, dict):
+        return False
+    review_dict = cast("dict[str, object]", review)
+    candidate = review_dict.get("candidate")
+    if not isinstance(candidate, dict):
+        return False
+    candidate_dict = cast("dict[str, object]", candidate)
+    story_items = candidate_dict.get("story_items")
+    if not isinstance(story_items, list) or not story_items:
+        return False
+    for item in story_items:
+        if not isinstance(item, dict):
+            return False
+        item_dict = cast("dict[str, object]", item)
+        if not _is_well_formed_invest_assessment(item_dict.get("invest_assessment")):
+            return False
+    return True
+
+
 def _invest_assessment_lines(value: object, *, indent: str = "") -> list[str]:
+    sub_indent = f"{indent}  "
     if not isinstance(value, dict):
-        return []
+        return [
+            f"{indent}INVEST assessment: [MALFORMED / MISSING] - "
+            "required quality evidence is incomplete"
+        ]
     dict_val = cast("dict[str, object]", value)
     lines = [f"{indent}INVEST assessment:"]
-    sub_indent = f"{indent}  "
     dimensions = [
         ("Independent", dict_val.get("independent")),
         ("Negotiable", dict_val.get("negotiable")),
@@ -1328,16 +1389,46 @@ def _invest_assessment_lines(value: object, *, indent: str = "") -> list[str]:
         ("Testable", dict_val.get("testable")),
     ]
     for name, dim_raw in dimensions:
-        if isinstance(dim_raw, dict):
+        if _is_well_formed_invest_dimension(dim_raw):
             dim_dict = cast("dict[str, object]", dim_raw)
-            result = _review_text(dim_dict.get("result")).upper()
-            rationale = _review_text(dim_dict.get("rationale"))
-            evidence = _review_text(dim_dict.get("evidence"))
+            result = cast("str", dim_dict["result"]).upper()
+            rationale = cast("str", dim_dict["rationale"]).strip()
+            evidence = cast("str", dim_dict["evidence"]).strip()
             lines.append(
-                f"{sub_indent}- {name} [{result}]: {rationale} (Evidence: {evidence})"
+                f"{sub_indent}- {name} [{result}]: "
+                f"{rationale} (Evidence: {evidence})"
+            )
+        elif isinstance(dim_raw, dict):
+            dim_dict = cast("dict[str, object]", dim_raw)
+            result_raw = dim_dict.get("result")
+            result = (
+                result_raw.upper()
+                if isinstance(result_raw, str) and result_raw.strip()
+                else "MISSING"
+            )
+            rationale_raw = dim_dict.get("rationale")
+            rat_text = (
+                rationale_raw.strip()
+                if isinstance(rationale_raw, str) and rationale_raw.strip()
+                else "MISSING"
+            )
+            evidence_raw = dim_dict.get("evidence")
+            evi_text = (
+                evidence_raw.strip()
+                if isinstance(evidence_raw, str) and evidence_raw.strip()
+                else "MISSING"
+            )
+            lines.append(
+                f"{sub_indent}- {name} [INVALID]: result={result}, "
+                f"rationale={rat_text}, evidence={evi_text}"
             )
         else:
-            lines.append(f"{sub_indent}- {name}: {_review_text(dim_raw)}")
+            raw_text = (
+                dim_raw.strip()
+                if isinstance(dim_raw, str) and dim_raw.strip()
+                else "No dimension assessment provided"
+            )
+            lines.append(f"{sub_indent}- {name} [MISSING]: {raw_text}")
     return lines
 
 
@@ -1380,10 +1471,9 @@ def _story_item_lines(value: object, *, indent: str = "") -> list[str]:
     lines.extend(
         _specification_lines(story.get("specification_evidence"), indent=indent)
     )
-    if story.get("invest_assessment") is not None:
-        lines.extend(
-            _invest_assessment_lines(story["invest_assessment"], indent=indent)
-        )
+    lines.extend(
+        _invest_assessment_lines(story.get("invest_assessment"), indent=indent)
+    )
     if story.get("research_caveats") is not None:
         lines.extend(
             _list_lines("Research caveats", story["research_caveats"], indent=indent)
@@ -1596,6 +1686,11 @@ def _roadmap_decide(args: argparse.Namespace, application: _Application) -> int:
 def _story_decide(args: argparse.Namespace, application: _Application) -> int:
     decision = cast("Literal['accepted', 'rejected', 'feedback']", args.decision)
     binding, review = _story_review_choice(application.story_reviews(args.project_id))
+    if decision == "accepted" and not _is_story_review_acceptable(review):
+        raise ValueError(
+            "Story proposal cannot be accepted: required INVEST quality assessment "
+            "is missing or malformed."
+        )
     if not _confirm_planning_review(review, decision=decision):
         raise ValueError("Story review cancelled before any write.")
     return _emit_result(

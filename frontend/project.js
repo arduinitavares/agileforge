@@ -1105,44 +1105,126 @@ function backlogItemMarkup(value) {
     </section>`;
 }
 
+const INVEST_DIMENSION_KEYS = [
+    'independent',
+    'negotiable',
+    'valuable',
+    'estimable',
+    'small',
+    'testable',
+];
+
+function isWellFormedInvestDimension(rawDim) {
+    if (typeof rawDim !== 'object' || rawDim === null || Array.isArray(rawDim)) {
+        return false;
+    }
+    const keys = Object.keys(rawDim);
+    if (keys.length !== 3) return false;
+    for (const key of ['result', 'rationale', 'evidence']) {
+        if (!keys.includes(key)) return false;
+    }
+    if (typeof rawDim.result !== 'string') return false;
+    if (rawDim.result !== 'pass' && rawDim.result !== 'concern' && rawDim.result !== 'fail') {
+        return false;
+    }
+    if (typeof rawDim.rationale !== 'string' || rawDim.rationale.trim().length === 0) {
+        return false;
+    }
+    if (typeof rawDim.evidence !== 'string' || rawDim.evidence.trim().length === 0) {
+        return false;
+    }
+    return true;
+}
+
+function isWellFormedInvestAssessment(rawAssessment) {
+    if (typeof rawAssessment !== 'object' || rawAssessment === null || Array.isArray(rawAssessment)) {
+        return false;
+    }
+    const keys = Object.keys(rawAssessment);
+    if (keys.length !== INVEST_DIMENSION_KEYS.length) return false;
+    for (const key of INVEST_DIMENSION_KEYS) {
+        if (!keys.includes(key)) return false;
+        if (!isWellFormedInvestDimension(rawAssessment[key])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+function isStoryReviewAcceptable(review) {
+    const candidate = reviewObject(review?.candidate);
+    if (!candidate) return false;
+    const items = reviewItems(candidate.story_items);
+    if (!items || items.length === 0) return false;
+    for (const item of items) {
+        const story = reviewObject(item);
+        if (!story || !isWellFormedInvestAssessment(story.invest_assessment)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 function investDimensionResultBadge(result) {
-    const norm = String(result || '').toLowerCase();
-    if (norm === 'pass') {
+    if (result === 'pass') {
         return '<span class="inline-flex items-center rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-semibold text-emerald-800">Pass</span>';
     }
-    if (norm === 'concern') {
+    if (result === 'concern') {
         return '<span class="inline-flex items-center rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-800">Concern</span>';
     }
-    if (norm === 'fail') {
+    if (result === 'fail') {
         return '<span class="inline-flex items-center rounded-full bg-rose-100 px-2 py-0.5 text-xs font-semibold text-rose-800">Fail</span>';
     }
-    return `<span class="inline-flex items-center rounded-full bg-slate-100 px-2 py-0.5 text-xs font-semibold text-slate-800">${escapeWorkflowText(String(result || 'Unknown'))}</span>`;
+    return `<span class="inline-flex items-center rounded-full bg-slate-100 px-2 py-0.5 text-xs font-semibold text-slate-800">${escapeWorkflowText(typeof result === 'string' && result ? result : 'Unknown')}</span>`;
 }
 
 function investAssessmentMarkup(value) {
     const assessment = reviewObject(value);
-    if (!assessment) return '';
+    const isValid = isWellFormedInvestAssessment(assessment);
     const dimensions = [
-        ['Independent', assessment.independent],
-        ['Negotiable', assessment.negotiable],
-        ['Valuable', assessment.valuable],
-        ['Estimable', assessment.estimable],
-        ['Small', assessment.small],
-        ['Testable', assessment.testable],
+        ['Independent', assessment?.independent],
+        ['Negotiable', assessment?.negotiable],
+        ['Valuable', assessment?.valuable],
+        ['Estimable', assessment?.estimable],
+        ['Small', assessment?.small],
+        ['Testable', assessment?.testable],
     ];
+
+    if (!isValid) {
+        return `<section class="space-y-2 rounded-md border border-rose-200 bg-rose-50 p-3 text-xs text-rose-800" data-invest-assessment="invalid">
+        <div class="flex items-center gap-2 font-semibold">
+            <span class="inline-flex items-center rounded-full bg-rose-200 px-2 py-0.5 text-xs font-semibold text-rose-900">Quality Assessment Incomplete</span>
+            <span>Required INVEST quality assessment is missing or malformed. Acceptance is disabled.</span>
+        </div>
+        ${assessment ? `<div class="mt-2 grid gap-2 sm:grid-cols-2">
+            ${dimensions.map(([name, rawDim]) => {
+                const dim = reviewObject(rawDim);
+                const dimValid = isWellFormedInvestDimension(dim);
+                return `<div class="rounded-md border ${dimValid ? 'border-slate-200 bg-white' : 'border-rose-300 bg-rose-100/50'} p-2.5 space-y-1 text-xs">
+                    <div class="flex items-center justify-between">
+                        <strong class="font-semibold text-slate-900">${escapeWorkflowText(name)}</strong>
+                        ${dimValid ? investDimensionResultBadge(dim.result) : '<span class="inline-flex items-center rounded-full bg-rose-200 px-2 py-0.5 text-xs font-semibold text-rose-900">Missing / Invalid</span>'}
+                    </div>
+                    <p class="text-slate-700"><strong>Rationale:</strong> ${typeof dim?.rationale === 'string' && dim.rationale.trim() ? escapeWorkflowText(dim.rationale) : '<em class="text-rose-700">Missing / Invalid rationale</em>'}</p>
+                    <p class="text-slate-600"><strong>Evidence:</strong> ${typeof dim?.evidence === 'string' && dim.evidence.trim() ? escapeWorkflowText(dim.evidence) : '<em class="text-rose-700">Missing / Invalid evidence</em>'}</p>
+                </div>`;
+            }).join('')}
+        </div>` : ''}
+    </section>`;
+    }
+
     return `<section class="space-y-2" data-invest-assessment="true">
         <h4 class="text-xs font-semibold uppercase text-slate-500">INVEST assessment</h4>
         <div class="grid gap-2 sm:grid-cols-2">
             ${dimensions.map(([name, rawDim]) => {
                 const dim = reviewObject(rawDim);
-                if (!dim) return '';
                 return `<div class="rounded-md border border-slate-200 bg-slate-50 p-2.5 space-y-1 text-xs">
                     <div class="flex items-center justify-between">
                         <strong class="font-semibold text-slate-900">${escapeWorkflowText(name)}</strong>
                         ${investDimensionResultBadge(dim.result)}
                     </div>
-                    <p class="text-slate-700"><strong>Rationale:</strong> ${escapeWorkflowText(reviewValue(dim.rationale))}</p>
-                    <p class="text-slate-600"><strong>Evidence:</strong> ${escapeWorkflowText(reviewValue(dim.evidence))}</p>
+                    <p class="text-slate-700"><strong>Rationale:</strong> ${escapeWorkflowText(dim.rationale)}</p>
+                    <p class="text-slate-600"><strong>Evidence:</strong> ${escapeWorkflowText(dim.evidence)}</p>
                 </div>`;
             }).join('')}
         </div>
@@ -1261,15 +1343,26 @@ function planningReviewContentMarkup(review) {
     return '';
 }
 
+function planningReviewAcceptButtonMarkup(scope, index, isAcceptable) {
+    if (isAcceptable) {
+        return `<button type="button" data-planning-review="${escapeWorkflowText(scope)}" data-review-index="${index}" data-review-decision="accepted" class="${BUTTON_PRIMARY}">Accept</button>`;
+    }
+    return `<button type="button" data-planning-review="${escapeWorkflowText(scope)}" data-review-index="${index}" data-review-decision="accepted" disabled class="${BUTTON_PRIMARY} opacity-50 cursor-not-allowed" title="Acceptance disabled: required INVEST quality assessment is missing or malformed">Accept</button>`;
+}
+
 function planningReviewCardMarkup(label, selected, scope, index = 0) {
     if (!selected?.review || !selected?.binding) return '';
     const content = planningReviewContentMarkup(selected.review);
     if (!content) return '';
+    const isStory = scope === 'story';
+    const isAcceptable = !isStory || isStoryReviewAcceptable(selected.review);
+
     return `<article class="rounded-lg border border-slate-300 bg-white p-4" data-planning-review-card="${escapeWorkflowText(scope)}">
         <h3 class="text-sm font-semibold">${escapeWorkflowText(label)}</h3>
+        ${!isAcceptable ? `<div class="mt-2 rounded-md border border-rose-300 bg-rose-50 p-3 text-xs text-rose-800 font-medium" data-review-error="invalid-invest">Story proposal cannot be accepted: required INVEST quality assessment is missing or malformed. Acceptance is disabled.</div>` : ''}
         <div class="mt-3 space-y-4">${content}</div>
         <div class="mt-4 flex flex-wrap gap-2">
-            <button type="button" data-planning-review="${escapeWorkflowText(scope)}" data-review-index="${index}" data-review-decision="accepted" class="${BUTTON_PRIMARY}">Accept</button>
+            ${planningReviewAcceptButtonMarkup(scope, index, isAcceptable)}
             <button type="button" data-planning-review="${escapeWorkflowText(scope)}" data-review-index="${index}" data-review-decision="feedback" class="${BUTTON_SECONDARY}">Request changes</button>
             <button type="button" data-planning-review="${escapeWorkflowText(scope)}" data-review-index="${index}" data-review-decision="rejected" class="${BUTTON_DANGER}">Reject</button>
         </div>
@@ -2080,6 +2173,9 @@ function capturePlanningReview(scope, index, decision) {
 function planningReviewBinding(selected, scope, decision) {
     const binding = selected?.binding;
     if (!binding?.decision_fingerprint) return null;
+    if (scope === 'story' && decision === 'accepted' && !isStoryReviewAcceptable(selected?.review)) {
+        return null;
+    }
     let titleScope = scope === 'sprint' ? 'Sprint plan' : scope;
     let titleSuffix = '';
     if (scope === 'story') {

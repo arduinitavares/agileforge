@@ -10,7 +10,12 @@ from typing import TYPE_CHECKING, cast
 import pytest
 
 from cli import main as cli_main
-from cli.main import build_parser, main
+from cli.main import (
+    _invest_assessment_lines,
+    _story_item_lines,
+    build_parser,
+    main,
+)
 from cli.workflow_commands import workflow_next
 from services.application import ExpectedPlanningReviewBinding
 from tests.adapters.test_command_renderer import position_fixture
@@ -1378,6 +1383,7 @@ class _Application:
     writes: list[tuple[object, ExpectedPlanningReviewBinding]] = field(
         default_factory=list
     )
+    story_review_override: dict[str, object] | None = None
 
     def backlog_review(self, _project_id: int) -> dict[str, object]:
         return _unique_review()
@@ -1406,7 +1412,11 @@ class _Application:
                             "decision_fingerprint": "story-decision-secret",
                             "instance_key": "story-instance-secret",
                         },
-                        "review": _planning_review("story"),
+                        "review": (
+                            self.story_review_override
+                            if self.story_review_override is not None
+                            else _planning_review("story")
+                        ),
                     }
                 ]
             },
@@ -1575,3 +1585,197 @@ def test_cli_source_has_no_retired_operator_surface() -> None:
     source = Path("cli/main.py").read_text(encoding="utf-8").casefold()
     assert "auth" + "ority" not in source
     assert "invar" + "iant" not in source
+
+
+def test_invest_assessment_lines_formats_valid_assessment() -> None:
+    """Format all six INVEST dimensions with uppercase results and evidence."""
+    assessment = {
+        "independent": {
+            "result": "pass",
+            "rationale": "Self-contained logic.",
+            "evidence": "No unbuilt dependencies.",
+        },
+        "negotiable": {
+            "result": "pass",
+            "rationale": "Refinable approach.",
+            "evidence": "Focuses on user outcome.",
+        },
+        "valuable": {
+            "result": "pass",
+            "rationale": "Direct benefit.",
+            "evidence": "Traces to REQ.001.",
+        },
+        "estimable": {
+            "result": "pass",
+            "rationale": "Clear boundaries.",
+            "evidence": "Discrete criteria.",
+        },
+        "small": {
+            "result": "concern",
+            "rationale": "Near upper size bound.",
+            "evidence": "Effort is M.",
+        },
+        "testable": {
+            "result": "pass",
+            "rationale": "Deterministic pass/fail.",
+            "evidence": "Explicit verification criteria.",
+        },
+    }
+    lines = _invest_assessment_lines(assessment, indent="  ")
+    assert lines[0] == "  INVEST assessment:"
+    assert (
+        "    - Independent [PASS]: Self-contained logic. "
+        "(Evidence: No unbuilt dependencies.)"
+    ) in lines
+    assert (
+        "    - Small [CONCERN]: Near upper size bound. "
+        "(Evidence: Effort is M.)"
+    ) in lines
+    assert (
+        "    - Testable [PASS]: Deterministic pass/fail. "
+        "(Evidence: Explicit verification criteria.)"
+    ) in lines
+
+
+def test_invest_assessment_lines_handles_missing_and_malformed_assessments() -> None:
+    """Emit explicit diagnostics for missing assessment or incomplete dimensions."""
+    # Non-dict assessment
+    missing = _invest_assessment_lines(None, indent="  ")
+    assert len(missing) == 1
+    assert "INVEST assessment: [MALFORMED / MISSING]" in missing[0]
+
+    # Incomplete assessment with missing dimension and invalid result
+    malformed = {
+        "independent": {
+            "result": "pass",
+            "rationale": "Valid.",
+            "evidence": "Valid.",
+        },
+        "negotiable": {
+            "result": "invalid_result",
+            "rationale": "Valid.",
+            "evidence": "Valid.",
+        },
+        "valuable": {
+            "result": "pass",
+            "rationale": "",
+            "evidence": "Valid.",
+        },
+    }
+    lines = _invest_assessment_lines(malformed, indent="  ")
+    assert "INVEST assessment:" in lines[0]
+    assert any("Independent [PASS]" in line for line in lines)
+    assert any("Negotiable [INVALID]" in line for line in lines)
+    assert any("Valuable [INVALID]" in line for line in lines)
+    assert any("Estimable [MISSING]" in line for line in lines)
+    assert any("Small [MISSING]" in line for line in lines)
+    assert any("Testable [MISSING]" in line for line in lines)
+
+    # Malformed types regression: integer rationale, dict evidence
+    type_malformed = {
+        "independent": {
+            "result": "pass",
+            "rationale": 123,
+            "evidence": {"source": "REQ.1"},
+        },
+        "negotiable": {
+            "result": "PASS",
+            "rationale": "Valid.",
+            "evidence": "Valid.",
+        },
+        "valuable": {
+            "result": "pass",
+            "rationale": "Valid.",
+            "evidence": "Valid.",
+            "extra_key": True,
+        },
+    }
+    type_lines = _invest_assessment_lines(type_malformed, indent="  ")
+    assert any("Independent [INVALID]" in line for line in type_lines)
+    assert any("Negotiable [INVALID]" in line for line in type_lines)
+    assert any("Valuable [INVALID]" in line for line in type_lines)
+
+
+def test_story_item_lines_formats_missing_invest_assessment() -> None:
+    """Always include INVEST diagnostic line when assessment is missing."""
+    story_without_invest: dict[str, object] = {
+        "story_title": "Title",
+        "statement": "As a user, I want something.",
+        "persona": "user",
+        "acceptance_criteria": ["Done."],
+        "specification_evidence": [],
+    }
+    lines = _story_item_lines(story_without_invest, indent="  ")
+    assert any(
+        "INVEST assessment: [MALFORMED / MISSING]" in line for line in lines
+    )
+
+
+def test_story_decide_rejects_acceptance_when_invest_missing_or_malformed(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Story decide with accepted decision fails closed on invalid INVEST assessment."""
+    app = _Application()
+    review = _planning_review("story")
+    candidate = cast("dict[str, object]", review["candidate"])
+    story_items = cast("list[dict[str, object]]", candidate["story_items"])
+    story_items[0]["invest_assessment"] = None
+    app.story_review_override = review
+
+    exit_code = main(_decision_argv("story"), application=app)
+    assert exit_code == ARGUMENT_ERROR_EXIT_CODE
+
+    captured = capsys.readouterr()
+    assert (
+        "Story proposal cannot be accepted: required INVEST quality assessment "
+        "is missing or malformed." in captured.out
+    )
+    assert len(app.writes) == 0
+
+
+def test_story_decide_allows_feedback_and_rejection_for_malformed_invest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Feedback and rejection decisions remain available even with malformed INVEST."""
+    app = _Application()
+    review = _planning_review("story")
+    candidate = cast("dict[str, object]", review["candidate"])
+    story_items = cast("list[dict[str, object]]", candidate["story_items"])
+    story_items[0]["invest_assessment"] = None
+    app.story_review_override = review
+    monkeypatch.setattr("sys.stdin", io.StringIO("yes\nyes\n"))
+
+    feedback_argv = [
+        "story",
+        "decide",
+        "--project-id",
+        "41",
+        "--decision",
+        "feedback",
+        "--rationale",
+        "Please provide valid INVEST assessment.",
+        "--idempotency-key",
+        "story-feedback-41",
+        "--actor",
+        "operator",
+    ]
+    assert main(feedback_argv, application=app) == 0
+    assert len(app.writes) == 1
+
+    reject_argv = [
+        "story",
+        "decide",
+        "--project-id",
+        "41",
+        "--decision",
+        "rejected",
+        "--rationale",
+        "Rejected incomplete proposal.",
+        "--idempotency-key",
+        "story-reject-41",
+        "--actor",
+        "operator",
+    ]
+    assert main(reject_argv, application=app) == 0
+    decisions = [getattr(w[0], "decision", None) for w in app.writes]
+    assert decisions == ["feedback", "rejected"]

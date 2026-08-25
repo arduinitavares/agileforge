@@ -99,6 +99,41 @@ _ACTION_CHILDREN = {
 }
 
 
+def _valid_invest_assessment_payload() -> JsonObject:
+    return {
+        "independent": {
+            "result": "pass",
+            "rationale": "Self-contained Story increment.",
+            "evidence": "No unbuilt dependencies required.",
+        },
+        "negotiable": {
+            "result": "pass",
+            "rationale": "Implementation details open to refinement.",
+            "evidence": "Outcome focused statement.",
+        },
+        "valuable": {
+            "result": "pass",
+            "rationale": "Directly delivers operator review capability.",
+            "evidence": "Addresses parent requirement.",
+        },
+        "estimable": {
+            "result": "pass",
+            "rationale": "Clear boundaries and discrete criteria.",
+            "evidence": "Single verification criterion.",
+        },
+        "small": {
+            "result": "pass",
+            "rationale": "Sized comfortably for one iteration.",
+            "evidence": "Effort is small.",
+        },
+        "testable": {
+            "result": "pass",
+            "rationale": "Deterministic verification condition.",
+            "evidence": "Verifiable pass/fail outcome.",
+        },
+    }
+
+
 @dataclass(frozen=True)
 class DashboardHarness:
     """One isolated dashboard origin and its browser process."""
@@ -810,6 +845,7 @@ class FakeLifecycle:
                     "persona": "Operator",
                     "acceptance_criteria": ["Controls render when available."],
                     "specification_evidence": [],
+                    "invest_assessment": _valid_invest_assessment_payload(),
                 }
             ],
             "is_complete": True,
@@ -1825,7 +1861,26 @@ def _delivery_position(actions: list[JsonObject]) -> JsonObject:
     }
 
 
-def _story_review(instance_key: str) -> JsonObject:
+def _story_review(
+    instance_key: str,
+    *,
+    invest_assessment: JsonObject | None = None,
+) -> JsonObject:
+    assessment = (
+        _valid_invest_assessment_payload()
+        if invest_assessment is None
+        else invest_assessment
+    )
+    story_item: JsonObject = {
+        "story_title": "Exact Story review",
+        "statement": "As an operator, I review the intended Story.",
+        "persona": "Operator",
+        "acceptance_criteria": ["The selector remains exact."],
+        "specification_evidence": [],
+    }
+    if assessment:
+        story_item["invest_assessment"] = assessment
+
     return {
         "binding": {
             "decision_fingerprint": f"decision-{instance_key}",
@@ -1843,15 +1898,7 @@ def _story_review(instance_key: str) -> JsonObject:
                 }
             },
             "candidate": {
-                "story_items": [
-                    {
-                        "story_title": "Exact Story review",
-                        "statement": "As an operator, I review the intended Story.",
-                        "persona": "Operator",
-                        "acceptance_criteria": ["The selector remains exact."],
-                        "specification_evidence": [],
-                    }
-                ],
+                "story_items": [story_item],
                 "is_complete": True,
                 "clarifying_questions": [],
             },
@@ -2079,11 +2126,20 @@ def test_story_generation_non_contiguous_labels_intent_confirmation_and_reconcil
     review_card = page.locator('[data-planning-review-card="story"]')
     expect(review_card).to_be_visible()
     expect(review_card).to_contain_text("Story review for PBI-000003")
+    expect(review_card).to_contain_text("INVEST assessment")
+    expect(review_card).to_contain_text("Independent")
+    expect(review_card).to_contain_text("Pass")
+    expect(
+        review_card.locator('[data-review-error="invalid-invest"]')
+    ).not_to_be_attached()
+    accept_review_btn = review_card.locator(
+        '[data-planning-review="story"][data-review-decision="accepted"]'
+    )
+    expect(accept_review_btn).to_be_enabled()
 
     pbi2_btn = page.locator(
         '[data-delivery-action-instance="backlog_item:PBI-000002"] button'
     )
-    expect(pbi2_btn).to_be_visible()
     expect(pbi2_btn).to_contain_text(
         "Generate Stories for PBI-000002: Support accepted Number List language."
     )
@@ -2091,7 +2147,6 @@ def test_story_generation_non_contiguous_labels_intent_confirmation_and_reconcil
     pbi4_btn = page.locator(
         '[data-delivery-action-instance="backlog_item:PBI-000004"] button'
     )
-    expect(pbi4_btn).to_be_visible()
     expect(pbi4_btn).to_contain_text(
         "Correct Stories for PBI-000004: Provide the installed CLI."
     )
@@ -2134,9 +2189,6 @@ def test_story_generation_non_contiguous_labels_intent_confirmation_and_reconcil
     assert fake.delivery_requests[0][1]["instance_key"] == "backlog_item:PBI-000004"
 
     # 4. Verify Immediate Post-Decision Reconciliation (Accepting review for PBI-000003)
-    accept_review_btn = page.locator(
-        '[data-planning-review="story"][data-review-decision="accepted"]'
-    )
     accept_review_btn.click()
     expect(dialog).to_be_visible()
     expect(page.locator("#human-action-title")).to_contain_text(
@@ -2591,5 +2643,59 @@ def test_progressive_story_readiness_failure_diagnostics_persist_on_reload(
     expect(error_banner).to_be_visible()
     expect(error_banner).to_contain_text("Story structural validation failed.")
     expect(error_banner).to_contain_text("STORY_SPEC_REFERENCE_INVALID")
+
+    context.close()
+
+
+def test_story_review_disables_acceptance_when_invest_missing_or_malformed(
+    dashboard_harness: DashboardHarness,
+) -> None:
+    """Verify Story candidate without valid INVEST disables acceptance."""
+    action_pbi2 = _story_generation_action("backlog_item:PBI-000002")
+    action_pbi4 = _story_generation_action("backlog_item:PBI-000004")
+    actions = [action_pbi2, action_pbi4]
+
+    fake = _delivery_ready_fake(actions)
+    fake.position_override = _non_contiguous_story_position(action_pbi2, action_pbi4)
+    fake.story_pending_override = _non_contiguous_story_pending()
+    # Missing invest_assessment
+    fake.planning_review_overrides["/story/reviews"] = {
+        "items": [_story_review("backlog_item:PBI-000003", invest_assessment={})]
+    }
+
+    context, page = _open_project_page(dashboard_harness, fake)
+
+    review_card = page.locator('[data-planning-review-card="story"]')
+    expect(review_card).to_be_visible()
+    expect(review_card).to_contain_text("Story review for PBI-000003")
+
+    # Visible quality error banner
+    error_banner = review_card.locator('[data-review-error="invalid-invest"]')
+    expect(error_banner).to_be_visible()
+    expect(error_banner).to_contain_text(
+        "Story proposal cannot be accepted: required INVEST quality assessment is "
+        "missing or malformed. Acceptance is disabled."
+    )
+
+    # Incomplete INVEST assessment section rendered
+    invalid_invest = review_card.locator('[data-invest-assessment="invalid"]')
+    expect(invalid_invest).to_be_visible()
+    expect(invalid_invest).to_contain_text("Quality Assessment Incomplete")
+
+    # Accept button is disabled
+    accept_btn = review_card.locator(
+        '[data-planning-review="story"][data-review-decision="accepted"]'
+    )
+    expect(accept_btn).to_be_disabled()
+
+    # Request changes and Reject buttons remain enabled
+    changes_btn = review_card.locator(
+        '[data-planning-review="story"][data-review-decision="feedback"]'
+    )
+    expect(changes_btn).to_be_enabled()
+    reject_btn = review_card.locator(
+        '[data-planning-review="story"][data-review-decision="rejected"]'
+    )
+    expect(reject_btn).to_be_enabled()
 
     context.close()

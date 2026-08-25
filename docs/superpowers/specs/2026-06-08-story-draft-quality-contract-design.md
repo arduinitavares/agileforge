@@ -1,5 +1,16 @@
 # Story Draft Quality Contract Design
 
+> [!IMPORTANT]
+> **Supersession Notice (2026-08-24 / Issue #221):**
+> The aggregate INVEST scoring mechanism described below (`invest_score`: High/Medium/Low, `decomposition_warning`, and the aggregate all-`Low` save gate) is **SUPERSEDED** by AgileForge Issue #221 and the [Story Refinement to Sprint Selection Design Handoff](../../feedback/2026-08-24-story-refinement-to-sprint-selection-design-handoff.md).
+>
+> **Updated INVEST Contract & Operational Semantics:**
+> - Aggregate `invest_score` and `decomposition_warning` are retired and removed (hard break).
+> - Each Story item requires an explainable `StoryInvestAssessment` evaluating all six dimensions: `independent`, `negotiable`, `valuable`, `estimable`, `small`, `testable`.
+> - Each dimension contains: `result` (`pass` | `concern` | `fail`), `rationale` (non-blank string), and `evidence` (non-blank string).
+> - **Operational Semantics:** Per-dimension results are advisory model recommendations provided as evidence for human review, subject to human discretion.
+> - **Host Gate & Failure Safety:** Deterministic host checks establish bounded structural completeness. Missing, malformed, or blank assessment dimensions fail closed and disable review acceptance in Browser UI and CLI. Semantic quality ratings (`concern` / `fail`) do not silently block or approve state; they are surfaced as review evidence for human decision-making.
+
 ## Goal
 
 Make Story draft generation honest about coverage and quality. A bounded story
@@ -39,19 +50,17 @@ Add an explicit story quality contract to the Story writer output:
 - `quality_findings`: structured findings with `code`, `severity`, `message`,
   and optional story indexes/titles
 
-Add `research_caveats` to each draft story. `decomposition_warning` remains the
-reason a story is low INVEST quality. Research caveats are advisory risk notes
-and do not force `invest_score=Low`.
+Add `research_caveats` to each draft story. Research caveats are advisory risk notes.
+Under Issue #221, `invest_score` and `decomposition_warning` are replaced by the
+explainable six-dimension `invest_assessment`.
 
-Add deterministic server-side quality evaluation in the Story runtime. The model
-may emit quality fields, but the runtime must add or override blocking findings
-for concrete local signals:
-
-- all emitted stories have `invest_score=Low`
+Add deterministic server-side quality evaluation in the Story runtime:
 - `coverage_status` is not `complete`
 - a refinement request asks for more stories than the per-attempt cap and the
   output returns only the capped count as complete
 - `remaining_scope` is empty for capacity-limited or clarification-needed output
+- story INVEST quality assessment must be structurally complete across all 6 dimensions
+
 
 Tie `is_reusable` to this quality gate. A successful model response can still be
 recorded as an attempt, but it is not a reusable draft unless the quality gate
@@ -82,16 +91,17 @@ The gate does not infer arbitrary missing scope from prose. It only uses explici
 count requests and emitted quality fields. Broader term coverage can be added
 later once the request model has a typed coverage-intent field.
 
-## Save Gate
+## Save & Review Gate
 
-`story_save_payload()` remains the final local save gate. It should return a
-payload only when the current draft artifact is complete and quality-saveable:
+The story review gate requires complete and quality-valid story drafts:
 
 - `is_complete` is true
 - `coverage_status` is `complete`
 - no `quality_findings` have `severity=blocking`
-- at least one story has `invest_score` other than `Low`
+- all draft stories contain a valid, complete `invest_assessment` across all 6 dimensions
 - no merge recommendation exists
+
+Per-dimension `concern` or `fail` ratings remain advisory evidence for human review, empowering the human operator to make an informed decision (Accept, Request changes, or Reject) rather than relying on an opaque automated all-`Low` block. Missing or malformed assessments fail closed.
 
 ## Regression Fixture
 
@@ -100,14 +110,13 @@ Use ASA only as a regression fixture. The product behavior is generic:
 - if a refinement asks for about fifteen smaller stories, the draft either
   returns quality-saveable complete coverage or explicitly reports capacity
   limitation with concrete remaining scope
-- it must not silently return eight low stories as complete/saveable
+- it must not silently return low-quality stories as complete/saveable
 
 ## Acceptance Criteria
 
-- Story writer schema accepts the new quality contract and research caveats.
-- A research caveat on a High/Medium story does not coerce that story to Low.
-- Complete output with all Low stories is not reusable and cannot enter
-  `STORY_REVIEW`.
+- Story writer schema accepts the new quality contract, research caveats, and 6-dimension `invest_assessment`.
+- Each story provides explainable `result`, `rationale`, and `evidence` across all six INVEST dimensions.
+- Missing or malformed INVEST assessments fail closed and disable review acceptance in Browser UI and CLI.
 - Complete output that hits an explicit requested story-count over the cap is not
   reusable unless it reports partial coverage with concrete remaining scope.
 - `story generate` and `story retry` responses expose the save guards and quality

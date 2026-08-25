@@ -304,13 +304,15 @@ statement
 persona                         # host-derived, never provider-authored
 acceptance_criteria             # ordered exact strings
 spec_item_ids                   # canonical sorted set
-invest_score
+invest_assessment               # explainable 6-dimension assessment (independent, negotiable, valuable, estimable, small, testable)
 estimated_effort
 produced_artifacts
 research_caveats
-decomposition_warning
 dependency_candidates
 ```
+
+> [!NOTE]
+> Per Issue #221 and the [Story Refinement to Sprint Selection Design Handoff](../../feedback/2026-08-24-story-refinement-to-sprint-selection-design-handoff.md), legacy `invest_score` (High/Medium/Low) and `decomposition_warning` are retired in favor of the explainable 6-dimension `invest_assessment` (`StoryInvestAssessment`).
 
 The item fingerprint hashes that complete object; it is stored beside the item
 in the Story artifact envelope and is not included recursively in its own hash.
