@@ -46,6 +46,7 @@ from services.application import (
     StoryReadinessRepair,
     StoryReadinessRepairRequest,
     StoryReviewRequest,
+    StorySprintSelectionRequest,
     VisionBootstrapRequest,
     VisionResponseRequest,
     VisionReviewRequest,
@@ -254,6 +255,11 @@ class _Application(Protocol):
     def reconcile_story_eligibility(
         self,
         request: StoryEligibilityReconcileRequest,
+    ) -> JsonObject: ...
+
+    def apply_story_sprint_selection(
+        self,
+        request: StorySprintSelectionRequest,
     ) -> JsonObject: ...
 
     def start_sprint(self, request: SprintStartRequest) -> TransitionResult: ...
@@ -553,6 +559,21 @@ def _install_planning_action_mutations(
         _story_eligibility_reconcile,
     )
     reconcile.add_argument("--story-id", dest="story_ids", action="append", type=int)
+    selection = branches[("story",)].add_parser("sprint-selection")
+    selection_sub = selection.add_subparsers(
+        dest="sprint_selection_action",
+        required=True,
+    )
+    for intent in ("select", "remove", "defer"):
+        mutation = _semantic_leaf(
+            selection_sub,
+            intent,
+            _story_sprint_selection,
+        )
+        mutation.add_argument("--story-id", type=int, required=True)
+        mutation.add_argument("--expected-state-fingerprint", required=True)
+        mutation.add_argument("--rationale")
+        mutation.set_defaults(selection_intent=intent)
     _semantic_leaf(branches[("sprint",)], "start", _sprint_start)
 
 
@@ -1805,6 +1826,27 @@ def _story_eligibility_reconcile(
             StoryEligibilityReconcileRequest(
                 project_id=args.project_id,
                 story_ids=tuple(args.story_ids) if args.story_ids is not None else None,
+                idempotency_key=args.idempotency_key,
+                actor=args.actor,
+                correlation_id=args.correlation_id,
+            )
+        )
+    )
+
+
+def _story_sprint_selection(
+    args: argparse.Namespace,
+    application: _Application,
+) -> int:
+    intent = cast("Literal['select', 'remove', 'defer']", args.selection_intent)
+    return _emit_read(
+        application.apply_story_sprint_selection(
+            StorySprintSelectionRequest(
+                project_id=args.project_id,
+                story_id=args.story_id,
+                intent=intent,
+                expected_state_fingerprint=args.expected_state_fingerprint,
+                rationale=args.rationale,
                 idempotency_key=args.idempotency_key,
                 actor=args.actor,
                 correlation_id=args.correlation_id,

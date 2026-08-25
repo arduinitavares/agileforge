@@ -9,7 +9,6 @@ from http import HTTPStatus
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
-import pytest
 from fastapi.testclient import TestClient
 from sqlmodel import Session, col, select
 
@@ -27,6 +26,7 @@ from workflow.definitions.root import project_graph
 from workflow.domain import WorkflowDomain
 
 if TYPE_CHECKING:
+    import pytest
     from sqlalchemy.engine import Engine
 
 _EXPECTED_SELECTION_EVENT_COUNT = 4

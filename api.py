@@ -55,6 +55,7 @@ from services.application import (
     StoryReadinessRepair,
     StoryReadinessRepairRequest,
     StoryReviewRequest,
+    StorySprintSelectionRequest,
     VisionBootstrapRequest,
     VisionResponseRequest,
     VisionReviewRequest,
@@ -262,6 +263,17 @@ class StoryEligibilityReconcileApiRequest(MutationApiRequest):
             message = "story_ids must not contain duplicate Story IDs."
             raise ValueError(message)
         return sorted(value)
+
+
+class StorySprintSelectionApiRequest(MutationApiRequest):
+    """One human Story-selection intent guarded by exact current state."""
+
+    story_id: PositiveStoryId
+    intent: Literal["select", "remove", "defer"]
+    expected_state_fingerprint: str = Field(
+        pattern=r"^sha256:[0-9a-f]{64}$"
+    )
+    rationale: SemanticText | None = None
 
 
 class StoryReadinessRepairApiRequest(MutationApiRequest):
@@ -1297,6 +1309,26 @@ def reconcile_project_story_structural_eligibility(
             StoryEligibilityReconcileRequest(
                 project_id=project_id,
                 story_ids=tuple(req.story_ids) if req.story_ids is not None else None,
+                **_metadata(req),
+            )
+        )
+    )
+
+
+@app.post("/api/projects/{project_id}/story/sprint-selection")
+def apply_project_story_sprint_selection(
+    project_id: int,
+    req: StorySprintSelectionApiRequest,
+) -> dict[str, object]:
+    """Apply one explicit human Sprint-selection intent to an exact Story."""
+    return _read_payload(
+        _application().apply_story_sprint_selection(
+            StorySprintSelectionRequest(
+                project_id=project_id,
+                story_id=req.story_id,
+                intent=req.intent,
+                expected_state_fingerprint=req.expected_state_fingerprint,
+                rationale=req.rationale,
                 **_metadata(req),
             )
         )
