@@ -60,6 +60,11 @@ _FORBIDDEN_BODY_FIELDS = {
     "graph_version",
     "model_id",
 }
+
+
+def _fingerprint(seed: str) -> str:
+    """Build a parseable fake fingerprint without exposing a real identity."""
+    return f"sha256:{seed[0].lower() * 64}"
 _ACTION_ENDPOINTS = {
     "decide_backlog": "backlog/decide",
     "decide_product_goal_review": "goals/review",
@@ -185,8 +190,8 @@ class FakeLifecycle:
     stories: list[JsonValue] = field(default_factory=list)
     story_dependencies: list[JsonValue] = field(default_factory=list)
     sprint_candidates: list[JsonValue] = field(default_factory=list)
-    story_validation_requests: list[JsonObject] = field(default_factory=list)
-    story_validation_failure: JsonObject | None = None
+    structural_reconcile_requests: list[JsonObject] = field(default_factory=list)
+    sprint_selection_requests: list[JsonObject] = field(default_factory=list)
     dependency_apply_requests: list[JsonObject] = field(default_factory=list)
     reject_stale_delivery_actions: bool = False
     refresh_count: int = 0
@@ -424,7 +429,8 @@ class FakeLifecycle:
             "/story/decide": self._decide_story,
             "/story/dependencies/apply": self._apply_story_dependencies,
             "/story/generate": self._generate_story,
-            "/story/validate": self._validate_story,
+            "/story/structural-eligibility/reconcile": self._reconcile_story_eligibility,
+            "/story/sprint-selection": self._apply_story_sprint_selection,
             "/vision/bootstrap": self._bootstrap_vision,
             "/vision/respond": self._record_vision_turn,
             "/vision/review": self._review_vision,
@@ -875,56 +881,40 @@ class FakeLifecycle:
         else:
             self.planning_review_overrides.pop("/story/reviews", None)
 
-    def _validate_story(self, body: JsonObject) -> JsonObject:
-        self._assert_fields(body, {"story_id", "mode"})
-        self.story_validation_requests.append(dict(body))
+    def _reconcile_story_eligibility(self, body: JsonObject) -> JsonObject:
+        self._assert_fields(body, {"story_ids"})
+        story_ids = body["story_ids"]
+        assert isinstance(story_ids, list) and len(story_ids) == 1
+        self.structural_reconcile_requests.append(dict(body))
+        return {"ok": True, "data": {}, "errors": []}
+
+    def _apply_story_sprint_selection(self, body: JsonObject) -> JsonObject:
+        self._assert_fields(
+            body,
+            {"story_id", "intent", "expected_state_fingerprint", "rationale"},
+        )
+        self.sprint_selection_requests.append(dict(body))
         story_id = body["story_id"]
-        if self.story_validation_failure:
-            failure = self.story_validation_failure
-            for s in self.stories:
-                if isinstance(s, dict) and s.get("story_id") == story_id:
-                    s["validation_status"] = "failed"
-                    s["validation_failures"] = [failure]
-                    s["readiness_blockers"] = ["STORY_VALIDATION_REQUIRED"]
-                    s["sprint_candidate"] = False
-            return {
-                "status": "success",
-                "data": {
-                    "success": True,
-                    "ready_for_sprint": False,
-                    "story_id": story_id,
-                    "mode": body["mode"],
-                    "structural_failures": [failure],
-                    "structural_warnings": [],
-                    "semantic_review_state": "not_requested",
-                    "semantic_findings": [],
-                    "validation_evidence": None,
-                },
-                "warnings": [],
-            }
-        for s in self.stories:
-            if isinstance(s, dict) and s.get("story_id") == story_id:
-                s["readiness_blockers"] = []
-                s["sprint_candidate"] = True
-                s["validation_status"] = "validated"
-                s["validation_failures"] = []
-                if s not in self.sprint_candidates:
-                    self.sprint_candidates.append(s)
-        return {
-            "status": "success",
-            "data": {
-                "success": True,
-                "ready_for_sprint": True,
-                "story_id": story_id,
-                "mode": body["mode"],
-                "structural_failures": [],
-                "structural_warnings": [],
-                "semantic_review_state": "not_requested",
-                "semantic_findings": [],
-                "validation_evidence": {"ready_for_sprint": True},
-            },
-            "warnings": [],
-        }
+        intent = body["intent"]
+        assert isinstance(story_id, int)
+        assert intent in {"select", "remove", "defer"}
+        for story in self.stories:
+            if isinstance(story, dict) and story.get("story_id") == story_id:
+                assert body["expected_state_fingerprint"] == story[
+                    "sprint_selection_state_fingerprint"
+                ]
+                story["sprint_selection_state"] = {
+                    "select": "selected",
+                    "remove": "unselected",
+                    "defer": "deferred",
+                }[intent]
+                story["sprint_selection_state_fingerprint"] = _fingerprint(
+                    str(story_id + len(self.sprint_selection_requests))
+                )
+                story["dependency_safe"] = False
+                story["sprint_candidate"] = False
+                return {"ok": True, "data": {}, "errors": []}
+        raise ValueError(f"Story {story_id} not found")
 
     def _apply_story_dependencies(self, body: JsonObject) -> None:
         self._assert_fields(body, {"selected_story_ids", "reviewed_edges"})
@@ -938,6 +928,16 @@ class FakeLifecycle:
                 "reason",
             }
         self.dependency_apply_requests.append(dict(body))
+        selected_ids = body["selected_story_ids"]
+        assert isinstance(selected_ids, list)
+        self.sprint_candidates = []
+        for story in self.stories:
+            if isinstance(story, dict):
+                selected = story.get("story_id") in selected_ids
+                story["dependency_safe"] = selected
+                story["sprint_candidate"] = selected
+                if selected:
+                    self.sprint_candidates.append(story)
 
     def _generate_sprint_plan(self, body: JsonObject) -> None:
         self._assert_fields(body, {"team_name"})
@@ -2473,7 +2473,13 @@ def _seed_progressive_stories(
         "status": "to_do",
         "story_points": 3,
         "rank": "0|hzzzzz:",
-        "sprint_candidate": True,
+        "structurally_eligible": True,
+        "structural_eligibility_status": "eligible",
+        "sprint_selection_state": "unselected",
+        "sprint_selection_state_fingerprint": _fingerprint("a"),
+        "selected_scope_fingerprint": _fingerprint("b"),
+        "dependency_safe": False,
+        "sprint_candidate": False,
         "content_accepted": True,
         "readiness_blockers": [],
         "validation_status": "validated",
@@ -2486,14 +2492,20 @@ def _seed_progressive_stories(
         "status": "to_do",
         "story_points": 5,
         "rank": "0|hzzzzz:1",
+        "structurally_eligible": True,
+        "structural_eligibility_status": "eligible",
+        "sprint_selection_state": "unselected",
+        "sprint_selection_state_fingerprint": _fingerprint("c"),
+        "selected_scope_fingerprint": _fingerprint("b"),
+        "dependency_safe": False,
         "sprint_candidate": False,
         "content_accepted": True,
-        "readiness_blockers": ["STORY_VALIDATION_REQUIRED"],
-        "validation_status": "unvalidated",
+        "readiness_blockers": [],
+        "validation_status": "validated",
         "validation_failures": [],
     }
     fake.stories = [story1, story2]
-    fake.sprint_candidates = [story1]
+    fake.sprint_candidates = []
     fake.story_dependencies = [
         {
             "dependency_id": 1,
@@ -2510,7 +2522,7 @@ def _seed_progressive_stories(
 def test_progressive_story_readiness_partial_refinement_to_sprint_planning(
     dashboard_harness: DashboardHarness,
 ) -> None:
-    """Unlock Sprint planning with ready Story, unvalidated sibling, and edge."""
+    """One selected Story advances while an accepted sibling stays outside scope."""
     story1_id, story2_id = 101, 102
     pbi3_action = _story_generation_action("backlog_item:PBI-000003")
     fake = _delivery_ready_fake(
@@ -2536,9 +2548,31 @@ def test_progressive_story_readiness_partial_refinement_to_sprint_planning(
     readiness = page.locator('[data-story-readiness-section="true"]')
     expect(readiness).to_be_visible()
     expect(readiness).to_contain_text("US-001")
-    expect(readiness).to_contain_text("Validated")
+    expect(readiness).to_contain_text("Structurally eligible")
+    expect(readiness).to_contain_text("Unselected")
     expect(readiness).to_contain_text("US-002")
-    expect(readiness).to_contain_text("Unvalidated")
+    expect(readiness).to_contain_text(
+        "does not select this Story for Sprint, confirm dependencies"
+    )
+
+    select_story1 = page.locator(
+        f'[data-story-selection-id="{story1_id}"][data-story-selection-intent="select"]'
+    )
+    expect(select_story1).to_be_visible()
+    select_story1.click()
+    page.wait_for_timeout(_UI_SETTLE_MS)
+    assert len(fake.sprint_selection_requests) == 1
+    assert fake.sprint_selection_requests[0]["story_id"] == story1_id
+    assert fake.sprint_selection_requests[0]["intent"] == "select"
+    assert not [
+        body
+        for suffix, body in fake.delivery_requests
+        if suffix == "/sprint/generate"
+    ]
+
+    expect(readiness).to_contain_text("Selected for Sprint")
+    expect(readiness).to_contain_text("US-002")
+    expect(readiness).to_contain_text("Unselected")
 
     dep_section = page.locator('[data-dependency-review-section="true"]')
     expect(dep_section).to_be_visible()
@@ -2570,24 +2604,42 @@ def test_progressive_story_readiness_partial_refinement_to_sprint_planning(
     sprint_form = page.locator('[data-delivery-generation-form="record_sprint_plan"]')
     expect(sprint_form).to_be_visible()
 
-    validate_btn = page.locator(f'[data-story-validate-id="{story2_id}"]')
-    expect(validate_btn).to_be_visible()
-    validate_btn.click()
+    remove_story1 = page.locator(
+        f'[data-story-selection-id="{story1_id}"][data-story-selection-intent="remove"]'
+    )
+    expect(remove_story1).to_be_visible()
+    remove_story1.click()
     page.wait_for_timeout(200)
-
-    assert len(fake.story_validation_requests) == 1
-    assert fake.story_validation_requests[0]["story_id"] == story2_id
-
-    page.locator("#refresh-project").click()
+    assert len(fake.sprint_selection_requests) == 2
+    defer_story1 = page.locator(
+        f'[data-story-selection-id="{story1_id}"][data-story-selection-intent="defer"]'
+    )
+    expect(defer_story1).to_be_visible()
+    defer_story1.click()
     page.wait_for_timeout(200)
-
-    expect(candidate_pool).to_contain_text("2 candidates ready")
-    expect(candidate_pool).to_contain_text("US-001")
-    expect(candidate_pool).to_contain_text("US-002")
+    expect(readiness).to_contain_text("Deferred")
+    reselect_story1 = page.locator(
+        f'[data-story-selection-id="{story1_id}"][data-story-selection-intent="select"]'
+    )
+    expect(reselect_story1).to_be_visible()
+    reselect_story1.click()
+    page.wait_for_timeout(200)
+    assert [request["intent"] for request in fake.sprint_selection_requests] == [
+        "select",
+        "remove",
+        "defer",
+        "select",
+    ]
 
     expect(
         page.locator('[data-delivery-action-instance="backlog_item:PBI-000003"]')
     ).to_be_visible()
+
+    assert not [
+        body
+        for suffix, body in fake.delivery_requests
+        if suffix == "/sprint/generate"
+    ]
 
     context.close()
 
@@ -2595,7 +2647,7 @@ def test_progressive_story_readiness_partial_refinement_to_sprint_planning(
 def test_progressive_story_readiness_failure_diagnostics_persist_on_reload(
     dashboard_harness: DashboardHarness,
 ) -> None:
-    """Validation failure diagnostics persist in per-story row after reload."""
+    """Only stale operational evidence offers structural reconciliation."""
     story_id = 101
     pbi1_action = _story_generation_action("backlog_item:PBI-000001")
     fake = _delivery_ready_fake([pbi1_action])
@@ -2617,46 +2669,43 @@ def test_progressive_story_readiness_failure_diagnostics_persist_on_reload(
             "status": "to_do",
             "story_points": 3,
             "rank": "0|hzzzzz:",
+            "structurally_eligible": False,
+            "structural_eligibility_status": "stale",
+            "sprint_selection_state": "selected",
+            "sprint_selection_state_fingerprint": _fingerprint("d"),
+            "selected_scope_fingerprint": _fingerprint("e"),
+            "dependency_safe": False,
             "sprint_candidate": False,
             "content_accepted": True,
-            "readiness_blockers": ["STORY_VALIDATION_REQUIRED"],
-            "validation_status": "unvalidated",
+            "readiness_blockers": [],
+            "validation_status": "validated",
             "validation_failures": [],
         }
     ]
-    fake.story_validation_failure = {
-        "code": "STORY_SPEC_REFERENCE_INVALID",
-        "message": "Story references invalid specification items: REQ.099",
-    }
 
     context, page = _open_project_page(dashboard_harness, fake)
 
     readiness_section = page.locator('[data-story-readiness-section="true"]')
     expect(readiness_section).to_be_visible()
-    expect(readiness_section).to_contain_text("Unvalidated")
+    expect(readiness_section).to_contain_text("Structural evidence stale")
+    expect(readiness_section).to_contain_text("Selected for Sprint")
 
-    validate_button = page.locator(f'[data-story-validate-id="{story_id}"]')
-    expect(validate_button).to_be_visible()
+    validate_button = page.locator(
+        f'[data-story-structural-reconcile-id="{story_id}"]'
+    )
+    expect(validate_button).to_have_text("Re-run structural checks")
 
     validate_button.click()
     page.wait_for_timeout(300)
 
-    expect(readiness_section).to_contain_text("Validation Failed")
-    diagnostics = page.locator('[data-story-validation-diagnostics="true"]')
-    expect(diagnostics).to_be_visible()
-    expect(diagnostics).to_contain_text("STORY_SPEC_REFERENCE_INVALID")
-    expect(diagnostics).to_contain_text(
-        "Story references invalid specification items: REQ.099"
-    )
-
-    revalidate_button = page.locator(f'[data-story-validate-id="{story_id}"]')
-    expect(revalidate_button).to_be_visible()
-    expect(revalidate_button).to_contain_text("Revalidate")
-
-    error_banner = page.locator("#project-error")
-    expect(error_banner).to_be_visible()
-    expect(error_banner).to_contain_text("Story structural validation failed.")
-    expect(error_banner).to_contain_text("STORY_SPEC_REFERENCE_INVALID")
+    assert len(fake.structural_reconcile_requests) == 1
+    assert fake.structural_reconcile_requests[0]["story_ids"] == [story_id]
+    expect(readiness_section).to_contain_text("Selected for Sprint")
+    assert not [
+        body
+        for suffix, body in fake.delivery_requests
+        if suffix == "/sprint/generate"
+    ]
 
     context.close()
 
