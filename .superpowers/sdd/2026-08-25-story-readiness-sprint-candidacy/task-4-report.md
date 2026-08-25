@@ -285,3 +285,98 @@ The warnings remain the existing Starlette `TestClient`/httpx,
   startup, push, merge, issue mutation, or live manual acceptance occurred.
 - No schema, Task 1 v3 evidence authority, Task 3 append-only selection parser,
   issue #224 ownership/defaulting behavior, or semantic/model validation changed.
+
+## Fix round 2/5: reachable external dependency freshness
+
+### Status
+
+Complete from clean fix-round base `ee7a2f3`.
+
+Planning candidacy, repository safety, and execution freshness now consume one
+shared `selected_dependency_active_closure` authority in
+`workflow/planning_integrity.py`.
+
+- The closure starts from exact selected Story IDs, follows active prerequisite
+  rows transitively, and returns rows in deterministic dependent/prerequisite/ID
+  order.
+- Candidate-set fingerprints now bind reachable external rows. Changing
+  selected `A -> B`, external `B -> C` into `B -> D` changes the pending/accepted
+  plan source fingerprint even when C and D are both complete.
+- Execution dependency row fingerprints bind the same full active closure, so
+  the old exact execution proof fails after the same external-row change.
+- Execution keeps `reviewed_edges` scoped to direct selected dependents. This
+  preserves the immutable selected-scope dependency-review contract while the
+  separate row fingerprint protects transitive execution freshness.
+- Repository candidacy uses the same closure for cycles and transitive
+  incomplete prerequisites. The prior reachable-cycle, unrelated-cycle, and
+  malformed-endpoint behavior remains intact.
+- Active external-only rows unreachable from selected Stories remain excluded
+  from candidate and execution fingerprints.
+
+### TDD evidence
+
+RED regressions were committed before production changes in `7dc2a20`:
+
+```text
+uv run --frozen pytest -q tests/workflow/test_planning_joins.py::test_candidate_fingerprint_binds_reachable_external_dependency_rows tests/workflow/test_execution_graph.py::test_execution_dependency_rows_bind_reachable_external_closure
+2 failed, 5 warnings in 0.77s
+```
+
+Both old fingerprints remained identical after changing reachable external
+`B -> C` to `B -> D`. The planning regression also asserts that adding unrelated
+external-only `8 -> 9` leaves the fingerprint unchanged.
+
+Targeted GREEN, including the prior closure-cycle controls:
+
+```text
+uv run --frozen pytest -q tests/workflow/test_planning_joins.py::test_candidate_fingerprint_binds_reachable_external_dependency_rows tests/workflow/test_execution_graph.py::test_execution_dependency_rows_bind_reachable_external_closure tests/test_story_dependencies.py::test_selected_dependency_closure_cycle_blocks_candidacy tests/test_story_dependencies.py::test_unrelated_external_cycle_does_not_block_selected_scope
+4 passed, 4 warnings in 1.19s
+```
+
+Affected planning, execution, and dependency suites:
+
+```text
+uv run --frozen pytest -q tests/test_story_dependencies.py tests/workflow/test_planning_graph.py tests/workflow/test_planning_joins.py tests/workflow/test_planning_transitions.py tests/workflow/test_execution_graph.py tests/workflow/test_graph_properties.py
+232 passed, 4 warnings in 36.55s
+```
+
+Full Task 4 focused matrix:
+
+```text
+uv run --frozen pytest -q tests/test_story_dependencies.py tests/test_sprint_selection.py tests/workflow/test_planning_transitions.py tests/workflow/test_execution_graph.py tests/workflow/test_graph_properties.py tests/workflow/test_planning_graph.py tests/workflow/test_planning_joins.py tests/services/test_story_sprint_selection.py tests/adapters/test_api_workflow_domain.py::test_planning_selection_derives_dependency_and_readiness_guards tests/adapters/test_api_workflow_domain.py::test_planning_selection_derives_sprint_start_from_accepted_current_plan tests/adapters/test_api_workflow_domain.py::test_sprint_generation_fails_closed_without_host_capacity_input tests/adapters/test_api_workflow_domain.py::test_invalid_manual_sprint_selection_fails_before_model tests/adapters/test_api_workflow_domain.py::test_semantic_sprint_generation_api_is_strict tests/adapters/test_cli_workflow_domain.py::test_semantic_sprint_generation_command_parses tests/adapters/test_cli_workflow_domain.py::test_removed_sprint_generation_flags_fail_parser_validation tests/adapters/test_command_renderer.py::test_sprint_generation_advertises_parser_valid_capacity_remediation
+314 passed, 5 warnings in 48.04s
+```
+
+Changed-file quality:
+
+```text
+uv run --frozen pyrepo-check ruff annotations ty workflow/planning_integrity.py repositories/workflow.py workflow/definitions/planning.py workflow/execution_integrity.py tests/workflow/test_planning_joins.py tests/workflow/test_execution_graph.py
+ruff passed; annotations passed; ty passed
+```
+
+Warnings remain the existing Starlette `TestClient`/httpx,
+`BaseAgentConfig`, and pytest-socket warnings.
+
+### Changed files
+
+- `workflow/planning_integrity.py`
+- `repositories/workflow.py`
+- `workflow/definitions/planning.py`
+- `workflow/execution_integrity.py`
+- `tests/workflow/test_planning_joins.py`
+- `tests/workflow/test_execution_graph.py`
+
+### Commits
+
+- `7dc2a20` `test: bind reachable external dependency freshness (#223)`
+- `711501e` `fix: bind freshness to reachable dependency closure (#223)`
+
+### Remaining concerns and protected boundaries
+
+- Task 6 still owns the broad repository gate and wider integration fixture
+  alignment.
+- No provider call, real Sprint generation or persistence, profile access, UI
+  startup, push, merge, issue mutation, or live manual acceptance occurred.
+- Dependency-review source fingerprinting and immutable replay/conflict behavior
+  did not change. No schema, Task 1 evidence authority, Task 3 selection parser,
+  issue #224 ownership behavior, or semantic/model validation changed.
