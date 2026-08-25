@@ -233,7 +233,7 @@ class StoryDependenciesApplyApiRequest(MutationApiRequest):
 
     @model_validator(mode="after")
     def validate_reviewed_edges(self) -> Self:
-        """Reject duplicate and out-of-selection dependency edges."""
+        """Keep reviewed dependents inside scope while retaining prerequisites."""
         pairs = [
             (item.dependent_story_id, item.prerequisite_story_id)
             for item in self.reviewed_edges
@@ -242,8 +242,8 @@ class StoryDependenciesApplyApiRequest(MutationApiRequest):
             message = "reviewed_edges must not contain duplicate Story pairs."
             raise ValueError(message)
         selected = set(self.selected_story_ids)
-        if any(left not in selected or right not in selected for left, right in pairs):
-            message = "reviewed_edges must remain inside selected_story_ids."
+        if any(left not in selected for left, _right in pairs):
+            message = "reviewed edge dependents must remain in selected_story_ids."
             raise ValueError(message)
         return self
 

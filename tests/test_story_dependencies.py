@@ -9,7 +9,6 @@ from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 from api import StoryDependenciesApplyApiRequest
-
 from models.core import UserStory, UserStoryDependency
 from models.enums import StoryStatus
 from models.events import WorkflowEvent
@@ -21,6 +20,7 @@ from services.agent_workbench.story_phase import (
     record_story_decision_in_session,
     record_story_draft_in_session,
 )
+from services.application import StoryDependencyEdgeRequest
 from services.contracts.story import (
     CanonicalStoryItem,
     CanonicalStoryOutput,
@@ -67,25 +67,30 @@ from workflow.requests import ApplyStoryDependencies
 from workflow.requests.planning import ReviewedDependencyEdge
 
 REVIEWED_AT = datetime(2026, 8, 2, 12, tzinfo=UTC)
+_SELECTED_STORY_ID = 101
+_EXTERNAL_PREREQUISITE_ID = 102
 
 
 def test_dependency_api_accepts_external_prerequisite_for_selected_dependent() -> None:
     """Transport preserves selected-to-external edges for dependency review."""
     request = StoryDependenciesApplyApiRequest(
-        selected_story_ids=[101],
+        selected_story_ids=[_SELECTED_STORY_ID],
         reviewed_edges=[
-            {
-                "dependent_story_id": 101,
-                "prerequisite_story_id": 102,
-                "reason": "Selected Story needs an external prerequisite.",
-            }
+            StoryDependencyEdgeRequest(
+                dependent_story_id=_SELECTED_STORY_ID,
+                prerequisite_story_id=_EXTERNAL_PREREQUISITE_ID,
+                reason="Selected Story needs an external prerequisite.",
+            )
         ],
         actor="dashboard-ui",
         idempotency_key="dashboard-external-dependency-edge",
     )
 
-    assert request.selected_story_ids == [101]
-    assert request.reviewed_edges[0].prerequisite_story_id == 102
+    assert request.selected_story_ids == [_SELECTED_STORY_ID]
+    assert (
+        request.reviewed_edges[0].prerequisite_story_id
+        == _EXTERNAL_PREREQUISITE_ID
+    )
 
 
 def _invest_assessment() -> StoryInvestAssessment:
