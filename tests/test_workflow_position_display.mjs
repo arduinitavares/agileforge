@@ -1140,6 +1140,96 @@ test('malformed Sprint candidate projection blocks the generated Sprint form and
     assert.ok(!markup.includes('data-delivery-generation-form="record_sprint_plan"'));
 });
 
+test('Sprint generation binds canonical candidates to the current dependency scope', () => {
+    const requests = [];
+    const context = loadFrontend(async (path) => {
+        requests.push(path);
+        return { ok: true, status: 200, text: async () => '{"status":"success","data":{}}' };
+    });
+    const sprintAction = {
+        node_id: 'planning.sprint.plan',
+        request_kind: 'record_sprint_plan',
+        endpoint: 'sprint/generate',
+        transport: 'semantic',
+        instance_key: null,
+    };
+    const candidate = sprintCandidateStory();
+    const currentStory = selectedScopeStory({
+        selected_scope_fingerprint: 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+    });
+    const appState = {
+        storyDependencies: { stories: [currentStory], edges: [] },
+        sprintCandidates: { items: [candidate] },
+    };
+
+    const markup = context.deliveryPanelMarkup({}, {}, [sprintAction], appState);
+    assert.strictEqual(context.canGenerateSprintPlan(appState), false);
+    assert.ok(markup.includes('Sprint candidate projection unavailable'));
+    assert.ok(!markup.includes('data-delivery-generation-form="record_sprint_plan"'));
+    assert.deepEqual(requests, []);
+});
+
+test('scope parser rejects a conflicting fingerprint on an unselected Story', () => {
+    const context = loadFrontend();
+    const selected = selectedScopeStory();
+    const unselected = selectedScopeStory({
+        story_id: 102,
+        source_story_item_id: 'US-002',
+        sprint_selection_state: 'unselected',
+        sprint_selection_state_fingerprint: 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+        selected_scope_fingerprint: 'sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+    });
+
+    assert.strictEqual(
+        context.selectedScopeDependencies([selected, unselected], {
+            stories: [selected, unselected],
+            edges: [],
+        }).isWellFormed,
+        false,
+    );
+});
+
+test('dependency scope excludes rejected edges and rejects self edges before transport', () => {
+    const context = loadFrontend();
+    const selected = selectedScopeStory();
+    const external = selectedScopeStory({
+        story_id: 102,
+        source_story_item_id: 'US-002',
+        sprint_selection_state: 'unselected',
+        sprint_selection_state_fingerprint: 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+    });
+    const rejected = context.selectedScopeDependencies([selected, external], {
+        stories: [selected, external],
+        edges: [{
+            dependent_story_id: 101,
+            prerequisite_story_id: 102,
+            status: 'rejected',
+            reason: 'Do not reactivate this edge.',
+        }],
+    });
+    assert.strictEqual(rejected.isWellFormed, true);
+    assert.deepEqual(JSON.parse(JSON.stringify(rejected.scopeEdges)), []);
+    assert.strictEqual(
+        context.selectedScopeDependencies([selected], {
+            stories: [selected],
+            edges: [{
+                dependent_story_id: 101,
+                prerequisite_story_id: 101,
+                status: 'proposed',
+                reason: 'Malformed self edge.',
+            }],
+        }).isWellFormed,
+        false,
+    );
+});
+
+test('dependency controls remain locked after a successful mutation cannot reload', () => {
+    const context = loadFrontend();
+    assert.strictEqual(context.shouldUnlockDependencyMutation(true, false), false);
+    assert.strictEqual(context.shouldUnlockDependencyMutation(true, true), false);
+    assert.strictEqual(context.shouldUnlockDependencyMutation(false, false), true);
+});
+
 test('rejected Story mutations restore every control to its exact prior state', () => {
     const context = loadFrontend();
     const disabledControl = {
