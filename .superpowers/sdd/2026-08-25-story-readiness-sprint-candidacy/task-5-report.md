@@ -227,3 +227,81 @@ ruff, annotations, and ty passed
 
 - `3d5d392` test: allow external dependency prerequisite at API boundary (#223)
 - `60b4e03` fix: preserve external dependency prerequisites (#223)
+
+## Fix round 2/5: torn scope and committed dependency reload lock
+
+### Delivered corrections
+
+- `record_sprint_plan` now requires both a strict canonical candidate projection
+  and the current strict `storyDependencies` projection. Their common
+  `selected_scope_fingerprint` must match exactly. A valid-but-stale candidate
+  scope now renders the existing alert and no Sprint-generation form.
+- Dependency scope validation now requires one valid identical selected-scope
+  fingerprint across every projected Story, including unselected siblings and
+  the parallel dependency Story projection. Duplicate dependency Story rows
+  fail closed too.
+- Every dependency edge must use `proposed`, `active`, or `rejected` status and
+  cannot be self-referential. Only `proposed`/`active` edges owned by selected
+  dependents are reviewable; rejected edges stay excluded and cannot be
+  silently reactivated. Explicit `edges: []` and external prerequisites remain
+  valid.
+- A dependency POST now has one semantic payload/idempotency key across its
+  single transport retry. If the POST succeeds but authority reload returns
+  false or throws, the original Confirm button remains native-disabled and
+  `aria-busy=true`, with the reload error visible; no second action can create a
+  new payload. Only a pre-commit failure restores its captured control state.
+
+### RED evidence
+
+```text
+node --test tests/test_workflow_position_display.mjs
+4 failed, 38 passed
+```
+
+Committed in `b9c8362` before production changes. The VM tests covered
+candidate/dependency scope mismatch, a conflicting unselected sibling
+fingerprint, rejected-edge exclusion, self-edge rejection, absent Sprint form,
+no generation transport, and post-success dependency lock semantics.
+
+```text
+uv run --frozen pytest -q tests/e2e/test_single_project_lifecycle_ui.py -k 'torn_candidate_dependency_scope or dependency_confirmation_stays_locked'
+2 failed, 18 deselected, 4 deprecation warnings
+```
+
+Committed in `b744257` before production changes. The isolated browser fake
+proved the old form was visible for a torn but otherwise valid candidate scope
+and the old dependency control was re-enabled after successful POST/reload
+failure.
+
+### GREEN verification
+
+```text
+node --check frontend/project.js
+node --test tests/*.mjs
+66 passed, 0 failed
+
+uv run --frozen pytest -q tests/e2e/test_single_project_lifecycle_ui.py -k 'progressive or sprint_generation_requires_team or torn_candidate_dependency_scope or dependency_confirmation_stays_locked'
+5 passed, 15 deselected, 4 deprecation warnings
+
+uv run --frozen pyrepo-check annotations ty ruff tests/e2e/test_single_project_lifecycle_ui.py
+ruff, annotations, and ty passed
+```
+
+The browser suite uses only a test-owned ephemeral server/profile/context and
+route fake. It does not submit a Sprint form: each relevant scenario asserts
+that `/sprint/generate` was never reached. The existing progressive scenario
+also confirms the selected dependent to external prerequisite edge is posted
+and the unselected dependent edge is excluded.
+
+### Fix-round commits
+
+- `b9c8362` test: cover strict Sprint scope and dependency locks
+- `b744257` test: cover torn Sprint scope and dependency reload lock
+- `073e178` fix: bind Sprint form to current dependency scope (#223)
+
+### Protected-boundary confirmation
+
+No provider call, real Sprint generation/persistence, real/manual profile,
+push, merge, issue mutation, or live manual acceptance occurred. #224
+team-name/default behavior remains untouched. The full `pyrepo-check --all`
+gate remains Task 6's responsibility.
