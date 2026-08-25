@@ -89,6 +89,10 @@ from services.specs.story_validation_service import (
     StoryValidationReadinessError,
     require_story_ready_for_sprint,
 )
+from services.story_sprint_selection import (
+    story_sprint_selection_fact_in_session,
+    story_structural_eligibility,
+)
 from utils.agileforge_spec_profile_v2 import (
     SpecificationPayload,
     canonical_spec_hash,
@@ -3040,14 +3044,18 @@ class WorkflowFactRepository:
                 "story dependency",
             )
 
-    @staticmethod
     def _story_fact(
+        self,
         row: UserStory,
-        story_id: int,
         artifact: PlanningArtifactFact | None,
         blockers: tuple[str, ...],
         sprint_ids: tuple[int, ...],
     ) -> StoryFact:
+        story_id = self._required_id(row.story_id, "story")
+        structurally_eligible, structural_eligibility_status = (
+            story_structural_eligibility(self._session, story=row)
+        )
+        selection = story_sprint_selection_fact_in_session(self._session, story=row)
         validation_status: Literal["validated", "failed", "unvalidated"] = "unvalidated"
         validation_failures: tuple[JsonObject, ...] = ()
         if row.validation_evidence is not None:
@@ -3096,7 +3104,17 @@ class WorkflowFactRepository:
             story_points=row.story_points,
             rank=row.rank,
             sprint_ids=sprint_ids,
-            sprint_candidate=not blockers,
+            structurally_eligible=structurally_eligible,
+            structural_eligibility_status=structural_eligibility_status,
+            sprint_selection_state=selection.selection_state,
+            sprint_selection_state_fingerprint=selection.state_fingerprint,
+            sprint_selection_event_id=selection.event_id,
+            sprint_selection_event_fingerprint=selection.event_fingerprint,
+            sprint_candidate=(
+                structurally_eligible
+                and selection.selection_state == "selected"
+                and not blockers
+            ),
             readiness_blockers=blockers,
             validation_status=validation_status,
             validation_failures=validation_failures,
@@ -3159,10 +3177,10 @@ class WorkflowFactRepository:
             spec_versions,
         )
         blockers = self._story_readiness_blockers(rows, dependencies, stories_by_id)
-        return tuple(
-            self._story_fact(
+        facts: list[StoryFact] = []
+        for story_id, row in stories_by_id.items():
+            facts.append(self._story_fact(
                 row,
-                story_id,
                 (
                     artifact
                     if (
@@ -3180,9 +3198,8 @@ class WorkflowFactRepository:
                 ),
                 blockers[story_id],
                 tuple(sprint_ids_by_story[story_id]),
-            )
-            for story_id, row in stories_by_id.items()
-        )
+            ))
+        return tuple(facts)
 
     def _story_dependencies(
         self,

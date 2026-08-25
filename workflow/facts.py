@@ -452,6 +452,12 @@ class StoryFact(FrozenModel):
     story_points: int | None = None
     rank: str | None = None
     sprint_ids: tuple[int, ...] = ()
+    structurally_eligible: bool
+    structural_eligibility_status: Literal["eligible", "ineligible", "stale"]
+    sprint_selection_state: Literal["unselected", "selected", "deferred"]
+    sprint_selection_state_fingerprint: str
+    sprint_selection_event_id: int | None = None
+    sprint_selection_event_fingerprint: str | None = None
     sprint_candidate: bool
     readiness_blockers: tuple[str, ...]
     validation_status: Literal["validated", "failed", "unvalidated"] | None = None
