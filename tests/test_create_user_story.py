@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import json
 import sqlite3
 import threading
 from datetime import datetime, timedelta
@@ -747,7 +748,9 @@ def test_story_race_classifier_uses_named_backend_constraint_only(
     assert _is_story_decision_uniqueness_race(error) is expected
 
 
-@pytest.mark.parametrize("corruption", ["missing", "extra", "drifted"])
+@pytest.mark.parametrize(
+    "corruption", ["missing", "extra", "drifted", "stale_evidence"]
+)
 def test_story_winner_proof_requires_exact_superseded_ancestor_rows(
     engine: Engine,
     corruption: str,
@@ -801,9 +804,19 @@ def test_story_winner_proof_requires_exact_superseded_ancestor_rows(
                 }
             )
             session.add(UserStory.model_validate(extra_values))
-        else:
+        elif corruption == "drifted":
             ancestor.title = "Drifted accepted ancestor"
             session.add(ancestor)
+        else:
+            winner = session.exec(
+                select(UserStory).where(
+                    col(UserStory.source_story_artifact_id) == artifact_c_id
+                )
+            ).one()
+            evidence = json.loads(winner.validation_evidence or "{}")
+            evidence["validator_version"] = "obsolete-validator"
+            winner.validation_evidence = canonical_json(evidence)
+            session.add(winner)
         session.commit()
 
     with Session(engine) as session:
@@ -912,6 +925,61 @@ def test_decide_story_translates_only_a_fully_proven_named_uniqueness_race(
     with Session(engine) as session, pytest.raises(IntegrityError) as raised:
         execute_decide_story(session, request, review, EVALUATED_AT)
     assert raised.value is unrelated
+
+
+def test_decide_story_rolls_back_when_structural_evaluator_raises_value_error(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unexpected validation errors leave no accepted decision or receipt."""
+    project_id, roadmap_id = _seed_story_parent(engine)
+    with Session(engine) as session:
+        artifact = _record_story(
+            session,
+            project_id=project_id,
+            roadmap_id=roadmap_id,
+        )
+        session.commit()
+        artifact_id = int(artifact.story_artifact_id or 0)
+        artifact_fingerprint = artifact.content_fingerprint
+    domain = _domain(engine)
+    position = domain.position(project_id)
+    review = next(
+        item
+        for item in position.decisions
+        if item.node_id == "planning.story.review"
+    )
+    request = DecideStory(
+        **_guards(position, "planning.story.review", review.instance_key),
+        idempotency_key="rollback-story-validation-value-error",
+        backlog_item_id="PBI-000001",
+        story_artifact_id=artifact_id,
+        artifact_fingerprint=artifact_fingerprint,
+        decision="accepted",
+        rationale="Acceptance must be atomic.",
+    )
+
+    def raise_evaluator_value_error(*_args: object, **_kwargs: object) -> None:
+        message = "unexpected structural evaluator failure"
+        raise ValueError(message)
+
+    monkeypatch.setattr(
+        story_phase,
+        "validate_story_with_specification_in_session",
+        raise_evaluator_value_error,
+    )
+    with pytest.raises(ValueError, match="unexpected structural evaluator failure"):
+        domain.transition(request)
+
+    with Session(engine) as session:
+        assert session.exec(select(StoryArtifactDecision)).all() == []
+        assert session.exec(select(UserStory)).all() == []
+        assert session.exec(
+            select(WorkflowTransitionReceipt).where(
+                col(WorkflowTransitionReceipt.idempotency_key)
+                == request.idempotency_key
+            )
+        ).all() == []
 
 
 def test_concurrent_distinct_story_decisions_commit_one_complete_winner(

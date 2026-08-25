@@ -895,13 +895,12 @@ def validate_story_with_specification(
     )
 
 
-def require_story_validation_evidence(
+def require_current_story_validation_evidence(
     session: Session,
     *,
     story: UserStory,
-    require_current_spec: bool,
 ) -> ValidationEvidence:
-    """Prove complete canonical evidence against exact immutable Story sources."""
+    """Prove canonical v3 evidence matches current controlled Story sources."""
     raw_evidence = story.validation_evidence
     if raw_evidence is None:
         message = "Story validation evidence is required."
@@ -925,7 +924,6 @@ def require_story_validation_evidence(
         or artifact.story_artifact_id is None
         or input_fingerprint is None
         or source_ids is None
-        or context.failures
     ):
         message = "Story validation source context is invalid."
         raise StoryValidationReadinessError(message)
@@ -951,7 +949,25 @@ def require_story_validation_evidence(
         and evidence.validator_version == _VALIDATOR_VERSION
         and evidence.referenced_spec_item_ids == expected_references
     )
-    if not exact_identities or not evidence.structurally_eligible:
+    if (
+        not exact_identities
+        or evidence.structural_failures != context.failures
+        or evidence.structurally_eligible != (not context.failures)
+    ):
+        message = "Story validation evidence is failed or stale."
+        raise StoryValidationReadinessError(message)
+    return evidence
+
+
+def require_story_validation_evidence(
+    session: Session,
+    *,
+    story: UserStory,
+    require_current_spec: bool,
+) -> ValidationEvidence:
+    """Prove current evidence is structurally eligible for Story readiness."""
+    evidence = require_current_story_validation_evidence(session, story=story)
+    if not evidence.structurally_eligible:
         message = "Story validation evidence is failed or stale."
         raise StoryValidationReadinessError(message)
     if require_current_spec:
@@ -985,6 +1001,7 @@ __all__ = [
     "StoryValidationReadinessError",
     "ValidateStoryInput",
     "compute_story_validation_input_fingerprint",
+    "require_current_story_validation_evidence",
     "require_story_ready_for_sprint",
     "require_story_validation_evidence",
     "story_validation_input_fingerprint",

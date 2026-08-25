@@ -447,6 +447,7 @@ def execute_decide_story(
         return _conflict("DecideStory does not target the waiting artifact.")
     from services.agent_workbench.story_phase import (  # noqa: PLC0415
         RecordStoryDecisionInput,
+        StoryAcceptanceValidationError,
         prove_story_decision_winner_in_session,
         record_story_decision_in_session,
     )
@@ -477,6 +478,8 @@ def execute_decide_story(
         return _conflict(
             "The Story artifact was decided by another workflow transition."
         )
+    except StoryAcceptanceValidationError:
+        raise
     except ValueError as error:
         return _conflict(str(error))
     return _success(

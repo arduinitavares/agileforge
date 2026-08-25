@@ -44,11 +44,10 @@ from services.planning_lineage import (
     select_current_accepted_artifact,
 )
 from services.specs.story_validation_service import (
-    compute_story_validation_input_fingerprint,
+    require_current_story_validation_evidence,
     validate_story_with_specification_in_session,
 )
 from services.story_rank import parse_story_rank
-from utils.spec_schemas import ValidationEvidence
 from workflow.fingerprints import canonical_hash, canonical_json
 
 if TYPE_CHECKING:
@@ -61,6 +60,10 @@ if TYPE_CHECKING:
 
 
 _STORY_POINTS: dict[str, int] = STORY_POINTS_BY_EFFORT
+
+
+class StoryAcceptanceValidationError(ValueError):
+    """An unexpected structural-evidence failure aborting Story acceptance."""
 
 
 @dataclass(frozen=True)
@@ -594,11 +597,14 @@ def _materialize_story_rows(
     session.flush()
     story_ids = tuple(_required_id(row.story_id, label="User Story") for row in rows)
     for story_id in story_ids:
-        validate_story_with_specification_in_session(
-            session,
-            {"story_id": story_id, "mode": "structural"},
-            now=lambda accepted_at=accepted_at: accepted_at,
-        )
+        try:
+            validate_story_with_specification_in_session(
+                session,
+                {"story_id": story_id, "mode": "structural"},
+                now=lambda accepted_at=accepted_at: accepted_at,
+            )
+        except Exception as error:
+            raise StoryAcceptanceValidationError(str(error)) from error
     return story_ids
 
 
@@ -888,24 +894,15 @@ def _acceptance_evidence_is_current(
     accepted_at: datetime,
 ) -> bool:
     """Prove a fresh activation retained exact v3 structural evidence."""
-    raw_evidence = story.validation_evidence
-    if raw_evidence is None:
-        return False
     try:
-        evidence = ValidationEvidence.model_validate_json(raw_evidence, strict=True)
-        current_fingerprint = compute_story_validation_input_fingerprint(
-            session,
-            story=story,
-        )
+        evidence = require_current_story_validation_evidence(session, story=story)
     except ValueError:
         return False
     return (
-        raw_evidence == canonical_json(evidence.model_dump(mode="json"))
-        and evidence.mode == "structural"
+        evidence.mode == "structural"
         and evidence.validated_at.replace(tzinfo=None) == accepted_at.replace(
             tzinfo=None
         )
-        and evidence.story_validation_input_fingerprint == current_fingerprint
     )
 
 
@@ -976,6 +973,7 @@ __all__ = [
     "RecordStoryDecisionInput",
     "RecordStoryDecisionResult",
     "RecordStoryDraftInput",
+    "StoryAcceptanceValidationError",
     "StoryCorrectionTarget",
     "load_stored_story_planning_content",
     "load_story_correction_target_in_session",
