@@ -46,6 +46,8 @@ if TYPE_CHECKING:
 
     from sqlalchemy.engine import Engine
 
+    from workflow.contracts import JsonObject
+
 _EXPECTED_SELECTION_EVENT_COUNT = 4
 _NOW = datetime(2026, 8, 25, 12, tzinfo=UTC)
 
@@ -59,6 +61,28 @@ def _build_application(engine: Engine) -> AgileForgeApplication:
         ),
         read_projection=DurableReadProjectionService(engine=engine),
     )
+
+
+def _result_data(result: JsonObject) -> JsonObject:
+    data = result["data"]
+    assert isinstance(data, dict)
+    return data
+
+
+def _result_string(result: JsonObject, key: str) -> str:
+    value = _result_data(result)[key]
+    assert isinstance(value, str)
+    return value
+
+
+def _error_code(result: JsonObject) -> str:
+    errors = result["errors"]
+    assert isinstance(errors, list)
+    error = errors[0]
+    assert isinstance(error, dict)
+    code = error["code"]
+    assert isinstance(code, str)
+    return code
 
 
 def test_eligible_story_defaults_to_unselected_and_not_a_candidate(
@@ -84,7 +108,7 @@ def _selection_request(
     *,
     project_id: int,
     story_id: int,
-    intent: str,
+    intent: selection_service.StorySprintSelectionIntent,
     expected_state_fingerprint: str,
     key: str,
 ) -> selection_service.StorySprintSelectionRequest:
@@ -111,10 +135,14 @@ def test_complete_selection_transition_table_is_append_only(engine: Engine) -> N
         )
 
         states: list[str] = []
-        for index, intent in enumerate(
-            ("select", "select", "remove", "defer", "select"),
-            start=1,
-        ):
+        intents: tuple[selection_service.StorySprintSelectionIntent, ...] = (
+            "select",
+            "select",
+            "remove",
+            "defer",
+            "select",
+        )
+        for index, intent in enumerate(intents, start=1):
             current = selection_service.apply_story_sprint_selection_in_session(
                 session,
                 _selection_request(
@@ -185,9 +213,9 @@ def test_application_replays_identical_request_and_rejects_conflicts(
 
     assert first == replay
     assert first["ok"] is True
-    assert first["data"]["selection_state"] == "selected"
+    assert _result_data(first)["selection_state"] == "selected"
     assert conflict["ok"] is False
-    assert conflict["errors"][0]["code"] == "IDEMPOTENCY_CONFLICT"
+    assert _error_code(conflict) == "IDEMPOTENCY_CONFLICT"
     with Session(engine) as session:
         assert len(
             session.exec(
@@ -291,7 +319,7 @@ def test_selected_intent_survives_staleness_and_reactivates_after_reconciliation
             key="preserve-select",
         )
     )
-    selected_fingerprint = selected["data"]["state_fingerprint"]
+    selected_fingerprint = _result_string(selected, "state_fingerprint")
     with Session(engine) as session:
         story = session.get_one(UserStory, story_id)
         story.validation_evidence = None
@@ -391,7 +419,7 @@ def test_select_requires_current_evidence_but_defer_and_remove_do_not(
         )
     )
     assert rejected["ok"] is False
-    assert rejected["errors"][0]["code"] == (
+    assert _error_code(rejected) == (
         "STORY_STRUCTURAL_ELIGIBILITY_REQUIRED"
     )
     deferred = app.apply_story_sprint_selection(
@@ -409,12 +437,15 @@ def test_select_requires_current_evidence_but_defer_and_remove_do_not(
             project_id=project_id,
             story_id=story_id,
             intent="remove",
-            expected_state_fingerprint=deferred["data"]["state_fingerprint"],
+            expected_state_fingerprint=_result_string(
+                deferred,
+                "state_fingerprint",
+            ),
             key="remove-stale",
         )
     )
     assert removed["ok"] is True
-    assert removed["data"]["selection_state"] == "unselected"
+    assert _result_data(removed)["selection_state"] == "unselected"
 
 
 def test_superseding_story_receives_no_selection_state_from_replaced_story(
@@ -559,12 +590,15 @@ def test_accepted_sprint_plan_locks_further_selection_changes(engine: Engine) ->
             project_id=project_id,
             story_id=story_id,
             intent="remove",
-            expected_state_fingerprint=selected["data"]["state_fingerprint"],
+            expected_state_fingerprint=_result_string(
+                selected,
+                "state_fingerprint",
+            ),
             key="remove-after-plan",
         )
     )
     assert locked["ok"] is False
-    assert locked["errors"][0]["code"] == "SELECTION_LIFECYCLE_LOCKED"
+    assert _error_code(locked) == "SELECTION_LIFECYCLE_LOCKED"
 
 
 def test_selection_event_audit_binds_exact_story_and_operator_metadata(
@@ -625,7 +659,7 @@ def test_selection_event_audit_binds_exact_story_and_operator_metadata(
     assert metadata.new_state == "selected"
     assert metadata.rationale == "Operator chose select."
     assert metadata.observed_eligibility_evidence_fingerprint is not None
-    assert result["data"]["selection_event_id"] == event.event_id
+    assert _result_data(result)["selection_event_id"] == event.event_id
 
 
 def test_same_state_is_receipted_and_stale_expected_state_fails_closed(
@@ -655,7 +689,10 @@ def test_same_state_is_receipted_and_stale_expected_state_fails_closed(
             project_id=project_id,
             story_id=story_id,
             intent="select",
-            expected_state_fingerprint=selected["data"]["state_fingerprint"],
+            expected_state_fingerprint=_result_string(
+                selected,
+                "state_fingerprint",
+            ),
             key="select-no-op",
         )
     )
@@ -670,7 +707,7 @@ def test_same_state_is_receipted_and_stale_expected_state_fails_closed(
     )
     assert no_op == selected
     assert stale["ok"] is False
-    assert stale["errors"][0]["code"] == "STALE_SELECTION_STATE"
+    assert _error_code(stale) == "STALE_SELECTION_STATE"
     with Session(engine) as session:
         events = session.exec(
             select(WorkflowEvent).where(

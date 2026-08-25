@@ -416,6 +416,7 @@ __all__ = [
     "StorySprintSelectionEventMetadata",
     "StorySprintSelectionFact",
     "StorySprintSelectionIntegrityError",
+    "StorySprintSelectionIntent",
     "StorySprintSelectionMutationError",
     "StorySprintSelectionRequest",
     "apply_story_sprint_selection_in_session",
