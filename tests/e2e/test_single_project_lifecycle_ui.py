@@ -50,6 +50,7 @@ _UI_SETTLE_MS = 150
 _DESKTOP_VIEWPORT: ViewportSize = {"width": 1440, "height": 900}
 _MOBILE_VIEWPORT: ViewportSize = {"width": 390, "height": 844}
 _EXPECTED_REMOVE_SELECTION_REQUESTS = 2
+_EXPECTED_RETRIED_DEPENDENCY_REQUESTS = 2
 _PNG_WIDTH_START = 16
 _PNG_WIDTH_END = 20
 _PNG_HEIGHT_START = 20
@@ -2766,7 +2767,7 @@ def test_dependency_confirmation_stays_locked_when_authority_reload_fails(
     expect(refreshed_confirm).to_be_enabled()
     refreshed_confirm.click()
     page.wait_for_timeout(_UI_SETTLE_MS)
-    assert len(fake.dependency_apply_requests) == 2
+    assert len(fake.dependency_apply_requests) == _EXPECTED_RETRIED_DEPENDENCY_REQUESTS
     assert not [
         body
         for suffix, body in fake.delivery_requests
