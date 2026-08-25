@@ -731,7 +731,7 @@ test('story generation control ignores candidate backlog reviews and stays disab
     assert.ok(!markup.includes('UNTRUSTED OR STALE CANDIDATE REQUIREMENT'));
 });
 
-test('story readiness section renders unvalidated story with exact ID, parent PBI, rank, points, and validate button', () => {
+test('story readiness keeps structural proof separate from three-state Sprint selection', () => {
     const context = loadFrontend();
     const stories = [
         {
@@ -740,9 +740,17 @@ test('story readiness section renders unvalidated story with exact ID, parent PB
             backlog_item_id: 'PBI-000001',
             story_points: 5,
             rank: '1',
+            structurally_eligible: true,
+            structural_eligibility_status: 'eligible',
+            sprint_selection_state: 'unselected',
+            sprint_selection_state_fingerprint: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+            selected_scope_fingerprint: null,
+            dependency_safe: false,
             sprint_candidate: false,
             content_accepted: true,
-            readiness_blockers: ['STORY_VALIDATION_REQUIRED'],
+            validation_status: 'validated',
+            validation_failures: [],
+            readiness_blockers: [],
         },
     ];
     const appState = {
@@ -760,12 +768,19 @@ test('story readiness section renders unvalidated story with exact ID, parent PB
     assert.ok(markup.includes('Implement parser core'));
     assert.ok(markup.includes('Rank: 1'));
     assert.ok(markup.includes('Points: 5'));
-    assert.ok(markup.includes('Unvalidated'));
-    assert.ok(markup.includes('data-story-validate-id="101"'));
-    assert.ok(markup.includes('Validate Story'));
+    assert.ok(markup.includes('Structurally eligible'));
+    assert.ok(markup.includes('Unselected'));
+    assert.ok(markup.includes('Select for Sprint'));
+    assert.ok(markup.includes('Defer'));
+    assert.ok(markup.includes('data-story-selection-id="101"'));
+    assert.ok(markup.includes('data-story-selection-fingerprint="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"'));
+    assert.ok(markup.includes('Passing provider-free structural checks proves structural eligibility only.'));
+    assert.ok(markup.includes('does not select this Story for Sprint, confirm dependencies, validate semantic quality, or generate a Sprint.'));
+    assert.ok(!markup.includes('Validate Story'));
+    assert.ok(!markup.includes('Validated'));
 });
 
-test('story readiness section renders validated badge and candidate pool renders candidate stories', () => {
+test('story readiness renders selected and deferred intent separately and preserves selected intent through stale evidence', () => {
     const context = loadFrontend();
     const stories = [
         {
@@ -774,8 +789,34 @@ test('story readiness section renders validated badge and candidate pool renders
             backlog_item_id: 'PBI-000001',
             story_points: 5,
             rank: '1',
-            sprint_candidate: true,
+            structurally_eligible: false,
+            structural_eligibility_status: 'stale',
+            sprint_selection_state: 'selected',
+            sprint_selection_state_fingerprint: 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+            selected_scope_fingerprint: null,
+            dependency_safe: false,
+            sprint_candidate: false,
             content_accepted: true,
+            validation_status: 'validated',
+            validation_failures: [],
+            readiness_blockers: [],
+        },
+        {
+            story_id: 102,
+            source_story_item_id: 'US-002',
+            backlog_item_id: 'PBI-000002',
+            story_points: 3,
+            rank: '2',
+            structurally_eligible: true,
+            structural_eligibility_status: 'eligible',
+            sprint_selection_state: 'deferred',
+            sprint_selection_state_fingerprint: 'sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+            selected_scope_fingerprint: null,
+            dependency_safe: false,
+            sprint_candidate: false,
+            content_accepted: true,
+            validation_status: 'validated',
+            validation_failures: [],
             readiness_blockers: [],
         },
     ];
@@ -785,15 +826,13 @@ test('story readiness section renders validated badge and candidate pool renders
         sprintCandidates: { items: stories },
     };
 
-    const readinessMarkup = context.storyReadinessMarkup(stories, appState);
-    assert.ok(readinessMarkup.includes('Validated'));
-    assert.ok(!readinessMarkup.includes('data-story-validate-id'));
-
-    const candidateMarkup = context.sprintCandidatePoolMarkup(stories);
-    assert.ok(candidateMarkup.includes('Sprint candidate pool'));
-    assert.ok(candidateMarkup.includes('1 candidate ready'));
-    assert.ok(candidateMarkup.includes('US-001'));
-    assert.ok(candidateMarkup.includes('(PBI-000001)'));
+    const markup = context.storyReadinessMarkup(stories, appState);
+    assert.ok(markup.includes('Structural evidence stale'));
+    assert.ok(markup.includes('Selected for Sprint'));
+    assert.ok(markup.includes('Re-run structural checks'));
+    assert.ok(markup.includes('Remove from Sprint selection'));
+    assert.ok(markup.includes('Deferred'));
+    assert.ok(markup.includes('data-story-selection-intent="select"'));
 });
 
 test('dependency review section renders when apply_story_dependencies action is available', () => {
@@ -871,7 +910,7 @@ test('dependency review displays human-readable story identifiers, PBIs, and dep
     assert.ok(markup.includes('Confirm dependencies'));
 });
 
-test('story readiness section renders validation failed badge and actionable diagnostics', () => {
+test('story readiness shows current rule diagnostics without suggesting another approval-like check', () => {
     const context = loadFrontend();
     const stories = [
         {
@@ -882,8 +921,14 @@ test('story readiness section renders validation failed badge and actionable dia
             story_points: 3,
             rank: '0|hzzzzz:',
             content_accepted: true,
+            structurally_eligible: false,
+            structural_eligibility_status: 'ineligible',
+            sprint_selection_state: 'unselected',
+            sprint_selection_state_fingerprint: 'sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',
+            selected_scope_fingerprint: null,
+            dependency_safe: false,
             sprint_candidate: false,
-            readiness_blockers: ['STORY_VALIDATION_REQUIRED'],
+            readiness_blockers: [],
             validation_status: 'failed',
             validation_failures: [
                 {
@@ -900,15 +945,15 @@ test('story readiness section renders validation failed badge and actionable dia
     };
 
     const readinessMarkup = context.storyReadinessMarkup(stories, appState);
-    assert.ok(readinessMarkup.includes('Validation Failed'));
+    assert.ok(readinessMarkup.includes('Structural eligibility failed'));
     assert.ok(readinessMarkup.includes('data-story-validation-diagnostics="true"'));
     assert.ok(readinessMarkup.includes('STORY_SPEC_REFERENCE_INVALID'));
     assert.ok(readinessMarkup.includes('Story references invalid specification items: REQ.099'));
-    assert.ok(readinessMarkup.includes('Revalidate'));
-    assert.ok(readinessMarkup.includes('data-story-validate-id="101"'));
+    assert.ok(!readinessMarkup.includes('Re-run structural checks'));
+    assert.ok(!readinessMarkup.includes('Validate Story'));
 });
 
-test('story readiness section renders validated badge and dependency blocker badge separately', () => {
+test('malformed readiness projections fail closed and hide selection controls', () => {
     const context = loadFrontend();
     const stories = [
         {
@@ -919,7 +964,13 @@ test('story readiness section renders validated badge and dependency blocker bad
             story_points: 5,
             rank: '0|hzzzzz:1',
             content_accepted: true,
-            sprint_candidate: false,
+            structurally_eligible: true,
+            structural_eligibility_status: 'eligible',
+            sprint_selection_state: 'selected',
+            // Missing exact selection state fingerprint.
+            selected_scope_fingerprint: null,
+            dependency_safe: true,
+            sprint_candidate: true,
             readiness_blockers: ['PREREQUISITE_STORY_101_INCOMPLETE'],
             validation_status: 'validated',
             validation_failures: [],
@@ -932,8 +983,38 @@ test('story readiness section renders validated badge and dependency blocker bad
     };
 
     const readinessMarkup = context.storyReadinessMarkup(stories, appState);
-    assert.ok(readinessMarkup.includes('Validated'));
-    assert.ok(readinessMarkup.includes('Blocked: PREREQUISITE_STORY_101_INCOMPLETE'));
+    assert.ok(readinessMarkup.includes('Story state unavailable'));
+    assert.ok(readinessMarkup.includes('aria-disabled="true"'));
+    assert.ok(!readinessMarkup.includes('data-story-selection-id="102"'));
+});
+
+test('structural and selection mutation payloads bind exact Story state and reuse an idempotency key for retry', async () => {
+    const requests = [];
+    let attempts = 0;
+    const context = loadFrontend(async (path, options) => {
+        requests.push({ path, body: JSON.parse(options.body) });
+        attempts += 1;
+        if (attempts === 1) throw new Error('temporary network failure');
+        return { ok: true, status: 200, text: async () => '{"ok":true,"data":{},"errors":[]}' };
+    });
+    const fingerprint = 'sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee';
+    await context.postStorySelectionMutation(1, 101, 'select', fingerprint);
+    assert.equal(requests.length, 2);
+    assert.equal(requests[0].path, '/api/projects/1/story/sprint-selection');
+    assert.deepEqual(requests[0].body, {
+        story_id: 101,
+        intent: 'select',
+        expected_state_fingerprint: fingerprint,
+        rationale: 'Selected for Sprint from dashboard.',
+        actor: 'dashboard-ui',
+        idempotency_key: 'dashboard-uuid-1',
+    });
+    assert.equal(requests[0].body.idempotency_key, requests[1].body.idempotency_key);
+    assert.deepEqual(context.structuralEligibilityMutationPayload(101), {
+        story_ids: [101],
+        actor: 'dashboard-ui',
+        idempotency_key: 'dashboard-uuid-1',
+    });
 });
 
 test('dependency review disables confirm button when canonical candidate projection is missing', () => {
