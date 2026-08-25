@@ -21,7 +21,11 @@ from workflow.definitions.planning import (
     candidate_set_fingerprint,
     story_dependency_source_fingerprint,
 )
-from workflow.execution_integrity import StoryClosurePayload, TaskEvidencePayload
+from workflow.execution_integrity import (
+    StoryClosurePayload,
+    TaskEvidencePayload,
+    selected_story_dependency_snapshot,
+)
 from workflow.facts import (
     PlanningArtifactFact,
     PostSprintTriageFact,
@@ -88,6 +92,19 @@ def _story(
     )
 
 
+def _external_story(story_id: int) -> StoryFact:
+    """Return one completed, unselected Story outside the exact Sprint scope."""
+    return StoryFact.model_validate(
+        {
+            **_story(story_id, status="Done", sprint_ids=()).model_dump(mode="json"),
+            "sprint_selection_state": "unselected",
+            "selected_scope_fingerprint": None,
+            "dependency_safe": False,
+            "sprint_candidate": False,
+        }
+    )
+
+
 def _task(
     task_id: int,
     story_id: int,
@@ -118,6 +135,57 @@ def _task(
         status=status,
         dependencies_satisfied=True,
     )
+
+
+def test_execution_dependency_rows_bind_reachable_external_closure() -> None:
+    """Invalidate exact execution evidence when a reachable external row changes."""
+    selected = _story(1)
+    external = tuple(_external_story(story_id) for story_id in (2, 3, 4))
+    selected_edge = StoryDependencyFact(
+        dependency_id=1,
+        dependent_story_id=1,
+        prerequisite_story_id=2,
+        status="active",
+        source="manual_review",
+        confidence="reviewed",
+        reason="Selected Story requires the external prerequisite.",
+    )
+    before = (
+        selected_edge,
+        StoryDependencyFact(
+            dependency_id=2,
+            dependent_story_id=2,
+            prerequisite_story_id=3,
+            status="active",
+            source="manual_review",
+            confidence="reviewed",
+            reason="External prerequisite requires completed Story 3.",
+        ),
+    )
+    after = (
+        selected_edge,
+        StoryDependencyFact(
+            dependency_id=2,
+            dependent_story_id=2,
+            prerequisite_story_id=4,
+            status="active",
+            source="manual_review",
+            confidence="reviewed",
+            reason="External prerequisite now requires completed Story 4.",
+        ),
+    )
+
+    before_scope = selected_story_dependency_snapshot(
+        _snapshot(stories=(selected, *external), dependencies=before),
+        (selected.story_id,),
+    )
+    after_scope = selected_story_dependency_snapshot(
+        _snapshot(stories=(selected, *external), dependencies=after),
+        (selected.story_id,),
+    )
+
+    assert before_scope.rows_fingerprint != after_scope.rows_fingerprint
+    assert before_scope.reviewed_edges == after_scope.reviewed_edges
 
 
 def _task_completion(

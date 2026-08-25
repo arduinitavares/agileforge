@@ -512,6 +512,23 @@ def test_candidate_fingerprint_is_order_independent() -> None:
     )
 
 
+def test_candidate_fingerprint_binds_reachable_external_dependency_rows() -> None:
+    """Stale a pending plan when a reachable external prerequisite row changes."""
+    stories = (_story(1),)
+    selected_edge = _dependency(1, 1, 2)
+    before = (selected_edge, _dependency(2, 2, 3))
+    after = (selected_edge, _dependency(2, 2, 4))
+
+    before_fingerprint = candidate_set_fingerprint(stories, before)
+    after_fingerprint = candidate_set_fingerprint(stories, after)
+
+    assert before_fingerprint != after_fingerprint
+    assert before_fingerprint == candidate_set_fingerprint(
+        stories,
+        (*before, _dependency(3, 8, 9)),
+    )
+
+
 def test_reversed_dependency_and_task_rows_preserve_semantic_fingerprints() -> None:
     """Sort repository-derived dependency and task semantics before hashing."""
     dependencies = (_dependency(1, 2, 1), _dependency(2, 3, 2))
