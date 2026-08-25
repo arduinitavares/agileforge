@@ -327,3 +327,53 @@ The full round-two GREEN commands now pass: `node --check frontend/project.js`,
 above (5 passed, 15 deselected, 4 deprecation warnings), and
 `uv run --frozen pyrepo-check annotations ty ruff tests/e2e/test_single_project_lifecycle_ui.py`
 (ruff, annotations, and ty passed).
+
+## Fix round 3/5: lock-aware 409 dependency rerender
+
+### Delivered correction
+
+`storyDependencyReviewMarkup` now reads the unresolved dependency-mutation
+sentinel. If a successful dependency POST is followed by a `loadDashboard()`
+HTTP 409 that rerenders stale lifecycle state, the replacement Confirm control
+is native-disabled with `aria-disabled="true"` and `aria-busy="true"`, shows
+the in-progress status, and remains handler-locked. The global error retains
+the exact reload-conflict message. A subsequent genuinely successful project
+reload clears the sentinel before rendering a new enabled current action.
+Unrelated controls are unchanged.
+
+### RED/GREEN evidence
+
+```text
+uv run --frozen pytest -q tests/e2e/test_single_project_lifecycle_ui.py -k dependency_confirmation_replacement_stays_locked
+1 failed, 20 deselected, 4 deprecation warnings
+```
+
+The committed RED (`b98945e`) exercised the actual `/story/dependencies` 409
+response during the post-success dashboard reload. It proved the replacement
+button was formerly enabled.
+
+```text
+node --check frontend/project.js
+node --test tests/*.mjs
+66 passed, 0 failed
+
+uv run --frozen pytest -q tests/e2e/test_single_project_lifecycle_ui.py -k 'dependency_confirmation_stays_locked or dependency_confirmation_replacement_stays_locked'
+2 passed, 19 deselected, 4 deprecation warnings
+
+uv run --frozen pyrepo-check annotations ty ruff tests/e2e/test_single_project_lifecycle_ui.py
+ruff, annotations, and ty passed
+```
+
+The focused browser tests assert the 409 replacement cannot post a second
+payload/key and that the existing later-successful-refresh recovery produces a
+new enabled valid Confirm action.
+
+### Fix-round commits and boundaries
+
+- `b98945e` test: lock dependency replacement on reload conflict (#223)
+- `2d3d70d` fix: keep dependency replacement locked on conflict (#223)
+- `f2f6947` fix: preserve conflict lock through dashboard rerender (#223)
+
+No provider call, real Sprint generation/persistence, manual profile, push,
+merge, issue mutation, or live manual acceptance occurred. #224 behavior is
+unchanged; full `pyrepo-check --all` remains Task 6's gate.
