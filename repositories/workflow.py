@@ -90,8 +90,9 @@ from services.specs.story_validation_service import (
     require_story_ready_for_sprint,
 )
 from services.story_sprint_selection import (
+    StorySprintSelectionFact,
     StorySprintSelectionIntegrityError,
-    story_sprint_selection_fact_in_session,
+    story_sprint_selection_facts_in_session,
     story_structural_eligibility,
 )
 from utils.agileforge_spec_profile_v2 import (
@@ -3051,18 +3052,12 @@ class WorkflowFactRepository:
         artifact: PlanningArtifactFact | None,
         blockers: tuple[str, ...],
         sprint_ids: tuple[int, ...],
+        selection: StorySprintSelectionFact,
     ) -> StoryFact:
         story_id = self._required_id(row.story_id, "story")
         structurally_eligible, structural_eligibility_status = (
             story_structural_eligibility(self._session, story=row)
         )
-        try:
-            selection = story_sprint_selection_fact_in_session(
-                self._session,
-                story=row,
-            )
-        except StorySprintSelectionIntegrityError as error:
-            raise self._error(str(error)) from error
         validation_status: Literal["validated", "failed", "unvalidated"] = "unvalidated"
         validation_failures: tuple[JsonObject, ...] = ()
         if row.validation_evidence is not None:
@@ -3184,6 +3179,13 @@ class WorkflowFactRepository:
             spec_versions,
         )
         blockers = self._story_readiness_blockers(rows, dependencies, stories_by_id)
+        try:
+            selection_by_story_id = story_sprint_selection_facts_in_session(
+                self._session,
+                project_id=project_id,
+            )
+        except StorySprintSelectionIntegrityError as error:
+            raise self._error(str(error)) from error
         facts: list[StoryFact] = []
         for story_id, row in stories_by_id.items():
             facts.append(
@@ -3206,6 +3208,7 @@ class WorkflowFactRepository:
                     ),
                     blockers[story_id],
                     tuple(sprint_ids_by_story[story_id]),
+                    selection_by_story_id[story_id],
                 )
             )
         return tuple(facts)

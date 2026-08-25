@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Annotated, Literal, cast
+from typing import Annotated, Literal, Self, cast
 
 from pydantic import (
     ConfigDict,
@@ -12,6 +12,7 @@ from pydantic import (
     TypeAdapter,
     ValidationError,
     field_validator,
+    model_validator,
 )
 from sqlmodel import Session, col, select
 
@@ -76,6 +77,15 @@ class StorySprintSelectionRequest(FrozenModel):
     actor: str = Field(min_length=1)
     correlation_id: str | None = None
 
+    @field_validator("actor")
+    @classmethod
+    def reject_blank_actor(cls, value: str) -> str:
+        """Require meaningful operator identity before writing audit history."""
+        if not value.strip():
+            message = "Selection actor must be nonblank."
+            raise ValueError(message)
+        return value
+
     @field_validator("rationale", "correlation_id")
     @classmethod
     def reject_blank_optional_text(cls, value: str | None) -> str | None:
@@ -100,7 +110,7 @@ class StorySprintSelectionEventMetadata(FrozenModel):
     source_story_item_fingerprint: Sha256Fingerprint
     accepted_spec_version_id: int
     accepted_spec_hash: Sha256Fingerprint
-    actor: str
+    actor: str = Field(min_length=1)
     action: StorySprintSelectionIntent
     new_state: SprintSelectionState
     previous_state: SprintSelectionState
@@ -108,6 +118,35 @@ class StorySprintSelectionEventMetadata(FrozenModel):
     observed_eligibility_evidence_fingerprint: Sha256Fingerprint | None
     rationale: str | None
     event_timestamp: datetime
+
+    @field_validator("actor")
+    @classmethod
+    def reject_blank_actor(cls, value: str) -> str:
+        """Reject canonical history without meaningful operator identity."""
+        if not value.strip():
+            message = "Selection event actor must be nonblank."
+            raise ValueError(message)
+        return value
+
+    @field_validator("rationale")
+    @classmethod
+    def reject_blank_rationale(cls, value: str | None) -> str | None:
+        """Preserve absent rationale while rejecting whitespace-only audit text."""
+        if value is not None and not value.strip():
+            message = "Selection event rationale must be nonblank when present."
+            raise ValueError(message)
+        return value
+
+    @model_validator(mode="after")
+    def require_select_evidence(self) -> Self:
+        """Bind every persisted Select action to observed eligible evidence."""
+        if (
+            self.action == "select"
+            and self.observed_eligibility_evidence_fingerprint is None
+        ):
+            message = "Select event must bind eligibility evidence."
+            raise ValueError(message)
+        return self
 
 
 class StorySprintSelectionFact(FrozenModel):
@@ -287,7 +326,19 @@ def story_sprint_selection_fact_in_session(
     story: UserStory,
 ) -> StorySprintSelectionFact:
     """Strictly derive the latest state from canonical append-only history."""
-    return _selection_facts(session, project_id=story.project_id)[_story_id(story)]
+    return story_sprint_selection_facts_in_session(
+        session,
+        project_id=story.project_id,
+    )[_story_id(story)]
+
+
+def story_sprint_selection_facts_in_session(
+    session: Session,
+    *,
+    project_id: int,
+) -> dict[int, StorySprintSelectionFact]:
+    """Strictly replay one Project's canonical selection history once."""
+    return _selection_facts(session, project_id=project_id)
 
 
 def _current_evidence_fingerprint(
@@ -421,5 +472,6 @@ __all__ = [
     "StorySprintSelectionRequest",
     "apply_story_sprint_selection_in_session",
     "story_sprint_selection_fact_in_session",
+    "story_sprint_selection_facts_in_session",
     "story_structural_eligibility",
 ]
