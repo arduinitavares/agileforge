@@ -501,7 +501,12 @@ class PlanningActionSelectionService:
             return None
         stories = tuple(
             sorted(
-                (item for item in snapshot.stories if item.sprint_candidate),
+                (
+                    item
+                    for item in snapshot.stories
+                    if item.structurally_eligible
+                    and item.sprint_selection_state == "selected"
+                ),
                 key=lambda item: item.story_id,
             )
         )
@@ -1365,8 +1370,8 @@ class StoryDependenciesApplyRequest(_PlanningMutationRequest):
             message = "reviewed_edges must not contain duplicate Story pairs."
             raise ValueError(message)
         selected = set(self.selected_story_ids)
-        if any(left not in selected or right not in selected for left, right in pairs):
-            message = "reviewed_edges must remain inside selected_story_ids."
+        if any(left not in selected for left, _right in pairs):
+            message = "reviewed edge dependents must remain in selected_story_ids."
             raise ValueError(message)
         return self
 

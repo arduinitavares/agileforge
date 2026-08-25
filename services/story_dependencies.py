@@ -14,7 +14,7 @@ from services.agent_workbench.story_phase import (
     load_story_correction_target_in_session,
 )
 from workflow.facts import StoryDependencyReviewEdgeFact
-from workflow.fingerprints import canonical_json
+from workflow.fingerprints import canonical_hash, canonical_json
 from workflow.planning_integrity import (
     canonical_dependency_edges,
     dependency_edges_have_duplicate_endpoints,
@@ -44,6 +44,68 @@ class DependencyGraph:
     proposed_edges: dict[int, set[int]]
     issues: list[DependencyGraphIssue]
     cycle_paths: list[list[int]]
+
+
+@dataclass(frozen=True)
+class SelectedScopeStory:
+    """Exact Story, evidence, and latest human-selection lineage in one scope."""
+
+    story_id: int
+    source_story_artifact_id: int
+    source_story_artifact_fingerprint: str
+    source_story_item_id: str
+    source_story_item_fingerprint: str
+    accepted_spec_version_id: int
+    accepted_spec_hash: str
+    validation_evidence_fingerprint: str
+    selection_state_fingerprint: str
+    selection_event_id: int
+    selection_event_fingerprint: str
+
+
+def selected_scope_fingerprint(
+    *,
+    project_id: int,
+    stories: tuple[SelectedScopeStory, ...],
+) -> str:
+    """Bind exact selected Story lineages to current evidence and intent facts."""
+    ordered = tuple(sorted(stories, key=lambda item: item.story_id))
+    if len({item.story_id for item in ordered}) != len(ordered):
+        message = "Selected Story scope contains duplicate Story identities."
+        raise ValueError(message)
+    return canonical_hash(
+        {
+            "schema_version": "agileforge.story-selected-scope.v1",
+            "project_id": project_id,
+            "stories": [
+                {
+                    "story_id": item.story_id,
+                    "source_story_artifact_id": item.source_story_artifact_id,
+                    "source_story_artifact_fingerprint": (
+                        item.source_story_artifact_fingerprint
+                    ),
+                    "source_story_item_id": item.source_story_item_id,
+                    "source_story_item_fingerprint": (
+                        item.source_story_item_fingerprint
+                    ),
+                    "accepted_spec_version_id": item.accepted_spec_version_id,
+                    "accepted_spec_hash": item.accepted_spec_hash,
+                    "validation_evidence_fingerprint": (
+                        item.validation_evidence_fingerprint
+                    ),
+                    "selection_state": "selected",
+                    "selection_state_fingerprint": (
+                        item.selection_state_fingerprint
+                    ),
+                    "selection_event_id": item.selection_event_id,
+                    "selection_event_fingerprint": (
+                        item.selection_event_fingerprint
+                    ),
+                }
+                for item in ordered
+            ],
+        }
+    )
 
 
 class StoryDependencyGraphError(RuntimeError):
@@ -232,7 +294,7 @@ class ApplyStoryDependenciesInput:
     reviewed_at: datetime
 
 
-def apply_story_dependencies_in_session(  # noqa: C901
+def apply_story_dependencies_in_session(  # noqa: C901, PLR0915
     session: Session,
     *,
     inputs: ApplyStoryDependenciesInput,
@@ -254,13 +316,16 @@ def apply_story_dependencies_in_session(  # noqa: C901
                 )
             ]
         )
+    endpoint_ids = selected | {
+        edge.prerequisite_story_id for edge in reviewed_edges
+    }
     stories = session.exec(
-        select(UserStory).where(col(UserStory.story_id).in_(selected))
+        select(UserStory).where(col(UserStory.story_id).in_(endpoint_ids))
     ).all()
     stories_by_id = {
         story.story_id: story for story in stories if story.story_id is not None
     }
-    if set(stories_by_id) != selected or any(
+    if set(stories_by_id) != endpoint_ids or any(
         story.project_id != project_id or story.is_superseded
         for story in stories_by_id.values()
     ):
@@ -270,7 +335,7 @@ def apply_story_dependencies_in_session(  # noqa: C901
                 DependencyGraphIssue(
                     code="STORY_DEPENDENCY_STORY_SET_INVALID",
                     message=message,
-                    story_ids=sorted(selected),
+                    story_ids=sorted(endpoint_ids),
                 )
             ]
         )
@@ -285,12 +350,12 @@ def apply_story_dependencies_in_session(  # noqa: C901
                 DependencyGraphIssue(
                     code="STORY_DEPENDENCY_CROSS_SPECIFICATION",
                     message=message,
-                    story_ids=sorted(selected),
+                    story_ids=sorted(endpoint_ids),
                 )
             ]
         )
     try:
-        for story_id in sorted(selected):
+        for story_id in sorted(endpoint_ids):
             load_story_correction_target_in_session(
                 session,
                 project_id=project_id,
@@ -302,15 +367,15 @@ def apply_story_dependencies_in_session(  # noqa: C901
                 DependencyGraphIssue(
                     code="STORY_DEPENDENCY_STORY_SET_INVALID",
                     message=str(error),
-                    story_ids=sorted(selected),
+                    story_ids=sorted(endpoint_ids),
                 )
             ]
         ) from error
     pairs = tuple(
         (edge.dependent_story_id, edge.prerequisite_story_id) for edge in reviewed_edges
     )
-    if any(left not in selected or right not in selected for left, right in pairs):
-        message = "Dependency review edge leaves the selected Story set."
+    if any(left not in selected for left, _right in pairs):
+        message = "Dependency review edge dependent leaves the selected Story set."
         raise StoryDependencyGraphError(
             [
                 DependencyGraphIssue(
@@ -348,6 +413,8 @@ def apply_story_dependencies_in_session(  # noqa: C901
         for edge in reviewed_edges
     }
     for pair, row in existing_by_pair.items():
+        if row.dependent_story_id not in selected:
+            continue
         row.status = "active" if pair in reviewed_by_pair else "rejected"
         row.source = "manual_review"
         row.confidence = "reviewed"
@@ -399,7 +466,6 @@ def apply_story_dependencies_in_session(  # noqa: C901
         )
     )
     session.flush()
-    assert_dependency_graph_valid_for_sprint(session, project_id=project_id)
     return review
 
 

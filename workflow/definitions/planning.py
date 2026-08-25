@@ -77,6 +77,9 @@ def candidate_set_fingerprint(
     """Hash canonical current Story, dependency, and readiness facts."""
     return canonical_hash(
         {
+            "selected_scope_fingerprint": (
+                story_dependency_source_fingerprint(stories) if stories else None
+            ),
             "stories": [
                 item.model_dump(mode="json", exclude={"sprint_ids"})
                 for item in sorted(stories, key=lambda story: story.story_id)
@@ -97,26 +100,17 @@ def candidate_set_fingerprint(
 
 
 def story_dependency_source_fingerprint(stories: tuple[StoryFact, ...]) -> str:
-    """Hash exact Story content selected for semantic dependency review."""
-    return canonical_hash(
-        [
-            {
-                "story_id": item.story_id,
-                "source_story_item_id": item.source_story_item_id,
-                "content_fingerprint": item.content_fingerprint,
-                "content_accepted": item.content_accepted,
-                "story_artifact_id": item.story_artifact_id,
-                "accepted_spec_version_id": item.accepted_spec_version_id,
-                "accepted_spec_hash": item.accepted_spec_hash,
-                "backlog_artifact_id": item.backlog_artifact_id,
-                "backlog_artifact_fingerprint": item.backlog_artifact_fingerprint,
-                "roadmap_artifact_id": item.roadmap_artifact_id,
-                "roadmap_artifact_fingerprint": item.roadmap_artifact_fingerprint,
-            }
-            for item in sorted(stories, key=lambda story: story.story_id)
-            if item.sprint_candidate
-        ]
+    """Return the canonical fingerprint already derived from durable authorities."""
+    selected = tuple(
+        item
+        for item in stories
+        if item.structurally_eligible and item.sprint_selection_state == "selected"
     )
+    fingerprints = {item.selected_scope_fingerprint for item in selected}
+    if not selected or None in fingerprints or len(fingerprints) != 1:
+        message = "Current selected Story scope fingerprint is missing or conflicting."
+        raise ValueError(message)
+    return next(item for item in fingerprints if item is not None)
 
 
 def readiness_fingerprint(stories: tuple[StoryFact, ...]) -> str:
@@ -823,6 +817,20 @@ def _candidate_stories(snapshot: WorkflowFactSnapshot) -> tuple[StoryFact, ...]:
     )
 
 
+def _selected_scope_stories(snapshot: WorkflowFactSnapshot) -> tuple[StoryFact, ...]:
+    return tuple(
+        sorted(
+            (
+                item
+                for item in snapshot.stories
+                if item.structurally_eligible
+                and item.sprint_selection_state == "selected"
+            ),
+            key=lambda item: item.story_id,
+        )
+    )
+
+
 def _story_lineage_problem(
     snapshot: WorkflowFactSnapshot,
     stories: tuple[StoryFact, ...],
@@ -895,7 +903,12 @@ def _dependency_review_evaluation(
     if matching:
         review = matching[0]
         try:
-            current_edges = active_dependency_review_edges(snapshot.story_dependencies)
+            selected_ids = {story.story_id for story in stories}
+            current_edges = active_dependency_review_edges(
+                edge
+                for edge in snapshot.story_dependencies
+                if edge.dependent_story_id in selected_ids
+            )
         except ValueError:
             return RuleEvaluation(
                 RuleCategory.INVALID,
@@ -909,6 +922,28 @@ def _dependency_review_evaluation(
             return RuleEvaluation(
                 RuleCategory.INVALID,
                 "STORY_DEPENDENCY_REVIEW_STALE",
+            )
+        incomplete = tuple(
+            blocker
+            for story in stories
+            for blocker in story.readiness_blockers
+            if blocker.startswith("PREREQUISITE_STORY_")
+            and blocker.endswith("_INCOMPLETE")
+        )
+        if incomplete:
+            return RuleEvaluation(
+                RuleCategory.BLOCKED,
+                "STORY_DEPENDENCY_EXTERNAL_INCOMPLETE",
+                blockers=tuple(
+                    Blocker(
+                        code=code,
+                        message=(
+                            "Selected Story scope has an incomplete external "
+                            "prerequisite."
+                        ),
+                    )
+                    for code in incomplete
+                ),
             )
         return RuleEvaluation(
             RuleCategory.SATISFIED,
@@ -976,7 +1011,7 @@ def _story_dependencies_rule(
     snapshot: WorkflowFactSnapshot,
     _evaluated_at: datetime,
 ) -> tuple[RuleEvaluation, ...]:
-    stories = _candidate_stories(snapshot)
+    stories = _selected_scope_stories(snapshot)
     if not stories:
         return _blocked(
             "STORY_DEPENDENCY_CANDIDATES_MISSING",
@@ -1053,14 +1088,6 @@ def _sprint_candidate_problem(
     lineage_problem = _story_lineage_problem(snapshot, stories)
     if lineage_problem is not None:
         return lineage_problem
-    dependency_problem = _dependency_problem(stories, snapshot.story_dependencies)
-    if dependency_problem is not None:
-        category, reason = dependency_problem
-        return RuleEvaluation(
-            category,
-            reason,
-            blockers=(Blocker(code=reason, message="Story dependencies are invalid."),),
-        )
     blockers: list[Blocker] = []
     if any(item.story_points is None for item in stories):
         blockers.append(
@@ -1090,11 +1117,11 @@ def _sprint_candidate_problem(
     return None
 
 
-def _sprint_join(
+def _sprint_join(  # noqa: PLR0911
     snapshot: WorkflowFactSnapshot,
 ) -> tuple[StoryFact, ...] | RuleEvaluation:
-    stories = _candidate_stories(snapshot)
-    if not stories:
+    selected = _selected_scope_stories(snapshot)
+    if not selected:
         return RuleEvaluation(
             RuleCategory.BLOCKED,
             "SPRINT_CANDIDATES_MISSING",
@@ -1105,13 +1132,12 @@ def _sprint_join(
                 ),
             ),
         )
-    candidate_problem = _sprint_candidate_problem(snapshot, stories)
-    if candidate_problem is not None:
-        return candidate_problem
-    dependency_review = _dependency_review_evaluation(snapshot, stories)
+    dependency_review = _dependency_review_evaluation(snapshot, selected)
     if dependency_review.category is RuleCategory.INVALID:
         return dependency_review
     if dependency_review.category is not RuleCategory.SATISFIED:
+        if dependency_review.category is RuleCategory.BLOCKED:
+            return dependency_review
         return RuleEvaluation(
             RuleCategory.BLOCKED,
             "STORY_DEPENDENCIES_UNREVIEWED",
@@ -1122,6 +1148,17 @@ def _sprint_join(
                 ),
             ),
         )
+    stories = _candidate_stories(snapshot)
+    if tuple(story.story_id for story in stories) != tuple(
+        story.story_id for story in selected
+    ):
+        return RuleEvaluation(
+            RuleCategory.INVALID,
+            "STORY_CANDIDACY_PROJECTION_INVALID",
+        )
+    candidate_problem = _sprint_candidate_problem(snapshot, stories)
+    if candidate_problem is not None:
+        return candidate_problem
     return stories
 
 

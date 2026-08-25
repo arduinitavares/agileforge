@@ -89,6 +89,10 @@ from services.specs.story_validation_service import (
     StoryValidationReadinessError,
     require_story_ready_for_sprint,
 )
+from services.story_dependencies import (
+    SelectedScopeStory,
+    selected_scope_fingerprint,
+)
 from services.story_sprint_selection import (
     StorySprintSelectionFact,
     StorySprintSelectionIntegrityError,
@@ -155,6 +159,7 @@ from workflow.fingerprints import (
     workflow_node_attempt_fingerprint,
 )
 from workflow.planning_integrity import (
+    active_dependency_review_edges,
     dependency_edges_are_canonical,
     dependency_edges_have_cycle,
     dependency_edges_payload,
@@ -405,6 +410,11 @@ class WorkflowFactRepository:
         story_dependency_reviews = self._story_dependency_reviews(
             project_id,
             stories,
+        )
+        stories = self._derive_story_candidates(
+            stories,
+            story_dependencies,
+            story_dependency_reviews,
         )
         tasks = self._tasks(
             project_id,
@@ -3046,18 +3056,18 @@ class WorkflowFactRepository:
                 "story dependency",
             )
 
-    def _story_fact(
+    def _story_fact(  # noqa: PLR0913
         self,
         row: UserStory,
         artifact: PlanningArtifactFact | None,
         blockers: tuple[str, ...],
         sprint_ids: tuple[int, ...],
         selection: StorySprintSelectionFact,
+        eligibility: tuple[bool, Literal["eligible", "ineligible", "stale"]],
+        selected_scope_source_fingerprint: str,
     ) -> StoryFact:
         story_id = self._required_id(row.story_id, "story")
-        structurally_eligible, structural_eligibility_status = (
-            story_structural_eligibility(self._session, story=row)
-        )
+        structurally_eligible, structural_eligibility_status = eligibility
         validation_status: Literal["validated", "failed", "unvalidated"] = "unvalidated"
         validation_failures: tuple[JsonObject, ...] = ()
         if row.validation_evidence is not None:
@@ -3112,11 +3122,9 @@ class WorkflowFactRepository:
             sprint_selection_state_fingerprint=selection.state_fingerprint,
             sprint_selection_event_id=selection.event_id,
             sprint_selection_event_fingerprint=selection.event_fingerprint,
-            sprint_candidate=(
-                not row.is_superseded
-                and structurally_eligible
-                and selection.selection_state == "selected"
-            ),
+            selected_scope_fingerprint=selected_scope_source_fingerprint,
+            dependency_safe=False,
+            sprint_candidate=False,
             readiness_blockers=blockers,
             validation_status=validation_status,
             validation_failures=validation_failures,
@@ -3186,6 +3194,54 @@ class WorkflowFactRepository:
             )
         except StorySprintSelectionIntegrityError as error:
             raise self._error(str(error)) from error
+        eligibility_by_story_id = {
+            story_id: story_structural_eligibility(self._session, story=row)
+            for story_id, row in stories_by_id.items()
+        }
+        selected_scope_entries: list[SelectedScopeStory] = []
+        for story_id, row in stories_by_id.items():
+            selection = selection_by_story_id[story_id]
+            eligible, _status = eligibility_by_story_id[story_id]
+            if (
+                row.is_superseded
+                or not eligible
+                or selection.selection_state != "selected"
+            ):
+                continue
+            if selection.event_id is None or selection.event_fingerprint is None:
+                message = "Selected Story has no latest selection-event identity."
+                raise self._error(message)
+            try:
+                evidence = require_story_ready_for_sprint(self._session, story=row)
+            except StoryValidationReadinessError as error:
+                message = "Selected Story eligibility evidence changed during load."
+                raise self._error(message) from error
+            selected_scope_entries.append(
+                SelectedScopeStory(
+                    story_id=story_id,
+                    source_story_artifact_id=row.source_story_artifact_id,
+                    source_story_artifact_fingerprint=(
+                        row.source_story_artifact_fingerprint
+                    ),
+                    source_story_item_id=row.source_story_item_id,
+                    source_story_item_fingerprint=row.source_story_item_fingerprint,
+                    accepted_spec_version_id=row.accepted_spec_version_id,
+                    accepted_spec_hash=row.accepted_spec_hash,
+                    validation_evidence_fingerprint=canonical_hash(
+                        evidence.model_dump(mode="json")
+                    ),
+                    selection_state_fingerprint=selection.state_fingerprint,
+                    selection_event_id=selection.event_id,
+                    selection_event_fingerprint=selection.event_fingerprint,
+                )
+            )
+        try:
+            scope_fingerprint = selected_scope_fingerprint(
+                project_id=project_id,
+                stories=tuple(selected_scope_entries),
+            )
+        except ValueError as error:
+            raise self._error(str(error)) from error
         facts: list[StoryFact] = []
         for story_id, row in stories_by_id.items():
             facts.append(
@@ -3209,6 +3265,8 @@ class WorkflowFactRepository:
                     blockers[story_id],
                     tuple(sprint_ids_by_story[story_id]),
                     selection_by_story_id[story_id],
+                    eligibility_by_story_id[story_id],
+                    scope_fingerprint,
                 )
             )
         return tuple(facts)
@@ -3258,7 +3316,7 @@ class WorkflowFactRepository:
             )
         return tuple(facts)
 
-    def _story_dependency_reviews(
+    def _story_dependency_reviews(  # noqa: C901
         self,
         project_id: int,
         stories: tuple[StoryFact, ...],
@@ -3305,10 +3363,15 @@ class WorkflowFactRepository:
             selected = set(story_ids)
             if any(
                 edge.dependent_story_id not in selected
-                or edge.prerequisite_story_id not in selected
                 for edge in reviewed_edges
             ):
-                message = "Story dependency review edges leave the selected set."
+                message = "Story dependency review dependent leaves selected scope."
+                raise self._error(message)
+            if any(
+                edge.prerequisite_story_id not in project_story_ids
+                for edge in reviewed_edges
+            ):
+                message = "Story dependency review prerequisite is not a Project Story."
                 raise self._error(message)
             if dependency_edges_have_cycle(reviewed_edges):
                 message = "Story dependency review edges contain a semantic cycle."
@@ -3319,8 +3382,8 @@ class WorkflowFactRepository:
             ):
                 message = "Story dependency review fingerprint changed."
                 raise self._error(message)
-            facts.append(
-                StoryDependencyReviewFact(
+            try:
+                fact = StoryDependencyReviewFact(
                     review_id=self._required_id(
                         row.story_dependency_review_id,
                         "story dependency review",
@@ -3330,7 +3393,94 @@ class WorkflowFactRepository:
                     source_fingerprint=row.source_fingerprint,
                     dependency_fingerprint=row.dependency_fingerprint,
                 )
+            except ValidationError as exc:
+                message = "Story dependency review projection is malformed."
+                raise self._error(message) from exc
+            facts.append(fact)
+        return tuple(facts)
+
+    def _derive_story_candidates(
+        self,
+        stories: tuple[StoryFact, ...],
+        dependencies: tuple[StoryDependencyFact, ...],
+        reviews: tuple[StoryDependencyReviewFact, ...],
+    ) -> tuple[StoryFact, ...]:
+        """Intersect current evidence, human selection, and dependency safety."""
+        if not stories:
+            return ()
+        selected = tuple(
+            sorted(
+                (
+                    story
+                    for story in stories
+                    if story.structurally_eligible
+                    and story.sprint_selection_state == "selected"
+                ),
+                key=lambda story: story.story_id,
             )
+        )
+        selected_ids = tuple(story.story_id for story in selected)
+        scope_fingerprints = {
+            story.selected_scope_fingerprint for story in stories
+        }
+        if None in scope_fingerprints or len(scope_fingerprints) != 1:
+            message = "Story selected-scope projection fingerprints conflict."
+            raise self._error(message)
+        scope_fingerprint = cast("str", next(iter(scope_fingerprints)))
+        matching = tuple(
+            review
+            for review in reviews
+            if review.selected_story_ids == selected_ids
+            and review.source_fingerprint == scope_fingerprint
+        )
+        if len(matching) > 1:
+            message = "Current Story selected scope has conflicting dependency reviews."
+            raise self._error(message)
+        dependency_safe = False
+        selected_id_set = set(selected_ids)
+        if matching:
+            review = matching[0]
+            try:
+                current_edges = active_dependency_review_edges(
+                    edge
+                    for edge in dependencies
+                    if edge.dependent_story_id in selected_id_set
+                )
+            except (ValidationError, ValueError) as exc:
+                message = "Current selected-scope dependency rows are malformed."
+                raise self._error(message) from exc
+            if (
+                review.reviewed_edges == current_edges
+                and review.dependency_fingerprint
+                == dependency_review_fingerprint(current_edges)
+            ):
+                stories_by_id = {story.story_id: story for story in stories}
+                external_ids = {
+                    edge.prerequisite_story_id
+                    for edge in current_edges
+                    if edge.prerequisite_story_id not in selected_id_set
+                }
+                dependency_safe = all(
+                    stories_by_id[story_id].status
+                    in {StoryStatus.DONE.value, StoryStatus.ACCEPTED.value}
+                    for story_id in external_ids
+                )
+        facts: list[StoryFact] = []
+        for story in stories:
+            safe = dependency_safe and story.story_id in selected_id_set
+            try:
+                facts.append(
+                    StoryFact.model_validate(
+                        {
+                            **story.model_dump(mode="json"),
+                            "dependency_safe": safe,
+                            "sprint_candidate": safe,
+                        }
+                    )
+                )
+            except ValidationError as exc:
+                message = "Story candidacy projection is malformed."
+                raise self._error(message) from exc
         return tuple(facts)
 
     def _tasks(

@@ -117,8 +117,8 @@ class ApplyStoryDependencies(PositionedRequest):
             message = "reviewed_edges must be sorted and unique."
             raise ValueError(message)
         selected = set(self.selected_story_ids)
-        if any(left not in selected or right not in selected for left, right in pairs):
-            message = "reviewed_edges must remain inside selected_story_ids."
+        if any(left not in selected for left, _right in pairs):
+            message = "reviewed edge dependents must remain in selected_story_ids."
             raise ValueError(message)
         return self
 

@@ -733,6 +733,8 @@ def test_sprint_projection_uses_exact_story_item_and_spec_evidence() -> None:
         structural_eligibility_status="eligible",
         sprint_selection_state="selected",
         sprint_selection_state_fingerprint="sha256:selected",
+        selected_scope_fingerprint="sha256:" + ("6" * 64),
+        dependency_safe=True,
         sprint_candidate=True,
         readiness_blockers=(),
     )
@@ -1001,6 +1003,8 @@ def test_sprint_projection_rejects_operational_story_drift_from_artifact(
         structural_eligibility_status="eligible",
         sprint_selection_state="selected",
         sprint_selection_state_fingerprint="sha256:selected",
+        selected_scope_fingerprint="sha256:" + ("6" * 64),
+        dependency_safe=True,
         sprint_candidate=True,
         readiness_blockers=(),
     )
@@ -1123,6 +1127,8 @@ def test_sprint_projection_requires_exact_accepted_story_decision(
         structural_eligibility_status="eligible",
         sprint_selection_state="selected",
         sprint_selection_state_fingerprint="sha256:selected",
+        selected_scope_fingerprint="sha256:" + ("6" * 64),
+        dependency_safe=True,
         sprint_candidate=True,
         readiness_blockers=(),
     )
@@ -1201,6 +1207,8 @@ def test_sprint_projection_rejects_candidate_from_prior_specification_root() -> 
         structural_eligibility_status="eligible",
         sprint_selection_state="selected",
         sprint_selection_state_fingerprint="sha256:selected",
+        selected_scope_fingerprint="sha256:" + ("6" * 64),
+        dependency_safe=True,
         sprint_candidate=True,
         readiness_blockers=(),
     )
@@ -1412,6 +1420,7 @@ def test_selected_story_waits_for_current_dependency_review_and_reconciliation(
     assert selected.sprint_selection_state == "selected"
     assert selected.dependency_safe is False
     assert selected.sprint_candidate is False
+    assert selected.selected_scope_fingerprint is not None
     assert selected.selected_scope_fingerprint.startswith("sha256:")
 
     _apply_current_dependencies(
@@ -1490,7 +1499,8 @@ def test_one_selected_story_progresses_with_unselected_and_unrefined_backlog(
     assert by_id[selected_story_id].sprint_candidate is True
     assert by_id[sibling_story_id].sprint_selection_state == "unselected"
     assert by_id[sibling_story_id].sprint_candidate is False
-    assert len(snapshot.stories) == 2
+    expected_refined_story_count = 2
+    assert len(snapshot.stories) == expected_refined_story_count
 
 
 def _apply_validation_evidence_case(

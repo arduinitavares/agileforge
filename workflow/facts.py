@@ -381,7 +381,10 @@ class StoryDependencyReviewFact(FrozenModel):
     review_id: int
     selected_story_ids: tuple[int, ...]
     reviewed_edges: tuple[StoryDependencyReviewEdgeFact, ...]
-    source_fingerprint: str
+    source_fingerprint: Annotated[
+        str,
+        Field(pattern=r"^sha256:[0-9a-f]{64}$"),
+    ]
     dependency_fingerprint: str
 
 
@@ -458,10 +461,31 @@ class StoryFact(FrozenModel):
     sprint_selection_state_fingerprint: str
     sprint_selection_event_id: int | None = None
     sprint_selection_event_fingerprint: str | None = None
+    selected_scope_fingerprint: Annotated[
+        str,
+        Field(pattern=r"^sha256:[0-9a-f]{64}$"),
+    ] | None = None
+    dependency_safe: bool = False
     sprint_candidate: bool
     readiness_blockers: tuple[str, ...]
     validation_status: Literal["validated", "failed", "unvalidated"] | None = None
     validation_failures: tuple[JsonObject, ...] = ()
+
+    @model_validator(mode="after")
+    def require_exact_candidate_intersection(self) -> StoryFact:
+        """Fail closed when a projection skips a required candidacy gate."""
+        selected_and_eligible = (
+            self.sprint_selection_state == "selected"
+            and self.structurally_eligible
+            and self.selected_scope_fingerprint is not None
+        )
+        if self.dependency_safe and not selected_and_eligible:
+            message = "Dependency-safe Story must belong to the current selected scope."
+            raise ValueError(message)
+        if self.sprint_candidate != (selected_and_eligible and self.dependency_safe):
+            message = "Sprint candidate must equal selected, eligible, dependency-safe."
+            raise ValueError(message)
+        return self
 
 
 class TaskFact(FrozenModel):

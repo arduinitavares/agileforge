@@ -234,7 +234,7 @@ def _apply_dependency_review(
             project_id=project_id,
             selected_story_ids=selected_story_ids,
             reviewed_edges=reviewed_edges,
-            source_fingerprint="sha256:dependency-source",
+            source_fingerprint="sha256:" + ("d" * 64),
             reviewer="dependency-reviewer",
             reviewed_at=REVIEWED_AT,
         ),
