@@ -203,7 +203,7 @@ assert selected["selection_state"] == "selected"
 **Interfaces:**
 - Renders separate structural eligibility and Sprint-selection states.
 - Renders `Select for Sprint`, `Remove from Sprint selection`, and `Defer` with exact Story/state fingerprints.
-- Removes the normal `Validate Story` interaction; exposes `Re-run structural checks` only for stale/failed operational reconciliation.
+- Removes the normal `Validate Story` interaction; exposes `Re-run structural checks` only for missing or stale operational evidence. A current rule failure shows diagnostics without suggesting that repeating the same deterministic check is an approval path.
 - Clears/locks dependent actions on malformed or unavailable eligibility, selection, dependency, or candidate projections.
 
 - [ ] **Step 1: Write RED Node tests for three-state markup, proof/non-proof copy, exact mutation payloads, malformed projections, double submission, and mutation-success/reload-failure lockout.**
