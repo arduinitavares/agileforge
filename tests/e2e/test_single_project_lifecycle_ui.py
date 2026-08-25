@@ -49,6 +49,7 @@ _HTTP_CONFLICT = 409
 _UI_SETTLE_MS = 150
 _DESKTOP_VIEWPORT: ViewportSize = {"width": 1440, "height": 900}
 _MOBILE_VIEWPORT: ViewportSize = {"width": 390, "height": 844}
+_EXPECTED_REMOVE_SELECTION_REQUESTS = 2
 _PNG_WIDTH_START = 16
 _PNG_WIDTH_END = 20
 _PNG_HEIGHT_START = 20
@@ -429,7 +430,9 @@ class FakeLifecycle:
             "/story/decide": self._decide_story,
             "/story/dependencies/apply": self._apply_story_dependencies,
             "/story/generate": self._generate_story,
-            "/story/structural-eligibility/reconcile": self._reconcile_story_eligibility,
+            "/story/structural-eligibility/reconcile": (
+                self._reconcile_story_eligibility
+            ),
             "/story/sprint-selection": self._apply_story_sprint_selection,
             "/vision/bootstrap": self._bootstrap_vision,
             "/vision/respond": self._record_vision_turn,
@@ -884,7 +887,8 @@ class FakeLifecycle:
     def _reconcile_story_eligibility(self, body: JsonObject) -> JsonObject:
         self._assert_fields(body, {"story_ids"})
         story_ids = body["story_ids"]
-        assert isinstance(story_ids, list) and len(story_ids) == 1
+        assert isinstance(story_ids, list)
+        assert len(story_ids) == 1
         self.structural_reconcile_requests.append(dict(body))
         return {"ok": True, "data": {}, "errors": []}
 
@@ -897,6 +901,7 @@ class FakeLifecycle:
         story_id = body["story_id"]
         intent = body["intent"]
         assert isinstance(story_id, int)
+        assert isinstance(intent, str)
         assert intent in {"select", "remove", "defer"}
         for story in self.stories:
             if isinstance(story, dict) and story.get("story_id") == story_id:
@@ -914,7 +919,8 @@ class FakeLifecycle:
                 story["dependency_safe"] = False
                 story["sprint_candidate"] = False
                 return {"ok": True, "data": {}, "errors": []}
-        raise ValueError(f"Story {story_id} not found")
+        message = f"Story {story_id} not found"
+        raise ValueError(message)
 
     def _apply_story_dependencies(self, body: JsonObject) -> None:
         self._assert_fields(body, {"selected_story_ids", "reviewed_edges"})
@@ -2525,7 +2531,7 @@ def _seed_progressive_stories(
     ]
 
 
-def test_progressive_story_readiness_partial_refinement_to_sprint_planning(
+def test_progressive_story_readiness_partial_refinement_to_sprint_planning(  # noqa: PLR0915
     dashboard_harness: DashboardHarness,
 ) -> None:
     """One selected Story advances while an accepted sibling stays outside scope."""
@@ -2580,7 +2586,9 @@ def test_progressive_story_readiness_partial_refinement_to_sprint_planning(
     expect(readiness).to_contain_text("US-002")
     expect(readiness).to_contain_text("Unselected")
     focused_story_id = page.evaluate(
-        """() => document.activeElement?.closest('[data-story-readiness-row]')?.dataset.storyReadinessRow ?? null"""
+        """() => document.activeElement?.closest(
+            '[data-story-readiness-row]'
+        )?.dataset.storyReadinessRow ?? null"""
     )
     assert focused_story_id == str(story1_id)
 
@@ -2649,7 +2657,7 @@ def test_progressive_story_readiness_partial_refinement_to_sprint_planning(
     expect(remove_story1).to_be_visible()
     remove_story1.click()
     page.wait_for_timeout(200)
-    assert len(fake.sprint_selection_requests) == 2
+    assert len(fake.sprint_selection_requests) == _EXPECTED_REMOVE_SELECTION_REQUESTS
     defer_story1 = page.locator(
         f'[data-story-selection-id="{story1_id}"][data-story-selection-intent="defer"]'
     )
