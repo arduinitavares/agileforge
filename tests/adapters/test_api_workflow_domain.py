@@ -1934,6 +1934,7 @@ def test_application_repairs_durable_invalid_story_rank_and_replays(
     domain = planning_domain(engine)
     _record_and_accept_roadmap(domain, project_id)
     _story_artifact_id, story_id = _record_and_accept_story(engine, domain, project_id)
+    _select_for_sprint(engine, story_id)
     _apply_current_dependencies(
         engine,
         domain,
@@ -3091,6 +3092,13 @@ def test_completed_sprint_metrics_supply_host_capacity(engine: "Engine") -> None
         )
     )
     assert triaged.ok is True
+    _select_for_sprint(engine, future_story_id)
+    _apply_current_dependencies(
+        engine,
+        domain,
+        project_id,
+        idempotency_key="metrics-capacity-future-story-dependencies",
+    )
     with Session(engine) as session:
         snapshot = WorkflowFactRepository(session).load(project_id)
     backlog = next(
