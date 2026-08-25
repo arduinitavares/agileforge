@@ -3,11 +3,17 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
+from http import HTTPStatus
 from typing import TYPE_CHECKING
+from unittest.mock import patch
 
+import pytest
+from fastapi.testclient import TestClient
 from sqlmodel import Session, col, select
 
+import api
 from models.core import UserStory
 from models.enums import WorkflowEventType
 from models.events import WorkflowEvent
@@ -174,3 +180,73 @@ def test_application_replays_identical_request_and_rejects_conflicts(
                 )
             ).all()
         ) == 1
+
+
+def test_api_and_cli_expose_intent_based_selection_mutations(
+    engine: Engine,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """HTTP uses one intent route while CLI exposes explicit state-change verbs."""
+    from cli.main import main  # noqa: PLC0415
+
+    story_id = _accepted_story(engine)
+    with Session(engine) as session:
+        story = session.get_one(UserStory, story_id)
+        initial = selection_service.story_sprint_selection_fact_in_session(
+            session,
+            story=story,
+        )
+        project_id = story.project_id
+    app = _build_application(engine)
+    client = TestClient(api.app)
+    with patch("api._application", return_value=app):
+        selected = client.post(
+            f"/api/projects/{project_id}/story/sprint-selection",
+            json={
+                "story_id": story_id,
+                "intent": "select",
+                "expected_state_fingerprint": initial.state_fingerprint,
+                "rationale": "Select exact Story.",
+                "idempotency_key": "api-select",
+                "actor": "api-operator",
+                "correlation_id": "api-correlation",
+            },
+        )
+        invalid = client.post(
+            f"/api/projects/{project_id}/story/sprint-selection",
+            json={
+                "story_id": story_id,
+                "intent": "maybe",
+                "expected_state_fingerprint": initial.state_fingerprint,
+                "idempotency_key": "api-invalid",
+                "actor": "api-operator",
+            },
+        )
+    assert selected.status_code == HTTPStatus.OK
+    selected_data = selected.json()["data"]
+    assert selected_data["selection_state"] == "selected"
+    assert invalid.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+
+    exit_code = main(
+        [
+            "story",
+            "sprint-selection",
+            "defer",
+            "--project-id",
+            str(project_id),
+            "--story-id",
+            str(story_id),
+            "--expected-state-fingerprint",
+            selected_data["state_fingerprint"],
+            "--rationale",
+            "Defer exact Story.",
+            "--idempotency-key",
+            "cli-defer",
+            "--actor",
+            "cli-operator",
+        ],
+        application=app,
+    )
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["data"]["selection_state"] == "deferred"
