@@ -139,7 +139,13 @@ assert current_evidence.validated_at == original_validated_at
 - Adds: `SprintSelectionState = Literal["unselected", "selected", "deferred"]`.
 - Adds: `StorySprintSelectionRequest(project_id, story_id, intent, expected_state_fingerprint, idempotency_key, actor, correlation_id)`.
 - Adds: `apply_story_sprint_selection_in_session(session, request) -> StorySprintSelectionFact`.
-- Event metadata contains schema version, project ID, Story ID, source Story artifact ID/fingerprint, source item ID/fingerprint, actor, intent, previous state, expected-state fingerprint, and timestamp.
+- API: `POST /api/projects/{project_id}/story/sprint-selection` with `story_id`, `intent: select|remove|defer`, `expected_state_fingerprint`, optional rationale, and standard mutation metadata.
+- CLI: `agileforge story sprint-selection select|remove|defer --story-id N --expected-state-fingerprint sha256:...` with optional `--rationale`.
+- `StoryFact` projects `structurally_eligible`, `structural_eligibility_status`, `sprint_selection_state`, `sprint_selection_state_fingerprint`, `sprint_selection_event_id`, and `sprint_selection_event_fingerprint`; candidacy requires current eligibility plus `selected` even before Task 4 adds selected-scope dependency confirmation.
+- Default `unselected` has a deterministic state fingerprint derived from the exact accepted Story artifact/item identities and no event. Later fingerprints include the latest event ID and canonical event fingerprint.
+- Event metadata uses `agileforge.story-sprint-selection.v1` and contains project ID, Story ID, source Story artifact ID/fingerprint, source item ID/fingerprint, accepted Specification ID/hash, actor, action, new state, previous state/fingerprint, observed eligibility evidence fingerprint, optional rationale, and event timestamp.
+- Same-state intent is a receipt-backed no-op and never appends a duplicate event. Malformed, noncanonical, cross-project, out-of-sequence, or identity-mismatched history fails closed.
+- `select` requires current eligible v3 evidence. `remove` and `defer` remain available after evidence becomes stale. No mutation is allowed after the exact Story is bound into an accepted Sprint plan or active Sprint.
 
 - [ ] **Step 1: Write RED domain tests for default unselected, select, remove-to-unselected, defer, reselect, reload, exact artifact binding, replay, conflicting reuse, concurrent requests, and supersession.**
 
