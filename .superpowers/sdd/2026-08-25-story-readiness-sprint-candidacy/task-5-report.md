@@ -120,3 +120,81 @@ server, profile, browser, and route fake.
   ephemeral E2E fixture, push, merge, issue mutation, or live manual
   acceptance occurred.
 - #224 team-name/default behavior was not changed.
+
+## Fix round 1/5: scope completeness and fail-closed Sprint controls
+
+### Delivered corrections
+
+- Dependency review now retains every proposed/current edge owned by the exact
+  selected-and-eligible dependent scope, including prerequisites outside that
+  scope. Such prerequisites render as `External/excluded prerequisite` and are
+  submitted unchanged; edges owned by unselected dependents remain excluded.
+- The dependency parser treats missing/non-array `stories` or `edges`, duplicate
+  Story IDs, duplicate dependency endpoints, bad IDs/reasons, mismatched Story
+  projections, and missing/conflicting selected-scope fingerprints as malformed.
+  Only an explicit empty `edges: []` is a valid no-edge review.
+- Sprint generation no longer trusts an advertised delivery action. Every
+  candidate must be a complete, selected, current-eligible, dependency-safe
+  candidate with positive unique ID, selection-state fingerprint, and one
+  common selected-scope fingerprint. Any absent, malformed, or contradictory
+  candidate projection renders an alert and no active Sprint form.
+- Readiness parsing now rejects incoherent combinations. Current eligibility
+  requires validated evidence without structural failures; a current ineligible
+  state requires `failed` evidence and at least one nonblank diagnostic.
+  `validation_status=unvalidated` renders exact `Structural evidence missing`;
+  stale prior validated evidence renders `Structural evidence stale`.
+- Rejected Story mutations restore each control's exact original disabled and
+  ARIA state. A successful mutation with failed reload remains locked. After a
+  successful reload, focus moves to a current native control in the exact Story
+  row (or the row itself if no enabled successor exists).
+
+### RED evidence
+
+```text
+node --test tests/test_workflow_position_display.mjs
+4 failed, 34 passed
+```
+
+The committed RED (`44b09c2`) covered external prerequisite retention,
+missing-versus-stale evidence copy and projection contradictions, malformed
+candidate Sprint-form lockout/no transport, and rejected-control restoration.
+
+```text
+uv run --frozen pytest -q tests/e2e/test_single_project_lifecycle_ui.py -k progressive
+1 failed, 1 passed, 16 deselected
+```
+
+The committed browser RED also proved that successful Story selection did not
+restore focus to its rerendered Story row.
+
+### GREEN verification
+
+```text
+node --check frontend/project.js
+node --test tests/*.mjs
+62 passed, 0 failed
+
+uv run --frozen pytest -q tests/e2e/test_single_project_lifecycle_ui.py -k 'progressive or sprint_generation_requires_team'
+3 passed, 15 deselected, 4 deprecation warnings
+
+uv run --frozen pyrepo-check annotations ty ruff tests/e2e/test_single_project_lifecycle_ui.py
+ruff, annotations, and ty passed
+```
+
+The progressive browser fake proves an external selected-scope edge is visible
+and posted exactly, the unselected sibling's dependent edge stays absent, an
+advertised Sprint action has no form while candidates are absent, and no
+`/sprint/generate` request occurs before the candidate gate passes.
+
+### Fix-round commits
+
+- `44b09c2` test: expose Story scope and Sprint gate regressions (#223)
+- `fab0475` fix: fail closed on Story scope and Sprint candidates (#223)
+- `6db56bd` test: keep Sprint gate browser fixture checked (#223)
+
+### Protected-boundary confirmation
+
+No provider call, real Sprint generation/persistence, real/manual profile,
+push, merge, issue mutation, or live manual acceptance occurred. Browser work
+used only the existing test-owned ephemeral server, profile, context, and API
+fake. The full `pyrepo-check --all` gate remains Task 6's responsibility.
