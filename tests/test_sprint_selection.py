@@ -42,6 +42,11 @@ from services.sprint_selection import (
     derive_parent_group,
     select_sprint_story_rows,
 )
+from services.story_sprint_selection import (
+    StorySprintSelectionRequest,
+    apply_story_sprint_selection_in_session,
+    story_sprint_selection_fact_in_session,
+)
 from tests.test_story_validation_service import _accepted_story, _validate
 from tests.workflow.lifecycle_fixtures import seed_accepted_specification
 from tests.workflow.test_planning_transitions import (
@@ -175,6 +180,26 @@ def _row(story_id: int, priority: int, points: int) -> dict[str, object]:
         "priority": priority,
         "story_points": points,
     }
+
+
+def _select_story_for_sprint(engine: Engine, story_id: int) -> None:
+    """Persist the explicit human intent required by candidate projections."""
+    with Session(engine) as session:
+        story = session.get_one(UserStory, story_id)
+        current = story_sprint_selection_fact_in_session(session, story=story)
+        apply_story_sprint_selection_in_session(
+            session,
+            StorySprintSelectionRequest(
+                project_id=story.project_id,
+                story_id=story_id,
+                intent="select",
+                expected_state_fingerprint=current.state_fingerprint,
+                idempotency_key=f"select-story-{story_id}",
+                actor="test-operator",
+                correlation_id=None,
+            ),
+        )
+        session.commit()
 
 
 def test_derive_priority_group_metadata_from_rank_priority() -> None:
@@ -703,6 +728,10 @@ def test_sprint_projection_uses_exact_story_item_and_spec_evidence() -> None:
         status="ready",
         story_points=3,
         rank="101",
+        structurally_eligible=True,
+        structural_eligibility_status="eligible",
+        sprint_selection_state="selected",
+        sprint_selection_state_fingerprint="sha256:selected",
         sprint_candidate=True,
         readiness_blockers=(),
     )
@@ -967,6 +996,10 @@ def test_sprint_projection_rejects_operational_story_drift_from_artifact(
         status="ready",
         story_points=3,
         rank="101",
+        structurally_eligible=True,
+        structural_eligibility_status="eligible",
+        sprint_selection_state="selected",
+        sprint_selection_state_fingerprint="sha256:selected",
         sprint_candidate=True,
         readiness_blockers=(),
     )
@@ -1085,6 +1118,10 @@ def test_sprint_projection_requires_exact_accepted_story_decision(
         status="ready",
         story_points=3,
         rank="101",
+        structurally_eligible=True,
+        structural_eligibility_status="eligible",
+        sprint_selection_state="selected",
+        sprint_selection_state_fingerprint="sha256:selected",
         sprint_candidate=True,
         readiness_blockers=(),
     )
@@ -1159,6 +1196,10 @@ def test_sprint_projection_rejects_candidate_from_prior_specification_root() -> 
         status="ready",
         story_points=3,
         rank="101",
+        structurally_eligible=True,
+        structural_eligibility_status="eligible",
+        sprint_selection_state="selected",
+        sprint_selection_state_fingerprint="sha256:selected",
         sprint_candidate=True,
         readiness_blockers=(),
     )
@@ -1292,6 +1333,9 @@ def test_story_fact_requires_exact_current_validation_evidence(engine: Engine) -
     with Session(engine) as session:
         row = session.get(UserStory, story_id)
         assert row is not None
+        row.validation_evidence = None
+        session.add(row)
+        session.commit()
         story = next(
             item
             for item in WorkflowFactRepository(session).load(row.project_id).stories
@@ -1309,7 +1353,9 @@ def test_story_fact_requires_exact_current_validation_evidence(engine: Engine) -
             for item in WorkflowFactRepository(session).load(row.project_id).stories
             if item.story_id == story_id
         )
-        assert story.sprint_candidate is True
+        assert story.structurally_eligible is True
+        assert story.sprint_selection_state == "unselected"
+        assert story.sprint_candidate is False
         assert story.readiness_blockers == ()
 
 
@@ -1329,24 +1375,13 @@ def _apply_validation_evidence_case(
             ValidationEvidence.model_validate(
                 {
                     **evidence.model_dump(mode="json"),
-                    "ready_for_sprint": False,
+                    "structurally_eligible": False,
                     "structural_failures": [
                         StructuralValidationFailure(
                             code="STORY_STATEMENT_INVALID",
                             message="Story statement is invalid.",
                         ).model_dump(mode="json")
                     ],
-                }
-            ).model_dump(mode="json")
-        )
-    elif evidence_case == "semantic_invalid":
-        story.validation_evidence = canonical_json(
-            ValidationEvidence.model_validate(
-                {
-                    **evidence.model_dump(mode="json"),
-                    "mode": "hybrid",
-                    "ready_for_sprint": False,
-                    "semantic_review_state": "invalid",
                 }
             ).model_dump(mode="json")
         )
@@ -1374,7 +1409,6 @@ def _apply_validation_evidence_case(
         "v1",
         "malformed",
         "failed",
-        "semantic_invalid",
         "fingerprint_stale",
         "points_stale",
         "rank_stale",
@@ -1392,6 +1426,7 @@ def test_sprint_input_paid_boundary_rechecks_complete_validation_matrix(
     _record_and_accept_roadmap(domain, project_id)
     _artifact_id, story_id = _record_and_accept_story(engine, domain, project_id)
     _validate(engine, story_id)
+    _select_story_for_sprint(engine, story_id)
     _apply_current_dependencies(
         engine,
         domain,
