@@ -90,6 +90,7 @@ from services.specs.story_validation_service import (
     require_story_ready_for_sprint,
 )
 from services.story_sprint_selection import (
+    StorySprintSelectionIntegrityError,
     story_sprint_selection_fact_in_session,
     story_structural_eligibility,
 )
@@ -3055,7 +3056,13 @@ class WorkflowFactRepository:
         structurally_eligible, structural_eligibility_status = (
             story_structural_eligibility(self._session, story=row)
         )
-        selection = story_sprint_selection_fact_in_session(self._session, story=row)
+        try:
+            selection = story_sprint_selection_fact_in_session(
+                self._session,
+                story=row,
+            )
+        except StorySprintSelectionIntegrityError as error:
+            raise self._error(str(error)) from error
         validation_status: Literal["validated", "failed", "unvalidated"] = "unvalidated"
         validation_failures: tuple[JsonObject, ...] = ()
         if row.validation_evidence is not None:
@@ -3111,9 +3118,7 @@ class WorkflowFactRepository:
             sprint_selection_event_id=selection.event_id,
             sprint_selection_event_fingerprint=selection.event_fingerprint,
             sprint_candidate=(
-                structurally_eligible
-                and selection.selection_state == "selected"
-                and not blockers
+                structurally_eligible and selection.selection_state == "selected"
             ),
             readiness_blockers=blockers,
             validation_status=validation_status,
@@ -3179,26 +3184,28 @@ class WorkflowFactRepository:
         blockers = self._story_readiness_blockers(rows, dependencies, stories_by_id)
         facts: list[StoryFact] = []
         for story_id, row in stories_by_id.items():
-            facts.append(self._story_fact(
-                row,
-                (
-                    artifact
-                    if (
-                        (
-                            artifact := accepted_artifacts.get(
-                                row.source_story_artifact_id
+            facts.append(
+                self._story_fact(
+                    row,
+                    (
+                        artifact
+                        if (
+                            (
+                                artifact := accepted_artifacts.get(
+                                    row.source_story_artifact_id
+                                )
                             )
+                            is not None
+                            and row.source_story_item_id in artifact.story_item_ids
+                            and row.source_story_artifact_fingerprint
+                            == artifact.artifact_fingerprint
                         )
-                        is not None
-                        and row.source_story_item_id in artifact.story_item_ids
-                        and row.source_story_artifact_fingerprint
-                        == artifact.artifact_fingerprint
-                    )
-                    else None
-                ),
-                blockers[story_id],
-                tuple(sprint_ids_by_story[story_id]),
-            ))
+                        else None
+                    ),
+                    blockers[story_id],
+                    tuple(sprint_ids_by_story[story_id]),
+                )
+            )
         return tuple(facts)
 
     def _story_dependencies(
