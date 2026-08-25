@@ -196,6 +196,7 @@ class FakeLifecycle:
     sprint_selection_requests: list[JsonObject] = field(default_factory=list)
     dependency_apply_requests: list[JsonObject] = field(default_factory=list)
     dependency_reload_failure: str | None = None
+    dependency_reload_conflict: str | None = None
     reject_stale_delivery_actions: bool = False
     refresh_count: int = 0
     api_errors: list[str] = field(default_factory=list)
@@ -342,6 +343,19 @@ class FakeLifecycle:
         assert self.project is not None, "Project must exist before scoped reads."
         suffix = path.removeprefix(prefix)
         if request.method == "GET":
+            if (
+                suffix == "/story/dependencies"
+                and self.dependency_reload_conflict
+                and self.dependency_apply_requests
+            ):
+                return _HTTP_CONFLICT, {
+                    "detail": {
+                        "error": {
+                            "code": "STALE_DEPENDENCY_PROJECTION",
+                            "message": self.dependency_reload_conflict,
+                        }
+                    }
+                }
             if suffix == "/position":
                 return _HTTP_OK, self.position_envelope()
             planning_response = self._planning_review_response(suffix)
@@ -2773,6 +2787,53 @@ def test_dependency_confirmation_stays_locked_when_authority_reload_fails(
         for suffix, body in fake.delivery_requests
         if suffix == "/sprint/generate"
     ]
+
+    context.close()
+
+
+def test_dependency_confirmation_replacement_stays_locked_on_reload_conflict(
+    dashboard_harness: DashboardHarness,
+) -> None:
+    """A 409 rerender cannot replace a committed control with an inert enabled one."""
+    fake = _delivery_ready_fake(
+        [
+            {
+                "node_id": "planning.story_dependencies",
+                "instance_key": None,
+                "request_kind": "apply_story_dependencies",
+                "endpoint": "story/dependencies/apply",
+                "transport": "semantic",
+            }
+        ]
+    )
+    _seed_progressive_stories(fake, 101, 102)
+    story = cast("JsonObject", fake.stories[0])
+    story["sprint_selection_state"] = "selected"
+    fake.dependency_reload_conflict = "Dependency authority projection conflicted."
+
+    context, page = _open_project_page(dashboard_harness, fake)
+    page.locator('[data-apply-dependencies="true"]').click()
+    page.wait_for_timeout(_UI_SETTLE_MS)
+
+    replacement = page.locator('[data-apply-dependencies="true"]')
+    expect(replacement).to_be_disabled()
+    expect(replacement).to_have_attribute("aria-disabled", "true")
+    expect(replacement).to_have_attribute("aria-busy", "true")
+    expect(page.locator("#project-error")).to_contain_text(
+        "Dependency authority projection conflicted."
+    )
+    replacement.evaluate("button => button.click()")
+    page.wait_for_timeout(_UI_SETTLE_MS)
+    assert len(fake.dependency_apply_requests) == 1
+
+    fake.dependency_reload_conflict = None
+    page.locator("#refresh-project").click()
+    page.wait_for_timeout(_UI_SETTLE_MS)
+    refreshed_confirm = page.locator('[data-apply-dependencies="true"]')
+    expect(refreshed_confirm).to_be_enabled()
+    refreshed_confirm.click()
+    page.wait_for_timeout(_UI_SETTLE_MS)
+    assert len(fake.dependency_apply_requests) == _EXPECTED_RETRIED_DEPENDENCY_REQUESTS
 
     context.close()
 
