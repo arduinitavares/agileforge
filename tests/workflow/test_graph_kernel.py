@@ -204,6 +204,10 @@ def test_join_waits_for_every_required_branch() -> None:
         accepted_spec_hash="sha256:" + "a" * 64,
         spec_item_ids=("REQ.001",),
         status="completed",
+        structurally_eligible=True,
+        structural_eligibility_status="eligible",
+        sprint_selection_state="unselected",
+        sprint_selection_state_fingerprint="sha256:selection-1",
         sprint_candidate=False,
         readiness_blockers=(),
     )
@@ -217,6 +221,10 @@ def test_join_waits_for_every_required_branch() -> None:
         accepted_spec_hash="sha256:" + "a" * 64,
         spec_item_ids=("REQ.002",),
         status="planned",
+        structurally_eligible=True,
+        structural_eligibility_status="eligible",
+        sprint_selection_state="unselected",
+        sprint_selection_state_fingerprint="sha256:selection-2",
         sprint_candidate=False,
         readiness_blockers=(),
     )

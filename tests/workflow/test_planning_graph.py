@@ -189,6 +189,12 @@ def _story(
         status="to_do",
         story_points=points,
         rank=rank,
+        structurally_eligible=accepted,
+        structural_eligibility_status=(
+            "eligible" if accepted else "ineligible"
+        ),
+        sprint_selection_state="selected" if candidate else "unselected",
+        sprint_selection_state_fingerprint=f"sha256:selection-{story_id}",
         sprint_candidate=candidate,
         readiness_blockers=(),
     )

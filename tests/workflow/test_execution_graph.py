@@ -77,6 +77,10 @@ def _story(
         story_artifact_id=100 + story_id,
         status=status,
         sprint_ids=sprint_ids,
+        structurally_eligible=True,
+        structural_eligibility_status="eligible",
+        sprint_selection_state="selected",
+        sprint_selection_state_fingerprint=f"sha256:selection-{story_id}",
         sprint_candidate=True,
         readiness_blockers=(),
     )
