@@ -198,3 +198,32 @@ No provider call, real Sprint generation/persistence, real/manual profile,
 push, merge, issue mutation, or live manual acceptance occurred. Browser work
 used only the existing test-owned ephemeral server, profile, context, and API
 fake. The full `pyrepo-check --all` gate remains Task 6's responsibility.
+
+### API transport alignment
+
+Review of the browser correction found one API-only contradiction: the
+application/domain request correctly permits an external prerequisite when the
+dependent is selected, but `StoryDependenciesApplyApiRequest` still rejected
+both endpoints unless selected. A narrow provider-free RED was committed before
+the adapter change:
+
+```text
+uv run --frozen pytest -q tests/test_story_dependencies.py -k dependency_api_accepts_external_prerequisite_for_selected_dependent
+1 failed, 19 deselected
+```
+
+`api.py` now requires only the reviewed edge dependent to be selected; project
+membership and prerequisite validity remain application/domain responsibilities.
+CLI inspection found no equivalent reviewed-edge prevalidation, so no CLI
+change was needed.
+
+```text
+uv run --frozen pytest -q tests/test_story_dependencies.py -k 'dependency_api_accepts_external_prerequisite_for_selected_dependent or selected_scope_review_preserves_unrelated_edges_and_external_visibility or external_prerequisite_blocks_until_complete_without_joining_scope'
+3 passed, 17 deselected, 4 deprecation warnings
+
+uv run --frozen pyrepo-check annotations ty ruff api.py tests/test_story_dependencies.py
+ruff, annotations, and ty passed
+```
+
+- `3d5d392` test: allow external dependency prerequisite at API boundary (#223)
+- `60b4e03` fix: preserve external dependency prerequisites (#223)
