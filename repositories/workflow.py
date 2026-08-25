@@ -3118,7 +3118,9 @@ class WorkflowFactRepository:
             sprint_selection_event_id=selection.event_id,
             sprint_selection_event_fingerprint=selection.event_fingerprint,
             sprint_candidate=(
-                structurally_eligible and selection.selection_state == "selected"
+                not row.is_superseded
+                and structurally_eligible
+                and selection.selection_state == "selected"
             ),
             readiness_blockers=blockers,
             validation_status=validation_status,
