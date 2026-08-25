@@ -105,7 +105,11 @@ from workflow.contracts import (
     WorkflowErrorCode,
     WorkflowPosition,
 )
-from workflow.definitions.planning import candidate_set_fingerprint
+from workflow.definitions.planning import (
+    candidate_set_fingerprint,
+    selected_scope_stories,
+    story_dependency_source_fingerprint,
+)
 from workflow.definitions.root import project_graph
 from workflow.domain import WorkflowDomain
 from workflow.fingerprints import canonical_hash, canonical_json
@@ -3214,6 +3218,86 @@ def test_completed_triaged_sprint_exposes_future_dependency_review(
 
     assert decision.category is NodeCategory.AVAILABLE
     assert decision.reason_code == "STORY_DEPENDENCY_REVIEW_REQUIRED"
+
+
+def test_next_sprint_dependency_apply_uses_only_projected_current_scope(
+    engine: "Engine",
+) -> None:
+    """Completed-Sprint intent stays historical while only the future scope writes."""
+    domain, project_id, sprint_id, completed_story_id, future_story_id, *_rest = (
+        _complete_execution_sprint_with_unselected_story(engine)
+    )
+    domain = WorkflowDomain(
+        engine=engine,
+        graph=project_graph(),
+        clock=FixedClock(now_value=EXECUTION_EVALUATED_AT),
+    )
+    triaged = domain.transition(
+        RecordPostSprintTriage(
+            **execution_guards(
+                domain,
+                project_id,
+                "execution.post_sprint_triage",
+                f"sprint:{sprint_id}",
+            ),
+            instance_key=f"sprint:{sprint_id}",
+            idempotency_key="next-scope-authority-triage",
+            sprint_id=sprint_id,
+            impact="none",
+            canonical_payload={"summary": "No downstream change."},
+        )
+    )
+    assert triaged.ok is True
+    _select_for_sprint(engine, future_story_id)
+
+    position = domain.position(project_id)
+    decision = next(
+        item
+        for item in position.decisions
+        if item.node_id == "planning.story_dependencies"
+    )
+    with Session(engine) as session:
+        snapshot = WorkflowFactRepository(session).load(project_id)
+    current_scope = selected_scope_stories(snapshot)
+    assert [item.story_id for item in current_scope] == [future_story_id]
+    completed_fact = next(
+        item for item in snapshot.stories if item.story_id == completed_story_id
+    )
+    assert completed_fact.sprint_selection_state == "selected"
+
+    selection = application_module.PlanningActionSelectionService(engine=engine)
+    source_fingerprint = selection.prepare_story_dependencies(
+        project_id=project_id,
+        decision=decision,
+        selected_story_ids=(future_story_id,),
+    )
+    assert source_fingerprint == story_dependency_source_fingerprint(current_scope)
+    assert (
+        selection.prepare_story_dependencies(
+            project_id=project_id,
+            decision=decision,
+            selected_story_ids=(completed_story_id, future_story_id),
+        )
+        is None
+    )
+
+    application = AgileForgeApplication(
+        workflow_domain=domain,
+        read_projection=DurableReadProjectionService(engine=engine),
+        planning_action_selection=selection,
+    )
+    with patch("api._application", return_value=application):
+        response = TestClient(api_module.app).post(
+            f"/api/projects/{project_id}/story/dependencies/apply",
+            json={
+                "selected_story_ids": [future_story_id],
+                "reviewed_edges": [],
+                "idempotency_key": "next-scope-authority-apply",
+                "actor": "operator@example.com",
+            },
+        )
+    assert response.status_code == HTTPStatus.OK
+    assert response.json()["data"]["selected_story_ids"] == [future_story_id]
 
 
 def test_invalid_manual_sprint_selection_fails_before_model(

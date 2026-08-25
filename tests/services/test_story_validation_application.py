@@ -155,6 +155,66 @@ def test_reconcile_all_active_stories_replaces_missing_evidence(engine: Engine) 
     assert "Dependency safety." in data["does_not_prove"]
 
 
+def test_reconciliation_api_and_cli_disclose_the_exact_structural_proof_boundary(
+    engine: Engine,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Every operator surface states the same exact proof and non-proof list."""
+    from cli.main import main  # noqa: PLC0415
+
+    story_id = _accepted_story(engine)
+    story = _story(engine, story_id)
+    expected_scope = {
+        "proves": [
+            "exact Story identity",
+            "immutable accepted Story artifact/item binding",
+            "accepted Backlog and Specification lineage",
+            "parent-bounded Specification references",
+            "required Story shape",
+            "non-empty acceptance criteria",
+            "current evidence and input fingerprints",
+        ],
+        "does_not_prove": [
+            "semantic/model quality",
+            "product value",
+            "human Sprint selection",
+            "dependency safety",
+            "Sprint candidacy",
+            "Sprint-generation readiness",
+        ],
+    }
+    app = _build_application(engine)
+    client = TestClient(api.app)
+
+    with patch("api._application", return_value=app):
+        response = client.post(
+            f"/api/projects/{story.project_id}/story/structural-eligibility/reconcile",
+            json={"idempotency_key": "exact-proof-api", "actor": "api-operator"},
+        )
+    assert response.status_code == HTTPStatus.OK
+    assert response.json()["data"]["structural_evidence_scope"] == expected_scope
+
+    assert main(
+        [
+            "story",
+            "eligibility",
+            "reconcile",
+            "--project-id",
+            str(story.project_id),
+            "--story-id",
+            str(story_id),
+            "--idempotency-key",
+            "exact-proof-cli",
+            "--actor",
+            "cli-operator",
+        ],
+        application=app,
+    ) == 0
+    assert json.loads(capsys.readouterr().out)["data"][
+        "structural_evidence_scope"
+    ] == expected_scope
+
+
 def test_reconcile_explicit_subset_is_canonical_and_rejects_duplicate_ids(
     engine: Engine,
 ) -> None:

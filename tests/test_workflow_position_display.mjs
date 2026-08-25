@@ -1061,6 +1061,96 @@ test('a successful Story mutation stays locked when its authority reload fails',
     assert.strictEqual(context.shouldUnlockStoryMutation(false, false), true);
 });
 
+test('Story mutation token lock survives a 409 authority reload and releases only on recovery', async () => {
+    let conflict = true;
+    const context = loadFrontend(async (path) => {
+        if (conflict && path.endsWith('/story/dependencies')) {
+            return {
+                ok: false,
+                status: 409,
+                text: async () => JSON.stringify({
+                    detail: { error: { code: 'STALE_POSITION', message: 'Projection changed.' } },
+                }),
+            };
+        }
+        return { ok: true, status: 200, text: async () => '{"data":{}}' };
+    });
+    const story = selectedScopeStory({ sprint_selection_state: 'unselected', selected_scope_fingerprint: null });
+    vm.runInContext(`
+        selectedProjectId = 7;
+        activeStoryMutation = {
+            token: 'story-token-409',
+            phase: 'awaiting_authority',
+            storyId: 101,
+            intent: 'select',
+        };
+    `, context);
+
+    await assert.rejects(context.loadDashboard());
+    const locked = context.storyReadinessMarkup([story], {
+        storyDependencies: { stories: [story], edges: [] },
+    });
+    assert.ok(locked.includes('data-story-selection-intent="select" disabled aria-disabled="true"'));
+    assert.ok(locked.includes('Current project projection is reloading; controls remain locked.'));
+    assert.notEqual(vm.runInContext('activeStoryMutation', context), null);
+
+    conflict = false;
+    assert.strictEqual(await context.loadDashboard(), true);
+    assert.strictEqual(vm.runInContext('activeStoryMutation', context), null);
+});
+
+test('dependency review submits the backend-projected next-Sprint IDs without rederiving history', () => {
+    const context = loadFrontend();
+    const completed = selectedScopeStory({ story_id: 101, source_story_item_id: 'US-completed' });
+    const future = selectedScopeStory({
+        story_id: 102,
+        source_story_item_id: 'US-future',
+        sprint_selection_state_fingerprint: 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+    });
+    const dependencies = {
+        stories: [completed, future],
+        selected_story_ids: [102],
+        selected_scope_fingerprint: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        edges: [],
+    };
+
+    const projection = context.selectedScopeDependencies([completed, future], dependencies);
+    assert.strictEqual(projection.isWellFormed, true);
+    assert.deepEqual(JSON.parse(JSON.stringify(projection.scopeIds)), [102]);
+    assert.strictEqual(projection.scopeFingerprint, dependencies.selected_scope_fingerprint);
+});
+
+test('browser renders the exact structural proof and non-proof disclosure from the projection', () => {
+    const context = loadFrontend();
+    const story = selectedScopeStory({ sprint_selection_state: 'unselected', selected_scope_fingerprint: null });
+    const scope = {
+        proves: [
+            'exact Story identity',
+            'immutable accepted Story artifact/item binding',
+            'accepted Backlog and Specification lineage',
+            'parent-bounded Specification references',
+            'required Story shape',
+            'non-empty acceptance criteria',
+            'current evidence and input fingerprints',
+        ],
+        does_not_prove: [
+            'semantic/model quality',
+            'product value',
+            'human Sprint selection',
+            'dependency safety',
+            'Sprint candidacy',
+            'Sprint-generation readiness',
+        ],
+    };
+
+    const markup = context.storyReadinessMarkup([story], {
+        storyDependencies: { stories: [story], edges: [], structural_evidence_scope: scope },
+    });
+    for (const item of [...scope.proves, ...scope.does_not_prove]) {
+        assert.ok(markup.includes(item));
+    }
+});
+
 test('selected scope retains external prerequisites and excludes unselected dependents', () => {
     const context = loadFrontend();
     const action = {

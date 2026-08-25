@@ -589,6 +589,66 @@ def test_story_dependencies_inspect_includes_stories_with_backlog_item_id(
     assert first["validation_failures"] == []
 
 
+def test_story_read_surfaces_use_story_fact_authority_and_exact_evidence_scope(
+    engine: Engine,
+) -> None:
+    """Direct, candidate, and dependency reads disclose the same bounded proof."""
+    story_id = _accepted_story_for_show(engine)
+    with Session(engine) as session:
+        snapshot = WorkflowFactRepository(session).load(project_id=1)
+    fact = next(item for item in snapshot.stories if item.story_id == story_id)
+    expected_scope = {
+        "proves": [
+            "exact Story identity",
+            "immutable accepted Story artifact/item binding",
+            "accepted Backlog and Specification lineage",
+            "parent-bounded Specification references",
+            "required Story shape",
+            "non-empty acceptance criteria",
+            "current evidence and input fingerprints",
+        ],
+        "does_not_prove": [
+            "semantic/model quality",
+            "product value",
+            "human Sprint selection",
+            "dependency safety",
+            "Sprint candidacy",
+            "Sprint-generation readiness",
+        ],
+    }
+    reads = DurableReadProjectionService(engine=engine)
+
+    shown = _data(reads.story_show(story_id=story_id))
+    assert "ready_for_sprint" not in shown
+    assert "validation_status" not in shown
+    assert "validation_failures" not in shown
+    assert shown["structurally_eligible"] == fact.structurally_eligible
+    assert (
+        shown["structural_eligibility_status"]
+        == fact.structural_eligibility_status
+    )
+    assert shown["structural_failures"] == list(fact.validation_failures)
+    assert shown["sprint_selection_state"] == fact.sprint_selection_state
+    assert (
+        shown["sprint_selection_state_fingerprint"]
+        == fact.sprint_selection_state_fingerprint
+    )
+    assert shown["selected_scope_fingerprint"] == fact.selected_scope_fingerprint
+    assert shown["dependency_safe"] == fact.dependency_safe
+    assert shown["sprint_candidate"] == fact.sprint_candidate
+    assert shown["readiness_blockers"] == list(fact.readiness_blockers)
+    assert shown["structural_evidence_scope"] == expected_scope
+
+    dependencies = _data(reads.story_dependencies_inspect(project_id=1))
+    assert dependencies["selected_story_ids"] == []
+    assert dependencies["selected_scope_fingerprint"] == fact.selected_scope_fingerprint
+    assert dependencies["structural_evidence_scope"] == expected_scope
+
+    candidates = _data(reads.sprint_candidates(project_id=1))
+    assert candidates["items"] == []
+    assert candidates["structural_evidence_scope"] == expected_scope
+
+
 def _vision_output_fingerprint(
     components: Mapping[str, object],
     statement: str,

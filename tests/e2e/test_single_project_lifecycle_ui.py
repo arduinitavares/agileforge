@@ -197,6 +197,9 @@ class FakeLifecycle:
     dependency_apply_requests: list[JsonObject] = field(default_factory=list)
     dependency_reload_failure: str | None = None
     dependency_reload_conflict: str | None = None
+    story_reload_conflict: str | None = None
+    dependency_selected_story_ids: list[int] | None = None
+    dependency_selected_scope_fingerprint: str | None = None
     reject_stale_delivery_actions: bool = False
     refresh_count: int = 0
     api_errors: list[str] = field(default_factory=list)
@@ -354,6 +357,22 @@ class FakeLifecycle:
                         "error": {
                             "code": "STALE_DEPENDENCY_PROJECTION",
                             "message": self.dependency_reload_conflict,
+                        }
+                    }
+                })
+            elif (
+                suffix == "/story/dependencies"
+                and self.story_reload_conflict
+                and (
+                    self.sprint_selection_requests
+                    or self.structural_reconcile_requests
+                )
+            ):
+                response = (_HTTP_CONFLICT, {
+                    "detail": {
+                        "error": {
+                            "code": "STALE_STORY_PROJECTION",
+                            "message": self.story_reload_conflict,
                         }
                     }
                 })
@@ -781,9 +800,51 @@ class FakeLifecycle:
         }
 
     def _story_dependencies_projection(self) -> JsonObject:
+        selected_story_ids = self.dependency_selected_story_ids
+        if selected_story_ids is None:
+            selected_story_ids = [
+                story["story_id"]
+                for story in self.stories
+                if isinstance(story, dict)
+                and story.get("sprint_selection_state") == "selected"
+                and isinstance(story.get("story_id"), int)
+            ]
+        scope_fingerprint = self.dependency_selected_scope_fingerprint
+        if scope_fingerprint is None:
+            scope_fingerprint = next(
+                (
+                    story.get("selected_scope_fingerprint")
+                    for story in self.stories
+                    if isinstance(story, dict)
+                    and story.get("story_id") in selected_story_ids
+                    and isinstance(story.get("selected_scope_fingerprint"), str)
+                ),
+                None,
+            )
         return {
             "stories": self.stories,
             "edges": self.story_dependencies,
+            "selected_story_ids": selected_story_ids,
+            "selected_scope_fingerprint": scope_fingerprint,
+            "structural_evidence_scope": {
+                "proves": [
+                    "exact Story identity",
+                    "immutable accepted Story artifact/item binding",
+                    "accepted Backlog and Specification lineage",
+                    "parent-bounded Specification references",
+                    "required Story shape",
+                    "non-empty acceptance criteria",
+                    "current evidence and input fingerprints",
+                ],
+                "does_not_prove": [
+                    "semantic/model quality",
+                    "product value",
+                    "human Sprint selection",
+                    "dependency safety",
+                    "Sprint candidacy",
+                    "Sprint-generation readiness",
+                ],
+            },
         }
 
     def _sprint_candidates_projection(self) -> JsonObject:
@@ -2755,6 +2816,90 @@ def test_progressive_story_readiness_partial_refinement_to_sprint_planning(  # n
         for suffix, body in fake.delivery_requests
         if suffix == "/sprint/generate"
     ]
+
+    context.close()
+
+
+def test_completed_sprint_next_scope_confirms_only_the_projected_future_story(
+    dashboard_harness: DashboardHarness,
+) -> None:
+    """Historical selected intent cannot re-enter the next dependency submission."""
+    completed_story_id, future_story_id = 101, 102
+    fake = _delivery_ready_fake(
+        [
+            {
+                "node_id": "planning.story_dependencies",
+                "instance_key": None,
+                "request_kind": "apply_story_dependencies",
+                "endpoint": "story/dependencies/apply",
+                "transport": "semantic",
+            }
+        ]
+    )
+    _seed_progressive_stories(fake, completed_story_id, future_story_id)
+    completed = cast("JsonObject", fake.stories[0])
+    completed["sprint_selection_state"] = "selected"
+    fake.dependency_selected_story_ids = [future_story_id]
+    fake.dependency_selected_scope_fingerprint = _fingerprint("b")
+
+    context, page = _open_project_page(dashboard_harness, fake)
+    page.locator(
+        f'[data-story-selection-id="{future_story_id}"][data-story-selection-intent="select"]'
+    ).click()
+    page.wait_for_timeout(_UI_SETTLE_MS)
+
+    confirm = page.locator('[data-apply-dependencies="true"]')
+    expect(confirm).to_be_enabled()
+    confirm.click()
+    page.wait_for_timeout(_UI_SETTLE_MS)
+
+    assert fake.sprint_selection_requests[0]["story_id"] == future_story_id
+    assert fake.dependency_apply_requests[0]["selected_story_ids"] == [future_story_id]
+    assert completed["sprint_selection_state"] == "selected"
+    assert not [
+        body
+        for suffix, body in fake.delivery_requests
+        if suffix == "/sprint/generate"
+    ]
+
+    context.close()
+
+
+def test_story_selection_stays_locked_through_409_until_current_projection_recovers(
+    dashboard_harness: DashboardHarness,
+) -> None:
+    """A committed Story selection cannot be repeated after its reload conflicts."""
+    fake = _delivery_ready_fake([])
+    _seed_progressive_stories(fake, 101, 102)
+    fake.story_reload_conflict = "Story authority projection conflicted."
+
+    context, page = _open_project_page(dashboard_harness, fake)
+    page.locator(
+        '[data-story-selection-id="101"][data-story-selection-intent="select"]'
+    ).click()
+    page.wait_for_timeout(_UI_SETTLE_MS)
+
+    locked = page.locator(
+        '[data-story-selection-id="101"][data-story-selection-intent="select"]'
+    )
+    expect(locked).to_be_disabled()
+    expect(locked).to_have_attribute("aria-disabled", "true")
+    expect(locked).to_have_attribute("aria-busy", "true")
+    expect(page.locator("#project-error")).to_contain_text(
+        "Story authority projection conflicted."
+    )
+    locked.evaluate("button => button.click()")
+    page.wait_for_timeout(_UI_SETTLE_MS)
+    assert len(fake.sprint_selection_requests) == 1
+
+    fake.story_reload_conflict = None
+    page.locator("#refresh-project").click()
+    page.wait_for_timeout(_UI_SETTLE_MS)
+    recovered = page.locator(
+        '[data-story-selection-id="101"][data-story-selection-intent="remove"]'
+    )
+    expect(recovered).to_be_enabled()
+    assert len(fake.sprint_selection_requests) == 1
 
     context.close()
 

@@ -1024,3 +1024,191 @@ def test_cross_project_story_binding_in_selection_event_fails_closed(
         match="exact Story lineage is invalid",
     ):
         WorkflowFactRepository(session).load(project_id)
+
+
+def test_selection_response_uses_the_canonical_post_event_story_fact(
+    engine: Engine,
+) -> None:
+    """A selection write must not locally infer dependency safety or candidacy."""
+    story_id = _accepted_story(engine)
+    with Session(engine) as session:
+        story = session.get_one(UserStory, story_id)
+        initial = selection_service.story_sprint_selection_fact_in_session(
+            session,
+            story=story,
+        )
+        project_id = story.project_id
+    app = _build_application(engine)
+
+    selected = app.apply_story_sprint_selection(
+        _selection_request(
+            project_id=project_id,
+            story_id=story_id,
+            intent="select",
+            expected_state_fingerprint=initial.state_fingerprint,
+            key="canonical-selection-response",
+        )
+    )
+    selected_data = _result_data(selected)
+    no_op = app.apply_story_sprint_selection(
+        _selection_request(
+            project_id=project_id,
+            story_id=story_id,
+            intent="select",
+            expected_state_fingerprint=_result_string(
+                selected,
+                "state_fingerprint",
+            ),
+            key="canonical-selection-no-op",
+        )
+    )
+
+    with Session(engine) as session:
+        snapshot = WorkflowFactRepository(session).load(project_id)
+    fact = next(item for item in snapshot.stories if item.story_id == story_id)
+
+    for response in (selected_data, _result_data(no_op)):
+        assert response["structurally_eligible"] == fact.structurally_eligible
+        assert (
+            response["structural_eligibility_status"]
+            == fact.structural_eligibility_status
+        )
+        assert response["selected_scope_fingerprint"] == fact.selected_scope_fingerprint
+        assert response["dependency_safe"] is False
+        assert response["sprint_candidate"] is False
+        assert response["dependency_safe"] == fact.dependency_safe
+        assert response["sprint_candidate"] == fact.sprint_candidate
+
+
+def test_direct_story_api_and_cli_show_exact_unselected_story_fact(
+    engine: Engine,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An eligible but unselected Story is never represented as a candidate."""
+    from cli.main import main  # noqa: PLC0415
+
+    story_id = _accepted_story(engine)
+    app = _build_application(engine)
+    direct = _result_data(app.reads.story_show(story_id=story_id))
+    assert direct["structurally_eligible"] is True
+    assert direct["structural_eligibility_status"] == "eligible"
+    assert direct["structural_failures"] == []
+    assert direct["sprint_selection_state"] == "unselected"
+    assert direct["sprint_selection_event_id"] is None
+    assert direct["sprint_selection_event_fingerprint"] is None
+    assert direct["dependency_safe"] is False
+    assert direct["sprint_candidate"] is False
+    assert "ready_for_sprint" not in direct
+    assert "validation_status" not in direct
+
+    with patch("api._application", return_value=app):
+        api_response = TestClient(api.app).get(f"/api/stories/{story_id}")
+    assert api_response.status_code == HTTPStatus.OK
+    assert api_response.json()["data"] == direct
+
+    assert main(["story", "show", "--story-id", str(story_id)], application=app) == 0
+    assert json.loads(capsys.readouterr().out)["data"] == direct
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    ["missing", "malformed", "mismatched", "coherent_tail_rewrite"],
+)
+def test_selection_event_requires_an_exact_completed_receipt_anchor(
+    engine: Engine,
+    corruption: str,
+) -> None:
+    """Selection history fails closed without its exact creating receipt anchor."""
+    story_id = _accepted_story(engine)
+    with Session(engine) as session:
+        story = session.get_one(UserStory, story_id)
+        initial = selection_service.story_sprint_selection_fact_in_session(
+            session,
+            story=story,
+        )
+        project_id = story.project_id
+    app = _build_application(engine)
+    selected = app.apply_story_sprint_selection(
+        _selection_request(
+            project_id=project_id,
+            story_id=story_id,
+            intent="select",
+            expected_state_fingerprint=initial.state_fingerprint,
+            key=f"receipt-anchor-select-{corruption}",
+        )
+    )
+
+    if corruption == "coherent_tail_rewrite":
+        removed = app.apply_story_sprint_selection(
+            _selection_request(
+                project_id=project_id,
+                story_id=story_id,
+                intent="remove",
+                expected_state_fingerprint=_result_string(
+                    selected,
+                    "state_fingerprint",
+                ),
+                key="receipt-anchor-remove",
+            )
+        )
+        app.apply_story_sprint_selection(
+            _selection_request(
+                project_id=project_id,
+                story_id=story_id,
+                intent="defer",
+                expected_state_fingerprint=_result_string(
+                    removed,
+                    "state_fingerprint",
+                ),
+                key="receipt-anchor-defer",
+            )
+        )
+
+    with Session(engine) as session:
+        events = session.exec(
+            select(WorkflowEvent)
+            .where(
+                col(WorkflowEvent.event_type)
+                == WorkflowEventType.STORY_SELECTION_CHANGED
+            )
+            .order_by(col(WorkflowEvent.event_id))
+        ).all()
+        event = events[-1]
+        assert event.event_metadata is not None
+        metadata = json.loads(event.event_metadata)
+        receipt_id = metadata.get("workflow_transition_receipt_id")
+        assert isinstance(receipt_id, int)
+        receipt = session.get(WorkflowTransitionReceipt, receipt_id)
+        assert receipt is not None
+
+        if corruption == "missing":
+            session.delete(receipt)
+        elif corruption == "malformed":
+            receipt.request_json = "{"
+            session.add(receipt)
+        elif corruption == "mismatched":
+            request = json.loads(receipt.request_json)
+            request["actor"] = "tampered@example.com"
+            receipt.request_json = canonical_json(request)
+            session.add(receipt)
+        else:
+            assert len(events) == 3  # noqa: PLR2004
+            first_metadata = json.loads(events[0].event_metadata or "{}")
+            metadata.update(
+                {
+                    "action": "select",
+                    "new_state": "selected",
+                    "observed_eligibility_evidence_fingerprint": first_metadata[
+                        "observed_eligibility_evidence_fingerprint"
+                    ],
+                }
+            )
+            event.event_metadata = canonical_json(metadata)
+            session.add(event)
+        session.commit()
+
+    with Session(engine), pytest.raises(
+        WorkflowFactLoadError,
+        match="selection receipt",
+    ):
+        WorkflowFactRepository(session).load(project_id)
