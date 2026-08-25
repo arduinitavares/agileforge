@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import patch
@@ -65,7 +66,7 @@ def _validate(
         )
 
 
-def test_structural_validation_persists_exact_v2_snapshot_without_provider(
+def test_structural_validation_persists_exact_v3_snapshot_without_provider(
     engine: Engine,
 ) -> None:
     story_id = _accepted_story(engine)
@@ -114,11 +115,29 @@ def test_structural_validation_persists_exact_v2_snapshot_without_provider(
         assert story.validation_evidence == canonical_json(
             evidence.model_dump(mode="json")
         )
-        assert evidence.schema_version == "agileforge.story-validation-evidence.v2"
+        assert evidence.schema_version == "agileforge.story-validation-evidence.v3"
+        assert evidence.structurally_eligible is True
         assert evidence.mode == "structural"
         assert evidence.semantic_review_state == "not_requested"
         assert evidence.referenced_spec_item_ids == ("REQ.planning-1",)
         assert evidence.validated_at == VALIDATED_AT
+
+
+def test_validation_evidence_rejects_legacy_v2_json(engine: Engine) -> None:
+    story_id = _accepted_story(engine)
+    _validate(engine, story_id)
+
+    with Session(engine) as session:
+        story = session.get(UserStory, story_id)
+        assert story is not None
+        assert story.validation_evidence is not None
+        legacy_v2_payload = json.loads(story.validation_evidence)
+        legacy_v2_payload["schema_version"] = (
+            "agileforge.story-validation-evidence.v2"
+        )
+
+    with pytest.raises(ValueError, match="schema_version"):
+        ValidationEvidence.model_validate_json(canonical_json(legacy_v2_payload))
 
 
 def test_missing_exact_acceptance_emits_only_acceptance_finding_and_stays_unready(

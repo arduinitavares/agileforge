@@ -338,7 +338,7 @@ def test_acceptance_materializes_exact_rows_but_feedback_does_not(
         )
         assert story.story_points == 3  # noqa: PLR2004
         assert story.rank == "101"
-        assert story.validation_evidence is None
+        assert story.validation_evidence is not None
 
 
 @pytest.mark.parametrize("intermediate_decision", ["feedback", "rejected"])

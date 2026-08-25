@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -25,8 +26,10 @@ from tests.test_create_user_story import (
 )
 from tests.test_story_validation_service import _accepted_story, _validate
 from tests.workflow.test_planning_transitions import (
+    EVALUATED_AT,
     _replace_specification_and_backlog,
 )
+from utils.spec_schemas import ValidationEvidence
 from workflow.fingerprints import canonical_hash, canonical_json
 
 if TYPE_CHECKING:
@@ -55,6 +58,26 @@ def test_gold_specification_fixture_contains_exact_37_item_direct_contract() -> 
     encoded = review_input.model_dump(mode="json")
     assert tuple(encoded).count("accepted_specification_json") == 1
     assert len(json.loads(review_input.accepted_specification_json)["items"]) == 37  # noqa: PLR2004
+
+
+def test_accepted_story_materializes_canonical_structural_v3_evidence(
+    engine: Engine,
+) -> None:
+    story_id = _accepted_story(engine)
+
+    with Session(engine) as session:
+        story = session.get(UserStory, story_id)
+        assert story is not None
+        assert story.validation_evidence is not None
+        evidence = ValidationEvidence.model_validate_json(
+            story.validation_evidence,
+            strict=True,
+        )
+
+    assert evidence.schema_version == "agileforge.story-validation-evidence.v3"
+    assert evidence.mode == "structural"
+    assert evidence.structurally_eligible is True
+    assert evidence.validated_at == EVALUATED_AT + timedelta(seconds=2)
 
 
 @pytest.mark.parametrize(
@@ -150,6 +173,22 @@ def test_readiness_rejects_missing_malformed_or_v1_evidence(
             require_story_ready_for_sprint(session, story=story)
 
 
+def test_readiness_rejects_evidence_from_a_different_validator_version(
+    engine: Engine,
+) -> None:
+    story_id = _accepted_story(engine)
+    with Session(engine) as session:
+        story = session.get(UserStory, story_id)
+        assert story is not None
+        assert story.validation_evidence is not None
+        payload = json.loads(story.validation_evidence)
+        payload["validator_version"] = "obsolete-validator"
+        story.validation_evidence = canonical_json(payload)
+
+        with pytest.raises(StoryValidationReadinessError, match="failed or stale"):
+            require_story_ready_for_sprint(session, story=story)
+
+
 def test_validation_allows_exact_historical_pin_but_new_sprint_readiness_does_not(
     engine: Engine,
 ) -> None:
@@ -169,7 +208,7 @@ def test_validation_allows_exact_historical_pin_but_new_sprint_readiness_does_no
             require_story_ready_for_sprint(session, story=story)
 
 
-def test_feedback_preserves_a_evidence_and_accepted_c_starts_unvalidated(
+def test_feedback_preserves_a_evidence_and_accepted_c_receives_fresh_evidence(
     engine: Engine,
 ) -> None:
     project_id, roadmap_id = _seed_story_parent(engine)
@@ -211,7 +250,9 @@ def test_feedback_preserves_a_evidence_and_accepted_c_starts_unvalidated(
         accepted_c = _decide_story(session, artifact_c, decision="accepted", offset=6)
         story_c = session.get(UserStory, accepted_c.activated_story_ids[0])
         assert story_c is not None
-        assert story_c.validation_evidence is None
+        assert story_c.validation_evidence is not None
         assert story_a.validation_evidence == evidence_a
-        with pytest.raises(StoryValidationReadinessError):
-            require_story_ready_for_sprint(session, story=story_c)
+        assert ValidationEvidence.model_validate_json(
+            story_c.validation_evidence,
+            strict=True,
+        ).validated_at == EVALUATED_AT + timedelta(seconds=6)

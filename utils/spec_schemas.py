@@ -38,11 +38,11 @@ class StructuralValidationFailure(BaseModel):
 
 
 class ValidationEvidence(BaseModel):
-    """Complete canonical v2 snapshot for one explicit validation action."""
+    """Complete canonical v3 snapshot for one explicit validation action."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal["agileforge.story-validation-evidence.v2"]
+    schema_version: Literal["agileforge.story-validation-evidence.v3"]
     project_id: Annotated[int, Field(gt=0)]
     story_id: Annotated[int, Field(gt=0)]
     source_story_artifact_id: Annotated[int, Field(gt=0)]
@@ -66,7 +66,7 @@ class ValidationEvidence(BaseModel):
     ]
     validator_version: Annotated[str, Field(min_length=1)]
     mode: Literal["structural", "hybrid"]
-    ready_for_sprint: bool
+    structurally_eligible: bool
     structural_failures: tuple[StructuralValidationFailure, ...]
     structural_warnings: tuple[()] = ()
     semantic_review_state: Literal["not_requested", "valid", "invalid"]
@@ -87,7 +87,7 @@ class ValidationEvidence(BaseModel):
             message = "structural failures must be unique and in canonical code order"
             raise ValueError(message)
         if self.structural_warnings:
-            message = "v2 structural warnings must be empty"
+            message = "v3 structural warnings must be empty"
             raise ValueError(message)
         if (
             tuple(sorted(set(self.referenced_spec_item_ids)))
@@ -123,11 +123,7 @@ class ValidationEvidence(BaseModel):
         if self.semantic_review_state == "invalid" and self.semantic_findings:
             message = "invalid semantic output cannot persist provider findings"
             raise ValueError(message)
-        expected_ready = not self.structural_failures and (
-            self.semantic_review_state == "not_requested"
-            or (self.semantic_review_state == "valid" and not self.semantic_findings)
-        )
-        if self.ready_for_sprint != expected_ready:
-            message = "ready_for_sprint is inconsistent with validation findings"
+        if self.structurally_eligible != (not self.structural_failures):
+            message = "structurally_eligible is inconsistent with structural failures"
             raise ValueError(message)
         return self

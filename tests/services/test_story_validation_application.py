@@ -52,7 +52,7 @@ def test_story_validation_application_facade_validates_story_structurally(
         statement = select(UserStory).where(col(UserStory.story_id) == story_id)
         story_before = session.exec(statement).first()
         assert story_before is not None
-        assert story_before.validation_evidence is None
+        assert story_before.validation_evidence is not None
         project_id = story_before.project_id
 
     app = _build_application(engine)
@@ -81,7 +81,7 @@ def test_story_validation_application_facade_validates_story_structurally(
         story_after = session.exec(statement).first()
         assert story_after is not None
         assert story_after.validation_evidence is not None
-        assert '"ready_for_sprint":true' in story_after.validation_evidence
+        assert '"structurally_eligible":true' in story_after.validation_evidence
 
 
 def test_story_validation_application_facade_rejects_mismatched_project(

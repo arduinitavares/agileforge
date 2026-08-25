@@ -3053,7 +3053,7 @@ class WorkflowFactRepository:
         if row.validation_evidence is not None:
             try:
                 ev = ValidationEvidence.model_validate_json(row.validation_evidence)
-                if ev.ready_for_sprint and not ev.structural_failures:
+                if ev.structurally_eligible and not ev.structural_failures:
                     validation_status = "validated"
                 else:
                     validation_status = "failed"

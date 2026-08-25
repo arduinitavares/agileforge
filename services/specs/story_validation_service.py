@@ -626,12 +626,8 @@ def _build_evidence(
         source_ids,
         (finding.spec_item_id for finding in semantic_findings),
     )
-    ready = not context.failures and (
-        semantic_review_state == "not_requested"
-        or (semantic_review_state == "valid" and not semantic_findings)
-    )
     return ValidationEvidence(
-        schema_version="agileforge.story-validation-evidence.v2",
+        schema_version="agileforge.story-validation-evidence.v3",
         project_id=story.project_id,
         story_id=story.story_id,
         source_story_artifact_id=artifact.story_artifact_id,
@@ -649,7 +645,7 @@ def _build_evidence(
         story_validation_input_fingerprint=input_fingerprint,
         validator_version=_VALIDATOR_VERSION,
         mode=mode,
-        ready_for_sprint=ready,
+        structurally_eligible=not context.failures,
         structural_failures=context.failures,
         structural_warnings=(),
         semantic_review_state=semantic_review_state,
@@ -699,7 +695,7 @@ def _validation_result(
         "success": True,
         "story_id": story_id,
         "mode": mode,
-        "ready_for_sprint": evidence.ready_for_sprint if evidence else False,
+        "ready_for_sprint": evidence.structurally_eligible if evidence else False,
         "structural_failures": [
             item.model_dump(mode="json") for item in context.failures
         ],
@@ -741,15 +737,17 @@ def _finalize_validation_in_session(
             story_id=parsed.story_id,
             mode=parsed.mode,
         )
+    validated_at = now()
     evidence = _build_evidence(
         context,
         mode=parsed.mode,
-        validated_at=now(),
+        validated_at=validated_at,
         semantic_review_state=semantic.state,
         semantic_findings=semantic.findings,
     )
     if evidence is not None:
         story.validation_evidence = canonical_json(evidence.model_dump(mode="json"))
+        story.updated_at = validated_at
         session.add(story)
         session.flush()
     return _validation_result(
@@ -911,7 +909,7 @@ def require_story_validation_evidence(
     try:
         evidence = ValidationEvidence.model_validate_json(raw_evidence, strict=True)
     except ValidationError as error:
-        message = "Story validation evidence is not strict v2."
+        message = "Story validation evidence is not strict v3."
         raise StoryValidationReadinessError(message) from error
     if canonical_json(evidence.model_dump(mode="json")) != raw_evidence:
         message = "Story validation evidence bytes are not canonical."
@@ -950,9 +948,10 @@ def require_story_validation_evidence(
         and evidence.spec_version_id == story.accepted_spec_version_id
         and evidence.spec_hash == story.accepted_spec_hash
         and evidence.story_validation_input_fingerprint == input_fingerprint
+        and evidence.validator_version == _VALIDATOR_VERSION
         and evidence.referenced_spec_item_ids == expected_references
     )
-    if not exact_identities or not evidence.ready_for_sprint:
+    if not exact_identities or not evidence.structurally_eligible:
         message = "Story validation evidence is failed or stale."
         raise StoryValidationReadinessError(message)
     if require_current_spec:

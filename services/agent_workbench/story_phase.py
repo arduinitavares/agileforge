@@ -43,7 +43,12 @@ from services.planning_lineage import (
     next_artifact_version,
     select_current_accepted_artifact,
 )
+from services.specs.story_validation_service import (
+    compute_story_validation_input_fingerprint,
+    validate_story_with_specification_in_session,
+)
 from services.story_rank import parse_story_rank
+from utils.spec_schemas import ValidationEvidence
 from workflow.fingerprints import canonical_hash, canonical_json
 
 if TYPE_CHECKING:
@@ -587,7 +592,14 @@ def _materialize_story_rows(
         session.add(row)
         rows.append(row)
     session.flush()
-    return tuple(_required_id(row.story_id, label="User Story") for row in rows)
+    story_ids = tuple(_required_id(row.story_id, label="User Story") for row in rows)
+    for story_id in story_ids:
+        validate_story_with_specification_in_session(
+            session,
+            {"story_id": story_id, "mode": "structural"},
+            now=lambda accepted_at=accepted_at: accepted_at,
+        )
+    return story_ids
 
 
 def record_story_decision_in_session(
@@ -808,6 +820,7 @@ def _story_projection_matches_artifact(  # noqa: PLR0913
         return False
     return all(
         _story_row_matches_item(
+            session,
             by_item_id.get(envelope.item.story_item_id),
             artifact=artifact,
             envelope=envelope,
@@ -822,6 +835,7 @@ def _story_projection_matches_artifact(  # noqa: PLR0913
 
 
 def _story_row_matches_item(  # noqa: PLR0913
+    session: Session,
     row: UserStory | None,
     *,
     artifact: StoryArtifact,
@@ -859,8 +873,39 @@ def _story_row_matches_item(  # noqa: PLR0913
         row.story_points == _STORY_POINTS[item.estimated_effort]
         and row.rank == str((parent.backlog_item.priority * 100) + ordinal)
         and row.status is StoryStatus.TO_DO
-        and row.validation_evidence is None
-        and row.updated_at == accepted_at
+        and _acceptance_evidence_is_current(
+            session=session,
+            story=row,
+            accepted_at=accepted_at,
+        )
+    )
+
+
+def _acceptance_evidence_is_current(
+    *,
+    session: Session,
+    story: UserStory,
+    accepted_at: datetime,
+) -> bool:
+    """Prove a fresh activation retained exact v3 structural evidence."""
+    raw_evidence = story.validation_evidence
+    if raw_evidence is None:
+        return False
+    try:
+        evidence = ValidationEvidence.model_validate_json(raw_evidence, strict=True)
+        current_fingerprint = compute_story_validation_input_fingerprint(
+            session,
+            story=story,
+        )
+    except ValueError:
+        return False
+    return (
+        raw_evidence == canonical_json(evidence.model_dump(mode="json"))
+        and evidence.mode == "structural"
+        and evidence.validated_at.replace(tzinfo=None) == accepted_at.replace(
+            tzinfo=None
+        )
+        and evidence.story_validation_input_fingerprint == current_fingerprint
     )
 
 
