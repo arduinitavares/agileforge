@@ -17,6 +17,8 @@ from tests.test_story_validation_service import _accepted_story
 if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
 
+_EXPECTED_SELECTION_EVENT_COUNT = 4
+
 
 def test_eligible_story_defaults_to_unselected_and_not_a_candidate(
     engine: Engine,
@@ -44,9 +46,8 @@ def _selection_request(
     intent: str,
     expected_state_fingerprint: str,
     key: str,
-) -> object:
-    request_type = getattr(selection_service, "StorySprintSelectionRequest")
-    return request_type(
+) -> selection_service.StorySprintSelectionRequest:
+    return selection_service.StorySprintSelectionRequest(
         project_id=project_id,
         story_id=story_id,
         intent=intent,
@@ -102,7 +103,7 @@ def test_complete_selection_transition_table_is_append_only(engine: Engine) -> N
             story=story,
         )
 
-    assert len(events) == 4
+    assert len(events) == _EXPECTED_SELECTION_EVENT_COUNT
     assert reloaded.selection_state == "selected"
     assert reloaded.event_id == events[-1].event_id
     assert reloaded.event_fingerprint is not None
