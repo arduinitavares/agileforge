@@ -1943,7 +1943,7 @@ function storyDependencyReviewMarkup(action, stories, dependencies) {
     const buttonLabel = mutationLocked ? 'Confirming...' : 'Confirm dependencies';
     const statusHidden = mutationLocked ? '' : 'hidden';
     const statusMessage = mutationLocked
-        ? 'Dependency review was accepted. Current authority projection is reloading; controls remain locked.'
+        ? 'Dependency review was accepted. Current project projection is reloading; controls remain locked.'
         : '';
 
     return `<div class="rounded-lg border border-amber-200 bg-amber-50/50 p-4 space-y-3" data-dependency-review-section="true" ${bindingAttributes}>

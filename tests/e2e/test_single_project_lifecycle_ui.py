@@ -343,25 +343,27 @@ class FakeLifecycle:
         assert self.project is not None, "Project must exist before scoped reads."
         suffix = path.removeprefix(prefix)
         if request.method == "GET":
+            response: tuple[int, JsonObject] | None = None
             if (
                 suffix == "/story/dependencies"
                 and self.dependency_reload_conflict
                 and self.dependency_apply_requests
             ):
-                return _HTTP_CONFLICT, {
+                response = (_HTTP_CONFLICT, {
                     "detail": {
                         "error": {
                             "code": "STALE_DEPENDENCY_PROJECTION",
                             "message": self.dependency_reload_conflict,
                         }
                     }
-                }
-            if suffix == "/position":
-                return _HTTP_OK, self.position_envelope()
-            planning_response = self._planning_review_response(suffix)
-            if planning_response is not None:
-                return planning_response
-            return _HTTP_OK, self._success(self._read(suffix))
+                })
+            elif suffix == "/position":
+                response = (_HTTP_OK, self.position_envelope())
+            else:
+                response = self._planning_review_response(suffix)
+                if response is None:
+                    response = (_HTTP_OK, self._success(self._read(suffix)))
+            return response
         assert request.method == "POST", f"Unexpected method: {request.method}"
         return self._mutate(
             suffix,
