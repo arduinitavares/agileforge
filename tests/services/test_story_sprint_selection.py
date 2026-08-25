@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 from datetime import UTC, datetime
 from http import HTTPStatus
@@ -11,13 +12,17 @@ from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlmodel import Session, col, select
+from sqlmodel import Session, SQLModel, col, create_engine, select
 
 import api
 from models.core import Sprint, Team, UserStory
 from models.enums import SprintStatus, WorkflowEventType
 from models.events import WorkflowEvent
-from models.workflow import SprintPlanArtifact, SprintPlanArtifactDecision
+from models.workflow import (
+    SprintPlanArtifact,
+    SprintPlanArtifactDecision,
+    WorkflowTransitionReceipt,
+)
 from repositories.workflow import WorkflowFactLoadError, WorkflowFactRepository
 from services import story_sprint_selection as selection_service
 from services.application import (
@@ -37,6 +42,8 @@ from workflow.domain import WorkflowDomain
 from workflow.fingerprints import canonical_hash, canonical_json
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from sqlalchemy.engine import Engine
 
 _EXPECTED_SELECTION_EVENT_COUNT = 4
@@ -558,3 +565,323 @@ def test_accepted_sprint_plan_locks_further_selection_changes(engine: Engine) ->
     )
     assert locked["ok"] is False
     assert locked["errors"][0]["code"] == "SELECTION_LIFECYCLE_LOCKED"
+
+
+def test_selection_event_audit_binds_exact_story_and_operator_metadata(
+    engine: Engine,
+) -> None:
+    """The event is a complete canonical audit fact, not a mutable state cache."""
+    story_id = _accepted_story(engine)
+    with Session(engine) as session:
+        story = session.get_one(UserStory, story_id)
+        initial = selection_service.story_sprint_selection_fact_in_session(
+            session,
+            story=story,
+        )
+        project_id = story.project_id
+        expected_identity = (
+            story.source_story_artifact_id,
+            story.source_story_artifact_fingerprint,
+            story.source_story_item_id,
+            story.source_story_item_fingerprint,
+            story.accepted_spec_version_id,
+            story.accepted_spec_hash,
+        )
+    result = _build_application(engine).apply_story_sprint_selection(
+        _selection_request(
+            project_id=project_id,
+            story_id=story_id,
+            intent="select",
+            expected_state_fingerprint=initial.state_fingerprint,
+            key="audit-selection",
+        )
+    )
+    with Session(engine) as session:
+        event = session.exec(
+            select(WorkflowEvent).where(
+                col(WorkflowEvent.event_type)
+                == WorkflowEventType.STORY_SELECTION_CHANGED
+            )
+        ).one()
+    assert event.event_metadata is not None
+    metadata = selection_service.StorySprintSelectionEventMetadata.model_validate_json(
+        event.event_metadata,
+        strict=True,
+    )
+    assert metadata.schema_version == "agileforge.story-sprint-selection.v1"
+    assert metadata.project_id == project_id
+    assert metadata.story_id == story_id
+    assert (
+        metadata.source_story_artifact_id,
+        metadata.source_story_artifact_fingerprint,
+        metadata.source_story_item_id,
+        metadata.source_story_item_fingerprint,
+        metadata.accepted_spec_version_id,
+        metadata.accepted_spec_hash,
+    ) == expected_identity
+    assert metadata.actor == "operator@example.com"
+    assert metadata.action == "select"
+    assert metadata.previous_state == "unselected"
+    assert metadata.new_state == "selected"
+    assert metadata.rationale == "Operator chose select."
+    assert metadata.observed_eligibility_evidence_fingerprint is not None
+    assert result["data"]["selection_event_id"] == event.event_id
+
+
+def test_same_state_is_receipted_and_stale_expected_state_fails_closed(
+    engine: Engine,
+) -> None:
+    """No-op intent replays durably while stale optimistic guards never append."""
+    story_id = _accepted_story(engine)
+    with Session(engine) as session:
+        story = session.get_one(UserStory, story_id)
+        initial = selection_service.story_sprint_selection_fact_in_session(
+            session,
+            story=story,
+        )
+        project_id = story.project_id
+    app = _build_application(engine)
+    selected = app.apply_story_sprint_selection(
+        _selection_request(
+            project_id=project_id,
+            story_id=story_id,
+            intent="select",
+            expected_state_fingerprint=initial.state_fingerprint,
+            key="select-once",
+        )
+    )
+    no_op = app.apply_story_sprint_selection(
+        _selection_request(
+            project_id=project_id,
+            story_id=story_id,
+            intent="select",
+            expected_state_fingerprint=selected["data"]["state_fingerprint"],
+            key="select-no-op",
+        )
+    )
+    stale = app.apply_story_sprint_selection(
+        _selection_request(
+            project_id=project_id,
+            story_id=story_id,
+            intent="defer",
+            expected_state_fingerprint=initial.state_fingerprint,
+            key="stale-expected",
+        )
+    )
+    assert no_op == selected
+    assert stale["ok"] is False
+    assert stale["errors"][0]["code"] == "STALE_SELECTION_STATE"
+    with Session(engine) as session:
+        events = session.exec(
+            select(WorkflowEvent).where(
+                col(WorkflowEvent.event_type)
+                == WorkflowEventType.STORY_SELECTION_CHANGED
+            )
+        ).all()
+        receipts = session.exec(
+            select(WorkflowTransitionReceipt).where(
+                col(WorkflowTransitionReceipt.request_kind)
+                == "apply_story_sprint_selection"
+            )
+        ).all()
+    assert len(events) == 1
+    assert len(receipts) == 3  # noqa: PLR2004
+
+
+def test_concurrent_identical_selection_requests_share_one_event(
+    tmp_path: Path,
+) -> None:
+    """SQLite writer serialization returns one receipt result and one audit event."""
+    database = tmp_path / "selection-race.sqlite3"
+    engine = create_engine(
+        f"sqlite:///{database}",
+        connect_args={"check_same_thread": False},
+    )
+    SQLModel.metadata.create_all(engine)
+    try:
+        story_id = _accepted_story(engine)
+        with Session(engine) as session:
+            story = session.get_one(UserStory, story_id)
+            initial = selection_service.story_sprint_selection_fact_in_session(
+                session,
+                story=story,
+            )
+            project_id = story.project_id
+        request = _selection_request(
+            project_id=project_id,
+            story_id=story_id,
+            intent="select",
+            expected_state_fingerprint=initial.state_fingerprint,
+            key="concurrent-selection",
+        )
+        app = _build_application(engine)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            first = executor.submit(app.apply_story_sprint_selection, request)
+            second = executor.submit(app.apply_story_sprint_selection, request)
+            first_result = first.result(timeout=10)
+            second_result = second.result(timeout=10)
+        assert first_result == second_result
+        with Session(engine) as session:
+            assert len(
+                session.exec(
+                    select(WorkflowEvent).where(
+                        col(WorkflowEvent.event_type)
+                        == WorkflowEventType.STORY_SELECTION_CHANGED
+                    )
+                ).all()
+            ) == 1
+            assert len(
+                session.exec(
+                    select(WorkflowTransitionReceipt).where(
+                        col(WorkflowTransitionReceipt.request_kind)
+                        == "apply_story_sprint_selection"
+                    )
+                ).all()
+            ) == 1
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ("corruption", "message"),
+    [
+        ("malformed_json", "metadata is malformed"),
+        ("noncanonical_json", "metadata is not canonical"),
+        ("timestamp_mismatch", "exact Story lineage is invalid"),
+        ("wrong_identity", "exact Story lineage is invalid"),
+        ("wrong_previous_fingerprint", "transition chain is invalid"),
+        ("invalid_transition", "transition chain is invalid"),
+    ],
+)
+def test_every_corrupt_selection_history_shape_fails_closed(
+    engine: Engine,
+    corruption: str,
+    message: str,
+) -> None:
+    """Canonical parsing rejects bytes, lineage, and transition-chain corruption."""
+    story_id = _accepted_story(engine)
+    with Session(engine) as session:
+        story = session.get_one(UserStory, story_id)
+        initial = selection_service.story_sprint_selection_fact_in_session(
+            session,
+            story=story,
+        )
+        project_id = story.project_id
+    _build_application(engine).apply_story_sprint_selection(
+        _selection_request(
+            project_id=project_id,
+            story_id=story_id,
+            intent="select",
+            expected_state_fingerprint=initial.state_fingerprint,
+            key=f"corrupt-{corruption}",
+        )
+    )
+    with Session(engine) as session:
+        event = session.exec(
+            select(WorkflowEvent).where(
+                col(WorkflowEvent.event_type)
+                == WorkflowEventType.STORY_SELECTION_CHANGED
+            )
+        ).one()
+        assert event.event_metadata is not None
+        metadata = json.loads(event.event_metadata)
+        if corruption == "malformed_json":
+            event.event_metadata = "{"
+        elif corruption == "noncanonical_json":
+            event.event_metadata = json.dumps(metadata, indent=2)
+        elif corruption == "timestamp_mismatch":
+            metadata["event_timestamp"] = "2030-01-01T00:00:00Z"
+            event.event_metadata = canonical_json(metadata)
+        elif corruption == "wrong_identity":
+            metadata["source_story_item_fingerprint"] = f"sha256:{'0' * 64}"
+            event.event_metadata = canonical_json(metadata)
+        elif corruption == "wrong_previous_fingerprint":
+            metadata["previous_state_fingerprint"] = f"sha256:{'0' * 64}"
+            event.event_metadata = canonical_json(metadata)
+        elif corruption == "invalid_transition":
+            metadata["new_state"] = "unselected"
+            event.event_metadata = canonical_json(metadata)
+        else:
+            raise AssertionError(corruption)
+        session.add(event)
+        session.commit()
+    with Session(engine) as session, pytest.raises(
+        WorkflowFactLoadError,
+        match=message,
+    ):
+        WorkflowFactRepository(session).load(project_id)
+
+
+def test_cross_project_story_binding_in_selection_event_fails_closed(
+    engine: Engine,
+) -> None:
+    """An event row cannot claim exact Story identity owned by another Project."""
+    story_id = _accepted_story(engine)
+    foreign_project_id, foreign_roadmap_id = _seed_story_parent(
+        engine,
+        requirements=("Foreign selection work",),
+    )
+    with Session(engine) as session:
+        foreign_artifact = _record_story(
+            session,
+            project_id=foreign_project_id,
+            roadmap_id=foreign_roadmap_id,
+            title="Foreign Story",
+        )
+        foreign_result = _decide_story(
+            session,
+            foreign_artifact,
+            decision="accepted",
+            offset=2,
+        )
+        session.commit()
+        foreign_story_id = foreign_result.activated_story_ids[0]
+    with Session(engine) as session:
+        story = session.get_one(UserStory, story_id)
+        foreign = session.get_one(UserStory, foreign_story_id)
+        initial = selection_service.story_sprint_selection_fact_in_session(
+            session,
+            story=story,
+        )
+        project_id = story.project_id
+    _build_application(engine).apply_story_sprint_selection(
+        _selection_request(
+            project_id=project_id,
+            story_id=story_id,
+            intent="select",
+            expected_state_fingerprint=initial.state_fingerprint,
+            key="cross-project-corruption",
+        )
+    )
+    with Session(engine) as session:
+        event = session.exec(
+            select(WorkflowEvent).where(
+                col(WorkflowEvent.event_type)
+                == WorkflowEventType.STORY_SELECTION_CHANGED
+            )
+        ).one()
+        assert event.event_metadata is not None
+        metadata = json.loads(event.event_metadata)
+        metadata.update(
+            {
+                "story_id": foreign_story_id,
+                "source_story_artifact_id": foreign.source_story_artifact_id,
+                "source_story_artifact_fingerprint": (
+                    foreign.source_story_artifact_fingerprint
+                ),
+                "source_story_item_id": foreign.source_story_item_id,
+                "source_story_item_fingerprint": (
+                    foreign.source_story_item_fingerprint
+                ),
+                "accepted_spec_version_id": foreign.accepted_spec_version_id,
+                "accepted_spec_hash": foreign.accepted_spec_hash,
+            }
+        )
+        event.event_metadata = canonical_json(metadata)
+        session.add(event)
+        session.commit()
+    with Session(engine) as session, pytest.raises(
+        WorkflowFactLoadError,
+        match="exact Story lineage is invalid",
+    ):
+        WorkflowFactRepository(session).load(project_id)
