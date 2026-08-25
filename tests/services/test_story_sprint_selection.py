@@ -446,6 +446,28 @@ def test_select_requires_current_evidence_but_defer_and_remove_do_not(
     )
     assert removed["ok"] is True
     assert _result_data(removed)["selection_state"] == "unselected"
+    with Session(engine) as session:
+        metadata = [
+            selection_service.StorySprintSelectionEventMetadata.model_validate_json(
+                event.event_metadata,
+                strict=True,
+            )
+            for event in session.exec(
+                select(WorkflowEvent)
+                .where(
+                    col(WorkflowEvent.event_type)
+                    == WorkflowEventType.STORY_SELECTION_CHANGED
+                )
+                .order_by(col(WorkflowEvent.event_id))
+            ).all()
+            if event.event_metadata is not None
+        ]
+        WorkflowFactRepository(session).load(project_id)
+    assert [item.action for item in metadata] == ["defer", "remove"]
+    assert all(
+        item.observed_eligibility_evidence_fingerprint is None
+        for item in metadata
+    )
 
 
 def test_superseding_story_receives_no_selection_state_from_replaced_story(
@@ -788,6 +810,9 @@ def test_concurrent_identical_selection_requests_share_one_event(
         ("wrong_identity", "exact Story lineage is invalid"),
         ("wrong_previous_fingerprint", "transition chain is invalid"),
         ("invalid_transition", "transition chain is invalid"),
+        ("select_without_evidence", "metadata is malformed"),
+        ("blank_actor", "metadata is malformed"),
+        ("blank_rationale", "metadata is malformed"),
     ],
 )
 def test_every_corrupt_selection_history_shape_fails_closed(
@@ -838,6 +863,15 @@ def test_every_corrupt_selection_history_shape_fails_closed(
         elif corruption == "invalid_transition":
             metadata["new_state"] = "unselected"
             event.event_metadata = canonical_json(metadata)
+        elif corruption == "select_without_evidence":
+            metadata["observed_eligibility_evidence_fingerprint"] = None
+            event.event_metadata = canonical_json(metadata)
+        elif corruption == "blank_actor":
+            metadata["actor"] = "   "
+            event.event_metadata = canonical_json(metadata)
+        elif corruption == "blank_rationale":
+            metadata["rationale"] = "   "
+            event.event_metadata = canonical_json(metadata)
         else:
             raise AssertionError(corruption)
         session.add(event)
@@ -847,6 +881,46 @@ def test_every_corrupt_selection_history_shape_fails_closed(
         match=message,
     ):
         WorkflowFactRepository(session).load(project_id)
+
+
+def test_selection_request_rejects_blank_actor() -> None:
+    """Whitespace-only actor text must never reach the append-only audit log."""
+    with pytest.raises(ValueError, match="nonblank"):
+        selection_service.StorySprintSelectionRequest(
+            project_id=1,
+            story_id=1,
+            intent="select",
+            expected_state_fingerprint=f"sha256:{'0' * 64}",
+            idempotency_key="blank-actor",
+            actor="   ",
+        )
+
+
+def test_repository_replays_selection_history_once_per_project(
+    engine: Engine,
+) -> None:
+    """One snapshot must replay the canonical project history once, not per Story."""
+    project_id, roadmap_id = _seed_story_parent(engine)
+    with Session(engine) as session:
+        artifact = _record_story(
+            session,
+            project_id=project_id,
+            roadmap_id=roadmap_id,
+            item_count=2,
+        )
+        result = _decide_story(session, artifact, decision="accepted", offset=2)
+        session.commit()
+    assert len(result.activated_story_ids) == 2  # noqa: PLR2004
+
+    with patch.object(
+        selection_service,
+        "_selection_facts",
+        wraps=selection_service._selection_facts,
+    ) as replay, Session(engine) as session:
+        snapshot = WorkflowFactRepository(session).load(project_id)
+
+    assert len(snapshot.stories) == 2  # noqa: PLR2004
+    assert replay.call_count == 1
 
 
 def test_cross_project_story_binding_in_selection_event_fails_closed(
