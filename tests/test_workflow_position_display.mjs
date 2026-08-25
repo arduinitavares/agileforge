@@ -179,6 +179,14 @@ function selectedScopeStory(overrides = {}) {
     };
 }
 
+function sprintCandidateStory(overrides = {}) {
+    return selectedScopeStory({
+        dependency_safe: true,
+        sprint_candidate: true,
+        ...overrides,
+    });
+}
+
 test('human lifecycle labels are the exact direct-Spec sequence', () => {
     const context = loadFrontend();
     assert.deepEqual(Array.from(context.lifecycleStageLabels()), [
@@ -368,6 +376,9 @@ test('Sprint generation asks the operator for a team', () => {
             request_kind: 'record_sprint_plan',
             endpoint: 'sprint/generate',
         }],
+        {
+            sprintCandidates: { items: [sprintCandidateStory()] },
+        },
     );
 
     assert.ok(markup.includes('data-delivery-generation-form="record_sprint_plan"'));
@@ -861,7 +872,7 @@ test('dependency review section renders when apply_story_dependencies action is 
         transport: 'semantic',
     };
     const stories = [selectedScopeStory({ backlog_item_id: 'PBI-000001' })];
-    const dependencies = { edges: [] };
+    const dependencies = { stories, edges: [] };
 
     const markup = context.storyDependencyReviewMarkup(action, stories, dependencies);
     assert.ok(markup.includes('Dependency review required'));
@@ -895,7 +906,7 @@ test('dependency review displays only candidate stories and candidate-contained 
         ],
     };
 
-    const markup = context.storyDependencyReviewMarkup(action, candidates, dependencies);
+    const markup = context.storyDependencyReviewMarkup(action, dependencies.stories, dependencies);
     assert.ok(markup.includes('US-001'));
     assert.ok(!markup.includes('US-002'));
     assert.ok(markup.includes('None (independent stories)'));
@@ -1074,7 +1085,7 @@ test('selected scope retains external prerequisites and excludes unselected depe
     const result = context.selectedScopeDependencies([selected, external], dependencies);
     assert.strictEqual(result.isWellFormed, true);
     assert.deepEqual(JSON.parse(JSON.stringify(result.scopeEdges)), [
-        { dependent_story_id: 101, prerequisite_story_id: 102, reason: 'US-001 requires external US-002.' },
+        { dependent_story_id: 101, prerequisite_story_id: 102, reason: 'US-001 requires external US-002.', isExternal: true },
     ]);
     const markup = context.storyDependencyReviewMarkup(action, [selected, external], dependencies);
     assert.ok(markup.includes('External/excluded prerequisite'));

@@ -179,6 +179,40 @@ function shouldUnlockStoryMutation(mutationCompleted, refreshed) {
     return !mutationCompleted || refreshed;
 }
 
+function captureStoryControlStates(controls) {
+    return Array.from(controls, (control) => ({
+        control,
+        disabled: control.disabled,
+        ariaDisabled: control.getAttribute('aria-disabled'),
+        ariaBusy: control.getAttribute('aria-busy'),
+    }));
+}
+
+function restoreStoryControlStates(states) {
+    for (const state of states) {
+        state.control.disabled = state.disabled;
+        for (const [name, value] of [
+            ['aria-disabled', state.ariaDisabled],
+            ['aria-busy', state.ariaBusy],
+        ]) {
+            if (value === null) state.control.removeAttribute(name);
+            else state.control.setAttribute(name, value);
+        }
+    }
+}
+
+function focusStoryReadiness(storyId) {
+    const row = document.querySelector(`[data-story-readiness-row="${storyId}"]`);
+    if (!row) return;
+    const control = row.querySelector('[data-story-selection-intent]:not([disabled]), [data-story-structural-reconcile-id]:not([disabled])');
+    if (control) {
+        control.focus();
+        return;
+    }
+    row.setAttribute('tabindex', '-1');
+    row.focus();
+}
+
 async function postStorySelectionMutation(projectId, storyId, intent, expectedStateFingerprint) {
     const payload = sprintSelectionMutationPayload(storyId, intent, expectedStateFingerprint);
     const path = `/api/projects/${projectId}/story/sprint-selection`;
@@ -1525,6 +1559,9 @@ function deliveryGenerationActionMarkup(action, position = {}, reviews = {}, ind
     const bindingAttributes = deliveryActionBindingAttributes(action);
     const content = `<p class="mb-3 text-sm leading-6 text-slate-600">${escapeWorkflowText(details.description)}</p>`;
     if (action.request_kind === 'record_sprint_plan') {
+        if (!canGenerateSprintPlan(context)) {
+            return `<section role="alert" data-sprint-candidate-projection-error="true" class="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-800">${content}<p><strong>Sprint candidate projection unavailable.</strong> Reload after current selected-scope dependency confirmation; Sprint generation remains blocked.</p></section>`;
+        }
         return `<form data-delivery-generation-action="${escapeWorkflowText(action.request_kind)}"
             data-delivery-generation-form="${escapeWorkflowText(action.request_kind)}" ${bindingAttributes}
             class="space-y-4 rounded-lg border border-slate-200 p-4">
@@ -1560,6 +1597,14 @@ function isSha256Fingerprint(value) {
     return typeof value === 'string' && /^sha256:[0-9a-f]{64}$/.test(value);
 }
 
+function isStructuralDiagnostic(value) {
+    return Boolean(value && typeof value === 'object'
+        && typeof (value.code ?? value.rule_name) === 'string'
+        && (value.code ?? value.rule_name).trim()
+        && typeof value.message === 'string'
+        && value.message.trim());
+}
+
 function parseStoryReadinessProjection(story) {
     if (!story || typeof story !== 'object' || !Number.isInteger(story.story_id) || story.story_id <= 0) return null;
     const eligibilityStatus = story.structural_eligibility_status;
@@ -1577,9 +1622,18 @@ function parseStoryReadinessProjection(story) {
         || !['validated', 'failed', 'unvalidated'].includes(validationStatus)
         || !Array.isArray(failures)
     ) return null;
-    if ((eligibilityStatus === 'eligible') !== story.structurally_eligible) return null;
+    const isEligible = eligibilityStatus === 'eligible';
+    const isCurrentFailure = eligibilityStatus === 'ineligible';
+    const isMissingEvidence = eligibilityStatus === 'stale' && validationStatus === 'unvalidated';
+    const isStaleEvidence = eligibilityStatus === 'stale' && validationStatus === 'validated';
+    if (isEligible && (!story.structurally_eligible || validationStatus !== 'validated' || failures.length !== 0)) return null;
+    if (isCurrentFailure && (story.structurally_eligible || validationStatus !== 'failed' || failures.length === 0 || !failures.every(isStructuralDiagnostic))) return null;
+    if ((isMissingEvidence || isStaleEvidence) && (story.structurally_eligible || failures.length !== 0)) return null;
+    if (!isEligible && !isCurrentFailure && !isMissingEvidence && !isStaleEvidence) return null;
+    if (selectionState === 'selected' && isEligible && !isSha256Fingerprint(story.selected_scope_fingerprint)) return null;
+    if (story.dependency_safe && (selectionState !== 'selected' || !isEligible || !isSha256Fingerprint(story.selected_scope_fingerprint))) return null;
     const expectedCandidate = selectionState === 'selected'
-        && story.structurally_eligible
+        && isEligible
         && story.dependency_safe
         && story.selected_scope_fingerprint !== null;
     if (story.sprint_candidate !== expectedCandidate) return null;
@@ -1588,7 +1642,8 @@ function parseStoryReadinessProjection(story) {
         eligibilityStatus,
         selectionState,
         failures,
-        isMissingOrStaleEvidence: validationStatus === 'unvalidated' || eligibilityStatus === 'stale',
+        isMissingEvidence,
+        isStaleEvidence,
     };
 }
 
@@ -1613,13 +1668,13 @@ function storyReadinessMarkup(stories, context = {}) {
         if (!projection) {
             return `<div class="py-3" data-story-readiness-row="${escapeWorkflowText(story?.story_id ?? 'unknown')}"><p role="alert" class="text-sm text-red-700">Story state unavailable. Dependent Sprint-selection controls are locked until a complete current projection is available.</p><button type="button" disabled aria-disabled="true" class="${BUTTON_SECONDARY}">Sprint selection unavailable</button></div>`;
         }
-        const { eligibilityStatus, selectionState, failures, isMissingOrStaleEvidence } = projection;
-        const eligibilityLabel = eligibilityStatus === 'eligible' ? 'Structurally eligible' : (eligibilityStatus === 'stale' ? 'Structural evidence stale' : 'Structural eligibility failed');
+        const { eligibilityStatus, selectionState, failures, isMissingEvidence, isStaleEvidence } = projection;
+        const eligibilityLabel = eligibilityStatus === 'eligible' ? 'Structurally eligible' : (isMissingEvidence ? 'Structural evidence missing' : (isStaleEvidence ? 'Structural evidence stale' : 'Structural eligibility failed'));
         const selectionLabel = selectionState === 'selected' ? 'Selected for Sprint' : (selectionState === 'deferred' ? 'Deferred' : 'Unselected');
         const diagnostics = eligibilityStatus === 'ineligible' && failures.length > 0
             ? `<ul role="list" class="mt-2 space-y-1 text-xs text-red-700" data-story-validation-diagnostics="true">${failures.map((failure) => `<li><strong>${escapeWorkflowText(failure?.code || failure?.rule_name || 'Structural failure')}</strong>: ${escapeWorkflowText(failure?.message || 'Structural rule failed.')}</li>`).join('')}</ul>`
             : '';
-        const reconcile = isMissingOrStaleEvidence
+        const reconcile = (isMissingEvidence || isStaleEvidence)
             ? `<button type="button" data-story-structural-reconcile-id="${story.story_id}" aria-label="Re-run structural checks for ${escapeWorkflowText(storyIdText)}" class="${BUTTON_SECONDARY}"><span data-story-reconcile-label="true">Re-run structural checks</span></button>`
             : '';
         return `<div class="py-3 first:pt-0 last:pb-0 flex flex-col gap-3" data-story-readiness-row="${story.story_id}">
@@ -1642,6 +1697,7 @@ function validateCandidateProjection(candidates) {
         };
     }
     const seenIds = new Set();
+    let scopeFingerprint = null;
     const validStories = [];
     const validIds = [];
 
@@ -1653,17 +1709,17 @@ function validateCandidateProjection(candidates) {
                 candidateIds: [],
             };
         }
-        if (
-            typeof s.story_id !== 'number' ||
-            !Number.isInteger(s.story_id) ||
-            s.story_id <= 0 ||
-            s.sprint_candidate !== true
-        ) {
+        const readiness = parseStoryReadinessProjection(s);
+        if (!readiness || !s.sprint_candidate || !s.dependency_safe || readiness.selectionState !== 'selected' || !s.structurally_eligible || !isSha256Fingerprint(s.selected_scope_fingerprint)) {
             return {
                 isValid: false,
                 candidateStories: [],
                 candidateIds: [],
             };
+        }
+        if (scopeFingerprint === null) scopeFingerprint = s.selected_scope_fingerprint;
+        else if (scopeFingerprint !== s.selected_scope_fingerprint) {
+            return { isValid: false, candidateStories: [], candidateIds: [] };
         }
         if (seenIds.has(s.story_id)) {
             return {
@@ -1682,6 +1738,10 @@ function validateCandidateProjection(candidates) {
         candidateStories: validStories,
         candidateIds: validIds,
     };
+}
+
+function canGenerateSprintPlan(context = {}) {
+    return validateCandidateProjection(context?.sprintCandidates?.items).isValid;
 }
 
 function canonicalCandidateDependencies(candidates, dependencies) {
@@ -1714,11 +1774,21 @@ function canonicalCandidateDependencies(candidates, dependencies) {
 }
 
 function selectedScopeDependencies(stories, dependencies) {
-    if (!Array.isArray(stories)) {
+    if (!Array.isArray(stories) || !dependencies || typeof dependencies !== 'object' || !Array.isArray(dependencies.stories) || !Array.isArray(dependencies.edges)) {
         return { scopeStories: [], scopeIds: [], scopeEdges: [], isWellFormed: false };
     }
     const projections = stories.map(parseStoryReadinessProjection);
-    if (projections.some((projection) => projection === null)) {
+    const dependencyProjections = dependencies.stories.map(parseStoryReadinessProjection);
+    if (projections.some((projection) => projection === null) || dependencyProjections.some((projection) => projection === null)) {
+        return { scopeStories: [], scopeIds: [], scopeEdges: [], isWellFormed: false };
+    }
+    const storyIds = new Set();
+    for (const projection of projections) {
+        if (storyIds.has(projection.story.story_id)) return { scopeStories: [], scopeIds: [], scopeEdges: [], isWellFormed: false };
+        storyIds.add(projection.story.story_id);
+    }
+    const dependencyStoryIds = new Set(dependencyProjections.map((projection) => projection.story.story_id));
+    if (dependencyStoryIds.size !== storyIds.size || [...storyIds].some((storyId) => !dependencyStoryIds.has(storyId))) {
         return { scopeStories: [], scopeIds: [], scopeEdges: [], isWellFormed: false };
     }
     const scopeStories = projections
@@ -1729,20 +1799,34 @@ function selectedScopeDependencies(stories, dependencies) {
     }
     const scopeIds = scopeStories.map((story) => story.story_id);
     const scopeIdSet = new Set(scopeIds);
-    const rawEdges = Array.isArray(dependencies?.edges) ? dependencies.edges : [];
+    const scopeFingerprints = new Set(scopeStories.map((story) => story.selected_scope_fingerprint));
+    if (scopeFingerprints.size !== 1 || !isSha256Fingerprint(scopeStories[0].selected_scope_fingerprint)) {
+        return { scopeStories: [], scopeIds: [], scopeEdges: [], isWellFormed: false };
+    }
+    const rawEdges = dependencies.edges;
     const scopeEdges = [];
+    const seenEdges = new Set();
     for (const edge of rawEdges) {
         if (!edge || typeof edge !== 'object'
             || !Number.isInteger(edge.dependent_story_id)
             || !Number.isInteger(edge.prerequisite_story_id)
-            || typeof edge.reason !== 'string') {
+            || edge.dependent_story_id <= 0
+            || edge.prerequisite_story_id <= 0
+            || !storyIds.has(edge.dependent_story_id)
+            || !storyIds.has(edge.prerequisite_story_id)
+            || typeof edge.reason !== 'string'
+            || !edge.reason.trim()) {
             return { scopeStories: [], scopeIds: [], scopeEdges: [], isWellFormed: false };
         }
-        if (scopeIdSet.has(edge.dependent_story_id) && scopeIdSet.has(edge.prerequisite_story_id)) {
+        const edgeKey = `${edge.dependent_story_id}:${edge.prerequisite_story_id}`;
+        if (seenEdges.has(edgeKey)) return { scopeStories: [], scopeIds: [], scopeEdges: [], isWellFormed: false };
+        seenEdges.add(edgeKey);
+        if (scopeIdSet.has(edge.dependent_story_id)) {
             scopeEdges.push({
                 dependent_story_id: edge.dependent_story_id,
                 prerequisite_story_id: edge.prerequisite_story_id,
                 reason: edge.reason,
+                isExternal: !scopeIdSet.has(edge.prerequisite_story_id),
             });
         }
     }
@@ -1793,7 +1877,8 @@ function storyDependencyReviewMarkup(action, stories, dependencies) {
                 const depLabel = storyDisplayLabel(dep) || `Story #${e.dependent_story_id}`;
                 const prereqLabel = storyDisplayLabel(prereq) || `Story #${e.prerequisite_story_id}`;
                 const reason = e.reason ? ` - ${e.reason}` : '';
-                return `${depLabel} -> ${prereqLabel}${reason}`;
+                const scopeLabel = e.isExternal ? ' (External/excluded prerequisite)' : '';
+                return `${depLabel} -> ${prereqLabel}${scopeLabel}${reason}`;
             }).join('; ')
             : 'None (independent stories)')
         : 'Unavailable (current selected scope missing or malformed)';
@@ -2927,6 +3012,7 @@ function installInteractions() {
                 return;
             }
             const controls = Array.from(document.querySelectorAll('[data-story-selection-intent], [data-story-structural-reconcile-id]'));
+            const controlStates = captureStoryControlStates(controls);
             const label = button.querySelector('[data-story-selection-label="true"], [data-story-reconcile-label="true"]');
             const idleLabel = label?.textContent ?? '';
             controls.forEach((control) => {
@@ -2959,15 +3045,13 @@ function installInteractions() {
                 if (!refreshed) {
                     throw new Error('The update was accepted, but the current project projection could not be reloaded. Controls remain locked until a successful refresh.');
                 }
+                focusStoryReadiness(storyId);
             } catch (error) {
                 setProjectError(error.message);
             } finally {
                 activeStoryMutation = null;
                 if (shouldUnlockStoryMutation(mutationCompleted, refreshed)) {
-                    controls.forEach((control) => {
-                        control.disabled = false;
-                        control.removeAttribute('aria-busy');
-                    });
+                    restoreStoryControlStates(controlStates);
                     if (label) label.textContent = idleLabel;
                 }
             }
@@ -2998,7 +3082,11 @@ function installInteractions() {
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(semanticMutationPayload({
                         selected_story_ids: scopeIds,
-                        reviewed_edges: scopeEdges,
+                        reviewed_edges: scopeEdges.map(({ dependent_story_id, prerequisite_story_id, reason }) => ({
+                            dependent_story_id,
+                            prerequisite_story_id,
+                            reason,
+                        })),
                     })),
                 });
                 await loadDashboard();

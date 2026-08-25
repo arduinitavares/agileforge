@@ -2414,6 +2414,12 @@ def test_sprint_generation_requires_team_and_blocks_duplicate_submission(
 ) -> None:
     """Collect operator-owned Sprint input and keep one mutation in flight."""
     fake = _delivery_ready_fake([_sprint_generation_action()])
+    _seed_progressive_stories(fake, 101, 102)
+    candidate = cast("JsonObject", fake.stories[0])
+    candidate["sprint_selection_state"] = "selected"
+    candidate["dependency_safe"] = True
+    candidate["sprint_candidate"] = True
+    fake.sprint_candidates = [candidate]
     context, page = _open_project_page(dashboard_harness, fake)
     form = page.locator('[data-delivery-generation-form="record_sprint_plan"]')
     team_name = form.locator('[name="team_name"]')
@@ -2579,7 +2585,19 @@ def test_progressive_story_readiness_partial_refinement_to_sprint_planning(
     assert focused_story_id == str(story1_id)
 
     sprint_plan_action = _sprint_generation_action()
-    fake.position_override = _delivery_position([pbi3_action, sprint_plan_action])
+    fake.position_override = _delivery_position(
+        [
+            pbi3_action,
+            {
+                "node_id": "planning.story_dependencies",
+                "instance_key": None,
+                "request_kind": "apply_story_dependencies",
+                "endpoint": "story/dependencies/apply",
+                "transport": "semantic",
+            },
+            sprint_plan_action,
+        ]
+    )
     page.locator("#refresh-project").click()
     page.wait_for_timeout(_UI_SETTLE_MS)
     expect(page.locator('[data-sprint-candidate-projection-error="true"]')).to_be_visible()
