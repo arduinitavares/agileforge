@@ -1,4 +1,4 @@
-"""ValidationEvidence v2 contract and canonical persistence tests."""
+"""ValidationEvidence v3 contract and canonical persistence tests."""
 # ruff: noqa: D103
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from workflow.fingerprints import canonical_json
 
 def _evidence(**changes: object) -> ValidationEvidence:
     values: dict[str, object] = {
-        "schema_version": "agileforge.story-validation-evidence.v2",
+        "schema_version": "agileforge.story-validation-evidence.v3",
         "project_id": 3,
         "story_id": 5,
         "source_story_artifact_id": 7,
@@ -31,7 +31,7 @@ def _evidence(**changes: object) -> ValidationEvidence:
         "story_validation_input_fingerprint": "sha256:" + "5" * 64,
         "validator_version": "2.0.0",
         "mode": "structural",
-        "ready_for_sprint": True,
+        "structurally_eligible": True,
         "structural_failures": (),
         "structural_warnings": (),
         "semantic_review_state": "not_requested",
@@ -42,7 +42,7 @@ def _evidence(**changes: object) -> ValidationEvidence:
     return ValidationEvidence.model_validate(values)
 
 
-def test_validation_evidence_v2_is_closed_frozen_and_canonical() -> None:
+def test_validation_evidence_v3_is_closed_frozen_and_canonical() -> None:
     evidence = _evidence()
     encoded = canonical_json(evidence.model_dump(mode="json"))
     assert ValidationEvidence.model_validate_json(encoded, strict=True) == evidence
@@ -61,7 +61,7 @@ def test_validation_evidence_enforces_structural_and_semantic_consistency() -> N
         message="Story statement does not use the required shape.",
     )
     with pytest.raises(ValidationError):
-        _evidence(structural_failures=(failure,), ready_for_sprint=True)
+        _evidence(structural_failures=(failure,), structurally_eligible=True)
     with pytest.raises(ValidationError):
         _evidence(
             mode="structural",
@@ -72,14 +72,8 @@ def test_validation_evidence_enforces_structural_and_semantic_consistency() -> N
         _evidence(
             mode="hybrid",
             semantic_review_state="invalid",
-            semantic_findings=(
-                StorySpecificationFinding(
-                    code="SPEC_ITEM_OMISSION",
-                    spec_item_id="DATA.001",
-                    message="Missing coverage.",
-                ),
-            ),
-            ready_for_sprint=False,
+            semantic_findings=(),
+            structurally_eligible=True,
         )
 
 
@@ -95,6 +89,6 @@ def test_validation_evidence_requires_ordered_codes_and_derived_references() -> 
         ),
     )
     with pytest.raises(ValidationError):
-        _evidence(structural_failures=failures, ready_for_sprint=False)
+        _evidence(structural_failures=failures, structurally_eligible=False)
     with pytest.raises(ValidationError):
         _evidence(referenced_spec_item_ids=("DATA.001", "DATA.001"))

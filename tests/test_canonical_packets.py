@@ -473,7 +473,7 @@ def test_packet_evidence_and_work_are_exact_direct_spec_contracts(
     story_validation = _object(evidence["story_validation"])
     assert specification_evidence["currentness"] == "current"
     assert story_validation["schema_version"] == (
-        "agileforge.story-validation-evidence.v2"
+        "agileforge.story-validation-evidence.v3"
     )
     accepted = _object(evidence["story_item"])
     operational = _object(story_work["story"])
@@ -1187,7 +1187,7 @@ def test_superseded_packet_rejects_corrupt_execution_contract_proof(
 def test_packet_reuses_deep_story_validation_evidence_owner(
     engine: Engine,
 ) -> None:
-    """Canonical but source-mismatched v2 evidence cannot enter a packet."""
+    """Canonical but source-mismatched v3 evidence cannot enter a packet."""
     project_id, sprint_id, story_id, _task_id = _seed(engine)
     with Session(engine) as session:
         story = session.get(UserStory, story_id)
@@ -1235,7 +1235,7 @@ def test_packet_rejects_noncanonical_or_mismatched_task_metadata(
 def test_packet_rejects_canonical_metadata_from_different_specification(
     engine: Engine,
 ) -> None:
-    """A well-formed v2 object must still equal the accepted plan identity."""
+    """A well-formed v3 object must still equal the accepted plan identity."""
     project_id, sprint_id, _story_id, task_id = _seed(engine)
     with Session(engine) as session:
         row = session.get(Task, task_id)
