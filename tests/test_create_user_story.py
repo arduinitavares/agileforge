@@ -64,6 +64,7 @@ from tests.workflow.test_planning_transitions import (
     _roadmap_content,
     _seed_accepted_backlog,
 )
+from utils.spec_schemas import ValidationEvidence
 from workflow.contracts import JsonObject, TransitionResult
 from workflow.fingerprints import canonical_hash, canonical_json
 from workflow.handlers.planning import (
@@ -749,7 +750,16 @@ def test_story_race_classifier_uses_named_backend_constraint_only(
 
 
 @pytest.mark.parametrize(
-    "corruption", ["missing", "extra", "drifted", "stale_evidence"]
+    "corruption",
+    [
+        "missing",
+        "extra",
+        "drifted",
+        "validator_version",
+        "identity",
+        "references",
+        "structural_diagnostics",
+    ],
 )
 def test_story_winner_proof_requires_exact_superseded_ancestor_rows(
     engine: Engine,
@@ -814,7 +824,20 @@ def test_story_winner_proof_requires_exact_superseded_ancestor_rows(
                 )
             ).one()
             evidence = json.loads(winner.validation_evidence or "{}")
-            evidence["validator_version"] = "obsolete-validator"
+            if corruption == "validator_version":
+                evidence["validator_version"] = "obsolete-validator"
+            elif corruption == "identity":
+                evidence["source_backlog_item_id"] = "PBI-999999"
+            elif corruption == "references":
+                evidence["referenced_spec_item_ids"] = ["REQ.other"]
+            else:
+                evidence["structural_failures"] = [
+                    {
+                        "code": "STORY_STATEMENT_INVALID",
+                        "message": "Tampered structural finding.",
+                    }
+                ]
+                evidence["structurally_eligible"] = False
             winner.validation_evidence = canonical_json(evidence)
             session.add(winner)
         session.commit()
@@ -982,6 +1005,115 @@ def test_decide_story_rolls_back_when_structural_evaluator_raises_value_error(
         ).all() == []
 
 
+def test_acceptance_persists_expected_structural_failure_evidence(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Expected structural diagnostics commit as canonical in-transaction evidence."""
+    project_id, roadmap_id = _seed_story_parent(engine)
+    original_validate = story_phase.validate_story_with_specification_in_session
+
+    def persist_structural_failure(
+        session: Session,
+        params: object,
+        **kwargs: object,
+    ) -> object:
+        story_id = int(dict(params)["story_id"])
+        story = session.get(UserStory, story_id)
+        assert story is not None
+        story.story_description = "Not a valid Story statement"
+        session.add(story)
+        return original_validate(session, params, **kwargs)
+
+    monkeypatch.setattr(
+        story_phase,
+        "validate_story_with_specification_in_session",
+        persist_structural_failure,
+    )
+    with Session(engine) as session:
+        artifact = _record_story(
+            session,
+            project_id=project_id,
+            roadmap_id=roadmap_id,
+        )
+        result = _decide_story(session, artifact, decision="accepted", offset=2)
+        session.commit()
+        story_id = result.activated_story_ids[0]
+
+    with Session(engine) as session:
+        story = session.get(UserStory, story_id)
+        assert story is not None
+        evidence = ValidationEvidence.model_validate_json(
+            story.validation_evidence or "",
+            strict=True,
+        )
+    assert evidence.structurally_eligible is False
+    assert [item.code for item in evidence.structural_failures] == [
+        "STORY_ITEM_BINDING_INVALID",
+        "STORY_STATEMENT_INVALID",
+    ]
+
+
+def test_decide_story_rolls_back_when_evidence_persistence_flush_fails(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A flush failure after evidence assignment rolls back the whole acceptance."""
+    project_id, roadmap_id = _seed_story_parent(engine)
+    with Session(engine) as session:
+        artifact = _record_story(
+            session,
+            project_id=project_id,
+            roadmap_id=roadmap_id,
+        )
+        session.commit()
+        artifact_id = int(artifact.story_artifact_id or 0)
+        artifact_fingerprint = artifact.content_fingerprint
+    domain = _domain(engine)
+    position = domain.position(project_id)
+    review = next(
+        item
+        for item in position.decisions
+        if item.node_id == "planning.story.review"
+    )
+    request = DecideStory(
+        **_guards(position, "planning.story.review", review.instance_key),
+        idempotency_key="rollback-story-evidence-flush",
+        backlog_item_id="PBI-000001",
+        story_artifact_id=artifact_id,
+        artifact_fingerprint=artifact_fingerprint,
+        decision="accepted",
+        rationale="Evidence persistence must be atomic.",
+    )
+    original_flush = Session.flush
+
+    def fail_evidence_flush(session: Session, *args: object, **kwargs: object) -> None:
+        if any(
+            isinstance(row, UserStory) and row.validation_evidence is not None
+            for row in session.identity_map.values()
+        ):
+            message = "simulated evidence flush failure"
+            raise RuntimeError(message)
+        original_flush(session, *args, **kwargs)
+
+    monkeypatch.setattr(Session, "flush", fail_evidence_flush)
+    with pytest.raises(
+        story_phase.StoryAcceptanceValidationError,
+        match="simulated evidence flush failure",
+    ):
+        domain.transition(request)
+
+    with Session(engine) as session:
+        assert session.exec(select(StoryArtifactDecision)).all() == []
+        assert session.exec(select(UserStory)).all() == []
+        assert session.exec(
+            select(WorkflowTransitionReceipt).where(
+                col(WorkflowTransitionReceipt.idempotency_key)
+                == request.idempotency_key
+            )
+        ).all() == []
+
+
 def test_concurrent_distinct_story_decisions_commit_one_complete_winner(
     tmp_path: Path,
 ) -> None:
@@ -1127,7 +1259,18 @@ def test_story_record_and_accept_replay_exact_identities_and_changed_input_confl
 ) -> None:
     """Reuse exact receipt results without duplicate artifacts, decisions, or rows."""
     project_id, _roadmap_id = _seed_story_parent(engine)
+
+    class AdvancingClock:
+        def __init__(self) -> None:
+            self.value = EVALUATED_AT
+
+        def now(self) -> datetime:
+            current = self.value
+            self.value += timedelta(seconds=1)
+            return current
+
     domain = _domain(engine)
+    domain._clock = AdvancingClock()
     position = domain.position(project_id)
     generate = next(
         decision
@@ -1188,6 +1331,10 @@ def test_story_record_and_accept_replay_exact_identities_and_changed_input_confl
         accepted_story = session.exec(select(UserStory)).one()
         evidence_before_replay = accepted_story.validation_evidence
         assert evidence_before_replay is not None
+        validated_at_before_replay = ValidationEvidence.model_validate_json(
+            evidence_before_replay,
+            strict=True,
+        ).validated_at
     replayed_accept = domain.transition(decision_request)
     assert accepted.ok is True
     assert replayed_accept == accepted.model_copy(update={"replayed": True})
@@ -1197,3 +1344,7 @@ def test_story_record_and_accept_replay_exact_identities_and_changed_input_confl
         stories = session.exec(select(UserStory)).all()
         assert len(stories) == 1
         assert stories[0].validation_evidence == evidence_before_replay
+        assert ValidationEvidence.model_validate_json(
+            stories[0].validation_evidence or "",
+            strict=True,
+        ).validated_at == validated_at_before_replay
