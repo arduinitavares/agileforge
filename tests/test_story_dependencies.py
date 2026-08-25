@@ -53,9 +53,9 @@ from tests.workflow.test_planning_transitions import (
 )
 from workflow.contracts import WorkflowErrorCode
 from workflow.definitions.planning import story_dependency_source_fingerprint
+from workflow.execution_integrity import selected_story_dependency_snapshot
 from workflow.facts import StoryDependencyReviewEdgeFact
 from workflow.fingerprints import canonical_hash, canonical_json
-from workflow.execution_integrity import selected_story_dependency_snapshot
 from workflow.planning_integrity import (
     canonical_dependency_edges,
     dependency_edges_payload,
@@ -818,7 +818,9 @@ def test_selected_dependency_closure_cycle_blocks_candidacy(engine: Engine) -> N
 
         snapshot = WorkflowFactRepository(session).load(project_id)
 
-    selected = next(story for story in snapshot.stories if story.story_id == selected_id)
+    selected = next(
+        story for story in snapshot.stories if story.story_id == selected_id
+    )
     assert selected.dependency_safe is False
     assert selected.sprint_candidate is False
     assert any("CYCLE" in blocker for blocker in selected.readiness_blockers)
@@ -877,7 +879,9 @@ def test_unrelated_external_cycle_does_not_block_selected_scope(engine: Engine) 
 
         snapshot = WorkflowFactRepository(session).load(project_id)
 
-    selected = next(story for story in snapshot.stories if story.story_id == selected_id)
+    selected = next(
+        story for story in snapshot.stories if story.story_id == selected_id
+    )
     assert selected.dependency_safe is True
     assert selected.sprint_candidate is True
 

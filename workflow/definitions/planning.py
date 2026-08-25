@@ -907,7 +907,10 @@ def _story_lineage_problem(
 def _dependency_review_evaluation(  # noqa: PLR0911
     snapshot: WorkflowFactSnapshot,
     stories: tuple[StoryFact, ...],
+    *,
+    proposals_actionable: bool = False,
 ) -> RuleEvaluation:
+    source = story_dependency_source_fingerprint(stories)
     dependency_problem = _dependency_problem(
         stories,
         snapshot.stories,
@@ -915,6 +918,20 @@ def _dependency_review_evaluation(  # noqa: PLR0911
     )
     if dependency_problem is not None:
         category, reason = dependency_problem
+        if proposals_actionable and reason == "STORY_DEPENDENCIES_UNREVIEWED":
+            return _dependency_review_required(
+                snapshot,
+                source,
+                blockers=(
+                    Blocker(
+                        code=reason,
+                        message=(
+                            "Selected Story scope contains proposed dependencies "
+                            "that require approval or exclusion."
+                        ),
+                    ),
+                ),
+            )
         return RuleEvaluation(
             category,
             reason,
@@ -925,7 +942,6 @@ def _dependency_review_evaluation(  # noqa: PLR0911
                 ),
             ),
         )
-    source = story_dependency_source_fingerprint(stories)
     selected_story_ids = tuple(item.story_id for item in stories)
     matching = tuple(
         item
@@ -984,6 +1000,16 @@ def _dependency_review_evaluation(  # noqa: PLR0911
             RuleCategory.SATISFIED,
             "STORY_DEPENDENCIES_REVIEWED",
         )
+    return _dependency_review_required(snapshot, source)
+
+
+def _dependency_review_required(
+    snapshot: WorkflowFactSnapshot,
+    source_fingerprint: str,
+    *,
+    blockers: tuple[Blocker, ...] = (),
+) -> RuleEvaluation:
+    """Expose the exact selected dependency scope for one human decision."""
     lineage = _accepted_backlog(snapshot)
     roadmap, _conflict = _accepted_current_roadmap(snapshot)
     references = [*_lineage_references(lineage)]
@@ -993,13 +1019,14 @@ def _dependency_review_evaluation(  # noqa: PLR0911
         FactReference(
             fact_type="story_dependency_source",
             fact_id=str(snapshot.project.project_id),
-            fingerprint=source,
+            fingerprint=source_fingerprint,
         )
     )
     return RuleEvaluation(
         RuleCategory.AVAILABLE,
         "STORY_DEPENDENCY_REVIEW_REQUIRED",
         fact_references=tuple(references),
+        blockers=blockers,
     )
 
 
@@ -1066,7 +1093,13 @@ def _story_dependencies_rule(
     lineage_problem = _story_lineage_problem(snapshot, stories)
     if lineage_problem is not None:
         return (lineage_problem,)
-    return (_dependency_review_evaluation(snapshot, stories),)
+    return (
+        _dependency_review_evaluation(
+            snapshot,
+            stories,
+            proposals_actionable=True,
+        ),
+    )
 
 
 def _story_readiness_rule(

@@ -773,6 +773,7 @@ def _record_and_accept_story(  # noqa: PLR0913
     *,
     requirement: str = "Plan immutable work",
     spec_item_id: str | None = None,
+    backlog_item_id: str | None = None,
     idempotency_suffix: str = "",
 ) -> tuple[int, int]:
     position = domain.position(project_id)
@@ -782,6 +783,14 @@ def _record_and_accept_story(  # noqa: PLR0913
         if item.node_id == "planning.story.generate"
         and item.category is NodeCategory.AVAILABLE
         and item.reason_code != "STORY_CORRECTION_AVAILABLE"
+        and (
+            backlog_item_id is None
+            or any(
+                reference.fact_type == "backlog_item"
+                and reference.fact_id == backlog_item_id
+                for reference in item.fact_references
+            )
+        )
     )
     assert generate.instance_key is not None
     backlog_item_reference = next(
@@ -1254,33 +1263,32 @@ def test_dependency_transition_canonicalizes_selected_ids_independent_of_rank(
     project_id = _seed_accepted_backlog(engine, requirements=requirements)
     domain = _domain(engine)
     _record_and_accept_roadmap(domain, project_id, requirements=requirements)
-    _first_artifact_id, first_story_id = _record_and_accept_story(
-        engine,
-        domain,
-        project_id,
-        requirement=requirements[0],
-        idempotency_suffix="-id-order-first",
-    )
-    _second_artifact_id, second_story_id = _record_and_accept_story(
+    with Session(engine) as session:
+        initial = WorkflowFactRepository(session).load(project_id)
+    backlog_ids = {
+        item.spec_item_ids[0]: item.backlog_item_id for item in initial.backlog_items
+    }
+    _lower_artifact_id, lower_story_id = _record_and_accept_story(
         engine,
         domain,
         project_id,
         requirement=requirements[1],
-        idempotency_suffix="-id-order-second",
+        spec_item_id="REQ.planning-2",
+        backlog_item_id=backlog_ids["REQ.planning-2"],
+        idempotency_suffix="-id-order-lower",
     )
-    assert first_story_id < second_story_id
-    with Session(engine) as session:
-        first = session.get_one(UserStory, first_story_id)
-        second = session.get_one(UserStory, second_story_id)
-        first.rank = "2"
-        second.rank = "1"
-        session.add(first)
-        session.add(second)
-        session.commit()
-    _validate_story_structurally(engine, first_story_id)
-    _validate_story_structurally(engine, second_story_id)
-    _select_for_sprint(engine, first_story_id)
-    _select_for_sprint(engine, second_story_id)
+    _higher_artifact_id, higher_story_id = _record_and_accept_story(
+        engine,
+        domain,
+        project_id,
+        requirement=requirements[0],
+        spec_item_id="REQ.planning-1",
+        backlog_item_id=backlog_ids["REQ.planning-1"],
+        idempotency_suffix="-id-order-higher",
+    )
+    assert lower_story_id < higher_story_id
+    _select_for_sprint(engine, lower_story_id)
+    _select_for_sprint(engine, higher_story_id)
     with Session(engine) as session:
         snapshot = WorkflowFactRepository(session).load(project_id)
     selected = tuple(
@@ -1290,10 +1298,10 @@ def test_dependency_transition_canonicalizes_selected_ids_independent_of_rank(
         and story.sprint_selection_state == "selected"
     )
     assert tuple(story.story_id for story in selected) == (
-        second_story_id,
-        first_story_id,
+        higher_story_id,
+        lower_story_id,
     )
-    canonical_ids = tuple(sorted((first_story_id, second_story_id)))
+    canonical_ids = (lower_story_id, higher_story_id)
     position = domain.position(project_id)
 
     result = domain.transition(

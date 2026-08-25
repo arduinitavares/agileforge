@@ -3437,6 +3437,7 @@ class WorkflowFactRepository:
             message = "Current Story selected scope has conflicting dependency reviews."
             raise self._error(message)
         dependency_safe = False
+        dependency_blockers: tuple[str, ...] = ()
         selected_id_set = set(selected_ids)
         if matching:
             review = matching[0]
@@ -3454,20 +3455,21 @@ class WorkflowFactRepository:
                 and review.dependency_fingerprint
                 == dependency_review_fingerprint(current_edges)
             ):
-                stories_by_id = {story.story_id: story for story in stories}
-                external_ids = {
-                    edge.prerequisite_story_id
-                    for edge in current_edges
-                    if edge.prerequisite_story_id not in selected_id_set
-                }
-                dependency_safe = all(
-                    stories_by_id[story_id].status
-                    in {StoryStatus.DONE.value, StoryStatus.ACCEPTED.value}
-                    for story_id in external_ids
+                dependency_safe, dependency_blockers = (
+                    self._selected_dependency_safety(
+                        selected_id_set,
+                        stories,
+                        dependencies,
+                    )
                 )
         facts: list[StoryFact] = []
         for story in stories:
             safe = dependency_safe and story.story_id in selected_id_set
+            readiness_blockers = story.readiness_blockers
+            if story.story_id in selected_id_set:
+                readiness_blockers = tuple(
+                    dict.fromkeys((*readiness_blockers, *dependency_blockers))
+                )
             try:
                 facts.append(
                     StoryFact.model_validate(
@@ -3475,6 +3477,7 @@ class WorkflowFactRepository:
                             **story.model_dump(mode="json"),
                             "dependency_safe": safe,
                             "sprint_candidate": safe,
+                            "readiness_blockers": readiness_blockers,
                         }
                     )
                 )
@@ -3482,6 +3485,87 @@ class WorkflowFactRepository:
                 message = "Story candidacy projection is malformed."
                 raise self._error(message) from exc
         return tuple(facts)
+
+    def _selected_dependency_safety(
+        self,
+        selected_story_ids: set[int],
+        stories: tuple[StoryFact, ...],
+        dependencies: tuple[StoryDependencyFact, ...],
+    ) -> tuple[bool, tuple[str, ...]]:
+        """Evaluate the dependency closure behind one reviewed selected scope."""
+        stories_by_id = {story.story_id: story for story in stories}
+        try:
+            closure_dependencies = self._selected_dependency_closure(
+                selected_story_ids,
+                dependencies,
+                frozenset(stories_by_id),
+            )
+            closure_edges = active_dependency_review_edges(closure_dependencies)
+        except (ValidationError, ValueError) as exc:
+            message = "Current selected dependency closure is malformed."
+            raise self._error(message) from exc
+        external_ids = {
+            edge.prerequisite_story_id
+            for edge in closure_edges
+            if edge.prerequisite_story_id not in selected_story_ids
+        }
+        incomplete_external_ids = tuple(
+            sorted(
+                story_id
+                for story_id in external_ids
+                if stories_by_id[story_id].status
+                not in {StoryStatus.DONE.value, StoryStatus.ACCEPTED.value}
+            )
+        )
+        closure_has_cycle = dependency_edges_have_cycle(closure_edges)
+        blockers = (
+            *(("STORY_DEPENDENCY_CYCLE",) if closure_has_cycle else ()),
+            *(
+                f"PREREQUISITE_STORY_{story_id}_INCOMPLETE"
+                for story_id in incomplete_external_ids
+            ),
+        )
+        return not blockers, blockers
+
+    @staticmethod
+    def _selected_dependency_closure(
+        selected_story_ids: set[int],
+        dependencies: tuple[StoryDependencyFact, ...],
+        project_story_ids: frozenset[int],
+    ) -> tuple[StoryDependencyFact, ...]:
+        """Return active rows reachable from exact selected dependents."""
+        active_by_dependent: dict[int, list[StoryDependencyFact]] = {}
+        for edge in dependencies:
+            if edge.status != "active":
+                continue
+            if (
+                edge.dependent_story_id not in project_story_ids
+                or edge.prerequisite_story_id not in project_story_ids
+                or edge.dependent_story_id == edge.prerequisite_story_id
+            ):
+                message = "Selected dependency closure contains an invalid endpoint."
+                raise ValueError(message)
+            active_by_dependent.setdefault(edge.dependent_story_id, []).append(edge)
+        reachable = set(selected_story_ids)
+        pending = sorted(selected_story_ids, reverse=True)
+        closure: list[StoryDependencyFact] = []
+        while pending:
+            dependent_id = pending.pop()
+            for edge in active_by_dependent.get(dependent_id, ()):
+                closure.append(edge)
+                if edge.prerequisite_story_id not in reachable:
+                    reachable.add(edge.prerequisite_story_id)
+                    pending.append(edge.prerequisite_story_id)
+        return tuple(
+            sorted(
+                closure,
+                key=lambda edge: (
+                    edge.dependent_story_id,
+                    edge.prerequisite_story_id,
+                    edge.dependency_id,
+                ),
+            )
+        )
 
     def _tasks(
         self,
