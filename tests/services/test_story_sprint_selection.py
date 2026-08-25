@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from sqlmodel import Session, col, select
@@ -12,12 +13,29 @@ from models.enums import WorkflowEventType
 from models.events import WorkflowEvent
 from repositories.workflow import WorkflowFactRepository
 from services import story_sprint_selection as selection_service
+from services.application import AgileForgeApplication
+from services.read_projections import DurableReadProjectionService
 from tests.test_story_validation_service import _accepted_story
+from workflow.clock import FixedClock
+from workflow.definitions.root import project_graph
+from workflow.domain import WorkflowDomain
 
 if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
 
 _EXPECTED_SELECTION_EVENT_COUNT = 4
+_NOW = datetime(2026, 8, 25, 12, tzinfo=UTC)
+
+
+def _build_application(engine: Engine) -> AgileForgeApplication:
+    return AgileForgeApplication(
+        workflow_domain=WorkflowDomain(
+            engine=engine,
+            graph=project_graph(),
+            clock=FixedClock(now_value=_NOW),
+        ),
+        read_projection=DurableReadProjectionService(engine=engine),
+    )
 
 
 def test_eligible_story_defaults_to_unselected_and_not_a_candidate(
@@ -107,3 +125,52 @@ def test_complete_selection_transition_table_is_append_only(engine: Engine) -> N
     assert reloaded.selection_state == "selected"
     assert reloaded.event_id == events[-1].event_id
     assert reloaded.event_fingerprint is not None
+
+
+def test_application_replays_identical_request_and_rejects_conflicts(
+    engine: Engine,
+) -> None:
+    """One key has one full request fingerprint and one durable result."""
+    story_id = _accepted_story(engine)
+    with Session(engine) as session:
+        story = session.get_one(UserStory, story_id)
+        initial = selection_service.story_sprint_selection_fact_in_session(
+            session,
+            story=story,
+        )
+        project_id = story.project_id
+    request = _selection_request(
+        project_id=project_id,
+        story_id=story_id,
+        intent="select",
+        expected_state_fingerprint=initial.state_fingerprint,
+        key="application-replay",
+    )
+    app = _build_application(engine)
+
+    first = app.apply_story_sprint_selection(request)
+    replay = app.apply_story_sprint_selection(request)
+    conflict = app.apply_story_sprint_selection(
+        _selection_request(
+            project_id=project_id,
+            story_id=story_id,
+            intent="defer",
+            expected_state_fingerprint=initial.state_fingerprint,
+            key="application-replay",
+        )
+    )
+
+    assert first == replay
+    assert first["ok"] is True
+    assert first["data"]["selection_state"] == "selected"
+    assert conflict["ok"] is False
+    assert conflict["errors"][0]["code"] == "IDEMPOTENCY_CONFLICT"
+    with Session(engine) as session:
+        assert len(
+            session.exec(
+                select(WorkflowEvent).where(
+                    col(WorkflowEvent.event_type)
+                    == WorkflowEventType.STORY_SELECTION_CHANGED
+                )
+            ).all()
+        ) == 1
