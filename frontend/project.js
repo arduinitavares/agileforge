@@ -2250,6 +2250,7 @@ async function loadDashboard() {
             storyDependencies: storyDependencies?.data ?? {},
             sprintCandidates: sprintCandidates?.data ?? {},
         };
+        activeDependencyMutation = null;
         setProjectError('');
         renderDashboard();
         return true;
