@@ -190,3 +190,98 @@ typed Story projection already serializes the new `StoryFact` fields.
   duplicating selection history parsing or inferring intent.
 - Issue #224 team-name/default ownership behavior was not changed.
 - No semantic/model-output validation was added.
+
+## Fix round 1/5: actionable proposals, dependency closure, canonical IDs
+
+### Status
+
+Complete from clean fix-round base `ccbfcce`.
+
+Three reviewed gaps are closed without changing the immutable dependency-review
+contract:
+
+- A selected-dependent proposed edge keeps `planning.story_dependencies`
+  available with a human-readable `STORY_DEPENDENCIES_UNREVIEWED` diagnostic,
+  while `planning.sprint.plan` remains blocked until the proposal is approved or
+  excluded by review.
+- Repository candidacy evaluates the active dependency closure reachable from
+  selected dependents. A selected Story that reaches an external Story and then
+  cycles back is dependency-unsafe and gets the explicit
+  `STORY_DEPENDENCY_CYCLE` blocker. An unrelated external-only cycle remains
+  outside the closure and does not globally block a valid selected scope.
+- Closure evaluation includes transitive external prerequisites, blocks any
+  incomplete prerequisite it reaches, and fails closed on malformed endpoints.
+- The ApplyStoryDependencies handler now canonicalizes selected Story facts once
+  by Story ID. Rank ordering can no longer conflict with the request/preparer's
+  existing sorted, unique Story-ID contract.
+- Exact retry still replays, a changed duplicate for the same selected-scope
+  fingerprint still conflicts, and a new review still requires a genuinely new
+  selection/evidence fingerprint.
+
+### TDD evidence
+
+RED tests were committed before production changes in `86219e1`:
+
+```text
+uv run --frozen pytest -q tests/workflow/test_planning_graph.py::test_selected_dependency_proposal_keeps_review_actionable tests/test_story_dependencies.py::test_selected_dependency_closure_cycle_blocks_candidacy tests/test_story_dependencies.py::test_unrelated_external_cycle_does_not_block_selected_scope tests/workflow/test_planning_transitions.py::test_dependency_transition_canonicalizes_selected_ids_independent_of_rank
+3 failed, 1 passed, 4 warnings in 1.94s
+```
+
+The failures proved that proposal review was blocked, a reachable external cycle
+incorrectly remained candidate-safe, and the handler compared an ID-ordered
+request with rank-ordered facts. The unrelated external-cycle control passed,
+proving that the required change was closure-scoped rather than project-global.
+
+Targeted GREEN after `ec91780`:
+
+```text
+uv run --frozen pytest -q tests/workflow/test_planning_graph.py::test_selected_dependency_proposal_keeps_review_actionable tests/test_story_dependencies.py::test_selected_dependency_closure_cycle_blocks_candidacy tests/test_story_dependencies.py::test_unrelated_external_cycle_does_not_block_selected_scope tests/workflow/test_planning_transitions.py::test_dependency_transition_canonicalizes_selected_ids_independent_of_rank
+4 passed, 4 warnings in 1.91s
+```
+
+Directly affected suites:
+
+```text
+uv run --frozen pytest -q tests/test_story_dependencies.py tests/workflow/test_planning_graph.py tests/workflow/test_planning_transitions.py
+148 passed, 4 warnings in 34.79s
+```
+
+Full Task 4 focused matrix:
+
+```text
+uv run --frozen pytest -q tests/test_story_dependencies.py tests/test_sprint_selection.py tests/workflow/test_planning_transitions.py tests/workflow/test_execution_graph.py tests/workflow/test_graph_properties.py tests/workflow/test_planning_graph.py tests/workflow/test_planning_joins.py tests/services/test_story_sprint_selection.py tests/adapters/test_api_workflow_domain.py::test_planning_selection_derives_dependency_and_readiness_guards tests/adapters/test_api_workflow_domain.py::test_planning_selection_derives_sprint_start_from_accepted_current_plan tests/adapters/test_api_workflow_domain.py::test_sprint_generation_fails_closed_without_host_capacity_input tests/adapters/test_api_workflow_domain.py::test_invalid_manual_sprint_selection_fails_before_model tests/adapters/test_api_workflow_domain.py::test_semantic_sprint_generation_api_is_strict tests/adapters/test_cli_workflow_domain.py::test_semantic_sprint_generation_command_parses tests/adapters/test_cli_workflow_domain.py::test_removed_sprint_generation_flags_fail_parser_validation tests/adapters/test_command_renderer.py::test_sprint_generation_advertises_parser_valid_capacity_remediation
+312 passed, 5 warnings in 48.13s
+```
+
+Changed-file quality:
+
+```text
+uv run --frozen pyrepo-check ruff annotations ty repositories/workflow.py workflow/definitions/planning.py workflow/handlers/planning.py tests/test_story_dependencies.py tests/workflow/test_planning_graph.py tests/workflow/test_planning_transitions.py
+ruff passed; annotations passed; ty passed
+```
+
+The warnings remain the existing Starlette `TestClient`/httpx,
+`BaseAgentConfig`, and pytest-socket warnings.
+
+### Changed files
+
+- `repositories/workflow.py`
+- `workflow/definitions/planning.py`
+- `workflow/handlers/planning.py`
+- `tests/test_story_dependencies.py`
+- `tests/workflow/test_planning_graph.py`
+- `tests/workflow/test_planning_transitions.py`
+
+### Commits
+
+- `86219e1` `test: expose selected dependency scope gaps (#223)`
+- `ec91780` `fix: close selected dependency review gaps (#223)`
+
+### Remaining concerns and protected boundaries
+
+- Task 6 still owns the broad repository gate and wider integration fixture
+  alignment.
+- No provider call, real Sprint generation or persistence, profile access, UI
+  startup, push, merge, issue mutation, or live manual acceptance occurred.
+- No schema, Task 1 v3 evidence authority, Task 3 append-only selection parser,
+  issue #224 ownership/defaulting behavior, or semantic/model validation changed.
