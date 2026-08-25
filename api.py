@@ -275,6 +275,15 @@ class StorySprintSelectionApiRequest(MutationApiRequest):
     )
     rationale: SemanticText | None = None
 
+    @field_validator("actor", "correlation_id", "rationale")
+    @classmethod
+    def reject_blank_audit_text(cls, value: str | None) -> str | None:
+        """Reject selection audit text before constructing a domain request."""
+        if value is not None and not value.strip():
+            message = "Selection audit metadata must be nonblank."
+            raise ValueError(message)
+        return value
+
 
 class StoryReadinessRepairApiRequest(MutationApiRequest):
     """Strict explicit Story readiness repairs without derived guards."""
