@@ -194,6 +194,7 @@ class FakeLifecycle:
     structural_reconcile_requests: list[JsonObject] = field(default_factory=list)
     sprint_selection_requests: list[JsonObject] = field(default_factory=list)
     dependency_apply_requests: list[JsonObject] = field(default_factory=list)
+    dependency_reload_failure: str | None = None
     reject_stale_delivery_actions: bool = False
     refresh_count: int = 0
     api_errors: list[str] = field(default_factory=list)
@@ -368,6 +369,8 @@ class FakeLifecycle:
         return {"status": "success", "data": {"output": {"recorded": True}}}
 
     def _read(self, suffix: str) -> JsonObject:
+        if self.dependency_reload_failure and self.dependency_apply_requests:
+            raise ValueError(self.dependency_reload_failure)
         readers: dict[str, Callable[[], JsonObject]] = {
             "": self._project_projection,
             "/goals/status": self._goal_projection,
@@ -2466,6 +2469,35 @@ def test_sprint_generation_requires_team_and_blocks_duplicate_submission(
     context.close()
 
 
+def test_sprint_generation_blocks_torn_candidate_dependency_scope(
+    dashboard_harness: DashboardHarness,
+) -> None:
+    """A stale candidate scope cannot expose or reach Sprint generation."""
+    fake = _delivery_ready_fake([_sprint_generation_action()])
+    _seed_progressive_stories(fake, 101, 102)
+    current = cast("JsonObject", fake.stories[0])
+    current["sprint_selection_state"] = "selected"
+    current["dependency_safe"] = True
+    current["sprint_candidate"] = True
+    stale_candidate = dict(current)
+    stale_candidate["selected_scope_fingerprint"] = _fingerprint("c")
+    fake.sprint_candidates = [stale_candidate]
+
+    context, page = _open_project_page(dashboard_harness, fake)
+
+    expect(page.locator('[data-sprint-candidate-projection-error="true"]')).to_be_visible()
+    expect(
+        page.locator('[data-delivery-generation-form="record_sprint_plan"]')
+    ).not_to_be_attached()
+    assert not [
+        body
+        for suffix, body in fake.delivery_requests
+        if suffix == "/sprint/generate"
+    ]
+
+    context.close()
+
+
 def _seed_progressive_stories(
     fake: FakeLifecycle,
     story1_id: int,
@@ -2682,6 +2714,50 @@ def test_progressive_story_readiness_partial_refinement_to_sprint_planning(  # n
         page.locator('[data-delivery-action-instance="backlog_item:PBI-000003"]')
     ).to_be_visible()
 
+    assert not [
+        body
+        for suffix, body in fake.delivery_requests
+        if suffix == "/sprint/generate"
+    ]
+
+    context.close()
+
+
+def test_dependency_confirmation_stays_locked_when_authority_reload_fails(
+    dashboard_harness: DashboardHarness,
+) -> None:
+    """A committed dependency review cannot be repeated on a stale projection."""
+    fake = _delivery_ready_fake(
+        [
+            {
+                "node_id": "planning.story_dependencies",
+                "instance_key": None,
+                "request_kind": "apply_story_dependencies",
+                "endpoint": "story/dependencies/apply",
+                "transport": "semantic",
+            }
+        ]
+    )
+    _seed_progressive_stories(fake, 101, 102)
+    story = cast("JsonObject", fake.stories[0])
+    story["sprint_selection_state"] = "selected"
+    fake.dependency_reload_failure = "Dependency authority reload failed."
+
+    context, page = _open_project_page(dashboard_harness, fake)
+    confirm = page.locator('[data-apply-dependencies="true"]')
+    expect(confirm).to_be_visible()
+    confirm.click()
+    page.wait_for_timeout(_UI_SETTLE_MS)
+
+    expect(confirm).to_be_disabled()
+    expect(confirm).to_have_attribute("aria-busy", "true")
+    expect(page.locator("#project-error")).to_contain_text(
+        "Dependency authority reload failed."
+    )
+    confirm.evaluate("button => button.click()")
+    page.wait_for_timeout(_UI_SETTLE_MS)
+    assert len(fake.dependency_apply_requests) == 1
+    assert fake.api_errors
     assert not [
         body
         for suffix, body in fake.delivery_requests
