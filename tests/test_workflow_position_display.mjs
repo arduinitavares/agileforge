@@ -162,6 +162,23 @@ function storyAction(overrides = {}) {
     };
 }
 
+function selectedScopeStory(overrides = {}) {
+    return {
+        story_id: 101,
+        source_story_item_id: 'US-001',
+        structurally_eligible: true,
+        structural_eligibility_status: 'eligible',
+        sprint_selection_state: 'selected',
+        sprint_selection_state_fingerprint: 'sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff',
+        selected_scope_fingerprint: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        dependency_safe: false,
+        sprint_candidate: false,
+        validation_status: 'validated',
+        validation_failures: [],
+        ...overrides,
+    };
+}
+
 test('human lifecycle labels are the exact direct-Spec sequence', () => {
     const context = loadFrontend();
     assert.deepEqual(Array.from(context.lifecycleStageLabels()), [
@@ -843,9 +860,7 @@ test('dependency review section renders when apply_story_dependencies action is 
         endpoint: 'story/dependencies/apply',
         transport: 'semantic',
     };
-    const stories = [
-        { story_id: 101, source_story_item_id: 'US-001', backlog_item_id: 'PBI-000001', sprint_candidate: true },
-    ];
+    const stories = [selectedScopeStory({ backlog_item_id: 'PBI-000001' })];
     const dependencies = { edges: [] };
 
     const markup = context.storyDependencyReviewMarkup(action, stories, dependencies);
@@ -864,13 +879,16 @@ test('dependency review displays only candidate stories and candidate-contained 
         endpoint: 'story/dependencies/apply',
         transport: 'semantic',
     };
-    const candidates = [
-        { story_id: 101, source_story_item_id: 'US-001', sprint_candidate: true },
-    ];
+    const candidates = [selectedScopeStory()];
     const dependencies = {
         stories: [
-            { story_id: 101, source_story_item_id: 'US-001', sprint_candidate: true },
-            { story_id: 102, source_story_item_id: 'US-002', sprint_candidate: false },
+            selectedScopeStory(),
+            selectedScopeStory({
+                story_id: 102,
+                source_story_item_id: 'US-002',
+                sprint_selection_state: 'unselected',
+                sprint_selection_state_fingerprint: 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+            }),
         ],
         edges: [
             { dependent_story_id: 102, prerequisite_story_id: 101, reason: 'US-002 needs US-001' },
@@ -893,8 +911,13 @@ test('dependency review displays human-readable story identifiers, PBIs, and dep
         transport: 'semantic',
     };
     const candidates = [
-        { story_id: 101, source_story_item_id: 'US-001', backlog_item_id: 'PBI-000001', sprint_candidate: true },
-        { story_id: 102, source_story_item_id: 'US-002', backlog_item_id: 'PBI-000002', sprint_candidate: true },
+        selectedScopeStory({ backlog_item_id: 'PBI-000001' }),
+        selectedScopeStory({
+            story_id: 102,
+            source_story_item_id: 'US-002',
+            backlog_item_id: 'PBI-000002',
+            sprint_selection_state_fingerprint: 'sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+        }),
     ];
     const dependencies = {
         stories: candidates,
@@ -1026,13 +1049,13 @@ test('dependency review disables confirm button when canonical candidate project
         transport: 'semantic',
     };
     const dependencies = {
-        stories: [{ story_id: 101, source_story_item_id: 'US-001', sprint_candidate: true }],
+        stories: [selectedScopeStory()],
         edges: [],
     };
 
     // When candidates is null (missing sprintCandidates.items)
     const markup = context.storyDependencyReviewMarkup(action, null, dependencies);
-    assert.ok(markup.includes('Unavailable (canonical candidate projection missing)'));
+    assert.ok(markup.includes('Unavailable (current selected scope missing or malformed)'));
     assert.ok(markup.includes('disabled'));
     assert.ok(markup.includes('aria-disabled="true"'));
 });
@@ -1040,7 +1063,7 @@ test('dependency review disables confirm button when canonical candidate project
 test('canonicalCandidateDependencies returns empty when candidates is missing without falling back', () => {
     const context = loadFrontend();
     const dependencies = {
-        stories: [{ story_id: 101, source_story_item_id: 'US-001', sprint_candidate: true }],
+        stories: [selectedScopeStory()],
         edges: [],
     };
 
@@ -1070,7 +1093,7 @@ test('canonicalCandidateDependencies and review markup fail closed on malformed 
     assert.strictEqual(result1.isWellFormed, false);
     assert.strictEqual(result1.candidateStories.length, 0);
     const markup1 = context.storyDependencyReviewMarkup(action, malformedMissingFlag, dependencies);
-    assert.ok(markup1.includes('Unavailable (canonical candidate projection missing)'));
+    assert.ok(markup1.includes('Unavailable (current selected scope missing or malformed)'));
     assert.ok(markup1.includes('disabled'));
     assert.ok(markup1.includes('aria-disabled="true"'));
     assert.strictEqual(context.sprintCandidatePoolMarkup(malformedMissingFlag), '');
@@ -1081,7 +1104,7 @@ test('canonicalCandidateDependencies and review markup fail closed on malformed 
     assert.strictEqual(result2.isWellFormed, false);
     assert.strictEqual(result2.candidateStories.length, 0);
     const markup2 = context.storyDependencyReviewMarkup(action, malformedNullRow, dependencies);
-    assert.ok(markup2.includes('Unavailable (canonical candidate projection missing)'));
+    assert.ok(markup2.includes('Unavailable (current selected scope missing or malformed)'));
     assert.ok(markup2.includes('disabled'));
     assert.ok(markup2.includes('aria-disabled="true"'));
     assert.strictEqual(context.sprintCandidatePoolMarkup(malformedNullRow), '');
@@ -1092,7 +1115,7 @@ test('canonicalCandidateDependencies and review markup fail closed on malformed 
     assert.strictEqual(result3.isWellFormed, false);
     assert.strictEqual(context.sprintCandidatePoolMarkup(notCandidate), '');
     const markup3 = context.storyDependencyReviewMarkup(action, notCandidate, dependencies);
-    assert.ok(markup3.includes('Unavailable (canonical candidate projection missing)'));
+    assert.ok(markup3.includes('Unavailable (current selected scope missing or malformed)'));
     assert.ok(markup3.includes('disabled'));
     assert.ok(markup3.includes('aria-disabled="true"'));
 
@@ -1102,7 +1125,7 @@ test('canonicalCandidateDependencies and review markup fail closed on malformed 
     assert.strictEqual(resultEmpty.isWellFormed, false);
     assert.strictEqual(context.sprintCandidatePoolMarkup(emptyCandidates), '');
     const markupEmpty = context.storyDependencyReviewMarkup(action, emptyCandidates, dependencies);
-    assert.ok(markupEmpty.includes('Unavailable (canonical candidate projection missing)'));
+    assert.ok(markupEmpty.includes('Unavailable (current selected scope missing or malformed)'));
     assert.ok(markupEmpty.includes('disabled'));
     assert.ok(markupEmpty.includes('aria-disabled="true"'));
 

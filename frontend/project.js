@@ -1706,6 +1706,42 @@ function canonicalCandidateDependencies(candidates, dependencies) {
     };
 }
 
+function selectedScopeDependencies(stories, dependencies) {
+    if (!Array.isArray(stories)) {
+        return { scopeStories: [], scopeIds: [], scopeEdges: [], isWellFormed: false };
+    }
+    const projections = stories.map(parseStoryReadinessProjection);
+    if (projections.some((projection) => projection === null)) {
+        return { scopeStories: [], scopeIds: [], scopeEdges: [], isWellFormed: false };
+    }
+    const scopeStories = projections
+        .filter((projection) => projection.story.structurally_eligible && projection.selectionState === 'selected')
+        .map((projection) => projection.story);
+    if (scopeStories.length === 0) {
+        return { scopeStories: [], scopeIds: [], scopeEdges: [], isWellFormed: false };
+    }
+    const scopeIds = scopeStories.map((story) => story.story_id);
+    const scopeIdSet = new Set(scopeIds);
+    const rawEdges = Array.isArray(dependencies?.edges) ? dependencies.edges : [];
+    const scopeEdges = [];
+    for (const edge of rawEdges) {
+        if (!edge || typeof edge !== 'object'
+            || !Number.isInteger(edge.dependent_story_id)
+            || !Number.isInteger(edge.prerequisite_story_id)
+            || typeof edge.reason !== 'string') {
+            return { scopeStories: [], scopeIds: [], scopeEdges: [], isWellFormed: false };
+        }
+        if (scopeIdSet.has(edge.dependent_story_id) && scopeIdSet.has(edge.prerequisite_story_id)) {
+            scopeEdges.push({
+                dependent_story_id: edge.dependent_story_id,
+                prerequisite_story_id: edge.prerequisite_story_id,
+                reason: edge.reason,
+            });
+        }
+    }
+    return { scopeStories, scopeIds, scopeEdges, isWellFormed: true };
+}
+
 function storyDisplayLabel(story) {
     if (!story) return '';
     const id = story.source_story_item_id || (story.story_id != null ? `Story #${story.story_id}` : '');
@@ -1732,19 +1768,19 @@ function buildStoryLookupMap(candidateStories, dependencies) {
     return map;
 }
 
-function storyDependencyReviewMarkup(action, candidates, dependencies) {
+function storyDependencyReviewMarkup(action, stories, dependencies) {
     if (!action || action.request_kind !== 'apply_story_dependencies') return '';
-    const { candidateStories, candidateEdges, isWellFormed } = canonicalCandidateDependencies(
-        candidates,
+    const { scopeStories, scopeEdges, isWellFormed } = selectedScopeDependencies(
+        stories,
         dependencies,
     );
-    const storyMap = buildStoryLookupMap(candidateStories, dependencies);
+    const storyMap = buildStoryLookupMap(scopeStories, dependencies);
     const storySummary = isWellFormed
-        ? (candidateStories.map((s) => storyDisplayLabel(s)).join(', ') || 'None')
-        : 'Unavailable (canonical candidate projection missing)';
+        ? (scopeStories.map((s) => storyDisplayLabel(s)).join(', ') || 'None')
+        : 'Unavailable (current selected scope missing or malformed)';
     const edgeSummary = isWellFormed
-        ? (candidateEdges.length > 0
-            ? candidateEdges.map((e) => {
+        ? (scopeEdges.length > 0
+            ? scopeEdges.map((e) => {
                 const dep = storyMap.get(e.dependent_story_id);
                 const prereq = storyMap.get(e.prerequisite_story_id);
                 const depLabel = storyDisplayLabel(dep) || `Story #${e.dependent_story_id}`;
@@ -1753,7 +1789,7 @@ function storyDependencyReviewMarkup(action, candidates, dependencies) {
                 return `${depLabel} -> ${prereqLabel}${reason}`;
             }).join('; ')
             : 'None (independent stories)')
-        : 'Unavailable (canonical candidate projection missing)';
+        : 'Unavailable (current selected scope missing or malformed)';
     const bindingAttributes = deliveryActionBindingAttributes(action);
     const disabledAttr = isWellFormed ? '' : 'disabled aria-disabled="true"';
 
@@ -1762,9 +1798,9 @@ function storyDependencyReviewMarkup(action, candidates, dependencies) {
             <span class="material-symbols-outlined text-amber-700" aria-hidden="true">account_tree</span>
             <h3 class="text-sm font-bold text-amber-900">Dependency review required</h3>
         </div>
-        <p class="text-xs leading-5 text-amber-800">Review and confirm execution dependencies among validated candidate stories before Sprint planning.</p>
+        <p class="text-xs leading-5 text-amber-800">Review and confirm dependencies for the selected structurally eligible scope. This does not generate a Sprint.</p>
         <div class="text-xs text-slate-700 bg-white rounded border border-slate-200 p-2.5 space-y-1">
-            <p><strong>Candidate stories:</strong> ${escapeWorkflowText(storySummary)}</p>
+            <p><strong>Selected Stories:</strong> ${escapeWorkflowText(storySummary)}</p>
             <p><strong>Dependency edges:</strong> ${escapeWorkflowText(edgeSummary)}</p>
         </div>
         <button type="button" data-apply-dependencies="true" ${disabledAttr} class="${BUTTON_PRIMARY}">
@@ -1838,7 +1874,7 @@ function deliveryPanelMarkup(position, reviews = {}, actions = [], context = {})
     );
 
     const readinessSection = storyReadinessMarkup(stories, context);
-    const dependencySection = storyDependencyReviewMarkup(dependencyAction, candidates, dependencies);
+    const dependencySection = storyDependencyReviewMarkup(dependencyAction, stories, dependencies);
     const candidateSection = sprintCandidatePoolMarkup(candidates);
 
     const availableDeliveryActions = (Array.isArray(actions) ? actions : []).filter((action) =>
@@ -2940,23 +2976,19 @@ function installInteractions() {
             }
             setProjectError('');
             try {
-                if (!Array.isArray(lifecycleState.sprintCandidates?.items)) {
-                    throw new Error('Canonical candidate projection is unavailable.');
-                }
-                const candidates = lifecycleState.sprintCandidates.items;
-                const { candidateIds, candidateEdges, isWellFormed } = canonicalCandidateDependencies(
-                    candidates,
+                const { scopeIds, scopeEdges, isWellFormed } = selectedScopeDependencies(
+                    lifecycleState.storyDependencies?.stories,
                     lifecycleState.storyDependencies,
                 );
-                if (!isWellFormed || candidateIds.length === 0) {
-                    throw new Error('Canonical candidate projection is unavailable.');
+                if (!isWellFormed || scopeIds.length === 0) {
+                    throw new Error('Current selected Story scope is unavailable.');
                 }
                 await requestJson(`/api/projects/${selectedProjectId}/story/dependencies/apply`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(semanticMutationPayload({
-                        selected_story_ids: candidateIds,
-                        reviewed_edges: candidateEdges,
+                        selected_story_ids: scopeIds,
+                        reviewed_edges: scopeEdges,
                     })),
                 });
                 await loadDashboard();
