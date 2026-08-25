@@ -1010,7 +1010,7 @@ test('structural and selection mutation payloads bind exact Story state and reus
         idempotency_key: 'dashboard-uuid-1',
     });
     assert.equal(requests[0].body.idempotency_key, requests[1].body.idempotency_key);
-    assert.deepEqual(context.structuralEligibilityMutationPayload(101), {
+    assert.deepEqual(JSON.parse(JSON.stringify(context.structuralEligibilityMutationPayload(101))), {
         story_ids: [101],
         actor: 'dashboard-ui',
         idempotency_key: 'dashboard-uuid-1',

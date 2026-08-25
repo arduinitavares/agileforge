@@ -129,6 +129,7 @@ let selectedProjectId = null;
 let pendingHumanAction = null;
 let dashboardLoadSequence = 0;
 let activeDashboardLoadController = null;
+let activeStoryMutation = null;
 let lifecycleState = {
     project: {},
     position: {},
@@ -155,6 +156,53 @@ function semanticMutationPayload(extra = {}) {
         actor: 'dashboard-ui',
         ...extra,
     };
+}
+
+function structuralEligibilityMutationPayload(storyId) {
+    return semanticMutationPayload({ story_ids: [storyId] });
+}
+
+function sprintSelectionMutationPayload(storyId, intent, expectedStateFingerprint) {
+    const rationaleByIntent = {
+        select: 'Selected for Sprint from dashboard.',
+        remove: 'Removed from Sprint selection from dashboard.',
+        defer: 'Deferred from Sprint selection from dashboard.',
+    };
+    return semanticMutationPayload({
+        story_id: storyId,
+        intent,
+        expected_state_fingerprint: expectedStateFingerprint,
+        rationale: rationaleByIntent[intent],
+    });
+}
+
+async function postStorySelectionMutation(projectId, storyId, intent, expectedStateFingerprint) {
+    const payload = sprintSelectionMutationPayload(storyId, intent, expectedStateFingerprint);
+    const path = `/api/projects/${projectId}/story/sprint-selection`;
+    try {
+        const response = await requestJson(path, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        if (response?.ok === false) {
+            const failure = response.errors?.[0];
+            throw new Error(failure?.message || 'Story Sprint-selection was rejected.');
+        }
+        return response;
+    } catch (error) {
+        if (error?.status) throw error;
+        const response = await requestJson(path, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        if (response?.ok === false) {
+            const failure = response.errors?.[0];
+            throw new Error(failure?.message || 'Story Sprint-selection was rejected.');
+        }
+        return response;
+    }
 }
 
 function escapeWorkflowText(value) {
@@ -1501,88 +1549,81 @@ function deliveryGenerationActionMarkup(action, position = {}, reviews = {}, ind
     </div>`;
 }
 
+function isSha256Fingerprint(value) {
+    return typeof value === 'string' && /^sha256:[0-9a-f]{64}$/.test(value);
+}
+
+function parseStoryReadinessProjection(story) {
+    if (!story || typeof story !== 'object' || !Number.isInteger(story.story_id) || story.story_id <= 0) return null;
+    const eligibilityStatus = story.structural_eligibility_status;
+    const selectionState = story.sprint_selection_state;
+    const validationStatus = story.validation_status;
+    const failures = story.validation_failures;
+    if (
+        typeof story.structurally_eligible !== 'boolean'
+        || !['eligible', 'ineligible', 'stale'].includes(eligibilityStatus)
+        || !['unselected', 'selected', 'deferred'].includes(selectionState)
+        || !isSha256Fingerprint(story.sprint_selection_state_fingerprint)
+        || !(story.selected_scope_fingerprint === null || isSha256Fingerprint(story.selected_scope_fingerprint))
+        || typeof story.dependency_safe !== 'boolean'
+        || typeof story.sprint_candidate !== 'boolean'
+        || !['validated', 'failed', 'unvalidated'].includes(validationStatus)
+        || !Array.isArray(failures)
+    ) return null;
+    if ((eligibilityStatus === 'eligible') !== story.structurally_eligible) return null;
+    const expectedCandidate = selectionState === 'selected'
+        && story.structurally_eligible
+        && story.dependency_safe
+        && story.selected_scope_fingerprint !== null;
+    if (story.sprint_candidate !== expectedCandidate) return null;
+    return {
+        story,
+        eligibilityStatus,
+        selectionState,
+        failures,
+        isMissingOrStaleEvidence: validationStatus === 'unvalidated' || eligibilityStatus === 'stale',
+    };
+}
+
+function storySelectionButtons(projection) {
+    const { story, selectionState } = projection;
+    const binding = `data-story-selection-id="${story.story_id}" data-story-selection-fingerprint="${story.sprint_selection_state_fingerprint}"`;
+    const button = (intent, label, disabled = false) => `<button type="button" ${binding} data-story-selection-intent="${intent}"${disabled ? ' disabled aria-disabled="true"' : ''} aria-label="${label} for ${escapeWorkflowText(story.source_story_item_id || `Story #${story.story_id}`)}" class="${BUTTON_SECONDARY}"><span data-story-selection-label="true">${label}</span></button>`;
+    if (selectionState === 'selected') return `${button('remove', 'Remove from Sprint selection')}${button('defer', 'Defer')}`;
+    if (selectionState === 'deferred') return `${button('select', 'Select for Sprint', !story.structurally_eligible)}${button('remove', 'Remove from Sprint selection')}`;
+    return `${button('select', 'Select for Sprint', !story.structurally_eligible)}${button('defer', 'Defer')}`;
+}
+
 function storyReadinessMarkup(stories, context = {}) {
     if (!Array.isArray(stories) || stories.length === 0) return '';
-    const pendingItems = Array.isArray(context?.storyPending?.items)
-        ? context.storyPending.items
-        : (Array.isArray(lifecycleState?.storyPending?.items)
-            ? lifecycleState.storyPending.items
-            : []);
+    const pendingItems = Array.isArray(context?.storyPending?.items) ? context.storyPending.items : [];
     const storyRows = stories.map((story) => {
-        const pbiId = story.backlog_item_id || '';
+        const projection = parseStoryReadinessProjection(story);
+        const pbiId = story?.backlog_item_id || '';
         const pending = pbiId ? pendingItems.find((item) => item?.backlog_item_id === pbiId) : null;
         const requirement = pending?.requirement || '';
-        const storyIdText = story.source_story_item_id || `Story #${story.story_id}`;
-        const blockers = Array.isArray(story.readiness_blockers) ? story.readiness_blockers : [];
-        const failures = Array.isArray(story.validation_failures) ? story.validation_failures : [];
-        const isValidationFailed = story.validation_status === 'failed' || failures.length > 0;
-        const isUnvalidated = !isValidationFailed && (story.validation_status === 'unvalidated' || blockers.includes('STORY_VALIDATION_REQUIRED') || !story.content_accepted);
-
-        let validationBadge = '';
-        let actionButtonMarkup = '';
-        let diagnosticsMarkup = '';
-
-        if (isValidationFailed) {
-            validationBadge = '<span class="inline-flex items-center rounded-full bg-red-50 px-2 py-0.5 text-xs font-semibold text-red-800 border border-red-200">Validation Failed</span>';
-            actionButtonMarkup = `<button type="button" data-story-validate-id="${story.story_id}" class="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-wait disabled:opacity-60">
-                <span class="material-symbols-outlined text-sm" aria-hidden="true">refresh</span>
-                <span data-story-validate-label="true">Revalidate</span>
-            </button>`;
-            if (failures.length > 0) {
-                const failureItems = failures.map((f) => {
-                    const code = escapeWorkflowText(f?.code || f?.rule_name || 'Structural Failure');
-                    const msg = escapeWorkflowText(f?.message || (typeof f === 'string' ? f : JSON.stringify(f)));
-                    return `<div>• <strong>${code}</strong>: ${msg}</div>`;
-                }).join('');
-                diagnosticsMarkup = `<div class="mt-1 rounded bg-red-50 p-2 text-xs text-red-700 border border-red-200 space-y-0.5" data-story-validation-diagnostics="true">${failureItems}</div>`;
-            }
-        } else if (isUnvalidated) {
-            validationBadge = '<span class="inline-flex items-center rounded-full bg-amber-50 px-2 py-0.5 text-xs font-semibold text-amber-800 border border-amber-200">Unvalidated</span>';
-            actionButtonMarkup = `<button type="button" data-story-validate-id="${story.story_id}" class="inline-flex items-center gap-1.5 rounded-lg bg-accent px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-800 disabled:cursor-wait disabled:opacity-60">
-                <span class="material-symbols-outlined text-sm" aria-hidden="true">task_alt</span>
-                <span data-story-validate-label="true">Validate Story</span>
-            </button>`;
-        } else {
-            validationBadge = '<span class="inline-flex items-center rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-semibold text-emerald-800 border border-emerald-200">Validated</span>';
+        const storyIdText = story?.source_story_item_id || `Story #${story?.story_id ?? '?'}`;
+        if (!projection) {
+            return `<div class="py-3" data-story-readiness-row="${escapeWorkflowText(story?.story_id ?? 'unknown')}"><p role="alert" class="text-sm text-red-700">Story state unavailable. Dependent Sprint-selection controls are locked until a complete current projection is available.</p><button type="button" disabled aria-disabled="true" class="${BUTTON_SECONDARY}">Sprint selection unavailable</button></div>`;
         }
-
-        const dependencyBlockers = blockers.filter((b) => b !== 'STORY_VALIDATION_REQUIRED');
-        let blockerBadge = '';
-        if (dependencyBlockers.length > 0) {
-            blockerBadge = `<span class="inline-flex items-center rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-900 border border-amber-300">Blocked: ${escapeWorkflowText(dependencyBlockers.join(', '))}</span>`;
-        }
-
-        const badgesMarkup = [validationBadge, blockerBadge].filter(Boolean).join(' ');
-
-        return `<div class="py-3 first:pt-0 last:pb-0 flex flex-col justify-between gap-2" data-story-readiness-row="${story.story_id}">
-            <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                <div class="min-w-0 space-y-1">
-                    <div class="flex items-center gap-2 flex-wrap">
-                        <span class="font-semibold text-sm text-slate-900">${escapeWorkflowText(storyIdText)}</span>
-                        ${pbiId ? `<span class="text-xs text-slate-500 font-mono">(${escapeWorkflowText(pbiId)})</span>` : ''}
-                        ${badgesMarkup}
-                    </div>
-                    ${requirement ? `<p class="text-xs text-slate-600 line-clamp-1">${escapeWorkflowText(requirement)}</p>` : ''}
-                    <div class="flex items-center gap-3 text-xs text-slate-500">
-                        <span>Rank: ${escapeWorkflowText(story.rank || '-')}</span>
-                        <span>Points: ${escapeWorkflowText(story.story_points ?? '-')}</span>
-                    </div>
-                </div>
-                ${actionButtonMarkup ? `<div class="shrink-0 flex items-center">${actionButtonMarkup}</div>` : ''}
-            </div>
-            ${diagnosticsMarkup}
+        const { eligibilityStatus, selectionState, failures, isMissingOrStaleEvidence } = projection;
+        const eligibilityLabel = eligibilityStatus === 'eligible' ? 'Structurally eligible' : (eligibilityStatus === 'stale' ? 'Structural evidence stale' : 'Structural eligibility failed');
+        const selectionLabel = selectionState === 'selected' ? 'Selected for Sprint' : (selectionState === 'deferred' ? 'Deferred' : 'Unselected');
+        const diagnostics = eligibilityStatus === 'ineligible' && failures.length > 0
+            ? `<ul role="list" class="mt-2 space-y-1 text-xs text-red-700" data-story-validation-diagnostics="true">${failures.map((failure) => `<li><strong>${escapeWorkflowText(failure?.code || failure?.rule_name || 'Structural failure')}</strong>: ${escapeWorkflowText(failure?.message || 'Structural rule failed.')}</li>`).join('')}</ul>`
+            : '';
+        const reconcile = isMissingOrStaleEvidence
+            ? `<button type="button" data-story-structural-reconcile-id="${story.story_id}" aria-label="Re-run structural checks for ${escapeWorkflowText(storyIdText)}" class="${BUTTON_SECONDARY}"><span data-story-reconcile-label="true">Re-run structural checks</span></button>`
+            : '';
+        return `<div class="py-3 first:pt-0 last:pb-0 flex flex-col gap-3" data-story-readiness-row="${story.story_id}">
+            <div class="min-w-0 space-y-1"><div class="flex items-center gap-2 flex-wrap"><span class="font-semibold text-sm text-slate-900">${escapeWorkflowText(storyIdText)}</span>${pbiId ? `<span class="text-xs text-slate-500 font-mono">(${escapeWorkflowText(pbiId)})</span>` : ''}</div>${requirement ? `<p class="text-xs text-slate-600">${escapeWorkflowText(requirement)}</p>` : ''}<p class="text-xs text-slate-500">Rank: ${escapeWorkflowText(story.rank || '-')} · Points: ${escapeWorkflowText(story.story_points ?? '-')}</p></div>
+            <ul role="list" class="flex flex-wrap gap-2 text-xs"><li class="rounded-full border border-slate-300 px-2 py-0.5">${eligibilityLabel}</li><li class="rounded-full border border-slate-300 px-2 py-0.5">${selectionLabel}</li><li class="rounded-full border border-slate-300 px-2 py-0.5">${story.dependency_safe ? 'Dependency confirmed' : 'Dependencies not confirmed'}</li><li class="rounded-full border border-slate-300 px-2 py-0.5">${story.sprint_candidate ? 'Sprint candidate' : 'Not a Sprint candidate'}</li></ul>
+            <p class="text-xs leading-5 text-slate-600">Passing provider-free structural checks proves structural eligibility only. It does not select this Story for Sprint, confirm dependencies, validate semantic quality, or generate a Sprint.</p>
+            ${diagnostics}
+            <div class="flex flex-wrap gap-2">${reconcile}${storySelectionButtons(projection)}</div>
         </div>`;
     });
-
-    return `<div class="rounded-lg border border-slate-200 bg-white p-4 space-y-3" data-story-readiness-section="true">
-        <div class="flex items-center justify-between border-b border-slate-100 pb-2">
-            <h3 class="text-sm font-bold text-ink">Story readiness</h3>
-            <span class="text-xs text-slate-500">${stories.length} accepted ${stories.length === 1 ? 'story' : 'stories'}</span>
-        </div>
-        <div class="divide-y divide-slate-100">
-            ${storyRows.join('')}
-        </div>
-    </div>`;
+    return `<section class="rounded-lg border border-slate-200 bg-white p-4 space-y-3" aria-labelledby="story-readiness-heading" data-story-readiness-section="true"><div class="flex items-center justify-between border-b border-slate-100 pb-2"><h3 id="story-readiness-heading" class="text-sm font-bold text-ink">Story readiness and Sprint selection</h3><span class="text-xs text-slate-500">${stories.length} accepted ${stories.length === 1 ? 'story' : 'stories'}</span></div><div class="divide-y divide-slate-100">${storyRows.join('')}</div></section>`;
 }
 
 function validateCandidateProjection(candidates) {
@@ -2829,36 +2870,60 @@ function installInteractions() {
             runDirectAction(button.dataset.directAction, button);
             return;
         }
-        if (button.dataset.storyValidateId) {
-            const storyId = Number.parseInt(button.dataset.storyValidateId, 10);
-            if (!Number.isInteger(storyId)) return;
-            const label = button.querySelector('[data-story-validate-label="true"]');
-            const idleLabel = label?.textContent ?? 'Validate Story';
-            button.disabled = true;
-            button.setAttribute('aria-busy', 'true');
-            if (label) label.textContent = 'Validating...';
+        if (button.dataset.storyStructuralReconcileId || button.dataset.storySelectionIntent) {
+            if (activeStoryMutation) return;
+            const storyId = Number.parseInt(
+                button.dataset.storyStructuralReconcileId || button.dataset.storySelectionId,
+                10,
+            );
+            if (!Number.isInteger(storyId) || storyId <= 0) return;
+            const intent = button.dataset.storySelectionIntent || null;
+            const fingerprint = button.dataset.storySelectionFingerprint || null;
+            if (intent && !isSha256Fingerprint(fingerprint)) {
+                setProjectError('Story Sprint-selection state is unavailable. Reload the current project projection.');
+                return;
+            }
+            const controls = Array.from(document.querySelectorAll('[data-story-selection-intent], [data-story-structural-reconcile-id]'));
+            const label = button.querySelector('[data-story-selection-label="true"], [data-story-reconcile-label="true"]');
+            const idleLabel = label?.textContent ?? '';
+            controls.forEach((control) => {
+                control.disabled = true;
+                control.setAttribute('aria-busy', 'true');
+            });
+            activeStoryMutation = { storyId, intent, fingerprint };
+            let refreshed = false;
             setProjectError('');
             try {
-                const response = await requestJson(`/api/projects/${selectedProjectId}/story/validate`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(semanticMutationPayload({
-                        story_id: storyId,
-                        mode: 'structural',
-                    })),
-                });
-                await loadDashboard();
-                if (response?.data?.success && !response.data.ready_for_sprint) {
-                    const failures = response.data.structural_failures || [];
-                    const diag = failures.map((f) => `${f.rule_name || f.code || 'Failure'}: ${f.message}`).join(' ');
-                    setProjectError(`Story structural validation failed. ${diag}`);
+                if (intent) {
+                    if (label) label.textContent = 'Saving selection...';
+                    await postStorySelectionMutation(selectedProjectId, storyId, intent, fingerprint);
+                } else {
+                    if (label) label.textContent = 'Running structural checks...';
+                    const response = await requestJson(`/api/projects/${selectedProjectId}/story/structural-eligibility/reconcile`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(structuralEligibilityMutationPayload(storyId)),
+                    });
+                    if (response?.ok === false) {
+                        const failure = response.errors?.[0];
+                        throw new Error(failure?.message || 'Structural eligibility reconciliation was rejected.');
+                    }
+                }
+                refreshed = await loadDashboard() === true;
+                if (!refreshed) {
+                    throw new Error('The update was accepted, but the current project projection could not be reloaded. Controls remain locked until a successful refresh.');
                 }
             } catch (error) {
                 setProjectError(error.message);
             } finally {
-                button.disabled = false;
-                button.removeAttribute('aria-busy');
-                if (label) label.textContent = idleLabel;
+                activeStoryMutation = null;
+                if (refreshed) {
+                    controls.forEach((control) => {
+                        control.disabled = false;
+                        control.removeAttribute('aria-busy');
+                    });
+                    if (label) label.textContent = idleLabel;
+                }
             }
             return;
         }
