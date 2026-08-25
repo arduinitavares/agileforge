@@ -220,6 +220,9 @@ def selected_story_dependency_snapshot(
         source_fingerprint = next(
             item for item in source_fingerprints if item is not None
         )
+    historical_rows = tuple(
+        {item.dependency_id: item for item in (*persisted_rows, *dependencies)}.values()
+    )
     return SelectedStoryDependencySnapshot(
         story_ids=canonical_story_ids,
         stories=stories,
@@ -227,7 +230,7 @@ def selected_story_dependency_snapshot(
         reviewed_edges=reviewed_edges,
         source_fingerprint=source_fingerprint,
         dependency_fingerprint=dependency_review_fingerprint(reviewed_edges),
-        rows_fingerprint=dependency_rows_fingerprint(persisted_rows),
+        rows_fingerprint=dependency_rows_fingerprint(historical_rows),
     )
 
 
