@@ -99,6 +99,28 @@ def select_sprint_story_rows(
     )
 
 
+def require_exact_candidate_story_ids(
+    *,
+    candidate_story_ids: Iterable[int],
+    requested_story_ids: Iterable[int],
+) -> None:
+    """Treat request-time Story IDs only as an exact durable-scope guard."""
+    canonical = tuple(sorted(candidate_story_ids))
+    requested = tuple(requested_story_ids)
+    if requested != canonical:
+        raise SprintSelectionError(
+            code="SPRINT_CANDIDATE_SET_STALE",
+            message=(
+                "Requested Story IDs must match the exact current durable "
+                "Sprint-candidate scope."
+            ),
+            details={
+                "candidate_story_ids": list(canonical),
+                "requested_story_ids": list(requested),
+            },
+        )
+
+
 def _select_manual(
     *,
     rows: list[dict[str, Any]],

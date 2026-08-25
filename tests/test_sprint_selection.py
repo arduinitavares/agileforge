@@ -1601,7 +1601,7 @@ def _apply_validation_evidence_case(
 @pytest.mark.parametrize(
     "evidence_case",
     [
-        "current_v2",
+        "current_v3",
         "missing",
         "v1",
         "malformed",
@@ -1666,13 +1666,14 @@ def test_sprint_input_paid_boundary_rechecks_complete_validation_matrix(
         app,
         application.SprintPlanningRequest(
             project_id=project_id,
+            selected_story_ids=(story_id,),
             max_story_points=8,
             team_name="Validated Team",
             idempotency_key=f"{evidence_case}-validation-input",
             actor="operator@example.com",
         ),
     )
-    if evidence_case == "current_v2":
+    if evidence_case == "current_v3":
         paid_sprint_adapter.assert_called_once()
         return
     assert result.ok is False

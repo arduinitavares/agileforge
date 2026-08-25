@@ -99,6 +99,7 @@ from services.specs.story_validation_service import (
 )
 from services.sprint_selection import (
     SprintSelectionError,
+    require_exact_candidate_story_ids,
     select_sprint_story_rows,
 )
 from services.story_rank import parse_story_rank, story_rank_is_valid
@@ -537,7 +538,7 @@ class PlanningActionSelectionService:
             sorted(
                 item.story_id
                 for item in snapshot.stories
-                if item.sprint_candidate
+                if item.sprint_selection_state == "selected"
                 and (item.story_points is None or not story_rank_is_valid(item.rank))
             )
         )
@@ -989,6 +990,10 @@ class SprintPlanningInputService:
                             "candidate set."
                         ),
                     )
+                require_exact_candidate_story_ids(
+                    candidate_story_ids=(item.story_id for item in candidates),
+                    requested_story_ids=request.selected_story_ids,
+                )
                 capacity = _resolve_sprint_capacity(
                     snapshot=snapshot,
                     requested_capacity=request.max_story_points,

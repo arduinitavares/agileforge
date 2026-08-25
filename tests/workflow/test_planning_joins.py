@@ -51,6 +51,7 @@ def _story(
     rank: str | None = "1",
     candidate: bool = True,
 ) -> StoryFact:
+    effective_candidate = candidate and accepted
     return StoryFact(
         story_id=story_id,
         source_story_artifact_id=100 + story_id,
@@ -76,7 +77,11 @@ def _story(
         ),
         sprint_selection_state="selected" if candidate else "unselected",
         sprint_selection_state_fingerprint=f"sha256:selection-{story_id}",
-        sprint_candidate=candidate,
+        selected_scope_fingerprint=(
+            "sha256:" + "c" * 64 if effective_candidate else None
+        ),
+        dependency_safe=effective_candidate,
+        sprint_candidate=effective_candidate,
         readiness_blockers=(),
     )
 
@@ -203,6 +208,12 @@ def _snapshot(
         ),
     )
     reviewed_edges = active_dependency_review_edges(dependencies)
+    selected_scope = tuple(
+        item
+        for item in stories
+        if item.structurally_eligible
+        and item.sprint_selection_state == "selected"
+    )
     current_reviews = (
         (
             StoryDependencyReviewFact(
@@ -211,12 +222,12 @@ def _snapshot(
                     item.story_id for item in stories if item.sprint_candidate
                 ),
                 reviewed_edges=reviewed_edges,
-                source_fingerprint=story_dependency_source_fingerprint(stories),
+                source_fingerprint=story_dependency_source_fingerprint(selected_scope),
                 dependency_fingerprint=dependency_review_fingerprint(reviewed_edges),
             ),
         )
-        if dependency_reviews is None
-        else dependency_reviews
+        if dependency_reviews is None and selected_scope
+        else (dependency_reviews or ())
     )
     current_tasks = tasks
     if current_tasks is None and sprint_plan is not None:
@@ -421,12 +432,12 @@ def _task(story_id: int) -> TaskFact:
     )
 
 
-def test_join_requires_accepted_content_for_every_candidate_story() -> None:
-    """Require accepted content for every Story entering the Sprint join."""
+def test_join_excludes_unaccepted_story_from_candidate_scope() -> None:
+    """Let one current candidate progress while another Story remains unaccepted."""
     snapshot = _snapshot((_story(1), _story(2, accepted=False)))
     decision = _decision(snapshot, "planning.sprint.plan")
-    assert decision.category is NodeCategory.BLOCKED
-    assert decision.reason_code == "STORY_CONTENT_NOT_ACCEPTED"
+    assert decision.category is NodeCategory.AVAILABLE
+    assert snapshot.stories[1].sprint_candidate is False
 
 
 def test_join_rejects_semantic_dependency_endpoint_outside_story_set() -> None:
@@ -446,6 +457,18 @@ def test_join_blocks_unreviewed_proposed_dependencies() -> None:
     decision = _decision(snapshot, "planning.sprint.plan")
     assert decision.category is NodeCategory.BLOCKED
     assert decision.reason_code == "STORY_DEPENDENCIES_UNREVIEWED"
+
+
+def test_join_ignores_proposed_dependency_owned_by_unselected_story() -> None:
+    """Keep unrelated future-work proposals outside the reviewed selected scope."""
+    snapshot = _snapshot(
+        (_story(1), _story(2, candidate=False)),
+        (_dependency(1, 2, 1, status="proposed"),),
+    )
+
+    decision = _decision(snapshot, "planning.sprint.plan")
+
+    assert decision.category is NodeCategory.AVAILABLE
 
 
 def test_dependency_review_fingerprint_must_match_typed_current_edges() -> None:

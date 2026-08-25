@@ -75,6 +75,10 @@ def candidate_set_fingerprint(
     dependencies: tuple[StoryDependencyFact, ...],
 ) -> str:
     """Hash canonical current Story, dependency, and readiness facts."""
+    selected_ids = {story.story_id for story in stories}
+    scoped_dependencies = tuple(
+        edge for edge in dependencies if edge.dependent_story_id in selected_ids
+    )
     return canonical_hash(
         {
             "selected_scope_fingerprint": (
@@ -87,7 +91,7 @@ def candidate_set_fingerprint(
             "dependencies": [
                 item.model_dump(mode="json")
                 for item in sorted(
-                    dependencies,
+                    scoped_dependencies,
                     key=lambda edge: (
                         edge.dependent_story_id,
                         edge.prerequisite_story_id,
@@ -831,6 +835,20 @@ def _selected_scope_stories(snapshot: WorkflowFactSnapshot) -> tuple[StoryFact, 
     )
 
 
+def _selected_intent_stories(snapshot: WorkflowFactSnapshot) -> tuple[StoryFact, ...]:
+    return tuple(
+        sorted(
+            (
+                item
+                for item in snapshot.stories
+                if item.sprint_selection_state == "selected"
+                and "STORY_SUPERSEDED" not in item.readiness_blockers
+            ),
+            key=lambda item: item.story_id,
+        )
+    )
+
+
 def _story_lineage_problem(
     snapshot: WorkflowFactSnapshot,
     stories: tuple[StoryFact, ...],
@@ -886,10 +904,27 @@ def _story_lineage_problem(
     return None
 
 
-def _dependency_review_evaluation(
+def _dependency_review_evaluation(  # noqa: PLR0911
     snapshot: WorkflowFactSnapshot,
     stories: tuple[StoryFact, ...],
 ) -> RuleEvaluation:
+    dependency_problem = _dependency_problem(
+        stories,
+        snapshot.stories,
+        snapshot.story_dependencies,
+    )
+    if dependency_problem is not None:
+        category, reason = dependency_problem
+        return RuleEvaluation(
+            category,
+            reason,
+            blockers=(
+                Blocker(
+                    code=reason,
+                    message="Selected Story dependency semantics are not safe.",
+                ),
+            ),
+        )
     source = story_dependency_source_fingerprint(stories)
     selected_story_ids = tuple(item.story_id for item in stories)
     matching = tuple(
@@ -970,15 +1005,19 @@ def _dependency_review_evaluation(
 
 def _dependency_problem(
     stories: tuple[StoryFact, ...],
+    all_stories: tuple[StoryFact, ...],
     dependencies: tuple[StoryDependencyFact, ...],
 ) -> tuple[RuleCategory, str] | None:
     story_ids = {item.story_id for item in stories}
+    all_story_ids = {item.story_id for item in all_stories}
     relevant = tuple(
-        item for item in dependencies if item.status in {"active", "proposed"}
+        item
+        for item in dependencies
+        if item.dependent_story_id in story_ids
+        and item.status in {"active", "proposed"}
     )
     if any(
-        item.dependent_story_id not in story_ids
-        or item.prerequisite_story_id not in story_ids
+        item.prerequisite_story_id not in all_story_ids
         or item.dependent_story_id == item.prerequisite_story_id
         for item in relevant
     ):
@@ -986,7 +1025,9 @@ def _dependency_problem(
     if any(item.status == "proposed" for item in relevant):
         return RuleCategory.BLOCKED, "STORY_DEPENDENCIES_UNREVIEWED"
     edges: dict[int, set[int]] = {}
-    for item in relevant:
+    for item in dependencies:
+        if item.status != "active":
+            continue
         edges.setdefault(item.dependent_story_id, set()).add(item.prerequisite_story_id)
     active: set[int] = set()
     visited: set[int] = set()
@@ -1032,7 +1073,7 @@ def _story_readiness_rule(
     snapshot: WorkflowFactSnapshot,
     _evaluated_at: datetime,
 ) -> tuple[RuleEvaluation, ...]:
-    stories = _candidate_stories(snapshot)
+    stories = _selected_intent_stories(snapshot)
     if any(not story.content_accepted for story in stories):
         return _blocked(
             "STORY_CONTENT_NOT_ACCEPTED",
@@ -1122,6 +1163,27 @@ def _sprint_join(  # noqa: PLR0911
 ) -> tuple[StoryFact, ...] | RuleEvaluation:
     selected = _selected_scope_stories(snapshot)
     if not selected:
+        selected_intent = _selected_intent_stories(snapshot)
+        if selected_intent:
+            candidate_problem = _sprint_candidate_problem(
+                snapshot,
+                selected_intent,
+            )
+            if candidate_problem is not None:
+                return candidate_problem
+            return RuleEvaluation(
+                RuleCategory.BLOCKED,
+                "STORY_STRUCTURAL_ELIGIBILITY_REQUIRED",
+                blockers=(
+                    Blocker(
+                        code="STORY_STRUCTURAL_ELIGIBILITY_REQUIRED",
+                        message=(
+                            "Selected Stories require current passing structural "
+                            "evidence."
+                        ),
+                    ),
+                ),
+            )
         return RuleEvaluation(
             RuleCategory.BLOCKED,
             "SPRINT_CANDIDATES_MISSING",
@@ -1132,6 +1194,9 @@ def _sprint_join(  # noqa: PLR0911
                 ),
             ),
         )
+    candidate_problem = _sprint_candidate_problem(snapshot, selected)
+    if candidate_problem is not None:
+        return candidate_problem
     dependency_review = _dependency_review_evaluation(snapshot, selected)
     if dependency_review.category is RuleCategory.INVALID:
         return dependency_review
@@ -1156,9 +1221,6 @@ def _sprint_join(  # noqa: PLR0911
             RuleCategory.INVALID,
             "STORY_CANDIDACY_PROJECTION_INVALID",
         )
-    candidate_problem = _sprint_candidate_problem(snapshot, stories)
-    if candidate_problem is not None:
-        return candidate_problem
     return stories
 
 

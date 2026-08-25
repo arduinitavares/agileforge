@@ -58,6 +58,11 @@ from services.contracts.story import (
     StoryItemEnvelope,
 )
 from services.specs import story_validation_service as story_validation_service_module
+from services.story_sprint_selection import (
+    StorySprintSelectionRequest,
+    apply_story_sprint_selection_in_session,
+    story_sprint_selection_fact_in_session,
+)
 from tests.workflow.lifecycle_fixtures import seed_accepted_specification
 from utils.task_metadata import parse_task_metadata
 from workflow.clock import FixedClock
@@ -838,6 +843,7 @@ def _record_sprint_plan_draft(
     """Record one persisted Sprint-plan draft and return exact bindings."""
     team_name = options["team_name"]
     idempotency_key = options["idempotency_key"]
+    _select_for_sprint(engine, story_id)
     _apply_current_dependencies(
         engine,
         domain,
@@ -915,6 +921,27 @@ def _apply_current_dependencies(
     assert applied.ok is True
 
 
+def _select_for_sprint(engine: Engine, story_id: int) -> None:
+    """Select one eligible fixture Story without replaying a lifecycle-locked no-op."""
+    with Session(engine) as session:
+        story = session.get_one(UserStory, story_id)
+        current = story_sprint_selection_fact_in_session(session, story=story)
+        if current.selection_state == "selected":
+            return
+        apply_story_sprint_selection_in_session(
+            session,
+            StorySprintSelectionRequest(
+                project_id=story.project_id,
+                story_id=story_id,
+                intent="select",
+                expected_state_fingerprint=current.state_fingerprint,
+                idempotency_key=f"select-planning-story-{story_id}",
+                actor="operator@example.com",
+            ),
+        )
+        session.commit()
+
+
 def _seed_dependency_review_rows(
     engine: Engine,
 ) -> tuple[int, int, tuple[int, ...], tuple[_DependencyEdgePayload, ...]]:
@@ -938,6 +965,8 @@ def _seed_dependency_review_rows(
         )[1]
         for index, requirement in enumerate(requirements, start=1)
     )
+    for story_id in story_ids:
+        _select_for_sprint(engine, story_id)
     foreign_project_id = _seed_accepted_backlog(
         engine,
         requirements=("Foreign dependency work",),
@@ -1159,6 +1188,7 @@ def test_dependency_and_readiness_transitions_bind_exact_current_story_facts(
     domain = _domain(engine)
     _record_and_accept_roadmap(domain, project_id)
     _story_artifact_id, story_id = _record_and_accept_story(engine, domain, project_id)
+    _select_for_sprint(engine, story_id)
     with Session(engine) as session:
         snapshot = WorkflowFactRepository(session).load(project_id)
     source_fingerprint = story_dependency_source_fingerprint(snapshot.stories)
@@ -1670,6 +1700,8 @@ def test_sprint_plan_order_is_retrievable_after_restart(engine: Engine) -> None:
         requirement=requirements[1],
         idempotency_suffix="-ordered-second",
     )[1]
+    _select_for_sprint(engine, first_story_id)
+    _select_for_sprint(engine, second_story_id)
     _apply_current_dependencies(
         engine,
         domain,
@@ -1896,6 +1928,7 @@ def test_concurrent_distinct_sprint_drafts_serialize_to_one_leaf(
             domain,
             project_id,
         )
+        _select_for_sprint(race_engine, story_id)
         _apply_current_dependencies(
             race_engine,
             domain,
@@ -2837,6 +2870,7 @@ def test_public_start_blocks_current_plan_while_exact_older_sprint_is_active(
         requirement=replacement_requirement,
         idempotency_suffix="-current-lineage",
     )
+    _select_for_sprint(engine, new_story_id)
     _apply_current_dependencies(
         engine,
         domain,
@@ -3283,6 +3317,8 @@ def test_apply_dependencies_rejects_cycle_without_persisting_edges(
         requirement="Validate planning work",
         idempotency_suffix="-second",
     )
+    _select_for_sprint(engine, first_story_id)
+    _select_for_sprint(engine, second_story_id)
     with Session(engine) as session:
         snapshot = WorkflowFactRepository(session).load(project_id)
     position = domain.position(project_id)

@@ -84,6 +84,7 @@ from tests.workflow.test_planning_transitions import (
     _record_and_accept_story,
     _record_sprint_plan_draft,
     _seed_accepted_backlog,
+    _select_for_sprint,
     _validate_story_structurally,
 )
 from tests.workflow.test_planning_transitions import (
@@ -1874,6 +1875,7 @@ def test_planning_selection_derives_dependency_and_readiness_guards(
     domain = planning_domain(engine)
     _record_and_accept_roadmap(domain, project_id)
     _story_artifact_id, story_id = _record_and_accept_story(engine, domain, project_id)
+    _select_for_sprint(engine, story_id)
     service_type = application_module.PlanningActionSelectionService
     service = service_type(engine=engine)
     position = domain.position(project_id)
@@ -2891,13 +2893,14 @@ def test_sprint_generation_fails_closed_without_host_capacity_input(
     engine: "Engine",
 ) -> None:
     """Require explicit or durable metrics capacity before model execution."""
-    domain, project_id, _story_id = _sprint_ready_project(engine)
+    domain, project_id, story_id = _sprint_ready_project(engine)
     application = _CapturingSprintApplication(
         domain,
         SprintPlanningInputService(engine=engine),
     )
     request = SprintPlanningRequest(
         project_id=project_id,
+        selected_story_ids=(story_id,),
         team_name="Platform",
         idempotency_key="sprint-41",
         actor="operator",
@@ -2918,6 +2921,7 @@ def _sprint_ready_project(
     domain = planning_domain(engine)
     _record_and_accept_roadmap(domain, project_id)
     _artifact_id, story_id = _record_and_accept_story(engine, domain, project_id)
+    _select_for_sprint(engine, story_id)
     _apply_current_dependencies(
         engine,
         domain,
@@ -3172,7 +3176,7 @@ def test_invalid_manual_sprint_selection_fails_before_model(
     assert result.ok is False
     assert result.error is not None
     assert result.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
-    assert result.error.blockers[0].code == "SPRINT_SELECTION_INVALID"
+    assert result.error.blockers[0].code == "SPRINT_CANDIDATE_SET_STALE"
     assert application.agent_requests == []
 
 

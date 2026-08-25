@@ -81,6 +81,8 @@ def _story(
         structural_eligibility_status="eligible",
         sprint_selection_state="selected",
         sprint_selection_state_fingerprint=f"sha256:selection-{story_id}",
+        selected_scope_fingerprint="sha256:" + "b" * 64,
+        dependency_safe=True,
         sprint_candidate=True,
         readiness_blockers=(),
     )
@@ -843,7 +845,7 @@ def test_completion_integrity_binds_complete_execution_contract(
     assert item.category is NodeCategory.INVALID
     assert item.reason_code == (
         "TASK_COMPLETION_EVIDENCE_STALE"
-        if tamper == "completion_evidence"
+        if tamper in {"story_content", "completion_evidence"}
         else "WORKFLOW_FACT_CONFLICT"
     )
 

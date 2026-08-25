@@ -375,7 +375,8 @@ def test_selected_intent_survives_staleness_and_reactivates_after_reconciliation
     assert restored.sprint_selection_state == "selected"
     assert restored.sprint_selection_state_fingerprint == selected_fingerprint
     assert restored.structurally_eligible is True
-    assert restored.sprint_candidate is True
+    assert restored.dependency_safe is False
+    assert restored.sprint_candidate is False
 
 
 def test_malformed_selection_history_uses_repository_integrity_error(

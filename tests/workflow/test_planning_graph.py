@@ -170,6 +170,7 @@ def _story(
     rank = options.get("rank", "1")
     accepted = options.get("accepted", True)
     candidate = options.get("candidate", True)
+    effective_candidate = candidate and accepted
     return StoryFact(
         story_id=story_id,
         source_story_artifact_id=300 + story_id,
@@ -195,7 +196,11 @@ def _story(
         ),
         sprint_selection_state="selected" if candidate else "unselected",
         sprint_selection_state_fingerprint=f"sha256:selection-{story_id}",
-        sprint_candidate=candidate,
+        selected_scope_fingerprint=(
+            "sha256:" + "c" * 64 if effective_candidate else None
+        ),
+        dependency_safe=effective_candidate,
+        sprint_candidate=effective_candidate,
         readiness_blockers=(),
     )
 
@@ -378,6 +383,12 @@ def _snapshot(
         else ()
     )
     reviewed_edges = active_dependency_review_edges(dependencies)
+    selected_scope = tuple(
+        item
+        for item in stories
+        if item.structurally_eligible
+        and item.sprint_selection_state == "selected"
+    )
     current_dependency_reviews = (
         (
             StoryDependencyReviewFact(
@@ -386,11 +397,11 @@ def _snapshot(
                     item.story_id for item in stories if item.sprint_candidate
                 ),
                 reviewed_edges=reviewed_edges,
-                source_fingerprint=story_dependency_source_fingerprint(stories),
+                source_fingerprint=story_dependency_source_fingerprint(selected_scope),
                 dependency_fingerprint=dependency_review_fingerprint(reviewed_edges),
             ),
         )
-        if dependency_reviews is None and stories
+        if dependency_reviews is None and selected_scope
         else (dependency_reviews or ())
     )
     return WorkflowFactSnapshot(

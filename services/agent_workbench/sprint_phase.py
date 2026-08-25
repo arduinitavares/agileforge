@@ -42,7 +42,6 @@ from services.planning_lineage import Decision as PlanningLineageDecision
 from services.specs.accepted_specification import (
     load_current_accepted_specification,
 )
-from services.story_dependencies import assert_dependency_graph_valid_for_sprint
 from utils.task_metadata import metadata_from_structured_task, serialize_task_metadata
 from workflow.definitions.planning import candidate_set_fingerprint
 from workflow.execution_integrity import (
@@ -323,7 +322,6 @@ def _validated_plan_candidates(
                 task,
                 parent_story_spec_item_ids=parent.spec_item_ids,
             )
-    assert_dependency_graph_valid_for_sprint(session, project_id=inputs.project_id)
     return inputs.planner_output, candidates, current_fingerprint
 
 

@@ -198,7 +198,6 @@ def selected_story_dependency_snapshot(
                 item
                 for item in snapshot.story_dependencies
                 if item.dependent_story_id in selected
-                or item.prerequisite_story_id in selected
             ),
             key=lambda item: (
                 item.dependent_story_id,
@@ -213,18 +212,20 @@ def selected_story_dependency_snapshot(
         reviewed_edges = active_dependency_review_edges(dependencies)
     except ValueError as error:
         _fail("Selected dependency edges are not reviewable.", cause=error)
-    if any(
-        edge.dependent_story_id not in selected
-        or edge.prerequisite_story_id not in selected
-        for edge in reviewed_edges
-    ):
-        _fail("Selected Stories are not closed over active dependencies.")
+    if any(edge.prerequisite_story_id not in stories_by_id for edge in reviewed_edges):
+        _fail("Selected dependency scope references a missing prerequisite Story.")
+    source_fingerprints = {story.selected_scope_fingerprint for story in stories}
+    if None in source_fingerprints or len(source_fingerprints) != 1:
+        _fail("Selected Story scope fingerprint is missing or conflicting.")
+    source_fingerprint = next(
+        item for item in source_fingerprints if item is not None
+    )
     return SelectedStoryDependencySnapshot(
         story_ids=canonical_story_ids,
         stories=stories,
         dependencies=dependencies,
         reviewed_edges=reviewed_edges,
-        source_fingerprint=accepted_story_source_fingerprint(stories),
+        source_fingerprint=source_fingerprint,
         dependency_fingerprint=dependency_review_fingerprint(reviewed_edges),
         rows_fingerprint=dependency_rows_fingerprint(dependencies),
     )
@@ -274,9 +275,19 @@ def current_dependency_review(
         )
     )
     selected_story_ids = tuple(item.story_id for item in stories)
-    source_fingerprint = accepted_story_source_fingerprint(stories)
+    source_fingerprints = {item.selected_scope_fingerprint for item in stories}
+    if None in source_fingerprints or len(source_fingerprints) != 1:
+        _fail("Current selected Story scope fingerprint is missing or conflicting.")
+    source_fingerprint = next(
+        item for item in source_fingerprints if item is not None
+    )
+    selected_id_set = set(selected_story_ids)
     try:
-        edges = active_dependency_review_edges(snapshot.story_dependencies)
+        edges = active_dependency_review_edges(
+            item
+            for item in snapshot.story_dependencies
+            if item.dependent_story_id in selected_id_set
+        )
     except ValueError as error:
         _fail("Current dependency edges are not reviewable.", cause=error)
     fingerprint = dependency_review_fingerprint(edges)
