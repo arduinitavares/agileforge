@@ -306,6 +306,8 @@ acceptance_criteria             # ordered exact strings
 spec_item_ids                   # canonical sorted set
 invest_assessment               # explainable 6-dimension assessment (independent, negotiable, valuable, estimable, small, testable)
 estimated_effort
+effort_rationale                # concise non-blank explanation of the Developer sizing estimate
+order_rationale                 # concise non-blank explanation of the proposed Story order within the parent PBI
 produced_artifacts
 research_caveats
 dependency_candidates
@@ -342,7 +344,7 @@ the canonical parent Backlog priority times 100 plus the one-based Story item
 ordinal, serialized as a decimal string.
 
 > [!NOTE]
-> Per Issue #222 and the [Story Refinement to Sprint Selection Design Handoff](../../feedback/2026-08-24-story-refinement-to-sprint-selection-design-handoff.md), pre-acceptance Story review surfaces (dashboard UI, CLI, and API projections) expose the complete planning proposal before acceptance: statement, persona, acceptance criteria, Specification evidence, estimated effort and derived story points, backlog order and rank, proposed dependencies, and the explainable 6-dimension INVEST assessment. Planning metadata values are visible and contestable recommendations before becoming operational state.
+> Per Issue #222 and the [Story Refinement to Sprint Selection Design Handoff](../../feedback/2026-08-24-story-refinement-to-sprint-selection-design-handoff.md), pre-acceptance Story review surfaces (dashboard UI, CLI, and API projections) expose the complete planning proposal before acceptance: statement, persona, acceptance criteria, Specification evidence, estimated effort and derived story points with rationale (`effort_rationale`), story order and rank with rationale (`order_rationale`), proposed dependencies (with explicit empty representation), and the explainable 6-dimension INVEST assessment. Planning metadata values are visible and contestable recommendations before becoming operational state.
 
 The remaining canonical Story-item
 fields stay in the immutable artifact and are resolved from it for reviews and

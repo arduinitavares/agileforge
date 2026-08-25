@@ -3804,6 +3804,8 @@ def test_story_review_renders_exact_candidate_and_only_cited_evidence(
             },
         },
         "estimated_effort": "M",
+        "effort_rationale": "Moderate complexity storage routine.",
+        "order_rationale": "First priority calculation.",
         "story_points": 3,
         "rank": "101",
         "order": 1,

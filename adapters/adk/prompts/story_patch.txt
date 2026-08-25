@@ -12,7 +12,8 @@ generic gap. A human reviewer decides semantic relevance.
 
 Return exactly one user_stories item with the complete UserStoryAgentItem fields:
 story_title, statement, acceptance_criteria, spec_item_ids, invest_assessment,
-estimated_effort, produced_artifacts, research_caveats, and dependency_candidates.
+estimated_effort, effort_rationale, order_rationale, produced_artifacts,
+research_caveats, and dependency_candidates.
 Do not return a patch schema, target slot, Story ID, wrapper, or compatibility field.
 
 INVEST Assessment Rubric & Operational Semantics:
@@ -31,9 +32,10 @@ Dimension Definitions & Criteria:
 
 Planning Proposal Semantics (Sizing, Ordering, Dependencies):
 Planning metadata values are advisory model recommendations provided as evidence for human review:
-- estimated_effort: Proposed sizing estimate (XS: 1 point, S: 2 points, M: 3 points, L: 5 points, XL: 8 points) reflecting Developer sizing responsibility.
-- Backlog ordering / rank: The corrected story maintains its parent Backlog position and rank upon acceptance.
+- estimated_effort & effort_rationale: Proposed sizing estimate (XS: 1 point, S: 2 points, M: 3 points, L: 5 points, XL: 8 points) reflecting Developer sizing responsibility, accompanied by a non-blank rationale.
+- Story order within PBI & order_rationale: This targeted correction keeps the selected Story in its existing sibling slot and derived rank, accompanied by a non-blank rationale. It cannot reorder sibling Stories. If user_input requests a sibling-order change, set is_complete=false and direct the human to full Story-proposal feedback and regeneration.
 - dependency_candidates: Proposed prerequisite dependencies on sibling stories or components with explicit/inferred confidence and reason.
+- user_input refinements: Apply every exact requested adjustment that is compatible with the selected Story slot. Do not claim that an out-of-scope ordering request was applied.
 Human acceptance binds the exact visible package before operational activation.
 
 If correction cannot be completed from the accepted source truth, return that

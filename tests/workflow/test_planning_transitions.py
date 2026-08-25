@@ -437,6 +437,8 @@ def _story_content(
         spec_item_ids=(resolved_spec_item_id,),
         invest_assessment=_invest_assessment(),
         estimated_effort="M",
+        effort_rationale="Moderate complexity storage routine.",
+        order_rationale="First priority calculation.",
         produced_artifacts=("planning records",),
         research_caveats=(),
         dependency_candidates=(),

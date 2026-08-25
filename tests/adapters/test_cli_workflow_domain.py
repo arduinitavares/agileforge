@@ -1339,6 +1339,8 @@ def _planning_review(phase: str) -> dict[str, object]:
                         },
                     },
                     "estimated_effort": "M",
+                    "effort_rationale": "Moderate calculation scope.",
+                    "order_rationale": "Initial balance reconciliation.",
                     "story_points": 3,
                     "rank": "101",
                     "order": 1,
@@ -1714,15 +1716,20 @@ def test_story_item_lines_formats_missing_invest_assessment() -> None:
     )
 
 
-def test_story_decide_rejects_acceptance_when_invest_missing_or_malformed(
+@pytest.mark.parametrize(
+    "malformed_field",
+    ["invest_assessment", "effort_rationale", "order_rationale"],
+)
+def test_story_decide_rejects_acceptance_when_required_evidence_is_malformed(
     capsys: pytest.CaptureFixture[str],
+    malformed_field: str,
 ) -> None:
-    """Story decide with accepted decision fails closed on invalid INVEST assessment."""
+    """Story acceptance fails closed on invalid quality or planning evidence."""
     app = _Application()
     review = _planning_review("story")
     candidate = cast("dict[str, object]", review["candidate"])
     story_items = cast("list[dict[str, object]]", candidate["story_items"])
-    story_items[0]["invest_assessment"] = None
+    story_items[0][malformed_field] = None
     app.story_review_override = review
 
     exit_code = main(_decision_argv("story"), application=app)
@@ -1730,8 +1737,8 @@ def test_story_decide_rejects_acceptance_when_invest_missing_or_malformed(
 
     captured = capsys.readouterr()
     assert (
-        "Story proposal cannot be accepted: required INVEST quality assessment "
-        "is missing or malformed." in captured.out
+        "Story proposal cannot be accepted: required INVEST, sizing, or ordering "
+        "evidence is missing or malformed." in captured.out
     )
     assert len(app.writes) == 0
 
@@ -1785,15 +1792,17 @@ def test_story_decide_allows_feedback_and_rejection_for_malformed_invest(
 
 
 def test_story_item_lines_formats_sizing_rank_and_dependencies() -> None:
-    """Format effort with derived points, rank/order, and dependency state."""
+    """Format effort with derived points, rank/order, rationales, and dependencies."""
     item_with_planning: dict[str, object] = {
         "story_title": "Title",
         "statement": "As a user, I want something.",
         "persona": "user",
         "order": 1,
         "rank": "101",
+        "order_rationale": "Initial foundation for subsequent increments.",
         "estimated_effort": "M",
         "story_points": 3,
+        "effort_rationale": "Moderate complexity data validation and transformation.",
         "acceptance_criteria": ["Done."],
         "specification_evidence": [],
         "invest_assessment": {
@@ -1807,8 +1816,13 @@ def test_story_item_lines_formats_sizing_rank_and_dependencies() -> None:
         "dependency_candidates": [],
     }
     lines = _story_item_lines(item_with_planning, indent="  ")
-    assert "  Order: 1 | Rank: 101" in lines
+    assert "  Story order within PBI: 1 | Derived rank: 101" in lines
+    assert "  Order rationale: Initial foundation for subsequent increments." in lines
     assert "  Estimated effort: M (derived: 3 story points)" in lines
+    assert (
+        "  Effort rationale: Moderate complexity data validation and transformation."
+        in lines
+    )
     assert "  Proposed dependencies: None" in lines
 
     # Non-empty dependencies

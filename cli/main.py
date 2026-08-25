@@ -1366,7 +1366,16 @@ def _is_story_review_acceptable(review: object) -> bool:
         if not isinstance(item, dict):
             return False
         item_dict = cast("dict[str, object]", item)
-        if not _is_well_formed_invest_assessment(item_dict.get("invest_assessment")):
+        rationales = (
+            item_dict.get("effort_rationale"),
+            item_dict.get("order_rationale"),
+        )
+        if not _is_well_formed_invest_assessment(
+            item_dict.get("invest_assessment")
+        ) or not all(
+            isinstance(rationale, str) and bool(rationale.strip())
+            for rationale in rationales
+        ):
             return False
     return True
 
@@ -1463,8 +1472,16 @@ def _story_item_lines(value: object, *, indent: str = "") -> list[str]:
     ]
     if story.get("rank") is not None:
         order = story.get("order")
-        order_text = f"Order: {_review_text(order)} | " if order is not None else ""
-        lines.append(f"{indent}{order_text}Rank: {_review_text(story['rank'])}")
+        order_text = (
+            f"Story order within PBI: {_review_text(order)} | "
+            if order is not None
+            else ""
+        )
+        lines.append(f"{indent}{order_text}Derived rank: {_review_text(story['rank'])}")
+    if story.get("order_rationale") is not None:
+        lines.append(
+            f"{indent}Order rationale: {_review_text(story['order_rationale'])}"
+        )
     if story.get("estimated_effort") is not None:
         effort = _review_text(story["estimated_effort"])
         points = story.get("story_points")
@@ -1475,6 +1492,10 @@ def _story_item_lines(value: object, *, indent: str = "") -> list[str]:
             )
         else:
             lines.append(f"{indent}Estimated effort: {effort}")
+    if story.get("effort_rationale") is not None:
+        lines.append(
+            f"{indent}Effort rationale: {_review_text(story['effort_rationale'])}"
+        )
     lines.extend(
         _list_lines(
             "Acceptance criteria", story.get("acceptance_criteria"), indent=indent
@@ -1700,8 +1721,8 @@ def _story_decide(args: argparse.Namespace, application: _Application) -> int:
     binding, review = _story_review_choice(application.story_reviews(args.project_id))
     if decision == "accepted" and not _is_story_review_acceptable(review):
         raise ValueError(
-            "Story proposal cannot be accepted: required INVEST quality assessment "
-            "is missing or malformed."
+            "Story proposal cannot be accepted: required INVEST, sizing, or "
+            "ordering evidence is missing or malformed."
         )
     if not _confirm_planning_review(review, decision=decision):
         raise ValueError("Story review cancelled before any write.")

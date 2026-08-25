@@ -351,6 +351,8 @@ def _story_content(
             },
         },
         "estimated_effort": "M",
+        "effort_rationale": "Moderate persistence and lifecycle routing scope.",
+        "order_rationale": f"Story {ordinal} follows accepted Backlog priority.",
         "produced_artifacts": ["workflow records"],
         "research_caveats": [],
         "dependency_candidates": [],

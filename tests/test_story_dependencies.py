@@ -105,6 +105,8 @@ def _story_set(session: Session, *, titles: tuple[str, ...]) -> tuple[int, ...]:
             spec_item_ids=("REQ.planning-1",),
             invest_assessment=_invest_assessment(),
             estimated_effort="S",
+            effort_rationale="Straightforward single operation.",
+            order_rationale=f"Step {ordinal} in sequence.",
             produced_artifacts=(),
             research_caveats=(),
             dependency_candidates=(),

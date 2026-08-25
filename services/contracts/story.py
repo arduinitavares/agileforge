@@ -104,9 +104,17 @@ class UserStoryAgentItem(BaseModel):
     )
     invest_assessment: StoryInvestAssessment
     estimated_effort: Literal["XS", "S", "M", "L", "XL"]
+    effort_rationale: Annotated[str, Field(min_length=1)]
+    order_rationale: Annotated[str, Field(min_length=1)]
     produced_artifacts: tuple[str, ...]
     research_caveats: tuple[str, ...]
     dependency_candidates: tuple[StoryDependencyCandidate, ...]
+
+    @field_validator("story_title", "effort_rationale", "order_rationale")
+    @classmethod
+    def validate_nonblank_text_fields(cls, value: str) -> str:
+        """Reject whitespace-only fields from agent output."""
+        return require_nonblank_text(value, field_name="User story field")
 
     @field_validator("acceptance_criteria")
     @classmethod
@@ -139,6 +147,8 @@ class CanonicalStoryItem(BaseModel):
     spec_item_ids: tuple[str, ...]
     invest_assessment: StoryInvestAssessment
     estimated_effort: Literal["XS", "S", "M", "L", "XL"]
+    effort_rationale: Annotated[str, Field(min_length=1)]
+    order_rationale: Annotated[str, Field(min_length=1)]
     produced_artifacts: tuple[str, ...]
     research_caveats: tuple[str, ...]
     dependency_candidates: tuple[StoryDependencyCandidate, ...]
@@ -149,7 +159,13 @@ class CanonicalStoryItem(BaseModel):
         """Reject impossible host Story IDs during canonical-item deserialization."""
         return validate_story_item_id(value)
 
-    @field_validator("story_title", "statement", "persona")
+    @field_validator(
+        "story_title",
+        "statement",
+        "persona",
+        "effort_rationale",
+        "order_rationale",
+    )
     @classmethod
     def validate_nonblank_content(cls, value: str) -> str:
         """Reject blank host Story content without rewriting valid bytes."""
@@ -291,6 +307,8 @@ def canonicalize_story_items(
                     ),
                     invest_assessment=item.invest_assessment,
                     estimated_effort=item.estimated_effort,
+                    effort_rationale=item.effort_rationale,
+                    order_rationale=item.order_rationale,
                     produced_artifacts=item.produced_artifacts,
                     research_caveats=item.research_caveats,
                     dependency_candidates=item.dependency_candidates,

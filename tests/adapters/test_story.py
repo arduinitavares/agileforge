@@ -168,5 +168,20 @@ def test_instructions_define_planning_proposal_semantics() -> None:
             in instructions
         )
         assert "Developer sizing responsibility" in instructions
+        assert "effort_rationale" in instructions
+        assert "order_rationale" in instructions
         assert "dependency_candidates" in instructions
+        assert "user_input refinements" in instructions
         assert "Human acceptance binds the exact visible package" in instructions
+
+    assert "changing story ordering" in USER_STORY_WRITER_INSTRUCTIONS
+    assert (
+        "MUST apply those exact requested adjustments"
+        in USER_STORY_WRITER_INSTRUCTIONS
+    )
+    assert "Story order within PBI" in USER_STORY_WRITER_INSTRUCTIONS
+    assert "cannot reorder sibling Stories" in USER_STORY_PATCH_INSTRUCTIONS
+    assert (
+        "full Story-proposal feedback and regeneration"
+        in USER_STORY_PATCH_INSTRUCTIONS
+    )

@@ -846,6 +846,13 @@ class FakeLifecycle:
                     "acceptance_criteria": ["Controls render when available."],
                     "specification_evidence": [],
                     "invest_assessment": _valid_invest_assessment_payload(),
+                    "estimated_effort": "M",
+                    "effort_rationale": "Bounded delivery generation slice.",
+                    "order_rationale": "First priority in backlog item.",
+                    "order": 1,
+                    "rank": "101",
+                    "story_points": 3,
+                    "dependency_candidates": [],
                 }
             ],
             "is_complete": True,
@@ -1877,6 +1884,13 @@ def _story_review(
         "persona": "Operator",
         "acceptance_criteria": ["The selector remains exact."],
         "specification_evidence": [],
+        "estimated_effort": "M",
+        "effort_rationale": "Clear bounded scope for UI test.",
+        "order_rationale": "First priority in backlog item.",
+        "order": 1,
+        "rank": "101",
+        "story_points": 3,
+        "dependency_candidates": [],
     }
     if assessment:
         story_item["invest_assessment"] = assessment
@@ -2130,7 +2144,7 @@ def test_story_generation_non_contiguous_labels_intent_confirmation_and_reconcil
     expect(review_card).to_contain_text("Independent")
     expect(review_card).to_contain_text("Pass")
     expect(
-        review_card.locator('[data-review-error="invalid-invest"]')
+        review_card.locator('[data-review-error="invalid-story-evidence"]')
     ).not_to_be_attached()
     accept_review_btn = review_card.locator(
         '[data-planning-review="story"][data-review-decision="accepted"]'
@@ -2647,10 +2661,10 @@ def test_progressive_story_readiness_failure_diagnostics_persist_on_reload(
     context.close()
 
 
-def test_story_review_disables_acceptance_when_invest_missing_or_malformed(
+def test_story_review_disables_acceptance_when_required_evidence_is_malformed(
     dashboard_harness: DashboardHarness,
 ) -> None:
-    """Verify Story candidate without valid INVEST disables acceptance."""
+    """Verify incomplete Story evidence disables acceptance."""
     action_pbi2 = _story_generation_action("backlog_item:PBI-000002")
     action_pbi4 = _story_generation_action("backlog_item:PBI-000004")
     actions = [action_pbi2, action_pbi4]
@@ -2669,12 +2683,14 @@ def test_story_review_disables_acceptance_when_invest_missing_or_malformed(
     expect(review_card).to_be_visible()
     expect(review_card).to_contain_text("Story review for PBI-000003")
 
-    # Visible quality error banner
-    error_banner = review_card.locator('[data-review-error="invalid-invest"]')
+    # Visible evidence error banner
+    error_banner = review_card.locator(
+        '[data-review-error="invalid-story-evidence"]'
+    )
     expect(error_banner).to_be_visible()
     expect(error_banner).to_contain_text(
-        "Story proposal cannot be accepted: required INVEST quality assessment is "
-        "missing or malformed. Acceptance is disabled."
+        "Story proposal cannot be accepted: required INVEST, sizing, or ordering "
+        "evidence is missing or malformed. Acceptance is disabled."
     )
 
     # Incomplete INVEST assessment section rendered

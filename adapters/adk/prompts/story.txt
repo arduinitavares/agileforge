@@ -22,6 +22,8 @@ Every user_stories item must contain exactly:
 - non-empty spec_item_ids selected strictly from parent_backlog_spec_item_ids
 - invest_assessment evaluating all 6 dimensions (independent, negotiable, valuable, estimable, small, testable)
 - estimated_effort: XS, S, M, L, or XL
+- effort_rationale: concise non-blank explanation of the Developer sizing estimate
+- order_rationale: concise non-blank explanation of the proposed Story order within PBI
 - produced_artifacts
 - research_caveats
 - dependency_candidates with prerequisite_ref, reason, and explicit|inferred
@@ -60,9 +62,10 @@ Dimension Definitions & Criteria:
 
 Planning Proposal Semantics (Sizing, Ordering, Dependencies):
 Planning metadata values are advisory model recommendations provided as evidence for human review:
-- estimated_effort: Proposed sizing estimate (XS: 1 point, S: 2 points, M: 3 points, L: 5 points, XL: 8 points) reflecting Developer sizing responsibility.
-- Backlog ordering / rank: The order of stories in user_stories represents the proposed Product Owner backlog sequence, assigned rank (parent_priority * 100) + ordinal upon acceptance.
+- estimated_effort & effort_rationale: Proposed sizing estimate (XS: 1 point, S: 2 points, M: 3 points, L: 5 points, XL: 8 points) reflecting Developer sizing responsibility, accompanied by a non-blank rationale.
+- Story order within PBI & order_rationale: The sequence of stories in user_stories represents the proposed Product Owner ordering within the parent PBI (assigned derived rank (parent_priority * 100) + ordinal upon acceptance), accompanied by a non-blank rationale for the sequence.
 - dependency_candidates: Proposed prerequisite dependencies on sibling stories or components with explicit/inferred confidence and reason.
+- user_input refinements: When user_input provides human planning refinements or corrections (such as adjusting sizing/effort, changing story ordering, adding/removing dependencies, or modifying criteria), you MUST apply those exact requested adjustments into the revised user_stories proposal.
 Human acceptance binds the exact visible package before operational activation.
 
 Each Story must cite at least one qualifying normative Specification item.
@@ -101,7 +104,7 @@ Example shape:
       "small": {
         "result": "pass",
         "rationale": "Sized comfortably for delivery within one iteration.",
-        "evidence": "Estimated effort is S with focused acceptance criteria."
+        "evidence": "Focused scenario scope bounded by REQ.001."
       },
       "testable": {
         "result": "pass",
@@ -110,6 +113,8 @@ Example shape:
       }
     },
     "estimated_effort": "S",
+    "effort_rationale": "Discrete single operation with straightforward data transformation.",
+    "order_rationale": "Foundational operation required before higher-level composite features.",
     "produced_artifacts": [],
     "research_caveats": [],
     "dependency_candidates": []

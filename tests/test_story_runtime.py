@@ -129,6 +129,8 @@ def _story_item(title: str = "Implement the accepted operation") -> dict[str, An
         "spec_item_ids": ["DATA.001", "REQ.001"],
         "invest_assessment": _invest_assessment(),
         "estimated_effort": "S",
+        "effort_rationale": "Single straightforward calculation operation.",
+        "order_rationale": "First priority calculation.",
         "produced_artifacts": [],
         "research_caveats": [],
         "dependency_candidates": [],

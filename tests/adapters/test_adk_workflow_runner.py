@@ -105,6 +105,7 @@ from utils.runtime_config import ADK_EXECUTION_TRACE_IDENTITY
 from workflow.clock import FixedClock
 from workflow.contracts import (
     JsonObject,
+    JsonValue,
     NodeCategory,
     NodeDecision,
     RecommendationKind,
@@ -115,6 +116,7 @@ from workflow.definitions.root import ROOT_GRAPH
 from workflow.domain import WorkflowDomain
 from workflow.fingerprints import canonical_hash
 from workflow.requests import (
+    DecideStory,
     RecordBacklogDraft,
     RecordRoadmapDraft,
     RecordSprintPlan,
@@ -552,6 +554,8 @@ def _story_provider_output(
                 "spec_item_ids": list(spec_item_ids),
                 "invest_assessment": _invest_assessment_payload(),
                 "estimated_effort": "S",
+                "effort_rationale": "Single straightforward calculation operation.",
+                "order_rationale": "First priority increment in sequence.",
                 "produced_artifacts": [],
                 "research_caveats": [],
                 "dependency_candidates": [],
@@ -992,6 +996,8 @@ async def test_delivery_recipe_fakes_use_production_contracts_and_canonicalizers
                 "spec_item_ids": ["DATA.001", "REQ.001"],
                 "invest_assessment": _invest_assessment_payload(),
                 "estimated_effort": "S",
+                "effort_rationale": "Single straightforward calculation operation.",
+                "order_rationale": "First priority increment in sequence.",
                 "produced_artifacts": [],
                 "research_caveats": [],
                 "dependency_candidates": [],
@@ -1303,6 +1309,8 @@ async def test_story_correction_recipe_repairs_then_merges_and_remints_once(
             "spec_item_ids": ["DATA.001", "REQ.001"],
             "invest_assessment": _invest_assessment_payload(),
             "estimated_effort": "S",
+            "effort_rationale": "Single straightforward calculation operation.",
+            "order_rationale": f"Sequential step for {title}.",
             "produced_artifacts": [],
             "research_caveats": [],
             "dependency_candidates": [],
@@ -1467,6 +1475,8 @@ async def test_story_correction_recipe_repairs_out_of_parent_reference(
             "spec_item_ids": list(spec_item_ids),
             "invest_assessment": _invest_assessment_payload(),
             "estimated_effort": "S",
+            "effort_rationale": "Single straightforward calculation operation.",
+            "order_rationale": f"Sequential step for {title}.",
             "produced_artifacts": [],
             "research_caveats": [],
             "dependency_candidates": [],
@@ -1688,6 +1698,222 @@ def test_story_runner_valid_first_persists_one_draft_and_replays_without_provide
         assert outcomes[0].status == "success"
 
 
+def _issue_222_story_item(
+    *,
+    title: str,
+    effort: str,
+    effort_rationale: str,
+    order_rationale: str,
+    dependency_candidates: list[JsonValue],
+) -> JsonObject:
+    """Build one literal Story item for the precise-feedback regression."""
+    return {
+        "story_title": title,
+        "statement": (
+            f"As an operator, I want {title}, so that its outcome is available."
+        ),
+        "acceptance_criteria": [f"Verify {title}."],
+        "spec_item_ids": ["REQ.planning-1"],
+        "invest_assessment": _invest_assessment_payload(),
+        "estimated_effort": effort,
+        "effort_rationale": effort_rationale,
+        "order_rationale": order_rationale,
+        "produced_artifacts": [],
+        "research_caveats": [],
+        "dependency_candidates": dependency_candidates,
+    }
+
+
+def _assert_issue_222_successor(
+    engine: Engine,
+    *,
+    source_artifact_id: int,
+    feedback_text: str,
+) -> None:
+    """Assert exact successor content, lineage, and pre-acceptance isolation."""
+    with Session(engine) as session:
+        artifacts = session.exec(
+            select(StoryArtifact).order_by(col(StoryArtifact.story_artifact_id))
+        ).all()
+        assert len(artifacts) == 2  # noqa: PLR2004
+        assert [artifact.version_number for artifact in artifacts] == [1, 2]
+        replacement = artifacts[1]
+        assert replacement.supersedes_story_artifact_id == source_artifact_id
+        replacement_content = CanonicalStoryOutput.model_validate_json(
+            replacement.canonical_content_json
+        )
+        replacement_items = replacement_content.story_items
+        assert [item.item.story_title for item in replacement_items] == [
+            "Story A",
+            "Story B",
+        ]
+        assert [item.item.estimated_effort for item in replacement_items] == [
+            "S",
+            "M",
+        ]
+        assert all(
+            not item.item.dependency_candidates for item in replacement_items
+        )
+        decisions = session.exec(select(StoryArtifactDecision)).all()
+        assert len(decisions) == 1
+        assert decisions[0].story_artifact_id == source_artifact_id
+        assert decisions[0].decision == "feedback"
+        assert decisions[0].rationale == feedback_text
+        assert session.exec(select(UserStory)).all() == []
+
+
+def test_story_runner_precise_feedback_creates_superseding_exact_candidate(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Carry exact feedback through generation into one reviewable successor."""
+    source_output: JsonObject = {
+        "user_stories": [
+            _issue_222_story_item(
+                title="Story B",
+                effort="M",
+                effort_rationale="Moderate second-outcome work.",
+                order_rationale="Initially proposed before Story A.",
+                dependency_candidates=[],
+            ),
+            _issue_222_story_item(
+                title="Story A",
+                effort="M",
+                effort_rationale="Moderate first-outcome work.",
+                order_rationale="Initially proposed after Story B.",
+                dependency_candidates=[
+                    {
+                        "prerequisite_ref": "dependency X",
+                        "reason": "The initial proposal expected dependency X.",
+                        "confidence": "explicit",
+                    }
+                ],
+            ),
+        ],
+        "is_complete": True,
+        "clarifying_questions": [],
+    }
+    revised_output: JsonObject = {
+        "user_stories": [
+            _issue_222_story_item(
+                title="Story A",
+                effort="S",
+                effort_rationale="Reduced to S after the requested refinement.",
+                order_rationale="Moved before Story B as requested.",
+                dependency_candidates=[],
+            ),
+            _issue_222_story_item(
+                title="Story B",
+                effort="M",
+                effort_rationale="Moderate second-outcome work.",
+                order_rationale="Moved after Story A as requested.",
+                dependency_candidates=[],
+            ),
+        ],
+        "is_complete": True,
+        "clarifying_questions": [],
+    }
+    model = SequenceStoryLlm(
+        model="provider-free-precise-story-feedback",
+        response_texts=[
+            json.dumps(source_output),
+            json.dumps(revised_output),
+        ],
+    )
+    monkeypatch.setattr(story_agents, "_create_story_writer_model", lambda: model)
+    system = _story_runner_system(
+        engine,
+        leaf=story_agents.create_user_story_writer_agent(),
+    )
+
+    first_position = system.domain.position(system.project_id)
+    first_decision = _story_decision(system.domain, system.project_id)
+    first = system.runner.run(
+        first_decision,
+        system.payload,
+        guards=AdkRunGuards(
+            position=first_position,
+            idempotency_key="issue-222-story-source",
+            actor="operator@example.com",
+            correlation_id="issue-222-story-source",
+        ),
+    )
+    assert first.ok is True
+    with Session(engine) as session:
+        source_artifact = session.exec(select(StoryArtifact)).one()
+        source_artifact_id = int(source_artifact.story_artifact_id or 0)
+        source_fingerprint = source_artifact.content_fingerprint
+        source_content_json = source_artifact.canonical_content_json
+
+    feedback_text = (
+        "Change Story A effort to S, move Story A before Story B, and remove "
+        "dependency X."
+    )
+    review_position = system.domain.position(system.project_id)
+    review_decision = next(
+        decision
+        for decision in review_position.decisions
+        if decision.node_id == "planning.story.review"
+        and decision.instance_key == first_decision.instance_key
+    )
+    feedback = system.domain.transition(
+        DecideStory(
+            project_id=system.project_id,
+            graph_version=review_position.graph_version,
+            fact_fingerprint=review_position.fact_fingerprint,
+            decision_fingerprint=review_decision.decision_fingerprint,
+            instance_key=review_decision.instance_key,
+            idempotency_key="issue-222-story-feedback",
+            actor="operator@example.com",
+            correlation_id="issue-222-story-feedback",
+            backlog_item_id="PBI-000001",
+            story_artifact_id=source_artifact_id,
+            artifact_fingerprint=source_fingerprint,
+            decision="feedback",
+            rationale=feedback_text,
+        )
+    )
+    assert feedback.ok is True
+
+    successor_position = system.domain.position(system.project_id)
+    successor_decision = _story_decision(system.domain, system.project_id)
+    successor_payload = DeliveryActionInputService(engine=engine).build(
+        project_id=system.project_id,
+        decision=successor_decision,
+        node_id="planning.story.generate",
+    )
+    assert isinstance(successor_payload, dict)
+    assert successor_payload["supersedes_story_artifact_id"] == source_artifact_id
+    writer_input = successor_payload["writer_input"]
+    assert isinstance(writer_input, dict)
+    persisted_feedback = writer_input["user_input"]
+    assert isinstance(persisted_feedback, str)
+    assert source_content_json in persisted_feedback
+    assert "Review outcome: feedback" in persisted_feedback
+    assert f"Review rationale: {feedback_text}" in persisted_feedback
+
+    successor = system.runner.run(
+        successor_decision,
+        successor_payload,
+        guards=AdkRunGuards(
+            position=successor_position,
+            idempotency_key="issue-222-story-successor",
+            actor="operator@example.com",
+            correlation_id="issue-222-story-successor",
+        ),
+    )
+    assert successor.ok is True
+    assert len(model.request_texts) == 2  # noqa: PLR2004
+    provider_successor_input = json.loads(model.request_texts[1])
+    assert provider_successor_input["user_input"] == persisted_feedback
+
+    _assert_issue_222_successor(
+        engine,
+        source_artifact_id=source_artifact_id,
+        feedback_text=feedback_text,
+    )
+
+
 def test_story_runner_concurrent_duplicate_never_enters_provider_twice(
     engine: Engine,
 ) -> None:
@@ -1869,6 +2095,8 @@ def _attempt_16_sanitized_responses(
                 "spec_item_ids": [valid_spec_id],
                 "invest_assessment": _invest_assessment_payload(),
                 "estimated_effort": "S",
+                "effort_rationale": "Small public package interface definition.",
+                "order_rationale": "Entrypoint definition for calculator.",
                 "produced_artifacts": [
                     "Public Python package interface exposing "
                     "`add(numbers: str) -> int`"
@@ -1916,6 +2144,8 @@ def _attempt_16_sanitized_responses(
                 "spec_item_ids": [valid_spec_id],
                 "invest_assessment": _invest_assessment_payload(),
                 "estimated_effort": "M",
+                "effort_rationale": "Moderate complexity delimiter and token parsing.",
+                "order_rationale": "Grammar support required before summation.",
                 "produced_artifacts": ["Supported Number List parsing behavior"],
                 "research_caveats": [],
                 "dependency_candidates": [],
@@ -1956,6 +2186,8 @@ def _attempt_16_sanitized_responses(
                 "spec_item_ids": [valid_spec_id, numeric_spelling_spec_id],
                 "invest_assessment": _invest_assessment_payload(),
                 "estimated_effort": "M",
+                "effort_rationale": "Arithmetic reduction across parsed tokens.",
+                "order_rationale": "Core calculation built on grammar parser.",
                 "produced_artifacts": [
                     "Public calculation behavior for supported "
                     "non-negative Number Lists"
@@ -2005,6 +2237,8 @@ def _attempt_16_sanitized_responses(
                 "spec_item_ids": [valid_spec_id],
                 "invest_assessment": _invest_assessment_payload(),
                 "estimated_effort": "M",
+                "effort_rationale": "Moderate complexity token parsing.",
+                "order_rationale": "Input grammar recognition.",
                 "produced_artifacts": ["Supported Number List parsing behavior"],
                 "research_caveats": [],
                 "dependency_candidates": [],
@@ -2039,6 +2273,8 @@ def _attempt_16_sanitized_responses(
                 "spec_item_ids": [valid_spec_id, unbounded_spec_id],
                 "invest_assessment": _invest_assessment_payload(),
                 "estimated_effort": "S",
+                "effort_rationale": "Straightforward summation logic.",
+                "order_rationale": "Arithmetic computation layer.",
                 "produced_artifacts": [
                     "Supported non-negative Number List summation behavior"
                 ],
@@ -2071,6 +2307,8 @@ def _attempt_16_sanitized_responses(
                 "spec_item_ids": [valid_spec_id],
                 "invest_assessment": _invest_assessment_payload(),
                 "estimated_effort": "S",
+                "effort_rationale": "Public package wrapper and export.",
+                "order_rationale": "Public interface presentation.",
                 "produced_artifacts": [
                     "Public `string_calculator.add` Python interface"
                 ],

@@ -109,6 +109,8 @@ def _story(*, criterion: str = "Verify the result.") -> UserStoryAgentItem:
         spec_item_ids=("REQ.alpha", "DATA.beta"),
         invest_assessment=_valid_invest_assessment(),
         estimated_effort="S",
+        effort_rationale="Discrete calculation operation with clear formula.",
+        order_rationale="First priority calculation capability.",
         produced_artifacts=("calculator",),
         research_caveats=(),
         dependency_candidates=(),
@@ -394,3 +396,29 @@ def test_story_item_rejects_retired_aggregate_invest_score() -> None:
     data["invest_score"] = "High"
     with pytest.raises(ValidationError):
         UserStoryAgentItem.model_validate(data)
+
+
+def test_story_item_requires_nonblank_effort_and_order_rationales() -> None:
+    # Missing effort_rationale
+    data_no_effort_rat = _story().model_dump(mode="json")
+    data_no_effort_rat.pop("effort_rationale")
+    with pytest.raises(ValidationError):
+        UserStoryAgentItem.model_validate(data_no_effort_rat)
+
+    # Blank effort_rationale
+    data_blank_effort_rat = _story().model_dump(mode="json")
+    data_blank_effort_rat["effort_rationale"] = "   "
+    with pytest.raises(ValidationError):
+        UserStoryAgentItem.model_validate(data_blank_effort_rat)
+
+    # Missing order_rationale
+    data_no_order_rat = _story().model_dump(mode="json")
+    data_no_order_rat.pop("order_rationale")
+    with pytest.raises(ValidationError):
+        UserStoryAgentItem.model_validate(data_no_order_rat)
+
+    # Blank order_rationale
+    data_blank_order_rat = _story().model_dump(mode="json")
+    data_blank_order_rat["order_rationale"] = ""
+    with pytest.raises(ValidationError):
+        UserStoryAgentItem.model_validate(data_blank_order_rat)

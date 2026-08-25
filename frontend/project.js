@@ -1161,6 +1161,12 @@ function isStoryReviewAcceptable(review) {
         if (!story || !isWellFormedInvestAssessment(story.invest_assessment)) {
             return false;
         }
+        if (typeof story.effort_rationale !== 'string' || !story.effort_rationale.trim()) {
+            return false;
+        }
+        if (typeof story.order_rationale !== 'string' || !story.order_rationale.trim()) {
+            return false;
+        }
     }
     return true;
 }
@@ -1261,9 +1267,13 @@ function storyItemMarkup(value) {
         <p class="text-sm leading-6">${escapeWorkflowText(reviewValue(story.statement))}</p>
         <div class="flex flex-wrap gap-4 text-sm">
             <p><strong>Persona:</strong> ${escapeWorkflowText(reviewValue(story.persona))}</p>
-            ${story.rank ? `<p><strong>Backlog order:</strong> ${escapeWorkflowText(reviewValue(story.order ?? '-'))} <span class="text-slate-500">(Rank: ${escapeWorkflowText(reviewValue(story.rank))})</span></p>` : ''}
+            ${story.rank ? `<p><strong>Story order within PBI:</strong> ${escapeWorkflowText(reviewValue(story.order ?? '-'))} <span class="text-slate-500">(Derived rank: ${escapeWorkflowText(reviewValue(story.rank))})</span></p>` : ''}
             ${story.estimated_effort ? `<p><strong>Estimated effort:</strong> ${escapeWorkflowText(reviewValue(story.estimated_effort))}${pointsText}</p>` : ''}
         </div>
+        ${story.order_rationale || story.effort_rationale ? `<div class="rounded-md border border-slate-200 bg-slate-50 p-2.5 space-y-1 text-xs">
+            ${story.order_rationale ? `<p class="text-slate-700"><strong>Order rationale:</strong> ${escapeWorkflowText(reviewValue(story.order_rationale))}</p>` : ''}
+            ${story.effort_rationale ? `<p class="text-slate-700"><strong>Effort rationale:</strong> ${escapeWorkflowText(reviewValue(story.effort_rationale))}</p>` : ''}
+        </div>` : ''}
         ${reviewListMarkup('Acceptance criteria', story.acceptance_criteria)}
         ${specificationEvidenceMarkup(story.specification_evidence)}
         ${investAssessmentMarkup(story.invest_assessment)}
@@ -1355,7 +1365,7 @@ function planningReviewAcceptButtonMarkup(scope, index, isAcceptable) {
     if (isAcceptable) {
         return `<button type="button" data-planning-review="${escapeWorkflowText(scope)}" data-review-index="${index}" data-review-decision="accepted" class="${BUTTON_PRIMARY}">Accept</button>`;
     }
-    return `<button type="button" data-planning-review="${escapeWorkflowText(scope)}" data-review-index="${index}" data-review-decision="accepted" disabled class="${BUTTON_PRIMARY} opacity-50 cursor-not-allowed" title="Acceptance disabled: required INVEST quality assessment is missing or malformed">Accept</button>`;
+    return `<button type="button" data-planning-review="${escapeWorkflowText(scope)}" data-review-index="${index}" data-review-decision="accepted" disabled class="${BUTTON_PRIMARY} opacity-50 cursor-not-allowed" title="Acceptance disabled: required INVEST, sizing, or ordering evidence is missing or malformed">Accept</button>`;
 }
 
 function planningReviewCardMarkup(label, selected, scope, index = 0) {
@@ -1367,7 +1377,7 @@ function planningReviewCardMarkup(label, selected, scope, index = 0) {
 
     return `<article class="rounded-lg border border-slate-300 bg-white p-4" data-planning-review-card="${escapeWorkflowText(scope)}">
         <h3 class="text-sm font-semibold">${escapeWorkflowText(label)}</h3>
-        ${!isAcceptable ? `<div class="mt-2 rounded-md border border-rose-300 bg-rose-50 p-3 text-xs text-rose-800 font-medium" data-review-error="invalid-invest">Story proposal cannot be accepted: required INVEST quality assessment is missing or malformed. Acceptance is disabled.</div>` : ''}
+        ${!isAcceptable ? `<div class="mt-2 rounded-md border border-rose-300 bg-rose-50 p-3 text-xs text-rose-800 font-medium" data-review-error="invalid-story-evidence">Story proposal cannot be accepted: required INVEST, sizing, or ordering evidence is missing or malformed. Acceptance is disabled.</div>` : ''}
         <div class="mt-3 space-y-4">${content}</div>
         <div class="mt-4 flex flex-wrap gap-2">
             ${planningReviewAcceptButtonMarkup(scope, index, isAcceptable)}

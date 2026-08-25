@@ -163,6 +163,8 @@ _STORY_ITEM_SHAPE: dict[str, object] = {
     "spec_item_ids": [str],
     "invest_assessment": _INVEST_ASSESSMENT_SHAPE,
     "estimated_effort": str,
+    "effort_rationale": str,
+    "order_rationale": str,
     "produced_artifacts": [str],
     "research_caveats": [str],
     "dependency_candidates": [

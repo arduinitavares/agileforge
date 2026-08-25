@@ -98,6 +98,10 @@ function storyReview(instanceKey) {
                     acceptance_criteria: ['The exact selector is preserved.'],
                     specification_evidence: [],
                     invest_assessment: validInvestAssessment(),
+                    estimated_effort: 'S',
+                    story_points: 2,
+                    effort_rationale: 'Single focused operation.',
+                    order_rationale: 'First priority slice.',
                 }],
                 is_complete: true,
                 clarifying_questions: [],
@@ -1087,8 +1091,10 @@ test('storyItemMarkup renders explainable INVEST assessment across all 6 dimensi
         },
         order: 1,
         rank: '101',
+        order_rationale: 'Foundational parser operations.',
         story_points: 2,
         estimated_effort: 'S',
+        effort_rationale: 'Single straightforward parser operation.',
         research_caveats: ['Requires standard floating point behavior.'],
         dependency_candidates: [
             {
@@ -1111,8 +1117,10 @@ test('storyItemMarkup renders explainable INVEST assessment across all 6 dimensi
     assert.ok(markup.includes('Concern'));
     assert.ok(markup.includes('Self-contained calculation logic.'));
     assert.ok(markup.includes('No dependencies on unbuilt stories.'));
-    assert.ok(markup.includes('Backlog order:</strong> 1 <span class="text-slate-500">(Rank: 101)</span>'));
+    assert.ok(markup.includes('Story order within PBI:</strong> 1 <span class="text-slate-500">(Derived rank: 101)</span>'));
     assert.ok(markup.includes('Estimated effort:</strong> S (derived: 2 pts)'));
+    assert.ok(markup.includes('Order rationale:</strong> Foundational parser operations.'));
+    assert.ok(markup.includes('Effort rationale:</strong> Single straightforward parser operation.'));
     assert.ok(markup.includes('Requires standard floating point behavior.'));
     assert.ok(markup.includes('Prerequisite:</strong> US-0001'));
     assert.ok(markup.includes('Parser needed first'));
@@ -1188,9 +1196,9 @@ test('planningReviewCardMarkup disables Accept and renders error banner for inva
     delete item.review.candidate.story_items[0].invest_assessment;
 
     const markup = context.planningReviewCardMarkup('Story review for PBI-000003', item, 'story', 0);
-    assert.ok(markup.includes('data-review-error="invalid-invest"'));
+    assert.ok(markup.includes('data-review-error="invalid-story-evidence"'));
     assert.ok(markup.includes('data-review-decision="accepted" disabled class='));
-    assert.ok(markup.includes('Acceptance disabled: required INVEST quality assessment is missing or malformed'));
+    assert.ok(markup.includes('Acceptance disabled: required INVEST, sizing, or ordering evidence is missing or malformed'));
     assert.ok(markup.includes('Request changes'));
     assert.ok(markup.includes('Reject'));
 
@@ -1213,12 +1221,23 @@ test('planningReviewCardMarkup disables Accept and renders error banner for inva
     assert.notStrictEqual(rejectBinding, null);
 });
 
+test('planningReviewCardMarkup names missing rationale evidence when disabling Accept', () => {
+    const context = loadFrontend();
+    const item = storyReview('backlog_item:PBI-000003');
+    delete item.review.candidate.story_items[0].effort_rationale;
+
+    const markup = context.planningReviewCardMarkup('Story review for PBI-000003', item, 'story', 0);
+    assert.ok(markup.includes('data-review-error="invalid-story-evidence"'));
+    assert.ok(markup.includes('required INVEST, sizing, or ordering evidence is missing or malformed'));
+    assert.ok(markup.includes('data-review-decision="accepted" disabled'));
+});
+
 test('planningReviewCardMarkup enables Accept when story review has valid INVEST assessment', () => {
     const context = loadFrontend();
     const item = storyReview('backlog_item:PBI-000003');
 
     const markup = context.planningReviewCardMarkup('Story review for PBI-000003', item, 'story', 0);
-    assert.ok(!markup.includes('data-review-error="invalid-invest"'));
+    assert.ok(!markup.includes('data-review-error="invalid-story-evidence"'));
     assert.ok(markup.includes('data-review-decision="accepted" class='));
     assert.ok(!markup.includes('data-review-decision="accepted" disabled'));
     assert.ok(markup.includes('>Accept</button>'));
