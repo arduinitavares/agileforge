@@ -170,6 +170,8 @@ def dependency_rows_fingerprint(
 def selected_story_dependency_snapshot(
     snapshot: WorkflowFactSnapshot,
     selected_story_ids: tuple[int, ...],
+    *,
+    source_fingerprint: str | None = None,
 ) -> SelectedStoryDependencySnapshot:
     """Scope dependency identity, edges, and Story source to selected Stories."""
     canonical_story_ids = selected_story_ids
@@ -211,12 +213,13 @@ def selected_story_dependency_snapshot(
         _fail("Selected dependency edges are not reviewable.", cause=error)
     if any(edge.prerequisite_story_id not in stories_by_id for edge in reviewed_edges):
         _fail("Selected dependency scope references a missing prerequisite Story.")
-    source_fingerprints = {story.selected_scope_fingerprint for story in stories}
-    if None in source_fingerprints or len(source_fingerprints) != 1:
-        _fail("Selected Story scope fingerprint is missing or conflicting.")
-    source_fingerprint = next(
-        item for item in source_fingerprints if item is not None
-    )
+    if source_fingerprint is None:
+        source_fingerprints = {story.selected_scope_fingerprint for story in stories}
+        if None in source_fingerprints or len(source_fingerprints) != 1:
+            _fail("Selected Story scope fingerprint is missing or conflicting.")
+        source_fingerprint = next(
+            item for item in source_fingerprints if item is not None
+        )
     return SelectedStoryDependencySnapshot(
         story_ids=canonical_story_ids,
         stories=stories,
@@ -462,6 +465,7 @@ def _contract_dependencies(
     selected = selected_story_dependency_snapshot(
         snapshot,
         start.selected_story_ids,
+        source_fingerprint=dependency_review.source_fingerprint,
     )
     if (
         dependency_review.selected_story_ids != selected.story_ids
@@ -634,17 +638,13 @@ def sprint_review_fingerprint(
 ) -> str:
     """Bind Sprint review to current terminal Story, Task, and closure facts."""
     contract = execution_contract(snapshot, sprint_id)
-    story_ids = {item.story_id for item in contract.stories}
     return canonical_hash(
         {
             "execution_contract_fingerprint": contract.fingerprint,
             "sprint_id": sprint_id,
             "stories": [
-                item.model_dump(mode="json")
-                for item in sorted(
-                    (item for item in snapshot.stories if item.story_id in story_ids),
-                    key=lambda item: item.story_id,
-                )
+                _accepted_story_payload(item)
+                for item in sorted(contract.stories, key=lambda item: item.story_id)
             ],
             "tasks": [item.model_dump(mode="json") for item in contract.tasks],
             "task_completions": [
@@ -696,7 +696,7 @@ def sprint_close_fingerprint(
             "sprint_id": sprint_id,
             "review_fingerprint": review_fingerprint,
             "terminal_stories": [
-                item.model_dump(mode="json") for item in contract.stories
+                _accepted_story_payload(item) for item in contract.stories
             ],
             "story_completions": [
                 {

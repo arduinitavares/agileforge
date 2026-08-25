@@ -68,6 +68,9 @@ from services.read_projections import DurableReadProjectionService
 from tests.adapters.test_command_renderer import position_fixture
 from tests.workflow.execution_fixtures import seed_started_execution
 from tests.workflow.test_execution_transitions import (
+    EVALUATED_AT as EXECUTION_EVALUATED_AT,
+)
+from tests.workflow.test_execution_transitions import (
     _complete_execution_sprint_with_unselected_story,
     _complete_task,
 )
@@ -90,6 +93,7 @@ from tests.workflow.test_planning_transitions import (
 from tests.workflow.test_planning_transitions import (
     _domain as planning_domain,
 )
+from workflow.clock import FixedClock
 from workflow.contracts import (
     FactReference,
     JsonObject,
@@ -102,6 +106,8 @@ from workflow.contracts import (
     WorkflowPosition,
 )
 from workflow.definitions.planning import candidate_set_fingerprint
+from workflow.definitions.root import project_graph
+from workflow.domain import WorkflowDomain
 from workflow.fingerprints import canonical_hash, canonical_json
 from workflow.requests import (
     ApplyStoryDependencies,
@@ -3075,6 +3081,11 @@ def test_completed_sprint_metrics_supply_host_capacity(engine: "Engine") -> None
     domain, project_id, _sprint_id, _story_id, future_story_id, *_rest = (
         _complete_execution_sprint_with_unselected_story(engine)
     )
+    domain = WorkflowDomain(
+        engine=engine,
+        graph=project_graph(),
+        clock=FixedClock(now_value=EXECUTION_EVALUATED_AT),
+    )
     completed_sprint_id = _sprint_id
     triaged = domain.transition(
         RecordPostSprintTriage(
@@ -3101,6 +3112,9 @@ def test_completed_sprint_metrics_supply_host_capacity(engine: "Engine") -> None
     )
     with Session(engine) as session:
         snapshot = WorkflowFactRepository(session).load(project_id)
+    assert [
+        story.story_id for story in snapshot.stories if story.sprint_candidate
+    ] == [future_story_id]
     backlog = next(
         item
         for item in snapshot.phase_artifacts
@@ -3158,6 +3172,48 @@ def test_completed_sprint_metrics_supply_host_capacity(engine: "Engine") -> None
     assert envelope["requested_max_story_points"] is None
     assert envelope["locked_story_ids"] == [future_story_id]
     assert "completed Sprints" in planner_input.capacity_basis
+
+
+def test_completed_triaged_sprint_exposes_future_dependency_review(
+    engine: "Engine",
+) -> None:
+    """Reopen dependency review only for the next active selected Story scope."""
+    domain, project_id, sprint_id, _story_id, future_story_id, *_rest = (
+        _complete_execution_sprint_with_unselected_story(engine)
+    )
+    domain = WorkflowDomain(
+        engine=engine,
+        graph=project_graph(),
+        clock=FixedClock(now_value=EXECUTION_EVALUATED_AT),
+    )
+    triaged = domain.transition(
+        RecordPostSprintTriage(
+            **execution_guards(
+                domain,
+                project_id,
+                "execution.post_sprint_triage",
+                f"sprint:{sprint_id}",
+            ),
+            instance_key=f"sprint:{sprint_id}",
+            idempotency_key="future-scope-dependency-triage",
+            sprint_id=sprint_id,
+            impact="none",
+            canonical_payload={"summary": "No downstream change."},
+        )
+    )
+    assert triaged.ok is True
+    _select_for_sprint(engine, future_story_id)
+
+    decisions = tuple(
+        item
+        for item in domain.position(project_id).decisions
+        if item.node_id == "planning.story_dependencies"
+    )
+    assert decisions, domain.position(project_id).model_dump(mode="json")
+    decision = decisions[0]
+
+    assert decision.category is NodeCategory.AVAILABLE
+    assert decision.reason_code == "STORY_DEPENDENCY_REVIEW_REQUIRED"
 
 
 def test_invalid_manual_sprint_selection_fails_before_model(

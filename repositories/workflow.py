@@ -405,7 +405,7 @@ class WorkflowFactRepository:
             project_id,
             spec_versions,
             planning_load.facts,
-            frozenset(item.sprint_id for item in sprints),
+            sprints,
         )
         story_dependencies = self._story_dependencies(project_id)
         story_dependency_reviews = self._story_dependency_reviews(
@@ -416,6 +416,9 @@ class WorkflowFactRepository:
             stories,
             story_dependencies,
             story_dependency_reviews,
+            completed_sprint_ids=frozenset(
+                item.sprint_id for item in sprints if item.status == "completed"
+            ),
         )
         tasks = self._tasks(
             project_id,
@@ -3136,8 +3139,12 @@ class WorkflowFactRepository:
         project_id: int,
         spec_versions: dict[int, str],
         planning_artifacts: tuple[PlanningArtifactFact, ...],
-        sprint_ids: frozenset[int],
+        sprints: tuple[SprintFact, ...],
     ) -> tuple[StoryFact, ...]:
+        sprint_ids = frozenset(item.sprint_id for item in sprints)
+        completed_sprint_ids = frozenset(
+            item.sprint_id for item in sprints if item.status == "completed"
+        )
         rows = tuple(
             self._session.exec(
                 select(UserStory)
@@ -3205,6 +3212,10 @@ class WorkflowFactRepository:
             eligible, _status = eligibility_by_story_id[story_id]
             if (
                 row.is_superseded
+                or any(
+                    sprint_id in completed_sprint_ids
+                    for sprint_id in sprint_ids_by_story[story_id]
+                )
                 or not eligible
                 or selection.selection_state != "selected"
             ):
@@ -3405,6 +3416,8 @@ class WorkflowFactRepository:
         stories: tuple[StoryFact, ...],
         dependencies: tuple[StoryDependencyFact, ...],
         reviews: tuple[StoryDependencyReviewFact, ...],
+        *,
+        completed_sprint_ids: frozenset[int],
     ) -> tuple[StoryFact, ...]:
         """Intersect current evidence, human selection, and dependency safety."""
         if not stories:
@@ -3416,6 +3429,10 @@ class WorkflowFactRepository:
                     for story in stories
                     if story.structurally_eligible
                     and story.sprint_selection_state == "selected"
+                    and not any(
+                        sprint_id in completed_sprint_ids
+                        for sprint_id in story.sprint_ids
+                    )
                 ),
                 key=lambda story: story.story_id,
             )

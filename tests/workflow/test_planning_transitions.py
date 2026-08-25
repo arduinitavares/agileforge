@@ -903,10 +903,17 @@ def _apply_current_dependencies(
     """Persist review of the current candidate dependency semantics."""
     with Session(engine) as session:
         snapshot = WorkflowFactRepository(session).load(project_id)
+    completed_sprint_ids = {
+        sprint.sprint_id for sprint in snapshot.sprints if sprint.status == "completed"
+    }
     stories = tuple(
         item
         for item in snapshot.stories
-        if item.structurally_eligible and item.sprint_selection_state == "selected"
+        if item.structurally_eligible
+        and item.sprint_selection_state == "selected"
+        and not any(
+            sprint_id in completed_sprint_ids for sprint_id in item.sprint_ids
+        )
     )
     reviewed_edges = tuple(
         ReviewedDependencyEdge(

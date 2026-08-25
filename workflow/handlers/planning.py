@@ -92,6 +92,9 @@ def _candidate_set_in_session(
     project_id: int,
 ) -> tuple[tuple[StoryFact, ...], tuple[StoryDependencyFact, ...]]:
     snapshot = WorkflowFactRepository(session).load(project_id)
+    completed_sprint_ids = {
+        sprint.sprint_id for sprint in snapshot.sprints if sprint.status == "completed"
+    }
     stories = tuple(
         sorted(
             (
@@ -99,6 +102,9 @@ def _candidate_set_in_session(
                 for item in snapshot.stories
                 if item.structurally_eligible
                 and item.sprint_selection_state == "selected"
+                and not any(
+                    sprint_id in completed_sprint_ids for sprint_id in item.sprint_ids
+                )
             ),
             key=lambda item: item.story_id,
         )

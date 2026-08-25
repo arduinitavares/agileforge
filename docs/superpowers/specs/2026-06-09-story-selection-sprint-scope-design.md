@@ -1,5 +1,13 @@
 # Story Selection Sprint Scope Design
 
+> **Superseded for Story-to-Sprint selection by #223.** This historical design's
+> parent-requirement selection authority, whole-parent requirement scope, and
+> `story_completion_scope`-driven candidate model no longer govern the product.
+> #223 permits partial Story subsets and makes durable Story-level human intent
+> the sole scope authority. See
+> [Story Readiness and Sprint Candidacy Contract](2026-08-25-story-readiness-sprint-candidacy-contract.md).
+> The remaining text is retained only as historical context.
+
 ## Problem
 
 AgileForge currently lets Story phase advance to Sprint setup only when either every roadmap requirement is saved or merged, or every requirement in a roadmap milestone is saved or merged. That is too coarse for research-heavy projects. A team may want to implement and learn from a small approved slice before decomposing the next requirements, because later Story requirements can change after the first sprint.

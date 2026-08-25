@@ -822,6 +822,17 @@ def _candidate_stories(snapshot: WorkflowFactSnapshot) -> tuple[StoryFact, ...]:
     )
 
 
+def _is_current_planning_story(
+    snapshot: WorkflowFactSnapshot,
+    story: StoryFact,
+) -> bool:
+    """Exclude completed-Sprint membership without clearing human intent."""
+    completed_sprint_ids = {
+        sprint.sprint_id for sprint in snapshot.sprints if sprint.status == "completed"
+    }
+    return not any(sprint_id in completed_sprint_ids for sprint_id in story.sprint_ids)
+
+
 def _selected_scope_stories(snapshot: WorkflowFactSnapshot) -> tuple[StoryFact, ...]:
     return tuple(
         sorted(
@@ -830,6 +841,7 @@ def _selected_scope_stories(snapshot: WorkflowFactSnapshot) -> tuple[StoryFact, 
                 for item in snapshot.stories
                 if item.structurally_eligible
                 and item.sprint_selection_state == "selected"
+                and _is_current_planning_story(snapshot, item)
             ),
             key=lambda item: item.story_id,
         )
@@ -844,6 +856,7 @@ def _selected_intent_stories(snapshot: WorkflowFactSnapshot) -> tuple[StoryFact,
                 for item in snapshot.stories
                 if item.sprint_selection_state == "selected"
                 and "STORY_SUPERSEDED" not in item.readiness_blockers
+                and _is_current_planning_story(snapshot, item)
             ),
             key=lambda item: item.story_id,
         )
@@ -1423,10 +1436,21 @@ def _sprint_plan_rule(
     state = _artifact_state(snapshot, "sprint_plan")
     if state.conflict:
         return (RuleEvaluation(RuleCategory.INVALID, "WORKFLOW_FACT_CONFLICT"),)
+    cycle_head = _sprint_plan_cycle_head(snapshot, state)
+    if (
+        cycle_head is not None
+        and cycle_head.status == "accepted"
+        and any(
+            sprint.sprint_id == cycle_head.activated_sprint_id
+            and sprint.status == "completed"
+            for sprint in snapshot.sprints
+        )
+        and not lifecycle_is_quiescent(snapshot)
+    ):
+        return _existing_sprint_plan_evaluation(snapshot, cycle_head, ())
     joined = _sprint_join(snapshot)
     if isinstance(joined, RuleEvaluation):
         return (joined,)
-    cycle_head = _sprint_plan_cycle_head(snapshot, state)
     if cycle_head is not None:
         return _existing_sprint_plan_evaluation(snapshot, cycle_head, joined)
     return (
