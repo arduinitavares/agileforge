@@ -1937,7 +1937,14 @@ function storyDependencyReviewMarkup(action, stories, dependencies) {
             : 'None (independent stories)')
         : 'Unavailable (current selected scope missing or malformed)';
     const bindingAttributes = deliveryActionBindingAttributes(action);
-    const disabledAttr = isWellFormed ? '' : 'disabled aria-disabled="true"';
+    const mutationLocked = Boolean(activeDependencyMutation);
+    const disabledAttr = isWellFormed && !mutationLocked ? '' : 'disabled aria-disabled="true"';
+    const busyAttr = mutationLocked ? ' aria-busy="true"' : '';
+    const buttonLabel = mutationLocked ? 'Confirming...' : 'Confirm dependencies';
+    const statusHidden = mutationLocked ? '' : 'hidden';
+    const statusMessage = mutationLocked
+        ? 'Dependency review was accepted. Current authority projection is reloading; controls remain locked.'
+        : '';
 
     return `<div class="rounded-lg border border-amber-200 bg-amber-50/50 p-4 space-y-3" data-dependency-review-section="true" ${bindingAttributes}>
         <div class="flex items-center gap-2">
@@ -1949,12 +1956,12 @@ function storyDependencyReviewMarkup(action, stories, dependencies) {
             <p><strong>Selected Stories:</strong> ${escapeWorkflowText(storySummary)}</p>
             <p><strong>Dependency edges:</strong> ${escapeWorkflowText(edgeSummary)}</p>
         </div>
-        <button type="button" data-apply-dependencies="true" ${disabledAttr} class="${BUTTON_PRIMARY}">
+        <button type="button" data-apply-dependencies="true" ${disabledAttr}${busyAttr} class="${BUTTON_PRIMARY}">
             <span class="material-symbols-outlined" aria-hidden="true">verified</span>
-            <span data-delivery-action-label="true">Confirm dependencies</span>
+            <span data-delivery-action-label="true">${buttonLabel}</span>
         </button>
-        <p data-delivery-action-status="true" hidden role="status" aria-live="polite" aria-atomic="true"
-            class="text-sm leading-6 text-slate-700"></p>
+        <p data-delivery-action-status="true" ${statusHidden} role="status" aria-live="polite" aria-atomic="true"
+            class="text-sm leading-6 text-slate-700">${statusMessage}</p>
     </div>`;
 }
 
