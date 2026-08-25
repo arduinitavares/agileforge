@@ -76,7 +76,7 @@ GREEN focused behavior:
 
 ```text
 uv run --frozen pytest -q tests/services/test_story_sprint_selection.py tests/test_sprint_selection.py tests/test_story_dependencies.py tests/services/test_story_validation_application.py tests/adapters/test_command_renderer.py
-123 passed, 5 warnings in 10.99s
+128 passed, 5 warnings in 11.42s
 ```
 
 Changed-file quality:
@@ -139,6 +139,60 @@ Warnings in the green suites are the existing Starlette `TestClient`/httpx and
 - `8cc75dc` test: align Sprint fixtures with explicit selection (#223)
 - `064eda9` test: type-check Story selection results (#223)
 - `3acccf7` test: update Story fact fixtures for selection (#223)
+- `0d98176` test: expose selection audit and replay gaps (#223)
+- `f962562` fix: harden Story selection history replay (#223)
+
+## Fix round 1: persisted audit invariants and bounded replay
+
+Review found two gaps after the initial Task 3 delivery: canonical persisted
+metadata still accepted Select events without an evidence fingerprint and
+whitespace-only audit text, while repository snapshots replayed the same
+Project selection history once per Story.
+
+RED was recorded before production changes in `0d98176`:
+
+```text
+uv run --frozen pytest -q tests/services/test_story_sprint_selection.py -k 'every_corrupt_selection_history_shape or selection_request_rejects_blank_actor or repository_replays_selection_history_once_per_project or select_requires_current_evidence_but_defer_and_remove_do_not'
+5 failed, 7 passed, 12 deselected, 5 warnings in 2.12s
+```
+
+The five expected failures proved that canonical tampering with a null Select
+evidence fingerprint, blank actor, or blank rationale did not raise
+`WorkflowFactLoadError`; whitespace-only request actors were accepted; and a
+two-Story repository snapshot called the central Project-history replay twice.
+
+GREEN was implemented in `f962562`:
+
+- `StorySprintSelectionEventMetadata` now rejects whitespace-only actor and
+  rationale text and requires non-null observed eligibility evidence for
+  `select`. `defer` and `remove` continue to accept null evidence after
+  staleness and reload successfully.
+- `StorySprintSelectionRequest` rejects whitespace-only actors before an event
+  can be written.
+- The service exposes one Project selection-fact map backed by the existing
+  canonical parser/deriver. `WorkflowFactRepository._stories` computes it once
+  and passes each precomputed fact into `_story_fact`.
+
+Targeted GREEN:
+
+```text
+uv run --frozen pytest -q tests/services/test_story_sprint_selection.py -k 'every_corrupt_selection_history_shape or selection_request_rejects_blank_actor or repository_replays_selection_history_once_per_project or select_requires_current_evidence_but_defer_and_remove_do_not'
+12 passed, 12 deselected, 5 warnings in 1.97s
+```
+
+Focused Task 3 GREEN:
+
+```text
+uv run --frozen pytest -q tests/services/test_story_sprint_selection.py tests/test_sprint_selection.py tests/test_story_dependencies.py tests/services/test_story_validation_application.py tests/adapters/test_command_renderer.py
+128 passed, 5 warnings in 11.42s
+```
+
+Fix-round changed-file quality:
+
+```text
+uv run --frozen pyrepo-check ruff annotations ty services/story_sprint_selection.py repositories/workflow.py tests/services/test_story_sprint_selection.py
+ruff passed; annotations passed; ty passed
+```
 
 ## Protected boundaries and follow-up
 
