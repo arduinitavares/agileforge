@@ -9,6 +9,7 @@ from http import HTTPStatus
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlmodel import Session, col, select
 
@@ -16,17 +17,20 @@ import api
 from models.core import UserStory
 from models.enums import WorkflowEventType
 from models.events import WorkflowEvent
-from repositories.workflow import WorkflowFactRepository
+from repositories.workflow import WorkflowFactLoadError, WorkflowFactRepository
 from services import story_sprint_selection as selection_service
-from services.application import AgileForgeApplication
+from services.application import (
+    AgileForgeApplication,
+    StoryEligibilityReconcileRequest,
+)
 from services.read_projections import DurableReadProjectionService
 from tests.test_story_validation_service import _accepted_story
 from workflow.clock import FixedClock
 from workflow.definitions.root import project_graph
 from workflow.domain import WorkflowDomain
+from workflow.fingerprints import canonical_json
 
 if TYPE_CHECKING:
-    import pytest
     from sqlalchemy.engine import Engine
 
 _EXPECTED_SELECTION_EVENT_COUNT = 4
@@ -250,3 +254,99 @@ def test_api_and_cli_expose_intent_based_selection_mutations(
     assert exit_code == 0
     captured = capsys.readouterr()
     assert json.loads(captured.out)["data"]["selection_state"] == "deferred"
+
+
+def test_selected_intent_survives_staleness_and_reactivates_after_reconciliation(
+    engine: Engine,
+) -> None:
+    """Evidence repair changes eligibility, never the preserved human intent."""
+    story_id = _accepted_story(engine)
+    with Session(engine) as session:
+        story = session.get_one(UserStory, story_id)
+        initial = selection_service.story_sprint_selection_fact_in_session(
+            session,
+            story=story,
+        )
+        project_id = story.project_id
+    app = _build_application(engine)
+    selected = app.apply_story_sprint_selection(
+        _selection_request(
+            project_id=project_id,
+            story_id=story_id,
+            intent="select",
+            expected_state_fingerprint=initial.state_fingerprint,
+            key="preserve-select",
+        )
+    )
+    selected_fingerprint = selected["data"]["state_fingerprint"]
+    with Session(engine) as session:
+        story = session.get_one(UserStory, story_id)
+        story.validation_evidence = None
+        session.add(story)
+        session.commit()
+    with Session(engine) as session:
+        stale = WorkflowFactRepository(session).load(project_id).stories[0]
+    assert stale.sprint_selection_state == "selected"
+    assert stale.sprint_selection_state_fingerprint == selected_fingerprint
+    assert stale.structural_eligibility_status == "stale"
+    assert stale.structurally_eligible is False
+    assert stale.sprint_candidate is False
+
+    reconciled = app.reconcile_story_eligibility(
+        StoryEligibilityReconcileRequest(
+            project_id=project_id,
+            story_ids=(story_id,),
+            idempotency_key="restore-evidence",
+            actor="operator@example.com",
+            correlation_id="reconcile-selection",
+        )
+    )
+    assert reconciled["ok"] is True
+    with Session(engine) as session:
+        restored = WorkflowFactRepository(session).load(project_id).stories[0]
+    assert restored.sprint_selection_state == "selected"
+    assert restored.sprint_selection_state_fingerprint == selected_fingerprint
+    assert restored.structurally_eligible is True
+    assert restored.sprint_candidate is True
+
+
+def test_malformed_selection_history_uses_repository_integrity_error(
+    engine: Engine,
+) -> None:
+    """Unexpected metadata keys fail closed through the repository error path."""
+    story_id = _accepted_story(engine)
+    with Session(engine) as session:
+        story = session.get_one(UserStory, story_id)
+        initial = selection_service.story_sprint_selection_fact_in_session(
+            session,
+            story=story,
+        )
+        project_id = story.project_id
+    _build_application(engine).apply_story_sprint_selection(
+        _selection_request(
+            project_id=project_id,
+            story_id=story_id,
+            intent="select",
+            expected_state_fingerprint=initial.state_fingerprint,
+            key="corrupt-history",
+        )
+    )
+    with Session(engine) as session:
+        event = session.exec(
+            select(WorkflowEvent).where(
+                col(WorkflowEvent.event_type)
+                == WorkflowEventType.STORY_SELECTION_CHANGED
+            )
+        ).one()
+        assert event.event_metadata is not None
+        metadata = json.loads(event.event_metadata)
+        metadata["unexpected"] = "not canonical schema"
+        event.event_metadata = canonical_json(metadata)
+        session.add(event)
+        session.commit()
+
+    with Session(engine) as session, pytest.raises(
+        WorkflowFactLoadError,
+        match="Story selection event metadata is malformed",
+    ):
+        WorkflowFactRepository(session).load(project_id)
