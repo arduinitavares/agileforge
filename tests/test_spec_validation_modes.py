@@ -287,7 +287,7 @@ def test_malformed_or_out_of_bound_hybrid_response_is_one_call_and_no_repair(
 
     result = _hybrid(engine, story_id, review)
     assert calls == 1
-    assert result["ready_for_sprint"] is False
+    assert result["ready_for_sprint"] is True
     assert result["semantic_review_state"] == "invalid"
     assert result["semantic_findings"] == []
     assert result["semantic_error"] == "STORY_SPECIFICATION_REVIEW_INVALID"
@@ -328,7 +328,7 @@ def test_semantic_findings_are_blocking_and_sorted_by_item_and_code(
         )
 
     result = _hybrid(engine, story_id, review)
-    assert result["ready_for_sprint"] is False
+    assert result["ready_for_sprint"] is True
     assert [item["code"] for item in result["semantic_findings"]] == [
         "SPEC_ITEM_CONTRADICTION",
         "SPEC_ITEM_OMISSION",

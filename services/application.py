@@ -110,7 +110,6 @@ from services.vision_evidence import (
 from services.vision_input import VisionInputService
 from utils.model_config import get_model_id
 from utils.runtime_config import get_specification_structurer_generation_config
-from utils.spec_schemas import ValidationEvidence
 from workflow.contracts import (
     Blocker,
     FactReference,
@@ -166,6 +165,7 @@ if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
 
     from adapters.adk.recipes import AdkRecipeRegistry
+    from utils.spec_schemas import ValidationEvidence
     from workflow.facts import (
         PostSprintTriageFact,
         StoryDependencyFact,
@@ -2551,9 +2551,9 @@ class AgileForgeApplication:
                 if refreshed is None or refreshed.validation_evidence is None:
                     message = "Story validation did not persist evidence."
                     raise RuntimeError(message) from None
-                evidence = ValidationEvidence.model_validate_json(
-                    refreshed.validation_evidence,
-                    strict=True,
+                evidence = require_current_story_validation_evidence(
+                    session,
+                    story=refreshed,
                 )
                 reconciled_story_ids.append(story_id)
             stories.append(_story_eligibility_item(story_id, evidence))

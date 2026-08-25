@@ -7,7 +7,7 @@ import json
 import sqlite3
 import threading
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from pydantic import ValidationError
@@ -56,6 +56,10 @@ from services.node_attempt_replay import (
     DurableNodeAttemptReplayService,
     NodeAttemptReplayQuery,
 )
+from services.specs.story_validation_service import (
+    StorySemanticReview,
+    ValidateStoryInput,
+)
 from tests.workflow.test_planning_transitions import (
     EVALUATED_AT,
     _accepted_backlog,
@@ -74,6 +78,7 @@ from workflow.handlers.planning import (
 from workflow.requests import DecideStory, RecordStoryDraft, StartNodeAttempt
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping, Sequence
     from pathlib import Path
 
     from sqlalchemy.engine import Engine
@@ -1015,15 +1020,26 @@ def test_acceptance_persists_expected_structural_failure_evidence(
 
     def persist_structural_failure(
         session: Session,
-        params: object,
-        **kwargs: object,
+        params: ValidateStoryInput | Mapping[str, object],
+        *,
+        semantic_review: StorySemanticReview | None = None,
+        now: Callable[[], datetime] = datetime.now,
     ) -> object:
-        story_id = int(dict(params)["story_id"])
+        story_id = (
+            params.story_id
+            if isinstance(params, ValidateStoryInput)
+            else cast("int", params["story_id"])
+        )
         story = session.get(UserStory, story_id)
         assert story is not None
         story.story_description = "Not a valid Story statement"
         session.add(story)
-        return original_validate(session, params, **kwargs)
+        return original_validate(
+            session,
+            params,
+            semantic_review=semantic_review,
+            now=now,
+        )
 
     monkeypatch.setattr(
         story_phase,
@@ -1087,14 +1103,17 @@ def test_decide_story_rolls_back_when_evidence_persistence_flush_fails(
     )
     original_flush = Session.flush
 
-    def fail_evidence_flush(session: Session, *args: object, **kwargs: object) -> None:
+    def fail_evidence_flush(
+        session: Session,
+        objects: Sequence[Any] | None = None,
+    ) -> None:
         if any(
             isinstance(row, UserStory) and row.validation_evidence is not None
             for row in session.identity_map.values()
         ):
             message = "simulated evidence flush failure"
             raise RuntimeError(message)
-        original_flush(session, *args, **kwargs)
+        original_flush(session, objects)
 
     monkeypatch.setattr(Session, "flush", fail_evidence_flush)
     with pytest.raises(
