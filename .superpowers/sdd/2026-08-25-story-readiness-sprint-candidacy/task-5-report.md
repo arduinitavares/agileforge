@@ -305,3 +305,25 @@ No provider call, real Sprint generation/persistence, real/manual profile,
 push, merge, issue mutation, or live manual acceptance occurred. #224
 team-name/default behavior remains untouched. The full `pyrepo-check --all`
 gate remains Task 6's responsibility.
+
+### Recovery follow-up
+
+The locked post-success view is intentionally non-repeatable, but a later
+successful manual authority refresh must restore a newly rendered Confirm
+action. The focused E2E RED below proved the stale lock otherwise survived the
+fresh projection and suppressed the new action:
+
+```text
+uv run --frozen pytest -q tests/e2e/test_single_project_lifecycle_ui.py -k dependency_confirmation_stays_locked
+1 failed, 19 deselected, 4 deprecation warnings
+```
+
+- `1ea1fc7` test: restore dependency action after authority refresh (#223)
+- `21d1590` fix: release dependency lock after fresh authority reload (#223)
+- `687c05b` test: name dependency retry expectation (#223)
+
+The full round-two GREEN commands now pass: `node --check frontend/project.js`,
+`node --test tests/*.mjs` (66 passed), the five-scenario focused browser command
+above (5 passed, 15 deselected, 4 deprecation warnings), and
+`uv run --frozen pyrepo-check annotations ty ruff tests/e2e/test_single_project_lifecycle_ui.py`
+(ruff, annotations, and ty passed).
