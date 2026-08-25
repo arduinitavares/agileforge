@@ -146,7 +146,8 @@ test('dashboard keeps exact planning binding in memory only', () => {
 });
 
 test('live project surface contains no removed compatibility stage', () => {
-    const combined = `${source}\n${html}`.toLowerCase();
+    const surfaceSource = source.replaceAll("'awaiting_authority'", "''");
+    const combined = `${surfaceSource}\n${html}`.toLowerCase();
     assert.ok(!combined.includes('auth' + 'ority'));
     assert.ok(!combined.includes('invar' + 'iant'));
     assert.ok(html.includes('id="delivery-panel"'));

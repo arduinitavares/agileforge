@@ -251,8 +251,13 @@ async function postStorySelectionMutation(projectId, storyId, intent, expectedSt
     }
 }
 
-async function postStoryDependencyMutation(projectId, scopeIds, scopeEdges) {
-    const payload = semanticMutationPayload({
+async function postStoryDependencyMutation(
+    projectId,
+    scopeIds,
+    scopeEdges,
+    mutationPayload = null,
+) {
+    const payload = mutationPayload ?? semanticMutationPayload({
         selected_story_ids: scopeIds,
         reviewed_edges: scopeEdges.map(({ dependent_story_id, prerequisite_story_id, reason }) => ({
             dependent_story_id,
@@ -1937,14 +1942,21 @@ function storyDependencyReviewMarkup(action, stories, dependencies) {
             : 'None (independent stories)')
         : 'Unavailable (current selected scope missing or malformed)';
     const bindingAttributes = deliveryActionBindingAttributes(action);
-    const mutationLocked = Boolean(activeDependencyMutation);
+    const mutationPhase = activeDependencyMutation?.phase ?? null;
+    const mutationSubmitting = mutationPhase === 'submitting';
+    const mutationAwaitingProjection = mutationPhase === 'awaiting_authority';
+    const mutationLocked = mutationSubmitting || mutationAwaitingProjection;
     const disabledAttr = isWellFormed && !mutationLocked ? '' : 'disabled aria-disabled="true"';
     const busyAttr = mutationLocked ? ' aria-busy="true"' : '';
-    const buttonLabel = mutationLocked ? 'Confirming...' : 'Confirm dependencies';
+    const buttonLabel = mutationSubmitting
+        ? 'Submitting...'
+        : (mutationAwaitingProjection ? 'Reloading...' : 'Confirm dependencies');
     const statusHidden = mutationLocked ? '' : 'hidden';
-    const statusMessage = mutationLocked
-        ? 'Dependency review was accepted. Current project projection is reloading; controls remain locked.'
-        : '';
+    const statusMessage = mutationSubmitting
+        ? 'Dependency review is being submitted; controls remain locked.'
+        : (mutationAwaitingProjection
+            ? 'Dependency review was accepted. Current project projection is reloading; controls remain locked.'
+            : '');
 
     return `<div class="rounded-lg border border-amber-200 bg-amber-50/50 p-4 space-y-3" data-dependency-review-section="true" ${bindingAttributes}>
         <div class="flex items-center gap-2">
@@ -2203,6 +2215,12 @@ async function requestPlanningReview(url, options) {
 
 async function loadDashboard() {
     const sequence = ++dashboardLoadSequence;
+    const dependencyMutationAtStart = activeDependencyMutation === null
+        ? null
+        : {
+            token: activeDependencyMutation.token,
+            phase: activeDependencyMutation.phase,
+        };
     activeDashboardLoadController?.abort();
     const controller = new AbortController();
     activeDashboardLoadController = controller;
@@ -2257,7 +2275,13 @@ async function loadDashboard() {
             storyDependencies: storyDependencies?.data ?? {},
             sprintCandidates: sprintCandidates?.data ?? {},
         };
-        activeDependencyMutation = null;
+        if (
+            dependencyMutationAtStart?.phase === 'awaiting_authority'
+            && activeDependencyMutation?.token === dependencyMutationAtStart.token
+            && activeDependencyMutation.phase === dependencyMutationAtStart.phase
+        ) {
+            activeDependencyMutation = null;
+        }
         setProjectError('');
         renderDashboard();
         return true;
@@ -3124,28 +3148,63 @@ function installInteractions() {
             const label = button.querySelector('[data-delivery-action-label="true"]');
             const idleLabel = label?.textContent ?? 'Confirm dependencies';
             const status = button.closest('[data-dependency-review-section]')?.querySelector('[data-delivery-action-status="true"]');
-            const controlState = captureStoryControlStates([button]);
-            button.disabled = true;
-            button.setAttribute('aria-busy', 'true');
-            if (label) label.textContent = 'Confirming...';
-            if (status) {
-                status.textContent = 'Applying dependency review...';
-                status.hidden = false;
-            }
-            activeDependencyMutation = { button };
             let mutationCompleted = false;
             let refreshed = false;
             setProjectError('');
+            const { scopeIds, scopeEdges, isWellFormed } = selectedScopeDependencies(
+                lifecycleState.storyDependencies?.stories,
+                lifecycleState.storyDependencies,
+            );
+            if (!isWellFormed || scopeIds.length === 0) {
+                setProjectError('Current selected Story scope is unavailable.');
+                return;
+            }
+            const payload = semanticMutationPayload({
+                selected_story_ids: scopeIds,
+                reviewed_edges: scopeEdges.map(({
+                    dependent_story_id,
+                    prerequisite_story_id,
+                    reason,
+                }) => ({
+                    dependent_story_id,
+                    prerequisite_story_id,
+                    reason,
+                })),
+            });
+            const token = payload.idempotency_key;
+            const controlState = captureStoryControlStates([button]);
+            button.disabled = true;
+            button.setAttribute('aria-disabled', 'true');
+            button.setAttribute('aria-busy', 'true');
+            if (label) label.textContent = 'Submitting...';
+            if (status) {
+                status.textContent = 'Dependency review is being submitted; controls remain locked.';
+                status.hidden = false;
+            }
+            activeDependencyMutation = {
+                token,
+                phase: 'submitting',
+                payload,
+                button,
+            };
             try {
-                const { scopeIds, scopeEdges, isWellFormed } = selectedScopeDependencies(
-                    lifecycleState.storyDependencies?.stories,
-                    lifecycleState.storyDependencies,
+                await postStoryDependencyMutation(
+                    selectedProjectId,
+                    scopeIds,
+                    scopeEdges,
+                    payload,
                 );
-                if (!isWellFormed || scopeIds.length === 0) {
-                    throw new Error('Current selected Story scope is unavailable.');
-                }
-                await postStoryDependencyMutation(selectedProjectId, scopeIds, scopeEdges);
                 mutationCompleted = true;
+                if (
+                    activeDependencyMutation?.token === token
+                    && activeDependencyMutation.phase === 'submitting'
+                ) {
+                    activeDependencyMutation = {
+                        ...activeDependencyMutation,
+                        phase: 'awaiting_authority',
+                    };
+                    renderDashboard();
+                }
                 refreshed = await loadDashboard() === true;
                 if (!refreshed) {
                     throw new Error('The dependency review was accepted, but the current project projection could not be reloaded. Controls remain locked until a successful refresh.');
@@ -3160,9 +3219,10 @@ function installInteractions() {
                 if (shouldUnlockDependencyMutation(mutationCompleted, refreshed)) {
                     restoreStoryControlStates(controlState);
                     if (label) label.textContent = idleLabel;
-                    activeDependencyMutation = null;
-                } else if (refreshed) {
-                    activeDependencyMutation = null;
+                    if (activeDependencyMutation?.token === token) {
+                        activeDependencyMutation = null;
+                        renderDashboard();
+                    }
                 }
             }
             return;
