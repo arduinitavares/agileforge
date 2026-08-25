@@ -55,6 +55,7 @@ from workflow.contracts import WorkflowErrorCode
 from workflow.definitions.planning import story_dependency_source_fingerprint
 from workflow.facts import StoryDependencyReviewEdgeFact
 from workflow.fingerprints import canonical_hash, canonical_json
+from workflow.execution_integrity import selected_story_dependency_snapshot
 from workflow.planning_integrity import (
     canonical_dependency_edges,
     dependency_edges_payload,
@@ -754,6 +755,14 @@ def test_external_prerequisite_blocks_until_complete_without_joining_scope(
         and edge.status == "active"
         for edge in completed.story_dependencies
     )
+    execution_scope = selected_story_dependency_snapshot(
+        completed,
+        (dependent_id,),
+    )
+    assert execution_scope.source_fingerprint == (
+        completed_by_id[dependent_id].selected_scope_fingerprint
+    )
+    assert tuple(edge.dependency_id for edge in execution_scope.dependencies)
 
 
 def test_selection_change_invalidates_review_until_exact_scope_is_confirmed(
