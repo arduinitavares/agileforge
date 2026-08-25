@@ -765,6 +765,123 @@ def test_external_prerequisite_blocks_until_complete_without_joining_scope(
     assert tuple(edge.dependency_id for edge in execution_scope.dependencies)
 
 
+def test_selected_dependency_closure_cycle_blocks_candidacy(engine: Engine) -> None:
+    """Reject a cycle that returns through one preserved external-dependent row."""
+    with Session(engine) as session:
+        project_id, selected_id, external_id, _unrelated_id = _story_set(
+            session,
+            titles=("Selected work", "External prerequisite", "Future work"),
+        )
+    _validate(engine, selected_id)
+    with Session(engine) as session:
+        external = session.get_one(UserStory, external_id)
+        external.status = StoryStatus.DONE
+        session.add(external)
+        _select_for_sprint(session, story_id=selected_id)
+        session.commit()
+        selected_scope = WorkflowFactRepository(session).load(project_id)
+        source_fingerprint = next(
+            story.selected_scope_fingerprint
+            for story in selected_scope.stories
+            if story.story_id == selected_id
+        )
+        assert source_fingerprint is not None
+        apply_story_dependencies_in_session(
+            session,
+            inputs=ApplyStoryDependenciesInput(
+                project_id=project_id,
+                selected_story_ids=(selected_id,),
+                reviewed_edges=(
+                    StoryDependencyReviewEdgeFact(
+                        dependent_story_id=selected_id,
+                        prerequisite_story_id=external_id,
+                        reason="Selected work requires the external prerequisite.",
+                    ),
+                ),
+                source_fingerprint=source_fingerprint,
+                reviewer="dependency-reviewer",
+                reviewed_at=REVIEWED_AT,
+            ),
+        )
+        session.add(
+            UserStoryDependency(
+                project_id=project_id,
+                dependent_story_id=external_id,
+                prerequisite_story_id=selected_id,
+                status="active",
+                confidence="reviewed",
+                source="manual_review",
+                reason="Preserved external work depends on selected work.",
+            )
+        )
+        session.commit()
+
+        snapshot = WorkflowFactRepository(session).load(project_id)
+
+    selected = next(story for story in snapshot.stories if story.story_id == selected_id)
+    assert selected.dependency_safe is False
+    assert selected.sprint_candidate is False
+    assert any("CYCLE" in blocker for blocker in selected.readiness_blockers)
+
+
+def test_unrelated_external_cycle_does_not_block_selected_scope(engine: Engine) -> None:
+    """Ignore a preserved cycle that is unreachable from selected dependents."""
+    with Session(engine) as session:
+        project_id, selected_id, first_external_id, second_external_id = _story_set(
+            session,
+            titles=("Selected work", "Future work one", "Future work two"),
+        )
+    _validate(engine, selected_id)
+    with Session(engine) as session:
+        _select_for_sprint(session, story_id=selected_id)
+        session.commit()
+        selected_scope = WorkflowFactRepository(session).load(project_id)
+        source_fingerprint = next(
+            story.selected_scope_fingerprint
+            for story in selected_scope.stories
+            if story.story_id == selected_id
+        )
+        assert source_fingerprint is not None
+        apply_story_dependencies_in_session(
+            session,
+            inputs=ApplyStoryDependenciesInput(
+                project_id=project_id,
+                selected_story_ids=(selected_id,),
+                reviewed_edges=(),
+                source_fingerprint=source_fingerprint,
+                reviewer="dependency-reviewer",
+                reviewed_at=REVIEWED_AT,
+            ),
+        )
+        session.add_all(
+            (
+                UserStoryDependency(
+                    project_id=project_id,
+                    dependent_story_id=first_external_id,
+                    prerequisite_story_id=second_external_id,
+                    status="active",
+                    confidence="reviewed",
+                    source="manual_review",
+                ),
+                UserStoryDependency(
+                    project_id=project_id,
+                    dependent_story_id=second_external_id,
+                    prerequisite_story_id=first_external_id,
+                    status="active",
+                    confidence="reviewed",
+                    source="manual_review",
+                ),
+            )
+        )
+        session.commit()
+
+        snapshot = WorkflowFactRepository(session).load(project_id)
+
+    selected = next(story for story in snapshot.stories if story.story_id == selected_id)
+    assert selected.dependency_safe is True
+    assert selected.sprint_candidate is True
+
+
 def test_selection_change_invalidates_review_until_exact_scope_is_confirmed(
     engine: Engine,
 ) -> None:

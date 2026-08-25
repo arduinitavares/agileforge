@@ -961,6 +961,44 @@ def test_dependency_cycle_fails_join_closed_as_invalid() -> None:
     assert sprint.reason_code == "STORY_DEPENDENCY_CYCLE"
 
 
+def test_selected_dependency_proposal_keeps_review_actionable() -> None:
+    """Expose review for selected proposals while Sprint planning stays blocked."""
+    stories = (_story(1, "req-a"), _story(2, "req-b"))
+    proposal = StoryDependencyFact(
+        dependency_id=1,
+        dependent_story_id=2,
+        prerequisite_story_id=1,
+        status="proposed",
+        source="story_writer",
+        confidence="explicit",
+        reason="Second may require the first Story.",
+    )
+    snapshot = _snapshot(
+        requirements=_requirements("req-a", "req-b"),
+        planning_artifacts=(
+            _roadmap(),
+            _story_artifact(1, "req-a"),
+            _story_artifact(2, "req-b"),
+        ),
+        stories=stories,
+        dependencies=(proposal,),
+        dependency_reviews=(),
+    )
+
+    dependency_review = _node(snapshot, "planning.story_dependencies")
+    sprint = _node(snapshot, "planning.sprint.plan")
+
+    assert dependency_review.category is NodeCategory.AVAILABLE
+    assert dependency_review.reason_code == "STORY_DEPENDENCY_REVIEW_REQUIRED"
+    assert any(
+        blocker.code == "STORY_DEPENDENCIES_UNREVIEWED"
+        and "proposed" in blocker.message.lower()
+        for blocker in dependency_review.blockers
+    )
+    assert sprint.category is NodeCategory.BLOCKED
+    assert sprint.reason_code == "STORY_DEPENDENCIES_UNREVIEWED"
+
+
 @pytest.mark.parametrize(
     ("points", "rank", "reason"),
     [

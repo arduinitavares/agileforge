@@ -1246,6 +1246,70 @@ def test_dependency_and_readiness_transitions_bind_exact_current_story_facts(
         assert repaired_story.rank == "101"
 
 
+def test_dependency_transition_canonicalizes_selected_ids_independent_of_rank(
+    engine: Engine,
+) -> None:
+    """Apply the ID-ordered selected scope when rank ordering is the reverse."""
+    requirements = ("Plan immutable work", "Validate planning work")
+    project_id = _seed_accepted_backlog(engine, requirements=requirements)
+    domain = _domain(engine)
+    _record_and_accept_roadmap(domain, project_id, requirements=requirements)
+    _first_artifact_id, first_story_id = _record_and_accept_story(
+        engine,
+        domain,
+        project_id,
+        requirement=requirements[0],
+        idempotency_suffix="-id-order-first",
+    )
+    _second_artifact_id, second_story_id = _record_and_accept_story(
+        engine,
+        domain,
+        project_id,
+        requirement=requirements[1],
+        idempotency_suffix="-id-order-second",
+    )
+    assert first_story_id < second_story_id
+    with Session(engine) as session:
+        first = session.get_one(UserStory, first_story_id)
+        second = session.get_one(UserStory, second_story_id)
+        first.rank = "2"
+        second.rank = "1"
+        session.add(first)
+        session.add(second)
+        session.commit()
+    _validate_story_structurally(engine, first_story_id)
+    _validate_story_structurally(engine, second_story_id)
+    _select_for_sprint(engine, first_story_id)
+    _select_for_sprint(engine, second_story_id)
+    with Session(engine) as session:
+        snapshot = WorkflowFactRepository(session).load(project_id)
+    selected = tuple(
+        story
+        for story in snapshot.stories
+        if story.structurally_eligible
+        and story.sprint_selection_state == "selected"
+    )
+    assert tuple(story.story_id for story in selected) == (
+        second_story_id,
+        first_story_id,
+    )
+    canonical_ids = tuple(sorted((first_story_id, second_story_id)))
+    position = domain.position(project_id)
+
+    result = domain.transition(
+        ApplyStoryDependencies(
+            **_guards(position, "planning.story_dependencies"),
+            idempotency_key="apply-id-ordered-dependencies",
+            selected_story_ids=canonical_ids,
+            reviewed_edges=(),
+            source_fingerprint=story_dependency_source_fingerprint(selected),
+        )
+    )
+
+    assert result.ok is True
+    assert result.output["selected_story_ids"] == canonical_ids
+
+
 def test_story_readiness_persistence_rejects_invalid_rank_before_mutation(
     engine: Engine,
 ) -> None:
