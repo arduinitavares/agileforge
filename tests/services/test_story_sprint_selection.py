@@ -8,7 +8,7 @@ import json
 from datetime import UTC, datetime
 from http import HTTPStatus
 from typing import TYPE_CHECKING
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -295,6 +295,33 @@ def test_api_and_cli_expose_intent_based_selection_mutations(
     assert exit_code == 0
     captured = capsys.readouterr()
     assert json.loads(captured.out)["data"]["selection_state"] == "deferred"
+
+
+@pytest.mark.parametrize("field", ["actor", "correlation_id", "rationale"])
+def test_selection_api_rejects_blank_audit_metadata_before_application(
+    field: str,
+) -> None:
+    """Selection-only blank audit text must stop at HTTP validation."""
+    application = MagicMock(spec=AgileForgeApplication)
+    payload: dict[str, int | str] = {
+        "story_id": 17,
+        "intent": "select",
+        "expected_state_fingerprint": f"sha256:{'0' * 64}",
+        "rationale": "Select exact Story.",
+        "idempotency_key": "api-invalid-audit",
+        "actor": "api-operator",
+        "correlation_id": "api-correlation",
+    }
+    payload[field] = "   "
+
+    with patch("api._application", return_value=application):
+        response = TestClient(api.app, raise_server_exceptions=False).post(
+            "/api/projects/1/story/sprint-selection",
+            json=payload,
+        )
+
+    assert response.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+    application.apply_story_sprint_selection.assert_not_called()
 
 
 def test_selected_intent_survives_staleness_and_reactivates_after_reconciliation(
