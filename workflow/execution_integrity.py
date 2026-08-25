@@ -198,7 +198,7 @@ def selected_story_dependency_snapshot(
         _fail("Selected dependency scope requires accepted Story content.")
     selected = set(canonical_story_ids)
     try:
-        direct_dependencies = tuple(
+        persisted_rows = tuple(
             item
             for item in snapshot.story_dependencies
             if item.dependent_story_id in selected
@@ -208,7 +208,7 @@ def selected_story_dependency_snapshot(
             canonical_story_ids,
             project_story_ids=frozenset(stories_by_id),
         )
-        reviewed_edges = active_dependency_review_edges(direct_dependencies)
+        reviewed_edges = active_dependency_review_edges(persisted_rows)
     except (ValueError, ValidationError) as error:
         _fail("Selected dependency edges are not reviewable.", cause=error)
     if any(edge.prerequisite_story_id not in stories_by_id for edge in reviewed_edges):
@@ -227,7 +227,7 @@ def selected_story_dependency_snapshot(
         reviewed_edges=reviewed_edges,
         source_fingerprint=source_fingerprint,
         dependency_fingerprint=dependency_review_fingerprint(reviewed_edges),
-        rows_fingerprint=dependency_rows_fingerprint(dependencies),
+        rows_fingerprint=dependency_rows_fingerprint(persisted_rows),
     )
 
 
