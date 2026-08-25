@@ -1503,6 +1503,59 @@ def test_one_selected_story_progresses_with_unselected_and_unrefined_backlog(
     assert len(snapshot.stories) == expected_refined_story_count
 
 
+def test_sprint_input_story_ids_are_exact_candidate_scope_guard(engine: Engine) -> None:
+    """Reject omitted request IDs instead of auto-adding durable candidates."""
+    project_id = _seed_accepted_backlog(engine)
+    domain = _domain(engine)
+    _record_and_accept_roadmap(domain, project_id)
+    _artifact_id, story_id = _record_and_accept_story(engine, domain, project_id)
+    _select_story_for_sprint(engine, story_id)
+    _apply_current_dependencies(
+        engine,
+        domain,
+        project_id,
+        idempotency_key="exact-generation-scope-dependencies",
+    )
+    position = domain.position(project_id)
+    decision = next(
+        item
+        for item in position.decisions
+        if item.node_id == "planning.sprint.plan"
+        and item.category is NodeCategory.AVAILABLE
+    )
+    service = application.SprintPlanningInputService(engine=engine)
+
+    omitted = service.build(
+        project_id=project_id,
+        decision=decision,
+        request=application.SprintPlanningRequest(
+            project_id=project_id,
+            selected_story_ids=(),
+            max_story_points=8,
+            team_name="Exact Scope Team",
+            idempotency_key="omitted-generation-scope",
+            actor="operator@example.com",
+        ),
+    )
+    exact = service.build(
+        project_id=project_id,
+        decision=decision,
+        request=application.SprintPlanningRequest(
+            project_id=project_id,
+            selected_story_ids=(story_id,),
+            max_story_points=8,
+            team_name="Exact Scope Team",
+            idempotency_key="exact-generation-scope",
+            actor="operator@example.com",
+        ),
+    )
+
+    assert isinstance(omitted, WorkflowError)
+    assert omitted.blockers[0].code == "SPRINT_CANDIDATE_SET_STALE"
+    assert isinstance(exact, dict)
+    assert exact["locked_story_ids"] == [story_id]
+
+
 def _apply_validation_evidence_case(
     story: UserStory,
     evidence: ValidationEvidence,
