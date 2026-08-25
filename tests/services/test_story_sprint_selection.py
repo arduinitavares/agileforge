@@ -14,9 +14,10 @@ from fastapi.testclient import TestClient
 from sqlmodel import Session, col, select
 
 import api
-from models.core import UserStory
-from models.enums import WorkflowEventType
+from models.core import Sprint, Team, UserStory
+from models.enums import SprintStatus, WorkflowEventType
 from models.events import WorkflowEvent
+from models.workflow import SprintPlanArtifact, SprintPlanArtifactDecision
 from repositories.workflow import WorkflowFactLoadError, WorkflowFactRepository
 from services import story_sprint_selection as selection_service
 from services.application import (
@@ -25,10 +26,11 @@ from services.application import (
 )
 from services.read_projections import DurableReadProjectionService
 from tests.test_story_validation_service import _accepted_story
+from tests.test_create_user_story import _decide_story, _record_story, _seed_story_parent
 from workflow.clock import FixedClock
 from workflow.definitions.root import project_graph
 from workflow.domain import WorkflowDomain
-from workflow.fingerprints import canonical_json
+from workflow.fingerprints import canonical_hash, canonical_json
 
 if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
@@ -350,3 +352,205 @@ def test_malformed_selection_history_uses_repository_integrity_error(
         match="Story selection event metadata is malformed",
     ):
         WorkflowFactRepository(session).load(project_id)
+
+
+def test_select_requires_current_evidence_but_defer_and_remove_do_not(
+    engine: Engine,
+) -> None:
+    """Only creating selected intent is gated by current structural evidence."""
+    story_id = _accepted_story(engine)
+    with Session(engine) as session:
+        story = session.get_one(UserStory, story_id)
+        initial = selection_service.story_sprint_selection_fact_in_session(
+            session,
+            story=story,
+        )
+        project_id = story.project_id
+        story.validation_evidence = None
+        session.add(story)
+        session.commit()
+    app = _build_application(engine)
+    rejected = app.apply_story_sprint_selection(
+        _selection_request(
+            project_id=project_id,
+            story_id=story_id,
+            intent="select",
+            expected_state_fingerprint=initial.state_fingerprint,
+            key="select-stale",
+        )
+    )
+    assert rejected["ok"] is False
+    assert rejected["errors"][0]["code"] == (
+        "STORY_STRUCTURAL_ELIGIBILITY_REQUIRED"
+    )
+    deferred = app.apply_story_sprint_selection(
+        _selection_request(
+            project_id=project_id,
+            story_id=story_id,
+            intent="defer",
+            expected_state_fingerprint=initial.state_fingerprint,
+            key="defer-stale",
+        )
+    )
+    assert deferred["ok"] is True
+    removed = app.apply_story_sprint_selection(
+        _selection_request(
+            project_id=project_id,
+            story_id=story_id,
+            intent="remove",
+            expected_state_fingerprint=deferred["data"]["state_fingerprint"],
+            key="remove-stale",
+        )
+    )
+    assert removed["ok"] is True
+    assert removed["data"]["selection_state"] == "unselected"
+
+
+def test_superseding_story_receives_no_selection_state_from_replaced_story(
+    engine: Engine,
+) -> None:
+    """A replacement Story ID starts unselected while old audit remains exact."""
+    project_id, roadmap_id = _seed_story_parent(engine)
+    with Session(engine) as session:
+        first_artifact = _record_story(
+            session,
+            project_id=project_id,
+            roadmap_id=roadmap_id,
+            title="Original selected work",
+        )
+        first_result = _decide_story(
+            session,
+            first_artifact,
+            decision="accepted",
+            offset=2,
+        )
+        session.commit()
+        first_story_id = first_result.activated_story_ids[0]
+        first_artifact_id = int(first_artifact.story_artifact_id or 0)
+    with Session(engine) as session:
+        first_story = session.get_one(UserStory, first_story_id)
+        initial = selection_service.story_sprint_selection_fact_in_session(
+            session,
+            story=first_story,
+        )
+    selected = _build_application(engine).apply_story_sprint_selection(
+        _selection_request(
+            project_id=project_id,
+            story_id=first_story_id,
+            intent="select",
+            expected_state_fingerprint=initial.state_fingerprint,
+            key="select-original",
+        )
+    )
+    assert selected["ok"] is True
+    with Session(engine) as session:
+        replacement_artifact = _record_story(
+            session,
+            project_id=project_id,
+            roadmap_id=roadmap_id,
+            title="Replacement work",
+            supersedes_id=first_artifact_id,
+            recorded_offset=3,
+        )
+        replacement = _decide_story(
+            session,
+            replacement_artifact,
+            decision="accepted",
+            offset=4,
+        )
+        session.commit()
+        replacement_story_id = replacement.activated_story_ids[0]
+
+    with Session(engine) as session:
+        snapshot = WorkflowFactRepository(session).load(project_id)
+    old = next(item for item in snapshot.stories if item.story_id == first_story_id)
+    new = next(
+        item for item in snapshot.stories if item.story_id == replacement_story_id
+    )
+    assert old.sprint_selection_state == "selected"
+    assert old.sprint_candidate is False
+    assert new.sprint_selection_state == "unselected"
+    assert new.sprint_selection_event_id is None
+    assert new.sprint_selection_state_fingerprint != (
+        old.sprint_selection_state_fingerprint
+    )
+
+
+def test_accepted_sprint_plan_locks_further_selection_changes(engine: Engine) -> None:
+    """An exact Story cannot change intent after accepted Sprint-plan binding."""
+    story_id = _accepted_story(engine)
+    with Session(engine) as session:
+        story = session.get_one(UserStory, story_id)
+        project_id = story.project_id
+        initial = selection_service.story_sprint_selection_fact_in_session(
+            session,
+            story=story,
+        )
+    app = _build_application(engine)
+    selected = app.apply_story_sprint_selection(
+        _selection_request(
+            project_id=project_id,
+            story_id=story_id,
+            intent="select",
+            expected_state_fingerprint=initial.state_fingerprint,
+            key="select-before-plan",
+        )
+    )
+    with Session(engine) as session:
+        story = session.get_one(UserStory, story_id)
+        team = Team(name=f"Selection lock team {project_id}")
+        session.add(team)
+        session.flush()
+        assert team.team_id is not None
+        sprint = Sprint(
+            project_id=project_id,
+            team_id=team.team_id,
+            goal="Lock selected Story.",
+            status=SprintStatus.PLANNED,
+        )
+        session.add(sprint)
+        session.flush()
+        assert sprint.sprint_id is not None
+        plan_fingerprint = canonical_hash({"plan": story_id})
+        plan = SprintPlanArtifact(
+            project_id=project_id,
+            spec_version_id=story.accepted_spec_version_id,
+            spec_hash=story.accepted_spec_hash,
+            sprint_plan_stream_id="SPS-1234567890abcdef1234567890abcdef",
+            version_number=1,
+            selected_story_ids_json=canonical_json([story_id]),
+            canonical_task_plan_json=canonical_json({"tasks": []}),
+            plan_fingerprint=plan_fingerprint,
+            candidate_set_fingerprint=canonical_hash({"stories": [story_id]}),
+            created_by="operator@example.com",
+            created_at=_NOW,
+        )
+        session.add(plan)
+        session.flush()
+        assert plan.sprint_plan_artifact_id is not None
+        session.add(
+            SprintPlanArtifactDecision(
+                project_id=project_id,
+                sprint_plan_artifact_id=plan.sprint_plan_artifact_id,
+                plan_fingerprint=plan_fingerprint,
+                decision="accepted",
+                activated_sprint_id=sprint.sprint_id,
+                rationale="Accepted exact selected scope.",
+                reviewer="operator@example.com",
+                idempotency_key="accept-selection-lock-plan",
+                decided_at=_NOW,
+            )
+        )
+        session.commit()
+
+    locked = app.apply_story_sprint_selection(
+        _selection_request(
+            project_id=project_id,
+            story_id=story_id,
+            intent="remove",
+            expected_state_fingerprint=selected["data"]["state_fingerprint"],
+            key="remove-after-plan",
+        )
+    )
+    assert locked["ok"] is False
+    assert locked["errors"][0]["code"] == "SELECTION_LIFECYCLE_LOCKED"
