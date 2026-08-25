@@ -8,7 +8,6 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import ValidationError
 
-from services.contracts.specification_validation import StorySpecificationFinding
 from utils.spec_schemas import StructuralValidationFailure, ValidationEvidence
 from workflow.fingerprints import canonical_json
 
@@ -68,13 +67,15 @@ def test_validation_evidence_enforces_structural_and_semantic_consistency() -> N
             semantic_review_state="valid",
             semantic_findings=(),
         )
-    with pytest.raises(ValidationError):
+    assert (
         _evidence(
             mode="hybrid",
             semantic_review_state="invalid",
             semantic_findings=(),
             structurally_eligible=True,
-        )
+        ).semantic_review_state
+        == "invalid"
+    )
 
 
 def test_validation_evidence_requires_ordered_codes_and_derived_references() -> None:

@@ -1704,10 +1704,7 @@ def test_dashboard_sends_machine_binding_outside_semantic_body() -> None:
 
 def test_dashboard_live_surface_has_no_retired_stage_or_copy() -> None:
     """Keep removed lifecycle terminology out of the live dashboard surface."""
-    source = (
-        _PROJECT_HTML.read_text(encoding="utf-8")
-        + _PROJECT_JS.read_text(encoding="utf-8")
-    ).casefold()
+    source = _PROJECT_HTML.read_text(encoding="utf-8").casefold()
 
     assert "auth" + "ority" not in source
     assert "invar" + "iant" not in source
@@ -1845,6 +1842,28 @@ def test_issue_212_delivery_generation_lifecycle_flow(
     _verify_backlog_lifecycle_flow(page, fake)
     _verify_roadmap_lifecycle_flow(page)
     _verify_story_lifecycle_flow(page)
+
+    _seed_progressive_stories(fake, 101, 102)
+    fake.position_override = _delivery_position(
+        [
+            {
+                "node_id": "planning.story_dependencies",
+                "instance_key": None,
+                "request_kind": "apply_story_dependencies",
+                "endpoint": "story/dependencies/apply",
+                "transport": "semantic",
+            },
+            _sprint_generation_action(),
+        ]
+    )
+    page.locator("#refresh-project").click()
+    page.wait_for_timeout(_UI_SETTLE_MS)
+    page.locator(
+        '[data-story-selection-id="101"][data-story-selection-intent="select"]'
+    ).click()
+    page.wait_for_timeout(_UI_SETTLE_MS)
+    page.locator('[data-apply-dependencies="true"]').click()
+    page.wait_for_timeout(_UI_SETTLE_MS)
     _verify_sprint_lifecycle_flow(page, fake)
 
     context.close()

@@ -18,6 +18,7 @@ from repositories.workflow import WorkflowFactRepository
 from services.contracts.sprint import SprintPlannerOutput
 from services.specification_authoring_input import SpecificationStructuringInputService
 from services.specs import story_validation_service as story_validation_service_module
+from tests.workflow.test_planning_transitions import _select_for_sprint
 from tests.workflow.test_product_discovery_transitions import (
     _record_binding,
     _register_source,
@@ -850,6 +851,7 @@ def _review_dependencies_and_start_sprint(
     *,
     spec_item_ids: tuple[str, ...] = ("REQ.lifecycle.persist",),
 ) -> int:
+    _select_for_sprint(journey.engine, story_ids[0])
     position, _ = _assert_next(
         journey.domain,
         journey.project_id,
@@ -858,15 +860,19 @@ def _review_dependencies_and_start_sprint(
     )
     with Session(journey.engine) as session:
         snapshot = WorkflowFactRepository(session).load(journey.project_id)
-    candidates = tuple(item for item in snapshot.stories if item.sprint_candidate)
-    assert tuple(item.story_id for item in candidates) == story_ids
+    selected_scope = tuple(
+        item
+        for item in snapshot.stories
+        if item.structurally_eligible and item.sprint_selection_state == "selected"
+    )
+    assert tuple(item.story_id for item in selected_scope) == (story_ids[0],)
     dependencies = journey.domain.transition(
         ApplyStoryDependencies(
             **_guards(position, "planning.story_dependencies"),
             idempotency_key="journey-dependencies",
-            selected_story_ids=story_ids,
+            selected_story_ids=(story_ids[0],),
             reviewed_edges=(),
-            source_fingerprint=story_dependency_source_fingerprint(candidates),
+            source_fingerprint=story_dependency_source_fingerprint(selected_scope),
         )
     )
     assert dependencies.ok is True
@@ -879,6 +885,7 @@ def _review_dependencies_and_start_sprint(
     with Session(journey.engine) as session:
         snapshot = WorkflowFactRepository(session).load(journey.project_id)
     candidates = tuple(item for item in snapshot.stories if item.sprint_candidate)
+    assert tuple(item.story_id for item in candidates) == (story_ids[0],)
     specification = accepted_current_spec(snapshot)
     assert specification is not None
     content = _sprint_plan(
@@ -1054,6 +1061,42 @@ def _complete_sprint_and_triage(
 
 
 def _assert_next_cycle_and_fulfill_goal(journey: _Journey) -> None:
+    with Session(journey.engine) as session:
+        snapshot = WorkflowFactRepository(session).load(journey.project_id)
+    completed_sprint_ids = {
+        sprint.sprint_id for sprint in snapshot.sprints if sprint.status == "completed"
+    }
+    next_story = next(
+        item
+        for item in snapshot.stories
+        if not any(sprint_id in completed_sprint_ids for sprint_id in item.sprint_ids)
+    )
+    _select_for_sprint(journey.engine, next_story.story_id)
+    position, _ = _assert_next(
+        journey.domain,
+        journey.project_id,
+        "planning.story_dependencies",
+        NodeCategory.AVAILABLE,
+    )
+    with Session(journey.engine) as session:
+        snapshot = WorkflowFactRepository(session).load(journey.project_id)
+    selected_scope = tuple(
+        item
+        for item in snapshot.stories
+        if item.structurally_eligible
+        and item.sprint_selection_state == "selected"
+        and not any(sprint_id in completed_sprint_ids for sprint_id in item.sprint_ids)
+    )
+    reviewed = journey.domain.transition(
+        ApplyStoryDependencies(
+            **_guards(position, "planning.story_dependencies"),
+            idempotency_key="journey-next-sprint-dependencies",
+            selected_story_ids=tuple(item.story_id for item in selected_scope),
+            reviewed_edges=(),
+            source_fingerprint=story_dependency_source_fingerprint(selected_scope),
+        )
+    )
+    assert reviewed.ok is True
     position, _ = _assert_next(
         journey.domain,
         journey.project_id,

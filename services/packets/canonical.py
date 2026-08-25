@@ -202,7 +202,7 @@ _VALIDATION_SHAPE: dict[str, object] = {
     "story_validation_input_fingerprint": str,
     "validator_version": str,
     "mode": str,
-    "ready_for_sprint": bool,
+    "structurally_eligible": bool,
     "structural_failures": [{"code": str, "message": str}],
     "structural_warnings": [object],
     "semantic_review_state": str,
@@ -439,7 +439,7 @@ def _require_canonical_agreement(
         and validation["source_backlog_item_id"] == backlog["backlog_item_id"]
         and validation["spec_version_id"] == specification["spec_version_id"]
         and validation["spec_hash"] == specification["spec_hash"]
-        and validation["ready_for_sprint"] is True
+        and validation["structurally_eligible"] is True
     )
     story_matches_lineage = (
         story_item["story_item_id"] == story["story_item_id"]
