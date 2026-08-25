@@ -8,6 +8,8 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
+from api import StoryDependenciesApplyApiRequest
+
 from models.core import UserStory, UserStoryDependency
 from models.enums import StoryStatus
 from models.events import WorkflowEvent
@@ -65,6 +67,25 @@ from workflow.requests import ApplyStoryDependencies
 from workflow.requests.planning import ReviewedDependencyEdge
 
 REVIEWED_AT = datetime(2026, 8, 2, 12, tzinfo=UTC)
+
+
+def test_dependency_api_accepts_external_prerequisite_for_selected_dependent() -> None:
+    """Transport preserves selected-to-external edges for dependency review."""
+    request = StoryDependenciesApplyApiRequest(
+        selected_story_ids=[101],
+        reviewed_edges=[
+            {
+                "dependent_story_id": 101,
+                "prerequisite_story_id": 102,
+                "reason": "Selected Story needs an external prerequisite.",
+            }
+        ],
+        actor="dashboard-ui",
+        idempotency_key="dashboard-external-dependency-edge",
+    )
+
+    assert request.selected_story_ids == [101]
+    assert request.reviewed_edges[0].prerequisite_story_id == 102
 
 
 def _invest_assessment() -> StoryInvestAssessment:
