@@ -76,7 +76,7 @@ GREEN focused behavior:
 
 ```text
 uv run --frozen pytest -q tests/services/test_story_sprint_selection.py tests/test_sprint_selection.py tests/test_story_dependencies.py tests/services/test_story_validation_application.py tests/adapters/test_command_renderer.py
-128 passed, 5 warnings in 11.42s
+131 passed, 5 warnings in 11.46s
 ```
 
 Changed-file quality:
@@ -141,6 +141,8 @@ Warnings in the green suites are the existing Starlette `TestClient`/httpx and
 - `3acccf7` test: update Story fact fixtures for selection (#223)
 - `0d98176` test: expose selection audit and replay gaps (#223)
 - `f962562` fix: harden Story selection history replay (#223)
+- `bfaac0f` test: expose selection API audit validation gap (#223)
+- `c9e9746` fix: validate selection audit metadata at API boundary (#223)
 
 ## Fix round 1: persisted audit invariants and bounded replay
 
@@ -191,6 +193,54 @@ Fix-round changed-file quality:
 
 ```text
 uv run --frozen pyrepo-check ruff annotations ty services/story_sprint_selection.py repositories/workflow.py tests/services/test_story_sprint_selection.py
+ruff passed; annotations passed; ty passed
+```
+
+## Fix round 2: selection API audit validation
+
+Re-review found that the selection domain request rejected whitespace-only
+audit text after FastAPI transport validation had already accepted it. For
+inherited `actor` and optional `correlation_id`, the resulting Pydantic error
+escaped the endpoint as HTTP 500. Selection `rationale` already used the
+whitespace-aware `SemanticText` transport type.
+
+RED was recorded in `bfaac0f` with a real `TestClient` request and a mocked
+application mutation:
+
+```text
+uv run --frozen pytest -q tests/services/test_story_sprint_selection.py -k selection_api_rejects_blank_audit_metadata_before_application
+2 failed, 1 passed, 24 deselected, 5 warnings in 0.84s
+```
+
+The actor and correlation cases returned HTTP 500 instead of 422; the rationale
+case already returned 422. Every case asserts that
+`apply_story_sprint_selection` is not called.
+
+GREEN was implemented in `c9e9746` with one validator local to
+`StorySprintSelectionApiRequest`. It rejects whitespace-only `actor`,
+`correlation_id`, and `rationale` during transport validation, without changing
+shared `MutationApiRequest`. The selection idempotency key was intentionally
+left unchanged because both transport and domain contracts require only a
+non-empty string; no stronger writer rule exists to align.
+
+Narrow API GREEN:
+
+```text
+uv run --frozen pytest -q tests/services/test_story_sprint_selection.py -k selection_api_rejects_blank_audit_metadata_before_application
+3 passed, 24 deselected, 5 warnings in 0.80s
+```
+
+Focused Task 3 GREEN:
+
+```text
+uv run --frozen pytest -q tests/services/test_story_sprint_selection.py tests/test_sprint_selection.py tests/test_story_dependencies.py tests/services/test_story_validation_application.py tests/adapters/test_command_renderer.py
+131 passed, 5 warnings in 11.46s
+```
+
+Fix-round changed-file quality:
+
+```text
+uv run --frozen pyrepo-check ruff annotations ty api.py tests/services/test_story_sprint_selection.py
 ruff passed; annotations passed; ty passed
 ```
 
