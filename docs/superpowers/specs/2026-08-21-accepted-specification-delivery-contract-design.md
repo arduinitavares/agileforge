@@ -669,6 +669,12 @@ never downgraded to advisory text and never repaired or inferred by the host.
 
 ### Persisted evidence
 
+> **#223 supersession — persisted evidence only.** The v2 evidence contract
+> below is historical. #223 replaces it with the current
+> [`agileforge.story-validation-evidence.v3` automatic provider-free structural
+> evidence contract](2026-08-25-story-readiness-sprint-candidacy-contract.md).
+> This narrow supersession does not alter the remaining #210 design.
+
 `ValidationEvidence` becomes a fresh-schema v2 contract containing:
 
 - `schema_version="agileforge.story-validation-evidence.v2"`;

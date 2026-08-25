@@ -833,7 +833,8 @@ def _is_current_planning_story(
     return not any(sprint_id in completed_sprint_ids for sprint_id in story.sprint_ids)
 
 
-def _selected_scope_stories(snapshot: WorkflowFactSnapshot) -> tuple[StoryFact, ...]:
+def selected_scope_stories(snapshot: WorkflowFactSnapshot) -> tuple[StoryFact, ...]:
+    """Return the current eligible human-selected Story scope."""
     return tuple(
         sorted(
             (
@@ -845,6 +846,29 @@ def _selected_scope_stories(snapshot: WorkflowFactSnapshot) -> tuple[StoryFact, 
             ),
             key=lambda item: item.story_id,
         )
+    )
+
+
+def dependency_review_lifecycle_locked(snapshot: WorkflowFactSnapshot) -> bool:
+    """Keep dependency review immutable until every prior Sprint is triaged."""
+    sprints_by_id = {item.sprint_id: item for item in snapshot.sprints}
+    triaged_sprint_ids = {item.sprint_id for item in snapshot.post_sprint_triage}
+    if any(item.status == "active" for item in snapshot.sprints):
+        return True
+    if any(
+        item.status == "completed" and item.sprint_id not in triaged_sprint_ids
+        for item in snapshot.sprints
+    ):
+        return True
+    return any(
+        item.status == "accepted"
+        and (
+            item.activated_sprint_id is None
+            or (sprint := sprints_by_id.get(item.activated_sprint_id)) is None
+            or sprint.status == "planned"
+        )
+        for item in snapshot.planning_artifacts
+        if item.artifact_type == "sprint_plan"
     )
 
 
@@ -1093,7 +1117,12 @@ def _story_dependencies_rule(
     snapshot: WorkflowFactSnapshot,
     _evaluated_at: datetime,
 ) -> tuple[RuleEvaluation, ...]:
-    stories = _selected_scope_stories(snapshot)
+    if dependency_review_lifecycle_locked(snapshot):
+        return _blocked(
+            "SPRINT_DEPENDENCY_REVIEW_LIFECYCLE_LOCKED",
+            "Dependency review is locked until prior Sprint lifecycle triage finishes.",
+        )
+    stories = selected_scope_stories(snapshot)
     if not stories:
         return _blocked(
             "STORY_DEPENDENCY_CANDIDATES_MISSING",
@@ -1208,7 +1237,7 @@ def _sprint_candidate_problem(
 def _sprint_join(  # noqa: PLR0911
     snapshot: WorkflowFactSnapshot,
 ) -> tuple[StoryFact, ...] | RuleEvaluation:
-    selected = _selected_scope_stories(snapshot)
+    selected = selected_scope_stories(snapshot)
     if not selected:
         selected_intent = _selected_intent_stories(snapshot)
         if selected_intent:
@@ -1796,7 +1825,9 @@ def planning_graph() -> WorkflowGraph:
 __all__ = [
     "PLANNING_NODES",
     "candidate_set_fingerprint",
+    "dependency_review_lifecycle_locked",
     "planning_graph",
     "readiness_fingerprint",
+    "selected_scope_stories",
     "story_dependency_source_fingerprint",
 ]

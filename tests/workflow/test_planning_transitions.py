@@ -68,9 +68,11 @@ from utils.task_metadata import parse_task_metadata
 from workflow.clock import FixedClock
 from workflow.contracts import (
     Blocker,
+    FactReference,
     JsonObject,
     NodeCategory,
     NodeDecision,
+    RecommendationKind,
     TransitionResult,
     WorkflowErrorCode,
     WorkflowPosition,
@@ -84,6 +86,7 @@ from workflow.definitions.planning import (
 from workflow.definitions.product_discovery import accepted_current_spec
 from workflow.domain import WorkflowDomain
 from workflow.fingerprints import canonical_hash, canonical_json
+from workflow.handlers.planning import execute_apply_story_dependencies
 from workflow.requests import (
     ApplyStoryDependencies,
     DecideRoadmap,
@@ -1260,6 +1263,134 @@ def test_dependency_and_readiness_transitions_bind_exact_current_story_facts(
         assert repaired_story is not None
         assert repaired_story.story_points == REPAIRED_STORY_POINTS
         assert repaired_story.rank == "101"
+
+
+@pytest.mark.parametrize("sprint_state", ["planned", "active", "completed"])
+def test_apply_dependencies_rechecks_prior_sprint_lifecycle_before_mutation(
+    engine: Engine,
+    sprint_state: Literal["planned", "active", "completed"],
+) -> None:
+    """Reject an exact new scope while the prior Sprint remains unresolved."""
+    requirements = ("Plan immutable work", "Validate planning work")
+    project_id = _seed_accepted_backlog(engine, requirements=requirements)
+    domain = _domain(engine)
+    _record_and_accept_roadmap(domain, project_id, requirements=requirements)
+    _first_artifact, historical_story_id = _record_and_accept_story(
+        engine,
+        domain,
+        project_id,
+        requirement=requirements[0],
+        spec_item_id="REQ.planning-1",
+    )
+    _second_artifact, future_story_id = _record_and_accept_story(
+        engine,
+        domain,
+        project_id,
+        requirement=requirements[1],
+        spec_item_id="REQ.planning-2",
+        idempotency_suffix="-future",
+    )
+    plan_id, _candidate, _plan, plan_fingerprint = _record_sprint_plan_draft(
+        engine,
+        domain,
+        project_id,
+        historical_story_id,
+        team_name="Lifecycle Lock Team",
+        idempotency_key=f"lifecycle-lock-{sprint_state}",
+    )
+    position = domain.position(project_id)
+    accepted = domain.transition(
+        DecideSprintPlan(
+            **_guards(position, "planning.sprint.review"),
+            idempotency_key=f"lifecycle-lock-{sprint_state}-accept",
+            sprint_plan_artifact_id=plan_id,
+            plan_fingerprint=plan_fingerprint,
+            decision="accepted",
+            rationale="Preserve the exact accepted Sprint scope.",
+        )
+    )
+    assert accepted.ok is True
+    sprint_id = _output_int(accepted, "activated_sprint_id")
+    if sprint_state in {"active", "completed"}:
+        position = domain.position(project_id)
+        started = domain.transition(
+            StartSprint(
+                **_guards(position, "planning.sprint.start"),
+                idempotency_key=f"lifecycle-lock-{sprint_state}-start",
+            )
+        )
+        assert started.ok is True
+    if sprint_state == "completed":
+        with Session(engine) as session:
+            sprint = session.get(Sprint, sprint_id)
+            assert sprint is not None
+            sprint.status = SprintStatus.COMPLETED
+            sprint.completed_at = EVALUATED_AT + timedelta(minutes=1)
+            session.add(sprint)
+            session.commit()
+
+    _select_for_sprint(engine, future_story_id)
+    with Session(engine) as session:
+        snapshot = WorkflowFactRepository(session).load(project_id)
+        completed_sprint_ids = {
+            item.sprint_id for item in snapshot.sprints if item.status == "completed"
+        }
+        selected = tuple(
+            item
+            for item in snapshot.stories
+            if item.structurally_eligible
+            and item.sprint_selection_state == "selected"
+            and not any(
+                sprint_id in completed_sprint_ids for sprint_id in item.sprint_ids
+            )
+        )
+        source_fingerprint = story_dependency_source_fingerprint(selected)
+        reviews_before = session.exec(
+            select(StoryDependencyReview).where(
+                col(StoryDependencyReview.project_id) == project_id
+            )
+        ).all()
+        result = execute_apply_story_dependencies(
+            session,
+            ApplyStoryDependencies(
+                project_id=project_id,
+                graph_version="test-graph",
+                fact_fingerprint="test-facts",
+                decision_fingerprint="test-decision",
+                idempotency_key=f"lifecycle-lock-{sprint_state}-dependencies",
+                actor="operator@example.com",
+                selected_story_ids=tuple(item.story_id for item in selected),
+                reviewed_edges=(),
+                source_fingerprint=source_fingerprint,
+            ),
+            NodeDecision(
+                node_id="planning.story_dependencies",
+                child_graph_id="planning",
+                request_kind="apply_story_dependencies",
+                category=NodeCategory.AVAILABLE,
+                recommendation_kind=RecommendationKind.REQUIRED,
+                reason_code="STORY_DEPENDENCY_REVIEW_REQUIRED",
+                fact_references=(
+                    FactReference(
+                        fact_type="story_dependency_source",
+                        fact_id=str(project_id),
+                        fingerprint=source_fingerprint,
+                    ),
+                ),
+                decision_fingerprint="test-decision",
+            ),
+            EVALUATED_AT,
+        )
+        reviews_after = session.exec(
+            select(StoryDependencyReview).where(
+                col(StoryDependencyReview.project_id) == project_id
+            )
+        ).all()
+
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
+    assert reviews_after == reviews_before
 
 
 def test_dependency_transition_canonicalizes_selected_ids_independent_of_rank(
@@ -2885,16 +3016,10 @@ def test_public_start_preserves_stale_specification_error(
     )
 
 
-def test_public_start_blocks_current_plan_while_exact_older_sprint_is_active(
+def test_active_sprint_locks_new_dependency_scope_without_mutation(
     engine: Engine,
 ) -> None:
-    """Treat an exact older active Sprint as availability, not target conflict."""
-    from services.application import (  # noqa: PLC0415
-        AgileForgeApplication,
-        PlanningActionSelectionService,
-        SprintStartRequest,
-    )
-
+    """Lock a new dependency scope while the older Sprint stays active."""
     project_id = _seed_accepted_backlog(engine)
     domain = _domain(engine)
     _record_and_accept_roadmap(domain, project_id)
@@ -2950,75 +3075,54 @@ def test_public_start_blocks_current_plan_while_exact_older_sprint_is_active(
         idempotency_suffix="-current-lineage",
     )
     _select_for_sprint(engine, new_story_id)
-    _apply_current_dependencies(
-        engine,
-        domain,
-        project_id,
-        idempotency_key="current-lineage-dependencies",
-    )
     with Session(engine) as session:
         snapshot = WorkflowFactRepository(session).load(project_id)
-    specification = accepted_current_spec(snapshot)
-    assert specification is not None
-    current_plan = SprintPlannerOutput.model_validate(_sprint_plan(new_story_id))
-    plan_position = domain.position(project_id)
-    current_recorded = domain.transition(
-        RecordSprintPlan(
-            **_guards(plan_position, "planning.sprint.plan"),
-            idempotency_key="current-lineage-sprint-draft",
-            team_name="Current Planned Sprint Team",
-            spec_version_id=specification.spec_version_id,
-            spec_hash=specification.spec_hash,
-            planner_output=current_plan,
-        )
-    )
-    assert current_recorded.ok is True
-    current_plan_id = _output_int(current_recorded, "sprint_plan_artifact_id")
-    current_plan_fingerprint = str(current_recorded.output["plan_fingerprint"])
-    current_review_position = domain.position(project_id)
-    current_accepted = domain.transition(
-        DecideSprintPlan(
-            **_guards(current_review_position, "planning.sprint.review"),
-            idempotency_key="current-lineage-sprint-accept",
-            sprint_plan_artifact_id=current_plan_id,
-            plan_fingerprint=current_plan_fingerprint,
-            decision="accepted",
-            rationale="Materialize the current planned Sprint.",
-        )
-    )
-    assert current_accepted.ok is True
-    current_sprint_id = _output_int(current_accepted, "activated_sprint_id")
-    assert current_sprint_id != old_sprint_id
+        reviews_before = session.exec(
+            select(StoryDependencyReview).where(
+                col(StoryDependencyReview.project_id) == project_id
+            )
+        ).all()
+        rows_before = session.exec(
+            select(UserStoryDependency).where(
+                col(UserStoryDependency.project_id) == project_id
+            )
+        ).all()
 
     position = domain.position(project_id)
-    graph_decision = _decision(position, "planning.sprint.start")
+    graph_decision = _decision(position, "planning.story_dependencies")
     assert graph_decision.category is NodeCategory.BLOCKED
-    assert graph_decision.reason_code == "ACTIVE_SPRINT_EXISTS"
-    application = AgileForgeApplication(
-        workflow_domain=domain,
-        planning_action_selection=PlanningActionSelectionService(engine=engine),
-    )
-
-    result = application.start_sprint(
-        SprintStartRequest(
-            project_id=project_id,
-            idempotency_key="current-lineage-sprint-start",
-            actor="operator@example.com",
-            correlation_id="task-10-current-lineage-active-block",
+    assert graph_decision.reason_code == "SPRINT_DEPENDENCY_REVIEW_LIFECYCLE_LOCKED"
+    result = domain.transition(
+        ApplyStoryDependencies(
+            **_guards(position, "planning.story_dependencies"),
+            idempotency_key="current-lineage-dependencies",
+            selected_story_ids=tuple(
+                item.story_id
+                for item in snapshot.stories
+                if item.structurally_eligible
+                and item.sprint_selection_state == "selected"
+            ),
+            reviewed_edges=(),
+            source_fingerprint=story_dependency_source_fingerprint(snapshot.stories),
         )
     )
 
-    message = (
-        "Another Sprint is already active for this Project. Close it before "
-        "starting this Sprint."
-    )
     assert result.ok is False
     assert result.error is not None
-    assert result.error.code is WorkflowErrorCode.ACTIVE_SPRINT_EXISTS
-    assert result.error.message == message
-    assert result.error.blockers == (
-        Blocker(code="ACTIVE_SPRINT_EXISTS", message=message),
-    )
+    assert result.error.code is WorkflowErrorCode.TRANSITION_NOT_AVAILABLE
+    with Session(engine) as session:
+        reviews_after = session.exec(
+            select(StoryDependencyReview).where(
+                col(StoryDependencyReview.project_id) == project_id
+            )
+        ).all()
+        rows_after = session.exec(
+            select(UserStoryDependency).where(
+                col(UserStoryDependency.project_id) == project_id
+            )
+        ).all()
+    assert reviews_after == reviews_before
+    assert rows_after == rows_before
 
 
 @pytest.mark.parametrize(

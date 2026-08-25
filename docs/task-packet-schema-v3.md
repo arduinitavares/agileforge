@@ -26,7 +26,8 @@ never rendered to humans.
 start timestamp, and dates. `evidence` contains the pinned Specification
 currentness and exact cited items, exact Backlog item, containing Roadmap
 release, accepted canonical Story item, selected Sprint-plan Story, and strict
-`agileforge.story-validation-evidence.v2` snapshot.
+`agileforge.story-validation-evidence.v3` automatic provider-free structural
+evidence snapshot.
 
 `work.story` keeps the accepted Story statement and acceptance criteria separate
 from Task completion. `work.task` contains description, status, assignee display

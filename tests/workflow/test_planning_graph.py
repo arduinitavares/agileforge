@@ -1186,6 +1186,59 @@ def test_started_sprint_stream_exposes_next_cycle_planning() -> None:
     assert start_rule.reason_code == "SPRINT_ALREADY_STARTED"
 
 
+@pytest.mark.parametrize(
+    ("sprint_status", "include_start"),
+    [
+        ("planned", False),
+        ("active", True),
+        ("completed", True),
+    ],
+)
+def test_dependency_review_is_locked_until_prior_sprint_is_triaged(
+    sprint_status: Literal["planned", "active", "completed"],
+    include_start: bool,
+) -> None:
+    """Keep selected-scope review closed while a prior Sprint is unresolved."""
+    historical = _story(1, "req-a", candidate=False)
+    future = _story(2, "req-b")
+    plan = _sprint_plan_artifact(
+        artifact_id=900,
+        stream_id="SPS-ffffffffffffffffffffffffffffffff",
+        status="accepted",
+        selected_story_ids=(historical.story_id,),
+        activated_sprint_id=601,
+    )
+    snapshot = _snapshot(
+        requirements=_requirements("req-a", "req-b"),
+        planning_artifacts=(
+            _roadmap(),
+            _story_artifact(1, "req-a"),
+            _story_artifact(2, "req-b"),
+            plan,
+        ),
+        stories=(historical, future),
+        dependency_reviews=(),
+        sprints=(
+            SprintFact(
+                sprint_id=601,
+                status=sprint_status,
+                completed_at=(
+                    EVALUATED_AT - timedelta(hours=1)
+                    if sprint_status == "completed"
+                    else None
+                ),
+            ),
+        ),
+        sprint_starts=((_sprint_start_fact(plan),) if include_start else ()),
+        post_sprint_triage=(),
+    )
+
+    decision = _node(snapshot, "planning.story_dependencies")
+
+    assert decision.category is NodeCategory.BLOCKED
+    assert decision.reason_code == "SPRINT_DEPENDENCY_REVIEW_LIFECYCLE_LOCKED"
+
+
 def test_different_active_sprint_blocks_start_with_stable_reason() -> None:
     """Distinguish another active Sprint from an exact already-started plan."""
     story = _story(1, "req-a")

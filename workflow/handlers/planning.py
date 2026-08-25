@@ -34,7 +34,9 @@ from workflow.contracts import (
 )
 from workflow.definitions.planning import (
     candidate_set_fingerprint,
+    dependency_review_lifecycle_locked,
     readiness_fingerprint,
+    selected_scope_stories,
     story_dependency_source_fingerprint,
 )
 from workflow.definitions.product_discovery import accepted_current_spec
@@ -55,7 +57,6 @@ if TYPE_CHECKING:
 
     from workflow.facts import (
         PlanningArtifactFact,
-        StoryDependencyFact,
         StoryFact,
         WorkflowFactSnapshot,
     )
@@ -84,32 +85,6 @@ type StoryPlanningRequest = (
     RecordStoryDraft | DecideStory | ApplyStoryDependencies | RepairStoryReadiness
 )
 type SprintPlanningRequest = RecordSprintPlan | DecideSprintPlan | StartSprint
-
-
-def _candidate_set_in_session(
-    session: Session,
-    *,
-    project_id: int,
-) -> tuple[tuple[StoryFact, ...], tuple[StoryDependencyFact, ...]]:
-    snapshot = WorkflowFactRepository(session).load(project_id)
-    completed_sprint_ids = {
-        sprint.sprint_id for sprint in snapshot.sprints if sprint.status == "completed"
-    }
-    stories = tuple(
-        sorted(
-            (
-                item
-                for item in snapshot.stories
-                if item.structurally_eligible
-                and item.sprint_selection_state == "selected"
-                and not any(
-                    sprint_id in completed_sprint_ids for sprint_id in item.sprint_ids
-                )
-            ),
-            key=lambda item: item.story_id,
-        )
-    )
-    return stories, snapshot.story_dependencies
 
 
 def _success(decision: NodeDecision, output: dict[str, object]) -> TransitionResult:
@@ -535,10 +510,13 @@ def execute_apply_story_dependencies(
     decision: NodeDecision,
     evaluated_at: datetime,
 ) -> TransitionResult:
-    stories, _dependencies = _candidate_set_in_session(
-        session,
-        project_id=request.project_id,
-    )
+    snapshot = WorkflowFactRepository(session).load(request.project_id)
+    if dependency_review_lifecycle_locked(snapshot):
+        return _conflict(
+            "ApplyStoryDependencies is locked until prior Sprint lifecycle "
+            "triage finishes."
+        )
+    stories = selected_scope_stories(snapshot)
     expected_ids = tuple(item.story_id for item in stories)
     expected_source = story_dependency_source_fingerprint(stories)
     if (
