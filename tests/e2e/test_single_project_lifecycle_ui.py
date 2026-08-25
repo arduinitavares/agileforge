@@ -2758,6 +2758,15 @@ def test_dependency_confirmation_stays_locked_when_authority_reload_fails(
     page.wait_for_timeout(_UI_SETTLE_MS)
     assert len(fake.dependency_apply_requests) == 1
     assert fake.api_errors
+
+    fake.dependency_reload_failure = None
+    page.locator("#refresh-project").click()
+    page.wait_for_timeout(_UI_SETTLE_MS)
+    refreshed_confirm = page.locator('[data-apply-dependencies="true"]')
+    expect(refreshed_confirm).to_be_enabled()
+    refreshed_confirm.click()
+    page.wait_for_timeout(_UI_SETTLE_MS)
+    assert len(fake.dependency_apply_requests) == 2
     assert not [
         body
         for suffix, body in fake.delivery_requests
