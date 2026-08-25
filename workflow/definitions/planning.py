@@ -37,6 +37,7 @@ from workflow.planning_integrity import (
     active_dependency_review_edges,
     current_task_content_fingerprint,
     dependency_review_fingerprint,
+    selected_dependency_active_closure,
 )
 
 if TYPE_CHECKING:
@@ -75,9 +76,9 @@ def candidate_set_fingerprint(
     dependencies: tuple[StoryDependencyFact, ...],
 ) -> str:
     """Hash canonical current Story, dependency, and readiness facts."""
-    selected_ids = {story.story_id for story in stories}
-    scoped_dependencies = tuple(
-        edge for edge in dependencies if edge.dependent_story_id in selected_ids
+    scoped_dependencies = selected_dependency_active_closure(
+        dependencies,
+        (story.story_id for story in stories),
     )
     return canonical_hash(
         {

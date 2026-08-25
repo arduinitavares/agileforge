@@ -5,11 +5,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
+from pydantic import ValidationError
+
 from models.enums import TaskStatus
 from workflow.fingerprints import canonical_hash
 from workflow.planning_integrity import (
     active_dependency_review_edges,
     dependency_review_fingerprint,
+    selected_dependency_active_closure,
 )
 
 if TYPE_CHECKING:
@@ -192,25 +195,19 @@ def selected_story_dependency_snapshot(
     ):
         _fail("Selected dependency scope requires accepted Story content.")
     selected = set(canonical_story_ids)
-    dependencies = tuple(
-        sorted(
-            (
-                item
-                for item in snapshot.story_dependencies
-                if item.dependent_story_id in selected
-            ),
-            key=lambda item: (
-                item.dependent_story_id,
-                item.prerequisite_story_id,
-                item.dependency_id,
-            ),
-        )
-    )
-    if len({item.dependency_id for item in dependencies}) != len(dependencies):
-        _fail("Selected dependency rows contain duplicate identities.")
     try:
-        reviewed_edges = active_dependency_review_edges(dependencies)
-    except ValueError as error:
+        direct_dependencies = tuple(
+            item
+            for item in snapshot.story_dependencies
+            if item.dependent_story_id in selected
+        )
+        dependencies = selected_dependency_active_closure(
+            snapshot.story_dependencies,
+            canonical_story_ids,
+            project_story_ids=frozenset(stories_by_id),
+        )
+        reviewed_edges = active_dependency_review_edges(direct_dependencies)
+    except (ValueError, ValidationError) as error:
         _fail("Selected dependency edges are not reviewable.", cause=error)
     if any(edge.prerequisite_story_id not in stories_by_id for edge in reviewed_edges):
         _fail("Selected dependency scope references a missing prerequisite Story.")

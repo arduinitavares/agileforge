@@ -165,6 +165,7 @@ from workflow.planning_integrity import (
     dependency_edges_payload,
     dependency_review_fingerprint,
     planned_task_content_fingerprint,
+    selected_dependency_active_closure,
 )
 
 if TYPE_CHECKING:
@@ -3495,10 +3496,10 @@ class WorkflowFactRepository:
         """Evaluate the dependency closure behind one reviewed selected scope."""
         stories_by_id = {story.story_id: story for story in stories}
         try:
-            closure_dependencies = self._selected_dependency_closure(
-                selected_story_ids,
+            closure_dependencies = selected_dependency_active_closure(
                 dependencies,
-                frozenset(stories_by_id),
+                selected_story_ids,
+                project_story_ids=frozenset(stories_by_id),
             )
             closure_edges = active_dependency_review_edges(closure_dependencies)
         except (ValidationError, ValueError) as exc:
@@ -3526,46 +3527,6 @@ class WorkflowFactRepository:
             ),
         )
         return not blockers, blockers
-
-    @staticmethod
-    def _selected_dependency_closure(
-        selected_story_ids: set[int],
-        dependencies: tuple[StoryDependencyFact, ...],
-        project_story_ids: frozenset[int],
-    ) -> tuple[StoryDependencyFact, ...]:
-        """Return active rows reachable from exact selected dependents."""
-        active_by_dependent: dict[int, list[StoryDependencyFact]] = {}
-        for edge in dependencies:
-            if edge.status != "active":
-                continue
-            if (
-                edge.dependent_story_id not in project_story_ids
-                or edge.prerequisite_story_id not in project_story_ids
-                or edge.dependent_story_id == edge.prerequisite_story_id
-            ):
-                message = "Selected dependency closure contains an invalid endpoint."
-                raise ValueError(message)
-            active_by_dependent.setdefault(edge.dependent_story_id, []).append(edge)
-        reachable = set(selected_story_ids)
-        pending = sorted(selected_story_ids, reverse=True)
-        closure: list[StoryDependencyFact] = []
-        while pending:
-            dependent_id = pending.pop()
-            for edge in active_by_dependent.get(dependent_id, ()):
-                closure.append(edge)
-                if edge.prerequisite_story_id not in reachable:
-                    reachable.add(edge.prerequisite_story_id)
-                    pending.append(edge.prerequisite_story_id)
-        return tuple(
-            sorted(
-                closure,
-                key=lambda edge: (
-                    edge.dependent_story_id,
-                    edge.prerequisite_story_id,
-                    edge.dependency_id,
-                ),
-            )
-        )
 
     def _tasks(
         self,

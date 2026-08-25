@@ -113,6 +113,62 @@ def active_dependency_review_edges(
     )
 
 
+def selected_dependency_active_closure(
+    dependencies: Iterable[StoryDependencyFact],
+    selected_story_ids: Iterable[int],
+    *,
+    project_story_ids: frozenset[int] | None = None,
+) -> tuple[StoryDependencyFact, ...]:
+    """Return canonical active rows reachable from exact selected dependents."""
+    selected = frozenset(selected_story_ids)
+    if project_story_ids is not None and not selected.issubset(project_story_ids):
+        message = "Selected dependency closure references a missing Story."
+        raise ValueError(message)
+    active_by_dependent: dict[int, list[StoryDependencyFact]] = {}
+    for edge in dependencies:
+        if edge.status == "active":
+            active_by_dependent.setdefault(edge.dependent_story_id, []).append(edge)
+    reachable = set(selected)
+    pending = sorted(selected, reverse=True)
+    closure: list[StoryDependencyFact] = []
+    dependency_ids: set[int] = set()
+    endpoints: set[tuple[int, int]] = set()
+    while pending:
+        dependent_id = pending.pop()
+        for edge in active_by_dependent.get(dependent_id, ()):
+            endpoint = (edge.dependent_story_id, edge.prerequisite_story_id)
+            if (
+                edge.dependent_story_id == edge.prerequisite_story_id
+                or edge.dependency_id in dependency_ids
+                or endpoint in endpoints
+                or (
+                    project_story_ids is not None
+                    and (
+                        edge.dependent_story_id not in project_story_ids
+                        or edge.prerequisite_story_id not in project_story_ids
+                    )
+                )
+            ):
+                message = "Selected dependency closure contains malformed endpoints."
+                raise ValueError(message)
+            dependency_ids.add(edge.dependency_id)
+            endpoints.add(endpoint)
+            closure.append(edge)
+            if edge.prerequisite_story_id not in reachable:
+                reachable.add(edge.prerequisite_story_id)
+                pending.append(edge.prerequisite_story_id)
+    return tuple(
+        sorted(
+            closure,
+            key=lambda edge: (
+                edge.dependent_story_id,
+                edge.prerequisite_story_id,
+                edge.dependency_id,
+            ),
+        )
+    )
+
+
 def planned_task_content_fingerprint(  # noqa: PLR0913
     plan: SprintPlannerOutput,
     *,
