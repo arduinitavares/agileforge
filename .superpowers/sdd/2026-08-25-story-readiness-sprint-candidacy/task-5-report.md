@@ -377,3 +377,78 @@ new enabled valid Confirm action.
 No provider call, real Sprint generation/persistence, manual profile, push,
 merge, issue mutation, or live manual acceptance occurred. #224 behavior is
 unchanged; full `pyrepo-check --all` remains Task 6's gate.
+
+## Fix round 4/5: token-bound dependency mutation phases
+
+### Delivered correction
+
+Dependency confirmation now has an explicit token-bound `submitting` and
+`awaiting_authority` contract. One mutation owns one canonical payload and
+idempotency key across its transport retry. A dashboard load captures the
+exact mutation token and phase when it starts; it may clear that token only
+when it began in `awaiting_authority`, returned a successful current
+projection, and the same token and phase remain active. A successful manual
+refresh begun during the unresolved POST therefore cannot release the lock,
+even if it rerenders the dashboard before the POST commits.
+
+Every dependency Confirm replacement rendered in either phase is a native
+disabled button with `aria-disabled="true"` and `aria-busy="true"`.
+`submitting` copy says the dependency review is being submitted and does not
+claim acceptance. After POST success, `awaiting_authority` copy may name the
+accepted review and projection reload. False, thrown, and 409 associated
+reloads retain the exact lock and visible error; a later successful load begun
+in `awaiting_authority` resolves it and renders a new enabled current action.
+
+The existing source-safety test now excludes only the exact internal
+`'awaiting_authority'` phase token from its removed-Authority-stage text scan;
+all other source and HTML occurrences remain rejected.
+
+### RED evidence
+
+```text
+node --test --test-name-pattern='dashboard load started during dependency submission' tests/test_workflow_position_display.mjs
+1 failed, 0 passed
+```
+
+The VM assertion failed because the successful manual dashboard load had
+cleared the active dependency token to `null`.
+
+```text
+uv run --frozen pytest -q tests/e2e/test_single_project_lifecycle_ui.py -k dependency_submission_survives_manual_refresh_race
+1 failed, 21 deselected, 4 warnings
+```
+
+The browser fake held the dependency POST pending, completed a manual refresh,
+and observed an enabled replacement with no disabled, ARIA-busy, or submitting
+status. Both RED tests were committed before production JavaScript.
+
+### GREEN verification
+
+```text
+node --check frontend/project.js
+node --test tests/*.mjs
+67 passed, 0 failed
+
+uv run --frozen pytest -q tests/e2e/test_single_project_lifecycle_ui.py -k 'dependency_confirmation_stays_locked or dependency_confirmation_replacement_stays_locked or dependency_submission_survives_manual_refresh_race'
+3 passed, 19 deselected, 4 warnings
+
+uv run --frozen pyrepo-check annotations ty ruff tests/e2e/test_single_project_lifecycle_ui.py
+ruff, annotations, and ty passed
+```
+
+The race scenario also attempts to click the replacement while the original
+POST is unresolved, then resolves the POST. It proves the POST count remains
+one, the observed idempotency key set remains one, submitting copy is coherent,
+and the post-success authority reload renders a new enabled Confirm action.
+The existing 409 lock and later-successful-refresh recovery scenarios remain
+GREEN.
+
+### Fix-round commits and boundaries
+
+- `b07e31a` test: expose dependency refresh submission race (#223)
+- `2892657` fix: bind dependency lock to projection phase (#223)
+
+No provider call, real Sprint generation/persistence, manual profile, push,
+merge, issue mutation, or live manual acceptance occurred. Browser work used
+only the existing test-owned ephemeral server/profile/context and API fake.
+#224 behavior is unchanged; full `pyrepo-check --all` remains Task 6's gate.
