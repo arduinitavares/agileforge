@@ -22,6 +22,7 @@ function loadFrontend(fetchImpl = async () => ({ ok: true, text: async () => '{}
         get textContent() { return this._textContent; },
     });
     const context = vm.createContext({
+        AbortController,
         console,
         crypto: { randomUUID: () => 'uuid-1' },
         document: {
@@ -1230,6 +1231,50 @@ test('dependency controls remain locked after a successful mutation cannot reloa
     assert.strictEqual(context.shouldUnlockDependencyMutation(true, false), false);
     assert.strictEqual(context.shouldUnlockDependencyMutation(true, true), false);
     assert.strictEqual(context.shouldUnlockDependencyMutation(false, false), true);
+});
+
+test('a dashboard load started during dependency submission cannot release its token', async () => {
+    const context = loadFrontend();
+    const action = {
+        node_id: 'planning.story_dependencies',
+        request_kind: 'apply_story_dependencies',
+        endpoint: 'story/dependencies/apply',
+        transport: 'semantic',
+    };
+    const story = selectedScopeStory();
+    vm.runInContext(`
+        selectedProjectId = 7;
+        activeDependencyMutation = {
+            token: 'dependency-token-1',
+            phase: 'submitting',
+            payload: {
+                selected_story_ids: [101],
+                reviewed_edges: [],
+                actor: 'dashboard-ui',
+                idempotency_key: 'dashboard-uuid-1',
+            },
+            button: null,
+        };
+    `, context);
+
+    assert.strictEqual(await context.loadDashboard(), true);
+
+    const active = JSON.parse(vm.runInContext(
+        'JSON.stringify(activeDependencyMutation)',
+        context,
+    ));
+    assert.notEqual(active, null);
+    assert.equal(active.token, 'dependency-token-1');
+    assert.equal(active.phase, 'submitting');
+    const markup = context.storyDependencyReviewMarkup(
+        action,
+        [story],
+        { stories: [story], edges: [] },
+    );
+    assert.ok(markup.includes('disabled aria-disabled="true"'));
+    assert.ok(markup.includes('aria-busy="true"'));
+    assert.ok(markup.includes('Dependency review is being submitted'));
+    assert.ok(!markup.includes('Dependency review was accepted'));
 });
 
 test('rejected Story mutations restore every control to its exact prior state', () => {

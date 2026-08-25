@@ -2840,6 +2840,91 @@ def test_dependency_confirmation_replacement_stays_locked_on_reload_conflict(
     context.close()
 
 
+def test_dependency_submission_survives_manual_refresh_race(
+    dashboard_harness: DashboardHarness,
+) -> None:
+    """A refresh begun while POST is pending cannot release its mutation token."""
+    fake = _delivery_ready_fake(
+        [
+            {
+                "node_id": "planning.story_dependencies",
+                "instance_key": None,
+                "request_kind": "apply_story_dependencies",
+                "endpoint": "story/dependencies/apply",
+                "transport": "semantic",
+            }
+        ]
+    )
+    _seed_progressive_stories(fake, 101, 102)
+    story = cast("JsonObject", fake.stories[0])
+    story["sprint_selection_state"] = "selected"
+
+    context, page = _open_project_page(dashboard_harness, fake)
+    page.evaluate(
+        """() => {
+            const originalFetch = window.fetch.bind(window);
+            window.issue223DependencyRace = { requests: [], resolvers: [] };
+            window.fetch = (input, init = {}) => {
+                const url = String(input);
+                if (url.endsWith('/story/dependencies/apply')
+                        && init.method === 'POST') {
+                    window.issue223DependencyRace.requests.push(JSON.parse(init.body));
+                    return new Promise((resolve) => {
+                        window.issue223DependencyRace.resolvers.push(resolve);
+                    });
+                }
+                return originalFetch(input, init);
+            };
+        }"""
+    )
+
+    page.locator('[data-apply-dependencies="true"]').click()
+    page.wait_for_function("window.issue223DependencyRace.requests.length === 1")
+    page.locator("#refresh-project").click()
+    expect(page.locator("#refresh-project")).to_be_enabled()
+
+    replacement = page.locator('[data-apply-dependencies="true"]')
+    submitting_snapshot = replacement.evaluate(
+        """button => ({
+            disabled: button.disabled,
+            ariaDisabled: button.getAttribute('aria-disabled'),
+            ariaBusy: button.getAttribute('aria-busy'),
+            status: button.closest('[data-dependency-review-section]')
+                .querySelector('[data-delivery-action-status="true"]').textContent,
+        })"""
+    )
+    replacement.evaluate("button => button.click()")
+    page.wait_for_timeout(_UI_SETTLE_MS)
+    page.evaluate(
+        """() => {
+            const payload = JSON.stringify({
+                status: 'success',
+                data: { output: { recorded: true } },
+            });
+            for (const resolve of window.issue223DependencyRace.resolvers.splice(0)) {
+                resolve(new Response(payload, {
+                    status: 200,
+                    headers: { 'Content-Type': 'application/json' },
+                }));
+            }
+        }"""
+    )
+    page.wait_for_timeout(_UI_SETTLE_MS * 2)
+
+    requests = page.evaluate("window.issue223DependencyRace.requests")
+    assert submitting_snapshot == {
+        "disabled": True,
+        "ariaDisabled": "true",
+        "ariaBusy": "true",
+        "status": "Dependency review is being submitted; controls remain locked.",
+    }
+    assert len(requests) == 1
+    assert len({request["idempotency_key"] for request in requests}) == 1
+    expect(page.locator('[data-apply-dependencies="true"]')).to_be_enabled()
+
+    context.close()
+
+
 def test_progressive_story_readiness_failure_diagnostics_persist_on_reload(
     dashboard_harness: DashboardHarness,
 ) -> None:
