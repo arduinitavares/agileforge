@@ -1087,7 +1087,7 @@ def test_closed_sprint_ignores_unselected_story_moved_to_later_sprint(
 def test_closed_sprint_rejects_selected_scope_dependency_tamper(
     engine: Engine,
 ) -> None:
-    """Bind Sprint A completion facts to relevant dependency row semantics."""
+    """Reject tampering with even rejected rows owned by Sprint A's selected scope."""
     (
         domain,
         project_id,
