@@ -33,15 +33,20 @@ from models.workflow import (
     StoryClosure,
     TaskCompletionEvidence,
 )
-from repositories.workflow import WorkflowFactLoadError
+from repositories.workflow import WorkflowFactLoadError, WorkflowFactRepository
 from tests.workflow.execution_fixtures import (
     seed_started_execution,
     seed_started_execution_with_unselected_story,
 )
+from tests.workflow.test_planning_transitions import _select_for_sprint
 from workflow.clock import FixedClock
 from workflow.contracts import JsonObject, NodeDecision, WorkflowErrorCode
 from workflow.definitions.execution import execution_graph
 from workflow.domain import WorkflowDomain
+from workflow.execution_integrity import (
+    sprint_close_fingerprint,
+    sprint_review_fingerprint,
+)
 from workflow.fingerprints import canonical_hash
 from workflow.requests import (
     CloseSprint,
@@ -254,6 +259,91 @@ def _close_execution_sprint(
         is True
     )
     return review_fingerprint
+
+
+def test_future_selection_preserves_active_sprint_review_fingerprints(
+    engine: Engine,
+) -> None:
+    """Keep an unrelated future selection out of an active Sprint's history."""
+    (
+        project_id,
+        sprint_id,
+        story_id,
+        future_story_id,
+        task_id,
+        _dependency_id,
+    ) = seed_started_execution_with_unselected_story(engine)
+    domain = _domain(engine)
+    assert domain.transition(_complete_task(domain, project_id, task_id)).ok is True
+    assert (
+        domain.transition(
+            CloseStory(
+                **_guards(
+                    domain,
+                    project_id,
+                    "execution.story.close",
+                    f"story:{story_id}",
+                ),
+                instance_key=f"story:{story_id}",
+                idempotency_key="close-story-before-future-selection",
+                story_id=story_id,
+                resolution="Completed",
+                delivered="Execution graph delivered.",
+                evidence="Focused tests pass.",
+                known_gaps="None.",
+            )
+        ).ok
+        is True
+    )
+    review_decision = _decision(
+        domain,
+        project_id,
+        "execution.sprint.review",
+        f"sprint:{sprint_id}",
+    )
+    review_fingerprint = next(
+        reference.fingerprint
+        for reference in review_decision.fact_references
+        if reference.fact_type == "sprint_review"
+    )
+    assert (
+        domain.transition(
+            ReviewSprint(
+                **_guards(
+                    domain,
+                    project_id,
+                    "execution.sprint.review",
+                    f"sprint:{sprint_id}",
+                ),
+                instance_key=f"sprint:{sprint_id}",
+                idempotency_key="review-sprint-before-future-selection",
+                sprint_id=sprint_id,
+                review_fingerprint=review_fingerprint,
+            )
+        ).ok
+        is True
+    )
+    with Session(engine) as session:
+        snapshot = WorkflowFactRepository(session).load(project_id)
+    close_fingerprint = sprint_close_fingerprint(
+        snapshot,
+        sprint_id,
+        review_fingerprint,
+    )
+
+    _select_for_sprint(engine, future_story_id)
+
+    with Session(engine) as session:
+        after_selection = WorkflowFactRepository(session).load(project_id)
+    assert sprint_review_fingerprint(after_selection, sprint_id) == review_fingerprint
+    assert (
+        sprint_close_fingerprint(
+            after_selection,
+            sprint_id,
+            review_fingerprint,
+        )
+        == close_fingerprint
+    )
 
 
 def _complete_execution_sprint_with_unselected_story(
