@@ -1047,6 +1047,116 @@ test('a successful Story mutation stays locked when its authority reload fails',
     assert.strictEqual(context.shouldUnlockStoryMutation(false, false), true);
 });
 
+test('selected scope retains external prerequisites and excludes unselected dependents', () => {
+    const context = loadFrontend();
+    const action = {
+        node_id: 'planning.story_dependencies',
+        request_kind: 'apply_story_dependencies',
+        endpoint: 'story/dependencies/apply',
+        transport: 'semantic',
+    };
+    const selected = selectedScopeStory({ backlog_item_id: 'PBI-000001' });
+    const external = selectedScopeStory({
+        story_id: 102,
+        source_story_item_id: 'US-002',
+        backlog_item_id: 'PBI-000002',
+        sprint_selection_state: 'unselected',
+        sprint_selection_state_fingerprint: 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+    });
+    const dependencies = {
+        stories: [selected, external],
+        edges: [
+            { dependent_story_id: 101, prerequisite_story_id: 102, reason: 'US-001 requires external US-002.' },
+            { dependent_story_id: 102, prerequisite_story_id: 101, reason: 'Unselected dependent stays out of scope.' },
+        ],
+    };
+
+    const result = context.selectedScopeDependencies([selected, external], dependencies);
+    assert.strictEqual(result.isWellFormed, true);
+    assert.deepEqual(JSON.parse(JSON.stringify(result.scopeEdges)), [
+        { dependent_story_id: 101, prerequisite_story_id: 102, reason: 'US-001 requires external US-002.' },
+    ]);
+    const markup = context.storyDependencyReviewMarkup(action, [selected, external], dependencies);
+    assert.ok(markup.includes('External/excluded prerequisite'));
+    assert.ok(markup.includes('US-002 (PBI-000002)'));
+    assert.ok(!markup.includes('Unselected dependent stays out of scope.'));
+});
+
+test('dependency and readiness contradictions fail closed while missing evidence is labelled precisely', () => {
+    const context = loadFrontend();
+    const selected = selectedScopeStory();
+    const missing = selectedScopeStory({
+        story_id: 102,
+        source_story_item_id: 'US-002',
+        structurally_eligible: false,
+        structural_eligibility_status: 'stale',
+        sprint_selection_state: 'unselected',
+        sprint_selection_state_fingerprint: 'sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+        selected_scope_fingerprint: null,
+        validation_status: 'unvalidated',
+        validation_failures: [],
+    });
+    const missingMarkup = context.storyReadinessMarkup([missing]);
+    assert.ok(missingMarkup.includes('Structural evidence missing'));
+    assert.ok(missingMarkup.includes('Re-run structural checks'));
+
+    const contradictoryEligible = selectedScopeStory({ validation_failures: [{ code: 'BAD', message: 'Should not accompany eligibility.' }] });
+    assert.strictEqual(context.parseStoryReadinessProjection(contradictoryEligible), null);
+    assert.strictEqual(context.selectedScopeDependencies([selected], { stories: [selected] }).isWellFormed, false);
+    assert.strictEqual(context.selectedScopeDependencies([selected, selected], { stories: [selected, selected], edges: [] }).isWellFormed, false);
+    assert.strictEqual(context.selectedScopeDependencies([selected], { stories: [selected], edges: [
+        { dependent_story_id: 101, prerequisite_story_id: 102, reason: 'Once.' },
+        { dependent_story_id: 101, prerequisite_story_id: 102, reason: 'Duplicate.' },
+    ] }).isWellFormed, false);
+});
+
+test('malformed Sprint candidate projection blocks the generated Sprint form and transport', () => {
+    const context = loadFrontend();
+    const sprintAction = {
+        node_id: 'planning.sprint.plan',
+        request_kind: 'record_sprint_plan',
+        endpoint: 'sprint/generate',
+        transport: 'semantic',
+        instance_key: null,
+    };
+    const malformed = [{ story_id: 101, sprint_candidate: true }];
+    const markup = context.deliveryPanelMarkup({}, {}, [sprintAction], {
+        storyDependencies: { stories: [] },
+        sprintCandidates: { items: malformed },
+    });
+    assert.strictEqual(context.canGenerateSprintPlan({ sprintCandidates: { items: malformed } }), false);
+    assert.ok(markup.includes('Sprint candidate projection unavailable'));
+    assert.ok(!markup.includes('data-delivery-generation-form="record_sprint_plan"'));
+});
+
+test('rejected Story mutations restore every control to its exact prior state', () => {
+    const context = loadFrontend();
+    const disabledControl = {
+        disabled: true,
+        attributes: new Map([['aria-disabled', 'true']]),
+        getAttribute(name) { return this.attributes.get(name) ?? null; },
+        setAttribute(name, value) { this.attributes.set(name, value); },
+        removeAttribute(name) { this.attributes.delete(name); },
+    };
+    const enabledControl = {
+        disabled: false,
+        attributes: new Map(),
+        getAttribute(name) { return this.attributes.get(name) ?? null; },
+        setAttribute(name, value) { this.attributes.set(name, value); },
+        removeAttribute(name) { this.attributes.delete(name); },
+    };
+    const states = context.captureStoryControlStates([disabledControl, enabledControl]);
+    disabledControl.disabled = false;
+    disabledControl.removeAttribute('aria-disabled');
+    enabledControl.disabled = true;
+    enabledControl.setAttribute('aria-disabled', 'true');
+    context.restoreStoryControlStates(states);
+    assert.equal(disabledControl.disabled, true);
+    assert.equal(disabledControl.getAttribute('aria-disabled'), 'true');
+    assert.equal(enabledControl.disabled, false);
+    assert.equal(enabledControl.getAttribute('aria-disabled'), null);
+});
+
 test('dependency review disables confirm button when canonical candidate projection is missing', () => {
     const context = loadFrontend();
     const action = {

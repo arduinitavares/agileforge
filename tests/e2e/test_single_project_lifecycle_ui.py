@@ -2509,12 +2509,12 @@ def _seed_progressive_stories(
     fake.story_dependencies = [
         {
             "dependency_id": 1,
-            "dependent_story_id": story2_id,
-            "prerequisite_story_id": story1_id,
+            "dependent_story_id": story1_id,
+            "prerequisite_story_id": story2_id,
             "status": "proposed",
             "source": "story_writer",
             "confidence": "inferred",
-            "reason": "Requires US-001 foundation",
+            "reason": "US-001 requires external US-002 foundation",
         }
     ]
 
@@ -2573,12 +2573,30 @@ def test_progressive_story_readiness_partial_refinement_to_sprint_planning(
     expect(readiness).to_contain_text("Selected for Sprint")
     expect(readiness).to_contain_text("US-002")
     expect(readiness).to_contain_text("Unselected")
+    focused_story_id = page.evaluate(
+        """() => document.activeElement?.closest('[data-story-readiness-row]')?.dataset.storyReadinessRow ?? null"""
+    )
+    assert focused_story_id == str(story1_id)
+
+    sprint_plan_action = _sprint_generation_action()
+    fake.position_override = _delivery_position([pbi3_action, sprint_plan_action])
+    page.locator("#refresh-project").click()
+    page.wait_for_timeout(_UI_SETTLE_MS)
+    expect(page.locator('[data-sprint-candidate-projection-error="true"]')).to_be_visible()
+    expect(
+        page.locator('[data-delivery-generation-form="record_sprint_plan"]')
+    ).not_to_be_attached()
+    assert not [
+        body
+        for suffix, body in fake.delivery_requests
+        if suffix == "/sprint/generate"
+    ]
 
     dep_section = page.locator('[data-dependency-review-section="true"]')
     expect(dep_section).to_be_visible()
     expect(dep_section).to_contain_text("US-001")
-    expect(dep_section).not_to_contain_text("US-002")
-    expect(dep_section).to_contain_text("None (independent stories)")
+    expect(dep_section).to_contain_text("US-002")
+    expect(dep_section).to_contain_text("External/excluded prerequisite")
 
     confirm_dep_btn = page.locator('[data-apply-dependencies="true"]')
     expect(confirm_dep_btn).to_be_visible()
@@ -2587,10 +2605,13 @@ def test_progressive_story_readiness_partial_refinement_to_sprint_planning(
 
     assert len(fake.dependency_apply_requests) == 1
     assert fake.dependency_apply_requests[0]["selected_story_ids"] == [story1_id]
-    assert fake.dependency_apply_requests[0]["reviewed_edges"] == []
-
-    sprint_plan_action = _sprint_generation_action()
-    fake.position_override = _delivery_position([pbi3_action, sprint_plan_action])
+    assert fake.dependency_apply_requests[0]["reviewed_edges"] == [
+        {
+            "dependent_story_id": story1_id,
+            "prerequisite_story_id": story2_id,
+            "reason": "US-001 requires external US-002 foundation",
+        }
+    ]
 
     page.locator("#refresh-project").click()
     page.wait_for_timeout(200)
