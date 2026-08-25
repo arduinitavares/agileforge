@@ -367,6 +367,7 @@ test('delivery panel keeps a pending Story review beside another generation acti
 
 test('Sprint generation asks the operator for a team', () => {
     const context = loadFrontend();
+    const candidate = sprintCandidateStory();
     const markup = context.deliveryPanelMarkup(
         { decisions: [] },
         {},
@@ -377,7 +378,8 @@ test('Sprint generation asks the operator for a team', () => {
             endpoint: 'sprint/generate',
         }],
         {
-            sprintCandidates: { items: [sprintCandidateStory()] },
+            storyDependencies: { stories: [candidate], edges: [] },
+            sprintCandidates: { items: [candidate] },
         },
     );
 
@@ -902,7 +904,7 @@ test('dependency review displays only candidate stories and candidate-contained 
             }),
         ],
         edges: [
-            { dependent_story_id: 102, prerequisite_story_id: 101, reason: 'US-002 needs US-001' },
+            { dependent_story_id: 102, prerequisite_story_id: 101, status: 'proposed', reason: 'US-002 needs US-001' },
         ],
     };
 
@@ -933,7 +935,7 @@ test('dependency review displays human-readable story identifiers, PBIs, and dep
     const dependencies = {
         stories: candidates,
         edges: [
-            { dependent_story_id: 102, prerequisite_story_id: 101, reason: 'US-002 requires data model from US-001' },
+            { dependent_story_id: 102, prerequisite_story_id: 101, status: 'proposed', reason: 'US-002 requires data model from US-001' },
         ],
     };
 
@@ -1077,8 +1079,8 @@ test('selected scope retains external prerequisites and excludes unselected depe
     const dependencies = {
         stories: [selected, external],
         edges: [
-            { dependent_story_id: 101, prerequisite_story_id: 102, reason: 'US-001 requires external US-002.' },
-            { dependent_story_id: 102, prerequisite_story_id: 101, reason: 'Unselected dependent stays out of scope.' },
+            { dependent_story_id: 101, prerequisite_story_id: 102, status: 'proposed', reason: 'US-001 requires external US-002.' },
+            { dependent_story_id: 102, prerequisite_story_id: 101, status: 'proposed', reason: 'Unselected dependent stays out of scope.' },
         ],
     };
 

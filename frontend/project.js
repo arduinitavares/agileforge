@@ -129,6 +129,7 @@ let pendingHumanAction = null;
 let dashboardLoadSequence = 0;
 let activeDashboardLoadController = null;
 let activeStoryMutation = null;
+let activeDependencyMutation = null;
 let lifecycleState = {
     project: {},
     position: {},
@@ -177,6 +178,10 @@ function sprintSelectionMutationPayload(storyId, intent, expectedStateFingerprin
 
 function shouldUnlockStoryMutation(mutationCompleted, refreshed) {
     return !mutationCompleted || refreshed;
+}
+
+function shouldUnlockDependencyMutation(mutationCompleted, refreshed) {
+    return !mutationCompleted;
 }
 
 function captureStoryControlStates(controls) {
@@ -243,6 +248,29 @@ async function postStorySelectionMutation(projectId, storyId, intent, expectedSt
             throw error;
         }
         return response;
+    }
+}
+
+async function postStoryDependencyMutation(projectId, scopeIds, scopeEdges) {
+    const payload = semanticMutationPayload({
+        selected_story_ids: scopeIds,
+        reviewed_edges: scopeEdges.map(({ dependent_story_id, prerequisite_story_id, reason }) => ({
+            dependent_story_id,
+            prerequisite_story_id,
+            reason,
+        })),
+    });
+    const path = `/api/projects/${projectId}/story/dependencies/apply`;
+    const request = () => requestJson(path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+    });
+    try {
+        return await request();
+    } catch (error) {
+        if (error?.status) throw error;
+        return request();
     }
 }
 
@@ -1694,6 +1722,7 @@ function validateCandidateProjection(candidates) {
             isValid: false,
             candidateStories: [],
             candidateIds: [],
+            scopeFingerprint: null,
         };
     }
     const seenIds = new Set();
@@ -1707,6 +1736,7 @@ function validateCandidateProjection(candidates) {
                 isValid: false,
                 candidateStories: [],
                 candidateIds: [],
+                scopeFingerprint: null,
             };
         }
         const readiness = parseStoryReadinessProjection(s);
@@ -1715,17 +1745,19 @@ function validateCandidateProjection(candidates) {
                 isValid: false,
                 candidateStories: [],
                 candidateIds: [],
+                scopeFingerprint: null,
             };
         }
         if (scopeFingerprint === null) scopeFingerprint = s.selected_scope_fingerprint;
         else if (scopeFingerprint !== s.selected_scope_fingerprint) {
-            return { isValid: false, candidateStories: [], candidateIds: [] };
+            return { isValid: false, candidateStories: [], candidateIds: [], scopeFingerprint: null };
         }
         if (seenIds.has(s.story_id)) {
             return {
                 isValid: false,
                 candidateStories: [],
                 candidateIds: [],
+                scopeFingerprint: null,
             };
         }
         seenIds.add(s.story_id);
@@ -1737,11 +1769,19 @@ function validateCandidateProjection(candidates) {
         isValid: true,
         candidateStories: validStories,
         candidateIds: validIds,
+        scopeFingerprint,
     };
 }
 
 function canGenerateSprintPlan(context = {}) {
-    return validateCandidateProjection(context?.sprintCandidates?.items).isValid;
+    const candidates = validateCandidateProjection(context?.sprintCandidates?.items);
+    const dependencies = selectedScopeDependencies(
+        context?.storyDependencies?.stories,
+        context?.storyDependencies,
+    );
+    return candidates.isValid
+        && dependencies.isWellFormed
+        && candidates.scopeFingerprint === dependencies.scopeFingerprint;
 }
 
 function canonicalCandidateDependencies(candidates, dependencies) {
@@ -1787,8 +1827,18 @@ function selectedScopeDependencies(stories, dependencies) {
         if (storyIds.has(projection.story.story_id)) return { scopeStories: [], scopeIds: [], scopeEdges: [], isWellFormed: false };
         storyIds.add(projection.story.story_id);
     }
+    const scopeFingerprints = new Set(projections.map((projection) => projection.story.selected_scope_fingerprint));
+    if (scopeFingerprints.size !== 1 || !isSha256Fingerprint(projections[0].story.selected_scope_fingerprint)) {
+        return { scopeStories: [], scopeIds: [], scopeEdges: [], isWellFormed: false };
+    }
     const dependencyStoryIds = new Set(dependencyProjections.map((projection) => projection.story.story_id));
-    if (dependencyStoryIds.size !== storyIds.size || [...storyIds].some((storyId) => !dependencyStoryIds.has(storyId))) {
+    if (dependencyProjections.length !== dependencyStoryIds.size
+        || dependencyStoryIds.size !== storyIds.size
+        || [...storyIds].some((storyId) => !dependencyStoryIds.has(storyId))) {
+        return { scopeStories: [], scopeIds: [], scopeEdges: [], isWellFormed: false };
+    }
+    const dependencyScopeFingerprints = new Set(dependencyProjections.map((projection) => projection.story.selected_scope_fingerprint));
+    if (dependencyScopeFingerprints.size !== 1 || dependencyProjections[0].story.selected_scope_fingerprint !== projections[0].story.selected_scope_fingerprint) {
         return { scopeStories: [], scopeIds: [], scopeEdges: [], isWellFormed: false };
     }
     const scopeStories = projections
@@ -1799,10 +1849,6 @@ function selectedScopeDependencies(stories, dependencies) {
     }
     const scopeIds = scopeStories.map((story) => story.story_id);
     const scopeIdSet = new Set(scopeIds);
-    const scopeFingerprints = new Set(scopeStories.map((story) => story.selected_scope_fingerprint));
-    if (scopeFingerprints.size !== 1 || !isSha256Fingerprint(scopeStories[0].selected_scope_fingerprint)) {
-        return { scopeStories: [], scopeIds: [], scopeEdges: [], isWellFormed: false };
-    }
     const rawEdges = dependencies.edges;
     const scopeEdges = [];
     const seenEdges = new Set();
@@ -1812,8 +1858,10 @@ function selectedScopeDependencies(stories, dependencies) {
             || !Number.isInteger(edge.prerequisite_story_id)
             || edge.dependent_story_id <= 0
             || edge.prerequisite_story_id <= 0
+            || edge.dependent_story_id === edge.prerequisite_story_id
             || !storyIds.has(edge.dependent_story_id)
             || !storyIds.has(edge.prerequisite_story_id)
+            || !['proposed', 'active', 'rejected'].includes(edge.status)
             || typeof edge.reason !== 'string'
             || !edge.reason.trim()) {
             return { scopeStories: [], scopeIds: [], scopeEdges: [], isWellFormed: false };
@@ -1821,7 +1869,7 @@ function selectedScopeDependencies(stories, dependencies) {
         const edgeKey = `${edge.dependent_story_id}:${edge.prerequisite_story_id}`;
         if (seenEdges.has(edgeKey)) return { scopeStories: [], scopeIds: [], scopeEdges: [], isWellFormed: false };
         seenEdges.add(edgeKey);
-        if (scopeIdSet.has(edge.dependent_story_id)) {
+        if (scopeIdSet.has(edge.dependent_story_id) && ['proposed', 'active'].includes(edge.status)) {
             scopeEdges.push({
                 dependent_story_id: edge.dependent_story_id,
                 prerequisite_story_id: edge.prerequisite_story_id,
@@ -1830,7 +1878,13 @@ function selectedScopeDependencies(stories, dependencies) {
             });
         }
     }
-    return { scopeStories, scopeIds, scopeEdges, isWellFormed: true };
+    return {
+        scopeStories,
+        scopeIds,
+        scopeEdges,
+        scopeFingerprint: projections[0].story.selected_scope_fingerprint,
+        isWellFormed: true,
+    };
 }
 
 function storyDisplayLabel(story) {
@@ -3058,9 +3112,11 @@ function installInteractions() {
             return;
         }
         if (button.dataset.applyDependencies) {
+            if (activeDependencyMutation) return;
             const label = button.querySelector('[data-delivery-action-label="true"]');
             const idleLabel = label?.textContent ?? 'Confirm dependencies';
             const status = button.closest('[data-dependency-review-section]')?.querySelector('[data-delivery-action-status="true"]');
+            const controlState = captureStoryControlStates([button]);
             button.disabled = true;
             button.setAttribute('aria-busy', 'true');
             if (label) label.textContent = 'Confirming...';
@@ -3068,6 +3124,9 @@ function installInteractions() {
                 status.textContent = 'Applying dependency review...';
                 status.hidden = false;
             }
+            activeDependencyMutation = { button };
+            let mutationCompleted = false;
+            let refreshed = false;
             setProjectError('');
             try {
                 const { scopeIds, scopeEdges, isWellFormed } = selectedScopeDependencies(
@@ -3077,19 +3136,12 @@ function installInteractions() {
                 if (!isWellFormed || scopeIds.length === 0) {
                     throw new Error('Current selected Story scope is unavailable.');
                 }
-                await requestJson(`/api/projects/${selectedProjectId}/story/dependencies/apply`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(semanticMutationPayload({
-                        selected_story_ids: scopeIds,
-                        reviewed_edges: scopeEdges.map(({ dependent_story_id, prerequisite_story_id, reason }) => ({
-                            dependent_story_id,
-                            prerequisite_story_id,
-                            reason,
-                        })),
-                    })),
-                });
-                await loadDashboard();
+                await postStoryDependencyMutation(selectedProjectId, scopeIds, scopeEdges);
+                mutationCompleted = true;
+                refreshed = await loadDashboard() === true;
+                if (!refreshed) {
+                    throw new Error('The dependency review was accepted, but the current project projection could not be reloaded. Controls remain locked until a successful refresh.');
+                }
             } catch (error) {
                 setProjectError(error.message);
                 if (status) {
@@ -3097,9 +3149,13 @@ function installInteractions() {
                     status.hidden = false;
                 }
             } finally {
-                button.disabled = false;
-                button.removeAttribute('aria-busy');
-                if (label) label.textContent = idleLabel;
+                if (shouldUnlockDependencyMutation(mutationCompleted, refreshed)) {
+                    restoreStoryControlStates(controlState);
+                    if (label) label.textContent = idleLabel;
+                    activeDependencyMutation = null;
+                } else if (refreshed) {
+                    activeDependencyMutation = null;
+                }
             }
             return;
         }
