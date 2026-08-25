@@ -1184,10 +1184,16 @@ def test_story_record_and_accept_replay_exact_identities_and_changed_input_confl
         rationale="Accept exact replay candidate.",
     )
     accepted = domain.transition(decision_request)
+    with Session(engine) as session:
+        accepted_story = session.exec(select(UserStory)).one()
+        evidence_before_replay = accepted_story.validation_evidence
+        assert evidence_before_replay is not None
     replayed_accept = domain.transition(decision_request)
     assert accepted.ok is True
     assert replayed_accept == accepted.model_copy(update={"replayed": True})
     with Session(engine) as session:
         assert len(session.exec(select(StoryArtifact)).all()) == 1
         assert len(session.exec(select(StoryArtifactDecision)).all()) == 1
-        assert len(session.exec(select(UserStory)).all()) == 1
+        stories = session.exec(select(UserStory)).all()
+        assert len(stories) == 1
+        assert stories[0].validation_evidence == evidence_before_replay
