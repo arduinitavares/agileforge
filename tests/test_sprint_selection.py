@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, cast
 from unittest.mock import Mock
 
 import pytest
+from pydantic import ValidationError
 from sqlmodel import Session
 
 from models.core import Project, UserStory
@@ -1357,6 +1358,139 @@ def test_story_fact_requires_exact_current_validation_evidence(engine: Engine) -
         assert story.sprint_selection_state == "unselected"
         assert story.sprint_candidate is False
         assert story.readiness_blockers == ()
+
+
+def test_story_fact_rejects_candidate_without_dependency_safe_scope() -> None:
+    """Reject a projection that skips the dependency-confirmation intersection."""
+    payload = {
+        "story_id": 42,
+        "source_story_artifact_id": 31,
+        "source_story_artifact_fingerprint": "sha256:" + ("1" * 64),
+        "source_story_item_id": "US-0001",
+        "source_story_item_fingerprint": "sha256:" + ("2" * 64),
+        "accepted_spec_version_id": 11,
+        "accepted_spec_hash": "sha256:" + ("3" * 64),
+        "spec_item_ids": ("REQ.001",),
+        "content_accepted": True,
+        "status": "To Do",
+        "story_points": 3,
+        "rank": "101",
+        "structurally_eligible": True,
+        "structural_eligibility_status": "eligible",
+        "sprint_selection_state": "selected",
+        "sprint_selection_state_fingerprint": "sha256:" + ("4" * 64),
+        "sprint_selection_event_id": 7,
+        "sprint_selection_event_fingerprint": "sha256:" + ("5" * 64),
+        "selected_scope_fingerprint": "sha256:" + ("6" * 64),
+        "readiness_blockers": (),
+    }
+
+    valid = StoryFact.model_validate(
+        {**payload, "dependency_safe": True, "sprint_candidate": True}
+    )
+
+    assert valid.sprint_candidate is True
+    with pytest.raises(ValidationError):
+        StoryFact.model_validate(
+            {**payload, "dependency_safe": False, "sprint_candidate": True}
+        )
+
+
+def test_selected_story_waits_for_current_dependency_review_and_reconciliation(
+    engine: Engine,
+) -> None:
+    """Preserve selected intent while evidence and dependency confirmation stale."""
+    project_id = _seed_accepted_backlog(engine)
+    domain = _domain(engine)
+    _record_and_accept_roadmap(domain, project_id)
+    _artifact_id, story_id = _record_and_accept_story(engine, domain, project_id)
+    _select_story_for_sprint(engine, story_id)
+
+    with Session(engine) as session:
+        selected = WorkflowFactRepository(session).load(project_id).stories[0]
+    assert selected.structurally_eligible is True
+    assert selected.sprint_selection_state == "selected"
+    assert selected.dependency_safe is False
+    assert selected.sprint_candidate is False
+    assert selected.selected_scope_fingerprint.startswith("sha256:")
+
+    _apply_current_dependencies(
+        engine,
+        domain,
+        project_id,
+        idempotency_key="initial-selected-scope-review",
+    )
+    with Session(engine) as session:
+        reviewed = WorkflowFactRepository(session).load(project_id).stories[0]
+        row = session.get_one(UserStory, story_id)
+        original_scope_fingerprint = reviewed.selected_scope_fingerprint
+        row.rank = "102"
+        session.add(row)
+        session.commit()
+    assert reviewed.dependency_safe is True
+    assert reviewed.sprint_candidate is True
+
+    with Session(engine) as session:
+        stale = WorkflowFactRepository(session).load(project_id).stories[0]
+    assert stale.sprint_selection_state == "selected"
+    assert stale.structurally_eligible is False
+    assert stale.dependency_safe is False
+    assert stale.sprint_candidate is False
+
+    _validate(engine, story_id)
+    with Session(engine) as session:
+        reconciled = WorkflowFactRepository(session).load(project_id).stories[0]
+    assert reconciled.sprint_selection_state == "selected"
+    assert reconciled.structurally_eligible is True
+    assert reconciled.selected_scope_fingerprint != original_scope_fingerprint
+    assert reconciled.dependency_safe is False
+    assert reconciled.sprint_candidate is False
+
+
+def test_one_selected_story_progresses_with_unselected_and_unrefined_backlog(
+    engine: Engine,
+) -> None:
+    """Do not require full Story selection or full Backlog refinement."""
+    requirements = (
+        "Plan the selected slice",
+        "Retain an accepted sibling",
+        "Leave one Backlog item unrefined",
+    )
+    project_id = _seed_accepted_backlog(engine, requirements=requirements)
+    domain = _domain(engine)
+    _record_and_accept_roadmap(domain, project_id, requirements=requirements)
+    _first_artifact_id, selected_story_id = _record_and_accept_story(
+        engine,
+        domain,
+        project_id,
+        requirement=requirements[0],
+        spec_item_id="REQ.planning-1",
+        idempotency_suffix="-selected-slice",
+    )
+    _second_artifact_id, sibling_story_id = _record_and_accept_story(
+        engine,
+        domain,
+        project_id,
+        requirement=requirements[1],
+        spec_item_id="REQ.planning-2",
+        idempotency_suffix="-unselected-sibling",
+    )
+    _select_story_for_sprint(engine, selected_story_id)
+    _apply_current_dependencies(
+        engine,
+        domain,
+        project_id,
+        idempotency_key="partial-refinement-dependencies",
+    )
+
+    with Session(engine) as session:
+        snapshot = WorkflowFactRepository(session).load(project_id)
+
+    by_id = {story.story_id: story for story in snapshot.stories}
+    assert by_id[selected_story_id].sprint_candidate is True
+    assert by_id[sibling_story_id].sprint_selection_state == "unselected"
+    assert by_id[sibling_story_id].sprint_candidate is False
+    assert len(snapshot.stories) == 2
 
 
 def _apply_validation_evidence_case(

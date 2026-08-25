@@ -888,7 +888,11 @@ def _apply_current_dependencies(
     """Persist review of the current candidate dependency semantics."""
     with Session(engine) as session:
         snapshot = WorkflowFactRepository(session).load(project_id)
-    stories = tuple(item for item in snapshot.stories if item.sprint_candidate)
+    stories = tuple(
+        item
+        for item in snapshot.stories
+        if item.structurally_eligible and item.sprint_selection_state == "selected"
+    )
     reviewed_edges = tuple(
         ReviewedDependencyEdge(
             dependent_story_id=edge.dependent_story_id,
