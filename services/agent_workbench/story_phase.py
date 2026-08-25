@@ -24,6 +24,7 @@ from services.contracts.specification_references import (
     AcceptedSpecificationReference,
 )
 from services.contracts.story import (
+    STORY_POINTS_BY_EFFORT,
     CanonicalStoryOutput,
     StoryItemEnvelope,
     UserStoryAgentItem,
@@ -54,7 +55,7 @@ if TYPE_CHECKING:
     from workflow.contracts import JsonObject
 
 
-_STORY_POINTS = {"XS": 1, "S": 2, "M": 3, "L": 5, "XL": 8}
+_STORY_POINTS: dict[str, int] = STORY_POINTS_BY_EFFORT
 
 
 @dataclass(frozen=True)

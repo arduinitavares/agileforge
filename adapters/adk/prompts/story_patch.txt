@@ -29,6 +29,13 @@ Dimension Definitions & Criteria:
 - small: Single focused vertical slice with bounded scenario scope (pass: focused vertical slice; concern: broad multi-flow scope needing future split; fail: unbounded composite or epic-sized scope).
 - testable: Verifiable criteria with deterministic pass/fail outcomes (pass: concrete observable criteria; concern: abstract phrasing; fail: missing or untestable).
 
+Planning Proposal Semantics (Sizing, Ordering, Dependencies):
+Planning metadata values are advisory model recommendations provided as evidence for human review:
+- estimated_effort: Proposed sizing estimate (XS: 1 point, S: 2 points, M: 3 points, L: 5 points, XL: 8 points) reflecting Developer sizing responsibility.
+- Backlog ordering / rank: The corrected story maintains its parent Backlog position and rank upon acceptance.
+- dependency_candidates: Proposed prerequisite dependencies on sibling stories or components with explicit/inferred confidence and reason.
+Human acceptance binds the exact visible package before operational activation.
+
 If correction cannot be completed from the accepted source truth, return that
 one best bounded draft, set is_complete=false, and ask focused
 clarifying_questions. Return JSON only.

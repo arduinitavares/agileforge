@@ -339,7 +339,12 @@ Each operational row stores exact `source_story_artifact_id` and fingerprint,
 statement, derived persona, and acceptance criteria. Initial `story_points` is
 the existing closed effort map `XS=1, S=2, M=3, L=5, XL=8`; initial `rank` is
 the canonical parent Backlog priority times 100 plus the one-based Story item
-ordinal, serialized as a decimal string. The remaining canonical Story-item
+ordinal, serialized as a decimal string.
+
+> [!NOTE]
+> Per Issue #222 and the [Story Refinement to Sprint Selection Design Handoff](../../feedback/2026-08-24-story-refinement-to-sprint-selection-design-handoff.md), pre-acceptance Story review surfaces (dashboard UI, CLI, and API projections) expose the complete planning proposal before acceptance: statement, persona, acceptance criteria, Specification evidence, estimated effort and derived story points, backlog order and rank, proposed dependencies, and the explainable 6-dimension INVEST assessment. Planning metadata values are visible and contestable recommendations before becoming operational state.
+
+The remaining canonical Story-item
 fields stay in the immutable artifact and are resolved from it for reviews and
 packets rather than duplicated onto the operational row. The row is unique on
 `(project_id, source_story_artifact_id, source_story_item_id)`, so acceptance

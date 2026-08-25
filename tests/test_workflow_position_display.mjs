@@ -1085,6 +1085,10 @@ test('storyItemMarkup renders explainable INVEST assessment across all 6 dimensi
                 evidence: 'Verify calculation passes.',
             },
         },
+        order: 1,
+        rank: '101',
+        story_points: 2,
+        estimated_effort: 'S',
         research_caveats: ['Requires standard floating point behavior.'],
         dependency_candidates: [
             {
@@ -1107,10 +1111,18 @@ test('storyItemMarkup renders explainable INVEST assessment across all 6 dimensi
     assert.ok(markup.includes('Concern'));
     assert.ok(markup.includes('Self-contained calculation logic.'));
     assert.ok(markup.includes('No dependencies on unbuilt stories.'));
-    assert.ok(markup.includes('Estimated effort:</strong> S'));
+    assert.ok(markup.includes('Backlog order:</strong> 1 <span class="text-slate-500">(Rank: 101)</span>'));
+    assert.ok(markup.includes('Estimated effort:</strong> S (derived: 2 pts)'));
     assert.ok(markup.includes('Requires standard floating point behavior.'));
     assert.ok(markup.includes('Prerequisite:</strong> US-0001'));
     assert.ok(markup.includes('Parser needed first'));
+});
+
+test('dependencyCandidatesMarkup renders explicit none proposed message when empty', () => {
+    const context = loadFrontend();
+    const emptyMarkup = context.dependencyCandidatesMarkup([]);
+    assert.ok(emptyMarkup.includes('Proposed dependencies'));
+    assert.ok(emptyMarkup.includes('None proposed'));
 });
 
 test('investAssessmentMarkup renders explicit error on missing or malformed assessment', () => {

@@ -1233,7 +1233,13 @@ function investAssessmentMarkup(value) {
 
 function dependencyCandidatesMarkup(values) {
     const items = reviewItems(values);
-    if (!items || items.length === 0) return '';
+    if (!items) return '';
+    if (items.length === 0) {
+        return `<section class="space-y-1">
+            <h4 class="text-xs font-semibold uppercase text-slate-500">Proposed dependencies</h4>
+            <p class="text-xs text-slate-500 italic">None proposed</p>
+        </section>`;
+    }
     return `<section class="space-y-2">
         <h4 class="text-xs font-semibold uppercase text-slate-500">Proposed dependencies</h4>
         <ul class="list-disc space-y-1 pl-5 text-sm">
@@ -1249,12 +1255,14 @@ function dependencyCandidatesMarkup(values) {
 function storyItemMarkup(value) {
     const story = reviewObject(value);
     if (!story) return '';
+    const pointsText = story.story_points != null ? ` (derived: ${escapeWorkflowText(reviewValue(story.story_points))} pts)` : '';
     return `<section class="space-y-3 rounded-md border border-slate-200 p-3">
         <div><p class="text-xs font-semibold uppercase text-slate-500">Story</p><p class="mt-1 font-semibold">${escapeWorkflowText(reviewValue(story.story_title ?? story.title))}</p></div>
         <p class="text-sm leading-6">${escapeWorkflowText(reviewValue(story.statement))}</p>
         <div class="flex flex-wrap gap-4 text-sm">
             <p><strong>Persona:</strong> ${escapeWorkflowText(reviewValue(story.persona))}</p>
-            ${story.estimated_effort ? `<p><strong>Estimated effort:</strong> ${escapeWorkflowText(reviewValue(story.estimated_effort))}</p>` : ''}
+            ${story.rank ? `<p><strong>Backlog order:</strong> ${escapeWorkflowText(reviewValue(story.order ?? '-'))} <span class="text-slate-500">(Rank: ${escapeWorkflowText(reviewValue(story.rank))})</span></p>` : ''}
+            ${story.estimated_effort ? `<p><strong>Estimated effort:</strong> ${escapeWorkflowText(reviewValue(story.estimated_effort))}${pointsText}</p>` : ''}
         </div>
         ${reviewListMarkup('Acceptance criteria', story.acceptance_criteria)}
         ${specificationEvidenceMarkup(story.specification_evidence)}

@@ -27,6 +27,13 @@ _PERSONA_PATTERN = re.compile(
 )
 _MAX_PERSONA_LENGTH = 100
 _MAX_STORY_ITEMS = 8
+STORY_POINTS_BY_EFFORT: dict[str, int] = {
+    "XS": 1,
+    "S": 2,
+    "M": 3,
+    "L": 5,
+    "XL": 8,
+}
 
 
 def parse_story_persona(statement: str) -> str:
@@ -296,6 +303,7 @@ def canonicalize_story_items(
 
 
 __all__ = [
+    "STORY_POINTS_BY_EFFORT",
     "CanonicalStoryItem",
     "CanonicalStoryOutput",
     "InvestDimensionAssessment",

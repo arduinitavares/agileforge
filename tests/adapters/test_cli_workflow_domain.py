@@ -1339,6 +1339,9 @@ def _planning_review(phase: str) -> dict[str, object]:
                         },
                     },
                     "estimated_effort": "M",
+                    "story_points": 3,
+                    "rank": "101",
+                    "order": 1,
                     "produced_artifacts": ["Balance report"],
                     "research_caveats": [],
                     "dependency_candidates": [],
@@ -1779,3 +1782,44 @@ def test_story_decide_allows_feedback_and_rejection_for_malformed_invest(
     assert main(reject_argv, application=app) == 0
     decisions = [getattr(w[0], "decision", None) for w in app.writes]
     assert decisions == ["feedback", "rejected"]
+
+
+def test_story_item_lines_formats_sizing_rank_and_dependencies() -> None:
+    """Format effort with derived points, rank/order, and dependency state."""
+    item_with_planning: dict[str, object] = {
+        "story_title": "Title",
+        "statement": "As a user, I want something.",
+        "persona": "user",
+        "order": 1,
+        "rank": "101",
+        "estimated_effort": "M",
+        "story_points": 3,
+        "acceptance_criteria": ["Done."],
+        "specification_evidence": [],
+        "invest_assessment": {
+            "independent": {"result": "pass", "rationale": "r", "evidence": "e"},
+            "negotiable": {"result": "pass", "rationale": "r", "evidence": "e"},
+            "valuable": {"result": "pass", "rationale": "r", "evidence": "e"},
+            "estimable": {"result": "pass", "rationale": "r", "evidence": "e"},
+            "small": {"result": "pass", "rationale": "r", "evidence": "e"},
+            "testable": {"result": "pass", "rationale": "r", "evidence": "e"},
+        },
+        "dependency_candidates": [],
+    }
+    lines = _story_item_lines(item_with_planning, indent="  ")
+    assert "  Order: 1 | Rank: 101" in lines
+    assert "  Estimated effort: M (derived: 3 story points)" in lines
+    assert "  Proposed dependencies: None" in lines
+
+    # Non-empty dependencies
+    item_with_deps = dict(item_with_planning)
+    item_with_deps["dependency_candidates"] = [
+        {
+            "prerequisite_ref": "US-001",
+            "confidence": "explicit",
+            "reason": "Requires US-001",
+        }
+    ]
+    dep_lines = _story_item_lines(item_with_deps, indent="  ")
+    assert "  Proposed dependencies:" in dep_lines
+    assert "    - Prerequisite: US-001 (explicit) - Requires US-001" in dep_lines

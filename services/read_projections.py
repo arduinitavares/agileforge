@@ -38,6 +38,7 @@ from services.contracts.specification_source import (
     SpecificationSourceDocument,
     source_bundle_fingerprint,
 )
+from services.contracts.story import STORY_POINTS_BY_EFFORT
 from services.packet_renderer import PacketRenderError, render_packet
 from services.phases.sprint_metrics import build_durable_sprint_metrics
 from services.planning_artifact_content import (
@@ -1378,8 +1379,9 @@ def _roadmap_review_projection(record: _RoadmapReviewRecord) -> JsonObject:
 def _story_review_projection(record: _StoryReviewRecord) -> JsonObject:
     artifact = record.artifact
     backlog = record.roadmap.backlog
+    parent_priority = record.backlog_item.priority
     story_items: list[JsonValue] = []
-    for envelope in record.content.story_items:
+    for ordinal, envelope in enumerate(record.content.story_items, start=1):
         item = envelope.item
         item_data = _validated(
             item.model_dump(
@@ -1391,6 +1393,9 @@ def _story_review_projection(record: _StoryReviewRecord) -> JsonObject:
             backlog.specification,
             item.spec_item_ids,
         )
+        item_data["order"] = ordinal
+        item_data["rank"] = str((parent_priority * 100) + ordinal)
+        item_data["story_points"] = STORY_POINTS_BY_EFFORT[item.estimated_effort]
         story_items.append(item_data)
     return {
         "schema_version": "agileforge.planning-artifact-review.v1",

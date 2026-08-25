@@ -147,3 +147,26 @@ def test_instructions_require_explainable_invest_assessment_with_rubric() -> Non
         assert "iteration capacity" not in instructions
         assert "invest_score: High, Medium, or Low" not in instructions
         assert "decomposition_warning" not in instructions
+
+
+def test_instructions_define_planning_proposal_semantics() -> None:
+    """Verify prompt instructions define sizing mapping and planning semantics."""
+    for instructions in (
+        USER_STORY_WRITER_INSTRUCTIONS,
+        USER_STORY_PATCH_INSTRUCTIONS,
+    ):
+        assert (
+            "Planning Proposal Semantics (Sizing, Ordering, Dependencies):"
+            in instructions
+        )
+        assert (
+            "Planning metadata values are advisory model recommendations"
+            in instructions
+        )
+        assert (
+            "XS: 1 point, S: 2 points, M: 3 points, L: 5 points, XL: 8 points"
+            in instructions
+        )
+        assert "Developer sizing responsibility" in instructions
+        assert "dependency_candidates" in instructions
+        assert "Human acceptance binds the exact visible package" in instructions

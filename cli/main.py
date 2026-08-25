@@ -1433,8 +1433,10 @@ def _invest_assessment_lines(value: object, *, indent: str = "") -> list[str]:
 
 
 def _dependency_candidate_lines(values: object, *, indent: str = "") -> list[str]:
-    if not isinstance(values, list) or not values:
+    if not isinstance(values, list):
         return []
+    if not values:
+        return [f"{indent}Proposed dependencies: None"]
     lines = [f"{indent}Proposed dependencies:"]
     sub_indent = f"{indent}  "
     for item in values:
@@ -1459,10 +1461,20 @@ def _story_item_lines(value: object, *, indent: str = "") -> list[str]:
         f"{indent}Statement: {_review_text(story.get('statement'))}",
         f"{indent}Persona: {_review_text(story.get('persona'))}",
     ]
+    if story.get("rank") is not None:
+        order = story.get("order")
+        order_text = f"Order: {_review_text(order)} | " if order is not None else ""
+        lines.append(f"{indent}{order_text}Rank: {_review_text(story['rank'])}")
     if story.get("estimated_effort") is not None:
-        lines.append(
-            f"{indent}Estimated effort: {_review_text(story['estimated_effort'])}"
-        )
+        effort = _review_text(story["estimated_effort"])
+        points = story.get("story_points")
+        if points is not None:
+            lines.append(
+                f"{indent}Estimated effort: {effort} "
+                f"(derived: {_review_text(points)} story points)"
+            )
+        else:
+            lines.append(f"{indent}Estimated effort: {effort}")
     lines.extend(
         _list_lines(
             "Acceptance criteria", story.get("acceptance_criteria"), indent=indent
