@@ -9,6 +9,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 from models.core import UserStory, UserStoryDependency
+from models.enums import StoryStatus
 from models.events import WorkflowEvent
 from models.workflow import BacklogArtifact, StoryDependencyReview
 from repositories.workflow import WorkflowFactRepository
@@ -33,13 +34,25 @@ from services.story_dependencies import (
     detect_dependency_cycles,
     load_story_dependency_graph,
 )
+from services.story_sprint_selection import (
+    StorySprintSelectionRequest,
+    apply_story_sprint_selection_in_session,
+    story_sprint_selection_fact_in_session,
+)
 from tests.test_create_user_story import (
     _decide_story,
     _record_story,
     _seed_story_parent,
 )
 from tests.test_story_validation_service import _validate
-from tests.workflow.test_planning_transitions import EVALUATED_AT, _roadmap_content
+from tests.workflow.test_planning_transitions import (
+    EVALUATED_AT,
+    _domain,
+    _guards,
+    _roadmap_content,
+)
+from workflow.contracts import WorkflowErrorCode
+from workflow.definitions.planning import story_dependency_source_fingerprint
 from workflow.facts import StoryDependencyReviewEdgeFact
 from workflow.fingerprints import canonical_hash, canonical_json
 from workflow.planning_integrity import (
@@ -47,6 +60,8 @@ from workflow.planning_integrity import (
     dependency_edges_payload,
     dependency_review_fingerprint,
 )
+from workflow.requests import ApplyStoryDependencies
+from workflow.requests.planning import ReviewedDependencyEdge
 
 REVIEWED_AT = datetime(2026, 8, 2, 12, tzinfo=UTC)
 
@@ -222,6 +237,22 @@ def _apply_dependency_review(
             source_fingerprint="sha256:dependency-source",
             reviewer="dependency-reviewer",
             reviewed_at=REVIEWED_AT,
+        ),
+    )
+
+
+def _select_for_sprint(session: Session, *, story_id: int) -> None:
+    story = session.get_one(UserStory, story_id)
+    current = story_sprint_selection_fact_in_session(session, story=story)
+    apply_story_sprint_selection_in_session(
+        session,
+        StorySprintSelectionRequest(
+            project_id=story.project_id,
+            story_id=story_id,
+            intent="select",
+            expected_state_fingerprint=current.state_fingerprint,
+            idempotency_key=f"select-dependency-story-{story_id}",
+            actor="dependency-reviewer",
         ),
     )
 
@@ -605,3 +636,219 @@ def test_story_fact_keeps_validation_status_separate_from_dependency_blockers(
         # BUT its validation_status MUST be 'validated', NOT 'failed'!
         assert fact_2.validation_status == "validated"
         assert fact_2.validation_failures == ()
+
+
+def test_selected_scope_review_preserves_unrelated_edges_and_external_visibility(
+    session: Session,
+) -> None:
+    """Mutate selected dependents only and retain external prerequisite edges."""
+    project_id, prerequisite_id, dependent_id, unrelated_id = _story_set(
+        session,
+        titles=(
+            "External prerequisite",
+            "Selected dependent",
+            "Unrelated future work",
+        ),
+    )
+    session.add(
+        UserStoryDependency(
+            project_id=project_id,
+            dependent_story_id=unrelated_id,
+            prerequisite_story_id=prerequisite_id,
+            status="proposed",
+            confidence="explicit",
+            source="story_writer",
+            reason="Future work also observes the external prerequisite.",
+        )
+    )
+    session.commit()
+    reviewed = StoryDependencyReviewEdgeFact(
+        dependent_story_id=dependent_id,
+        prerequisite_story_id=prerequisite_id,
+        reason="Selected work requires the external prerequisite.",
+    )
+
+    _apply_dependency_review(
+        session,
+        project_id=project_id,
+        selected_story_ids=(dependent_id,),
+        reviewed_edges=(reviewed,),
+    )
+    session.commit()
+
+    rows = {
+        (row.dependent_story_id, row.prerequisite_story_id): row
+        for row in session.exec(select(UserStoryDependency)).all()
+    }
+    selected_edge = rows[(dependent_id, prerequisite_id)]
+    preserved = rows[(unrelated_id, prerequisite_id)]
+    assert selected_edge.status == "active"
+    assert selected_edge.source == "manual_review"
+    assert preserved.status == "proposed"
+    assert preserved.source == "story_writer"
+    payload = dependency_inspect_payload(session, project_id=project_id)
+    assert any(
+        edge["prerequisite_story_id"] == prerequisite_id
+        for edge in payload["active_edges"]
+    )
+
+
+def test_external_prerequisite_blocks_until_complete_without_joining_scope(
+    engine: Engine,
+) -> None:
+    """Keep an external prerequisite visible but outside final candidacy."""
+    with Session(engine) as session:
+        project_id, prerequisite_id, dependent_id, _unrelated_id = _story_set(
+            session,
+            titles=(
+                "External prerequisite",
+                "Selected dependent",
+                "Unrelated future work",
+            ),
+        )
+    _validate(engine, dependent_id)
+    with Session(engine) as session:
+        _select_for_sprint(session, story_id=dependent_id)
+        session.commit()
+        snapshot = WorkflowFactRepository(session).load(project_id)
+        source_fingerprint = snapshot.stories[0].selected_scope_fingerprint
+        assert source_fingerprint is not None
+        apply_story_dependencies_in_session(
+            session,
+            inputs=ApplyStoryDependenciesInput(
+                project_id=project_id,
+                selected_story_ids=(dependent_id,),
+                reviewed_edges=(
+                    StoryDependencyReviewEdgeFact(
+                        dependent_story_id=dependent_id,
+                        prerequisite_story_id=prerequisite_id,
+                        reason="Selected work requires the external prerequisite.",
+                    ),
+                ),
+                source_fingerprint=source_fingerprint,
+                reviewer="dependency-reviewer",
+                reviewed_at=REVIEWED_AT,
+            ),
+        )
+        session.commit()
+
+        incomplete = WorkflowFactRepository(session).load(project_id)
+        incomplete_by_id = {story.story_id: story for story in incomplete.stories}
+        assert incomplete_by_id[dependent_id].dependency_safe is False
+        assert incomplete_by_id[dependent_id].sprint_candidate is False
+        assert incomplete_by_id[prerequisite_id].sprint_candidate is False
+
+        prerequisite = session.get_one(UserStory, prerequisite_id)
+        prerequisite.status = StoryStatus.DONE
+        session.add(prerequisite)
+        session.commit()
+        completed = WorkflowFactRepository(session).load(project_id)
+
+    completed_by_id = {story.story_id: story for story in completed.stories}
+    assert completed_by_id[dependent_id].dependency_safe is True
+    assert completed_by_id[dependent_id].sprint_candidate is True
+    assert completed_by_id[prerequisite_id].sprint_candidate is False
+    assert any(
+        edge.dependent_story_id == dependent_id
+        and edge.prerequisite_story_id == prerequisite_id
+        and edge.status == "active"
+        for edge in completed.story_dependencies
+    )
+
+
+def test_selection_change_invalidates_review_until_exact_scope_is_confirmed(
+    engine: Engine,
+) -> None:
+    """Never infer a new selected scope from an older dependency review."""
+    with Session(engine) as session:
+        project_id, first_id, second_id, _third_id = _story_set(
+            session,
+            titles=("First selected", "Second selected", "Future work"),
+        )
+    _validate(engine, first_id)
+    _validate(engine, second_id)
+    with Session(engine) as session:
+        _select_for_sprint(session, story_id=first_id)
+        session.commit()
+        first_scope = WorkflowFactRepository(session).load(project_id)
+        first_fingerprint = first_scope.stories[0].selected_scope_fingerprint
+        assert first_fingerprint is not None
+        apply_story_dependencies_in_session(
+            session,
+            inputs=ApplyStoryDependenciesInput(
+                project_id=project_id,
+                selected_story_ids=(first_id,),
+                reviewed_edges=(),
+                source_fingerprint=first_fingerprint,
+                reviewer="dependency-reviewer",
+                reviewed_at=REVIEWED_AT,
+            ),
+        )
+        session.commit()
+        _select_for_sprint(session, story_id=second_id)
+        session.commit()
+        changed = WorkflowFactRepository(session).load(project_id)
+
+    selected = tuple(
+        story
+        for story in changed.stories
+        if story.sprint_selection_state == "selected"
+        and story.structurally_eligible
+    )
+    assert tuple(story.story_id for story in selected) == tuple(
+        sorted((first_id, second_id))
+    )
+    assert selected[0].selected_scope_fingerprint != first_fingerprint
+    assert all(story.dependency_safe is False for story in selected)
+    assert all(story.sprint_candidate is False for story in selected)
+
+
+def test_dependency_review_duplicate_replays_and_changed_payload_conflicts(
+    engine: Engine,
+) -> None:
+    """Replay one exact review and reject a changed duplicate submit."""
+    with Session(engine) as session:
+        project_id, first_id, second_id, _third_id = _story_set(
+            session,
+            titles=("First selected", "Second selected", "Future work"),
+        )
+    _validate(engine, first_id)
+    _validate(engine, second_id)
+    with Session(engine) as session:
+        _select_for_sprint(session, story_id=first_id)
+        _select_for_sprint(session, story_id=second_id)
+        session.commit()
+        snapshot = WorkflowFactRepository(session).load(project_id)
+    domain = _domain(engine)
+    position = domain.position(project_id)
+    request = ApplyStoryDependencies(
+        **_guards(position, "planning.story_dependencies"),
+        idempotency_key="selected-scope-review-replay",
+        selected_story_ids=tuple(sorted((first_id, second_id))),
+        reviewed_edges=(),
+        source_fingerprint=story_dependency_source_fingerprint(snapshot.stories),
+    )
+
+    first = domain.transition(request)
+    replay = domain.transition(request)
+    conflict = domain.transition(
+        ApplyStoryDependencies(
+            **_guards(position, "planning.story_dependencies"),
+            idempotency_key=request.idempotency_key,
+            selected_story_ids=request.selected_story_ids,
+            reviewed_edges=(
+                ReviewedDependencyEdge(
+                    dependent_story_id=second_id,
+                    prerequisite_story_id=first_id,
+                    reason="Changed duplicate payload.",
+                ),
+            ),
+            source_fingerprint=request.source_fingerprint,
+        )
+    )
+
+    assert first.ok is True
+    assert replay == first.model_copy(update={"replayed": True})
+    assert conflict.ok is False
+    assert conflict.error is not None
+    assert conflict.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
