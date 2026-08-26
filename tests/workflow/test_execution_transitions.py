@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, TypedDict, get_args
 
@@ -23,8 +24,8 @@ from models.core import (
     UserStory,
     UserStoryDependency,
 )
-from models.enums import SprintStatus, StoryStatus, TaskStatus
-from models.events import StoryCompletionLog, TaskExecutionLog
+from models.enums import SprintStatus, StoryStatus, TaskStatus, WorkflowEventType
+from models.events import StoryCompletionLog, TaskExecutionLog, WorkflowEvent
 from models.workflow import (
     PostSprintTriage,
     SprintClosure,
@@ -36,7 +37,11 @@ from models.workflow import (
 from repositories.workflow import WorkflowFactLoadError, WorkflowFactRepository
 from tests.workflow.execution_fixtures import (
     seed_started_execution,
+    seed_started_execution_with_transitive_dependency,
     seed_started_execution_with_unselected_story,
+)
+from tests.workflow.test_planning_transitions import (
+    _domain as _planning_domain,
 )
 from tests.workflow.test_planning_transitions import _select_for_sprint
 from workflow.clock import FixedClock
@@ -44,11 +49,13 @@ from workflow.contracts import JsonObject, NodeDecision, WorkflowErrorCode
 from workflow.definitions.execution import execution_graph
 from workflow.domain import WorkflowDomain
 from workflow.execution_integrity import (
+    execution_contract,
     sprint_close_fingerprint,
     sprint_review_fingerprint,
 )
-from workflow.fingerprints import canonical_hash
+from workflow.fingerprints import canonical_hash, canonical_json
 from workflow.requests import (
+    ApplyStoryDependencies,
     CloseSprint,
     CloseStory,
     CompleteTask,
@@ -184,6 +191,30 @@ def _complete_execution_sprint(
         task_id=task_id,
     )
     return domain, project_id, sprint_id, story_id, task_id, review_fingerprint
+
+
+def _triage_execution_sprint(
+    domain: WorkflowDomain,
+    *,
+    project_id: int,
+    sprint_id: int,
+) -> None:
+    triaged = domain.transition(
+        RecordPostSprintTriage(
+            **_guards(
+                domain,
+                project_id,
+                "execution.post_sprint_triage",
+                f"sprint:{sprint_id}",
+            ),
+            instance_key=f"sprint:{sprint_id}",
+            idempotency_key=f"triage-sprint-{sprint_id}",
+            sprint_id=sprint_id,
+            impact="none",
+            canonical_payload={"summary": "No downstream change."},
+        )
+    )
+    assert triaged.ok is True
 
 
 def _close_execution_sprint(
@@ -1107,6 +1138,129 @@ def test_closed_sprint_rejects_selected_scope_dependency_tamper(
 
     with pytest.raises(WorkflowFactLoadError):
         domain.position(project_id)
+
+
+def test_sprint_start_dependency_snapshot_is_exact_and_tamper_evident(
+    engine: Engine,
+) -> None:
+    """Persist exact A-to-B-to-C history in Sprint A's immutable start event."""
+    (
+        project_id,
+        sprint_id,
+        story_a_id,
+        story_b_id,
+        story_c_id,
+        _task_id,
+        dependency_ab_id,
+        dependency_bc_id,
+    ) = seed_started_execution_with_transitive_dependency(engine)
+    with Session(engine) as session:
+        event = session.exec(
+            select(WorkflowEvent).where(
+                WorkflowEvent.project_id == project_id,
+                WorkflowEvent.sprint_id == sprint_id,
+                WorkflowEvent.event_type == WorkflowEventType.SPRINT_STARTED,
+            )
+        ).one()
+        assert event.event_metadata is not None
+        metadata = json.loads(event.event_metadata)
+        assert metadata["dependency_rows_snapshot"] == [
+            {
+                "confidence": "reviewed",
+                "dependency_id": dependency_ab_id,
+                "dependent_story_id": story_a_id,
+                "prerequisite_story_id": story_b_id,
+                "reason": "Story A requires Story B.",
+                "source": "manual_review",
+                "status": "active",
+            },
+            {
+                "confidence": "reviewed",
+                "dependency_id": dependency_bc_id,
+                "dependent_story_id": story_b_id,
+                "prerequisite_story_id": story_c_id,
+                "reason": "Story B requires Story C.",
+                "source": "manual_review",
+                "status": "active",
+            },
+        ]
+        metadata["dependency_rows_snapshot"][1]["reason"] = (
+            "Tampered historical dependency semantics."
+        )
+        event.event_metadata = canonical_json(metadata)
+        session.add(event)
+        session.commit()
+
+    with pytest.raises(WorkflowFactLoadError):
+        _domain(engine).position(project_id)
+
+
+def test_triaged_sprint_history_survives_current_transitive_dependency_removal(
+    engine: Engine,
+) -> None:
+    """Let selected Story B remove B-to-C without rewriting Sprint A history."""
+    (
+        project_id,
+        sprint_id,
+        story_a_id,
+        story_b_id,
+        _story_c_id,
+        task_id,
+        dependency_ab_id,
+        dependency_bc_id,
+    ) = seed_started_execution_with_transitive_dependency(engine)
+    execution_domain = _domain(engine)
+    _close_execution_sprint(
+        execution_domain,
+        project_id=project_id,
+        sprint_id=sprint_id,
+        story_id=story_a_id,
+        task_id=task_id,
+    )
+    _triage_execution_sprint(
+        execution_domain,
+        project_id=project_id,
+        sprint_id=sprint_id,
+    )
+    with Session(engine) as session:
+        before = WorkflowFactRepository(session).load(project_id)
+    historical_contract_fingerprint = execution_contract(before, sprint_id).fingerprint
+
+    _select_for_sprint(engine, story_b_id)
+    planning_domain = _planning_domain(engine)
+    position = planning_domain.position(project_id)
+    decision = next(
+        item
+        for item in position.decisions
+        if item.node_id == "planning.story_dependencies"
+    )
+    source = next(
+        item
+        for item in decision.fact_references
+        if item.fact_type == "story_dependency_source"
+    )
+    removed = planning_domain.transition(
+        ApplyStoryDependencies(
+            **_guards(planning_domain, project_id, "planning.story_dependencies"),
+            idempotency_key="remove-current-b-to-c-dependency",
+            selected_story_ids=(story_b_id,),
+            reviewed_edges=(),
+            source_fingerprint=source.fingerprint,
+        )
+    )
+    assert removed.ok is True
+
+    with Session(engine) as session:
+        dependency_ab = session.get(UserStoryDependency, dependency_ab_id)
+        dependency_bc = session.get(UserStoryDependency, dependency_bc_id)
+        assert dependency_ab is not None
+        assert dependency_bc is not None
+        assert dependency_ab.status == "active"
+        assert dependency_bc.status == "rejected"
+        after = WorkflowFactRepository(session).load(project_id)
+    assert execution_contract(after, sprint_id).fingerprint == (
+        historical_contract_fingerprint
+    )
 
 
 def test_closed_sprint_rejects_attached_task_content_tamper(

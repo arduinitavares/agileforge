@@ -926,6 +926,7 @@ def _apply_current_dependencies(
         )
         for edge in snapshot.story_dependencies
         if edge.status == "active"
+        and edge.dependent_story_id in {item.story_id for item in stories}
     )
     position = domain.position(project_id)
     applied = domain.transition(

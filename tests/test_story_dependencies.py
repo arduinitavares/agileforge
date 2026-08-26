@@ -1,6 +1,6 @@
 """Tests for story dependency persistence."""
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import text
@@ -12,7 +12,11 @@ from api import StoryDependenciesApplyApiRequest
 from models.core import UserStory, UserStoryDependency
 from models.enums import StoryStatus
 from models.events import WorkflowEvent
-from models.workflow import BacklogArtifact, StoryDependencyReview
+from models.workflow import (
+    BacklogArtifact,
+    StoryDependencyReview,
+    WorkflowTransitionReceipt,
+)
 from repositories.workflow import WorkflowFactRepository
 from services.agent_workbench.story_phase import (
     RecordStoryDecisionInput,
@@ -20,7 +24,12 @@ from services.agent_workbench.story_phase import (
     record_story_decision_in_session,
     record_story_draft_in_session,
 )
-from services.application import StoryDependencyEdgeRequest
+from services.application import (
+    AgileForgeApplication,
+    PlanningActionSelectionService,
+    StoryDependenciesApplyRequest,
+    StoryDependencyEdgeRequest,
+)
 from services.contracts.story import (
     CanonicalStoryItem,
     CanonicalStoryOutput,
@@ -51,6 +60,7 @@ from tests.workflow.test_planning_transitions import (
     _guards,
     _roadmap_content,
 )
+from utils.spec_schemas import ValidationEvidence
 from workflow.contracts import WorkflowErrorCode
 from workflow.definitions.planning import story_dependency_source_fingerprint
 from workflow.execution_integrity import selected_story_dependency_snapshot
@@ -73,6 +83,7 @@ def test_dependency_api_accepts_external_prerequisite_for_selected_dependent() -
     """Transport preserves selected-to-external edges for dependency review."""
     request = StoryDependenciesApplyApiRequest(
         selected_story_ids=[_SELECTED_STORY_ID],
+        selected_scope_fingerprint="sha256:" + ("a" * 64),
         reviewed_edges=[
             StoryDependencyEdgeRequest(
                 dependent_story_id=_SELECTED_STORY_ID,
@@ -85,6 +96,7 @@ def test_dependency_api_accepts_external_prerequisite_for_selected_dependent() -
     )
 
     assert request.selected_story_ids == [_SELECTED_STORY_ID]
+    assert request.selected_scope_fingerprint == "sha256:" + ("a" * 64)
     assert (
         request.reviewed_edges[0].prerequisite_story_id
         == _EXTERNAL_PREREQUISITE_ID
@@ -889,3 +901,136 @@ def test_dependency_review_duplicate_replays_and_changed_payload_conflicts(
     assert conflict.ok is False
     assert conflict.error is not None
     assert conflict.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
+
+
+@pytest.mark.parametrize("scope_change", ["selection", "evidence"])
+def test_dependency_apply_rejects_changed_observed_scope_without_mutation(
+    engine: Engine,
+    scope_change: str,
+) -> None:
+    """Same IDs cannot replace the exact selection/evidence scope the operator saw."""
+    with Session(engine) as session:
+        project_id, selected_id, prerequisite_id, _future_id = _story_set(
+            session,
+            titles=("Selected work", "External prerequisite", "Future work"),
+        )
+    _validate(engine, selected_id)
+    with Session(engine) as session:
+        _select_for_sprint(session, story_id=selected_id)
+        session.add(
+            UserStoryDependency(
+                project_id=project_id,
+                dependent_story_id=selected_id,
+                prerequisite_story_id=prerequisite_id,
+                status="proposed",
+                source="story_writer",
+                confidence="explicit",
+                reason="Preserve this proposed row when the observed scope is stale.",
+            )
+        )
+        session.commit()
+        observed = WorkflowFactRepository(session).load(project_id)
+        observed_fingerprint = next(
+            story.selected_scope_fingerprint
+            for story in observed.stories
+            if story.story_id == selected_id
+        )
+        assert observed_fingerprint is not None
+
+        story = session.get_one(UserStory, selected_id)
+        if scope_change == "selection":
+            current = story_sprint_selection_fact_in_session(session, story=story)
+            apply_story_sprint_selection_with_receipt_in_session(
+                session,
+                StorySprintSelectionRequest(
+                    project_id=project_id,
+                    story_id=selected_id,
+                    intent="remove",
+                    expected_state_fingerprint=current.state_fingerprint,
+                    idempotency_key="change-observed-scope-remove",
+                    actor="dependency-reviewer",
+                ),
+            )
+            current = story_sprint_selection_fact_in_session(session, story=story)
+            apply_story_sprint_selection_with_receipt_in_session(
+                session,
+                StorySprintSelectionRequest(
+                    project_id=project_id,
+                    story_id=selected_id,
+                    intent="select",
+                    expected_state_fingerprint=current.state_fingerprint,
+                    idempotency_key="change-observed-scope-reselect",
+                    actor="dependency-reviewer",
+                ),
+            )
+        else:
+            assert story.validation_evidence is not None
+            evidence = ValidationEvidence.model_validate_json(
+                story.validation_evidence,
+                strict=True,
+            )
+            changed_evidence = evidence.model_copy(
+                update={"validated_at": evidence.validated_at + timedelta(seconds=1)}
+            )
+            story.validation_evidence = canonical_json(
+                changed_evidence.model_dump(mode="json")
+            )
+            session.add(story)
+        session.commit()
+
+        changed = WorkflowFactRepository(session).load(project_id)
+        changed_scope = tuple(
+            story
+            for story in changed.stories
+            if story.structurally_eligible
+            and story.sprint_selection_state == "selected"
+        )
+        assert tuple(story.story_id for story in changed_scope) == (selected_id,)
+        assert changed_scope[0].selected_scope_fingerprint != observed_fingerprint
+
+        row = session.exec(select(UserStoryDependency)).one()
+        row_before = (
+            row.status,
+            row.source,
+            row.confidence,
+            row.reason,
+            row.updated_at,
+        )
+        reviews_before = session.exec(select(StoryDependencyReview)).all()
+        receipts_before = session.exec(
+            select(WorkflowTransitionReceipt).where(
+                WorkflowTransitionReceipt.request_kind
+                == "apply_story_dependencies"
+            )
+        ).all()
+
+    application = AgileForgeApplication(
+        workflow_domain=_domain(engine),
+        planning_action_selection=PlanningActionSelectionService(engine=engine),
+    )
+    result = application.apply_story_dependencies(
+        StoryDependenciesApplyRequest(
+            project_id=project_id,
+            selected_story_ids=(selected_id,),
+            selected_scope_fingerprint=observed_fingerprint,
+            reviewed_edges=(),
+            idempotency_key=f"stale-observed-{scope_change}-scope",
+            actor="dependency-reviewer",
+        )
+    )
+
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
+    with Session(engine) as session:
+        row = session.exec(select(UserStoryDependency)).one()
+        assert (row.status, row.source, row.confidence, row.reason, row.updated_at) == (
+            row_before
+        )
+        assert session.exec(select(StoryDependencyReview)).all() == reviews_before
+        assert session.exec(
+            select(WorkflowTransitionReceipt).where(
+                WorkflowTransitionReceipt.request_kind
+                == "apply_story_dependencies"
+            )
+        ).all() == receipts_before

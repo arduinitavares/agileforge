@@ -1242,3 +1242,118 @@ def test_selection_event_requires_an_exact_completed_receipt_anchor(
         ),
     ):
         WorkflowFactRepository(session).load(project_id)
+
+
+def test_selection_receipt_persists_only_immutable_transition_result(
+    engine: Engine,
+) -> None:
+    """Persist only immutable event facts in the canonical selection receipt."""
+    story_id = _accepted_story(engine)
+    with Session(engine) as session:
+        story = session.get_one(UserStory, story_id)
+        initial = selection_service.story_sprint_selection_fact_in_session(
+            session,
+            story=story,
+        )
+        project_id = story.project_id
+    request = _selection_request(
+        project_id=project_id,
+        story_id=story_id,
+        intent="select",
+        expected_state_fingerprint=initial.state_fingerprint,
+        key="closed-selection-receipt-result",
+    )
+    app = _build_application(engine)
+    first = app.apply_story_sprint_selection(request)
+    assert first["ok"] is True
+
+    expected_result_keys = {
+        "project_id",
+        "story_id",
+        "selection_state",
+        "state_fingerprint",
+        "selection_event_id",
+        "selection_event_fingerprint",
+    }
+    with Session(engine) as session:
+        receipt = session.exec(
+            select(WorkflowTransitionReceipt).where(
+                col(WorkflowTransitionReceipt.request_kind)
+                == "apply_story_sprint_selection",
+                col(WorkflowTransitionReceipt.idempotency_key)
+                == request.idempotency_key,
+            )
+        ).one()
+        assert receipt.result_json is not None
+        persisted = json.loads(receipt.result_json)
+        assert set(persisted) == {"ok", "data", "errors"}
+        assert set(persisted["data"]) == expected_result_keys
+
+
+def test_selection_receipt_replay_rejects_extra_projection_semantics(
+    engine: Engine,
+) -> None:
+    """A receipt replays immutable selection facts, never mutable candidacy truth."""
+    story_id = _accepted_story(engine)
+    with Session(engine) as session:
+        story = session.get_one(UserStory, story_id)
+        initial = selection_service.story_sprint_selection_fact_in_session(
+            session,
+            story=story,
+        )
+        project_id = story.project_id
+    request = _selection_request(
+        project_id=project_id,
+        story_id=story_id,
+        intent="select",
+        expected_state_fingerprint=initial.state_fingerprint,
+        key="tampered-selection-receipt-result",
+    )
+    app = _build_application(engine)
+    first = app.apply_story_sprint_selection(request)
+    assert first["ok"] is True
+
+    immutable_keys = {
+        "project_id",
+        "story_id",
+        "selection_state",
+        "state_fingerprint",
+        "selection_event_id",
+        "selection_event_fingerprint",
+    }
+    with Session(engine) as session:
+        receipt = session.exec(
+            select(WorkflowTransitionReceipt).where(
+                col(WorkflowTransitionReceipt.request_kind)
+                == "apply_story_sprint_selection",
+                col(WorkflowTransitionReceipt.idempotency_key)
+                == request.idempotency_key,
+            )
+        ).one()
+        assert receipt.result_json is not None
+        persisted = json.loads(receipt.result_json)
+        receipt.result_json = canonical_json(
+            {
+                "ok": True,
+                "data": {
+                    **{
+                        key: persisted["data"][key]
+                        for key in immutable_keys
+                    },
+                    "sprint_candidate": True,
+                },
+                "errors": [],
+            }
+        )
+        session.add(receipt)
+        session.commit()
+
+    replay = app.apply_story_sprint_selection(request)
+    assert replay["ok"] is False
+    assert _error_code(replay) == "WORKFLOW_FACT_CONFLICT"
+    assert "sprint_candidate" not in _result_data(replay)
+    with (
+        Session(engine) as session,
+        pytest.raises(WorkflowFactLoadError, match="selection receipt"),
+    ):
+        WorkflowFactRepository(session).load(project_id)

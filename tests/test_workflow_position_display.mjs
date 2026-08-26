@@ -1144,6 +1144,22 @@ test('dependency review submits the backend-projected next-Sprint IDs without re
     assert.strictEqual(projection.scopeFingerprint, dependencies.selected_scope_fingerprint);
 });
 
+test('dependency mutation submits the exact projected selected-scope fingerprint', async () => {
+    const requests = [];
+    const context = loadFrontend(async (url, options = {}) => {
+        requests.push({ url, options });
+        return { ok: true, text: async () => '{}' };
+    });
+    const scopeFingerprint = 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+
+    await context.postStoryDependencyMutation(7, [101], [], scopeFingerprint);
+
+    assert.equal(requests.length, 1);
+    const body = JSON.parse(requests[0].options.body);
+    assert.equal(body.selected_scope_fingerprint, scopeFingerprint);
+    assert.deepEqual(body.selected_story_ids, [101]);
+});
+
 test('browser renders the exact structural proof and non-proof disclosure from the projection', () => {
     const context = loadFrontend();
     const story = selectedScopeStory({ sprint_selection_state: 'unselected', selected_scope_fingerprint: null });
@@ -1281,6 +1297,46 @@ test('Sprint generation binds canonical candidates to the current dependency sco
     assert.ok(markup.includes('Sprint candidate projection unavailable'));
     assert.ok(!markup.includes('data-delivery-generation-form="record_sprint_plan"'));
     assert.deepEqual(requests, []);
+});
+
+test('Sprint generation submits the exact projected candidate IDs', async () => {
+    const requests = [];
+    const context = loadFrontend(async (url, options = {}) => {
+        requests.push({ url, options });
+        return { ok: true, text: async () => '{}' };
+    });
+    const action = {
+        node_id: 'planning.sprint.plan',
+        instance_key: null,
+        request_kind: 'record_sprint_plan',
+        endpoint: 'sprint/generate',
+        transport: 'semantic',
+    };
+    const first = sprintCandidateStory({ story_id: 101 });
+    const second = sprintCandidateStory({
+        story_id: 103,
+        source_story_item_id: 'US-003',
+        sprint_selection_state_fingerprint: 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+    });
+    vm.runInContext(`selectedProjectId = 7; lifecycleState = ${JSON.stringify({
+        actions: [action],
+        position: {},
+        planningReviews: {},
+        storyDependencies: dependencyProjection([first, second]),
+        sprintCandidates: { items: [first, second] },
+    })}; loadDashboard = async () => true;`, context);
+
+    await context.runDirectAction(
+        'record_sprint_plan',
+        directActionButton(action),
+        null,
+        { team_name: 'Exact Candidate Team' },
+    );
+
+    const post = requests.find(({ options }) => options.method === 'POST');
+    assert.ok(post);
+    const body = JSON.parse(post.options.body);
+    assert.deepEqual(body.selected_story_ids, [101, 103]);
 });
 
 test('scope parser rejects a conflicting fingerprint on an unselected Story', () => {

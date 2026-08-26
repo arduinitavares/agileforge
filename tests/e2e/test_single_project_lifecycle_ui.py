@@ -1015,7 +1015,18 @@ class FakeLifecycle:
         raise ValueError(message)
 
     def _apply_story_dependencies(self, body: JsonObject) -> None:
-        self._assert_fields(body, {"selected_story_ids", "reviewed_edges"})
+        self._assert_fields(
+            body,
+            {
+                "selected_story_ids",
+                "selected_scope_fingerprint",
+                "reviewed_edges",
+            },
+        )
+        assert (
+            body["selected_scope_fingerprint"]
+            == self._story_dependencies_projection()["selected_scope_fingerprint"]
+        )
         reviewed_edges = body.get("reviewed_edges")
         assert isinstance(reviewed_edges, list)
         for edge in reviewed_edges:
@@ -1038,7 +1049,13 @@ class FakeLifecycle:
                     self.sprint_candidates.append(story)
 
     def _generate_sprint_plan(self, body: JsonObject) -> None:
-        self._assert_fields(body, {"team_name"})
+        self._assert_fields(body, {"team_name", "selected_story_ids"})
+        projected_candidate_ids = [
+            story["story_id"]
+            for story in self.sprint_candidates
+            if isinstance(story, dict) and isinstance(story.get("story_id"), int)
+        ]
+        assert body["selected_story_ids"] == projected_candidate_ids
         if self.delivery_generation_failure:
             raise ValueError(self.delivery_generation_failure)
         self.sprint_plan_candidate = {
@@ -2573,6 +2590,7 @@ def test_sprint_generation_requires_team_and_blocks_duplicate_submission(
     ]
     assert len(sprint_requests) == 1
     assert sprint_requests[0]["team_name"] == "Product Team"
+    assert sprint_requests[0]["selected_story_ids"] == [101]
 
     context.close()
 

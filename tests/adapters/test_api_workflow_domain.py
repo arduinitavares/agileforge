@@ -1029,6 +1029,7 @@ def _planning_review_headers(path: str) -> dict[str, str]:
             "planning.story_dependencies",
             {
                 "selected_story_ids": (7, 9),
+                "selected_scope_fingerprint": "sha256:" + ("a" * 64),
                 "reviewed_edges": (
                     {
                         "dependent_story_id": 9,
@@ -1050,6 +1051,7 @@ def _planning_review_headers(path: str) -> dict[str, str]:
             },
             {
                 "selected_story_ids": [7, 9],
+                "selected_scope_fingerprint": "sha256:" + ("a" * 64),
                 "reviewed_edges": [
                     {
                         "dependent_story_id": 9,
@@ -3813,6 +3815,7 @@ def test_delivery_review_api_rejects_caller_owned_guards(
             "/api/projects/41/story/dependencies/apply",
             {
                 "selected_story_ids": [7, 9],
+                "selected_scope_fingerprint": "sha256:" + ("a" * 64),
                 "reviewed_edges": [
                     {
                         "dependent_story_id": 9,
@@ -3866,6 +3869,8 @@ def test_planning_action_api_uses_task_specific_semantic_requests(
     assert not hasattr(request, "graph_version")
     assert not hasattr(request, "fact_fingerprint")
     assert not hasattr(request, "decision_fingerprint")
+    if request_type_name == "StoryDependenciesApplyRequest":
+        assert request.selected_scope_fingerprint == "sha256:" + ("a" * 64)
 
 
 @pytest.mark.parametrize(

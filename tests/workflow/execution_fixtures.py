@@ -6,8 +6,8 @@ from typing import TYPE_CHECKING
 
 from sqlmodel import Session, select
 
-from models.core import Task, UserStoryDependency
-from models.enums import TaskStatus
+from models.core import Task, UserStory, UserStoryDependency
+from models.enums import StoryStatus, TaskStatus
 from tests.workflow.test_planning_transitions import (
     _domain as _planning_domain,
 )
@@ -184,4 +184,99 @@ def seed_started_execution_with_unselected_story(
         )
 
 
-__all__ = ["seed_started_execution", "seed_started_execution_with_unselected_story"]
+def seed_started_execution_with_transitive_dependency(
+    engine: Engine,
+    *,
+    task_status: TaskStatus = TaskStatus.IN_PROGRESS,
+) -> tuple[int, int, int, int, int, int, int, int]:
+    """Start Story A with active A-to-B and transitive B-to-C dependencies."""
+    requirements = (
+        "Deliver Sprint A work",
+        "Deliver future Story B work",
+        "Deliver future Story C work",
+    )
+    project_id = _seed_accepted_backlog(engine, requirements=requirements)
+    domain = _planning_domain(engine)
+    _record_and_accept_roadmap(domain, project_id, requirements=requirements)
+    story_ids = tuple(
+        _record_and_accept_story(
+            engine,
+            domain,
+            project_id,
+            requirement=requirement,
+            spec_item_id=f"REQ.planning-{index}",
+            idempotency_suffix=f"-historical-dependency-{index}",
+        )[1]
+        for index, requirement in enumerate(requirements, start=1)
+    )
+    story_a_id, story_b_id, story_c_id = story_ids
+    with Session(engine) as session:
+        for story_id in (story_b_id, story_c_id):
+            story = session.get_one(UserStory, story_id)
+            story.status = StoryStatus.ACCEPTED
+            session.add(story)
+        dependency_ab = UserStoryDependency(
+            project_id=project_id,
+            dependent_story_id=story_a_id,
+            prerequisite_story_id=story_b_id,
+            status="active",
+            source="manual_review",
+            confidence="reviewed",
+            reason="Story A requires Story B.",
+        )
+        dependency_bc = UserStoryDependency(
+            project_id=project_id,
+            dependent_story_id=story_b_id,
+            prerequisite_story_id=story_c_id,
+            status="active",
+            source="manual_review",
+            confidence="reviewed",
+            reason="Story B requires Story C.",
+        )
+        session.add_all((dependency_ab, dependency_bc))
+        session.commit()
+        dependency_ab_id = _required_identity(
+            dependency_ab.dependency_id,
+            "Story A dependency",
+        )
+        dependency_bc_id = _required_identity(
+            dependency_bc.dependency_id,
+            "Story B dependency",
+        )
+    plan_binding = _record_sprint_plan_draft(
+        engine,
+        domain,
+        project_id,
+        story_a_id,
+        team_name="Historical dependency snapshot team",
+        idempotency_key="historical-dependency-sprint-plan",
+    )
+    sprint_id = _accept_and_start_sprint(
+        domain,
+        project_id=project_id,
+        plan_binding=plan_binding,
+        idempotency_suffix="-historical-dependency",
+    )
+    with Session(engine) as session:
+        task = session.exec(select(Task).where(Task.story_id == story_a_id)).one()
+        task.status = task_status
+        session.add(task)
+        session.commit()
+        task_id = _required_identity(task.task_id, "Task")
+    return (
+        project_id,
+        sprint_id,
+        story_a_id,
+        story_b_id,
+        story_c_id,
+        task_id,
+        dependency_ab_id,
+        dependency_bc_id,
+    )
+
+
+__all__ = [
+    "seed_started_execution",
+    "seed_started_execution_with_transitive_dependency",
+    "seed_started_execution_with_unselected_story",
+]

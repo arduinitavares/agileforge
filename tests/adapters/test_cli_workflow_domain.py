@@ -722,6 +722,8 @@ def test_story_review_uses_no_caller_owned_instance_selector() -> None:
         (
             "story dependencies apply --project-id 41 "
             "--story-id 7 --story-id 9 "
+            "--selected-scope-fingerprint "
+            f"sha256:{'a' * 64} "
             "--dependency '9:7:Story 9 requires Story 7.' "
             "--idempotency-key dependencies-41 --actor operator",
             "StoryDependenciesApplyRequest",
@@ -774,6 +776,8 @@ def test_planning_action_commands_use_task_specific_semantics(
     assert not hasattr(request, "graph_version")
     assert not hasattr(request, "fact_fingerprint")
     assert not hasattr(request, "request_file")
+    if request_type_name == "StoryDependenciesApplyRequest":
+        assert request.selected_scope_fingerprint == f"sha256:{'a' * 64}"
     assert '"ok": true' in capsys.readouterr().out
 
 
