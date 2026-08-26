@@ -427,3 +427,80 @@ The Playwright work used only its ephemeral test server, profile, browser, and
 route fake. It made no provider call and persisted no real Sprint. No protected
 profile, manual/live UI, push, merge, issue mutation, #224 terminology, or live
 manual acceptance action was touched.
+
+## Completion-gate and final correctness fixes
+
+The first clean full-gate attempt after review round 2 found one migration gap:
+the CLI parser required the observed selected-scope fingerprint, but
+`workflow next` still rendered the old dependency command. The aggregate result
+was `2491 passed, 1 failed, 1 skipped, 1 deselected`; the only failure was the
+command-renderer parser contract. The test was tightened first to require the
+exact placeholder. Commit `6f33fee` (`fix: render selected scope guard (#223)`)
+adds that task-specific field to the existing renderer and documents why it is
+operator-observed scope rather than an internal graph guard.
+
+Focused renderer GREEN:
+
+```text
+tests/adapters/test_command_renderer.py
+39 passed, 4 warnings
+
+focused dependency CLI
+4 passed, 125 deselected, 4 warnings
+
+CLI documentation contracts
+16 passed, 4 warnings
+
+changed-file ruff, ty, and git diff --check
+passed
+```
+
+The final correctness re-review then found that browser candidate items preserve
+rank order while the backend exact guard requires numeric Story-ID order. It
+also proved that a torn candidate subset sharing the selected-scope fingerprint
+was accepted locally. Both browser REDs failed before production changes:
+
+```text
+Sprint generation rejects a torn candidate vector within one selected scope
+failed: canGenerateSprintPlan returned true
+
+Sprint generation submits the exact projected candidate IDs
+failed: sent [103, 101], backend canonical vector is [101, 103]
+```
+
+Commit `6faedb7` (`fix: canonicalize browser Sprint candidates (#223)`) sorts
+only the transport guard IDs and exact-cross-checks them against the candidacy
+flags in the current dependency projection. Candidate display order remains
+rank-based. GREEN:
+
+```text
+targeted browser authority tests
+2 passed
+
+node --test tests/*.mjs
+70 passed, 0 failed
+
+authorized test-owned Playwright subset
+9 passed, 15 deselected, 4 warnings
+
+git diff --check
+passed
+```
+
+The interrupted aggregate rerun after `6f33fee` is not completion evidence; it
+was stopped once the independent reviewer confirmed the browser defect. A new
+clean-head full gate follows the final review-fix documentation commit. No
+provider, protected profile, real Sprint, live/manual UI, or remote mutation was
+used during either fix.
+
+Independent re-review verdicts after the fixes:
+
+- Specification: APPROVED, no Important findings.
+- Correctness: APPROVED after `6faedb7`, no remaining Important findings.
+- Lean scope: APPROVED, no Important bloat or dead paths.
+
+The specification/lean reviewer ran a 621-test provider-free branch matrix,
+Node contract coverage, and bounded delta checks. The correctness reviewer ran
+the focused unchanged domain matrix, full Node coverage, both candidate-vector
+regressions, and exact diff checks. Reviewers made no repository or external
+state changes.
