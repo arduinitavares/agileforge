@@ -228,3 +228,125 @@ Changed in this round:
 No provider calls, real Sprint generation/persistence, profile access, manual
 UI startup, push, merge, issue mutation, live acceptance, or #224 terminology
 changes occurred.
+
+## Final whole-branch review fix
+
+The final #223 review RED was committed first as `2d949f4`
+(`test: capture final #223 review regressions`). The GREEN implementation is
+`52c13d4` (`fix: close final selection contracts (#223)`).
+
+### Contract changes
+
+- Dependency planning now takes `selected_scope_stories(snapshot)` as its sole
+  current-scope authority. The dependency projection carries the exact
+  `selected_story_ids` and selected-scope fingerprint; the browser parses and
+  submits those projected values rather than recalculating them. Completed
+  Sprint Story A can retain historical selected intent while only future Story
+  B is in the next current scope.
+- The selection writer returns a post-event repository `StoryFact`, including
+  the current `dependency_safe` and `sprint_candidate` truth. Same-state
+  responses also use that authoritative projection.
+- Every selection event has a required, completed
+  `WorkflowTransitionReceipt` anchor. Integrity verifies the canonical request
+  JSON/fingerprint, identity, actor and intent metadata, expected prior-state
+  fingerprint, result event identity/fingerprint/state, and lineage. Missing,
+  malformed, mismatched, and coherent-tail rewrite anchors fail closed. The
+  transaction creates the pending receipt before the event, completes it with
+  the canonical result, and rolls both back together on failure.
+- Story selection/reconciliation uses a token-bound browser mutation phase.
+  A successful POST followed by a failed authoritative reload, including 409,
+  keeps stale controls locked until a matching successful current load; a
+  pre-commit POST failure restores the prior controls.
+- Direct Story API and CLI reads removed `ready_for_sprint` and conflated
+  validation fields. They expose canonical structural eligibility/evidence,
+  selection state/event and scope fingerprints, dependency safety, candidacy,
+  and blockers. Malformed projections fail closed.
+- `services/story_evidence_scope.py` is the stable provider-free disclosure:
+  it proves exact Story identity; immutable accepted artifact/item binding;
+  accepted Backlog and Specification lineage; parent-bounded Specification
+  references; required Story shape; non-empty acceptance criteria; and current
+  evidence/input fingerprints. It does not prove semantic/model quality,
+  product value, human Sprint selection, dependency safety, Sprint candidacy,
+  or Sprint-generation readiness. The API, CLI, direct/candidate/dependency
+  reads, and browser use the same exact lists.
+
+### RED and GREEN evidence
+
+```text
+RED (committed before production): 2d949f4
+- next-Sprint projected-scope API/browser path;
+- canonical mutation response/reload truth;
+- missing, malformed, mismatched, and coherent-tail receipt anchors;
+- selection 409 lock/recovery/double-click path;
+- direct Story API/CLI hard-break fields and exact disclosure.
+
+GREEN: uv run --frozen pytest -q \
+  tests/services/test_story_sprint_selection.py \
+  tests/services/test_story_validation_application.py \
+  tests/services/test_durable_product_definition_projections.py \
+  tests/test_story_dependencies.py tests/test_sprint_selection.py \
+  tests/workflow/test_planning_transitions.py \
+  tests/adapters/test_api_workflow_domain.py
+489 passed, 5 warnings in 67.96s
+
+GREEN: node --test tests/*.mjs
+67 passed, 0 failed
+
+GREEN: authorized test-owned Playwright subset
+uv run --frozen pytest -q tests/e2e/test_single_project_lifecycle_ui.py -k \
+  'progressive or sprint_generation_requires_team or \
+  torn_candidate_dependency_scope or dependency_confirmation_stays_locked or \
+  dependency_confirmation_replacement_stays_locked or \
+  dependency_submission_survives_manual_refresh_race or \
+  completed_sprint_next_scope or story_selection_stays_locked_through_409'
+9 passed, 15 deselected, 4 warnings in 18.83s
+
+GREEN: uv run --frozen pyrepo-check --all (clean commit 52c13d4)
+ruff: passed; annotations: passed; ty: passed; bandit: no issues
+pytest: 2488 passed, 1 skipped, 1 deselected, 70 warnings in 461.44s
+```
+
+The first full-gate attempt was intentionally retained as diagnostic evidence:
+from the dirty pre-GREEN checkout, only
+`tests/test_ci_launcher_smoke.py::test_real_script_runs_complete_launcher_lifecycle`
+and
+`tests/test_ci_launcher_smoke.py::test_real_pre_identity_failure_cleans_process_group_and_profiles`
+failed. A no-UI diagnostic `./agileforge-dev init` returned
+`acceptance checkout must be clean` before profile creation. The clean-head
+rerun above passed both tests, proving an acceptance-mode checkout-cleanliness
+precondition rather than a #223 production defect. No packaging configuration
+was changed.
+
+### Lean dispositions and changed files
+
+`rg` found no production caller for the retired global `DependencyGraph`
+load/inspect/assert pipeline, so it and its helper-only tests were deleted.
+`DependencyGraphIssue`, `StoryDependencyGraphError`,
+`detect_dependency_cycles`, and current mutation validation remain. The dead
+frontend `canonicalCandidateDependencies` helper and its helper-only tests were
+also removed; render/path proofs remain. `SelectedScopeStory` direct-lineage
+fields were retained as auditable scope identity, and concurrency coverage was
+not reduced.
+
+Changed in this final round:
+
+- `services/application.py`, `services/read_projections.py`,
+  `services/story_dependencies.py`, `services/story_evidence_scope.py`, and
+  `services/story_sprint_selection.py`
+- `frontend/project.js`
+- `docs/superpowers/specs/2026-08-25-story-readiness-sprint-candidacy-contract.md`
+- `tests/adapters/test_api_workflow_domain.py`,
+  `tests/e2e/test_single_project_lifecycle_ui.py`,
+  `tests/services/test_durable_product_definition_projections.py`,
+  `tests/services/test_story_sprint_selection.py`,
+  `tests/services/test_story_validation_application.py`,
+  `tests/test_sprint_selection.py`, `tests/test_story_dependencies.py`,
+  `tests/test_workflow_position_display.mjs`, and
+  `tests/workflow/test_planning_transitions.py`
+
+Warnings are existing FastAPI test-client deprecation, experimental ADK
+resumability, and the test-owned blocked-network exercise. The E2E work was
+test-owned only; #223 scenarios did not reach `/sprint/generate`. No provider
+call, protected/source profile action, manual/live UI start, real Sprint
+generation or persistence, push, merge, issue mutation, or live manual
+acceptance occurred.
