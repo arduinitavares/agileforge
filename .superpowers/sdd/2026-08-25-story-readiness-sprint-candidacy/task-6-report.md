@@ -350,3 +350,80 @@ test-owned only; #223 scenarios did not reach `/sprint/generate`. No provider
 call, protected/source profile action, manual/live UI start, real Sprint
 generation or persistence, push, merge, issue mutation, or live manual
 acceptance occurred.
+
+## Independent review fix round 2: final authority boundaries
+
+The second independent review found five Important defects that green tests had
+not exposed: dependency confirmation silently replaced a stale observed scope
+fingerprint; browser Sprint generation omitted the exact candidate IDs; a
+successful selection receipt could replay mutable or tampered result data;
+later current dependency edits could rewrite historical transitive closure; and
+the old automatic Sprint selector was unreachable dead code behind the exact-ID
+guard. RED `41d25a2` (`test: capture final authority regressions (#223)`) records
+those gaps before production changes. GREEN `5a42093`
+(`fix: close final authority gaps (#223)`) closes them.
+
+### Contract changes
+
+- API, CLI, application replay input, and browser dependency submission now
+  require the exact observed `selected_scope_fingerprint`. Pre-dispatch and
+  transactional checks reject a same-ID scope whose evidence or selection
+  identity changed; no layer substitutes the newest fingerprint.
+- Browser Sprint-plan generation submits the exact projected candidate IDs and
+  blocks transport if candidate and dependency projections disagree.
+- Successful selection receipts have one closed immutable result schema. They
+  contain only Project, Story, resulting state/state fingerprint, and optional
+  event identity. Replay validates canonical request input, no-op state, or the
+  exact anchored event. Mutable eligibility, dependency, and candidacy fields
+  are reloaded from the repository rather than persisted in the receipt.
+- Sprint-start audit metadata now stores the canonical immutable union of all
+  direct selected-dependent rows and the active reachable external-prerequisite
+  closure. Historical execution integrity reads that snapshot, while current
+  dependency rows remain editable for a later scope. Row order, identity,
+  endpoints, Project ownership, and fingerprint fail closed on tampering.
+- Empty Sprint selection is rejected. The unreachable automatic selector,
+  dependency promotion helpers, and helper-only tests were deleted; exact human
+  candidate IDs are the only supported input.
+
+### RED and focused GREEN evidence
+
+```text
+RED: historical dependency mutation/snapshot packet
+2 failed: Sprint-start evidence had no immutable row snapshot, and removing a
+later B -> C row rewrote an earlier A -> B -> C execution contract.
+
+RED: observed-scope API/CLI/application packet
+4 failed, 4 passed: omission and same-ID stale-scope requests were still
+accepted or lacked an explicit transport requirement.
+
+RED: receipt authority packet
+2 failed: an extra result field and an allowed-field transition rewrite replayed.
+
+RED: node --test tests/*.mjs
+2 failed: dependency mutation omitted the observed fingerprint and Sprint
+generation omitted exact projected candidate IDs.
+
+RED: test-owned Playwright packets
+1 failed in each affected packet: the browser dependency/Sprint transports did
+not carry the new exact authority fields. The zero-provider backend guard passed.
+
+GREEN: authority/API/CLI/selection/dependency matrix
+448 passed, 5 warnings in 33.83s
+
+GREEN: planning and immutable execution-history matrix
+286 passed, 5 warnings in 73.80s
+
+GREEN: node --test tests/*.mjs
+69 passed, 0 failed
+
+GREEN: authorized test-owned Playwright subset
+9 passed, 15 deselected, 4 warnings in 18.92s
+
+GREEN: changed-file ruff and ty; git diff --check
+passed
+```
+
+The Playwright work used only its ephemeral test server, profile, browser, and
+route fake. It made no provider call and persisted no real Sprint. No protected
+profile, manual/live UI, push, merge, issue mutation, #224 terminology, or live
+manual acceptance action was touched.
