@@ -1856,10 +1856,18 @@ function sprintGenerationCandidateIds(context = {}) {
         context?.storyDependencies?.stories,
         context?.storyDependencies,
     );
+    const candidateIds = [...candidates.candidateIds].sort((left, right) => left - right);
+    const dependencyCandidateIds = dependencies.scopeStories
+        .filter((story) => story.sprint_candidate)
+        .map((story) => story.story_id)
+        .sort((left, right) => left - right);
+    const candidateVectorMatches = candidateIds.length === dependencyCandidateIds.length
+        && candidateIds.every((storyId, index) => storyId === dependencyCandidateIds[index]);
     const isCurrent = candidates.isValid
         && dependencies.isWellFormed
-        && candidates.scopeFingerprint === dependencies.scopeFingerprint;
-    return isCurrent ? [...candidates.candidateIds] : null;
+        && candidates.scopeFingerprint === dependencies.scopeFingerprint
+        && candidateVectorMatches;
+    return isCurrent ? candidateIds : null;
 }
 
 function canGenerateSprintPlan(context = {}) {

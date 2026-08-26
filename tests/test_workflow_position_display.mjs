@@ -1299,6 +1299,23 @@ test('Sprint generation binds canonical candidates to the current dependency sco
     assert.deepEqual(requests, []);
 });
 
+test('Sprint generation rejects a torn candidate vector within one selected scope', () => {
+    const context = loadFrontend();
+    const first = sprintCandidateStory({ story_id: 101 });
+    const second = sprintCandidateStory({
+        story_id: 103,
+        source_story_item_id: 'US-003',
+        sprint_selection_state_fingerprint: 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+    });
+    const appState = {
+        storyDependencies: dependencyProjection([first, second]),
+        sprintCandidates: { items: [first] },
+    };
+
+    assert.strictEqual(context.canGenerateSprintPlan(appState), false);
+    assert.strictEqual(context.sprintGenerationCandidateIds(appState), null);
+});
+
 test('Sprint generation submits the exact projected candidate IDs', async () => {
     const requests = [];
     const context = loadFrontend(async (url, options = {}) => {
@@ -1323,7 +1340,7 @@ test('Sprint generation submits the exact projected candidate IDs', async () => 
         position: {},
         planningReviews: {},
         storyDependencies: dependencyProjection([first, second]),
-        sprintCandidates: { items: [first, second] },
+        sprintCandidates: { items: [second, first] },
     })}; loadDashboard = async () => true;`, context);
 
     await context.runDirectAction(
