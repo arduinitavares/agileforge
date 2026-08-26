@@ -746,7 +746,7 @@ def _install_lifecycle_mutations(
     sprint_generate.add_argument("--input", dest="user_input")
     sprint_generate.add_argument("--selected-story-ids", nargs="+", type=int)
     sprint_generate.add_argument("--max-story-points", type=int)
-    sprint_generate.add_argument("--team-name", required=True)
+    sprint_generate.add_argument("--team-name")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1569,9 +1569,21 @@ def _story_review_lines(
 
 
 def _sprint_review_lines(candidate: dict[str, object]) -> list[str]:
+    owner = _review_object(candidate.get("sprint_owner"), "Sprint owner")
+    owner_kind = owner.get("kind")
+    if not isinstance(owner_kind, str):
+        raise ValueError("Sprint owner evidence is invalid.")
+    owner_kind_label = {
+        "solo_project": "Solo project",
+        "named_team": "Named team",
+        "legacy_named_team": "Legacy named team",
+    }.get(owner_kind)
+    owner_label = owner.get("label")
+    if owner_kind_label is None or not isinstance(owner_label, str) or not owner_label:
+        raise ValueError("Sprint owner evidence is invalid.")
     lines = [
         "Sprint plan review",
-        f"Team: {_review_text(candidate.get('team_name'))}",
+        f"Sprint owner: {owner_kind_label} — {owner_label}",
         f"Sprint goal: {_review_text(candidate.get('sprint_goal'))}",
     ]
     for raw_story in _review_items(

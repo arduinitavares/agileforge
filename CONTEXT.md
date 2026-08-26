@@ -108,6 +108,18 @@ capacity, and Accepted Specification facts.
 
 Avoid: active Sprint, ad hoc Task list.
 
+## Sprint Owner
+
+The durable accountable role for a Sprint Plan. New plans default to the
+project-scoped `solo_project` owner; an explicit meaningful named Team creates
+a `named_team` owner. Historical plans without durable owner-kind evidence are
+shown as `legacy_named_team` and retain their original label.
+
+A reserved solo-owner Team row is an internal persistence carrier for the
+project-scoped role, not evidence of a multi-person Scrum Team.
+
+Avoid: authenticated person, agent identity, sticky preferred Team.
+
 ## Workflow Fact
 
 A typed durable record whose current value can affect graph decisions.

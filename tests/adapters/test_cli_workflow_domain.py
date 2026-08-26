@@ -1156,6 +1156,26 @@ def test_semantic_sprint_generation_command_parses() -> None:
     assert not hasattr(parsed, "model_id")
 
 
+def test_semantic_sprint_generation_command_defaults_to_solo_owner() -> None:
+    """The named-Team flag is optional for one project-scoped solo operator."""
+    parsed = cli_main.build_parser().parse_args(
+        [
+            "sprint",
+            "generate",
+            "--project-id",
+            "41",
+            "--max-story-points",
+            str(SPRINT_CAPACITY_POINTS),
+            "--idempotency-key",
+            "sprint-solo-41",
+            "--actor",
+            "operator",
+        ]
+    )
+
+    assert parsed.team_name is None
+
+
 @pytest.mark.parametrize(
     "flag",
     ["--sprint-duration-days", "--team-velocity-assumption", "--model-id"],
@@ -1363,6 +1383,14 @@ def _planning_review(phase: str) -> dict[str, object]:
     else:
         candidate = {
             "team_name": "Balance team",
+            "sprint_owner": {
+                "kind": "solo_project",
+                "key": "agileforge:sprint-owner:solo-project:v1:project:41",
+                "label": (
+                    "[agileforge:sprint-owner:solo-project:v1:project:41] "
+                    "Solo operator for Exact Project"
+                ),
+            },
             "sprint_goal": "Ship trusted balances.",
             "selected_stories": [
                 {
@@ -1385,6 +1413,7 @@ def _planning_review(phase: str) -> dict[str, object]:
                 }
             ],
         }
+        common["schema_version"] = "agileforge.planning-artifact-review.v2"
     common["candidate"] = candidate
     return common
 
@@ -1535,6 +1564,29 @@ def test_planning_review_reads_use_phase_specific_human_labels(
     assert "schema_version" not in output
     assert "artifact_fingerprint" not in output
     assert "{" not in output
+
+
+def test_sprint_plan_review_renders_durable_owner_kind_and_label(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """CLI review preserves explicit ownership evidence after durable reload."""
+    application = _Application()
+
+    assert (
+        main(
+            ["sprint", "plan-review", "--project-id", "41"],
+            application=application,
+        )
+        == 0
+    )
+
+    output = capsys.readouterr().out
+    assert (
+        "Sprint owner: Solo project — "
+        "[agileforge:sprint-owner:solo-project:v1:project:41] "
+        "Solo operator for Exact Project"
+    ) in output
+    assert "Team:" not in output
 
 
 def test_backlog_decision_displays_evidence_and_keeps_binding_hidden(

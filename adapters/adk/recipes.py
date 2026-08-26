@@ -182,6 +182,7 @@ class _SprintRecipePayload(BaseModel):
     requested_story_ids: list[int]
     locked_story_ids: list[int]
     team_name: str
+    owner_kind: Literal["solo_project", "named_team"] | None = None
     guidance: str | None = None
     candidate_set_fingerprint: str
 

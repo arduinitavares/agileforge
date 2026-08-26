@@ -97,6 +97,11 @@ from services.specs.story_validation_service import (
     require_story_ready_for_sprint,
     validate_story_with_specification_in_session,
 )
+from services.sprint_ownership import (
+    ResolvedSprintOwner,
+    SprintOwnerResolutionError,
+    resolve_sprint_owner,
+)
 from services.sprint_selection import (
     SprintSelectionError,
     require_exact_candidate_story_ids,
@@ -410,12 +415,20 @@ class _SprintPlanningInputPort(Protocol):
 
     def replay(self, query: NodeAttemptReplayQuery) -> TransitionResult | None: ...
 
+    def resolve_owner(
+        self,
+        *,
+        project_id: int,
+        team_name: str | None,
+    ) -> ResolvedSprintOwner | WorkflowError: ...
+
     def build(
         self,
         *,
         project_id: int,
         decision: NodeDecision,
         request: SprintPlanningRequest,
+        owner: ResolvedSprintOwner,
     ) -> JsonObject | WorkflowError: ...
 
 
@@ -943,16 +956,44 @@ class SprintPlanningInputService:
         """Replay a Sprint attempt using stored guards and candidate identity."""
         return DurableNodeAttemptReplayService(engine=self.engine).replay(query)
 
+    def resolve_owner(
+        self,
+        *,
+        project_id: int,
+        team_name: str | None,
+    ) -> ResolvedSprintOwner | WorkflowError:
+        """Resolve one Sprint owner before replay or external execution."""
+        try:
+            with Session(self.engine) as session:
+                return resolve_sprint_owner(
+                    session,
+                    project_id=project_id,
+                    team_name=team_name,
+                )
+        except SprintOwnerResolutionError as error:
+            message = str(error)
+            return WorkflowError(
+                code=error.code,
+                message=message,
+                blockers=(Blocker(code=error.code.value, message=message),),
+            )
+
     def build(  # noqa: PLR0911
         self,
         *,
         project_id: int,
         decision: NodeDecision,
         request: SprintPlanningRequest,
+        owner: ResolvedSprintOwner,
     ) -> JsonObject | WorkflowError:
         """Build an immutable planner envelope from exact current business facts."""
         try:
             with Session(self.engine) as session:
+                if request.team_name != owner.label:
+                    return _sprint_input_error(
+                        code="SPRINT_OWNER_CONFLICT",
+                        message="Sprint request does not match its resolved owner.",
+                    )
                 lineage = _delivery_lineage(
                     session,
                     project_id=project_id,
@@ -1045,6 +1086,7 @@ class SprintPlanningInputService:
                         "team_name": request.team_name,
                         "guidance": request.guidance,
                         "candidate_set_fingerprint": (current_candidate_fingerprint),
+                        "owner_kind": owner.kind,
                     }
                 )
         except SprintSelectionError as error:
@@ -1310,7 +1352,7 @@ class SprintPlanningRequest(FrozenModel):
     guidance: str | None = None
     selected_story_ids: tuple[int, ...] = ()
     max_story_points: int | None = Field(default=None, gt=0)
-    team_name: str = Field(min_length=1)
+    team_name: SemanticText | None = None
     idempotency_key: str = Field(min_length=1)
     actor: str = Field(min_length=1)
     correlation_id: str | None = None
@@ -2179,6 +2221,13 @@ class AgileForgeApplication:
         input_service = self._sprint_planning_input
         if input_service is None:
             return _transition_not_available(None, "planning.sprint.plan")
+        owner = input_service.resolve_owner(
+            project_id=request.project_id,
+            team_name=request.team_name,
+        )
+        if isinstance(owner, WorkflowError):
+            return TransitionResult(ok=False, error=owner)
+        resolved_request = request.model_copy(update={"team_name": owner.label})
         replay = input_service.replay(
             NodeAttemptReplayQuery(
                 project_id=request.project_id,
@@ -2189,7 +2238,10 @@ class AgileForgeApplication:
                 idempotency_key=request.idempotency_key,
                 actor=request.actor,
                 correlation_id=request.correlation_id,
-                semantic_input=_sprint_replay_input(request),
+                semantic_input=_sprint_replay_input(
+                    resolved_request,
+                    owner_kind=owner.kind,
+                ),
             )
         )
         if replay is not None:
@@ -2201,7 +2253,8 @@ class AgileForgeApplication:
         prepared = input_service.build(
             project_id=request.project_id,
             decision=decision,
-            request=request,
+            request=resolved_request,
+            owner=owner,
         )
         if isinstance(prepared, WorkflowError):
             return TransitionResult(ok=False, position=position, error=prepared)
@@ -5096,12 +5149,17 @@ def _stale_specification_source_registration_action(
     )
 
 
-def _sprint_replay_input(request: SprintPlanningRequest) -> JsonObject:
+def _sprint_replay_input(
+    request: SprintPlanningRequest,
+    *,
+    owner_kind: Literal["solo_project", "named_team"],
+) -> JsonObject:
     """Return only caller semantics replaced during durable replay comparison."""
     return {
         "requested_max_story_points": request.max_story_points,
         "requested_story_ids": list(request.selected_story_ids),
         "team_name": request.team_name,
+        "owner_kind": owner_kind,
         "guidance": request.guidance,
     }
 

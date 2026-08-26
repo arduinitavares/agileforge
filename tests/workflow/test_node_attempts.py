@@ -490,6 +490,7 @@ def test_semantic_replay_binds_the_requested_instance_selector(
             "requested_max_story_points": 8,
             "requested_story_ids": [11, 12],
             "team_name": "Platform",
+            "owner_kind": "named_team",
             "include_task_decomposition": False,
             "guidance": "Keep the exact cohort.",
         },
@@ -497,6 +498,15 @@ def test_semantic_replay_binds_the_requested_instance_selector(
             "requested_max_story_points": 5,
             "requested_story_ids": [11],
             "team_name": "Platform",
+            "owner_kind": "named_team",
+            "include_task_decomposition": False,
+            "guidance": "Keep the exact cohort.",
+        },
+        {
+            "requested_max_story_points": 5,
+            "requested_story_ids": [11, 12],
+            "team_name": "Other Team",
+            "owner_kind": "named_team",
             "include_task_decomposition": False,
             "guidance": "Keep the exact cohort.",
         },
@@ -504,6 +514,7 @@ def test_semantic_replay_binds_the_requested_instance_selector(
             "requested_max_story_points": 5,
             "requested_story_ids": [11, 12],
             "team_name": "Platform",
+            "owner_kind": "named_team",
             "include_task_decomposition": False,
             "guidance": "Changed guidance.",
         },
@@ -518,6 +529,7 @@ def test_sprint_semantic_replay_conflicts_on_changed_request_identity(
         "requested_max_story_points": 5,
         "requested_story_ids": [11, 12],
         "team_name": "Platform",
+        "owner_kind": "named_team",
         "include_task_decomposition": False,
         "guidance": "Keep the exact cohort.",
     }
@@ -589,11 +601,108 @@ def test_sprint_semantic_replay_conflicts_on_changed_request_identity(
             semantic_input=semantic_input,
         )
     )
+    solo_conflict = DurableNodeAttemptReplayService(engine=engine).replay(
+        NodeAttemptReplayQuery(
+            project_id=stored.project_id,
+            graph_version=None,
+            fact_fingerprint=None,
+            decision_fingerprint=None,
+            node_id=stored.target_node_id,
+            idempotency_key=stored.idempotency_key,
+            actor=stored.actor,
+            correlation_id=stored.correlation_id,
+            semantic_input={
+                "requested_max_story_points": 5,
+                "requested_story_ids": [11],
+                "team_name": "Historical Team",
+                "owner_kind": "solo_project",
+                "guidance": "Keep the exact cohort.",
+            },
+        )
+    )
 
     assert replay == persisted.model_copy(update={"replayed": True})
+    assert solo_conflict is not None
+    assert solo_conflict.error is not None
+    assert solo_conflict.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
     assert conflict is not None
     assert conflict.error is not None
     assert conflict.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
+
+
+def test_sprint_legacy_named_replay_preserves_the_stored_fingerprint(
+    engine: Engine,
+) -> None:
+    """A legacy named attempt must replay without backfilling owner_kind."""
+    stored = StartNodeAttempt(
+        project_id=41,
+        graph_version="agileforge.workflow.v2",
+        fact_fingerprint="facts-before-sprint-plan",
+        decision_fingerprint="decision-before-sprint-plan",
+        idempotency_key="legacy-sprint-named-replay",
+        actor="operator@example.com",
+        correlation_id="sprint-correlation",
+        target_node_id="planning.sprint.plan",
+        normalized_input={
+            "planner_input": {"available_stories": [{"story_id": 11}]},
+            "capacity_points": 5,
+            "capacity_source": "user_override",
+            "capacity_basis": "5 points provided by the operator.",
+            "requested_max_story_points": 5,
+            "requested_story_ids": [11],
+            "team_name": "Historical Team",
+            "guidance": "Keep the exact cohort.",
+            "locked_story_ids": [11],
+            "candidate_set_fingerprint": "sha256:locked-candidates",
+        },
+        model_id=MODEL_ID,
+        execution_settings=EXECUTION_SETTINGS,
+        lease_seconds=LEASE_SECONDS,
+    )
+    persisted = TransitionResult(ok=True, applied_node_id="planning.sprint.plan")
+    stored_fingerprint = canonical_hash(stored.model_dump(mode="json"))
+    with Session(engine) as session:
+        session.add(
+            WorkflowTransitionReceipt(
+                request_kind="start_node_attempt",
+                idempotency_key=stored.idempotency_key,
+                request_fingerprint=stored_fingerprint,
+                request_json=canonical_json(stored.model_dump(mode="json")),
+                result_json=canonical_json(persisted.model_dump(mode="json")),
+                started_at=EVALUATED_AT,
+                completed_at=EVALUATED_AT,
+            )
+        )
+        session.commit()
+
+    replay = DurableNodeAttemptReplayService(engine=engine).replay(
+        NodeAttemptReplayQuery(
+            project_id=stored.project_id,
+            graph_version=None,
+            fact_fingerprint=None,
+            decision_fingerprint=None,
+            node_id=stored.target_node_id,
+            idempotency_key=stored.idempotency_key,
+            actor=stored.actor,
+            correlation_id=stored.correlation_id,
+            semantic_input={
+                "requested_max_story_points": 5,
+                "requested_story_ids": [11],
+                "team_name": "Historical Team",
+                "owner_kind": "named_team",
+                "guidance": "Keep the exact cohort.",
+            },
+        )
+    )
+
+    assert replay == persisted.model_copy(update={"replayed": True})
+    with Session(engine) as session:
+        receipt = session.exec(
+            select(WorkflowTransitionReceipt).where(
+                WorkflowTransitionReceipt.idempotency_key == stored.idempotency_key
+            )
+        ).one()
+    assert receipt.request_fingerprint == stored_fingerprint
 
 
 def test_replay_query_returns_terminal_result_after_position_advanced(

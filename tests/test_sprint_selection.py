@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from inspect import Parameter, signature
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
@@ -36,6 +37,7 @@ from services.specs.candidate_contract import (
     canonical_candidate_json,
     load_candidate_contract,
 )
+from services.sprint_ownership import ResolvedSprintOwner
 from services.sprint_selection import (
     SprintSelectionError,
     derive_group_slot,
@@ -79,6 +81,13 @@ if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
 
 GOLD_HASH = "sha256:accepted"
+
+
+def test_new_sprint_input_build_requires_resolved_owner() -> None:
+    """Concrete input preparation cannot create legacy owner evidence."""
+    owner = signature(application.SprintPlanningInputService.build).parameters["owner"]
+
+    assert owner.default is Parameter.empty
 
 
 def _invest_assessment() -> StoryInvestAssessment:
@@ -1145,7 +1154,15 @@ def test_sprint_input_preserves_stale_specification_integrity_error(
     result = application.SprintPlanningInputService(engine=engine).build(
         project_id=3,
         decision=cast("NodeDecision", SimpleNamespace()),
-        request=cast("application.SprintPlanningRequest", SimpleNamespace()),
+        request=cast(
+            "application.SprintPlanningRequest",
+            SimpleNamespace(team_name="Stale Team"),
+        ),
+        owner=ResolvedSprintOwner(
+            kind="named_team",
+            key="test:stale-team",
+            label="Stale Team",
+        ),
     )
 
     assert isinstance(result, WorkflowError)
@@ -1398,6 +1415,8 @@ def test_sprint_input_story_ids_are_exact_candidate_scope_guard(engine: Engine) 
         and item.category is NodeCategory.AVAILABLE
     )
     service = application.SprintPlanningInputService(engine=engine)
+    owner = service.resolve_owner(project_id=project_id, team_name="Exact Scope Team")
+    assert isinstance(owner, ResolvedSprintOwner)
 
     omitted = service.build(
         project_id=project_id,
@@ -1410,6 +1429,7 @@ def test_sprint_input_story_ids_are_exact_candidate_scope_guard(engine: Engine) 
             idempotency_key="omitted-generation-scope",
             actor="operator@example.com",
         ),
+        owner=owner,
     )
     exact = service.build(
         project_id=project_id,
@@ -1422,6 +1442,7 @@ def test_sprint_input_story_ids_are_exact_candidate_scope_guard(engine: Engine) 
             idempotency_key="exact-generation-scope",
             actor="operator@example.com",
         ),
+        owner=owner,
     )
 
     assert isinstance(omitted, WorkflowError)

@@ -797,8 +797,8 @@ def test_generic_workflow_command_renderer_is_removed() -> None:
     assert "<request-file>" not in source
 
 
-def test_sprint_generation_advertises_parser_valid_capacity_remediation() -> None:
-    """Emit one callable semantic command with an explicit capacity placeholder."""
+def test_sprint_generation_advertises_solo_default_without_team_placeholder() -> None:
+    """Emit one callable Sprint command whose omitted Team selects solo ownership."""
     decision = NodeDecision(
         node_id="planning.sprint.plan",
         child_graph_id="planning",
@@ -825,7 +825,7 @@ def test_sprint_generation_advertises_parser_valid_capacity_remediation() -> Non
     assert "agileforge sprint generate" in command
     tokens = shlex.split(command)
     assert tokens[tokens.index("--max-story-points") + 1] == "<max-story-points>"
-    assert tokens[tokens.index("--team-name") + 1] == "<team-name>"
+    assert "--team-name" not in tokens
     assert "--input-file" not in command
     assert "--model-id" not in command
     argv = [
@@ -833,7 +833,7 @@ def test_sprint_generation_advertises_parser_valid_capacity_remediation() -> Non
     ]
     parsed = build_parser().parse_args(argv)
     assert parsed.max_story_points == int(_PLACEHOLDERS["<max-story-points>"])
-    assert parsed.team_name == "Platform"
+    assert parsed.team_name is None
 
 
 def test_story_generation_renders_each_exact_requirement_selector() -> None:

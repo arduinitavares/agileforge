@@ -631,6 +631,14 @@ def _review(phase: str) -> dict[str, object]:
         }
         candidate = {
             "team_name": "Review team",
+            "sprint_owner": {
+                "kind": "legacy_named_team",
+                "key": (
+                    "agileforge:sprint-owner:legacy-named-team:v1:sha256:"
+                    "4433d3cbd694dfae6e3f5747577b68f57c2df760563d7524a4e9635d721c64ff"
+                ),
+                "label": "Review team",
+            },
             "sprint_goal": "Deliver exact review.",
             "selected_stories": [story],
         }

@@ -26,6 +26,7 @@ from workflow.requests import StartNodeAttempt, TransitionRequest
 _TRANSITION_REQUEST = TypeAdapter(TransitionRequest)
 _CALLER_OWNED_ATTEMPT_SELECTOR_NODES = frozenset({"planning.story.generate"})
 _CALLER_OWNED_TRANSITION_SELECTOR_KINDS = frozenset({"decide_story"})
+_SPRINT_OWNER_KINDS = frozenset({"solo_project", "named_team"})
 
 if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
@@ -78,6 +79,10 @@ class DurableNodeAttemptReplayService:
             if receipt is None:
                 return None
             stored = StartNodeAttempt.model_validate_json(receipt.request_json)
+            if _sprint_replay_conflicts(stored, query):
+                return _fact_conflict(
+                    "The idempotency key was already used for different input."
+                )
             expected = StartNodeAttempt(
                 project_id=query.project_id,
                 graph_version=(
@@ -206,8 +211,38 @@ def _replay_normalized_input(
                 }
             )
         else:
-            normalized_input.update(query.semantic_input)
+            semantic_input = query.semantic_input
+            if (
+                stored.target_node_id == "planning.sprint.plan"
+                and "owner_kind" not in stored.normalized_input
+            ):
+                semantic_input = {
+                    key: value
+                    for key, value in semantic_input.items()
+                    if key != "owner_kind"
+                }
+            normalized_input.update(semantic_input)
     return normalized_input
+
+
+def _sprint_replay_conflicts(
+    stored: StartNodeAttempt,
+    query: NodeAttemptReplayQuery,
+) -> bool:
+    """Apply the closed owner-kind replay rules without rewriting legacy input."""
+    if stored.target_node_id != "planning.sprint.plan" or query.semantic_input is None:
+        return False
+    requested_kind = query.semantic_input.get("owner_kind")
+    stored_kind = stored.normalized_input.get("owner_kind")
+    if requested_kind not in _SPRINT_OWNER_KINDS:
+        return True
+    if stored_kind is None:
+        return (
+            requested_kind != "named_team"
+            or query.semantic_input.get("team_name")
+            != stored.normalized_input.get("team_name")
+        )
+    return stored_kind not in _SPRINT_OWNER_KINDS or stored_kind != requested_kind
 
 
 def _reuses_stored_story_correction_selector(

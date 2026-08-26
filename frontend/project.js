@@ -1192,6 +1192,51 @@ function reviewValue(value) {
     return String(value);
 }
 
+function sprintOwnerKindLabel(kind) {
+    return {
+        solo_project: 'Solo project',
+        named_team: 'Named team',
+        legacy_named_team: 'Legacy named team',
+    }[kind] ?? 'Unknown owner';
+}
+
+function sprintOwnerProjection(context = {}) {
+    const owner = context?.sprintCandidates?.sprint_owner;
+    if (!owner || typeof owner !== 'object' || Array.isArray(owner)) return null;
+    if (owner.kind !== 'solo_project' || owner.named_team_override_allowed !== true) return null;
+    if (typeof owner.key !== 'string' || !owner.key.trim()) return null;
+    if (typeof owner.label !== 'string' || !owner.label.trim()) return null;
+    return owner;
+}
+
+const SPRINT_OWNER_CASEFOLD_EXPANSIONS = new Map([
+    ['ß', 'ss'],
+    ['ſ', 's'],
+    ['ﬀ', 'ff'],
+    ['ﬁ', 'fi'],
+    ['ﬂ', 'fl'],
+    ['ﬃ', 'ffi'],
+    ['ﬄ', 'ffl'],
+    ['ﬅ', 'st'],
+    ['ﬆ', 'st'],
+]);
+
+function sprintOwnerNamespaceCasefold(value) {
+    return Array.from(
+        value.toLowerCase(),
+        (character) => SPRINT_OWNER_CASEFOLD_EXPANSIONS.get(character) ?? character,
+    ).join('');
+}
+
+function sprintTeamOverrideFields(rawValue) {
+    const teamName = String(rawValue ?? '').trim();
+    if (!teamName) return {};
+    if (sprintOwnerNamespaceCasefold(teamName).startsWith('[agileforge:sprint-owner:')) {
+        throw new Error('A named Team override cannot use the reserved Sprint-owner namespace.');
+    }
+    return { team_name: teamName };
+}
+
 function reviewListMarkup(label, values) {
     const items = reviewItems(values);
     if (!items) return '';
@@ -1469,8 +1514,11 @@ function storyReviewMarkup(review, candidate) {
 function sprintReviewMarkup(candidate) {
     const stories = reviewItems(candidate.selected_stories);
     if (!stories) return '';
+    const owner = reviewObject(candidate.sprint_owner);
+    const ownerKind = owner?.kind ?? candidate.owner_kind;
+    const ownerLabel = owner?.label ?? candidate.team_name;
     return `<div class="space-y-4">
-        <p class="text-sm"><strong>Team:</strong> ${escapeWorkflowText(reviewValue(candidate.team_name))}</p>
+        <p class="text-sm"><strong>Sprint owner:</strong> ${escapeWorkflowText(sprintOwnerKindLabel(ownerKind))} — ${escapeWorkflowText(reviewValue(ownerLabel))}</p>
         <p class="text-sm"><strong>Sprint goal:</strong> ${escapeWorkflowText(reviewValue(candidate.sprint_goal))}</p>
         ${stories.map((rawStory) => {
             const story = reviewObject(rawStory);
@@ -1603,15 +1651,21 @@ function deliveryGenerationActionMarkup(action, position = {}, reviews = {}, ind
         if (!canGenerateSprintPlan(context)) {
             return `<section role="alert" data-sprint-candidate-projection-error="true" class="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-800">${content}<p><strong>Sprint candidate projection unavailable.</strong> Reload after current selected-scope dependency confirmation; Sprint generation remains blocked.</p></section>`;
         }
+        const owner = sprintOwnerProjection(context);
+        if (!owner) {
+            return `<section role="alert" data-sprint-owner-projection-error="true" class="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-800">${content}<p><strong>Sprint owner projection unavailable.</strong> Reload before generating a Sprint plan.</p></section>`;
+        }
         return `<form data-delivery-generation-action="${escapeWorkflowText(action.request_kind)}"
             data-delivery-generation-form="${escapeWorkflowText(action.request_kind)}" ${bindingAttributes}
             class="space-y-4 rounded-lg border border-slate-200 p-4">
             ${content}
             <div class="max-w-xl">
-                <label for="delivery-team-name-${index}" class="text-sm font-semibold">Team name</label>
-                <input id="delivery-team-name-${index}" name="team_name" type="text" required autocomplete="organization"
+                <p class="text-sm font-semibold">Sprint owner</p>
+                <p class="mt-1 break-anywhere text-sm leading-6 text-slate-700" data-sprint-owner-kind="${escapeWorkflowText(owner.kind)}" data-sprint-owner-key="${escapeWorkflowText(owner.key)}">${escapeWorkflowText(owner.label)}</p>
+                <label for="delivery-team-name-${index}" class="mt-4 block text-sm font-semibold">Named team override</label>
+                <input id="delivery-team-name-${index}" name="team_name" type="text" autocomplete="organization"
                     class="mt-1.5 w-full rounded-lg border-slate-300 text-sm focus:border-accent focus:ring-accent" />
-                <p class="mt-1 text-xs leading-5 text-slate-500">Choose the team that will own this Sprint plan.</p>
+                <p class="mt-1 text-xs leading-5 text-slate-500">Optional. Leave blank to use the resolved Sprint owner.</p>
             </div>
             <button type="submit" class="${BUTTON_PRIMARY}">
                 <span class="material-symbols-outlined" aria-hidden="true">${details.icon}</span>
@@ -3010,12 +3064,12 @@ function installInteractions() {
             const fields = {};
             if (deliveryRequestKind === 'record_sprint_plan') {
                 const teamName = form.querySelector('[name="team_name"]');
-                const value = teamName?.value.trim() ?? '';
-                if (!value) {
-                    teamName?.reportValidity?.();
+                try {
+                    Object.assign(fields, sprintTeamOverrideFields(teamName?.value));
+                } catch (error) {
+                    setProjectError(error.message);
                     return;
                 }
-                fields.team_name = value;
             }
             await runDirectAction(
                 deliveryRequestKind,

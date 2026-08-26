@@ -296,6 +296,7 @@ def _sprint_attempt_input() -> JsonObject:
         "requested_story_ids": [11, 12],
         "locked_story_ids": [11, 12],
         "team_name": "Platform",
+        "owner_kind": "named_team",
         "guidance": "Keep the cohort exact.",
         "candidate_set_fingerprint": "sha256:candidates",
     }

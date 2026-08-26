@@ -401,7 +401,17 @@ test('delivery panel keeps a pending Story review beside another generation acti
     assert.ok(markup.includes('data-delivery-generation-action="record_story_draft"'));
 });
 
-test('Sprint generation asks the operator for a team', () => {
+function sprintOwnerProjection(overrides = {}) {
+    return {
+        kind: 'solo_project',
+        key: 'agileforge:sprint-owner:solo-project:v1:project:7',
+        label: '[agileforge:sprint-owner:solo-project:v1:project:7] Solo operator for Exact Project',
+        named_team_override_allowed: true,
+        ...overrides,
+    };
+}
+
+test('Sprint generation displays the resolved solo owner and makes named Teams optional', () => {
     const context = loadFrontend();
     const candidate = sprintCandidateStory();
     const markup = context.deliveryPanelMarkup(
@@ -415,14 +425,33 @@ test('Sprint generation asks the operator for a team', () => {
         }],
         {
             storyDependencies: dependencyProjection([candidate]),
-            sprintCandidates: { items: [candidate] },
+            sprintCandidates: { items: [candidate], sprint_owner: sprintOwnerProjection() },
         },
     );
 
     assert.ok(markup.includes('data-delivery-generation-form="record_sprint_plan"'));
     assert.ok(markup.includes('name="team_name"'));
-    assert.ok(markup.includes('required'));
-    assert.ok(!markup.includes('value="Platform"'));
+    assert.ok(markup.includes('Sprint owner'));
+    assert.ok(markup.includes('Solo operator for Exact Project'));
+    assert.ok(markup.includes('Named team override'));
+    assert.ok(!markup.includes('name="team_name" type="text" required'));
+});
+
+test('Sprint generation blocks when provider-free owner evidence is unavailable', () => {
+    const context = loadFrontend();
+    const candidate = sprintCandidateStory();
+    const markup = context.deliveryPanelMarkup(
+        { decisions: [] }, {}, [{
+            node_id: 'planning.sprint.plan', instance_key: null,
+            request_kind: 'record_sprint_plan', endpoint: 'sprint/generate',
+        }], {
+            storyDependencies: dependencyProjection([candidate]),
+            sprintCandidates: { items: [candidate] },
+        },
+    );
+
+    assert.ok(markup.includes('data-sprint-owner-projection-error="true"'));
+    assert.ok(!markup.includes('data-delivery-generation-form="record_sprint_plan"'));
 });
 
 test('story generation controls render exact PBI IDs and requirement summaries, not array ordinals', () => {
@@ -1340,20 +1369,47 @@ test('Sprint generation submits the exact projected candidate IDs', async () => 
         position: {},
         planningReviews: {},
         storyDependencies: dependencyProjection([first, second]),
-        sprintCandidates: { items: [second, first] },
+        sprintCandidates: { items: [second, first], sprint_owner: sprintOwnerProjection() },
     })}; loadDashboard = async () => true;`, context);
 
     await context.runDirectAction(
         'record_sprint_plan',
         directActionButton(action),
         null,
-        { team_name: 'Exact Candidate Team' },
+        {},
     );
 
     const post = requests.find(({ options }) => options.method === 'POST');
     assert.ok(post);
     const body = JSON.parse(post.options.body);
     assert.deepEqual(body.selected_story_ids, [101, 103]);
+    assert.ok(!Object.hasOwn(body, 'team_name'));
+});
+
+test('Sprint generation trims a named Team override and never transports a reserved one', () => {
+    const context = loadFrontend();
+    assert.equal(context.sprintTeamOverrideFields('  Delivery Team  ').team_name, 'Delivery Team');
+    assert.equal(Object.keys(context.sprintTeamOverrideFields('   ')).length, 0);
+    assert.throws(
+        () => context.sprintTeamOverrideFields(' [AgileForge:Sprint-Owner:spoof] '),
+        /reserved Sprint-owner namespace/i,
+    );
+    assert.throws(
+        () => context.sprintTeamOverrideFields(' [agileforge:\u017fprint-owner:spoof] '),
+        /reserved Sprint-owner namespace/i,
+    );
+});
+
+test('Sprint review renders durable owner kind and exact label', () => {
+    const context = loadFrontend();
+    const markup = context.sprintReviewMarkup({
+        team_name: '[agileforge:sprint-owner:solo-project:v1:project:7] Solo operator for Exact Project',
+        sprint_owner: sprintOwnerProjection(),
+        sprint_goal: 'Ship the browser boundary.', selected_stories: [],
+    });
+    assert.ok(markup.includes('Sprint owner'));
+    assert.ok(markup.includes('Solo project'));
+    assert.ok(markup.includes('Solo operator for Exact Project'));
 });
 
 test('scope parser rejects a conflicting fingerprint on an unselected Story', () => {

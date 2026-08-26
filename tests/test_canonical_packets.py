@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -9,7 +10,7 @@ from typing import TYPE_CHECKING, cast
 import pytest
 from sqlmodel import Session, select
 
-from models.core import Project, Sprint, Task, UserStory
+from models.core import Project, Sprint, Task, Team, UserStory
 from models.enums import SprintStatus
 from models.specs import SpecRegistry
 from models.workflow import SprintStart
@@ -25,6 +26,7 @@ from services.specs.story_validation_service import (
     story_validation_input_fingerprint,
     story_validation_input_payload,
 )
+from services.sprint_ownership import SprintOwnerEvidenceError
 from tests.workflow.execution_fixtures import seed_started_execution
 from tests.workflow.test_planning_transitions import (
     _domain as _planning_domain,
@@ -417,10 +419,28 @@ def test_packets_have_exact_versions_order_and_deterministic_metadata(
         "evidence",
         "work",
     ]
-    assert story["schema_version"] == "story_packet.v2"
+    assert story["schema_version"] == "story_packet.v3"
     assert story["packet_kind"] == "story"
-    assert task["schema_version"] == "task_packet.v3"
+    assert task["schema_version"] == "task_packet.v4"
     assert task["packet_kind"] == "task"
+    for packet in (story, task):
+        sprint = _object(_object(packet["context"])["sprint"])
+        assert list(sprint) == [
+            "goal",
+            "status",
+            "team_name",
+            "owner_kind",
+            "owner_key",
+            "started_at",
+            "start_date",
+            "end_date",
+        ]
+        assert sprint["team_name"] == "Task 12 normalized execution team"
+        assert sprint["owner_kind"] == "legacy_named_team"
+        assert sprint["owner_key"] == (
+            "agileforge:sprint-owner:legacy-named-team:v1:sha256:"
+            "23cef5eb59c7cd9bc96df3dfbac45c03d245dd9c6f778d050a80e31109c424fb"
+        )
     metadata = _object(story["metadata"])
     assert list(metadata) == ["packet_id", "source_fingerprint"]
     source = {key: story[key] for key in ("lineage", "context", "evidence", "work")}
@@ -486,6 +506,132 @@ def test_packet_evidence_and_work_are_exact_direct_spec_contracts(
     task_value = _object(task_work["task"])
     assert story_task_metadata["version"] == "task_metadata.v2"
     assert task_value["metadata"] == story_task_metadata
+
+
+def test_packet_fails_closed_when_sprint_owner_evidence_is_invalid(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Packet creation refuses an artifact whose durable owner chain is invalid."""
+    project_id, sprint_id, story_id, _task_id = _seed(engine)
+
+    def _invalid_owner_evidence(_session: Session, **_kwargs: object) -> None:
+        message = "forged owner evidence"
+        raise SprintOwnerEvidenceError(message)
+
+    monkeypatch.setattr(
+        "services.packets.canonical.load_sprint_owner_evidence",
+        _invalid_owner_evidence,
+    )
+    with Session(engine) as session, pytest.raises(CanonicalPacketError) as error:
+        build_story_packet(
+            session,
+            project_id=project_id,
+            sprint_id=sprint_id,
+            story_id=story_id,
+        )
+
+    assert error.value.code == "PACKET_CONTENT_INVALID"
+
+
+def test_packet_fails_closed_when_sprint_team_disagrees_with_owner_evidence(
+    engine: Engine,
+) -> None:
+    """Activated Sprint carrier must retain the accepted artifact owner label."""
+    project_id, sprint_id, story_id, _task_id = _seed(engine)
+    with Session(engine) as session:
+        sprint = session.get_one(Sprint, sprint_id)
+        different = Team(name="Different operational team")
+        session.add(different)
+        session.flush()
+        assert different.team_id is not None
+        sprint.team_id = different.team_id
+        session.add(sprint)
+        session.commit()
+
+    with Session(engine) as session, pytest.raises(CanonicalPacketError) as error:
+        build_story_packet(
+            session,
+            project_id=project_id,
+            sprint_id=sprint_id,
+            story_id=story_id,
+        )
+
+    assert error.value.code == "PACKET_LINEAGE_INVALID"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("owner_kind", "named_team"),
+        ("owner_key", "agileforge:sprint-owner:named-team:v1:sha256:" + "0" * 64),
+        ("team_name", "Forged Sprint owner"),
+    ],
+)
+def test_validator_rejects_rehashed_sprint_owner_context_tampering(
+    engine: Engine,
+    field: str,
+    value: str,
+) -> None:
+    """A refreshed packet fingerprint cannot replace its owner evidence contract."""
+    project_id, sprint_id, story_id, _task_id = _seed(engine)
+    with Session(engine) as session:
+        packet = build_story_packet(
+            session,
+            project_id=project_id,
+            sprint_id=sprint_id,
+            story_id=story_id,
+        )
+
+    mutated = _rehashed_packet(packet)
+    _object(_object(mutated["context"])["sprint"])[field] = value
+    mutated = _rehashed_packet(mutated)
+
+    with pytest.raises(CanonicalPacketError) as error:
+        validate_canonical_packet(mutated)
+
+    assert error.value.code == "PACKET_CONTENT_INVALID"
+
+
+@pytest.mark.parametrize(
+    ("owner_kind", "owner_label"),
+    [
+        ("solo_project", "Forged solo owner"),
+        ("named_team", "[agileforge:sprint-owner:forged] Team"),
+        ("named_team", " Named team with padding "),
+    ],
+)
+def test_validator_rejects_rehashed_forged_sprint_owner_triples(
+    engine: Engine,
+    owner_kind: str,
+    owner_label: str,
+) -> None:
+    """A matching kind/key pair cannot legitimize a forged owner label."""
+    project_id, sprint_id, story_id, _task_id = _seed(engine)
+    with Session(engine) as session:
+        packet = build_story_packet(
+            session,
+            project_id=project_id,
+            sprint_id=sprint_id,
+            story_id=story_id,
+        )
+
+    mutated = _rehashed_packet(packet)
+    sprint = _object(_object(mutated["context"])["sprint"])
+    sprint["owner_kind"] = owner_kind
+    sprint["team_name"] = owner_label
+    sprint["owner_key"] = (
+        f"agileforge:sprint-owner:solo-project:v1:project:{project_id}"
+        if owner_kind == "solo_project"
+        else "agileforge:sprint-owner:named-team:v1:sha256:"
+        + hashlib.sha256(owner_label.encode()).hexdigest()
+    )
+    mutated = _rehashed_packet(mutated)
+
+    with pytest.raises(CanonicalPacketError) as error:
+        validate_canonical_packet(mutated)
+
+    assert error.value.code == "PACKET_CONTENT_INVALID"
 
 
 @pytest.mark.parametrize(

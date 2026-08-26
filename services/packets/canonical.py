@@ -56,6 +56,12 @@ from services.specs.story_validation_service import (
     require_story_validation_evidence,
     story_validation_input_fingerprint,
 )
+from services.sprint_ownership import (
+    SprintOwnerEvidence,
+    SprintOwnerEvidenceError,
+    load_sprint_owner_evidence,
+    validate_sprint_owner_identity,
+)
 from utils.agileforge_spec_profile_v2 import SpecificationItem, SpecItemType
 from utils.spec_schemas import ValidationEvidence
 from utils.task_metadata import (
@@ -71,8 +77,8 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 _JSON_OBJECT = TypeAdapter(JsonObject)
-_TASK_SCHEMA_VERSION = "task_packet.v3"
-_STORY_SCHEMA_VERSION = "story_packet.v2"
+_TASK_SCHEMA_VERSION = "task_packet.v4"
+_STORY_SCHEMA_VERSION = "story_packet.v3"
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _PACKET_ID = re.compile(r"^[st]p_[0-9a-f]{16}$")
 _SPRINT_PLAN_STREAM_ID = re.compile(r"^SPS-[0-9a-f]{32}$")
@@ -97,7 +103,9 @@ class _PacketContext:
     project: Project
     sprint: Sprint
     story: UserStory
-    team: Team | None
+    owner_kind: Literal["solo_project", "named_team", "legacy_named_team"]
+    owner_key: str
+    owner_label: str
     specification: AcceptedSpecification
     backlog: BacklogArtifact
     backlog_item: BacklogItem
@@ -264,7 +272,9 @@ _CONTEXT_SHAPE: dict[str, object] = {
     "sprint": {
         "goal": str,
         "status": str,
-        "team_name": (str, type(None)),
+        "team_name": str,
+        "owner_kind": str,
+        "owner_key": str,
         "started_at": (str, type(None)),
         "start_date": (str, type(None)),
         "end_date": (str, type(None)),
@@ -398,6 +408,23 @@ def _require_canonical_context_temporals(context: JsonObject) -> None:
             value_text = cast("str", value)
             if date.fromisoformat(value_text).isoformat() != value_text:
                 _invalid_packet_content()
+
+
+def _require_canonical_sprint_owner_context(context: JsonObject) -> None:
+    """Require the explicit owner kind, key, and retained label to agree."""
+    project = cast("JsonObject", context["project"])
+    sprint = cast("JsonObject", context["sprint"])
+    owner = SprintOwnerEvidence.model_validate(
+        {
+            "kind": sprint["owner_kind"],
+            "key": sprint["owner_key"],
+            "label": sprint["team_name"],
+        }
+    )
+    validate_sprint_owner_identity(
+        owner,
+        project_id=cast("int", project["project_id"]),
+    )
 
 
 def _require_canonical_agreement(
@@ -607,6 +634,9 @@ def validate_canonical_packet(packet: JsonObject) -> JsonObject:
             for item in cast("list[JsonObject]", specification["items"])
         )
         _require_canonical_context_temporals(cast("JsonObject", packet["context"]))
+        _require_canonical_sprint_owner_context(
+            cast("JsonObject", packet["context"])
+        )
         backlog_item = BacklogItem.model_validate(evidence["backlog_item"])
         roadmap_release = RoadmapRelease.model_validate(evidence["roadmap_release"])
         story_item = CanonicalStoryItem.model_validate(evidence["story_item"])
@@ -946,6 +976,22 @@ def _load_context(  # noqa: PLR0915
         raise _error(
             "PACKET_CONTENT_INVALID", "Sprint-plan content is invalid."
         ) from exc
+    try:
+        owner = load_sprint_owner_evidence(
+            session,
+            artifact=plan,
+            owner_label=envelope.team_name,
+        )
+    except SprintOwnerEvidenceError as exc:
+        raise _error(
+            "PACKET_CONTENT_INVALID", "Sprint owner evidence is invalid."
+        ) from exc
+    team = session.get(Team, sprint.team_id)
+    if team is None or team.name != owner.label:
+        raise _error(
+            "PACKET_LINEAGE_INVALID",
+            "Activated Sprint owner projection is invalid.",
+        )
     selected_story = _one(
         tuple(
             item
@@ -1145,7 +1191,9 @@ def _load_context(  # noqa: PLR0915
         project=project,
         sprint=sprint,
         story=story,
-        team=session.get(Team, sprint.team_id),
+        owner_kind=owner.kind,
+        owner_key=owner.key,
+        owner_label=owner.label,
         specification=specification,
         backlog=backlog,
         backlog_item=backlog_item,
@@ -1225,7 +1273,9 @@ def _snapshot_context(context: _PacketContext) -> JsonObject:
             "sprint": {
                 "goal": context.sprint.goal,
                 "status": context.sprint.status.value,
-                "team_name": None if context.team is None else context.team.name,
+                "team_name": context.owner_label,
+                "owner_kind": context.owner_kind,
+                "owner_key": context.owner_key,
                 "started_at": _temporal(context.sprint.started_at),
                 "start_date": _temporal(context.sprint.start_date),
                 "end_date": _temporal(context.sprint.end_date),
@@ -1345,7 +1395,7 @@ def _packet(
 def build_story_packet(
     session: Session, *, project_id: int, sprint_id: int, story_id: int
 ) -> JsonObject:
-    """Build one deterministic story_packet.v2 from accepted plan activation."""
+    """Build one deterministic story_packet.v3 from accepted plan activation."""
     context = _load_context(
         session,
         project_id=project_id,
@@ -1366,7 +1416,7 @@ def build_story_packet(
 def build_task_packet(
     session: Session, *, project_id: int, sprint_id: int, task_id: int
 ) -> JsonObject:
-    """Build one deterministic task_packet.v3 from accepted plan activation."""
+    """Build one deterministic task_packet.v4 from accepted plan activation."""
     if session.get(Project, project_id) is None:
         raise _error("PROJECT_NOT_FOUND", f"Project {project_id} was not found.")
     task = session.get(Task, task_id)

@@ -201,7 +201,7 @@ class SprintPlanningApiRequest(MutationApiRequest):
     user_input: str | None = None
     selected_story_ids: list[int] = Field(default_factory=list)
     max_story_points: int | None = Field(default=None, gt=0)
-    team_name: str = Field(min_length=1)
+    team_name: SemanticText | None = None
 
     @field_validator("selected_story_ids")
     @classmethod

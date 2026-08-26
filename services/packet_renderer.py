@@ -36,6 +36,15 @@ def _text(value: object) -> str:
     return html.escape("" if value is None else str(value), quote=False)
 
 
+def _owner_kind_display(value: object) -> str:
+    displays = {
+        "solo_project": "Solo project",
+        "named_team": "Named team",
+        "legacy_named_team": "Legacy named team",
+    }
+    return displays[str(value)]
+
+
 def _validate(packet: JsonObject, flavor: str) -> tuple[PacketFlavor, str]:
     if flavor not in {"human", "agent"}:
         message = "Packet flavor must be exactly 'human' or 'agent'."
@@ -79,7 +88,10 @@ def _human(packet: JsonObject, kind: str) -> str:
         "",
         f"Sprint: {_text(sprint.get('goal'))}",
         f"Status: {_text(sprint.get('status'))}",
-        f"Team: {_text(sprint.get('team_name'))}",
+        (
+            f"Sprint owner: {_owner_kind_display(sprint.get('owner_kind'))} — "
+            f"{_text(sprint.get('team_name'))}"
+        ),
         "",
         f"## Story: {_text(story.get('title'))}",
         _text(story.get("statement")),
@@ -142,6 +154,10 @@ def _agent(packet: JsonObject, kind: str) -> str:
         (
             f'<sprint goal="{html.escape(str(sprint.get("goal") or ""), quote=True)}" '
             f'status="{_text(sprint.get("status"))}" />'
+        ),
+        (
+            f'<sprint_owner kind="{_text(sprint.get("owner_kind"))}">'
+            f"{_text(sprint.get('team_name'))}</sprint_owner>"
         ),
         f'<specification currentness="{_text(specification.get("currentness"))}">',
     ]

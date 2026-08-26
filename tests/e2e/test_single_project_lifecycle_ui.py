@@ -861,6 +861,15 @@ class FakeLifecycle:
         return {
             "items": self.sprint_candidates,
             "count": len(self.sprint_candidates),
+            "sprint_owner": {
+                "kind": "solo_project",
+                "key": "agileforge:sprint-owner:solo-project:v1:project:1",
+                "label": (
+                    "[agileforge:sprint-owner:solo-project:v1:project:1] "
+                    "Solo operator for Exact Project"
+                ),
+                "named_team_override_allowed": True,
+            },
         }
 
     def _generate_backlog(self, body: JsonObject) -> None:
@@ -1049,7 +1058,10 @@ class FakeLifecycle:
                     self.sprint_candidates.append(story)
 
     def _generate_sprint_plan(self, body: JsonObject) -> None:
-        self._assert_fields(body, {"team_name", "selected_story_ids"})
+        if "team_name" in body:
+            self._assert_fields(body, {"team_name", "selected_story_ids"})
+        else:
+            self._assert_fields(body, {"selected_story_ids"})
         projected_candidate_ids = [
             story["story_id"]
             for story in self.sprint_candidates
@@ -1059,7 +1071,20 @@ class FakeLifecycle:
         if self.delivery_generation_failure:
             raise ValueError(self.delivery_generation_failure)
         self.sprint_plan_candidate = {
-            "team_name": body["team_name"],
+            "team_name": body.get(
+                "team_name",
+                "[agileforge:sprint-owner:solo-project:v1:project:1] "
+                "Solo operator for Exact Project",
+            ),
+            "sprint_owner": {
+                "kind": "solo_project" if "team_name" not in body else "named_team",
+                "key": "agileforge:sprint-owner:solo-project:v1:project:1",
+                "label": body.get(
+                    "team_name",
+                    "[agileforge:sprint-owner:solo-project:v1:project:1] "
+                    "Solo operator for Exact Project",
+                ),
+            },
             "sprint_goal": "Deliver Sprint 1 MVP",
             "selected_stories": [
                 {
@@ -1888,8 +1913,9 @@ def _verify_sprint_lifecycle_flow(page: Page, fake: FakeLifecycle) -> None:
     sprint_form = page.locator('[data-delivery-generation-form="record_sprint_plan"]')
     team_name = sprint_form.locator('[name="team_name"]')
     expect(team_name).to_be_visible()
-    expect(team_name).to_have_attribute("required", "")
-    team_name.fill("Delivery Team")
+    expect(team_name).not_to_have_attribute("required", "")
+    expect(sprint_form.get_by_text("Sprint owner", exact=True)).to_be_visible()
+    expect(sprint_form.get_by_text("Solo operator for Exact Project")).to_be_visible()
     generate_sprint_btn = sprint_form.locator('button[type="submit"]')
     expect(generate_sprint_btn).to_be_visible()
     expect(generate_sprint_btn).to_contain_text("Generate Sprint plan")
@@ -1898,8 +1924,10 @@ def _verify_sprint_lifecycle_flow(page: Page, fake: FakeLifecycle) -> None:
     review_card = page.locator('[data-planning-review-card="sprint"]')
     expect(review_card).to_be_visible()
     expect(review_card).to_contain_text("Sprint plan review")
-    expect(review_card).to_contain_text("Delivery Team")
-    assert fake.delivery_requests[-1][1]["team_name"] == "Delivery Team"
+    expect(review_card).to_contain_text("Sprint owner")
+    expect(review_card).to_contain_text("Solo project")
+    expect(review_card).to_contain_text("Solo operator for Exact Project")
+    assert "team_name" not in fake.delivery_requests[-1][1]
 
 
 def test_issue_212_delivery_generation_lifecycle_flow(
@@ -2543,10 +2571,10 @@ def test_pending_story_review_keeps_another_generation_action_visible(
     context.close()
 
 
-def test_sprint_generation_requires_team_and_blocks_duplicate_submission(
+def test_sprint_generation_defaults_to_solo_owner_and_blocks_duplicate_submission(
     dashboard_harness: DashboardHarness,
 ) -> None:
-    """Collect operator-owned Sprint input and keep one mutation in flight."""
+    """Show the resolved owner before one blank-override transport."""
     fake = _delivery_ready_fake([_sprint_generation_action()])
     _seed_progressive_stories(fake, 101, 102)
     candidate = cast("JsonObject", fake.stories[0])
@@ -2558,9 +2586,10 @@ def test_sprint_generation_requires_team_and_blocks_duplicate_submission(
     form = page.locator('[data-delivery-generation-form="record_sprint_plan"]')
     team_name = form.locator('[name="team_name"]')
     expect(team_name).to_be_visible()
-    expect(team_name).to_have_attribute("required", "")
+    expect(team_name).not_to_have_attribute("required", "")
+    expect(form.get_by_text("Sprint owner", exact=True)).to_be_visible()
+    expect(form.get_by_text("Solo operator for Exact Project")).to_be_visible()
 
-    team_name.fill("Product Team")
     busy_state = form.evaluate(
         """form => {
             form.requestSubmit();
@@ -2584,12 +2613,41 @@ def test_sprint_generation_requires_team_and_blocks_duplicate_submission(
 
     review_card = page.locator('[data-planning-review-card="sprint"]')
     expect(review_card).to_be_visible()
-    expect(review_card).to_contain_text("Product Team")
+    expect(review_card).to_contain_text("Sprint owner")
+    expect(review_card).to_contain_text("Solo project")
+    expect(review_card).to_contain_text("Solo operator for Exact Project")
     sprint_requests = [
         body for suffix, body in fake.delivery_requests if suffix == "/sprint/generate"
     ]
     assert len(sprint_requests) == 1
-    assert sprint_requests[0]["team_name"] == "Product Team"
+    assert "team_name" not in sprint_requests[0]
+    assert sprint_requests[0]["selected_story_ids"] == [101]
+
+    context.close()
+
+
+def test_sprint_generation_posts_a_trimmed_named_team_override(
+    dashboard_harness: DashboardHarness,
+) -> None:
+    """Transport only a meaningful, normalized named-Team override."""
+    fake = _delivery_ready_fake([_sprint_generation_action()])
+    _seed_progressive_stories(fake, 101, 102)
+    candidate = cast("JsonObject", fake.stories[0])
+    candidate["sprint_selection_state"] = "selected"
+    candidate["dependency_safe"] = True
+    candidate["sprint_candidate"] = True
+    fake.sprint_candidates = [candidate]
+    context, page = _open_project_page(dashboard_harness, fake)
+    form = page.locator('[data-delivery-generation-form="record_sprint_plan"]')
+    form.locator('[name="team_name"]').fill("  Delivery Team  ")
+    form.locator('button[type="submit"]').click()
+
+    expect(page.locator('[data-planning-review-card="sprint"]')).to_be_visible()
+    sprint_requests = [
+        body for suffix, body in fake.delivery_requests if suffix == "/sprint/generate"
+    ]
+    assert len(sprint_requests) == 1
+    assert sprint_requests[0]["team_name"] == "Delivery Team"
     assert sprint_requests[0]["selected_story_ids"] == [101]
 
     context.close()

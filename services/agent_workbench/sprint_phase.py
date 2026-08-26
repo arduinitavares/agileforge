@@ -42,7 +42,14 @@ from services.planning_lineage import Decision as PlanningLineageDecision
 from services.specs.accepted_specification import (
     load_current_accepted_specification,
 )
+from services.sprint_ownership import (
+    SprintOwnerEvidenceError,
+    SprintOwnerResolutionError,
+    ensure_solo_project_owner_team,
+    load_sprint_owner_evidence,
+)
 from utils.task_metadata import metadata_from_structured_task, serialize_task_metadata
+from workflow.contracts import WorkflowErrorCode
 from workflow.definitions.planning import candidate_set_fingerprint
 from workflow.execution_integrity import (
     ExecutionIntegrityError,
@@ -656,12 +663,32 @@ def record_sprint_plan_decision_in_session(
             if prior is None or prior[1].activated_sprint_id is None
             else session.get(Sprint, prior[1].activated_sprint_id)
         )
-        team_id = _ensure_team(
-            session,
-            project_id=artifact.project_id,
-            team_name=envelope.team_name,
-            now=inputs.decided_at,
-        )
+        try:
+            owner = load_sprint_owner_evidence(
+                session,
+                artifact=artifact,
+                owner_label=envelope.team_name,
+            )
+        except SprintOwnerEvidenceError as error:
+            message = "Sprint owner evidence conflicts with this plan."
+            raise SprintOwnerResolutionError(
+                WorkflowErrorCode.SPRINT_OWNER_CONFLICT,
+                message,
+            ) from error
+        if owner.kind == "solo_project":
+            team_id = ensure_solo_project_owner_team(
+                session,
+                project_id=artifact.project_id,
+                owner_label=owner.label,
+                now=inputs.decided_at,
+            )
+        else:
+            team_id = _ensure_team(
+                session,
+                project_id=artifact.project_id,
+                team_name=envelope.team_name,
+                now=inputs.decided_at,
+            )
         sprint = _replace_operational_projection(
             session,
             artifact=artifact,

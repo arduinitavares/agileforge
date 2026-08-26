@@ -10,7 +10,7 @@ from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import BaseModel, ValidationError
-from sqlmodel import Session, select
+from sqlmodel import Session, col, select
 
 import api as api_module
 import services.application as application_module
@@ -20,12 +20,13 @@ from api import (
     build_create_project_command,
 )
 from cli.workflow_commands import COMMAND_PREFIXES
-from models.core import Project, UserStory
+from models.core import Project, Team, UserStory
 from models.workflow import (
     BacklogArtifact,
     RoadmapArtifact,
     SprintPlanArtifact,
     StoryArtifact,
+    WorkflowNodeAttempt,
     WorkflowTransitionReceipt,
 )
 from repositories.workflow import WorkflowFactRepository
@@ -66,6 +67,7 @@ from services.node_attempt_replay import (
 )
 from services.product_goal_interview_input import ProductGoalInterviewInputService
 from services.read_projections import DurableReadProjectionService
+from services.sprint_ownership import ResolvedSprintOwner
 from tests.adapters.test_command_renderer import position_fixture
 from tests.workflow.execution_fixtures import seed_started_execution
 from tests.workflow.test_execution_transitions import (
@@ -2956,6 +2958,18 @@ def _sprint_ready_project(
     return domain, project_id, story_id
 
 
+def _assert_no_sprint_attempt(engine: "Engine", *, idempotency_key: str) -> None:
+    """Prove an ownership failure preceded attempt persistence."""
+    with Session(engine) as session:
+        attempts = session.exec(
+            select(WorkflowNodeAttempt).where(
+                col(WorkflowNodeAttempt.node_id) == "planning.sprint.plan",
+                col(WorkflowNodeAttempt.idempotency_key) == idempotency_key,
+            )
+        ).all()
+    assert attempts == []
+
+
 def test_delivery_review_selection_verifies_each_durable_artifact(
     engine: "Engine",
 ) -> None:
@@ -3088,10 +3102,40 @@ def test_explicit_sprint_capacity_locks_exact_durable_cohort(
     assert envelope["capacity_points"] == capacity_points
     assert envelope["capacity_source"] == "user_override"
     assert envelope["locked_story_ids"] == [story_id]
+    assert envelope["owner_kind"] == "named_team"
     assert envelope["requested_story_ids"] == [story_id]
     assert envelope["team_name"] == "Platform"
     assert envelope["guidance"] == "Prioritize durable replay."
     assert isinstance(envelope["candidate_set_fingerprint"], str)
+
+
+def test_default_sprint_owner_records_solo_kind_before_attempt(
+    engine: "Engine",
+) -> None:
+    """The default owner kind is durable host input, not planner input."""
+    domain, project_id, story_id = _sprint_ready_project(engine)
+    application = _CapturingSprintApplication(
+        domain,
+        SprintPlanningInputService(engine=engine),
+    )
+
+    result = application.generate_sprint(
+        SprintPlanningRequest(
+            project_id=project_id,
+            selected_story_ids=(story_id,),
+            max_story_points=3,
+            idempotency_key="sprint-default-owner",
+            actor="operator",
+        )
+    )
+
+    assert result.ok is True
+    envelope = application.agent_requests[0].input_payload
+    assert envelope["owner_kind"] == "solo_project"
+    assert isinstance(envelope["team_name"], str)
+    assert envelope["team_name"].startswith(
+        f"[agileforge:sprint-owner:solo-project:v1:project:{project_id}] "
+    )
 
 
 def test_completed_sprint_metrics_supply_host_capacity(engine: "Engine") -> None:
@@ -3171,7 +3215,10 @@ def test_completed_sprint_metrics_supply_host_capacity(engine: "Engine") -> None
         }
     )
 
-    envelope = SprintPlanningInputService(engine=engine).build(
+    input_service = SprintPlanningInputService(engine=engine)
+    owner = input_service.resolve_owner(project_id=project_id, team_name="Platform")
+    assert isinstance(owner, ResolvedSprintOwner)
+    envelope = input_service.build(
         project_id=project_id,
         decision=decision,
         request=SprintPlanningRequest(
@@ -3181,6 +3228,7 @@ def test_completed_sprint_metrics_supply_host_capacity(engine: "Engine") -> None
             idempotency_key="sprint-metrics-capacity",
             actor="operator",
         ),
+        owner=owner,
     )
 
     assert isinstance(envelope, dict)
@@ -3354,6 +3402,105 @@ def test_invalid_manual_sprint_selection_fails_before_model(
     assert result.error.code is WorkflowErrorCode.WORKFLOW_FACT_CONFLICT
     assert result.error.blockers[0].code == "SPRINT_CANDIDATE_SET_STALE"
     assert application.agent_requests == []
+
+
+def test_reserved_sprint_owner_override_fails_before_attempt(
+    engine: "Engine",
+) -> None:
+    """Reject every reserved owner override before durable or external work."""
+    domain, project_id, _story_id = _sprint_ready_project(engine)
+    application = _CapturingSprintApplication(
+        domain,
+        SprintPlanningInputService(engine=engine),
+    )
+
+    result = application.generate_sprint(
+        SprintPlanningRequest(
+            project_id=project_id,
+            max_story_points=3,
+            team_name="[AGILEFORGE:SPRINT-OWNER:spoof] Team",
+            idempotency_key="sprint-reserved-owner",
+            actor="operator",
+        )
+    )
+
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.code is WorkflowErrorCode.SPRINT_OWNER_CONFLICT
+    assert application.agent_requests == []
+    _assert_no_sprint_attempt(engine, idempotency_key="sprint-reserved-owner")
+
+
+def test_unavailable_default_sprint_owner_fails_before_attempt(
+    engine: "Engine",
+) -> None:
+    """Malformed durable Project identity fails before attempt or provider work."""
+    domain, project_id, story_id = _sprint_ready_project(engine)
+    with Session(engine) as session:
+        project = session.get(Project, project_id)
+        assert project is not None
+        project.name = "Unavailable\nowner"
+        session.add(project)
+        session.commit()
+    application = _CapturingSprintApplication(
+        domain,
+        SprintPlanningInputService(engine=engine),
+    )
+
+    result = application.generate_sprint(
+        SprintPlanningRequest(
+            project_id=project_id,
+            selected_story_ids=(story_id,),
+            max_story_points=3,
+            idempotency_key="sprint-unavailable-owner",
+            actor="operator",
+        )
+    )
+
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.code is WorkflowErrorCode.SPRINT_OWNER_UNAVAILABLE
+    assert application.agent_requests == []
+    _assert_no_sprint_attempt(engine, idempotency_key="sprint-unavailable-owner")
+
+
+def test_reserved_solo_team_collision_fails_before_attempt(
+    engine: "Engine",
+) -> None:
+    """An orphaned reserved Team blocks default ownership before external work."""
+    domain, project_id, story_id = _sprint_ready_project(engine)
+    with Session(engine) as session:
+        project = session.get(Project, project_id)
+        assert project is not None
+        session.add(
+            Team(
+                name=(
+                    "[agileforge:sprint-owner:solo-project:v1:project:"
+                    f"{project_id}] Solo operator for {project.name}"
+                )
+            )
+        )
+        session.commit()
+    application = _CapturingSprintApplication(
+        domain,
+        SprintPlanningInputService(engine=engine),
+    )
+
+    result = application.generate_sprint(
+        SprintPlanningRequest(
+            project_id=project_id,
+            selected_story_ids=(story_id,),
+            max_story_points=3,
+            idempotency_key="sprint-owner-collision",
+            actor="operator",
+        )
+    )
+
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.code is WorkflowErrorCode.SPRINT_OWNER_CONFLICT
+    assert application.agent_requests == []
+    _assert_no_sprint_attempt(engine, idempotency_key="sprint-owner-collision")
 
 
 @pytest.mark.parametrize(
@@ -4258,6 +4405,94 @@ def test_semantic_sprint_generation_api_is_strict(
             json={**payload, extra_field: "caller-owned"},
         )
         assert rejected.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+
+
+@pytest.mark.parametrize("team_name", [pytest.param(None, id="null")])
+def test_sprint_generation_api_allows_solo_owner_default(
+    monkeypatch: pytest.MonkeyPatch,
+    team_name: None,
+) -> None:
+    """Omitted and null Team overrides retain one explicit solo-default request."""
+    application = _FakeApiApplication(position=_all_request_kinds_position())
+    monkeypatch.setattr(api_module, "_application", lambda: application)
+    base_payload = {
+        "selected_story_ids": [7, 9],
+        "max_story_points": 8,
+        "idempotency_key": "sprint-solo-41",
+        "actor": "operator",
+    }
+    payloads = (base_payload, {**base_payload, "team_name": team_name})
+
+    for payload in payloads:
+        response = TestClient(api_module.app).post(
+            "/api/projects/41/sprint/generate",
+            json=payload,
+        )
+        assert response.status_code == HTTPStatus.OK
+
+    requests = [
+        cast("SprintPlanningRequest", request) for request in application.requests
+    ]
+    assert [request.team_name for request in requests] == [None, None]
+
+
+def test_sprint_generation_api_rejects_whitespace_team_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Whitespace is malformed caller input, not a solo-default spelling."""
+    application = _FakeApiApplication(position=_all_request_kinds_position())
+    monkeypatch.setattr(api_module, "_application", lambda: application)
+
+    response = TestClient(api_module.app).post(
+        "/api/projects/41/sprint/generate",
+        json={
+            "selected_story_ids": [7, 9],
+            "max_story_points": 8,
+            "team_name": "   ",
+            "idempotency_key": "sprint-whitespace-41",
+            "actor": "operator",
+        },
+    )
+
+    assert response.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+    assert application.requests == []
+
+
+@pytest.mark.parametrize(
+    ("code", "expected_status"),
+    [
+        (WorkflowErrorCode.PROJECT_NOT_FOUND, HTTPStatus.NOT_FOUND),
+        (WorkflowErrorCode.SPRINT_OWNER_UNAVAILABLE, HTTPStatus.CONFLICT),
+        (WorkflowErrorCode.SPRINT_OWNER_CONFLICT, HTTPStatus.CONFLICT),
+    ],
+)
+def test_sprint_owner_api_errors_use_exact_http_statuses(
+    monkeypatch: pytest.MonkeyPatch,
+    code: WorkflowErrorCode,
+    expected_status: HTTPStatus,
+) -> None:
+    """Map each closed owner failure to its documented transport status."""
+    application = _FakeApiApplication(
+        position=_all_request_kinds_position(),
+        transition_result=TransitionResult(
+            ok=False,
+            error=WorkflowError(code=code, message="Sprint owner unavailable."),
+        ),
+    )
+    monkeypatch.setattr(api_module, "_application", lambda: application)
+
+    response = TestClient(api_module.app).post(
+        "/api/projects/41/sprint/generate",
+        json={
+            "selected_story_ids": [7, 9],
+            "max_story_points": 8,
+            "idempotency_key": "sprint-owner-error-41",
+            "actor": "operator",
+        },
+    )
+
+    assert response.status_code == expected_status
+    assert response.json()["detail"]["error"]["code"] == code.value
 
 
 def test_retained_non_agentic_delivery_api_rejects_input_payload(

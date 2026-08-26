@@ -15,7 +15,7 @@ import pytest
 from pydantic import TypeAdapter
 from sqlmodel import Session, select
 
-from models.core import Project, UserStory
+from models.core import Project, Team, UserStory
 from models.product_definition import (
     ProductGoalArtifact,
     ProductGoalArtifactDecision,
@@ -32,7 +32,11 @@ from models.product_definition import (
 )
 from models.repository import RepositoryBinding, repository_binding_fingerprint
 from models.specs import SpecRegistry
-from models.workflow import BacklogArtifact, RoadmapArtifact, WorkflowNodeAttempt
+from models.workflow import (
+    BacklogArtifact,
+    RoadmapArtifact,
+    WorkflowNodeAttempt,
+)
 from repositories.workflow import WorkflowFactRepository
 from services.contracts.specification_authoring import (
     SPECIFICATION_PRODUCT_GOAL_SOURCE_ID,
@@ -673,7 +677,51 @@ def test_story_read_surfaces_use_story_fact_authority_and_exact_evidence_scope(
 
     candidates = _data(reads.sprint_candidates(project_id=1))
     assert candidates["items"] == []
+    assert candidates["sprint_owner"] == {
+        "kind": "solo_project",
+        "key": "agileforge:sprint-owner:solo-project:v1:project:1",
+        "label": (
+            "[agileforge:sprint-owner:solo-project:v1:project:1] "
+            "Solo operator for Task 11 ('Plan immutable work',)"
+        ),
+        "named_team_override_allowed": True,
+    }
     assert candidates["structural_evidence_scope"] == expected_scope
+
+
+def test_sprint_candidates_returns_closed_solo_owner_resolution_errors(
+    engine: Engine,
+) -> None:
+    """Candidate reads block unavailable and conflicting default owner identity."""
+    with Session(engine) as session:
+        unavailable = Project(name=" ")
+        conflicting = Project(name="Candidate owner conflict")
+        session.add(unavailable)
+        session.add(conflicting)
+        session.flush()
+        assert unavailable.project_id is not None
+        assert conflicting.project_id is not None
+        conflict_label = (
+            "[agileforge:sprint-owner:solo-project:v1:project:"
+            f"{conflicting.project_id}] Solo operator for {conflicting.name}"
+        )
+        session.add(Team(name=conflict_label))
+        session.commit()
+        unavailable_id = unavailable.project_id
+        conflicting_id = conflicting.project_id
+
+    reads = DurableReadProjectionService(engine=engine)
+    unavailable_result = reads.sprint_candidates(project_id=unavailable_id)
+    conflicting_result = reads.sprint_candidates(project_id=conflicting_id)
+
+    assert unavailable_result["ok"] is False
+    unavailable_errors = unavailable_result["errors"]
+    assert isinstance(unavailable_errors, list)
+    assert _json_object(unavailable_errors[0])["code"] == "SPRINT_OWNER_UNAVAILABLE"
+    assert conflicting_result["ok"] is False
+    conflicting_errors = conflicting_result["errors"]
+    assert isinstance(conflicting_errors, list)
+    assert _json_object(conflicting_errors[0])["code"] == "SPRINT_OWNER_CONFLICT"
 
 
 def _vision_output_fingerprint(
@@ -4429,9 +4477,11 @@ def test_sprint_plan_review_is_durable_before_activation_and_after_drift(  # noq
     assert tuple(pending) == ("ok", "data", "warnings", "errors")
     assert pending["ok"] is True
     data = _json_object(pending["data"])
-    assert data["schema_version"] == "agileforge.planning-artifact-review.v1"
+    assert data["schema_version"] == "agileforge.planning-artifact-review.v2"
     assert data["phase"] == "sprint_plan"
     candidate = _json_object(data["candidate"])
+    assert _json_object(candidate["sprint_owner"])["kind"] == "legacy_named_team"
+    assert _json_object(candidate["sprint_owner"])["label"] == "Review Projection Team"
     selected = candidate["selected_stories"]
     assert isinstance(selected, list)
     selected_story = _json_object(selected[0])
@@ -4495,6 +4545,93 @@ def test_sprint_plan_review_is_durable_before_activation_and_after_drift(  # noq
     errors = corrupted["errors"]
     assert isinstance(errors, list)
     assert _json_object(errors[0])["code"] == "PLANNING_ARTIFACT_CONTENT_INVALID"
+
+
+@pytest.mark.parametrize(
+    (
+        "owner_kind",
+        "team_name",
+        "expected_kind",
+        "tamper_attempt",
+        "tamper_receipt",
+    ),
+    [
+        (
+            "solo_project",
+            (
+                "[agileforge:sprint-owner:solo-project:v1:project:1] "
+                "Solo operator for Review"
+            ),
+            "solo_project",
+            False,
+            False,
+        ),
+        ("named_team", "Durable Named Team", "named_team", False, False),
+        ("named_team", "Durable Named Team", None, True, False),
+        ("named_team", "Durable Named Team", None, False, True),
+        ("solo_project", "Tampered solo owner", None, False, False),
+        (
+            "named_team",
+            "[agileforge:sprint-owner:forged] Team",
+            None,
+            False,
+            False,
+        ),
+    ],
+)
+def test_sprint_plan_review_reloads_owner_kind_from_attempt_evidence(  # noqa: PLR0913
+    engine: Engine,
+    owner_kind: Literal["solo_project", "named_team"],
+    team_name: str,
+    expected_kind: Literal["solo_project", "named_team"] | None,
+    tamper_attempt: bool,
+    tamper_receipt: bool,
+) -> None:
+    """Sprint review derives kind from durable host evidence, never a label."""
+    from tests.workflow.test_planning_transitions import (  # noqa: PLC0415
+        _attach_sprint_owner_evidence,
+        _domain,
+        _record_and_accept_roadmap,
+        _record_and_accept_story,
+        _record_sprint_plan_draft,
+        _seed_accepted_backlog,
+    )
+
+    project_id = _seed_accepted_backlog(engine)
+    domain = _domain(engine)
+    _record_and_accept_roadmap(domain, project_id)
+    _artifact_id, story_id = _record_and_accept_story(engine, domain, project_id)
+    plan_id, _candidate, _plan, plan_fingerprint = _record_sprint_plan_draft(
+        engine,
+        domain,
+        project_id,
+        story_id,
+        team_name=team_name,
+        idempotency_key=f"durable-owner-{owner_kind}",
+    )
+    _attach_sprint_owner_evidence(
+        engine,
+        project_id=project_id,
+        sprint_plan_artifact_id=plan_id,
+        plan_fingerprint=plan_fingerprint,
+        team_name=team_name,
+        owner_kind=owner_kind,
+        tamper_attempt_fingerprint=tamper_attempt,
+        tamper_receipt_result=tamper_receipt,
+    )
+
+    result = DurableReadProjectionService(engine=engine).sprint_plan_review(
+        project_id=project_id,
+        sprint_plan_artifact_id=plan_id,
+    )
+
+    if expected_kind is None:
+        assert result["ok"] is False
+        return
+    candidate = _json_object(_data(result)["candidate"])
+    owner = _json_object(candidate["sprint_owner"])
+    assert owner["kind"] == expected_kind
+    assert owner["label"] == team_name
 
 
 def test_pending_sprint_plan_review_reports_exact_source_stale_error(

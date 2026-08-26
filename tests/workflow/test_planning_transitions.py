@@ -46,6 +46,8 @@ from models.workflow import (
     StoryArtifact,
     StoryArtifactDecision,
     StoryDependencyReview,
+    WorkflowNodeAttempt,
+    WorkflowNodeAttemptOutcome,
     WorkflowTransitionReceipt,
 )
 from repositories.workflow import WorkflowFactLoadError, WorkflowFactRepository
@@ -85,7 +87,11 @@ from workflow.definitions.planning import (
 )
 from workflow.definitions.product_discovery import accepted_current_spec
 from workflow.domain import WorkflowDomain
-from workflow.fingerprints import canonical_hash, canonical_json
+from workflow.fingerprints import (
+    canonical_hash,
+    canonical_json,
+    workflow_node_attempt_fingerprint,
+)
 from workflow.handlers.planning import execute_apply_story_dependencies
 from workflow.requests import (
     ApplyStoryDependencies,
@@ -96,6 +102,7 @@ from workflow.requests import (
     RecordSprintPlan,
     RecordStoryDraft,
     RepairStoryReadiness,
+    StartNodeAttempt,
     StartSprint,
     TransitionRequest,
 )
@@ -896,6 +903,118 @@ def _record_sprint_plan_draft(
     )
 
 
+def _attach_sprint_owner_evidence(  # noqa: PLR0913
+    engine: Engine,
+    *,
+    project_id: int,
+    sprint_plan_artifact_id: int,
+    plan_fingerprint: str,
+    team_name: str,
+    owner_kind: Literal["solo_project", "named_team"],
+    tamper_attempt_fingerprint: bool = False,
+    tamper_receipt_result: bool = False,
+) -> None:
+    """Persist one valid successful planning attempt for acceptance tests."""
+    normalized_input: JsonObject = {
+        "team_name": team_name,
+        "owner_kind": owner_kind,
+    }
+    start = StartNodeAttempt(
+        project_id=project_id,
+        graph_version="agileforge.workflow.v2",
+        fact_fingerprint="sha256:sprint-owner-facts",
+        decision_fingerprint="sha256:sprint-owner-decision",
+        idempotency_key=f"sprint-owner-attempt-{sprint_plan_artifact_id}",
+        actor="owner-reviewer",
+        correlation_id=None,
+        target_node_id="planning.sprint.plan",
+        normalized_input=normalized_input,
+        model_id="test/sprint-owner",
+        execution_settings={"timeout_seconds": 5},
+        lease_seconds=60,
+    )
+    with Session(engine) as session:
+        attempt = WorkflowNodeAttempt(
+            project_id=project_id,
+            node_id="planning.sprint.plan",
+            instance_key=None,
+            graph_version=start.graph_version,
+            fact_fingerprint=start.fact_fingerprint,
+            business_fact_fingerprint="sha256:sprint-owner-business",
+            decision_fingerprint=start.decision_fingerprint,
+            normalized_input_json=canonical_json(normalized_input),
+            input_fingerprint=canonical_hash(normalized_input),
+            model_id=start.model_id,
+            execution_settings_json=canonical_json(start.execution_settings),
+            idempotency_key=start.idempotency_key,
+            actor=start.actor,
+            correlation_id=start.correlation_id,
+            started_at=EVALUATED_AT,
+            lease_expires_at=EVALUATED_AT + timedelta(seconds=60),
+            attempt_fingerprint="pending",
+        )
+        session.add(attempt)
+        session.flush()
+        assert attempt.workflow_node_attempt_id is not None
+        attempt.attempt_fingerprint = workflow_node_attempt_fingerprint(
+            {
+                "attempt_id": attempt.workflow_node_attempt_id,
+                "project_id": attempt.project_id,
+                "node_id": attempt.node_id,
+                "instance_key": attempt.instance_key,
+                "graph_version": attempt.graph_version,
+                "fact_fingerprint": attempt.fact_fingerprint,
+                "business_fact_fingerprint": attempt.business_fact_fingerprint,
+                "decision_fingerprint": attempt.decision_fingerprint,
+                "normalized_input": normalized_input,
+                "input_fingerprint": attempt.input_fingerprint,
+                "model_id": attempt.model_id,
+                "execution_settings": start.execution_settings,
+                "idempotency_key": attempt.idempotency_key,
+                "actor": attempt.actor,
+                "correlation_id": attempt.correlation_id,
+                "started_at": attempt.started_at,
+                "lease_expires_at": attempt.lease_expires_at,
+            }
+        )
+        if tamper_attempt_fingerprint:
+            attempt.attempt_fingerprint = "sha256:tampered-attempt"
+        output: JsonObject = {
+            "sprint_plan_artifact_id": sprint_plan_artifact_id,
+            "plan_fingerprint": plan_fingerprint,
+        }
+        receipt_output = dict(output)
+        if tamper_receipt_result:
+            receipt_output["sprint_plan_artifact_id"] = sprint_plan_artifact_id + 1
+        receipt_result = TransitionResult(
+            ok=True,
+            applied_node_id="planning.sprint.plan",
+            output=receipt_output,
+        )
+        session.add(
+            WorkflowTransitionReceipt(
+                request_kind="start_node_attempt",
+                idempotency_key=start.idempotency_key,
+                request_fingerprint=canonical_hash(start.model_dump(mode="json")),
+                request_json=canonical_json(start.model_dump(mode="json")),
+                result_json=canonical_json(receipt_result.model_dump(mode="json")),
+                started_at=EVALUATED_AT,
+                completed_at=EVALUATED_AT,
+            )
+        )
+        session.add(
+            WorkflowNodeAttemptOutcome(
+                project_id=project_id,
+                workflow_node_attempt_id=attempt.workflow_node_attempt_id,
+                status="success",
+                output_fingerprint=canonical_hash(output),
+                output_json=canonical_json(output),
+                recorded_at=EVALUATED_AT,
+            )
+        )
+        session.commit()
+
+
 def _apply_current_dependencies(
     engine: Engine,
     domain: WorkflowDomain,
@@ -1554,6 +1673,270 @@ def test_sprint_plan_review_and_start_bind_exact_plan_and_candidate_set(
         assert "implementation" in task.metadata_json
 
 
+def test_solo_owner_acceptance_rejects_raced_reserved_team_conflict(
+    engine: Engine,
+) -> None:
+    """Acceptance rechecks owner authority after generation before activation."""
+    project_id = _seed_accepted_backlog(engine)
+    domain = _domain(engine)
+    _record_and_accept_roadmap(domain, project_id)
+    _artifact_id, story_id = _record_and_accept_story(engine, domain, project_id)
+    with Session(engine) as session:
+        project = session.get(Project, project_id)
+        assert project is not None
+        team_name = (
+            "[agileforge:sprint-owner:solo-project:v1:project:"
+            f"{project_id}] Solo operator for {project.name}"
+        )
+    plan_id, _candidate, _plan, plan_fingerprint = _record_sprint_plan_draft(
+        engine,
+        domain,
+        project_id,
+        story_id,
+        team_name=team_name,
+        idempotency_key="solo-owner-race",
+    )
+    _attach_sprint_owner_evidence(
+        engine,
+        project_id=project_id,
+        sprint_plan_artifact_id=plan_id,
+        plan_fingerprint=plan_fingerprint,
+        team_name=team_name,
+        owner_kind="solo_project",
+    )
+    with Session(engine) as session:
+        foreign = Project(name="Foreign reserved Team link")
+        session.add(foreign)
+        session.flush()
+        assert foreign.project_id is not None
+        conflicting_team = Team(name=team_name)
+        session.add(conflicting_team)
+        session.flush()
+        assert conflicting_team.team_id is not None
+        session.add(
+            ProjectTeam(
+                project_id=foreign.project_id,
+                team_id=conflicting_team.team_id,
+            )
+        )
+        session.commit()
+        conflicting_team_id = conflicting_team.team_id
+
+    position = domain.position(project_id)
+    accepted = domain.transition(
+        DecideSprintPlan(
+            **_guards(position, "planning.sprint.review"),
+            idempotency_key="solo-owner-race-accept",
+            sprint_plan_artifact_id=plan_id,
+            plan_fingerprint=plan_fingerprint,
+            decision="accepted",
+            rationale="Accept only if the solo owner remains exclusive.",
+        )
+    )
+
+    assert accepted.ok is False
+    assert accepted.error is not None
+    assert accepted.error.code is WorkflowErrorCode.SPRINT_OWNER_CONFLICT
+    with Session(engine) as session:
+        assert (
+            session.exec(
+                select(SprintPlanArtifactDecision).where(
+                    SprintPlanArtifactDecision.sprint_plan_artifact_id == plan_id
+                )
+            ).first()
+            is None
+        )
+        current_sprints = session.exec(
+            select(Sprint).where(Sprint.project_id == project_id)
+        )
+        assert current_sprints.first() is None
+        assert session.exec(select(SprintStory)).first() is None
+        assert session.exec(select(Task)).first() is None
+        assert session.get(ProjectTeam, (project_id, conflicting_team_id)) is None
+
+
+def test_solo_owner_acceptance_creates_and_links_an_absent_reserved_team(
+    engine: Engine,
+) -> None:
+    """A valid solo role creates exactly its Project-local persistence carrier."""
+    project_id = _seed_accepted_backlog(engine)
+    domain = _domain(engine)
+    _record_and_accept_roadmap(domain, project_id)
+    _artifact_id, story_id = _record_and_accept_story(engine, domain, project_id)
+    with Session(engine) as session:
+        project = session.get(Project, project_id)
+        assert project is not None
+        team_name = (
+            "[agileforge:sprint-owner:solo-project:v1:project:"
+            f"{project_id}] Solo operator for {project.name}"
+        )
+    plan_id, _candidate, _plan, plan_fingerprint = _record_sprint_plan_draft(
+        engine,
+        domain,
+        project_id,
+        story_id,
+        team_name=team_name,
+        idempotency_key="solo-owner-create",
+    )
+    _attach_sprint_owner_evidence(
+        engine,
+        project_id=project_id,
+        sprint_plan_artifact_id=plan_id,
+        plan_fingerprint=plan_fingerprint,
+        team_name=team_name,
+        owner_kind="solo_project",
+    )
+
+    position = domain.position(project_id)
+    accepted = domain.transition(
+        DecideSprintPlan(
+            **_guards(position, "planning.sprint.review"),
+            idempotency_key="solo-owner-create-accept",
+            sprint_plan_artifact_id=plan_id,
+            plan_fingerprint=plan_fingerprint,
+            decision="accepted",
+            rationale="Accept the current exclusive solo owner.",
+        )
+    )
+
+    assert accepted.ok is True
+    with Session(engine) as session:
+        team = session.exec(select(Team).where(Team.name == team_name)).one()
+        assert team.team_id is not None
+        assert session.get(ProjectTeam, (project_id, team.team_id)) is not None
+
+
+def test_solo_owner_acceptance_reuses_only_the_current_project_reserved_team(
+    engine: Engine,
+) -> None:
+    """A pre-existing exclusive solo carrier is reused instead of duplicated."""
+    project_id = _seed_accepted_backlog(engine)
+    domain = _domain(engine)
+    _record_and_accept_roadmap(domain, project_id)
+    _artifact_id, story_id = _record_and_accept_story(engine, domain, project_id)
+    with Session(engine) as session:
+        project = session.get(Project, project_id)
+        assert project is not None
+        team_name = (
+            "[agileforge:sprint-owner:solo-project:v1:project:"
+            f"{project_id}] Solo operator for {project.name}"
+        )
+    plan_id, _candidate, _plan, plan_fingerprint = _record_sprint_plan_draft(
+        engine,
+        domain,
+        project_id,
+        story_id,
+        team_name=team_name,
+        idempotency_key="solo-owner-reuse",
+    )
+    with Session(engine) as session:
+        team = Team(name=team_name)
+        session.add(team)
+        session.flush()
+        assert team.team_id is not None
+        session.add(ProjectTeam(project_id=project_id, team_id=team.team_id))
+        session.commit()
+        team_id = team.team_id
+    _attach_sprint_owner_evidence(
+        engine,
+        project_id=project_id,
+        sprint_plan_artifact_id=plan_id,
+        plan_fingerprint=plan_fingerprint,
+        team_name=team_name,
+        owner_kind="solo_project",
+    )
+
+    position = domain.position(project_id)
+    accepted = domain.transition(
+        DecideSprintPlan(
+            **_guards(position, "planning.sprint.review"),
+            idempotency_key="solo-owner-reuse-accept",
+            sprint_plan_artifact_id=plan_id,
+            plan_fingerprint=plan_fingerprint,
+            decision="accepted",
+            rationale="Reuse the current exclusive solo owner.",
+        )
+    )
+
+    assert accepted.ok is True
+    with Session(engine) as session:
+        sprint_id = _output_int(accepted, "activated_sprint_id")
+        sprint = session.get(Sprint, sprint_id)
+        assert sprint is not None
+        assert sprint.team_id == team_id
+        persisted_team = session.exec(
+            select(Team).where(Team.name == team_name)
+        ).one()
+        assert persisted_team.team_id == team_id
+
+
+@pytest.mark.parametrize(
+    ("owner_kind", "team_name"),
+    [
+        ("named_team", "Shared named Team"),
+        (
+            None,
+            "[agileforge:sprint-owner:solo-project:v1:project:999] Historical Team",
+        ),
+    ],
+)
+def test_named_and_legacy_owner_acceptance_preserves_shared_team_behavior(
+    engine: Engine,
+    owner_kind: Literal["named_team"] | None,
+    team_name: str,
+) -> None:
+    """Named and historical labels retain the preexisting shared-Team behavior."""
+    project_id = _seed_accepted_backlog(engine)
+    domain = _domain(engine)
+    _record_and_accept_roadmap(domain, project_id)
+    _artifact_id, story_id = _record_and_accept_story(engine, domain, project_id)
+    plan_id, _candidate, _plan, plan_fingerprint = _record_sprint_plan_draft(
+        engine,
+        domain,
+        project_id,
+        story_id,
+        team_name=team_name,
+        idempotency_key=f"shared-owner-{owner_kind or 'legacy'}",
+    )
+    if owner_kind is not None:
+        _attach_sprint_owner_evidence(
+            engine,
+            project_id=project_id,
+            sprint_plan_artifact_id=plan_id,
+            plan_fingerprint=plan_fingerprint,
+            team_name=team_name,
+            owner_kind=owner_kind,
+        )
+    with Session(engine) as session:
+        foreign = Project(name=f"Shared owner foreign {owner_kind or 'legacy'}")
+        session.add(foreign)
+        session.flush()
+        assert foreign.project_id is not None
+        team = Team(name=team_name)
+        session.add(team)
+        session.flush()
+        assert team.team_id is not None
+        session.add(ProjectTeam(project_id=foreign.project_id, team_id=team.team_id))
+        session.commit()
+        team_id = team.team_id
+
+    position = domain.position(project_id)
+    accepted = domain.transition(
+        DecideSprintPlan(
+            **_guards(position, "planning.sprint.review"),
+            idempotency_key=f"shared-owner-{owner_kind or 'legacy'}-accept",
+            sprint_plan_artifact_id=plan_id,
+            plan_fingerprint=plan_fingerprint,
+            decision="accepted",
+            rationale="Retain shared named-Team compatibility.",
+        )
+    )
+
+    assert accepted.ok is True
+    with Session(engine) as session:
+        assert session.get(ProjectTeam, (project_id, team_id)) is not None
+
+
 def test_accepted_unstarted_revision_replaces_only_current_projection(
     engine: Engine,
 ) -> None:
@@ -1992,20 +2375,35 @@ def test_sprint_acceptance_failure_after_projection_rolls_back_every_row(
     engine: Engine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Roll back Team, Sprint, membership, Task, and decision as one unit."""
+    """Roll back the new solo carrier and every projection write as one unit."""
     import services.agent_workbench.sprint_phase as sprint_phase_module  # noqa: PLC0415
 
     project_id = _seed_accepted_backlog(engine)
     domain = _domain(engine)
     _record_and_accept_roadmap(domain, project_id)
     _story_artifact_id, story_id = _record_and_accept_story(engine, domain, project_id)
+    with Session(engine) as session:
+        project = session.get(Project, project_id)
+        assert project is not None
+        team_name = (
+            "[agileforge:sprint-owner:solo-project:v1:project:"
+            f"{project_id}] Solo operator for {project.name}"
+        )
     plan_id, _candidate, _plan, plan_fingerprint = _record_sprint_plan_draft(
         engine,
         domain,
         project_id,
         story_id,
-        team_name="Rollback Team",
+        team_name=team_name,
         idempotency_key="rollback-plan-draft",
+    )
+    _attach_sprint_owner_evidence(
+        engine,
+        project_id=project_id,
+        sprint_plan_artifact_id=plan_id,
+        plan_fingerprint=plan_fingerprint,
+        team_name=team_name,
+        owner_kind="solo_project",
     )
     original = sprint_phase_module._replace_operational_projection
 

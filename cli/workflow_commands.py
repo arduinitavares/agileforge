@@ -218,8 +218,6 @@ _SEMANTIC_ARGUMENTS: dict[str, tuple[str, ...]] = {
     "record_sprint_plan": (
         "--max-story-points",
         "<max-story-points>",
-        "--team-name",
-        "<team-name>",
     ),
     "record_story_draft": (),
     "record_vision_interview_turn": ("--text", "<text>"),

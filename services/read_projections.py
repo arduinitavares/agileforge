@@ -66,6 +66,12 @@ from services.specs.candidate_contract import (
     load_candidate_contract,
     render_candidate_review_markdown,
 )
+from services.sprint_ownership import (
+    SprintOwnerEvidenceError,
+    SprintOwnerResolutionError,
+    load_sprint_owner_evidence,
+    resolve_sprint_owner,
+)
 from services.story_evidence_scope import structural_evidence_scope_payload
 from utils.spec_schemas import ValidationEvidence
 from workflow.contracts import JsonObject, JsonValue
@@ -2376,6 +2382,19 @@ class DurableReadProjectionService:
 
     def sprint_candidates(self, *, project_id: int) -> JsonObject:
         """Return Story facts currently eligible for Sprint planning."""
+        with Session(self._engine) as session:
+            try:
+                owner = resolve_sprint_owner(
+                    session,
+                    project_id=project_id,
+                    team_name=None,
+                )
+            except SprintOwnerResolutionError as error:
+                return _error(
+                    error.code.value,
+                    str(error),
+                    project_id=project_id,
+                )
         snapshot_or_error = self._snapshot(project_id)
         if isinstance(snapshot_or_error, dict):
             return snapshot_or_error
@@ -2389,6 +2408,10 @@ class DurableReadProjectionService:
                 "project_id": project_id,
                 "items": items,
                 "count": len(items),
+                "sprint_owner": {
+                    **owner.model_dump(mode="json"),
+                    "named_team_override_allowed": True,
+                },
                 "structural_evidence_scope": structural_evidence_scope_payload(),
             }
         )
@@ -2424,13 +2447,23 @@ class DurableReadProjectionService:
                     candidate_set_fingerprint=artifact.candidate_set_fingerprint,
                     selected_story_ids_json=artifact.selected_story_ids_json,
                 )
+                owner = load_sprint_owner_evidence(
+                    session,
+                    artifact=artifact,
+                    owner_label=envelope.team_name,
+                )
                 specification = load_accepted_specification(
                     session,
                     project_id=project_id,
                     spec_version_id=artifact.spec_version_id,
                     spec_hash=artifact.spec_hash,
                 )
-            except (AcceptedSpecificationIntegrityError, ValidationError, ValueError):
+            except (
+                AcceptedSpecificationIntegrityError,
+                SprintOwnerEvidenceError,
+                ValidationError,
+                ValueError,
+            ):
                 return _error(
                     "PLANNING_ARTIFACT_CONTENT_INVALID",
                     "Sprint plan artifact content is invalid.",
@@ -2638,7 +2671,7 @@ class DurableReadProjectionService:
             }
             return _success(
                 {
-                    "schema_version": "agileforge.planning-artifact-review.v1",
+                    "schema_version": "agileforge.planning-artifact-review.v2",
                     "phase": "sprint_plan",
                     "project_id": project_id,
                     "lineage": {
@@ -2664,6 +2697,7 @@ class DurableReadProjectionService:
                         "created_by": artifact.created_by,
                         "created_at": _iso(artifact.created_at),
                         "team_name": envelope.team_name,
+                        "sprint_owner": owner.model_dump(mode="json"),
                         "sprint_goal": envelope.planner_output.sprint_goal,
                         "selected_stories": selected_stories,
                     },
@@ -2929,7 +2963,7 @@ class DurableReadProjectionService:
         task_id: int,
         flavor: str | None = None,
     ) -> JsonObject:
-        """Return canonical task_packet.v3 from exact accepted delivery lineage."""
+        """Return canonical task_packet.v4 from exact accepted delivery lineage."""
         from services.packets.canonical import (  # noqa: PLC0415
             CanonicalPacketError,
             build_task_packet,
@@ -2955,7 +2989,7 @@ class DurableReadProjectionService:
         story_id: int,
         flavor: str | None = None,
     ) -> JsonObject:
-        """Return canonical story_packet.v2 from exact accepted delivery lineage."""
+        """Return canonical story_packet.v3 from exact accepted delivery lineage."""
         from services.packets.canonical import (  # noqa: PLC0415
             CanonicalPacketError,
             build_story_packet,

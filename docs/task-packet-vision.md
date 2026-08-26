@@ -5,8 +5,8 @@
 AgileForge hands accepted planning evidence to delivery through two canonical,
 deterministic artifacts:
 
-- `story_packet.v2` bootstraps one Story session.
-- `task_packet.v3` describes one Task-sized execution slice.
+- `story_packet.v3` bootstraps one Story session.
+- `task_packet.v4` describes one Task-sized execution slice.
 
 The packet is the durable product. Human briefs and agent prompts are closed
 renderings of that packet, not alternative sources of truth.
@@ -40,6 +40,8 @@ Canonical packets:
 - derive `source_fingerprint` from ordered lineage, context, evidence, and work;
 - contain no wall-clock generation timestamp;
 - require canonical `task_metadata.v2` bytes and exact accepted-plan identity;
+- retain the exact Sprint owner label, durable owner kind, and deterministic
+  owner key from accepted planning evidence;
 - fail closed on absent, ambiguous, corrupt, stale, or inconsistent evidence.
 
 The same durable state therefore produces byte-equivalent canonical JSON.
@@ -66,5 +68,8 @@ empty and unknown flavors fail closed. Both renderers call the shared complete
 canonical validator, so missing, unknown, malformed, or non-finite packet
 content cannot be converted into usable-looking text.
 
-See [Story Packet v2](./story-packet-schema-v2.md) and
-[Task Packet v3](./task-packet-schema-v3.md) for the exact public contracts.
+See [Story Packet v3](./story-packet-schema-v3.md) and
+[Task Packet v4](./task-packet-schema-v4.md) for the exact public contracts.
+The previous v2/v3 documents remain as historical contracts. The ownership
+decision is recorded in the
+[solo-operator Sprint ownership design](./superpowers/specs/2026-08-26-solo-operator-sprint-ownership-design.md).

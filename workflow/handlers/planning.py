@@ -717,6 +717,12 @@ def execute_decide_sprint_plan(
                 ),
             )
     except ValueError as error:
+        from services.sprint_ownership import (  # noqa: PLC0415
+            SprintOwnerResolutionError,
+        )
+
+        if isinstance(error, SprintOwnerResolutionError):
+            return _workflow_error(error.code, str(error))
         return _conflict(str(error))
     return _success(
         decision,

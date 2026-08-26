@@ -188,6 +188,8 @@ def test_contract_enums_are_closed() -> None:
         "SPECIFICATION_OUTPUT_INCOMPLETE",
         "SPECIFICATION_PRODUCER_FAILED",
         "SPRINT_PLAN_STREAM_ID_COLLISION",
+        "SPRINT_OWNER_UNAVAILABLE",
+        "SPRINT_OWNER_CONFLICT",
         "ACTIVE_SPRINT_EXISTS",
         "STALE_SPECIFICATION",
     }

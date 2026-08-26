@@ -64,6 +64,12 @@ def test_human_renderer_shows_exact_language_without_machine_identity(
     assert "Verification: acceptance-test" in story_text
     assert "The Roadmap references Plan immutable work exactly once." in story_text
     assert "Task checklist:" in task_text
+    assert (
+        "Sprint owner: Legacy named team — Task 12 normalized execution team"
+        in story_text
+    )
+    assert "Team:" not in story_text
+    assert "Team:" not in task_text
     for forbidden in (
         "sha256:",
         "spec_version_id",
@@ -94,6 +100,10 @@ def test_agent_renderer_keeps_domain_evidence_but_not_internal_lineage(
     )
     assert "<acceptance_criteria>" in story_text
     assert "<checklist>" in task_text
+    assert (
+        '<sprint_owner kind="legacy_named_team">'
+        "Task 12 normalized execution team</sprint_owner>"
+    ) in story_text
     for forbidden in ("sha256:", "artifact_id", "fingerprint", "instance_key"):
         assert forbidden not in story_text
         assert forbidden not in task_text
@@ -115,8 +125,8 @@ def test_renderer_rejects_every_noncanonical_flavor(
     ("schema", "kind"),
     [
         ("story_packet." + "v1", "story"),
-        ("task_packet." + "v2", "task"),
-        ("story_packet.v2", "task"),
+        ("task_packet." + "v3", "task"),
+        ("story_packet.v3", "task"),
         ("unknown", "story"),
     ],
 )
