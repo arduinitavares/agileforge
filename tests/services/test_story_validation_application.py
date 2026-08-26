@@ -151,8 +151,9 @@ def test_reconcile_all_active_stories_replaces_missing_evidence(engine: Engine) 
     assert item["structural_failures"] == []
     assert item["validated_at"]
     assert item["evidence_fingerprint"].startswith("sha256:")
-    assert "Sprint selection." in data["does_not_prove"]
-    assert "Dependency safety." in data["does_not_prove"]
+    scope = cast("dict[str, Any]", data["structural_evidence_scope"])
+    assert "human Sprint selection" in scope["does_not_prove"]
+    assert "dependency safety" in scope["does_not_prove"]
 
 
 def test_reconciliation_api_and_cli_disclose_the_exact_structural_proof_boundary(

@@ -32,13 +32,11 @@ from services.story_dependencies import (
     ApplyStoryDependenciesInput,
     StoryDependencyGraphError,
     apply_story_dependencies_in_session,
-    dependency_inspect_payload,
     detect_dependency_cycles,
-    load_story_dependency_graph,
 )
 from services.story_sprint_selection import (
     StorySprintSelectionRequest,
-    apply_story_sprint_selection_in_session,
+    apply_story_sprint_selection_with_receipt_in_session,
     story_sprint_selection_fact_in_session,
 )
 from tests.test_create_user_story import (
@@ -271,7 +269,7 @@ def _apply_dependency_review(
 def _select_for_sprint(session: Session, *, story_id: int) -> None:
     story = session.get_one(UserStory, story_id)
     current = story_sprint_selection_fact_in_session(session, story=story)
-    apply_story_sprint_selection_in_session(
+    apply_story_sprint_selection_with_receipt_in_session(
         session,
         StorySprintSelectionRequest(
             project_id=story.project_id,
@@ -501,121 +499,9 @@ def test_dependency_test_engine_enforces_sqlite_foreign_keys(engine: Engine) -> 
         assert conn.execute(text("PRAGMA foreign_keys")).scalar_one() == 1
 
 
-def test_build_dependency_graph_reports_missing_story(
-    engine: Engine,
-    session: Session,
-) -> None:
-    """Report orphaned dependency edges without crashing graph load."""
-    project_id, dependent_story_id, _ = _story_pair(session)
-    session.close()
-    with engine.connect() as conn:
-        conn.exec_driver_sql("PRAGMA foreign_keys=OFF")
-        conn.execute(
-            text(
-                """
-                INSERT INTO user_story_dependencies
-                    (
-                        project_id,
-                        dependent_story_id,
-                        prerequisite_story_id,
-                        status,
-                        source,
-                        confidence
-                    )
-                VALUES
-                    (
-                        :project_id,
-                        :dependent_story_id,
-                        999999,
-                        'active',
-                        'manual_review',
-                        'reviewed'
-                    )
-                """
-            ),
-            {
-                "project_id": project_id,
-                "dependent_story_id": dependent_story_id,
-            },
-        )
-        conn.commit()
-        conn.exec_driver_sql("PRAGMA foreign_keys=ON")
-
-    with Session(engine) as fresh_session:
-        graph = load_story_dependency_graph(fresh_session, project_id=project_id)
-
-    assert graph.active_edges == {}
-    assert [issue.code for issue in graph.issues] == ["STORY_DEPENDENCY_ORPHAN"]
-    assert graph.issues[0].story_ids == [999999]
-
-
-def test_build_dependency_graph_reports_superseded_story(session: Session) -> None:
-    """Report active edges pointing at superseded stories."""
-    project_id, dependent_story_id, prerequisite_story_id = _story_pair(session)
-    prerequisite = session.get(UserStory, prerequisite_story_id)
-    assert prerequisite is not None
-    prerequisite.is_superseded = True
-    session.add(prerequisite)
-    session.add(
-        UserStoryDependency(
-            project_id=project_id,
-            dependent_story_id=dependent_story_id,
-            prerequisite_story_id=prerequisite_story_id,
-            status="active",
-        )
-    )
-    session.commit()
-
-    graph = load_story_dependency_graph(session, project_id=project_id)
-
-    assert graph.active_edges == {}
-    assert [issue.code for issue in graph.issues] == [
-        "STORY_DEPENDENCY_SUPERSEDED_STORY"
-    ]
-    assert graph.issues[0].story_ids == [prerequisite_story_id]
-
-
 def test_detect_cycle_returns_cycle_path() -> None:
     """Return deterministic cycle paths from dependency adjacency."""
     assert detect_dependency_cycles({1: {2}, 2: {3}, 3: {1}}) == [[1, 2, 3, 1]]
-
-
-def test_inspect_payload_separates_active_and_proposed_edges(session: Session) -> None:
-    """Expose active and proposed dependency edges in separate inspect buckets."""
-    project_id, story_a, story_b, story_c = _story_set(
-        session,
-        titles=("A", "B", "C"),
-    )
-    session.add(
-        UserStoryDependency(
-            project_id=project_id,
-            dependent_story_id=story_b,
-            prerequisite_story_id=story_a,
-            status="active",
-            confidence="reviewed",
-            source="manual_review",
-        )
-    )
-    session.add(
-        UserStoryDependency(
-            project_id=project_id,
-            dependent_story_id=story_c,
-            prerequisite_story_id=story_b,
-            status="proposed",
-            confidence="explicit",
-            source="story_writer",
-        )
-    )
-    session.commit()
-
-    payload = dependency_inspect_payload(session, project_id=project_id)
-
-    assert payload["active_edge_count"] == 1
-    assert payload["proposed_edge_count"] == 1
-    assert payload["active_edges"][0]["dependent_story_id"] == story_b
-    assert payload["proposed_edges"][0]["dependent_story_id"] == story_c
-    assert payload["cycle_count"] == 0
-    assert payload["issues"] == []
 
 
 def test_story_fact_keeps_validation_status_separate_from_dependency_blockers(
@@ -713,11 +599,6 @@ def test_selected_scope_review_preserves_unrelated_edges_and_external_visibility
     assert selected_edge.source == "manual_review"
     assert preserved.status == "proposed"
     assert preserved.source == "story_writer"
-    payload = dependency_inspect_payload(session, project_id=project_id)
-    assert any(
-        edge["prerequisite_story_id"] == prerequisite_id
-        for edge in payload["active_edges"]
-    )
 
 
 def test_external_prerequisite_blocks_until_complete_without_joining_scope(

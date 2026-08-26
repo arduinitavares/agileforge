@@ -21,13 +21,23 @@ acceptance transaction. Expected structural rule failures commit the accepted
 Story and its diagnostics atomically. Evaluator, persistence, or transaction
 failures roll back acceptance and evidence atomically.
 
-Current passing v3 evidence proves only structural eligibility for that exact
-accepted Story version. It does not prove semantic quality, human Sprint
-selection, dependency safety, candidacy, or Sprint generation readiness.
-Missing, v2, stale, and malformed evidence are operationally reconciled through
-the explicit reconciliation surface. A fresh canonical v3 evidence fingerprint
-is part of the scope identity, so reconciliation cannot silently revive an old
-dependency decision.
+Current passing v3 evidence publishes this exact stable proof scope for that
+accepted Story version:
+
+- exact Story identity;
+- immutable accepted Story artifact/item binding;
+- accepted Backlog and Specification lineage;
+- parent-bounded Specification references;
+- required Story shape;
+- non-empty acceptance criteria; and
+- current evidence and input fingerprints.
+
+It publishes this exact non-proof scope: semantic/model quality, product value,
+human Sprint selection, dependency safety, Sprint candidacy, and
+Sprint-generation readiness. Missing, v2, stale, and malformed evidence are
+operationally reconciled through the explicit reconciliation surface. A fresh
+canonical v3 evidence fingerprint is part of the scope identity, so
+reconciliation cannot silently revive an old dependency decision.
 
 The old operator mutation surfaces are removed without aliases:
 
@@ -47,6 +57,13 @@ Each exact, active accepted Story has one append-only human intent projection:
 state have an exact-version state fingerprint. A real transition adds one
 canonical selection event; an already-represented intent is a receipt-backed
 no-op and adds no duplicate event.
+
+Every real event is anchored to its creating completed
+`apply_story_sprint_selection` receipt in the same transaction. Replay verifies
+the canonical request JSON and fingerprint, Project/Story/actor/intent,
+rationale and correlation ID where present, prior state fingerprint, exact
+event identity/fingerprint/result state, and event lineage. Missing, malformed,
+or mismatched anchors fail closed; there is no unanchored legacy reader.
 
 | Intent | Allowed current state | Result |
 | --- | --- | --- |
@@ -77,6 +94,12 @@ Sprint are excluded from the *current* planning scope and candidate pool without
 clearing their durable human intent. After completed-Sprint post-triage, a newly
 selected current scope with no exact dependency review exposes dependency review
 when there is no active Sprint or pending accepted-plan boundary.
+
+Dependency review and mutation are unavailable while an accepted plan is
+unstarted, a Sprint is active, or a completed Sprint is awaiting post-Sprint
+triage. The mutation rechecks this lifecycle lock in its own transaction; it
+does not alter selected-scope rows while prior Sprint execution or history
+depends on them.
 
 Dependency confirmation is valid only for the exact selected Story IDs and one
 canonical `selected_scope_fingerprint`, which covers accepted Story identities,
@@ -114,3 +137,13 @@ exact IDs and fingerprints, then reload the authoritative projection. Malformed
 or unavailable eligibility, selection, selected-scope, dependency, or candidate
 facts fail closed. A successful mutation whose reload fails remains locked; no
 client guesses candidacy or selection locally.
+
+Dependency reads include the canonical `selected_story_ids` and
+`selected_scope_fingerprint`; clients submit those projected values rather than
+rederiving a scope from visible Stories. `GET /api/stories/{story_id}` and
+`agileforge story show --story-id <id>` expose the exact `StoryFact` structural
+eligibility/status/failures, selection state and event/state fingerprints,
+selected-scope fingerprint, dependency safety, candidacy, blockers, and the
+same structural evidence proof/non-proof lists. They do not expose legacy
+`ready_for_sprint` or conflated validation-status fields. A structurally
+eligible but unselected Story is not a candidate.

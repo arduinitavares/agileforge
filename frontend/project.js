@@ -176,10 +176,6 @@ function sprintSelectionMutationPayload(storyId, intent, expectedStateFingerprin
     });
 }
 
-function shouldUnlockStoryMutation(mutationCompleted, refreshed) {
-    return !mutationCompleted || refreshed;
-}
-
 function shouldUnlockDependencyMutation(mutationCompleted, refreshed) {
     return !mutationCompleted;
 }
@@ -218,8 +214,18 @@ function focusStoryReadiness(storyId) {
     row.focus();
 }
 
-async function postStorySelectionMutation(projectId, storyId, intent, expectedStateFingerprint) {
-    const payload = sprintSelectionMutationPayload(storyId, intent, expectedStateFingerprint);
+async function postStorySelectionMutation(
+    projectId,
+    storyId,
+    intent,
+    expectedStateFingerprint,
+    mutationPayload = null,
+) {
+    const payload = mutationPayload ?? sprintSelectionMutationPayload(
+        storyId,
+        intent,
+        expectedStateFingerprint,
+    );
     const path = `/api/projects/${projectId}/story/sprint-selection`;
     try {
         const response = await requestJson(path, {
@@ -1638,6 +1644,64 @@ function isStructuralDiagnostic(value) {
         && value.message.trim());
 }
 
+const STRUCTURAL_EVIDENCE_PROVES = [
+    'exact Story identity',
+    'immutable accepted Story artifact/item binding',
+    'accepted Backlog and Specification lineage',
+    'parent-bounded Specification references',
+    'required Story shape',
+    'non-empty acceptance criteria',
+    'current evidence and input fingerprints',
+];
+const STRUCTURAL_EVIDENCE_DOES_NOT_PROVE = [
+    'semantic/model quality',
+    'product value',
+    'human Sprint selection',
+    'dependency safety',
+    'Sprint candidacy',
+    'Sprint-generation readiness',
+];
+
+function parseStructuralEvidenceScope(value) {
+    if (!value || typeof value !== 'object'
+        || !Array.isArray(value.proves)
+        || !Array.isArray(value.does_not_prove)) return null;
+    const exact = (received, expected) => received.length === expected.length
+        && received.every((item, index) => item === expected[index]);
+    if (!exact(value.proves, STRUCTURAL_EVIDENCE_PROVES)
+        || !exact(value.does_not_prove, STRUCTURAL_EVIDENCE_DOES_NOT_PROVE)) {
+        return null;
+    }
+    return value;
+}
+
+function structuralEvidenceScopeMarkup(scope) {
+    if (!scope) {
+        return `<p role="alert" class="text-xs leading-5 text-red-700" data-story-evidence-scope-unavailable="true">Structural evidence scope is unavailable. Story controls are locked until the current exact proof boundary is loaded.</p>`;
+    }
+    const list = (items) => `<ul role="list" class="list-disc pl-5 space-y-1">${items.map((item) => `<li>${escapeWorkflowText(item)}</li>`).join('')}</ul>`;
+    return `<section class="rounded border border-slate-200 bg-slate-50 p-3 text-xs leading-5 text-slate-700" data-story-evidence-scope="true"><p><strong>Provider-free structural evidence proves:</strong></p>${list(scope.proves)}<p class="mt-2"><strong>It does not prove:</strong></p>${list(scope.does_not_prove)}</section>`;
+}
+
+function storyMutationPhase() {
+    return activeStoryMutation?.phase ?? null;
+}
+
+function storyMutationLocked() {
+    return ['submitting', 'awaiting_authority'].includes(storyMutationPhase());
+}
+
+function storyMutationStatusMarkup() {
+    const phase = storyMutationPhase();
+    if (phase === 'submitting') {
+        return `<p role="status" aria-live="polite" class="text-xs text-slate-700">Story update is being submitted; controls remain locked.</p>`;
+    }
+    if (phase === 'awaiting_authority') {
+        return `<p role="status" aria-live="polite" class="text-xs text-slate-700">Story update was accepted. Current project projection is reloading; controls remain locked.</p>`;
+    }
+    return '';
+}
+
 function parseStoryReadinessProjection(story) {
     if (!story || typeof story !== 'object' || !Number.isInteger(story.story_id) || story.story_id <= 0) return null;
     const eligibilityStatus = story.structural_eligibility_status;
@@ -1680,10 +1744,13 @@ function parseStoryReadinessProjection(story) {
     };
 }
 
-function storySelectionButtons(projection) {
+function storySelectionButtons(projection, controlsLocked = false) {
     const { story, selectionState } = projection;
     const binding = `data-story-selection-id="${story.story_id}" data-story-selection-fingerprint="${story.sprint_selection_state_fingerprint}"`;
-    const button = (intent, label, disabled = false) => `<button type="button" ${binding} data-story-selection-intent="${intent}"${disabled ? ' disabled aria-disabled="true"' : ''} aria-label="${label} for ${escapeWorkflowText(story.source_story_item_id || `Story #${story.story_id}`)}" class="${BUTTON_SECONDARY}"><span data-story-selection-label="true">${label}</span></button>`;
+    const button = (intent, label, disabled = false) => {
+        const locked = disabled || controlsLocked;
+        return `<button type="button" ${binding} data-story-selection-intent="${intent}"${locked ? ' disabled aria-disabled="true"' : ''}${controlsLocked ? ' aria-busy="true"' : ''} aria-label="${label} for ${escapeWorkflowText(story.source_story_item_id || `Story #${story.story_id}`)}" class="${BUTTON_SECONDARY}"><span data-story-selection-label="true">${label}</span></button>`;
+    };
     if (selectionState === 'selected') return `${button('remove', 'Remove from Sprint selection')}${button('defer', 'Defer')}`;
     if (selectionState === 'deferred') return `${button('select', 'Select for Sprint', !story.structurally_eligible)}${button('remove', 'Remove from Sprint selection')}`;
     return `${button('select', 'Select for Sprint', !story.structurally_eligible)}${button('defer', 'Defer')}`;
@@ -1692,6 +1759,10 @@ function storySelectionButtons(projection) {
 function storyReadinessMarkup(stories, context = {}) {
     if (!Array.isArray(stories) || stories.length === 0) return '';
     const pendingItems = Array.isArray(context?.storyPending?.items) ? context.storyPending.items : [];
+    const evidenceScope = parseStructuralEvidenceScope(
+        context?.storyDependencies?.structural_evidence_scope,
+    );
+    const controlsLocked = storyMutationLocked() || evidenceScope === null;
     const storyRows = stories.map((story) => {
         const projection = parseStoryReadinessProjection(story);
         const pbiId = story?.backlog_item_id || '';
@@ -1708,17 +1779,16 @@ function storyReadinessMarkup(stories, context = {}) {
             ? `<ul role="list" class="mt-2 space-y-1 text-xs text-red-700" data-story-validation-diagnostics="true">${failures.map((failure) => `<li><strong>${escapeWorkflowText(failure?.code || failure?.rule_name || 'Structural failure')}</strong>: ${escapeWorkflowText(failure?.message || 'Structural rule failed.')}</li>`).join('')}</ul>`
             : '';
         const reconcile = (isMissingEvidence || isStaleEvidence)
-            ? `<button type="button" data-story-structural-reconcile-id="${story.story_id}" aria-label="Re-run structural checks for ${escapeWorkflowText(storyIdText)}" class="${BUTTON_SECONDARY}"><span data-story-reconcile-label="true">Re-run structural checks</span></button>`
+            ? `<button type="button" data-story-structural-reconcile-id="${story.story_id}"${controlsLocked ? ' disabled aria-disabled="true" aria-busy="true"' : ''} aria-label="Re-run structural checks for ${escapeWorkflowText(storyIdText)}" class="${BUTTON_SECONDARY}"><span data-story-reconcile-label="true">Re-run structural checks</span></button>`
             : '';
         return `<div class="py-3 first:pt-0 last:pb-0 flex flex-col gap-3" data-story-readiness-row="${story.story_id}">
             <div class="min-w-0 space-y-1"><div class="flex items-center gap-2 flex-wrap"><span class="font-semibold text-sm text-slate-900">${escapeWorkflowText(storyIdText)}</span>${pbiId ? `<span class="text-xs text-slate-500 font-mono">(${escapeWorkflowText(pbiId)})</span>` : ''}</div>${requirement ? `<p class="text-xs text-slate-600">${escapeWorkflowText(requirement)}</p>` : ''}<p class="text-xs text-slate-500">Rank: ${escapeWorkflowText(story.rank || '-')} · Points: ${escapeWorkflowText(story.story_points ?? '-')}</p></div>
             <ul role="list" class="flex flex-wrap gap-2 text-xs"><li class="rounded-full border border-slate-300 px-2 py-0.5">${eligibilityLabel}</li><li class="rounded-full border border-slate-300 px-2 py-0.5">${selectionLabel}</li><li class="rounded-full border border-slate-300 px-2 py-0.5">${story.dependency_safe ? 'Dependency confirmed' : 'Dependencies not confirmed'}</li><li class="rounded-full border border-slate-300 px-2 py-0.5">${story.sprint_candidate ? 'Sprint candidate' : 'Not a Sprint candidate'}</li></ul>
-            <p class="text-xs leading-5 text-slate-600">Passing provider-free structural checks proves structural eligibility only. It does not select this Story for Sprint, confirm dependencies, validate semantic quality, or generate a Sprint.</p>
             ${diagnostics}
-            <div class="flex flex-wrap gap-2">${reconcile}${storySelectionButtons(projection)}</div>
+            <div class="flex flex-wrap gap-2">${reconcile}${storySelectionButtons(projection, controlsLocked)}</div>
         </div>`;
     });
-    return `<section class="rounded-lg border border-slate-200 bg-white p-4 space-y-3" aria-labelledby="story-readiness-heading" data-story-readiness-section="true"><div class="flex items-center justify-between border-b border-slate-100 pb-2"><h3 id="story-readiness-heading" class="text-sm font-bold text-ink">Story readiness and Sprint selection</h3><span class="text-xs text-slate-500">${stories.length} accepted ${stories.length === 1 ? 'story' : 'stories'}</span></div><div class="divide-y divide-slate-100">${storyRows.join('')}</div></section>`;
+    return `<section class="rounded-lg border border-slate-200 bg-white p-4 space-y-3" aria-labelledby="story-readiness-heading" data-story-readiness-section="true"><div class="flex items-center justify-between border-b border-slate-100 pb-2"><h3 id="story-readiness-heading" class="text-sm font-bold text-ink">Story readiness and Sprint selection</h3><span class="text-xs text-slate-500">${stories.length} accepted ${stories.length === 1 ? 'story' : 'stories'}</span></div>${structuralEvidenceScopeMarkup(evidenceScope)}${storyMutationStatusMarkup()}<div class="divide-y divide-slate-100">${storyRows.join('')}</div></section>`;
 }
 
 function validateCandidateProjection(candidates) {
@@ -1789,71 +1859,41 @@ function canGenerateSprintPlan(context = {}) {
         && candidates.scopeFingerprint === dependencies.scopeFingerprint;
 }
 
-function canonicalCandidateDependencies(candidates, dependencies) {
-    const projection = validateCandidateProjection(candidates);
-    if (!projection.isValid) {
-        return {
-            candidateStories: [],
-            candidateIds: [],
-            candidateEdges: [],
-            isWellFormed: false,
-        };
-    }
-
-    const { candidateStories, candidateIds } = projection;
-    const candidateSet = new Set(candidateIds);
-    const rawEdges = Array.isArray(dependencies?.edges) ? dependencies.edges : [];
-    const candidateEdges = rawEdges
-        .filter((e) => e && typeof e === 'object' && candidateSet.has(e.dependent_story_id) && candidateSet.has(e.prerequisite_story_id))
-        .map((e) => ({
-            dependent_story_id: e.dependent_story_id,
-            prerequisite_story_id: e.prerequisite_story_id,
-            reason: e.reason || 'Operator reviewed dependency',
-        }));
-    return {
-        candidateStories,
-        candidateIds,
-        candidateEdges,
-        isWellFormed: true,
-    };
-}
-
 function selectedScopeDependencies(stories, dependencies) {
-    if (!Array.isArray(stories) || !dependencies || typeof dependencies !== 'object' || !Array.isArray(dependencies.stories) || !Array.isArray(dependencies.edges)) {
+    if (!Array.isArray(stories) || !dependencies || typeof dependencies !== 'object'
+        || !Array.isArray(dependencies.stories)
+        || !Array.isArray(dependencies.edges)
+        || !Array.isArray(dependencies.selected_story_ids)
+        || !isSha256Fingerprint(dependencies.selected_scope_fingerprint)) {
         return { scopeStories: [], scopeIds: [], scopeEdges: [], isWellFormed: false };
     }
-    const projections = stories.map(parseStoryReadinessProjection);
     const dependencyProjections = dependencies.stories.map(parseStoryReadinessProjection);
-    if (projections.some((projection) => projection === null) || dependencyProjections.some((projection) => projection === null)) {
+    if (dependencyProjections.some((projection) => projection === null)) {
         return { scopeStories: [], scopeIds: [], scopeEdges: [], isWellFormed: false };
     }
-    const storyIds = new Set();
-    for (const projection of projections) {
-        if (storyIds.has(projection.story.story_id)) return { scopeStories: [], scopeIds: [], scopeEdges: [], isWellFormed: false };
-        storyIds.add(projection.story.story_id);
+    const dependencyById = new Map();
+    for (const projection of dependencyProjections) {
+        if (dependencyById.has(projection.story.story_id)) {
+            return { scopeStories: [], scopeIds: [], scopeEdges: [], isWellFormed: false };
+        }
+        dependencyById.set(projection.story.story_id, projection);
     }
-    const scopeFingerprints = new Set(projections.map((projection) => projection.story.selected_scope_fingerprint));
-    if (scopeFingerprints.size !== 1 || !isSha256Fingerprint(projections[0].story.selected_scope_fingerprint)) {
+    const scopeIds = dependencies.selected_story_ids;
+    if (scopeIds.length === 0
+        || scopeIds.some((storyId) => !Number.isInteger(storyId) || storyId <= 0)
+        || new Set(scopeIds).size !== scopeIds.length) {
         return { scopeStories: [], scopeIds: [], scopeEdges: [], isWellFormed: false };
     }
-    const dependencyStoryIds = new Set(dependencyProjections.map((projection) => projection.story.story_id));
-    if (dependencyProjections.length !== dependencyStoryIds.size
-        || dependencyStoryIds.size !== storyIds.size
-        || [...storyIds].some((storyId) => !dependencyStoryIds.has(storyId))) {
+    const scopeProjections = scopeIds.map((storyId) => dependencyById.get(storyId));
+    if (scopeProjections.some((projection) => !projection)
+        || scopeProjections.some((projection) => !projection.story.structurally_eligible
+            || projection.selectionState !== 'selected'
+            || projection.story.selected_scope_fingerprint !== dependencies.selected_scope_fingerprint)) {
         return { scopeStories: [], scopeIds: [], scopeEdges: [], isWellFormed: false };
     }
-    const dependencyScopeFingerprints = new Set(dependencyProjections.map((projection) => projection.story.selected_scope_fingerprint));
-    if (dependencyScopeFingerprints.size !== 1 || dependencyProjections[0].story.selected_scope_fingerprint !== projections[0].story.selected_scope_fingerprint) {
-        return { scopeStories: [], scopeIds: [], scopeEdges: [], isWellFormed: false };
-    }
-    const scopeStories = projections
-        .filter((projection) => projection.story.structurally_eligible && projection.selectionState === 'selected')
-        .map((projection) => projection.story);
-    if (scopeStories.length === 0) {
-        return { scopeStories: [], scopeIds: [], scopeEdges: [], isWellFormed: false };
-    }
-    const scopeIds = scopeStories.map((story) => story.story_id);
+    const scopeStories = scopeProjections.map((projection) => projection.story);
     const scopeIdSet = new Set(scopeIds);
+    const dependencyStoryIds = new Set(dependencyById.keys());
     const rawEdges = dependencies.edges;
     const scopeEdges = [];
     const seenEdges = new Set();
@@ -1864,8 +1904,8 @@ function selectedScopeDependencies(stories, dependencies) {
             || edge.dependent_story_id <= 0
             || edge.prerequisite_story_id <= 0
             || edge.dependent_story_id === edge.prerequisite_story_id
-            || !storyIds.has(edge.dependent_story_id)
-            || !storyIds.has(edge.prerequisite_story_id)
+            || !dependencyStoryIds.has(edge.dependent_story_id)
+            || !dependencyStoryIds.has(edge.prerequisite_story_id)
             || !['proposed', 'active', 'rejected'].includes(edge.status)
             || typeof edge.reason !== 'string'
             || !edge.reason.trim()) {
@@ -1887,7 +1927,7 @@ function selectedScopeDependencies(stories, dependencies) {
         scopeStories,
         scopeIds,
         scopeEdges,
-        scopeFingerprint: projections[0].story.selected_scope_fingerprint,
+        scopeFingerprint: dependencies.selected_scope_fingerprint,
         isWellFormed: true,
     };
 }
@@ -2215,6 +2255,12 @@ async function requestPlanningReview(url, options) {
 
 async function loadDashboard() {
     const sequence = ++dashboardLoadSequence;
+    const storyMutationAtStart = activeStoryMutation === null
+        ? null
+        : {
+            token: activeStoryMutation.token,
+            phase: activeStoryMutation.phase,
+        };
     const dependencyMutationAtStart = activeDependencyMutation === null
         ? null
         : {
@@ -2275,6 +2321,13 @@ async function loadDashboard() {
             storyDependencies: storyDependencies?.data ?? {},
             sprintCandidates: sprintCandidates?.data ?? {},
         };
+        if (
+            storyMutationAtStart?.phase === 'awaiting_authority'
+            && activeStoryMutation?.token === storyMutationAtStart.token
+            && activeStoryMutation.phase === storyMutationAtStart.phase
+        ) {
+            activeStoryMutation = null;
+        }
         if (
             dependencyMutationAtStart?.phase === 'awaiting_authority'
             && activeDependencyMutation?.token === dependencyMutationAtStart.token
@@ -3101,31 +3154,58 @@ function installInteractions() {
             const controlStates = captureStoryControlStates(controls);
             const label = button.querySelector('[data-story-selection-label="true"], [data-story-reconcile-label="true"]');
             const idleLabel = label?.textContent ?? '';
+            const payload = intent
+                ? sprintSelectionMutationPayload(storyId, intent, fingerprint)
+                : structuralEligibilityMutationPayload(storyId);
+            const token = payload.idempotency_key;
             controls.forEach((control) => {
                 control.disabled = true;
                 control.setAttribute('aria-busy', 'true');
             });
-            activeStoryMutation = { storyId, intent, fingerprint };
+            activeStoryMutation = {
+                token,
+                phase: 'submitting',
+                payload,
+                storyId,
+                intent,
+                fingerprint,
+            };
             let refreshed = false;
             let mutationCompleted = false;
             setProjectError('');
             try {
                 if (intent) {
                     if (label) label.textContent = 'Saving selection...';
-                    await postStorySelectionMutation(selectedProjectId, storyId, intent, fingerprint);
+                    await postStorySelectionMutation(
+                        selectedProjectId,
+                        storyId,
+                        intent,
+                        fingerprint,
+                        payload,
+                    );
                     mutationCompleted = true;
                 } else {
                     if (label) label.textContent = 'Running structural checks...';
                     const response = await requestJson(`/api/projects/${selectedProjectId}/story/structural-eligibility/reconcile`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(structuralEligibilityMutationPayload(storyId)),
+                        body: JSON.stringify(payload),
                     });
                     if (response?.ok === false) {
                         const failure = response.errors?.[0];
                         throw new Error(failure?.message || 'Structural eligibility reconciliation was rejected.');
                     }
                     mutationCompleted = true;
+                }
+                if (
+                    activeStoryMutation?.token === token
+                    && activeStoryMutation.phase === 'submitting'
+                ) {
+                    activeStoryMutation = {
+                        ...activeStoryMutation,
+                        phase: 'awaiting_authority',
+                    };
+                    renderDashboard();
                 }
                 refreshed = await loadDashboard() === true;
                 if (!refreshed) {
@@ -3135,8 +3215,8 @@ function installInteractions() {
             } catch (error) {
                 setProjectError(error.message);
             } finally {
-                activeStoryMutation = null;
-                if (shouldUnlockStoryMutation(mutationCompleted, refreshed)) {
+                if (!mutationCompleted && activeStoryMutation?.token === token) {
+                    activeStoryMutation = null;
                     restoreStoryControlStates(controlStates);
                     if (label) label.textContent = idleLabel;
                 }

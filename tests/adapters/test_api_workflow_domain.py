@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from http import HTTPStatus
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
+from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -3295,9 +3296,20 @@ def test_next_sprint_dependency_apply_uses_only_projected_current_scope(
                 "idempotency_key": "next-scope-authority-apply",
                 "actor": "operator@example.com",
             },
-        )
+    )
     assert response.status_code == HTTPStatus.OK
-    assert response.json()["data"]["selected_story_ids"] == [future_story_id]
+    assert response.json()["status"] == "success"
+    with Session(engine) as session:
+        applied = WorkflowFactRepository(session).load(project_id)
+    assert applied.story_dependency_reviews[-1].selected_story_ids == (
+        future_story_id,
+    )
+    projection = DurableReadProjectionService(engine=engine).story_dependencies_inspect(
+        project_id=project_id
+    )
+    assert projection["ok"] is True
+    projection_data = cast("dict[str, Any]", projection["data"])
+    assert projection_data["selected_story_ids"] == [future_story_id]
 
 
 def test_invalid_manual_sprint_selection_fails_before_model(

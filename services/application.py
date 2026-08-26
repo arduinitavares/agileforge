@@ -102,14 +102,17 @@ from services.sprint_selection import (
     require_exact_candidate_story_ids,
     select_sprint_story_rows,
 )
+from services.story_evidence_scope import structural_evidence_scope_payload
 from services.story_rank import parse_story_rank, story_rank_is_valid
 from services.story_runtime import build_story_input_context
 from services.story_sprint_selection import (
+    StorySprintSelectionFact,
     StorySprintSelectionIntegrityError,
     StorySprintSelectionMutationError,
     StorySprintSelectionRequest,
     apply_story_sprint_selection_in_session,
-    story_structural_eligibility,
+    story_sprint_selection_request_fingerprint,
+    story_sprint_selection_request_payload,
 )
 from services.vision_evidence import (
     VisionEvidenceCollectionError,
@@ -134,6 +137,7 @@ from workflow.contracts import (
 from workflow.definitions.planning import (
     candidate_set_fingerprint,
     readiness_fingerprint,
+    selected_scope_stories,
     story_dependency_source_fingerprint,
 )
 from workflow.execution_integrity import (
@@ -500,17 +504,9 @@ class PlanningActionSelectionService:
         snapshot = self._snapshot(project_id)
         if snapshot is None:
             return None
-        stories = tuple(
-            sorted(
-                (
-                    item
-                    for item in snapshot.stories
-                    if item.structurally_eligible
-                    and item.sprint_selection_state == "selected"
-                ),
-                key=lambda item: item.story_id,
-            )
-        )
+        stories = selected_scope_stories(snapshot)
+        if not stories:
+            return None
         expected_ids = tuple(item.story_id for item in stories)
         source_fingerprint = story_dependency_source_fingerprint(stories)
         reference = _single_fact_reference(decision, "story_dependency_source")
@@ -1444,6 +1440,11 @@ def _story_eligibility_error(*, code: str, message: str) -> JsonObject:
     }
 
 
+def _selection_integrity_error_response(message: str) -> JsonObject:
+    """Build the fail-closed response for corrupted selection history."""
+    return _story_eligibility_error(code="WORKFLOW_FACT_CONFLICT", message=message)
+
+
 def _story_eligibility_item(
     story_id: int,
     evidence: ValidationEvidence,
@@ -1457,6 +1458,52 @@ def _story_eligibility_item(
         ],
         "validated_at": evidence.validated_at.isoformat(),
         "evidence_fingerprint": canonical_hash(evidence.model_dump(mode="json")),
+        "input_fingerprint": evidence.story_validation_input_fingerprint,
+    }
+
+
+def _selection_receipt_anchor_response(
+    request: StorySprintSelectionRequest,
+    fact: StorySprintSelectionFact,
+) -> JsonObject:
+    """Persist the minimum result required to validate a new selection event."""
+    return {
+        "ok": True,
+        "data": {
+            "project_id": request.project_id,
+            "story_id": request.story_id,
+            "selection_state": fact.selection_state,
+            "state_fingerprint": fact.state_fingerprint,
+            "selection_event_id": fact.event_id,
+            "selection_event_fingerprint": fact.event_fingerprint,
+        },
+        "errors": [],
+    }
+
+
+def _selection_story_fact_response(
+    request: StorySprintSelectionRequest,
+    fact: StoryFact,
+) -> JsonObject:
+    """Return only the authoritative post-write StoryFact selection projection."""
+    return {
+        "ok": True,
+        "data": {
+            "project_id": request.project_id,
+            "story_id": fact.story_id,
+            "selection_state": fact.sprint_selection_state,
+            "state_fingerprint": fact.sprint_selection_state_fingerprint,
+            "selection_event_id": fact.sprint_selection_event_id,
+            "selection_event_fingerprint": fact.sprint_selection_event_fingerprint,
+            "structurally_eligible": fact.structurally_eligible,
+            "structural_eligibility_status": fact.structural_eligibility_status,
+            "structural_failures": list(fact.validation_failures),
+            "selected_scope_fingerprint": fact.selected_scope_fingerprint,
+            "dependency_safe": fact.dependency_safe,
+            "sprint_candidate": fact.sprint_candidate,
+            "readiness_blockers": list(fact.readiness_blockers),
+        },
+        "errors": [],
     }
 
 
@@ -2575,21 +2622,20 @@ class AgileForgeApplication:
                 reconciled_story_ids.append(story_id)
             stories.append(_story_eligibility_item(story_id, evidence))
         story_ids = [cast("int", story.story_id) for story in targets]
-        return cast("JsonObject", {
-            "ok": True,
-            "data": {
-                "story_ids": story_ids,
-                "reconciled_story_ids": reconciled_story_ids,
-                "unchanged_story_ids": unchanged_story_ids,
-                "stories": stories,
-                "proves": [
-                    "Current provider-free structural eligibility evidence.",
-                    "Persisted structural failures for each returned Story.",
-                ],
-                "does_not_prove": ["Sprint selection.", "Dependency safety."],
+        return cast(
+            "JsonObject",
+            {
+                "ok": True,
+                "data": {
+                    "story_ids": story_ids,
+                    "reconciled_story_ids": reconciled_story_ids,
+                    "unchanged_story_ids": unchanged_story_ids,
+                    "stories": stories,
+                    "structural_evidence_scope": structural_evidence_scope_payload(),
+                },
+                "errors": [],
             },
-            "errors": [],
-        })
+        )
 
     def reconcile_story_eligibility(
         self,
@@ -2660,98 +2706,94 @@ class AgileForgeApplication:
         request: StorySprintSelectionRequest,
     ) -> JsonObject:
         """Apply one writer-locked, receipt-backed human selection intent."""
-        request_payload: JsonObject = {
-            "project_id": request.project_id,
-            "story_id": request.story_id,
-            "intent": request.intent,
-            "expected_state_fingerprint": request.expected_state_fingerprint,
-            "rationale": request.rationale,
-            "actor": request.actor,
-            "correlation_id": request.correlation_id,
-        }
-        request_fingerprint = canonical_hash(request_payload)
-        with Session(self._engine(), expire_on_commit=False) as session:
-            if session.get_bind().dialect.name == "sqlite":
-                session.connection().exec_driver_sql("BEGIN IMMEDIATE")
-            existing = session.exec(
-                select(WorkflowTransitionReceipt).where(
-                    col(WorkflowTransitionReceipt.request_kind)
-                    == "apply_story_sprint_selection",
-                    col(WorkflowTransitionReceipt.idempotency_key)
-                    == request.idempotency_key,
-                )
-            ).one_or_none()
-            if existing is not None:
-                if existing.request_fingerprint != request_fingerprint:
-                    return {
-                        "ok": False,
-                        "data": {},
-                        "errors": [
-                            {
-                                "code": "IDEMPOTENCY_CONFLICT",
-                                "message": (
-                                    "The idempotency key was already used for"
-                                    " different input."
-                                ),
-                            }
-                        ],
-                    }
-                if existing.result_json is not None:
-                    return _JSON_OBJECT.validate_json(existing.result_json)
-                message = "Story selection receipt is incomplete."
-                raise StorySprintSelectionIntegrityError(message)
-            try:
-                fact = apply_story_sprint_selection_in_session(session, request)
-                story = session.get_one(UserStory, request.story_id)
-                structurally_eligible, eligibility_status = (
-                    story_structural_eligibility(session, story=story)
-                )
-                response: JsonObject = {
-                    "ok": True,
-                    "data": {
-                        "project_id": request.project_id,
-                        "story_id": request.story_id,
-                        "selection_state": fact.selection_state,
-                        "state_fingerprint": fact.state_fingerprint,
-                        "selection_event_id": fact.event_id,
-                        "selection_event_fingerprint": fact.event_fingerprint,
-                        "structurally_eligible": structurally_eligible,
-                        "structural_eligibility_status": eligibility_status,
-                        "sprint_candidate": (
-                            structurally_eligible
-                            and fact.selection_state == "selected"
-                        ),
-                    },
-                    "errors": [],
-                }
-            except StorySprintSelectionMutationError as error:
-                response = {
-                    "ok": False,
-                    "data": {},
-                    "errors": [{"code": error.code, "message": str(error)}],
-                }
-            except StorySprintSelectionIntegrityError as error:
-                response = {
-                    "ok": False,
-                    "data": {},
-                    "errors": [
-                        {"code": "WORKFLOW_FACT_CONFLICT", "message": str(error)}
-                    ],
-                }
-            completed_at = datetime.now(tz=UTC)
-            session.add(
-                WorkflowTransitionReceipt(
+        request_payload = story_sprint_selection_request_payload(request)
+        request_fingerprint = story_sprint_selection_request_fingerprint(request)
+        try:
+            with Session(self._engine(), expire_on_commit=False) as session:
+                if session.get_bind().dialect.name == "sqlite":
+                    session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+                existing = session.exec(
+                    select(WorkflowTransitionReceipt).where(
+                        col(WorkflowTransitionReceipt.request_kind)
+                        == "apply_story_sprint_selection",
+                        col(WorkflowTransitionReceipt.idempotency_key)
+                        == request.idempotency_key,
+                    )
+                ).one_or_none()
+                if existing is not None:
+                    if existing.request_fingerprint != request_fingerprint:
+                        return {
+                            "ok": False,
+                            "data": {},
+                            "errors": [
+                                {
+                                    "code": "IDEMPOTENCY_CONFLICT",
+                                    "message": (
+                                        "The idempotency key was already used for"
+                                        " different input."
+                                    ),
+                                }
+                            ],
+                        }
+                    if existing.result_json is not None:
+                        return _JSON_OBJECT.validate_json(existing.result_json)
+                    return _selection_integrity_error_response(
+                        "Story selection receipt is incomplete."
+                    )
+
+                started_at = datetime.now(tz=UTC)
+                receipt = WorkflowTransitionReceipt(
                     request_kind="apply_story_sprint_selection",
                     idempotency_key=request.idempotency_key,
                     request_fingerprint=request_fingerprint,
                     request_json=canonical_json(request_payload),
-                    result_json=canonical_json(response),
-                    started_at=completed_at,
-                    completed_at=completed_at,
+                    started_at=started_at,
                 )
-            )
-            session.commit()
-            return response
+                session.add(receipt)
+                session.flush()
+                try:
+                    fact = apply_story_sprint_selection_in_session(
+                        session,
+                        request,
+                        receipt=receipt,
+                    )
+                except StorySprintSelectionMutationError as error:
+                    response: JsonObject = {
+                        "ok": False,
+                        "data": {},
+                        "errors": [{"code": error.code, "message": str(error)}],
+                    }
+                else:
+                    completed_at = datetime.now(tz=UTC)
+                    receipt.result_json = canonical_json(
+                        _selection_receipt_anchor_response(request, fact)
+                    )
+                    receipt.completed_at = completed_at
+                    session.add(receipt)
+                    session.flush()
+                    snapshot = WorkflowFactRepository(session).load(request.project_id)
+                    current = next(
+                        (
+                            item
+                            for item in snapshot.stories
+                            if item.story_id == request.story_id
+                        ),
+                        None,
+                    )
+                    if current is None:
+                        message = (
+                            "Selected Story disappeared from its canonical projection."
+                        )
+                        raise StorySprintSelectionIntegrityError(message)
+                    response = _selection_story_fact_response(request, current)
+
+                receipt.result_json = canonical_json(response)
+                receipt.completed_at = datetime.now(tz=UTC)
+                session.add(receipt)
+                session.commit()
+                return response
+        except StorySprintSelectionIntegrityError as error:
+            return _selection_integrity_error_response(str(error))
 
     def start_sprint(self, request: SprintStartRequest) -> TransitionResult:
         """Start the accepted current Sprint plan without caller-owned identity."""

@@ -142,8 +142,11 @@ def test_complete_selection_transition_table_is_append_only(engine: Engine) -> N
             "defer",
             "select",
         )
+        apply_selection = (
+            selection_service.apply_story_sprint_selection_with_receipt_in_session
+        )
         for index, intent in enumerate(intents, start=1):
-            current = selection_service.apply_story_sprint_selection_in_session(
+            current = apply_selection(
                 session,
                 _selection_request(
                     project_id=story.project_id,
@@ -217,14 +220,17 @@ def test_application_replays_identical_request_and_rejects_conflicts(
     assert conflict["ok"] is False
     assert _error_code(conflict) == "IDEMPOTENCY_CONFLICT"
     with Session(engine) as session:
-        assert len(
-            session.exec(
-                select(WorkflowEvent).where(
-                    col(WorkflowEvent.event_type)
-                    == WorkflowEventType.STORY_SELECTION_CHANGED
-                )
-            ).all()
-        ) == 1
+        assert (
+            len(
+                session.exec(
+                    select(WorkflowEvent).where(
+                        col(WorkflowEvent.event_type)
+                        == WorkflowEventType.STORY_SELECTION_CHANGED
+                    )
+                ).all()
+            )
+            == 1
+        )
 
 
 def test_api_and_cli_expose_intent_based_selection_mutations(
@@ -414,9 +420,12 @@ def test_malformed_selection_history_uses_repository_integrity_error(
         session.add(event)
         session.commit()
 
-    with Session(engine) as session, pytest.raises(
-        WorkflowFactLoadError,
-        match="Story selection event metadata is malformed",
+    with (
+        Session(engine) as session,
+        pytest.raises(
+            WorkflowFactLoadError,
+            match="Story selection event metadata is malformed",
+        ),
     ):
         WorkflowFactRepository(session).load(project_id)
 
@@ -447,9 +456,7 @@ def test_select_requires_current_evidence_but_defer_and_remove_do_not(
         )
     )
     assert rejected["ok"] is False
-    assert _error_code(rejected) == (
-        "STORY_STRUCTURAL_ELIGIBILITY_REQUIRED"
-    )
+    assert _error_code(rejected) == ("STORY_STRUCTURAL_ELIGIBILITY_REQUIRED")
     deferred = app.apply_story_sprint_selection(
         _selection_request(
             project_id=project_id,
@@ -493,8 +500,7 @@ def test_select_requires_current_evidence_but_defer_and_remove_do_not(
         WorkflowFactRepository(session).load(project_id)
     assert [item.action for item in metadata] == ["defer", "remove"]
     assert all(
-        item.observed_eligibility_evidence_fingerprint is None
-        for item in metadata
+        item.observed_eligibility_evidence_fingerprint is None for item in metadata
     )
 
 
@@ -809,22 +815,28 @@ def test_concurrent_identical_selection_requests_share_one_event(
             second_result = second.result(timeout=10)
         assert first_result == second_result
         with Session(engine) as session:
-            assert len(
-                session.exec(
-                    select(WorkflowEvent).where(
-                        col(WorkflowEvent.event_type)
-                        == WorkflowEventType.STORY_SELECTION_CHANGED
-                    )
-                ).all()
-            ) == 1
-            assert len(
-                session.exec(
-                    select(WorkflowTransitionReceipt).where(
-                        col(WorkflowTransitionReceipt.request_kind)
-                        == "apply_story_sprint_selection"
-                    )
-                ).all()
-            ) == 1
+            assert (
+                len(
+                    session.exec(
+                        select(WorkflowEvent).where(
+                            col(WorkflowEvent.event_type)
+                            == WorkflowEventType.STORY_SELECTION_CHANGED
+                        )
+                    ).all()
+                )
+                == 1
+            )
+            assert (
+                len(
+                    session.exec(
+                        select(WorkflowTransitionReceipt).where(
+                            col(WorkflowTransitionReceipt.request_kind)
+                            == "apply_story_sprint_selection"
+                        )
+                    ).all()
+                )
+                == 1
+            )
     finally:
         engine.dispose()
 
@@ -836,8 +848,14 @@ def test_concurrent_identical_selection_requests_share_one_event(
         ("noncanonical_json", "metadata is not canonical"),
         ("timestamp_mismatch", "exact Story lineage is invalid"),
         ("wrong_identity", "exact Story lineage is invalid"),
-        ("wrong_previous_fingerprint", "transition chain is invalid"),
-        ("invalid_transition", "transition chain is invalid"),
+        (
+            "wrong_previous_fingerprint",
+            "selection receipt request does not match the event",
+        ),
+        (
+            "invalid_transition",
+            "selection receipt request does not match the event",
+        ),
         ("select_without_evidence", "metadata is malformed"),
         ("blank_actor", "metadata is malformed"),
         ("blank_rationale", "metadata is malformed"),
@@ -904,9 +922,12 @@ def test_every_corrupt_selection_history_shape_fails_closed(
             raise AssertionError(corruption)
         session.add(event)
         session.commit()
-    with Session(engine) as session, pytest.raises(
-        WorkflowFactLoadError,
-        match=message,
+    with (
+        Session(engine) as session,
+        pytest.raises(
+            WorkflowFactLoadError,
+            match=message,
+        ),
     ):
         WorkflowFactRepository(session).load(project_id)
 
@@ -940,11 +961,14 @@ def test_repository_replays_selection_history_once_per_project(
         session.commit()
     assert len(result.activated_story_ids) == 2  # noqa: PLR2004
 
-    with patch.object(
-        selection_service,
-        "_selection_facts",
-        wraps=selection_service._selection_facts,
-    ) as replay, Session(engine) as session:
+    with (
+        patch.object(
+            selection_service,
+            "_selection_facts",
+            wraps=selection_service._selection_facts,
+        ) as replay,
+        Session(engine) as session,
+    ):
         snapshot = WorkflowFactRepository(session).load(project_id)
 
     assert len(snapshot.stories) == 2  # noqa: PLR2004
@@ -1019,9 +1043,12 @@ def test_cross_project_story_binding_in_selection_event_fails_closed(
         event.event_metadata = canonical_json(metadata)
         session.add(event)
         session.commit()
-    with Session(engine) as session, pytest.raises(
-        WorkflowFactLoadError,
-        match="exact Story lineage is invalid",
+    with (
+        Session(engine) as session,
+        pytest.raises(
+            WorkflowFactLoadError,
+            match="exact Story lineage is invalid",
+        ),
     ):
         WorkflowFactRepository(session).load(project_id)
 
@@ -1207,8 +1234,11 @@ def test_selection_event_requires_an_exact_completed_receipt_anchor(
             session.add(event)
         session.commit()
 
-    with Session(engine), pytest.raises(
-        WorkflowFactLoadError,
-        match="selection receipt",
+    with (
+        Session(engine),
+        pytest.raises(
+            WorkflowFactLoadError,
+            match="selection receipt",
+        ),
     ):
         WorkflowFactRepository(session).load(project_id)

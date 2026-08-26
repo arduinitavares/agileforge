@@ -45,7 +45,7 @@ from services.sprint_selection import (
 )
 from services.story_sprint_selection import (
     StorySprintSelectionRequest,
-    apply_story_sprint_selection_in_session,
+    apply_story_sprint_selection_with_receipt_in_session,
     story_sprint_selection_fact_in_session,
 )
 from tests.test_story_validation_service import _accepted_story, _validate
@@ -188,7 +188,7 @@ def _select_story_for_sprint(engine: Engine, story_id: int) -> None:
     with Session(engine) as session:
         story = session.get_one(UserStory, story_id)
         current = story_sprint_selection_fact_in_session(session, story=story)
-        apply_story_sprint_selection_in_session(
+        apply_story_sprint_selection_with_receipt_in_session(
             session,
             StorySprintSelectionRequest(
                 project_id=story.project_id,

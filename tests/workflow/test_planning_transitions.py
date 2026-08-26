@@ -60,7 +60,7 @@ from services.contracts.story import (
 from services.specs import story_validation_service as story_validation_service_module
 from services.story_sprint_selection import (
     StorySprintSelectionRequest,
-    apply_story_sprint_selection_in_session,
+    apply_story_sprint_selection_with_receipt_in_session,
     story_sprint_selection_fact_in_session,
 )
 from tests.workflow.lifecycle_fixtures import seed_accepted_specification
@@ -947,7 +947,7 @@ def _select_for_sprint(engine: Engine, story_id: int) -> None:
         current = story_sprint_selection_fact_in_session(session, story=story)
         if current.selection_state == "selected":
             return
-        apply_story_sprint_selection_in_session(
+        apply_story_sprint_selection_with_receipt_in_session(
             session,
             StorySprintSelectionRequest(
                 project_id=story.project_id,

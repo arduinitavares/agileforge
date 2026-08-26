@@ -67,6 +67,8 @@ _FORBIDDEN_BODY_FIELDS = {
 def _fingerprint(seed: str) -> str:
     """Build a parseable fake fingerprint without exposing a real identity."""
     return f"sha256:{seed[0].lower() * 64}"
+
+
 _ACTION_ENDPOINTS = {
     "decide_backlog": "backlog/decide",
     "decide_product_goal_review": "goals/review",
@@ -352,30 +354,35 @@ class FakeLifecycle:
                 and self.dependency_reload_conflict
                 and self.dependency_apply_requests
             ):
-                response = (_HTTP_CONFLICT, {
-                    "detail": {
-                        "error": {
-                            "code": "STALE_DEPENDENCY_PROJECTION",
-                            "message": self.dependency_reload_conflict,
+                response = (
+                    _HTTP_CONFLICT,
+                    {
+                        "detail": {
+                            "error": {
+                                "code": "STALE_DEPENDENCY_PROJECTION",
+                                "message": self.dependency_reload_conflict,
+                            }
                         }
-                    }
-                })
+                    },
+                )
             elif (
                 suffix == "/story/dependencies"
                 and self.story_reload_conflict
                 and (
-                    self.sprint_selection_requests
-                    or self.structural_reconcile_requests
+                    self.sprint_selection_requests or self.structural_reconcile_requests
                 )
             ):
-                response = (_HTTP_CONFLICT, {
-                    "detail": {
-                        "error": {
-                            "code": "STALE_STORY_PROJECTION",
-                            "message": self.story_reload_conflict,
+                response = (
+                    _HTTP_CONFLICT,
+                    {
+                        "detail": {
+                            "error": {
+                                "code": "STALE_STORY_PROJECTION",
+                                "message": self.story_reload_conflict,
+                            }
                         }
-                    }
-                })
+                    },
+                )
             elif suffix == "/position":
                 response = (_HTTP_OK, self.position_envelope())
             else:
@@ -821,31 +828,34 @@ class FakeLifecycle:
                 ),
                 None,
             )
-        return {
-            "stories": self.stories,
-            "edges": self.story_dependencies,
-            "selected_story_ids": selected_story_ids,
-            "selected_scope_fingerprint": scope_fingerprint,
-            "structural_evidence_scope": {
-                "proves": [
-                    "exact Story identity",
-                    "immutable accepted Story artifact/item binding",
-                    "accepted Backlog and Specification lineage",
-                    "parent-bounded Specification references",
-                    "required Story shape",
-                    "non-empty acceptance criteria",
-                    "current evidence and input fingerprints",
-                ],
-                "does_not_prove": [
-                    "semantic/model quality",
-                    "product value",
-                    "human Sprint selection",
-                    "dependency safety",
-                    "Sprint candidacy",
-                    "Sprint-generation readiness",
-                ],
+        return cast(
+            "JsonObject",
+            {
+                "stories": self.stories,
+                "edges": self.story_dependencies,
+                "selected_story_ids": selected_story_ids,
+                "selected_scope_fingerprint": scope_fingerprint,
+                "structural_evidence_scope": {
+                    "proves": [
+                        "exact Story identity",
+                        "immutable accepted Story artifact/item binding",
+                        "accepted Backlog and Specification lineage",
+                        "parent-bounded Specification references",
+                        "required Story shape",
+                        "non-empty acceptance criteria",
+                        "current evidence and input fingerprints",
+                    ],
+                    "does_not_prove": [
+                        "semantic/model quality",
+                        "product value",
+                        "human Sprint selection",
+                        "dependency safety",
+                        "Sprint candidacy",
+                        "Sprint-generation readiness",
+                    ],
+                },
             },
-        }
+        )
 
     def _sprint_candidates_projection(self) -> JsonObject:
         return {
@@ -986,9 +996,10 @@ class FakeLifecycle:
         assert intent in {"select", "remove", "defer"}
         for story in self.stories:
             if isinstance(story, dict) and story.get("story_id") == story_id:
-                assert body["expected_state_fingerprint"] == story[
-                    "sprint_selection_state_fingerprint"
-                ]
+                assert (
+                    body["expected_state_fingerprint"]
+                    == story["sprint_selection_state_fingerprint"]
+                )
                 story["sprint_selection_state"] = {
                     "select": "selected",
                     "remove": "unselected",
@@ -2582,14 +2593,14 @@ def test_sprint_generation_blocks_torn_candidate_dependency_scope(
 
     context, page = _open_project_page(dashboard_harness, fake)
 
-    expect(page.locator('[data-sprint-candidate-projection-error="true"]')).to_be_visible()
+    expect(
+        page.locator('[data-sprint-candidate-projection-error="true"]')
+    ).to_be_visible()
     expect(
         page.locator('[data-delivery-generation-form="record_sprint_plan"]')
     ).not_to_be_attached()
     assert not [
-        body
-        for suffix, body in fake.delivery_requests
-        if suffix == "/sprint/generate"
+        body for suffix, body in fake.delivery_requests if suffix == "/sprint/generate"
     ]
 
     context.close()
@@ -2692,9 +2703,8 @@ def test_progressive_story_readiness_partial_refinement_to_sprint_planning(  # n
     expect(readiness).to_contain_text("Structurally eligible")
     expect(readiness).to_contain_text("Unselected")
     expect(readiness).to_contain_text("US-002")
-    expect(readiness).to_contain_text(
-        "does not select this Story for Sprint, confirm dependencies"
-    )
+    expect(readiness).to_contain_text("exact Story identity")
+    expect(readiness).to_contain_text("human Sprint selection")
 
     select_story1 = page.locator(
         f'[data-story-selection-id="{story1_id}"][data-story-selection-intent="select"]'
@@ -2706,9 +2716,7 @@ def test_progressive_story_readiness_partial_refinement_to_sprint_planning(  # n
     assert fake.sprint_selection_requests[0]["story_id"] == story1_id
     assert fake.sprint_selection_requests[0]["intent"] == "select"
     assert not [
-        body
-        for suffix, body in fake.delivery_requests
-        if suffix == "/sprint/generate"
+        body for suffix, body in fake.delivery_requests if suffix == "/sprint/generate"
     ]
 
     expect(readiness).to_contain_text("Selected for Sprint")
@@ -2737,14 +2745,14 @@ def test_progressive_story_readiness_partial_refinement_to_sprint_planning(  # n
     )
     page.locator("#refresh-project").click()
     page.wait_for_timeout(_UI_SETTLE_MS)
-    expect(page.locator('[data-sprint-candidate-projection-error="true"]')).to_be_visible()
+    expect(
+        page.locator('[data-sprint-candidate-projection-error="true"]')
+    ).to_be_visible()
     expect(
         page.locator('[data-delivery-generation-form="record_sprint_plan"]')
     ).not_to_be_attached()
     assert not [
-        body
-        for suffix, body in fake.delivery_requests
-        if suffix == "/sprint/generate"
+        body for suffix, body in fake.delivery_requests if suffix == "/sprint/generate"
     ]
 
     dep_section = page.locator('[data-dependency-review-section="true"]')
@@ -2812,9 +2820,7 @@ def test_progressive_story_readiness_partial_refinement_to_sprint_planning(  # n
     ).to_be_visible()
 
     assert not [
-        body
-        for suffix, body in fake.delivery_requests
-        if suffix == "/sprint/generate"
+        body for suffix, body in fake.delivery_requests if suffix == "/sprint/generate"
     ]
 
     context.close()
@@ -2857,9 +2863,7 @@ def test_completed_sprint_next_scope_confirms_only_the_projected_future_story(
     assert fake.dependency_apply_requests[0]["selected_story_ids"] == [future_story_id]
     assert completed["sprint_selection_state"] == "selected"
     assert not [
-        body
-        for suffix, body in fake.delivery_requests
-        if suffix == "/sprint/generate"
+        body for suffix, body in fake.delivery_requests if suffix == "/sprint/generate"
     ]
 
     context.close()
@@ -2949,9 +2953,7 @@ def test_dependency_confirmation_stays_locked_when_authority_reload_fails(
     page.wait_for_timeout(_UI_SETTLE_MS)
     assert len(fake.dependency_apply_requests) == _EXPECTED_RETRIED_DEPENDENCY_REQUESTS
     assert not [
-        body
-        for suffix, body in fake.delivery_requests
-        if suffix == "/sprint/generate"
+        body for suffix, body in fake.delivery_requests if suffix == "/sprint/generate"
     ]
 
     context.close()
@@ -3135,9 +3137,7 @@ def test_progressive_story_readiness_failure_diagnostics_persist_on_reload(
     expect(readiness_section).to_contain_text("Structural evidence stale")
     expect(readiness_section).to_contain_text("Selected for Sprint")
 
-    validate_button = page.locator(
-        f'[data-story-structural-reconcile-id="{story_id}"]'
-    )
+    validate_button = page.locator(f'[data-story-structural-reconcile-id="{story_id}"]')
     expect(validate_button).to_have_text("Re-run structural checks")
 
     validate_button.click()
@@ -3147,9 +3147,7 @@ def test_progressive_story_readiness_failure_diagnostics_persist_on_reload(
     assert fake.structural_reconcile_requests[0]["story_ids"] == [story_id]
     expect(readiness_section).to_contain_text("Selected for Sprint")
     assert not [
-        body
-        for suffix, body in fake.delivery_requests
-        if suffix == "/sprint/generate"
+        body for suffix, body in fake.delivery_requests if suffix == "/sprint/generate"
     ]
 
     context.close()
@@ -3178,9 +3176,7 @@ def test_story_review_disables_acceptance_when_required_evidence_is_malformed(
     expect(review_card).to_contain_text("Story review for PBI-000003")
 
     # Visible evidence error banner
-    error_banner = review_card.locator(
-        '[data-review-error="invalid-story-evidence"]'
-    )
+    error_banner = review_card.locator('[data-review-error="invalid-story-evidence"]')
     expect(error_banner).to_be_visible()
     expect(error_banner).to_contain_text(
         "Story proposal cannot be accepted: required INVEST, sizing, or ordering "

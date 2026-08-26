@@ -66,14 +66,14 @@ from services.specs.candidate_contract import (
     load_candidate_contract,
     render_candidate_review_markdown,
 )
-from services.specs.story_validation_service import (
-    StoryValidationReadinessError,
-    require_story_ready_for_sprint,
-)
+from services.story_evidence_scope import structural_evidence_scope_payload
 from utils.spec_schemas import ValidationEvidence
 from workflow.contracts import JsonObject, JsonValue
 from workflow.definitions.backlog import current_backlog_lineage
-from workflow.definitions.planning import candidate_set_fingerprint
+from workflow.definitions.planning import (
+    candidate_set_fingerprint,
+    selected_scope_stories,
+)
 from workflow.definitions.product_discovery import select_product_definition_state
 from workflow.definitions.product_goal import (
     accepted_current_goal,
@@ -2138,7 +2138,7 @@ class DurableReadProjectionService:
         )
 
     def story_show(self, *, story_id: int) -> JsonObject:
-        """Return one durable Story record."""
+        """Return one durable Story record with canonical readiness facts."""
         with Session(self._engine) as session:
             story = session.get(UserStory, story_id)
             if story is None:
@@ -2148,6 +2148,33 @@ class DurableReadProjectionService:
                     story_id=story_id,
                 )
             artifact = session.get(StoryArtifact, story.source_story_artifact_id)
+            validation_evidence: JsonObject | None = None
+            if story.validation_evidence is not None:
+                try:
+                    evidence = ValidationEvidence.model_validate_json(
+                        story.validation_evidence,
+                        strict=True,
+                    )
+                    if (
+                        canonical_json(evidence.model_dump(mode="json"))
+                        == story.validation_evidence
+                    ):
+                        validation_evidence = evidence.model_dump(mode="json")
+                except ValidationError:
+                    validation_evidence = None
+        snapshot_or_error = self._snapshot(story.project_id)
+        if isinstance(snapshot_or_error, dict):
+            return snapshot_or_error
+        fact = next(
+            (item for item in snapshot_or_error.stories if item.story_id == story_id),
+            None,
+        )
+        if fact is None:
+            return _error(
+                "PROJECT_FACTS_UNAVAILABLE",
+                "Stored Story is unavailable from the canonical workflow projection.",
+                story_id=story_id,
+            )
         try:
             acceptance_criteria = _canonical_acceptance_criteria(
                 story.acceptance_criteria_json
@@ -2159,28 +2186,6 @@ class DurableReadProjectionService:
                 story_id=story_id,
             )
         acceptance_criteria_value: list[JsonValue] = list(acceptance_criteria)
-        spec_item_ids: list[JsonValue] = (
-            list(_STRING_LIST.validate_json(story.spec_item_ids_json))
-            if story.spec_item_ids_json
-            else []
-        )
-        validation_evidence: JsonObject | None = None
-        ready_for_sprint = False
-        validation_failures: list[JsonValue] = []
-        validation_status = "unvalidated"
-        if story.validation_evidence is not None:
-            try:
-                ev = ValidationEvidence.model_validate_json(story.validation_evidence)
-                validation_evidence = ev.model_dump(mode="json")
-                validation_failures = [
-                    f.model_dump(mode="json") for f in ev.structural_failures
-                ]
-                require_story_ready_for_sprint(session, story=story)
-                ready_for_sprint = True
-                validation_status = "validated"
-            except (ValidationError, ValueError, StoryValidationReadinessError):
-                ready_for_sprint = False
-                validation_status = "failed"
         return _success(
             {
                 "story_id": story_id,
@@ -2188,8 +2193,8 @@ class DurableReadProjectionService:
                 "title": story.title,
                 "description": story.story_description,
                 "acceptance_criteria": acceptance_criteria_value,
-                "spec_item_ids": spec_item_ids,
-                "status": _enum_value(story.status),
+                "spec_item_ids": list(fact.spec_item_ids),
+                "status": fact.status,
                 "story_points": story.story_points,
                 "rank": story.rank,
                 "source_story_item_id": story.source_story_item_id,
@@ -2199,9 +2204,22 @@ class DurableReadProjectionService:
                 ),
                 "is_superseded": story.is_superseded,
                 "validation_evidence": validation_evidence,
-                "validation_status": validation_status,
-                "validation_failures": validation_failures,
-                "ready_for_sprint": ready_for_sprint,
+                "structurally_eligible": fact.structurally_eligible,
+                "structural_eligibility_status": fact.structural_eligibility_status,
+                "structural_failures": list(fact.validation_failures),
+                "sprint_selection_state": fact.sprint_selection_state,
+                "sprint_selection_state_fingerprint": (
+                    fact.sprint_selection_state_fingerprint
+                ),
+                "sprint_selection_event_id": fact.sprint_selection_event_id,
+                "sprint_selection_event_fingerprint": (
+                    fact.sprint_selection_event_fingerprint
+                ),
+                "selected_scope_fingerprint": fact.selected_scope_fingerprint,
+                "dependency_safe": fact.dependency_safe,
+                "sprint_candidate": fact.sprint_candidate,
+                "readiness_blockers": list(fact.readiness_blockers),
+                "structural_evidence_scope": structural_evidence_scope_payload(),
                 "updated_at": _iso(story.updated_at),
             }
         )
@@ -2322,6 +2340,19 @@ class DurableReadProjectionService:
         if isinstance(snapshot_or_error, dict):
             return snapshot_or_error
         snapshot = snapshot_or_error
+        selected = selected_scope_stories(snapshot)
+        scope_fingerprints = {
+            item.selected_scope_fingerprint for item in snapshot.stories
+        }
+        if len(scope_fingerprints) > 1 or None in scope_fingerprints:
+            return _error(
+                "PROJECT_FACTS_UNAVAILABLE",
+                "Current selected Story scope fingerprint is unavailable.",
+                project_id=project_id,
+            )
+        selected_scope_fingerprint = (
+            None if not scope_fingerprints else next(iter(scope_fingerprints))
+        )
         return _success(
             {
                 "project_id": project_id,
@@ -2337,6 +2368,9 @@ class DurableReadProjectionService:
                     _validated(item.model_dump(mode="json"))
                     for item in snapshot.stories
                 ],
+                "selected_story_ids": [item.story_id for item in selected],
+                "selected_scope_fingerprint": selected_scope_fingerprint,
+                "structural_evidence_scope": structural_evidence_scope_payload(),
             }
         )
 
@@ -2350,7 +2384,14 @@ class DurableReadProjectionService:
             for item in snapshot_or_error.stories
             if item.sprint_candidate
         ]
-        return _success({"project_id": project_id, "items": items, "count": len(items)})
+        return _success(
+            {
+                "project_id": project_id,
+                "items": items,
+                "count": len(items),
+                "structural_evidence_scope": structural_evidence_scope_payload(),
+            }
+        )
 
     def sprint_plan_review(  # noqa: C901, PLR0911
         self,

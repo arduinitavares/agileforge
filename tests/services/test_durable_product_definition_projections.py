@@ -528,20 +528,30 @@ def test_story_show_rejects_invalid_persisted_acceptance_criteria(
     }
 
 
-def test_story_show_returns_backlog_item_id_and_validation_evidence(
+def test_story_show_returns_backlog_item_id_and_canonical_readiness_evidence(
     engine: Engine,
 ) -> None:
-    """Expose parent backlog_item_id, spec_item_ids, and validation readiness."""
+    """Expose parent lineage and the canonical StoryFact readiness authority."""
     story_id = _accepted_story_for_show(engine)
     result = DurableReadProjectionService(engine=engine).story_show(story_id=story_id)
+    with Session(engine) as session:
+        fact = next(
+            item
+            for item in WorkflowFactRepository(session).load(project_id=1).stories
+            if item.story_id == story_id
+        )
 
     assert result["ok"] is True
     data = _data(result)
     assert data["story_id"] == story_id
     assert data["backlog_item_id"] == "PBI-000001"
     assert data["spec_item_ids"] == ["REQ.planning-1"]
-    assert data["validation_status"] == "validated"
-    assert data["ready_for_sprint"] is True
+    assert data["structurally_eligible"] == fact.structurally_eligible
+    assert data["structural_eligibility_status"] == fact.structural_eligibility_status
+    assert data["structural_failures"] == list(fact.validation_failures)
+    assert data["sprint_candidate"] == fact.sprint_candidate
+    assert "validation_status" not in data
+    assert "ready_for_sprint" not in data
     assert data["validation_evidence"] is not None
 
     # Test unvalidated state
@@ -555,10 +565,27 @@ def test_story_show_returns_backlog_item_id_and_validation_evidence(
     unvalidated_result = DurableReadProjectionService(engine=engine).story_show(
         story_id=story_id
     )
+    with Session(engine) as session:
+        unvalidated_fact = next(
+            item
+            for item in WorkflowFactRepository(session).load(project_id=1).stories
+            if item.story_id == story_id
+        )
     assert unvalidated_result["ok"] is True
     unvalidated_data = _data(unvalidated_result)
-    assert unvalidated_data["validation_status"] == "unvalidated"
-    assert unvalidated_data["ready_for_sprint"] is False
+    assert (
+        unvalidated_data["structurally_eligible"]
+        == unvalidated_fact.structurally_eligible
+    )
+    assert (
+        unvalidated_data["structural_eligibility_status"]
+        == unvalidated_fact.structural_eligibility_status
+    )
+    assert unvalidated_data["structural_failures"] == list(
+        unvalidated_fact.validation_failures
+    )
+    assert "validation_status" not in unvalidated_data
+    assert "ready_for_sprint" not in unvalidated_data
     assert unvalidated_data["validation_evidence"] is None
 
 

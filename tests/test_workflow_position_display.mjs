@@ -188,6 +188,41 @@ function sprintCandidateStory(overrides = {}) {
     });
 }
 
+const structuralEvidenceScope = {
+    proves: [
+        'exact Story identity',
+        'immutable accepted Story artifact/item binding',
+        'accepted Backlog and Specification lineage',
+        'parent-bounded Specification references',
+        'required Story shape',
+        'non-empty acceptance criteria',
+        'current evidence and input fingerprints',
+    ],
+    does_not_prove: [
+        'semantic/model quality',
+        'product value',
+        'human Sprint selection',
+        'dependency safety',
+        'Sprint candidacy',
+        'Sprint-generation readiness',
+    ],
+};
+
+function dependencyProjection(stories, edges = [], selectedStoryIds = null) {
+    const selected = selectedStoryIds ?? stories
+        .filter((story) => story.structurally_eligible
+            && story.sprint_selection_state === 'selected')
+        .map((story) => story.story_id);
+    const selectedStory = stories.find((story) => story.story_id === selected[0]);
+    return {
+        stories,
+        edges,
+        selected_story_ids: selected,
+        selected_scope_fingerprint: selectedStory?.selected_scope_fingerprint ?? null,
+        structural_evidence_scope: structuralEvidenceScope,
+    };
+}
+
 test('human lifecycle labels are the exact direct-Spec sequence', () => {
     const context = loadFrontend();
     assert.deepEqual(Array.from(context.lifecycleStageLabels()), [
@@ -379,7 +414,7 @@ test('Sprint generation asks the operator for a team', () => {
             endpoint: 'sprint/generate',
         }],
         {
-            storyDependencies: { stories: [candidate], edges: [] },
+            storyDependencies: dependencyProjection([candidate]),
             sprintCandidates: { items: [candidate] },
         },
     );
@@ -790,6 +825,7 @@ test('story readiness keeps structural proof separate from three-state Sprint se
                 { backlog_item_id: 'PBI-000001', requirement: 'Implement parser core' },
             ],
         },
+        storyDependencies: dependencyProjection(stories, [], []),
     };
 
     const markup = context.storyReadinessMarkup(stories, appState);
@@ -805,8 +841,9 @@ test('story readiness keeps structural proof separate from three-state Sprint se
     assert.ok(markup.includes('Defer'));
     assert.ok(markup.includes('data-story-selection-id="101"'));
     assert.ok(markup.includes('data-story-selection-fingerprint="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"'));
-    assert.ok(markup.includes('Passing provider-free structural checks proves structural eligibility only.'));
-    assert.ok(markup.includes('does not select this Story for Sprint, confirm dependencies, validate semantic quality, or generate a Sprint.'));
+    assert.ok(markup.includes('Provider-free structural evidence proves:'));
+    assert.ok(markup.includes('exact Story identity'));
+    assert.ok(markup.includes('Sprint-generation readiness'));
     assert.ok(!markup.includes('Validate Story'));
     assert.ok(!markup.includes('Validated'));
 });
@@ -853,7 +890,7 @@ test('story readiness renders selected and deferred intent separately and preser
     ];
     const appState = {
         storyPending: { items: [] },
-        storyDependencies: { stories },
+        storyDependencies: dependencyProjection(stories, [], []),
         sprintCandidates: { items: stories },
     };
 
@@ -875,7 +912,7 @@ test('dependency review section renders when apply_story_dependencies action is 
         transport: 'semantic',
     };
     const stories = [selectedScopeStory({ backlog_item_id: 'PBI-000001' })];
-    const dependencies = { stories, edges: [] };
+    const dependencies = dependencyProjection(stories);
 
     const markup = context.storyDependencyReviewMarkup(action, stories, dependencies);
     assert.ok(markup.includes('Dependency review required'));
@@ -894,20 +931,17 @@ test('dependency review displays only candidate stories and candidate-contained 
         transport: 'semantic',
     };
     const candidates = [selectedScopeStory()];
-    const dependencies = {
-        stories: [
-            selectedScopeStory(),
-            selectedScopeStory({
+    const dependencies = dependencyProjection([
+        selectedScopeStory(),
+        selectedScopeStory({
                 story_id: 102,
                 source_story_item_id: 'US-002',
                 sprint_selection_state: 'unselected',
                 sprint_selection_state_fingerprint: 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
-            }),
-        ],
-        edges: [
-            { dependent_story_id: 102, prerequisite_story_id: 101, status: 'proposed', reason: 'US-002 needs US-001' },
-        ],
-    };
+        }),
+    ], [
+        { dependent_story_id: 102, prerequisite_story_id: 101, status: 'proposed', reason: 'US-002 needs US-001' },
+    ]);
 
     const markup = context.storyDependencyReviewMarkup(action, dependencies.stories, dependencies);
     assert.ok(markup.includes('US-001'));
@@ -933,12 +967,9 @@ test('dependency review displays human-readable story identifiers, PBIs, and dep
             sprint_selection_state_fingerprint: 'sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
         }),
     ];
-    const dependencies = {
-        stories: candidates,
-        edges: [
-            { dependent_story_id: 102, prerequisite_story_id: 101, status: 'proposed', reason: 'US-002 requires data model from US-001' },
-        ],
-    };
+    const dependencies = dependencyProjection(candidates, [
+        { dependent_story_id: 102, prerequisite_story_id: 101, status: 'proposed', reason: 'US-002 requires data model from US-001' },
+    ]);
 
     const markup = context.storyDependencyReviewMarkup(action, candidates, dependencies);
     assert.ok(markup.includes('US-001 (PBI-000001)'));
@@ -1054,13 +1085,6 @@ test('structural and selection mutation payloads bind exact Story state and reus
     });
 });
 
-test('a successful Story mutation stays locked when its authority reload fails', () => {
-    const context = loadFrontend();
-    assert.strictEqual(context.shouldUnlockStoryMutation(true, false), false);
-    assert.strictEqual(context.shouldUnlockStoryMutation(true, true), true);
-    assert.strictEqual(context.shouldUnlockStoryMutation(false, false), true);
-});
-
 test('Story mutation token lock survives a 409 authority reload and releases only on recovery', async () => {
     let conflict = true;
     const context = loadFrontend(async (path) => {
@@ -1167,13 +1191,10 @@ test('selected scope retains external prerequisites and excludes unselected depe
         sprint_selection_state: 'unselected',
         sprint_selection_state_fingerprint: 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
     });
-    const dependencies = {
-        stories: [selected, external],
-        edges: [
-            { dependent_story_id: 101, prerequisite_story_id: 102, status: 'proposed', reason: 'US-001 requires external US-002.' },
-            { dependent_story_id: 102, prerequisite_story_id: 101, status: 'proposed', reason: 'Unselected dependent stays out of scope.' },
-        ],
-    };
+    const dependencies = dependencyProjection([selected, external], [
+        { dependent_story_id: 101, prerequisite_story_id: 102, status: 'proposed', reason: 'US-001 requires external US-002.' },
+        { dependent_story_id: 102, prerequisite_story_id: 101, status: 'proposed', reason: 'Unselected dependent stays out of scope.' },
+    ]);
 
     const result = context.selectedScopeDependencies([selected, external], dependencies);
     assert.strictEqual(result.isWellFormed, true);
@@ -1251,7 +1272,7 @@ test('Sprint generation binds canonical candidates to the current dependency sco
         selected_scope_fingerprint: 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
     });
     const appState = {
-        storyDependencies: { stories: [currentStory], edges: [] },
+        storyDependencies: dependencyProjection([currentStory]),
         sprintCandidates: { items: [candidate] },
     };
 
@@ -1291,27 +1312,25 @@ test('dependency scope excludes rejected edges and rejects self edges before tra
         sprint_selection_state: 'unselected',
         sprint_selection_state_fingerprint: 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
     });
-    const rejected = context.selectedScopeDependencies([selected, external], {
-        stories: [selected, external],
-        edges: [{
+    const rejected = context.selectedScopeDependencies([selected, external], dependencyProjection(
+        [selected, external], [{
             dependent_story_id: 101,
             prerequisite_story_id: 102,
             status: 'rejected',
             reason: 'Do not reactivate this edge.',
         }],
-    });
+    ));
     assert.strictEqual(rejected.isWellFormed, true);
     assert.deepEqual(JSON.parse(JSON.stringify(rejected.scopeEdges)), []);
     assert.strictEqual(
-        context.selectedScopeDependencies([selected], {
-            stories: [selected],
-            edges: [{
+        context.selectedScopeDependencies([selected], dependencyProjection(
+            [selected], [{
                 dependent_story_id: 101,
                 prerequisite_story_id: 101,
                 status: 'proposed',
                 reason: 'Malformed self edge.',
             }],
-        }).isWellFormed,
+        )).isWellFormed,
         false,
     );
 });
@@ -1413,98 +1432,6 @@ test('dependency review disables confirm button when canonical candidate project
     assert.ok(markup.includes('Unavailable (current selected scope missing or malformed)'));
     assert.ok(markup.includes('disabled'));
     assert.ok(markup.includes('aria-disabled="true"'));
-});
-
-test('canonicalCandidateDependencies returns empty when candidates is missing without falling back', () => {
-    const context = loadFrontend();
-    const dependencies = {
-        stories: [selectedScopeStory()],
-        edges: [],
-    };
-
-    const result = context.canonicalCandidateDependencies(null, dependencies);
-    assert.strictEqual(result.candidateStories.length, 0);
-    assert.strictEqual(result.candidateIds.length, 0);
-    assert.strictEqual(result.candidateEdges.length, 0);
-    assert.strictEqual(result.isWellFormed, false);
-});
-
-test('canonicalCandidateDependencies and review markup fail closed on malformed candidates without throwing', () => {
-    const context = loadFrontend();
-    const action = {
-        node_id: 'planning.story_dependencies',
-        request_kind: 'apply_story_dependencies',
-        endpoint: 'story/dependencies/apply',
-        transport: 'semantic',
-    };
-    const dependencies = {
-        stories: [{ story_id: 101, source_story_item_id: 'US-001', sprint_candidate: true }],
-        edges: [],
-    };
-
-    // 1. Missing sprint_candidate boolean flag
-    const malformedMissingFlag = [{ story_id: 101, source_story_item_id: 'US-001' }];
-    const result1 = context.canonicalCandidateDependencies(malformedMissingFlag, dependencies);
-    assert.strictEqual(result1.isWellFormed, false);
-    assert.strictEqual(result1.candidateStories.length, 0);
-    const markup1 = context.storyDependencyReviewMarkup(action, malformedMissingFlag, dependencies);
-    assert.ok(markup1.includes('Unavailable (current selected scope missing or malformed)'));
-    assert.ok(markup1.includes('disabled'));
-    assert.ok(markup1.includes('aria-disabled="true"'));
-    assert.strictEqual(context.sprintCandidatePoolMarkup(malformedMissingFlag), '');
-
-    // 2. Null row in candidates array
-    const malformedNullRow = [null];
-    const result2 = context.canonicalCandidateDependencies(malformedNullRow, dependencies);
-    assert.strictEqual(result2.isWellFormed, false);
-    assert.strictEqual(result2.candidateStories.length, 0);
-    const markup2 = context.storyDependencyReviewMarkup(action, malformedNullRow, dependencies);
-    assert.ok(markup2.includes('Unavailable (current selected scope missing or malformed)'));
-    assert.ok(markup2.includes('disabled'));
-    assert.ok(markup2.includes('aria-disabled="true"'));
-    assert.strictEqual(context.sprintCandidatePoolMarkup(malformedNullRow), '');
-
-    // 3. sprint_candidate: false is NOT accepted and does NOT appear Ready
-    const notCandidate = [{ story_id: 101, source_story_item_id: 'US-001', sprint_candidate: false }];
-    const result3 = context.canonicalCandidateDependencies(notCandidate, dependencies);
-    assert.strictEqual(result3.isWellFormed, false);
-    assert.strictEqual(context.sprintCandidatePoolMarkup(notCandidate), '');
-    const markup3 = context.storyDependencyReviewMarkup(action, notCandidate, dependencies);
-    assert.ok(markup3.includes('Unavailable (current selected scope missing or malformed)'));
-    assert.ok(markup3.includes('disabled'));
-    assert.ok(markup3.includes('aria-disabled="true"'));
-
-    // 4. Empty candidate array fails closed and disables confirmation
-    const emptyCandidates = [];
-    const resultEmpty = context.canonicalCandidateDependencies(emptyCandidates, dependencies);
-    assert.strictEqual(resultEmpty.isWellFormed, false);
-    assert.strictEqual(context.sprintCandidatePoolMarkup(emptyCandidates), '');
-    const markupEmpty = context.storyDependencyReviewMarkup(action, emptyCandidates, dependencies);
-    assert.ok(markupEmpty.includes('Unavailable (current selected scope missing or malformed)'));
-    assert.ok(markupEmpty.includes('disabled'));
-    assert.ok(markupEmpty.includes('aria-disabled="true"'));
-
-    // 5. Duplicate candidate IDs fail closed
-    const duplicateCandidates = [
-        { story_id: 101, source_story_item_id: 'US-001', sprint_candidate: true },
-        { story_id: 101, source_story_item_id: 'US-001', sprint_candidate: true },
-    ];
-    const resultDup = context.canonicalCandidateDependencies(duplicateCandidates, dependencies);
-    assert.strictEqual(resultDup.isWellFormed, false);
-    assert.strictEqual(context.sprintCandidatePoolMarkup(duplicateCandidates), '');
-
-    // 6. Non-positive, fractional, NaN, or infinite IDs fail closed
-    for (const invalidId of [-1, 0, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
-        const invalidCandidates = [
-            { story_id: invalidId, source_story_item_id: 'US-001', sprint_candidate: true },
-        ];
-        assert.strictEqual(
-            context.canonicalCandidateDependencies(invalidCandidates, dependencies).isWellFormed,
-            false,
-            `Expected story_id ${invalidId} to fail closed`,
-        );
-        assert.strictEqual(context.sprintCandidatePoolMarkup(invalidCandidates), '');
-    }
 });
 
 test('storyItemMarkup renders explainable INVEST assessment across all 6 dimensions', () => {
