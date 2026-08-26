@@ -131,6 +131,8 @@ _SEMANTIC_ARGUMENTS: dict[str, tuple[str, ...]] = {
         "<story-id>",
         "--dependency",
         "<dependency>",
+        "--selected-scope-fingerprint",
+        "<selected-scope-fingerprint>",
     ),
     "begin_vision_revision": ("--reason", "<reason>"),
     "close_sprint": (),

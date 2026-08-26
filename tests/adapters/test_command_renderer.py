@@ -32,6 +32,7 @@ _PLACEHOLDERS = {
     "<source-path>": "specification.md",
     "<story-id>": "7",
     "<dependency>": "7:8:Story 7 requires Story 8.",
+    "<selected-scope-fingerprint>": f"sha256:{'a' * 64}",
     "<repair>": "7:3:101",
     "<outcome-summary>": "Implemented semantic execution.",
     "<artifact-ref>": "services/application.py",
@@ -482,7 +483,11 @@ def test_delivery_reviews_render_fingerprint_free_semantic_commands() -> None:
     [
         (
             "apply_story_dependencies",
-            ("--story-id", "--dependency"),
+            (
+                "--story-id",
+                "--dependency",
+                "--selected-scope-fingerprint",
+            ),
             (
                 FactReference(
                     fact_type="story_dependency_source",
@@ -556,7 +561,12 @@ def test_planning_actions_render_task_specific_semantic_commands(
     assert len(commands) == 1
     command = commands[0]["command"]
     assert "--request-file" not in command
-    assert "fingerprint" not in command
+    if request_kind == "apply_story_dependencies":
+        tokens = shlex.split(command)
+        fingerprint_index = tokens.index("--selected-scope-fingerprint")
+        assert tokens[fingerprint_index + 1] == "<selected-scope-fingerprint>"
+    else:
+        assert "fingerprint" not in command
     for flag in expected_flags:
         assert flag in command
     parsed = build_parser().parse_args(

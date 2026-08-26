@@ -127,6 +127,12 @@ semantic fields. AgileForge derives and validates internal guards from the
 current durable position. Operators provide only task-specific semantic fields
 and transport metadata such as idempotency key and actor.
 
+Story dependency confirmation additionally carries the
+`--selected-scope-fingerprint` shown by the current dependency projection. This
+is the operator-observed scope being confirmed, not an internal graph guard.
+AgileForge rejects it if selection or structural evidence changed before the
+mutation.
+
 Use a new idempotency key for each distinct request. Reuse a key only to retry
 the exact same request after an uncertain transport result.
 
